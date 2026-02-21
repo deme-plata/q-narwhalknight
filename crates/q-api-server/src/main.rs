@@ -703,10 +703,68 @@ async fn update_tui_metrics(
     #[cfg(not(target_os = "linux"))]
     let (cpu_usage, ram_usage, ram_total, disk_usage, disk_total) = (0.0, 0.0, 8.0, 0.0, 500.0);
 
+    // Collect mining statistics (tokio RwLock — requires .await)
+    let (mining_enabled, active_miners, total_hashrate, blocks_mined) =
+        if let Some(ref mining_stats_arc) = app_state.mining_statistics {
+            let stats = mining_stats_arc.read().await;
+            let hashrate_sum: f64 = stats
+                .active_miners
+                .values()
+                .map(|m| m.last_hashrate)
+                .sum();
+            (
+                true,
+                stats.active_miners.len(),
+                hashrate_sum,
+                stats.total_solutions_accepted,
+            )
+        } else {
+            (false, 0, 0.0, 0)
+        };
+
+    // Network height (atomic, lock-free)
+    let network_height = app_state
+        .highest_network_height
+        .load(std::sync::atomic::Ordering::Relaxed);
+
+    // Last mining solution time
+    let last_solution_ts = app_state
+        .last_mining_solution_time
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let now_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let last_block_secs = if last_solution_ts > 0 {
+        now_ts.saturating_sub(last_solution_ts)
+    } else {
+        0
+    };
+
+    // Total supply
+    let total_supply_raw = *app_state.total_minted_supply.read().await;
+    let total_supply_display = total_supply_raw as f64 / 1e24;
+
+    // Emission rate: ~2,625,000 QUG/year, ~0.0833 QUG/block at 1 bps
+    let emission_rate = if block_height > 0 { 0.0833 } else { 0.0 };
+
+    // Network ID and version
+    let network_id = std::env::var("Q_NETWORK_ID").unwrap_or_default();
+    let version = env!("CARGO_PKG_VERSION").to_string();
+
+    // Sync detection
+    let is_syncing = network_height > block_height + 10;
+    let sync_progress = if is_syncing && network_height > 0 {
+        (block_height as f32 / network_height as f32 * 100.0).clamp(0.0, 99.9)
+    } else if block_height > 0 {
+        100.0
+    } else {
+        0.0
+    };
+
     // Now acquire write lock and update metrics (no awaits here!)
     // Use ok() instead of unwrap() to prevent panic on lock poisoning
     if let Ok(mut metrics) = tui_metrics.write() {
-
         metrics.uptime_secs = uptime_secs;
         metrics.peer_count = peer_count;
         metrics.block_height = block_height;
@@ -719,17 +777,25 @@ async fn update_tui_metrics(
         metrics.ram_total_gb = ram_total;
         metrics.disk_usage_gb = disk_usage;
         metrics.disk_total_gb = disk_total;
-        metrics.latency_p50_ms = 50; // Placeholder
-        metrics.latency_p99_ms = 150; // Placeholder
-        metrics.tor_circuits = 0; // TODO
-        metrics.mining_enabled = false;
-        metrics.hashrate = 0.0;
-        metrics.blocks_mined = 0;
-        metrics.bytes_received = 0; // TODO
-        metrics.bytes_sent = 0; // TODO
-        metrics.inbound_peers = 0; // TODO
-        metrics.outbound_peers = 0; // TODO
-        metrics.last_block_secs = 0; // TODO
+
+        // Real data instead of placeholders
+        metrics.mining_enabled = mining_enabled;
+        metrics.active_miners = active_miners;
+        metrics.hashrate = total_hashrate;
+        metrics.blocks_mined = blocks_mined;
+        metrics.last_block_secs = last_block_secs;
+        metrics.last_block_timestamp = last_solution_ts;
+        metrics.network_height = network_height;
+        metrics.total_supply = total_supply_display;
+        metrics.emission_rate = emission_rate;
+        metrics.network_id = network_id;
+        metrics.version = version;
+        metrics.is_syncing = is_syncing;
+        metrics.sync_progress_percent = sync_progress;
+        metrics.sync_current_height = block_height;
+        metrics.sync_target_height = network_height;
+        metrics.inbound_peers = peer_count; // P2P doesn't distinguish in/out yet
+        metrics.outbound_peers = 0;
     } // Lock dropped here
 
     Ok(())
@@ -1049,6 +1115,12 @@ impl BrowserTransaction {
     }
 }
 
+// Thread-local storage for TUI log buffer — created during tracing init, consumed when building TUI App.
+#[cfg(feature = "tui")]
+std::thread_local! {
+    static TUI_LOG_BUFFER: std::cell::RefCell<Option<std::sync::Arc<std::sync::RwLock<ringbuf::HeapRb<q_tui::LogEntry>>>>> = std::cell::RefCell::new(None);
+}
+
 // v7.1.6: Explicit 19 worker threads for 19 vCPU (was default = num_cpus)
 #[tokio::main(flavor = "multi_thread", worker_threads = 19)]
 async fn main() -> anyhow::Result<()> {
@@ -1264,14 +1336,35 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
             .with(tracing_subscriber::fmt::layer())
             .init();
     } else {
-        // TUI mode - minimal logging, will be captured by TUI
-        tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "q_api_server=info,q_network=info,tower_http=warn".into()),
-            )
-            .with(tracing_subscriber::fmt::layer())
-            .init();
+        // TUI mode - route tracing into TUI ring buffer instead of stdout.
+        // The shared log buffer is created here and later passed to App via with_metrics_and_logs.
+        #[cfg(feature = "tui")]
+        {
+            let tui_log_buffer = std::sync::Arc::new(std::sync::RwLock::new(
+                ringbuf::HeapRb::<q_tui::LogEntry>::new(1000),
+            ));
+            // Store in a thread-local so we can retrieve it when creating the TUI app
+            TUI_LOG_BUFFER.with(|cell| {
+                *cell.borrow_mut() = Some(tui_log_buffer.clone());
+            });
+            tracing_subscriber::registry()
+                .with(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| "q_api_server=info,q_network=info,tower_http=warn".into()),
+                )
+                .with(q_tui::TuiLogLayer::new(tui_log_buffer))
+                .init();
+        }
+        #[cfg(not(feature = "tui"))]
+        {
+            tracing_subscriber::registry()
+                .with(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| "q_api_server=info,q_network=info,tower_http=warn".into()),
+                )
+                .with(tracing_subscriber::fmt::layer())
+                .init();
+        }
     }
 
     // v0.9.57-beta: Verify binary version FIRST (detect stale Docker containers)
@@ -1299,8 +1392,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                 info!("🌐 Auto-detected network: mainnet2026.2 (past Feb 22 12:00 UTC)");
                 "mainnet2026.2".to_string()
             } else {
-                info!("🌐 Auto-detected network: mainnet2026.1.1 (rehearsal, before Feb 22 12:00 UTC)");
-                "mainnet2026.1.1".to_string()
+                info!("🌐 Auto-detected network: mainnet2026.1.3 (rehearsal, before Feb 22 12:00 UTC)");
+                "mainnet2026.1.3".to_string()
             }
         });
 
@@ -1357,7 +1450,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
     // On mainnet (strict mode): Node PANICS if any check fails
     // This protects BILLIONS of dollars from "cowboy coding" mistakes.
     //
-    let is_mainnet = matches!(network_id, q_types::NetworkId::Mainnet2026 | q_types::NetworkId::Mainnet2026_1 | q_types::NetworkId::Mainnet2026_1_1 | q_types::NetworkId::Mainnet2026_2);
+    let is_mainnet = matches!(network_id, q_types::NetworkId::Mainnet2026 | q_types::NetworkId::Mainnet2026_1 | q_types::NetworkId::Mainnet2026_1_1 | q_types::NetworkId::Mainnet2026_1_3 | q_types::NetworkId::Mainnet2026_2);
     let guard_config = if is_mainnet {
         GuardConfig::mainnet()
     } else {
@@ -2051,7 +2144,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
 
             // v7.3.2: Subscribe to Quillon Mail email topic
             {
-                let email_topic = format!("/qnk/{}/email", turbo_network_id.display_name());
+                let email_topic = format!("/qnk/{}/email", turbo_network_id.as_str());
                 if let Err(e) = manager.subscribe_topic(&email_topic) {
                     warn!("⚠️  Failed to subscribe to email topic: {}", e);
                 } else {
@@ -2061,7 +2154,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
 
             // v7.3.3: Subscribe to Blockchain Calendar topic
             {
-                let calendar_topic = format!("/qnk/{}/calendar", turbo_network_id.display_name());
+                let calendar_topic = format!("/qnk/{}/calendar", turbo_network_id.as_str());
                 if let Err(e) = manager.subscribe_topic(&calendar_topic) {
                     warn!("⚠️  Failed to subscribe to calendar topic: {}", e);
                 } else {
@@ -2234,6 +2327,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
     info!("✅ Node signing key ready for pool announcements");
 
     // Initialize application state with network components
+    // v8.0.2: Pass balance_engine directly to new_with_networks() so the LockFreeProducerPool
+    // and all spawned block producer tasks use the SAME engine as the API endpoints.
+    // This fixes the dual-controller bug where lib.rs created a separate engine that diverged.
     let state = AppState::new_with_networks(
         config.clone(),
         node_id,
@@ -2244,15 +2340,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
         None,                      // production_peer_discovery is deactivated
         libp2p_discovery,          // ✅ ENABLED - libp2p gossipsub for transaction propagation
         libp2p_command_tx.clone(), // ✅ Command channel for non-blocking P2P operations
+        balance_engine.clone(),    // v8.0.2: Unified balance_consensus_engine
     )
     .await?;
     let mut state = state;
-
-    // v7.1.0: CRITICAL FIX - Replace the AppState's balance_consensus_engine with this one
-    // AppState::new_with_networks() creates its own BalanceConsensusEngine with a WRONG
-    // genesis timestamp (hardcoded 1700000000). The main.rs one uses the correct GENESIS_TIMESTAMP.
-    // Without this, the API's emission/stats endpoint reads from a stale empty instance.
-    state.balance_consensus_engine = balance_engine.clone();
 
     // v7.1.0: Load persisted emission controller state from RocksDB
     // This ensures emission stats survive restarts instead of resetting to 0
@@ -2559,6 +2650,57 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
         };
 
         let mining_pool = Arc::new(q_mining_pool::MiningPool::new(pool_config));
+
+        // Wire payout handler to credit miner balances via storage engine
+        {
+            let storage_for_payouts = state.storage_engine.clone();
+            mining_pool.set_payout_handler(Arc::new(move |outputs: Vec<(String, u64)>| {
+                let storage = storage_for_payouts.clone();
+                let total_amount: u64 = outputs.iter().map(|(_, a)| *a).sum();
+                let recipient_count = outputs.len();
+
+                // Use block_in_place to safely call async from sync context
+                // This moves the thread out of the tokio worker pool to avoid deadlock
+                let credited = tokio::task::block_in_place(|| {
+                    let rt = tokio::runtime::Handle::current();
+                    let mut credited = 0u64;
+                    for (wallet, amount) in &outputs {
+                        let amount_u128 = *amount as u128;
+                        if let Err(e) = rt.block_on(
+                            q_storage::BalanceStorage::add_balance(storage.as_ref(), wallet, amount_u128)
+                        ) {
+                            tracing::error!(
+                                wallet = %wallet,
+                                amount = amount,
+                                error = %e,
+                                "Failed to credit pool payout balance"
+                            );
+                        } else {
+                            credited += amount;
+                            tracing::debug!(
+                                wallet = %wallet,
+                                amount = amount,
+                                "Pool payout: credited miner balance"
+                            );
+                        }
+                    }
+                    credited
+                });
+
+                let tx_hash = format!("pool_payout_{}", chrono::Utc::now().timestamp_millis());
+                tracing::info!(
+                    tx_hash = %tx_hash,
+                    recipients = recipient_count,
+                    total = total_amount,
+                    credited = credited,
+                    "Pool payout batch completed - {} miner balances credited",
+                    recipient_count,
+                );
+
+                tx_hash
+            }));
+        }
+
         state.mining_pool = Some(Arc::clone(&mining_pool));
 
         // Start the Stratum server in background
@@ -2593,7 +2735,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
             // Create coordinator config from node identity
             let coordinator_config = q_mining_pool::distributed::coordinator::CoordinatorConfig {
                 peer_id: node_id,
-                network_id: network_config.network_id.display_name().to_string(),
+                network_id: network_config.network_id.as_str().to_string(),
                 stratum_port,
                 region: "global".to_string(),
                 heartbeat_interval: std::time::Duration::from_secs(30),
@@ -5469,6 +5611,37 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
         }
     }
 
+    // v8.0.1: Pre-register slint-wallet as PKCE public client (no secret needed)
+    // This allows the Slint desktop wallet to complete OAuth2 browser consent flow
+    // without requiring a prior wallet login to register itself.
+    {
+        let slint_client = q_api_server::oauth2_provider::OAuth2Client {
+            client_id: "slint-wallet".to_string(),
+            client_secret: String::new(), // PKCE-only public client, no secret
+            redirect_uris: vec![
+                "http://127.0.0.1:17655/callback".to_string(),
+                "http://localhost:17655/callback".to_string(),
+            ],
+            name: "Quillon Desktop Wallet".to_string(),
+            description: "Native Slint desktop wallet (PKCE public client)".to_string(),
+            website: "http://127.0.0.1:17655".to_string(),
+            logo_url: None,
+            scopes: vec![
+                "read:balance".to_string(),
+                "read:history".to_string(),
+                "read:tokens".to_string(),
+                "send:transaction".to_string(),
+            ],
+            created_at: chrono::Utc::now(),
+            kyber_public_key: None,
+        };
+        if let Err(e) = app_state.oauth2_storage.register_client(slint_client).await {
+            warn!("Failed to register slint-wallet OAuth2 client: {}", e);
+        } else {
+            info!("🔐 Registered slint-wallet OAuth2 client (PKCE public)");
+        }
+    }
+
     // ========================================
     // v7.3.1: BRIDGE COMMITTEE PERIODIC TASK (cleanup + peer update + rotation)
     // ========================================
@@ -5877,6 +6050,31 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
             q_api_server::perpetual_api::adl_loop(perp_app_state_adl).await;
         });
         info!("⚡ [PERP] Auto-Deleveraging (ADL) engine started");
+    }
+
+    // ========================================
+    // 📧 v8.1.2: QUILLON MAIL — SMTP SERVER + MTA
+    // Inbound SMTP on port 25, Submission on port 587
+    // Outbound MTA processes queue every 30s
+    // ========================================
+    {
+        let smtp_state_25 = app_state.clone();
+        tokio::spawn(async move {
+            q_api_server::email_smtp::start_smtp_server(smtp_state_25, 25).await;
+        });
+
+        let smtp_state_587 = app_state.clone();
+        tokio::spawn(async move {
+            q_api_server::email_smtp::start_smtp_server(smtp_state_587, 587).await;
+        });
+
+        let mta_state = app_state.clone();
+        tokio::spawn(async move {
+            let mta = q_api_server::email_mta::MailTransportAgent::new(mta_state);
+            mta.start().await;
+        });
+
+        info!("📧 [MAIL] Quillon Mail started: SMTP :25/:587, MTA outbound queue");
     }
 
     // ========================================
@@ -6422,9 +6620,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                             }
 
                             // v7.3.0: Update vault QUG price from P2P swap if it involves QUG/QUGUSD pool
-                            // Without this, the vault price stays at default $42.50 on nodes that didn't
+                            // Without this, the vault price stays at default $3000.00 on nodes that didn't
                             // execute the swap locally. The oracle endpoint reads from vault, so frontends
-                            // connected to those nodes see stale $42.50 instead of the post-swap price.
+                            // connected to those nodes see stale $3000.00 instead of the post-swap price.
                             {
                                 let from_upper = swap.from_token.to_uppercase();
                                 let to_upper = swap.to_token.to_uppercase();
@@ -6448,7 +6646,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
 
                                         if qug_r > 0 && usd_r > 0 {
                                             let new_price = usd_r as f64 / qug_r as f64;
-                                            if new_price > 0.0 && new_price < 1_000_000.0 {
+                                            // v8.0.1: Reject stale prices from old $42.50 era
+                                            if new_price >= 100.0 && new_price < 1_000_000.0 {
                                                 let mut vault = app_state_gossip.collateral_vault.write().await;
                                                 vault.qug_price_usd = new_price;
                                                 vault.last_price_update = chrono::Utc::now().timestamp();
@@ -6490,7 +6689,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                                     }
                                     drop(pools);
 
-                                    if found_price > 0.0 && found_price < 1_000_000.0 {
+                                    // v8.0.1: Reject stale prices from old $42.50 era
+                                    if found_price >= 100.0 && found_price < 1_000_000.0 {
                                         let current_price = app_state_gossip.collateral_vault.read().await.qug_price_usd;
                                         // Only update if price changed meaningfully (>0.1% difference)
                                         let diff_pct = ((found_price - current_price) / current_price).abs() * 100.0;
@@ -7495,12 +7695,22 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                                     .highest_network_height
                                     .load(Ordering::SeqCst);
                                 if block_height > current_highest {
+                                    // v8.0.8: Height sanity check — prevent rogue peers from poisoning network height
+                                    let our_height = app_state_gossip
+                                        .current_height_atomic
+                                        .load(Ordering::Relaxed);
+                                    let max_reasonable = (our_height * 3).max(our_height + 500_000);
+                                    if block_height > max_reasonable {
+                                        warn!("🚫 [BLOCK FALLBACK] Rejecting suspicious block height {} (our: {}, max reasonable: {})",
+                                              block_height, our_height, max_reasonable);
+                                    } else {
                                     app_state_gossip
                                         .highest_network_height
                                         .store(block_height, Ordering::SeqCst);
                                     debug!("📊 [BLOCK FALLBACK] Network height updated to {} (from received block, was {})",
                                           block_height, current_highest);
                                     trace!("🔄 [BLOCK FALLBACK] Bypassing peer-height announcements - using block height directly");
+                                    }
                                 } else if block_height == current_highest {
                                     debug!("📊 [BLOCK FALLBACK] Block {} matches current network height", block_height);
                                 } else {
@@ -10912,9 +11122,18 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                         Ok(pool_message) => {
                             // Route to distributed pool coordinator if available
                             if let Some(ref coordinator) = app_state_gossip.distributed_pool_coordinator {
-                                // Extract sender peer ID from the message (for now use a placeholder)
-                                // In production, this would come from libp2p message metadata
-                                let from_peer: [u8; 32] = [0u8; 32]; // TODO: Get actual peer ID from gossipsub
+                                // Extract sender peer ID from the message content
+                                let from_peer: [u8; 32] = match &pool_message {
+                                    q_mining_pool::distributed::PoolMessage::Share(s) => s.receiving_node,
+                                    q_mining_pool::distributed::PoolMessage::BlockFound(a) => a.finding_node,
+                                    q_mining_pool::distributed::PoolMessage::PPLNSSync(s) => s.sender,
+                                    q_mining_pool::distributed::PoolMessage::Payout(b) => b.initiator,
+                                    q_mining_pool::distributed::PoolMessage::Heartbeat(h) => h.peer_id,
+                                    q_mining_pool::distributed::PoolMessage::BlockTemplate(t) => t.sender,
+                                    q_mining_pool::distributed::PoolMessage::Attestation(a) => a.attester,
+                                    q_mining_pool::distributed::PoolMessage::PayoutVoteMsg(v) => v.voter,
+                                    q_mining_pool::distributed::PoolMessage::RequestPPLNSState { .. } => [0u8; 32],
+                                };
 
                                 let coord = coordinator.read().await;
                                 if let Err(e) = coord.handle_message(from_peer, pool_message.clone()).await {
@@ -11633,6 +11852,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
             let mut last_log = std::time::Instant::now();
             let mut batch_buffer: Vec<q_api_server::MiningSubmission> = Vec::with_capacity(500);
             let mut last_batch_process = std::time::Instant::now();
+            // v8.0.5: Mining loop watchdog — detect stalls
+            let mut last_batch_completed = std::time::Instant::now();
+            let mut watchdog_warned = false;
 
             while let Some(submission) = mining_rx.recv().await {
                 // v1.0.2: Fast drain when node is far behind — don't waste CPU on stale submissions
@@ -11665,6 +11887,15 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
 
                 // Collect submissions into batch
                 batch_buffer.push(submission);
+
+                // v8.0.5: Mining loop watchdog — detect stalls before they cause "Mining queue full"
+                let watchdog_elapsed = last_batch_completed.elapsed();
+                if watchdog_elapsed.as_secs() >= 120 && !watchdog_warned {
+                    error!("🐕 [WATCHDOG] Mining loop hasn't completed a batch in {:.0}s!", watchdog_elapsed.as_secs_f64());
+                    error!("   batch_buffer={}, channel_remaining=~{}", batch_buffer.len(), 50000 - batch_buffer.len());
+                    error!("   This indicates a hang in PHASE 4/5/6 — timeouts should prevent this in v8.0.5");
+                    watchdog_warned = true;
+                }
 
                 // Process batch every 500 submissions OR every 5ms (whichever comes first)
                 // v2.8.0: Reduced from 20ms to 5ms for faster P2P mining reward propagation
@@ -12068,16 +12299,24 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                     );
 
                     // PHASE 5: Check if we should produce blocks
-                    let should_produce =
-                        match app_state_mining.block_producer_pool.should_produce().await {
-                            Ok(result) => result,
-                            Err(e) => {
-                                error!("❌🚨 CRITICAL: should_produce() failed: {:?}", e);
-                                error!("   This indicates one or more producer tasks have died!");
-                                error!("   Exiting to trigger systemd restart...");
-                                std::process::exit(1); // Crash-fast philosophy
-                            }
-                        };
+                    // v8.0.5: Add 15s timeout to prevent mining loop hang
+                    let should_produce = match tokio::time::timeout(
+                        std::time::Duration::from_secs(15),
+                        app_state_mining.block_producer_pool.should_produce(),
+                    ).await {
+                        Ok(Ok(result)) => result,
+                        Ok(Err(e)) => {
+                            error!("❌🚨 CRITICAL: should_produce() failed: {:?}", e);
+                            error!("   This indicates one or more producer tasks have died!");
+                            error!("   Exiting to trigger systemd restart...");
+                            std::process::exit(1); // Crash-fast philosophy
+                        }
+                        Err(_) => {
+                            warn!("⏱️ [TIMEOUT] should_produce() timed out after 15s — skipping batch");
+                            batch_buffer.clear();
+                            continue;
+                        }
+                    };
 
                     if should_produce {
                         // SYNC MODE CHECK: Don't produce blocks if we're catching up
@@ -12142,22 +12381,42 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                         }
 
                         // 🚨 v0.9.95-beta: CRITICAL FIX - Verify producers are synced with database
-                        // Expert consensus: ChatGPT, DeepSeek, Kimi AI (99% confidence)
-                        // Prevents height desync bug that caused 221→242 phantom jump
-                        if let Err(e) = app_state_mining
-                            .block_producer_pool
-                            .sync_from_storage(&app_state_mining.storage_engine)
-                            .await
-                        {
-                            error!("🚨 HEIGHT DESYNC DETECTED before block production: {}", e);
-                            error!("   Forcing producer resync to prevent height drift");
-                            continue; // Skip this production cycle, retry after resync
+                        // v8.0.5: Add 10s timeout — sync_from_storage() can hang on RocksDB,
+                        // blocking the entire mining loop and causing "Mining queue full" backpressure.
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(10),
+                            app_state_mining.block_producer_pool.sync_from_storage(&app_state_mining.storage_engine),
+                        ).await {
+                            Ok(Err(e)) => {
+                                error!("🚨 HEIGHT DESYNC DETECTED before block production: {}", e);
+                                error!("   Forcing producer resync to prevent height drift");
+                                continue; // Skip this production cycle, retry after resync
+                            }
+                            Err(_) => {
+                                warn!("⏱️ [TIMEOUT] sync_from_storage() timed out after 10s — skipping sync, proceeding with production");
+                                // Don't continue — proceed with potentially stale height.
+                                // A stale sync is better than a frozen mining loop.
+                            }
+                            Ok(Ok(())) => {
+                                // Sync succeeded normally
+                            }
                         }
 
                         info!("🔨 Block production triggered");
                         let produce_start = std::time::Instant::now();
-                        let new_blocks =
-                            app_state_mining.block_producer_pool.produce_blocks().await;
+                        // v8.0.5: Add 60s timeout — produce_blocks() calls DAG-Knight
+                        // committed round check which can hang, freezing the mining loop.
+                        let new_blocks = match tokio::time::timeout(
+                            std::time::Duration::from_secs(60),
+                            app_state_mining.block_producer_pool.produce_blocks(),
+                        ).await {
+                            Ok(blocks) => blocks,
+                            Err(_) => {
+                                error!("⏱️ [TIMEOUT] produce_blocks() timed out after 60s — mining loop was about to hang!");
+                                error!("   This prevents the 'Mining queue full' stall bug");
+                                Vec::new()
+                            }
+                        };
                         let produce_duration = produce_start.elapsed();
 
                         let blocks_produced = new_blocks.len();
@@ -12472,17 +12731,22 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                                 info!("🔄 [v1.0.14-beta] Syncing ALL {} producers to latest height {} (bug fix)",
                                       8, new_block.header.height);
 
-                                if let Err(e) = app_state_mining
-                                    .block_producer_pool
-                                    .sync_from_storage(&app_state_mining.storage_engine)
-                                    .await
-                                {
-                                    error!("❌ CRITICAL: Failed to sync producers after block save: {}", e);
-                                    error!("   This will cause height regression on next block!");
-                                    // Continue anyway - better to have stale producers than halt block production
-                                } else {
-                                    info!("✅ [v1.0.14-beta] ALL producers synchronized to height {} (prevents height regression)",
-                                          new_block.header.height);
+                                // v8.0.5: Add 10s timeout to post-save sync
+                                match tokio::time::timeout(
+                                    std::time::Duration::from_secs(10),
+                                    app_state_mining.block_producer_pool.sync_from_storage(&app_state_mining.storage_engine),
+                                ).await {
+                                    Ok(Err(e)) => {
+                                        error!("❌ CRITICAL: Failed to sync producers after block save: {}", e);
+                                        error!("   This will cause height regression on next block!");
+                                    }
+                                    Err(_) => {
+                                        warn!("⏱️ [TIMEOUT] Post-save sync_from_storage() timed out after 10s");
+                                    }
+                                    Ok(Ok(())) => {
+                                        info!("✅ [v1.0.14-beta] ALL producers synchronized to height {} (prevents height regression)",
+                                              new_block.header.height);
+                                    }
                                 }
 
                                 // v3.5.9-beta: Index all block transactions for wallet history
@@ -13255,14 +13519,20 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                                 "🔄 Syncing {} producers after creating {} blocks...",
                                 8, blocks_produced
                             );
-                            if let Err(e) = app_state_mining
-                                .block_producer_pool
-                                .sync_from_storage(&app_state_mining.storage_engine)
-                                .await
-                            {
-                                error!("❌ Failed to sync producers after block production: {}", e);
-                            } else {
-                                info!("✅ All producers synchronized - ready for next height");
+                            // v8.0.5: Add 10s timeout to post-production sync
+                            match tokio::time::timeout(
+                                std::time::Duration::from_secs(10),
+                                app_state_mining.block_producer_pool.sync_from_storage(&app_state_mining.storage_engine),
+                            ).await {
+                                Ok(Err(e)) => {
+                                    error!("❌ Failed to sync producers after block production: {}", e);
+                                }
+                                Err(_) => {
+                                    warn!("⏱️ [TIMEOUT] Post-production sync_from_storage() timed out after 10s");
+                                }
+                                Ok(Ok(())) => {
+                                    info!("✅ All producers synchronized - ready for next height");
+                                }
                             }
                         }
                     } // Close `if should_produce {` block
@@ -13271,6 +13541,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                     processed_count += batch_size as u64;
                     batch_buffer.clear();
                     last_batch_process = std::time::Instant::now();
+                    // v8.0.5: Reset watchdog timer after successful batch
+                    last_batch_completed = std::time::Instant::now();
+                    watchdog_warned = false;
 
                     let batch_time = start.elapsed();
                     let throughput = batch_size as f64 / batch_time.as_secs_f64();
@@ -13507,8 +13780,14 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
             }
         });
 
-        // ✅ v1.0.3-beta: Use new block production loop with comprehensive stall protection
-        block_production_v2::spawn_block_production_loop(app_state_block_producer.clone());
+        // 🚨 v8.0.1: DISABLED block_production_v2 — it competes with the mining pipeline's
+        // produce_blocks() call via the production_in_progress atomic flag. Both loops call
+        // produce_blocks(), but block_production_v2 holds the flag during slow channel
+        // communication, causing the mining pipeline to always hit the race prevention guard
+        // and return 0 blocks. The mining pipeline (PHASE 4→5→6) handles solution queueing
+        // AND block production, so block_production_v2 is redundant.
+        // block_production_v2::spawn_block_production_loop(app_state_block_producer.clone());
+        info!("ℹ️  block_production_v2 DISABLED — mining pipeline handles production (v8.0.1 fix)");
 
         // Integrated mining removed v7.1.3 - use external q-miner binary
 
@@ -14396,9 +14675,6 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
             } else {
                 None
             };
-            // v1.0.65-beta: Changed from 100ms to 500ms to reduce CPU usage
-            // 100ms was too aggressive and caused unnecessary CPU burn when synced
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
             let mut last_sync_down_warning = std::time::Instant::now();
 
             // ✅ v0.9.74-beta: Discovery attempt counter for HTTP fallback
@@ -14412,10 +14688,19 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
             // v5.2.0: Clone sync_trigger for select! wake-up
             let sync_trigger = app_state_sync.sync_trigger.clone();
 
+            // 🚀 v1.0.2: Adaptive sync loop frequency (miner-optimized pattern)
+            // Instead of fixed 500ms, adapt based on sync gap:
+            //   Fully synced (gap=0):   2000ms (save CPU, gossipsub delivers new blocks)
+            //   Slightly behind (1-5):  500ms  (current default)
+            //   Behind (5-50):          200ms  (aggressive catch-up)
+            //   Far behind (50+):       100ms  (maximum throughput)
+            let mut adaptive_interval_ms: u64 = 500; // Start at default
+
             loop {
-                // v5.2.0: Wake on interval OR immediate sync trigger (whichever comes first)
+                // 🚀 v1.0.2: Adaptive interval — use sleep instead of fixed interval
+                // sync_trigger.notified() provides instant wake on new blocks from gossipsub
                 tokio::select! {
-                    _ = interval.tick() => {}
+                    _ = tokio::time::sleep(tokio::time::Duration::from_millis(adaptive_interval_ms)) => {}
                     _ = sync_trigger.notified() => {
                         debug!("[ACTIVE RECOVERY] Sync loop woken by peer height trigger");
                     }
@@ -14424,8 +14709,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                 // 🔍 v1.0.3.7-beta: Track sync loop execution with iteration counter
                 let iteration = SYNC_LOOP_ITERATIONS.fetch_add(1, Ordering::SeqCst);
                 if iteration % 100 == 0 {
-                    // Log every 100 iterations (10 seconds at 100ms interval)
-                    info!("🔁 [SYNC LOOP] iteration={} (loop is executing)", iteration);
+                    info!("🔁 [SYNC LOOP] iteration={} interval={}ms (loop is executing)", iteration, adaptive_interval_ms);
                 }
 
                 // Check if we're behind the network
@@ -14450,10 +14734,15 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                     .load(std::sync::atomic::Ordering::SeqCst);
 
                 // v5.2.0: Use median peer height when available to resist Byzantine outliers
-                // If max height > 120% of median and we have 2+ peers, use median instead
+                // 🚀 v1.0.2: Lock-free fast path — only acquire RwLock when we have 2+ peers
+                // and there's actually a meaningful sync gap. When fully synced, skip the lock entirely.
                 if let Some(ref turbo_sync) = app_state_sync.turbo_sync {
-                    let registry = turbo_sync.get_enhanced_registry().await;
-                    if registry.active_peer_count() >= 2 {
+                    let fast_peer_count = turbo_sync.peer_count_fast();
+                    // Only do expensive median check when:
+                    // 1. We have 2+ peers (otherwise no outlier detection possible)
+                    // 2. We're actually behind (gap > 0)
+                    if fast_peer_count >= 2 && network_height > current_height {
+                        let registry = turbo_sync.get_enhanced_registry().await;
                         if let Some(median) = registry.median_height() {
                             if network_height > median + median / 5 {
                                 // Max is >20% above median - likely a Byzantine outlier
@@ -14515,8 +14804,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                                                     // peer-height announcements aren't being received (mesh formation issues)
                                                     if let Some(ref turbo_sync) = app_state_sync.turbo_sync {
                                                         // Use the known bootstrap peer ID from Server Beta (mainnet)
-                                                        // FIXED v1.4.2-beta: Use correct peer ID from data-mine16/libp2p_identity.key
-                                                        const BOOTSTRAP_PEER_ID: &str = "12D3KooWBHTC9FhwwXmvH7YA17YHTLdcxbtLWg2U5xEtxSeqX7jc";
+                                                        // FIXED v1.0.2: Updated to current mainnet peer ID
+                                                        const BOOTSTRAP_PEER_ID: &str = "12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH";
                                                         if let Ok(peer_id) = BOOTSTRAP_PEER_ID.parse::<libp2p::PeerId>() {
                                                             turbo_sync.register_peer(peer_id, bootstrap_height).await;
                                                             info!("🚀 [TURBO SYNC] Auto-registered bootstrap peer {} with height {} from HTTP discovery",
@@ -14575,15 +14864,28 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                     // Just skip the sync attempt below
                 }
                 // ✅ v0.9.76-beta: GAP DETECTION AND FILL BEFORE SEQUENTIAL SYNC
-                // Check for gaps in the blockchain FIRST - this prevents getting stuck
-                // waiting for sequential blocks when we have future blocks but are missing early ones
-                match app_state_sync
-                    .storage_engine
-                    .get_first_missing_height()
-                    .await
-                {
+                // 🚀 v1.0.2: Lock-free fast path — skip expensive DB scan when no gaps known
+                // Only call get_first_missing_height() when cached_has_gaps is true or after sync ops
+                let should_check_gaps = if let Some(ref turbo_sync) = app_state_sync.turbo_sync {
+                    turbo_sync.has_gaps_fast()
+                } else {
+                    true // No turbo_sync = always check (conservative)
+                };
+
+                // Skip gap detection entirely when we know there are no gaps (saves ~2ms DB query)
+                let gap_result = if should_check_gaps {
+                    app_state_sync.storage_engine.get_first_missing_height().await
+                } else {
+                    Ok(None)
+                };
+
+                match gap_result {
                     Ok(Some(missing_height)) => {
                         // Critical gap detected!
+                        // 🚀 v1.0.2: Mark gaps as present (enable DB scan on next iterations)
+                        if let Some(ref turbo_sync) = app_state_sync.turbo_sync {
+                            turbo_sync.set_has_gaps(true);
+                        }
                         let highest_stored = app_state_sync
                             .storage_engine
                             .get_highest_contiguous_block()
@@ -14699,6 +15001,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                     }
                     Ok(None) => {
                         // No gaps - proceed with normal sequential sync below
+                        // 🚀 v1.0.2: Mark gaps as cleared (skip DB scan on next iterations)
+                        if let Some(ref turbo_sync) = app_state_sync.turbo_sync {
+                            turbo_sync.set_has_gaps(false);
+                        }
                     }
                     Err(e) => {
                         error!("❌ Failed to check for gaps: {}", e);
@@ -15581,6 +15887,47 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                         }
                     }
                 }
+
+                // ═══════════════════════════════════════════════════════════════════
+                // 🚀 v1.0.2: ADAPTIVE SYNC LOOP FREQUENCY (Miner-Optimized Pattern)
+                // ═══════════════════════════════════════════════════════════════════
+                // Dynamically adjust loop interval based on sync gap:
+                //   Fully synced (gap=0):    2000ms (save CPU, rely on gossipsub)
+                //   Slightly behind (1-10):  500ms  (current default)
+                //   Behind (10-50):          200ms  (aggressive catch-up)
+                //   Far behind (50+):        100ms  (maximum throughput)
+                let sync_gap = network_height.saturating_sub(current_height);
+                let new_interval = if sync_gap == 0 || network_height == 0 {
+                    // Fully synced or no network info — save CPU
+                    if let Some(ref turbo_sync) = app_state_sync.turbo_sync {
+                        turbo_sync.set_fully_synced(sync_gap == 0 && network_height > 0);
+                    }
+                    2000
+                } else if sync_gap <= 10 {
+                    // Near tip — gossipsub handles most blocks
+                    if let Some(ref turbo_sync) = app_state_sync.turbo_sync {
+                        turbo_sync.set_fully_synced(false);
+                    }
+                    500
+                } else if sync_gap <= 50 {
+                    if let Some(ref turbo_sync) = app_state_sync.turbo_sync {
+                        turbo_sync.set_fully_synced(false);
+                    }
+                    200
+                } else {
+                    if let Some(ref turbo_sync) = app_state_sync.turbo_sync {
+                        turbo_sync.set_fully_synced(false);
+                        // Re-enable gap checking when we're behind (gaps may appear during sync)
+                        turbo_sync.set_has_gaps(true);
+                    }
+                    100
+                };
+
+                if new_interval != adaptive_interval_ms {
+                    debug!("⚡ [ADAPTIVE SYNC] Interval changed: {}ms → {}ms (gap={} blocks)",
+                          adaptive_interval_ms, new_interval, sync_gap);
+                }
+                adaptive_interval_ms = new_interval;
             }
         });
         info!("✅ Active block sync loop started");
@@ -17643,6 +17990,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
         // v7.3.1: Node operator fee settings (master-wallet-only)
         .route("/api/v1/admin/operator-fees", get(q_api_server::admin_settings_api::get_operator_fees))
         .route("/api/v1/admin/operator-fees", post(q_api_server::admin_settings_api::update_operator_fees))
+        // v8.1.1: Operator fee earnings (admin-only, not master-only)
+        .route("/api/v1/admin/fee-earnings", get(q_api_server::admin_settings_api::get_fee_earnings))
         // v7.3.1: Node update check (admin-only)
         .route("/api/v1/admin/node/update-check", get(q_api_server::admin_settings_api::check_node_update))
         // User-level OAuth2 consent management (any authenticated wallet)
@@ -18052,8 +18401,12 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
             let tui_metrics =
                 std::sync::Arc::new(std::sync::RwLock::new(q_tui::Metrics::default()));
 
-            // Create TUI app with shared metrics
-            let tui_app = q_tui::App::with_metrics(tui_metrics.clone());
+            // Create TUI app with shared metrics AND the log buffer from tracing init
+            let tui_log_buf = TUI_LOG_BUFFER.with(|cell| cell.borrow_mut().take())
+                .unwrap_or_else(|| std::sync::Arc::new(std::sync::RwLock::new(
+                    ringbuf::HeapRb::<q_tui::LogEntry>::new(1000),
+                )));
+            let tui_app = q_tui::App::with_metrics_and_logs(tui_metrics.clone(), tui_log_buf);
 
             // Spawn metrics updater task
             let metrics_clone = tui_metrics.clone();

@@ -64,16 +64,29 @@ pub fn render(f: &mut Frame, app: &App) {
 fn render_header(f: &mut Frame, area: Rect, app: &App) {
     let metrics = app.metrics.read().unwrap();
 
-    let status_text = if metrics.peer_count > 0 {
-        Span::styled("✅ SYNCED", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+    let status_text = if metrics.is_syncing {
+        Span::styled("SYNCING", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+    } else if metrics.peer_count > 0 {
+        Span::styled("SYNCED", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
     } else {
-        Span::styled("⚠ CONNECTING", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        Span::styled("CONNECTING", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+    };
+
+    let version_str = if metrics.version.is_empty() {
+        env!("CARGO_PKG_VERSION").to_string()
+    } else {
+        metrics.version.clone()
+    };
+
+    let net_str = if metrics.network_id.is_empty() {
+        String::new()
+    } else {
+        format!(" ({}) ", metrics.network_id)
     };
 
     let header = Paragraph::new(Line::from(vec![
         Span::styled("Q-NarwhalKnight ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::raw("v0.0.7-beta │ "),
-        Span::raw("Status: "),
+        Span::raw(format!("v{}{}│ ", version_str, net_str)),
         status_text,
         Span::raw(" │ Uptime: "),
         Span::styled(
@@ -101,45 +114,102 @@ fn render_metrics_grid(f: &mut Frame, area: Rect, app: &App) {
         ])
         .split(area);
 
-    // Network metrics
-    let network_items = vec![
-        ListItem::new(Line::from(vec![
-            Span::raw("Peers:        "),
-            Span::styled(
-                format!("{}/{}", metrics.peer_count, 100),
-                Style::default().fg(if metrics.peer_count > 0 { Color::Green } else { Color::Red })
-            ),
-        ])),
-        ListItem::new(format!("├ Inbound:   {}", metrics.inbound_peers)),
-        ListItem::new(format!("└ Outbound:  {}", metrics.outbound_peers)),
-        ListItem::new(format!("Tor Circuits: {}", metrics.tor_circuits)),
-        ListItem::new(Line::from(vec![
-            Span::raw("↓ "),
-            Span::styled(
-                format!("{}/s", Metrics::format_bytes(metrics.bytes_received)),
-                Style::default().fg(Color::Cyan)
-            ),
-        ])),
-        ListItem::new(Line::from(vec![
-            Span::raw("↑ "),
-            Span::styled(
-                format!("{}/s", Metrics::format_bytes(metrics.bytes_sent)),
-                Style::default().fg(Color::Magenta)
-            ),
-        ])),
-    ];
+    // Network metrics (left panel) — or Mining panel if mining is enabled
+    if metrics.mining_enabled {
+        let mining_items = vec![
+            ListItem::new(Line::from(vec![
+                Span::raw("Miners:      "),
+                Span::styled(
+                    format!("{}", metrics.active_miners),
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                ),
+            ])),
+            ListItem::new(Line::from(vec![
+                Span::raw("Hashrate:    "),
+                Span::styled(
+                    format!("{:.1} H/s", metrics.hashrate),
+                    Style::default().fg(Color::Cyan)
+                ),
+            ])),
+            ListItem::new(Line::from(vec![
+                Span::raw("Blocks:      "),
+                Span::styled(
+                    format!("{}", metrics.blocks_mined),
+                    Style::default().fg(Color::Yellow)
+                ),
+            ])),
+            ListItem::new(Line::from(vec![
+                Span::raw("Peers:       "),
+                Span::styled(
+                    format!("{}", metrics.peer_count),
+                    Style::default().fg(if metrics.peer_count > 0 { Color::Green } else { Color::Red })
+                ),
+            ])),
+            ListItem::new(format!("├ In:       {}", metrics.inbound_peers)),
+            ListItem::new(format!("└ Out:      {}", metrics.outbound_peers)),
+        ];
 
-    let network = List::new(network_items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("🔗 Network")
-                .style(Style::default().fg(Color::Blue))
-        );
-    f.render_widget(network, chunks[0]);
+        let mining_widget = List::new(mining_items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("⛏️  Mining + Network")
+                    .style(Style::default().fg(Color::Yellow))
+            );
+        f.render_widget(mining_widget, chunks[0]);
+    } else {
+        let network_items = vec![
+            ListItem::new(Line::from(vec![
+                Span::raw("Peers:        "),
+                Span::styled(
+                    format!("{}", metrics.peer_count),
+                    Style::default().fg(if metrics.peer_count > 0 { Color::Green } else { Color::Red })
+                ),
+            ])),
+            ListItem::new(format!("├ Inbound:   {}", metrics.inbound_peers)),
+            ListItem::new(format!("└ Outbound:  {}", metrics.outbound_peers)),
+            ListItem::new(format!("Tor Circuits: {}", metrics.tor_circuits)),
+            ListItem::new(Line::from(vec![
+                Span::raw("↓ "),
+                Span::styled(
+                    format!("{}/s", Metrics::format_bytes(metrics.bytes_received)),
+                    Style::default().fg(Color::Cyan)
+                ),
+            ])),
+            ListItem::new(Line::from(vec![
+                Span::raw("↑ "),
+                Span::styled(
+                    format!("{}/s", Metrics::format_bytes(metrics.bytes_sent)),
+                    Style::default().fg(Color::Magenta)
+                ),
+            ])),
+        ];
+
+        let network = List::new(network_items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("🔗 Network")
+                    .style(Style::default().fg(Color::Blue))
+            );
+        f.render_widget(network, chunks[0]);
+    }
 
     // Blockchain metrics
-    let blockchain_items = vec![
+    let last_block_display = if metrics.last_block_secs == 0 && metrics.block_height == 0 {
+        "N/A".to_string()
+    } else {
+        format!("{}s ago", metrics.last_block_secs)
+    };
+    let last_block_color = if metrics.last_block_secs == 0 {
+        Color::DarkGray
+    } else if metrics.last_block_secs < 5 {
+        Color::Green
+    } else {
+        Color::Yellow
+    };
+
+    let mut blockchain_items = vec![
         ListItem::new(Line::from(vec![
             Span::raw("Height:      "),
             Span::styled(
@@ -147,17 +217,32 @@ fn render_metrics_grid(f: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
             ),
         ])),
-        ListItem::new(format!("DAG Size:     {:.1} MB", metrics.dag_size_mb)),
         ListItem::new(Line::from(vec![
-            Span::raw("Last Block:  "),
+            Span::raw("Net Height:  "),
             Span::styled(
-                format!("{}s ago", metrics.last_block_secs),
-                Style::default().fg(if metrics.last_block_secs < 5 { Color::Green } else { Color::Yellow })
+                format!("{}", metrics.network_height),
+                Style::default().fg(Color::Blue)
             ),
         ])),
-        ListItem::new(format!("Anchors:      {}", metrics.anchor_count)),
-        ListItem::new(format!("Vertices:     {}", metrics.vertex_count)),
+        ListItem::new(Line::from(vec![
+            Span::raw("Last Block:  "),
+            Span::styled(last_block_display, Style::default().fg(last_block_color)),
+        ])),
+        ListItem::new(format!("DAG Size:     {:.1} MB", metrics.dag_size_mb)),
     ];
+
+    if metrics.total_supply > 0.0 {
+        blockchain_items.push(ListItem::new(Line::from(vec![
+            Span::raw("Supply:      "),
+            Span::styled(
+                format!("{:.2} QUG", metrics.total_supply),
+                Style::default().fg(Color::Yellow)
+            ),
+        ])));
+    }
+    if metrics.emission_rate > 0.0 {
+        blockchain_items.push(ListItem::new(format!("Emission:     {:.6} QUG/blk", metrics.emission_rate)));
+    }
 
     let blockchain = List::new(blockchain_items)
         .block(

@@ -1315,6 +1315,7 @@ pub async fn stream_message(
                                             "total_tokens": total_tokens,
                                             "total_time_ms": total_time_ms,
                                             "tokens_per_second": tokens_per_second,
+                                            "finish_reason": "stop",
                                             "engine": "distributed-ai",
                                             "nodes_used": nodes_used.len(),
                                             "worker_latency_ms": latency_ms
@@ -1497,6 +1498,7 @@ pub async fn stream_message(
                                     "total_time_ms": stats.total_time_ms,
                                     "tokens_per_second": stats.tokens_per_second,
                                     "time_to_first_token_ms": stats.time_to_first_token_ms,
+                                    "finish_reason": "stop",
                                     "engine": "mistral.rs (optimized)"
                                 });
 
@@ -1839,6 +1841,7 @@ pub async fn stream_message_anonymous(
                                     "total_time_ms": stats.total_time_ms,
                                     "tokens_per_second": stats.tokens_per_second,
                                     "time_to_first_token_ms": stats.time_to_first_token_ms,
+                                    "finish_reason": "stop",
                                     "engine": "mistral.rs (single-node)"
                                 });
 

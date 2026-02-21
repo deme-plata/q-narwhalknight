@@ -1,4 +1,5 @@
 use crate::app::App;
+use crate::metrics::Metrics;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -51,12 +52,40 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
 fn render_peer_table(f: &mut Frame, area: Rect, app: &App) {
     let metrics = app.metrics.read().unwrap();
 
-    // Sample peer data (in real implementation, this would come from actual peer manager)
-    let peer_rows = vec![
-        Row::new(vec!["node2", "12D3Koo...jgYmG", "Inbound", "12ms", "↓2.3MB ↑1.1MB"]),
-        Row::new(vec!["node3", "185.182.185.227:8081", "Outbound", "45ms", "↓1.8MB ↑0.9MB"]),
-        Row::new(vec!["node4", "abc123.onion:9050", "Tor", "234ms", "↓0.5MB ↑0.3MB"]),
-    ];
+    let peer_rows: Vec<Row> = if metrics.peer_count == 0 {
+        vec![Row::new(vec!["", "No peers connected", "", "", ""])]
+    } else {
+        // Show summary row based on real peer counts
+        let mut rows = Vec::new();
+        if metrics.inbound_peers > 0 {
+            rows.push(Row::new(vec![
+                "inbound".to_string(),
+                format!("{} peers", metrics.inbound_peers),
+                "In".to_string(),
+                "-".to_string(),
+                format!("↓{}", Metrics::format_bytes(metrics.bytes_received)),
+            ]));
+        }
+        if metrics.outbound_peers > 0 {
+            rows.push(Row::new(vec![
+                "outbound".to_string(),
+                format!("{} peers", metrics.outbound_peers),
+                "Out".to_string(),
+                "-".to_string(),
+                format!("↑{}", Metrics::format_bytes(metrics.bytes_sent)),
+            ]));
+        }
+        if rows.is_empty() {
+            rows.push(Row::new(vec![
+                "peers".to_string(),
+                format!("{} connected", metrics.peer_count),
+                "-".to_string(),
+                "-".to_string(),
+                "-".to_string(),
+            ]));
+        }
+        rows
+    };
 
     let widths = [
         Constraint::Length(8),
@@ -75,7 +104,7 @@ fn render_peer_table(f: &mut Frame, area: Rect, app: &App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(format!("🔗 Connected Peers ({}/100)", metrics.peer_count))
+                .title(format!("🔗 Connected Peers ({})", metrics.peer_count))
         );
 
     f.render_widget(table, area);
@@ -84,35 +113,61 @@ fn render_peer_table(f: &mut Frame, area: Rect, app: &App) {
 fn render_network_info(f: &mut Frame, area: Rect, app: &App) {
     let metrics = app.metrics.read().unwrap();
 
-    let info_items = vec![
+    let bootstrap_status = if metrics.peer_count > 0 {
+        Span::styled("Connected", Style::default().fg(Color::Green))
+    } else {
+        Span::styled("Searching...", Style::default().fg(Color::Yellow))
+    };
+
+    let net_id = if metrics.network_id.is_empty() { "unknown" } else { &metrics.network_id };
+
+    let mut info_items = vec![
         ListItem::new(Line::from(vec![
             Span::styled("📊 Network Statistics", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         ])),
         ListItem::new(""),
         ListItem::new(Line::from(vec![
-            Span::raw("Bootstrap: "),
-            Span::styled("✅ Connected to 185.182.185.227:8081", Style::default().fg(Color::Green)),
+            Span::raw("Network:    "),
+            Span::styled(net_id.to_string(), Style::default().fg(Color::Cyan)),
         ])),
         ListItem::new(Line::from(vec![
-            Span::raw("Tor Status: "),
+            Span::raw("Bootstrap:  "),
+            bootstrap_status,
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::raw("Peers:      "),
             Span::styled(
-                format!("✅ {} circuits active", metrics.tor_circuits),
+                format!("{} (in: {} / out: {})", metrics.peer_count, metrics.inbound_peers, metrics.outbound_peers),
                 Style::default().fg(Color::Green)
             ),
         ])),
         ListItem::new(Line::from(vec![
-            Span::raw("mDNS: "),
-            Span::styled("✅ Discovering local peers", Style::default().fg(Color::Green)),
+            Span::raw("Height:     "),
+            Span::styled(
+                format!("{} / net: {}", metrics.block_height, metrics.network_height),
+                Style::default().fg(Color::Cyan)
+            ),
         ])),
-        ListItem::new(""),
-        ListItem::new(Line::from(vec![
-            Span::styled("🌐 Network Topology", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        ])),
-        ListItem::new(""),
-        ListItem::new("       [You] ─────┬──────── node2 (12ms)"),
-        ListItem::new("                  ├──────── node3 (45ms)"),
-        ListItem::new("                  └──────── node4 [Tor] (234ms)"),
     ];
+
+    if metrics.tor_circuits > 0 {
+        info_items.push(ListItem::new(Line::from(vec![
+            Span::raw("Tor:        "),
+            Span::styled(
+                format!("{} circuits active", metrics.tor_circuits),
+                Style::default().fg(Color::Green)
+            ),
+        ])));
+    }
+
+    info_items.push(ListItem::new(""));
+    info_items.push(ListItem::new(Line::from(vec![
+        Span::raw("Bandwidth:  "),
+        Span::styled(
+            format!("↓{}/s  ↑{}/s", Metrics::format_bytes(metrics.bytes_received), Metrics::format_bytes(metrics.bytes_sent)),
+            Style::default().fg(Color::Blue)
+        ),
+    ])));
 
     let info = List::new(info_items)
         .block(

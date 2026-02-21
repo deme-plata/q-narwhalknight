@@ -66,7 +66,7 @@ async fn mint_qugusd(
     }
 
     // Constants
-    const QUG_PRICE: f64 = 42.50;
+    const QUG_PRICE: f64 = 3000.00;
     const MIN_COLLATERAL_RATIO: f64 = 150.0;
 
     // Calculate collateral ratio
@@ -126,7 +126,7 @@ async fn burn_qugusd(
 
     Ok(Json(ApiResponse::success(serde_json::json!({
         "amount_burned": request.amount,
-        "collateral_returned": request.amount / 42.50,
+        "collateral_returned": request.amount / 3000.00,
         "recipient": request.recipient,
     }))))
 }

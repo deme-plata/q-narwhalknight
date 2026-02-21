@@ -1924,18 +1924,35 @@ impl QStorage {
         let fetch_start = std::time::Instant::now();
         debug!("🚀 [BATCH FETCH] Fetching {} blocks from height {}", capped_limit, start_height);
 
-        // Get latest height to know the upper bound
-        let latest_height = match self.hot_db.get(CF_BLOCKS, b"qblock:latest").await? {
+        // v8.0.6: Use MAX of contiguous height AND tip height as upper bound.
+        // qblock:latest tracks contiguous height (no gaps), but blocks beyond it
+        // may exist from individual production or non-sequential turbo sync.
+        // Without this, block-pack serving returns 0 blocks for heights above
+        // the contiguous pointer even though the blocks exist in RocksDB.
+        let contiguous_height = match self.hot_db.get(CF_BLOCKS, b"qblock:latest").await? {
             Some(height_bytes) if height_bytes.len() == 8 => {
                 let mut height_array = [0u8; 8];
                 height_array.copy_from_slice(&height_bytes);
                 u64::from_be_bytes(height_array)
             }
-            _ => {
-                debug!("No latest QBlock height found, returning empty range");
-                return Ok(Vec::new());
-            }
+            _ => 0,
         };
+        let tip_height = match self.hot_db.get(CF_BLOCKS, b"qblock:tip_height").await? {
+            Some(height_bytes) if height_bytes.len() == 8 => {
+                let mut height_array = [0u8; 8];
+                height_array.copy_from_slice(&height_bytes);
+                u64::from_be_bytes(height_array)
+            }
+            _ => 0,
+        };
+        // Also check height cache which tracks the actual production height
+        let cached_height = self.height_cache.cached();
+        let latest_height = contiguous_height.max(tip_height).max(cached_height);
+
+        if latest_height == 0 {
+            debug!("No QBlock height found (contiguous=0, tip=0, cache=0), returning empty range");
+            return Ok(Vec::new());
+        }
 
         // Calculate end height (inclusive)
         let end_height = std::cmp::min(start_height + capped_limit as u64 - 1, latest_height);
@@ -4937,6 +4954,78 @@ impl QStorage {
         self.hot_db.delete(CF_MANIFEST, key.as_bytes()).await?;
         debug!("🗑️ Deleted loan application: {}", loan_id);
         Ok(())
+    }
+
+    /// Load all bank messages from persistent storage
+    pub async fn load_bank_messages(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let mut messages = Vec::new();
+
+        match self.hot_db.scan_all(CF_BANK_MESSAGES).await {
+            Ok(entries) => {
+                for (key, value) in entries {
+                    if let Ok(key_str) = String::from_utf8(key) {
+                        messages.push((key_str, value));
+                    }
+                }
+                info!(
+                    "📬 Loaded {} bank messages from persistent storage",
+                    messages.len()
+                );
+            }
+            Err(e) => {
+                warn!("Failed to scan bank messages: {}", e);
+            }
+        }
+
+        Ok(messages)
+    }
+
+    /// Load all user identities from persistent storage
+    pub async fn load_user_identities(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let mut identities = Vec::new();
+
+        match self.hot_db.scan_all(CF_USER_IDENTITIES).await {
+            Ok(entries) => {
+                for (key, value) in entries {
+                    if let Ok(key_str) = String::from_utf8(key) {
+                        identities.push((key_str, value));
+                    }
+                }
+                info!(
+                    "🪪 Loaded {} user identities from persistent storage",
+                    identities.len()
+                );
+            }
+            Err(e) => {
+                warn!("Failed to scan user identities: {}", e);
+            }
+        }
+
+        Ok(identities)
+    }
+
+    /// Load all death certificates from persistent storage
+    pub async fn load_death_certificates(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let mut certs = Vec::new();
+
+        match self.hot_db.scan_all(CF_DEATH_CERTIFICATES).await {
+            Ok(entries) => {
+                for (key, value) in entries {
+                    if let Ok(key_str) = String::from_utf8(key) {
+                        certs.push((key_str, value));
+                    }
+                }
+                info!(
+                    "💀 Loaded {} death certificates from persistent storage",
+                    certs.len()
+                );
+            }
+            Err(e) => {
+                warn!("Failed to scan death certificates: {}", e);
+            }
+        }
+
+        Ok(certs)
     }
 
     // ============================================================================

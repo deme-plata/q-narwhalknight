@@ -112,27 +112,31 @@ impl IntoResponse for AuthError {
 }
 
 #[async_trait]
-impl<S> FromRequestParts<S> for AuthenticatedWallet
-where
-    S: Send + Sync,
-{
+impl FromRequestParts<std::sync::Arc<crate::AppState>> for AuthenticatedWallet {
     type Rejection = AuthError;
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &std::sync::Arc<crate::AppState>,
+    ) -> Result<Self, Self::Rejection> {
         let request_path = parts.uri.path();
 
-        // Extract authentication header
+        // v8.0.1: Try Bearer token first (OAuth2 flow), then fall back to X-Wallet-Auth
+        if let Some(bearer_result) = try_bearer_auth(parts, state).await {
+            return bearer_result;
+        }
+
+        // Extract cryptographic authentication header
         let auth_header = parts
             .headers
             .get("X-Wallet-Auth")
             .ok_or_else(|| {
-                // v3.4.5: Only log for transaction lookups to debug ZK-STARK auth
                 if request_path.contains("/transactions/") && !request_path.contains("/transactions/send") {
                     tracing::debug!("🔐 [AUTH] No X-Wallet-Auth header for transaction lookup: {}", request_path);
                 }
                 AuthError {
                     error: "missing_auth".to_string(),
-                    message: "Missing X-Wallet-Auth header. Please sign your request.".to_string(),
+                    message: "Missing X-Wallet-Auth or Authorization: Bearer header.".to_string(),
                 }
             })?
             .to_str()
@@ -455,6 +459,72 @@ fn verify_aegis_ql(auth: &AuthHeader, address: &Address, message: &[u8]) -> Resu
     }
 
     Ok(())
+}
+
+/// v8.0.1: Try Bearer token authentication (OAuth2 flow).
+/// Returns Some(Ok(...)) if Bearer auth succeeded, Some(Err(...)) if token was invalid,
+/// None if no Bearer token was present (fall through to X-Wallet-Auth).
+async fn try_bearer_auth(
+    parts: &Parts,
+    state: &std::sync::Arc<crate::AppState>,
+) -> Option<Result<AuthenticatedWallet, AuthError>> {
+    let auth_header = parts.headers.get("Authorization")?.to_str().ok()?;
+    let token = auth_header.strip_prefix("Bearer ")?;
+    if token.is_empty() {
+        return None;
+    }
+
+    // Look up the access token in OAuth2 storage
+    let access_token = match state.oauth2_storage.get_access_token(token).await {
+        Some(t) => t,
+        None => {
+            return Some(Err(AuthError {
+                error: "invalid_bearer_token".to_string(),
+                message: "Bearer token not found or revoked.".to_string(),
+            }));
+        }
+    };
+
+    // Check expiration
+    if access_token.expires_at < chrono::Utc::now() {
+        return Some(Err(AuthError {
+            error: "expired_bearer_token".to_string(),
+            message: "Bearer token has expired. Please re-authenticate.".to_string(),
+        }));
+    }
+
+    // Extract wallet address from token
+    let addr_str = &access_token.wallet_address;
+    let hex_part = if addr_str.starts_with("qnk") {
+        &addr_str[3..]
+    } else {
+        addr_str
+    };
+
+    let address_bytes = match hex::decode(hex_part) {
+        Ok(b) if b.len() == 32 => b,
+        _ => {
+            return Some(Err(AuthError {
+                error: "invalid_token_address".to_string(),
+                message: "Bearer token has invalid wallet address.".to_string(),
+            }));
+        }
+    };
+
+    let mut address = [0u8; 32];
+    address.copy_from_slice(&address_bytes);
+
+    tracing::debug!(
+        "🔐 [AUTH] Bearer token accepted for wallet qnk{}... (scopes: {:?})",
+        &hex_part[..8.min(hex_part.len())],
+        access_token.scopes
+    );
+
+    Some(Ok(AuthenticatedWallet {
+        address,
+        timestamp: chrono::Utc::now(),
+        scheme: AuthScheme::Ed25519, // Bearer tokens don't have a crypto scheme
+    }))
 }
 
 /// Generate authentication challenge for wallet

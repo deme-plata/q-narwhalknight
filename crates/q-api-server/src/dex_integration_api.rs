@@ -38,7 +38,7 @@ use axum::{
 };
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -673,8 +673,69 @@ pub struct SwapQuote {
     pub valid_until: u64, // Timestamp
 }
 
+/// Find a liquidity pool matching the given token pair (order-independent)
+fn find_pool_for_pair<'a>(
+    pools: &'a HashMap<String, crate::LiquidityPool>,
+    token_in: &str,
+    token_out: &str,
+) -> Option<(&'a String, &'a crate::LiquidityPool, bool)> {
+    let tin = token_in.to_uppercase();
+    let tout = token_out.to_uppercase();
+    for (pool_id, pool) in pools.iter() {
+        let t0 = pool.token0.to_uppercase();
+        let t1 = pool.token1.to_uppercase();
+        if t0 == tin && t1 == tout {
+            return Some((pool_id, pool, false)); // token_in = token0
+        }
+        if t0 == tout && t1 == tin {
+            return Some((pool_id, pool, true)); // token_in = token1 (reversed)
+        }
+    }
+    None
+}
+
+/// Constant-product AMM: calculate output amount given input amount and reserves
+/// Uses x*y=k formula with 0.3% fee (997/1000)
+/// Returns (amount_out, price_impact)
+fn amm_get_amount_out(amount_in: u128, reserve_in: u128, reserve_out: u128) -> (u128, f64) {
+    if reserve_in == 0 || reserve_out == 0 || amount_in == 0 {
+        return (0, 1.0);
+    }
+    // Apply 0.3% fee: amount_in_with_fee = amount_in * 997
+    let amount_in_with_fee = amount_in.saturating_mul(997);
+    // numerator = amount_in_with_fee * reserve_out
+    // denominator = reserve_in * 1000 + amount_in_with_fee
+    // Use u128 checked arithmetic to prevent overflow on large pools
+    let numerator = (amount_in_with_fee as u128).checked_mul(reserve_out as u128);
+    let denominator = (reserve_in as u128)
+        .checked_mul(1000)
+        .and_then(|v| v.checked_add(amount_in_with_fee as u128));
+
+    let amount_out = match (numerator, denominator) {
+        (Some(n), Some(d)) if d > 0 => n / d,
+        _ => 0u128,
+    };
+
+    // Price impact: compare effective price vs spot price
+    // Spot price = reserve_out / reserve_in (ideal output for tiny trade)
+    // Effective price = amount_out / amount_in
+    // Price impact = 1 - (effective_price / spot_price)
+    let spot_output = if reserve_in > 0 {
+        (amount_in as f64) * (reserve_out as f64) / (reserve_in as f64) * 0.997
+    } else {
+        0.0
+    };
+    let price_impact = if spot_output > 0.0 {
+        1.0 - (amount_out as f64 / spot_output)
+    } else {
+        1.0
+    };
+
+    (amount_out, price_impact.max(0.0))
+}
+
 pub async fn get_swap_quote(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Json(request): Json<SwapQuoteRequest>,
 ) -> Result<Json<DexApiResponse<SwapQuote>>, StatusCode> {
     // Input validation
@@ -690,54 +751,93 @@ pub async fn get_swap_quote(
         )));
     }
 
-    // Validate amount_in or amount_out is provided
     if request.amount_in.is_none() && request.amount_out.is_none() {
         return Ok(Json(DexApiResponse::error(
             "Either amount_in or amount_out must be specified".to_string(),
         )));
     }
 
-    // Validate slippage tolerance
-    // v3.4.19-beta: Convert to basis points for integer math (0.5% = 50 bps, max 10% = 1000 bps)
+    // Validate slippage tolerance (0.5% default, max 10%)
     let slippage_percent = request.slippage_tolerance.unwrap_or(0.5);
     if slippage_percent < 0.0 || slippage_percent > 10.0 {
         return Ok(Json(DexApiResponse::error(
             "Slippage tolerance must be between 0% and 10%".to_string(),
         )));
     }
-    // Convert to basis points (1% = 100 bps) for integer math
     let slippage_bps: u128 = (slippage_percent * 100.0) as u128;
 
-    // For demonstration, return a mock quote
-    let amount_in = request.amount_in.unwrap_or_else(|| "1000000".to_string()); // 1 QNK
-    let amount_out = "950000".to_string(); // 0.95 of the other token (accounting for fees)
+    // v8.0.9: Real AMM quote from liquidity pools
+    let pools_guard = state.liquidity_pools.read().await;
+    let pool_match = find_pool_for_pair(&pools_guard, &request.token_in, &request.token_out);
 
-    // v3.4.19-beta: Use integer math for slippage calculation to avoid f64 precision loss
-    // Formula: minimum_out = amount_out * (10000 - slippage_bps) / 10000
-    let minimum_amount_out = {
-        let base: u128 = amount_out.parse().unwrap_or(0);
-        // 10000 bps = 100%, so (10000 - slippage_bps) gives the multiplier
-        let slippage_adjusted = base.saturating_mul(10000 - slippage_bps) / 10000;
-        slippage_adjusted.to_string()
+    let (pool_id, reserve_in, reserve_out) = match pool_match {
+        Some((pid, pool, reversed)) => {
+            if reversed {
+                (pid.clone(), pool.reserve1, pool.reserve0)
+            } else {
+                (pid.clone(), pool.reserve0, pool.reserve1)
+            }
+        }
+        None => {
+            return Ok(Json(DexApiResponse::error(format!(
+                "No liquidity pool found for {}/{}",
+                request.token_in, request.token_out
+            ))));
+        }
+    };
+    drop(pools_guard);
+
+    if reserve_in == 0 || reserve_out == 0 {
+        return Ok(Json(DexApiResponse::error(
+            "Pool has no liquidity".to_string(),
+        )));
+    }
+
+    // Parse amount_in (in 24-decimal base units)
+    let amount_in_raw: u128 = match request.amount_in.as_ref() {
+        Some(s) => match s.parse::<u128>() {
+            Ok(v) if v > 0 => v,
+            _ => return Ok(Json(DexApiResponse::error("Invalid amount_in".to_string()))),
+        },
+        None => return Ok(Json(DexApiResponse::error("amount_in required".to_string()))),
+    };
+
+    // Calculate output using constant-product AMM (x*y=k with 0.3% fee)
+    let (amount_out, price_impact) = amm_get_amount_out(amount_in_raw, reserve_in, reserve_out);
+
+    if amount_out == 0 {
+        return Ok(Json(DexApiResponse::error(
+            "Insufficient liquidity for this trade size".to_string(),
+        )));
+    }
+
+    // Apply slippage tolerance for minimum output
+    let minimum_amount_out = amount_out.saturating_mul(10000 - slippage_bps) / 10000;
+
+    // Execution price = amount_out / amount_in (display units cancel out since both 24-decimal)
+    let execution_price = if amount_in_raw > 0 {
+        amount_out as f64 / amount_in_raw as f64
+    } else {
+        0.0
     };
 
     let quote = SwapQuote {
-        amount_in,
-        amount_out: amount_out.clone(),
-        minimum_amount_out,
-        price_impact: 0.02,                       // 2% price impact
-        gas_estimate: 120000,                     // Estimated gas for DEX swap
-        route: vec!["pool_qnk_usdc".to_string()], // Route through QNK/USDC pool
-        execution_price: 0.95,
-        valid_until: current_timestamp() + 300, // Valid for 5 minutes
+        amount_in: amount_in_raw.to_string(),
+        amount_out: amount_out.to_string(),
+        minimum_amount_out: minimum_amount_out.to_string(),
+        price_impact,
+        gas_estimate: 125000,
+        route: vec![pool_id],
+        execution_price,
+        valid_until: current_timestamp() + 300, // 5 minutes
     };
 
     tracing::info!(
-        "Generated swap quote: {} {} -> {} {}",
-        quote.amount_in,
-        request.token_in,
-        quote.amount_out,
-        request.token_out
+        "📊 [DEX] Swap quote: {} {} -> {} {} (impact: {:.4}%, pool reserves: {}/{})",
+        quote.amount_in, request.token_in,
+        quote.amount_out, request.token_out,
+        price_impact * 100.0,
+        reserve_in, reserve_out
     );
 
     Ok(Json(DexApiResponse::success(quote)))
@@ -800,10 +900,12 @@ pub async fn execute_swap(
         )));
     }
 
-    // Validate recipient address format (basic check)
-    if request.recipient.len() != 42 || !request.recipient.starts_with("0x") {
+    // Accept both 0x-prefixed (42 chars) and qnk-prefixed (69 chars) addresses
+    if !(request.recipient.len() == 42 && request.recipient.starts_with("0x"))
+        && !(request.recipient.len() >= 64 && request.recipient.starts_with("qnk"))
+    {
         return Ok(Json(DexApiResponse::error(
-            "invalid recipient address format".to_string(),
+            "invalid recipient address format (use 0x... or qnk...)".to_string(),
         )));
     }
 
@@ -813,7 +915,7 @@ pub async fn execute_swap(
         _ => return Ok(Json(DexApiResponse::error("invalid amount_in".to_string()))),
     };
 
-    let _minimum_out: u128 = match request.minimum_amount_out.parse() {
+    let minimum_out: u128 = match request.minimum_amount_out.parse() {
         Ok(amount) if amount > 0 => amount,
         _ => {
             return Ok(Json(DexApiResponse::error(
@@ -823,16 +925,92 @@ pub async fn execute_swap(
     };
 
     // ============================================================================
-    // v1.0.91-beta: PROPER TRANSACTION HANDLING
-    // Fixes 10 critical design flaws from v1.0.90-beta:
-    // 1. Proper cryptographic transaction ID (SHA3-256 hash)
-    // 2. Nonce management for replay attack prevention
-    // 3. Pending status (not Confirmed immediately)
-    // 4. Block production queue integration
-    // 5. Proper broadcast mechanism
+    // v8.0.9: REAL AMM SWAP EXECUTION
+    // 1. Find pool and calculate output via constant-product AMM
+    // 2. Enforce slippage (minimum_amount_out)
+    // 3. Update pool reserves atomically
+    // 4. Create and broadcast transaction
+    // 5. Persist updated pool to storage
     // ============================================================================
 
-    // Parse recipient address to derive sender
+    // Step 1: Find pool and calculate AMM output
+    let mut pools_guard = state.liquidity_pools.write().await;
+    let pool_match = find_pool_for_pair(&pools_guard, &request.token_in, &request.token_out);
+
+    let (pool_id, reserve_in, reserve_out, reversed) = match pool_match {
+        Some((pid, pool, rev)) => {
+            if rev {
+                (pid.clone(), pool.reserve1, pool.reserve0, true)
+            } else {
+                (pid.clone(), pool.reserve0, pool.reserve1, false)
+            }
+        }
+        None => {
+            return Ok(Json(DexApiResponse::error(format!(
+                "No liquidity pool found for {}/{}",
+                request.token_in, request.token_out
+            ))));
+        }
+    };
+
+    if reserve_in == 0 || reserve_out == 0 {
+        return Ok(Json(DexApiResponse::error(
+            "Pool has no liquidity".to_string(),
+        )));
+    }
+
+    let (amount_out, price_impact) = amm_get_amount_out(amount_in, reserve_in, reserve_out);
+
+    if amount_out == 0 {
+        return Ok(Json(DexApiResponse::error(
+            "Insufficient liquidity for this trade size".to_string(),
+        )));
+    }
+
+    // Step 2: Enforce slippage protection
+    if amount_out < minimum_out {
+        return Ok(Json(DexApiResponse::error(format!(
+            "Slippage exceeded: output {} < minimum {}",
+            amount_out, minimum_out
+        ))));
+    }
+
+    // Step 3: Update pool reserves atomically
+    if let Some(pool) = pools_guard.get_mut(&pool_id) {
+        if reversed {
+            // token_in = token1, token_out = token0
+            pool.reserve1 = pool.reserve1.saturating_add(amount_in);
+            pool.reserve0 = pool.reserve0.saturating_sub(amount_out);
+        } else {
+            // token_in = token0, token_out = token1
+            pool.reserve0 = pool.reserve0.saturating_add(amount_in);
+            pool.reserve1 = pool.reserve1.saturating_sub(amount_out);
+        }
+
+        // Persist updated pool to storage
+        if let Ok(pool_bytes) = serde_json::to_vec(pool) {
+            let _ = state.storage_engine.save_liquidity_pool(&pool_id, &pool_bytes).await;
+        }
+
+        // Update collateral vault price if this is the QUG/QUGUSD pool
+        let t0 = pool.token0.to_uppercase();
+        let t1 = pool.token1.to_uppercase();
+        if (t0 == "QUG" && t1 == "QUGUSD") || (t0 == "QUGUSD" && t1 == "QUG") {
+            let (qug_reserve, qugusd_reserve) = if t0 == "QUG" {
+                (pool.reserve0, pool.reserve1)
+            } else {
+                (pool.reserve1, pool.reserve0)
+            };
+            if qug_reserve > 0 {
+                let new_price = qugusd_reserve as f64 / qug_reserve as f64;
+                let mut vault = state.collateral_vault.write().await;
+                vault.qug_price_usd = new_price;
+            }
+        }
+    }
+    drop(pools_guard);
+
+    // Step 4: Parse recipient and create transaction
     let sender = match parse_address_32(&request.recipient) {
         Ok(addr) => addr,
         Err(_) => {
@@ -842,16 +1020,14 @@ pub async fn execute_swap(
         }
     };
 
-    // Get next nonce for this wallet (prevents replay attacks)
     let nonce = state.nonce_tracker.get_and_increment(&sender);
 
-    // Create transaction with proper cryptographic ID using transaction_utils
     let transaction = q_api_server::transaction_utils::TransactionBuilder::new()
         .from(sender)
         .to([0u8; 32]) // DEX contract address
         .amount(amount_in)
         .fee(1_000_000) // 0.01 QNK fee
-        .data(format!("swap:{}:{}", request.token_in, request.token_out).into_bytes())
+        .data(format!("swap:{}:{}:out:{}", request.token_in, request.token_out, amount_out).into_bytes())
         .token_type(q_types::TokenType::QUG)
         .fee_token_type(q_types::TokenType::QUGUSD)
         .tx_type(q_types::TransactionType::Swap)
@@ -860,7 +1036,6 @@ pub async fn execute_swap(
     let tx_id = transaction.id;
     let tx_hash = format!("0x{}", hex::encode(tx_id));
 
-    // Submit transaction properly: pool, mempool queue, and broadcast
     let submission_result = q_api_server::transaction_utils::submit_transaction(
         transaction,
         &state.tx_pool,
@@ -868,15 +1043,6 @@ pub async fn execute_swap(
         state.production_mempool.as_ref(),
         state.libp2p_discovery.as_ref(),
     ).await;
-
-    // Create result with proper status
-    // v3.4.19-beta: Use integer math for amount_out calculation
-    // In production, this would come from the actual AMM calculation
-    // For now, estimate with 0.3% swap fee (30 bps): output = input * 9970 / 10000
-    let estimated_amount_out = amount_in
-        .saturating_mul(9970)  // 99.7% (0.3% fee)
-        .checked_div(10000)
-        .unwrap_or(0);
 
     let swap_result = SwapResult {
         transaction_hash: tx_hash.clone(),
@@ -886,14 +1052,16 @@ pub async fn execute_swap(
             _ => "pending".to_string(),
         },
         amount_in: request.amount_in,
-        amount_out: estimated_amount_out.to_string(),
+        amount_out: amount_out.to_string(),
         gas_used: 125000,
     };
 
     tracing::info!(
-        "📤 [DEX] Swap transaction submitted: {} (nonce={}, broadcast={}, queued={})",
+        "📤 [DEX] Swap EXECUTED: {} (nonce={}, impact={:.4}%, out={}, broadcast={}, queued={})",
         &tx_hash[..16],
         nonce,
+        price_impact * 100.0,
+        amount_out,
         submission_result.broadcast_success,
         submission_result.queued_for_block
     );
@@ -914,10 +1082,74 @@ pub struct TokenPrice {
 }
 
 pub async fn get_all_prices(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<DexApiResponse<Vec<TokenPrice>>>, StatusCode> {
-    // TODO: Implement actual price oracle
-    let prices = vec![];
+    // v8.0.9: Real price oracle from liquidity pool reserves
+    let mut prices = vec![];
+    let now = current_timestamp();
+
+    // QUG price from collateral vault (updated by AMM swaps)
+    let qug_price_usd = {
+        let vault = state.collateral_vault.read().await;
+        if vault.qug_price_usd > 0.0 { vault.qug_price_usd } else { 42.50 }
+    };
+
+    prices.push(TokenPrice {
+        token: "QUG".to_string(),
+        price_usd: qug_price_usd,
+        price_qnk: 1.0,
+        change_24h: 0.0,
+        volume_24h: "0".to_string(),
+        last_updated: now,
+    });
+
+    prices.push(TokenPrice {
+        token: "QUGUSD".to_string(),
+        price_usd: 1.0,
+        price_qnk: 1.0 / qug_price_usd,
+        change_24h: 0.0,
+        volume_24h: "0".to_string(),
+        last_updated: now,
+    });
+
+    // Derive prices for wrapped tokens from their pool ratios against QUG
+    let pools_guard = state.liquidity_pools.read().await;
+    let mut seen_tokens = std::collections::HashSet::new();
+    seen_tokens.insert("QUG".to_string());
+    seen_tokens.insert("QUGUSD".to_string());
+
+    for pool in pools_guard.values() {
+        if pool.reserve0 == 0 || pool.reserve1 == 0 {
+            continue;
+        }
+        let t0 = pool.token0.to_uppercase();
+        let t1 = pool.token1.to_uppercase();
+        // If one side is QUG, derive the other token's price
+        if t0 == "QUG" && !seen_tokens.contains(&t1) {
+            let token_price = (pool.reserve0 as f64 / pool.reserve1 as f64) * qug_price_usd;
+            prices.push(TokenPrice {
+                token: t1.clone(),
+                price_usd: token_price,
+                price_qnk: pool.reserve0 as f64 / pool.reserve1 as f64,
+                change_24h: 0.0,
+                volume_24h: "0".to_string(),
+                last_updated: now,
+            });
+            seen_tokens.insert(t1);
+        } else if t1 == "QUG" && !seen_tokens.contains(&t0) {
+            let token_price = (pool.reserve1 as f64 / pool.reserve0 as f64) * qug_price_usd;
+            prices.push(TokenPrice {
+                token: t0.clone(),
+                price_usd: token_price,
+                price_qnk: pool.reserve1 as f64 / pool.reserve0 as f64,
+                change_24h: 0.0,
+                volume_24h: "0".to_string(),
+                last_updated: now,
+            });
+            seen_tokens.insert(t0);
+        }
+    }
+
     Ok(Json(DexApiResponse::success(prices)))
 }
 
@@ -1203,13 +1435,13 @@ pub async fn get_token_price(
     let token_upper = token.to_uppercase();
 
     // v4.0.4: Get QUG price from vault (which is updated from AMM after each swap)
-    // Previously forced to hardcoded $42.50 which prevented price discovery
+    // Previously forced to hardcoded $3000.00 which prevented price discovery
     let qug_price_usd = {
         let vault_price = state.collateral_vault.read().await.qug_price_usd;
         if vault_price > 0.0 {
             vault_price
         } else {
-            42.50 // Only use default if vault has no price at all
+            3000.00 // Only use default if vault has no price at all
         }
     };
 

@@ -48,8 +48,8 @@ pub struct Config {
 }
 
 fn default_block_interval() -> u64 {
-    2
-} // Phase 2: Fast block production for exciting visualization
+    0
+} // v8.0.9: 0 = produce as fast as possible (target 10+ bps with multiple producers)
 fn default_min_solutions() -> usize {
     1
 }
@@ -115,7 +115,7 @@ impl Default for Config {
             node_id: None,
             tor: TorConfig::default(),
             allow_manual_trigger: false,  // v0.0.22-beta: default secure
-            block_interval_secs: 2, // Phase 2: Fast block production for exciting visualization
+            block_interval_secs: 0, // v8.0.10: 0 = produce as fast as possible (10+ BPS target)
             min_solutions_per_block: 1, // v0.0.22-beta: default 1
             max_solutions_per_block: 10_000, // v7.1.4: Increased from 100 - queue backlog fix
             validator_index: 0,     // v0.0.22-beta: default primary
@@ -130,19 +130,12 @@ impl Config {
     pub fn validate(&self) -> anyhow::Result<()> {
         use tracing::{info, warn};
 
-        // Validate block interval (Phase 2: Allow 2s for exciting visualization)
-        if self.block_interval_secs < 2 {
-            anyhow::bail!(
-                "INVALID CONFIG: block_interval_secs ({}) must be >= 2 seconds (Phase 2 minimum)",
-                self.block_interval_secs
-            );
-        }
-
-        // Warn about fast block production for visualization
-        if self.block_interval_secs < 5 {
-            warn!("⚡ Fast block production enabled: {} second intervals (Phase 2 exciting visualization)",
+        // v8.0.10: Allow interval=0 for maximum block throughput (10+ BPS target)
+        if self.block_interval_secs == 0 {
+            info!("⚡ Maximum block production enabled: interval=0 (produce as fast as possible)");
+        } else if self.block_interval_secs < 5 {
+            warn!("⚡ Fast block production enabled: {} second intervals",
                   self.block_interval_secs);
-            warn!("⚡ This is optimized for DAG visualization - consider 5-15s for production");
         }
 
         if self.block_interval_secs > 300 {

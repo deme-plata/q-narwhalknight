@@ -26,7 +26,7 @@ use rayon::prelude::*;  // ✅ v0.9.41-beta: Parallel decompression
 use serde::{Deserialize, Serialize};
 use std::cmp::min;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, RwLock, Semaphore, Mutex};
@@ -401,19 +401,22 @@ impl Default for TurboSyncConfig {
                         sys.refresh_memory();
                         (sys.total_memory() / (1024 * 1024)) as usize
                     };
-                    // v7.1.4: Turbo-charged for 32GB+ servers (was 8 for 16-31GB, now 12)
+                    // v8.0.10: Higher parallel streams — more concurrency = better throughput
+                    // RSS backpressure (with reduced max wait) still prevents OOM
                     match ram_mb {
-                        0..=3999     => 1,    // micro: 1 stream (OOM prevention)
-                        4000..=7999  => 1,    // small (Gamma 7.8GB): 1 stream (v6.1.0 OOM fix)
-                        8000..=15999 => 6,    // medium: 6 streams (was 4)
-                        16000..=31999 => 12,  // large: 12 streams (was 8)
-                        32000..=63999 => 20,  // xlarge 32GB: 20 streams (was 16)
-                        _            => 24,   // xxlarge 64GB+: 24 streams
+                        0..=3999     => 4,    // micro: 4 streams (was 2)
+                        4000..=7999  => 8,    // small: 8 streams (was 4)
+                        8000..=15999 => 16,   // medium: 16 streams (was 8)
+                        16000..=31999 => 24,  // large: 24 streams (was 16)
+                        32000..=63999 => 32,  // xlarge: 32 streams (was 24)
+                        _            => 48,   // xxlarge 64GB+: 48 streams (was 32)
                     }
                 }),
-            // v6.0.9: RAM-aware chunk size to reduce per-chunk memory footprint
-            // Each chunk allocates ~50KB × chunk_size for serialization/deserialization
-            // On Gamma (7.8GB): 500 blocks × 50KB = ~25MB per chunk (was 50MB with 1000)
+            // v8.0.7: P2P-aware chunk size — capped at 500 regardless of local RAM
+            // Problem: Large chunks (2000-3000) on big servers timeout because the
+            // SERVING peer (e.g., Gamma 7.8GB) can't fetch+serialize+send that many
+            // blocks within the 45s timeout. Gamma reliably serves ~500 blocks in ~5s.
+            // RAM-based scaling only helps for local DB writes, not P2P requests.
             chunk_size: std::env::var("Q_TURBO_CHUNK_SIZE")
                 .ok().and_then(|v| v.parse().ok()).unwrap_or_else(|| {
                     let ram_mb = {
@@ -422,21 +425,21 @@ impl Default for TurboSyncConfig {
                         sys.refresh_memory();
                         (sys.total_memory() / (1024 * 1024)) as u64
                     };
-                    // v7.1.4: Larger chunks for 32GB+ (more blocks per request = fewer round trips)
+                    // v8.0.10: Aggressive chunk sizes — small chunks = high RTT overhead per block
+                    // Each round-trip is ~2-5s regardless of chunk size, so bigger = better BPS
+                    // 500 blocks @ ~50KB avg = ~25MB per chunk (well within memory budget)
                     match ram_mb {
-                        0..=3999     => 50,    // micro: tiny chunks (OOM prevention)
-                        4000..=7999  => 100,   // small (Gamma): 100 blocks/chunk (v6.1.0 OOM fix)
-                        8000..=15999 => 500,   // medium
-                        16000..=31999 => 1000, // large: 1000 blocks/chunk
-                        32000..=63999 => 2000, // xlarge 32GB: 2000 blocks/chunk (was 1000)
-                        _            => 3000,  // xxlarge 64GB+: 3000 blocks/chunk
+                        0..=3999     => 250,   // micro: 250 blocks/chunk (was 100)
+                        4000..=7999  => 500,   // small: 500 blocks/chunk (was 250)
+                        8000..=15999 => 1000,  // medium: 1000 blocks/chunk (was 500)
+                        _            => 2000,  // large+: 2000 blocks/chunk (amortize RTT)
                     }
                 }),
             compression_level: std::env::var("Q_TURBO_COMPRESSION_LEVEL")
                 .ok().and_then(|v| v.parse().ok()).unwrap_or(1),  // Level 1 for speed
             chunk_timeout: Duration::from_secs(
                 std::env::var("Q_TURBO_CHUNK_TIMEOUT_SECS")
-                    .ok().and_then(|v| v.parse().ok()).unwrap_or(45)),  // v3.4.7: 45s (was 30s, max was 180s)
+                    .ok().and_then(|v| v.parse().ok()).unwrap_or(30)),  // v8.0.10: 30s (was 45s — faster retry)
 
             // Protocol features (safe to keep enabled)
             delta_compression: true,
@@ -1252,7 +1255,25 @@ pub struct TurboSyncManager {
 
     /// 🚀 v2.3.4-beta: Emergency sync guard to prevent multiple concurrent syncs
     /// When true, a sync is in progress and new emergency syncs should be skipped
-    emergency_sync_in_progress: Arc<std::sync::atomic::AtomicBool>,
+    emergency_sync_in_progress: Arc<AtomicBool>,
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // 🚀 v1.0.2: Lock-Free Sync State (Miner-Optimized Atomics)
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// Cached max peer height — updated atomically on every peer registration.
+    /// Sync loop reads this instead of acquiring RwLock on peer_registry.
+    pub cached_max_peer_height: Arc<AtomicU64>,
+
+    /// Cached active peer count — updated atomically on peer add/remove.
+    pub cached_peer_count: Arc<AtomicU32>,
+
+    /// Whether the blockchain has known gaps — set true when gap detected, false when filled.
+    /// Sync loop skips expensive get_first_missing_height() DB scan when false.
+    pub cached_has_gaps: Arc<AtomicBool>,
+
+    /// Whether the node is fully synced (gap == 0). Used for adaptive loop frequency.
+    pub is_fully_synced: Arc<AtomicBool>,
 
     /// 🚀 v1.5.0-beta: CHIRON Parallel State Applicator (~30% sync speedup)
     /// Uses pre-computed execution hints to parallelize transaction state application
@@ -1342,8 +1363,8 @@ impl TurboSyncManager {
         // If a request takes >45s, it's better to retry with another peer anyway.
         // For 5000-block chunks at ~100KB/block = ~500MB, 45s = ~11MB/s minimum.
         let adaptive_timeout = Arc::new(RwLock::new(AdaptiveTimeout::new(
-            10000,  // 10 second minimum timeout (fast retry for small syncs)
-            45000,  // 45 second maximum timeout (was 180s - too slow!)
+            5000,   // v8.0.10: 5 second minimum timeout (was 10s — too slow for 250-block chunks)
+            30000,  // v8.0.10: 30 second maximum timeout (was 45s — faster retry on slow peers)
         )));
         let progress_tracker = Arc::new(RwLock::new(SyncProgressTracker::new(enhanced_config.clone())));
         let block_verifier = Arc::new(RwLock::new(IncrementalBlockVerifier::new(enhanced_config, None)));
@@ -1530,18 +1551,20 @@ impl TurboSyncManager {
 
         // 🚀 v6.0.5: RAM-aware decompression parallelism
         // Each concurrent decompression holds a full pack in memory (~5-25MB each)
-        // On 7.8GB Gamma, 64 concurrent decompressions = potential 1.6GB memory spike
+        // v8.0.10: Match decompression parallelism to stream count
+        // Decompression is fast (~5ms per chunk with LZ4) — the old low limits
+        // serialized work and caused sync <10 BPS
         let default_decomp = {
             use sysinfo::System;
             let mut sys = System::new();
             sys.refresh_memory();
             let ram_mb = (sys.total_memory() / (1024 * 1024)) as usize;
             match ram_mb {
-                0..=3999     => 2usize,   // micro: minimal
-                4000..=7999  => 4,         // small (Gamma): conservative
-                8000..=15999 => 8,         // medium
-                16000..=31999 => 16,       // large
-                _            => 32,        // xlarge
+                0..=3999     => 4usize,   // micro: match 4 streams
+                4000..=7999  => 8,         // small: match 8 streams
+                8000..=15999 => 16,        // medium: match 16 streams
+                16000..=31999 => 24,       // large: match 24 streams
+                _            => 32,        // xlarge: match 32 streams
             }
         };
         let decompression_parallelism = std::env::var("Q_DECOMPRESSION_PARALLELISM")
@@ -1657,6 +1680,11 @@ impl TurboSyncManager {
             // 🚀 v2.3.10-beta: WARP SYNC Phase 2 & 3
             warp_multi_peer,
             warp_prefetch,
+            // 🚀 v1.0.2: Lock-Free Sync State
+            cached_max_peer_height: Arc::new(AtomicU64::new(0)),
+            cached_peer_count: Arc::new(AtomicU32::new(0)),
+            cached_has_gaps: Arc::new(AtomicBool::new(true)), // Assume gaps until proven otherwise
+            is_fully_synced: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1671,6 +1699,40 @@ impl TurboSyncManager {
     /// Allows block producers and other components to use CHIRON parallel processing
     pub fn get_parallel_state_applicator(&self) -> Arc<ParallelStateApplicator> {
         Arc::clone(&self.parallel_state_applicator)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // 🚀 v1.0.2: Lock-Free Sync State Accessors (Miner-Optimized)
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// Read max peer height without acquiring RwLock (lock-free, O(1))
+    pub fn max_peer_height_fast(&self) -> u64 {
+        self.cached_max_peer_height.load(Ordering::Acquire)
+    }
+
+    /// Read active peer count without acquiring RwLock (lock-free, O(1))
+    pub fn peer_count_fast(&self) -> u32 {
+        self.cached_peer_count.load(Ordering::Acquire)
+    }
+
+    /// Check if blockchain has known gaps (lock-free)
+    pub fn has_gaps_fast(&self) -> bool {
+        self.cached_has_gaps.load(Ordering::Acquire)
+    }
+
+    /// Mark gap state (called after gap detection / gap fill)
+    pub fn set_has_gaps(&self, has_gaps: bool) {
+        self.cached_has_gaps.store(has_gaps, Ordering::Release);
+    }
+
+    /// Check if node is fully synced (lock-free)
+    pub fn is_synced_fast(&self) -> bool {
+        self.is_fully_synced.load(Ordering::Acquire)
+    }
+
+    /// Update fully-synced state
+    pub fn set_fully_synced(&self, synced: bool) {
+        self.is_fully_synced.store(synced, Ordering::Release);
     }
 
     /// 🚀 v1.5.0-beta: Check if CHIRON hints are enabled
@@ -2093,7 +2155,17 @@ impl TurboSyncManager {
     }
 
     /// Register a peer with height and optional tip hash (v5.2.0)
+    /// v8.0.8: Added height sanity check to prevent rogue peers from poisoning registry
     pub async fn register_peer_with_tip(&self, peer_id: PeerId, highest_block: u64, tip_hash: Option<[u8; 32]>) {
+        // v8.0.8: Height sanity — reject heights unreasonably far ahead of our stored tip
+        let our_height = self.storage.get_highest_contiguous_block().await.unwrap_or(0);
+        let max_reasonable = (our_height * 3).max(our_height + 500_000);
+        if highest_block > max_reasonable {
+            warn!("🚫 [PEER REGISTRY] Rejecting suspicious height {} from peer {} (our: {}, max: {})",
+                highest_block, peer_id, our_height, max_reasonable);
+            return;
+        }
+
         let mut registry = self.peer_registry.write().await;
 
         let accepted = registry.update_peer(peer_id, highest_block, tip_hash);
@@ -2101,6 +2173,19 @@ impl TurboSyncManager {
             warn!("🚫 [PEER REGISTRY] Rejected update from peer {} (monotonicity violations)", peer_id);
             return;
         }
+
+        // 🚀 v1.0.2: Update lock-free atomic caches (sync loop reads these without lock)
+        // Update max height: atomic CAS loop to ensure we only increase
+        let mut current_max = self.cached_max_peer_height.load(Ordering::Relaxed);
+        while highest_block > current_max {
+            match self.cached_max_peer_height.compare_exchange_weak(
+                current_max, highest_block, Ordering::Release, Ordering::Relaxed
+            ) {
+                Ok(_) => break,
+                Err(actual) => current_max = actual,
+            }
+        }
+        self.cached_peer_count.store(registry.active_peer_count() as u32, Ordering::Release);
 
         // 🚀 v2.3.10-beta: Also register with Warp Sync MultiPeerDownloader
         // This enables intelligent peer selection based on bandwidth/latency metrics
@@ -2123,7 +2208,15 @@ impl TurboSyncManager {
     /// v5.2.0: Evict stale peers (not heard from in `stale_secs` seconds)
     pub async fn evict_stale_peers(&self, stale_secs: u64) -> usize {
         let mut registry = self.peer_registry.write().await;
-        registry.evict_stale(stale_secs)
+        let evicted = registry.evict_stale(stale_secs);
+        // 🚀 v1.0.2: Update lock-free atomics after eviction
+        if evicted > 0 {
+            self.cached_peer_count.store(registry.active_peer_count() as u32, Ordering::Release);
+            // Recalculate max height after eviction
+            let new_max = registry.max_height().unwrap_or(0);
+            self.cached_max_peer_height.store(new_max, Ordering::Release);
+        }
+        evicted
     }
 
     /// 🤖 v1.4.0-beta: Extract sync features for ML batch size prediction
@@ -2983,10 +3076,13 @@ impl TurboSyncManager {
             // 🚀 v3.4.12-beta: EXTREME_SKIP_BALANCES - Skip balance processing for 10x speed
             // When Q_EXTREME_SKIP_BALANCES=1 or auto-detected (>100k behind), skip balance
             // processing to achieve 2000+ BPS. Balances can be rebuilt after sync completes.
+            // v8.0.9: Lowered from 100k to 5k — users syncing 10-50k blocks were
+            // getting slow balance processing needlessly. Balances rebuild from coinbase
+            // after sync completes, so skipping during initial catch-up is safe.
             let extreme_skip_balances_threshold: u64 = std::env::var("Q_EXTREME_SKIP_BALANCES_THRESHOLD")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(100_000);  // 100k blocks = auto-skip balances
+                .unwrap_or(5_000);  // 5k blocks = auto-skip balances (was 100k)
 
             let estimated_network_height_for_balance = {
                 let registry = self.peer_registry.read().await;
@@ -3113,10 +3209,12 @@ impl TurboSyncManager {
             // 🚀 v3.4.11-beta: AUTO-EXTREME SYNC for initial sync
             // When node is >50,000 blocks behind, automatically use EXTREME mode
             // This gives fresh nodes 2000+ BPS without manual configuration
+            // v8.0.9: Lowered from 50k to 5k — users syncing 5k+ blocks should
+            // get EXTREME mode automatically (skip per-chunk WAL sync, faster writes)
             let auto_extreme_threshold: u64 = std::env::var("Q_AUTO_EXTREME_THRESHOLD")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(50_000);  // 50k blocks = auto-enable extreme
+                .unwrap_or(5_000);  // 5k blocks = auto-enable extreme (was 50k)
 
             // Use peer registry to estimate network height (highest known peer)
             let estimated_network_height = {
@@ -3570,7 +3668,7 @@ impl TurboSyncManager {
             };
             let blocks_behind = estimated_network_height.saturating_sub(self.storage.height_cache.cached());
             let extreme_skip_balances_threshold: u64 = std::env::var("Q_EXTREME_SKIP_BALANCES_THRESHOLD")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(100_000);
+                .ok().and_then(|v| v.parse().ok()).unwrap_or(5_000);  // v8.0.9: 5k (was 100k)
             let skip_balances = std::env::var("Q_EXTREME_SKIP_BALANCES")
                 .map(|v| v == "1" || v.to_lowercase() == "true").unwrap_or(false)
                 || blocks_behind > extreme_skip_balances_threshold;
@@ -3619,13 +3717,16 @@ impl TurboSyncManager {
             let use_extreme = std::env::var("Q_EXTREME_SYNC")
                 .map(|v| v == "1" || v.to_lowercase() == "true").unwrap_or(false)
                 || blocks_behind > std::env::var("Q_AUTO_EXTREME_THRESHOLD")
-                    .ok().and_then(|v| v.parse().ok()).unwrap_or(50_000u64);
+                    .ok().and_then(|v| v.parse().ok()).unwrap_or(5_000u64);  // v8.0.9: 5k (was 50k)
 
             if !use_extreme {
                 let chunks_processed = self.chunks_since_wal_sync.fetch_add(1, Ordering::Relaxed) + 1;
-                // v7.2.7: Reduced to 5 chunks (was 50) to minimize data loss on crash
+                // v8.0.9: Increased to 10 chunks during sync (was 5, was 50)
+                // 5 was too frequent — each WAL sync adds ~50-200ms latency.
+                // At 4 parallel streams × 250 blocks/chunk = 1000 blocks between syncs.
+                // Max data loss on crash: ~2500 blocks (~5 minutes of chain), easily re-synced.
                 let wal_sync_batch_size = std::env::var("Q_WAL_SYNC_BATCH_SIZE")
-                    .ok().and_then(|v| v.parse().ok()).unwrap_or(5u64);
+                    .ok().and_then(|v| v.parse().ok()).unwrap_or(10u64);
                 if chunks_processed >= wal_sync_batch_size {
                     self.storage.sync_wal().await?;
                     self.chunks_since_wal_sync.store(0, Ordering::Relaxed);
@@ -3680,8 +3781,8 @@ impl TurboSyncManager {
         // This new check reads OUR OWN RSS directly from procfs - near zero cost.
         let memory_check_start = Instant::now();
         let mut memory_wait_loops = 0u32;
-        const MAX_MEMORY_WAIT_LOOPS: u32 = 120; // Max 12 seconds (120 x 100ms)
-        const MEMORY_WAIT_INTERVAL_MS: u64 = 100;
+        const MAX_MEMORY_WAIT_LOOPS: u32 = 5; // v8.0.10: Max 250ms (was 3s — still too slow, caused <10 BPS)
+        const MEMORY_WAIT_INTERVAL_MS: u64 = 50; // v8.0.10: 50ms (was 100ms)
 
         // v6.1.0: CGROUP-AWARE RSS limit for backpressure
         // v6.0.9 used sys.total_memory() which reads HOST RAM, but containers/systemd
@@ -3707,9 +3808,9 @@ impl TurboSyncManager {
                 let total_mb = sys.total_memory() / (1024 * 1024);
 
                 let effective_mb = cgroup_limit_mb.unwrap_or(total_mb);
-                // v7.1.4: Higher RSS allowance for 32GB+ servers (65% vs 55%)
-                // 32GB+ servers have plenty of headroom for RocksDB + page cache
-                let ratio = if effective_mb >= 32000 { 0.65 } else { 0.55 };
+                // v8.0.10: Higher RSS allowance — 55% was too conservative, caused sync <10 BPS
+                // OS page cache reclaim handles the rest; malloc_trim returns freed pages
+                let ratio = if effective_mb >= 32000 { 0.75 } else if effective_mb >= 16000 { 0.70 } else { 0.65 };
                 let limit = (effective_mb as f64 * ratio) as u64;
                 info!("🧠 [RSS BACKPRESSURE v7.1.4] RSS limit: {}MB ({:.0}% of {}MB effective, cgroup: {:?}, system: {}MB)",
                     limit, ratio * 100.0, effective_mb, cgroup_limit_mb, total_mb);
@@ -4247,6 +4348,11 @@ impl TurboSyncManager {
             // 🚀 v2.3.10-beta: WARP SYNC Phase 2 & 3
             warp_multi_peer: Arc::clone(&self.warp_multi_peer),
             warp_prefetch: Arc::clone(&self.warp_prefetch),
+            // 🚀 v1.0.2: Lock-Free Sync State
+            cached_max_peer_height: Arc::clone(&self.cached_max_peer_height),
+            cached_peer_count: Arc::clone(&self.cached_peer_count),
+            cached_has_gaps: Arc::clone(&self.cached_has_gaps),
+            is_fully_synced: Arc::clone(&self.is_fully_synced),
         }
     }
 

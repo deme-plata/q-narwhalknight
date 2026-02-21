@@ -114,6 +114,30 @@ impl App {
         }
     }
 
+    /// Create a new App with externally managed metrics AND log buffer.
+    /// The log buffer should be the same Arc passed to `TuiLogLayer` so that
+    /// tracing events appear in the TUI log panel.
+    pub fn with_metrics_and_logs(
+        metrics: Arc<RwLock<Metrics>>,
+        logs: Arc<RwLock<HeapRb<LogEntry>>>,
+    ) -> Self {
+        Self {
+            view_mode: ViewMode::Dashboard,
+            metrics,
+            logs,
+            logs_paused: false,
+            log_scroll: 0,
+            log_filter: LogLevel::Info,
+            menu_selection: 0,
+            tps_history: Arc::new(RwLock::new(HeapRb::new(60))),
+            should_quit: false,
+            bounty_testnet_address: String::new(),
+            bounty_mainnet_address: String::new(),
+            bounty_input_field: BountyInputField::TestnetAddress,
+            bounty_status_message: String::new(),
+        }
+    }
+
     /// Add a log entry (with level filtering)
     pub fn add_log(&mut self, level: LogLevel, target: String, message: String) {
         // Filter out logs below the current filter level

@@ -24,6 +24,9 @@ path = "src/bin/quillon-bank-cli.rs"
 # v6.1.0: libc for THP disable + malloc tuning (prevents OOM on 8GB servers)
 libc = "0.2"
 
+# Ring buffer for TUI log layer
+ringbuf = "0.3"
+
 # v6.2.1: jemalloc - see [target.'cfg(unix)'.dependencies] section below
 
 # Vendored OpenSSL for cross-compilation (ARM64, etc.)

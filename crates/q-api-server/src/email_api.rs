@@ -781,13 +781,26 @@ async fn resolve_recipient(
         }
     }
 
-    // Check if it's user@quillon.xyz — resolve to wallet via lookup
+    // Check if it's user@quillon.xyz — resolve to wallet via alias or hex prefix lookup
     if to.ends_with("@quillon.xyz") {
         let username = to.strip_suffix("@quillon.xyz").unwrap_or("");
-        // Try to resolve username as a wallet hex prefix
+
+        // First: try resolving as a custom alias (e.g. "demetri@quillon.xyz")
+        if !username.is_empty() {
+            if let Ok(Some(wallet_hex)) = state.storage_engine.get_email_alias_wallet(username).await {
+                if let Ok(bytes) = hex::decode(&wallet_hex) {
+                    if bytes.len() == 32 {
+                        let mut addr = [0u8; 32];
+                        addr.copy_from_slice(&bytes);
+                        info!("📧 Resolved alias '{}' to wallet {}", username, &wallet_hex[..8]);
+                        return (Some(addr), Some(to.to_string()), DeliveryMethod::P2PGossipsub);
+                    }
+                }
+            }
+        }
+
+        // Second: try resolving as a wallet hex prefix (e.g. "a1b2c3d4@quillon.xyz")
         if username.len() >= 8 && username.chars().all(|c| c.is_ascii_hexdigit()) {
-            // It's a wallet-based email (hex prefix@quillon.xyz)
-            // Look up full wallet address from balances
             let balances = state.wallet_balances.read().await;
             for (addr, _) in balances.iter() {
                 let addr_hex = hex::encode(addr);
@@ -796,7 +809,9 @@ async fn resolve_recipient(
                 }
             }
         }
-        // Unknown quillon.xyz user — deliver via P2P broadcast and hope the recipient gets it
+
+        // Unknown quillon.xyz user — deliver via P2P broadcast
+        warn!("📧 Could not resolve @quillon.xyz recipient: {}", to);
         return (None, Some(to.to_string()), DeliveryMethod::P2PGossipsub);
     }
 
@@ -805,7 +820,21 @@ async fn resolve_recipient(
         return (None, Some(to.to_string()), DeliveryMethod::SmtpOutbound);
     }
 
-    // Fallback: treat as wallet address attempt
+    // Fallback: try resolving as a bare alias name (e.g. user typed "demetri" without @quillon.xyz)
+    if !to.is_empty() && to.len() <= 20 && to.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.') {
+        if let Ok(Some(wallet_hex)) = state.storage_engine.get_email_alias_wallet(to).await {
+            if let Ok(bytes) = hex::decode(&wallet_hex) {
+                if bytes.len() == 32 {
+                    let mut addr = [0u8; 32];
+                    addr.copy_from_slice(&bytes);
+                    info!("📧 Resolved bare alias '{}' to wallet {}", to, &wallet_hex[..8]);
+                    return (Some(addr), Some(format!("{}@quillon.xyz", to)), DeliveryMethod::P2PGossipsub);
+                }
+            }
+        }
+    }
+
+    // Truly unknown recipient
     (None, Some(to.to_string()), DeliveryMethod::P2PGossipsub)
 }
 
@@ -978,7 +1007,7 @@ async fn process_crypto_transfer(
 
 /// Publish email via P2P gossipsub for wallet-to-wallet delivery
 async fn publish_email_p2p(state: &Arc<AppState>, email: &EmailMessage) -> Result<(), String> {
-    let network_id = std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "mainnet2026.1".to_string());
+    let network_id = std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "mainnet2026.2".to_string());
     let topic = format!("/qnk/{}/email", network_id);
 
     let email_bytes = serde_json::to_vec(email).map_err(|e| format!("Serialize error: {}", e))?;

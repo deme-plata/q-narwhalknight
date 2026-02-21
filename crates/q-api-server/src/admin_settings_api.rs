@@ -384,6 +384,60 @@ pub async fn update_operator_fees(
 }
 
 // ============================================================================
+// v8.1.1: Operator Fee Earnings API
+// ============================================================================
+
+#[derive(Serialize)]
+pub struct OperatorFeeEarnings {
+    pub admin_wallet: String,
+    pub fee_share_promille: u64,
+    pub fee_share_percent: String,
+    pub session_earnings_qug: f64,
+    pub total_earnings_qug: f64,
+    pub fee_tx_count: u64,
+    pub node_uptime_secs: u64,
+}
+
+/// GET /api/v1/admin/fee-earnings
+/// Returns fee earnings for the node operator. Admin-wallet gated (not master-only).
+pub async fn get_fee_earnings(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<OperatorFeeEarnings>, StatusCode> {
+    if !is_node_admin(&headers, &state) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let promille = state.node_operator_fee_promille.load(std::sync::atomic::Ordering::Relaxed);
+    let session_raw = state.operator_fees_earned_session.load(std::sync::atomic::Ordering::Relaxed);
+    let total_raw = state.operator_fees_earned_total.load(std::sync::atomic::Ordering::Relaxed);
+    let tx_count = state.operator_fee_tx_count.load(std::sync::atomic::Ordering::Relaxed);
+
+    // Convert from micro-QUG (1e-6) stored in AtomicU64 to QUG
+    let session_qug = session_raw as f64 / 1_000_000.0;
+    let total_qug = total_raw as f64 / 1_000_000.0;
+
+    let uptime = state.start_time.elapsed().as_secs();
+
+    Ok(Json(OperatorFeeEarnings {
+        admin_wallet: format!("{}...{}", &state.admin_wallet[..8], &state.admin_wallet[56..]),
+        fee_share_promille: promille,
+        fee_share_percent: format!("{:.1}%", promille as f64 / 10.0),
+        session_earnings_qug: session_qug,
+        total_earnings_qug: total_qug,
+        fee_tx_count: tx_count,
+        node_uptime_secs: uptime,
+    }))
+}
+
+/// Record a fee earning event (called from contracts_api when operator gets credited)
+pub fn record_operator_fee(state: &AppState, amount_qug_micro: u64) {
+    state.operator_fees_earned_session.fetch_add(amount_qug_micro, std::sync::atomic::Ordering::Relaxed);
+    state.operator_fees_earned_total.fetch_add(amount_qug_micro, std::sync::atomic::Ordering::Relaxed);
+    state.operator_fee_tx_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+// ============================================================================
 // v7.3.1: Node Update Check API
 // ============================================================================
 

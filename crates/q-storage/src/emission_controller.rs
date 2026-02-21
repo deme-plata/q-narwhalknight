@@ -57,6 +57,7 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
 
 // v3.2.2: Import u128_serde for MessagePack P2P compatibility
@@ -73,6 +74,10 @@ pub const GENESIS_TIMESTAMP: u64 = 1771761600;
 /// Used for the 4-day rehearsal period before mainnet2026.2 launch
 /// Fixed: was 1739836800 (Feb 18, 2025) — off by exactly 1 year
 pub const REHEARSAL_GENESIS_TIMESTAMP: u64 = 1771372800;
+
+/// Rehearsal 3 genesis timestamp: Feb 19, 2026 21:00 UTC (Mainnet 2026.1.3 emission rehearsal)
+/// Fresh chain with fixed emission rate calculation (global rate instead of per-window averaging)
+pub const REHEARSAL3_GENESIS_TIMESTAMP: u64 = 1771534800;
 
 /// Seconds per halving era: exactly 4 × 365.25 × 86400
 /// 365.25 days accounts for leap years (Julian year convention, same as IAU)
@@ -146,17 +151,23 @@ const HI_PRECISION: u128 = 100_000_000;
 const RATE_WINDOW_SIZE: usize = 1000;
 
 /// Correction factor bounds (prevent runaway oscillations)
-/// At 3.0×: triple reward to catch up from under-emission
+/// v8.0.2: Raised max from 3.0 to 5.0 — at very low block rates (0.1 bps),
+/// the rate can be overestimated 3-10× by turbo sync, so the correction needs
+/// headroom to compensate for persistent under-emission.
+/// At 5.0×: quintuple reward to catch up from under-emission
 /// At 0.01×: near-zero reward to correct severe over-emission
-const CORRECTION_FACTOR_MAX: f64 = 3.0;
+const CORRECTION_FACTOR_MAX: f64 = 5.0;
 const CORRECTION_FACTOR_MIN: f64 = 0.01;
 
 /// Smoothing exponent for correction: higher = slower correction, more stable
 /// At 0.15: correct 15% of error per cycle (too slow for 44% overshoot)
 /// At 0.5: correct 50% of error per cycle (good convergence in 2-3 cycles)
+/// At 0.8: correct 80% of error per cycle (fast convergence, slight oscillation risk)
 /// At 1.0: attempt full correction immediately (can oscillate)
-/// v7.1.2: Increased from 0.15 to 0.5 to catch up from mainnet2026 overshoot
-const CORRECTION_SMOOTHING: f64 = 0.5;
+/// v8.0.2: Increased from 0.5 to 0.8 — with wall-clock rate measurement the rate
+/// is now accurate, so we can afford more aggressive correction to catch up from
+/// the initial deficit caused by turbo-sync rate inflation.
+const CORRECTION_SMOOTHING: f64 = 0.8;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // TYPES
@@ -247,6 +258,32 @@ pub struct EmissionSummary {
     pub block_rate: f64,
     pub current_reward_per_block: u128,
     pub days_tracked: u64,
+}
+
+/// v8.0.3: Rate measurement diagnostics for ultra-advanced analytics display
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RateDiagnostics {
+    pub active_method: String,
+    pub confidence_pct: f64,
+    pub window_rate_bps: f64,
+    pub window_blocks: u64,
+    pub window_elapsed_secs: f64,
+    pub window_buckets: usize,
+    pub cumulative_rate_bps: f64,
+    pub cumulative_blocks: u64,
+    pub cumulative_elapsed_secs: f64,
+    pub block_timestamp_rate_bps: f64,
+    pub block_timestamp_windows: usize,
+    pub smoothed_rate_bps: f64,
+    pub correction_factor: f64,
+    pub correction_smoothing: f64,
+    pub correction_max: f64,
+    pub correction_min: f64,
+    pub error_fraction_pct: f64,
+    pub convergence_eta_secs: Option<u64>,
+    pub actual_emission_rate_qug_per_hour: f64,
+    pub target_emission_rate_qug_per_hour: f64,
+    pub phase: String,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -433,6 +470,23 @@ pub struct EmissionController {
     /// v7.1.3: Last tracked block height (prevents duplicate tracking from TOCTOU races)
     #[serde(default)]
     last_tracked_height: u64,
+
+    /// v8.0.2: Wall-clock epoch (unix seconds) when the first block was tracked after (re)start.
+    /// Used for wall-clock rate measurement that is immune to turbo-sync timestamp inflation.
+    #[serde(default)]
+    wallclock_start_epoch: u64,
+
+    /// v8.0.2: Count of blocks tracked since wallclock_start_epoch
+    #[serde(default)]
+    wallclock_blocks_tracked: u64,
+
+    /// v8.0.3: Wall-clock sliding window for rate measurement.
+    /// Each entry = (wall_timestamp_secs, block_count_in_this_10s_bucket).
+    /// Keeps last 180 entries = 30 minutes of data.
+    /// This replaces the cumulative wallclock rate which was poisoned by turbo-sync
+    /// burst blocks on startup (inflated rate → too-low rewards → persistent under-emission).
+    #[serde(default)]
+    wallclock_windows: VecDeque<(u64, u64)>,
 }
 
 fn default_correction_factor() -> f64 { 1.0 }
@@ -459,6 +513,9 @@ impl EmissionController {
             correction_factor: 1.0,
             total_blocks_tracked: 0,
             last_tracked_height: 0,
+            wallclock_start_epoch: 0,
+            wallclock_blocks_tracked: 0,
+            wallclock_windows: VecDeque::with_capacity(180),
         }
     }
 
@@ -512,6 +569,50 @@ impl EmissionController {
 
         self.total_blocks_tracked += 1;
 
+        // v8.0.2: Wall-clock rate tracking — immune to turbo-sync timestamp inflation.
+        // Uses the ACTUAL time blocks arrive at this node, not block-embedded timestamps.
+        let wall_now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if self.wallclock_start_epoch == 0 {
+            self.wallclock_start_epoch = wall_now;
+        }
+
+        // v8.0.3: CRITICAL FIX — Only count LIVE blocks in wall-clock rate tracking.
+        // Turbo-synced historical blocks have timestamps far in the past relative to
+        // wall_now. If we count them, the rate inflates 2-5× (e.g. 5000 synced blocks
+        // in 2 minutes → 41 bps when real rate is 0.2 bps). This causes the reward
+        // formula R = Annual/(rate×T) to produce 2-5× too little reward.
+        //
+        // A block is "live" if its embedded timestamp is within 120 seconds of wall time.
+        // Historical turbo-synced blocks will have timestamps minutes/hours in the past.
+        const LIVE_BLOCK_THRESHOLD_SECS: u64 = 120;
+        let is_live_block = wall_now.saturating_sub(timestamp) < LIVE_BLOCK_THRESHOLD_SECS;
+
+        if is_live_block {
+            self.wallclock_blocks_tracked += 1;
+
+            // v8.0.3: Wall-clock SLIDING WINDOW rate tracking (30-minute window).
+            // Each bucket = 10 seconds of wall-clock time. Keep 180 buckets = 30 min.
+            // ONLY live blocks counted — turbo-synced historical blocks excluded.
+            const WALL_BUCKET_SECS: u64 = 10;
+            const MAX_WALL_BUCKETS: usize = 180; // 180 × 10s = 30 minutes
+            let should_new_bucket = match self.wallclock_windows.back() {
+                Some(&(ts, _)) => wall_now.saturating_sub(ts) >= WALL_BUCKET_SECS,
+                None => true,
+            };
+            if should_new_bucket {
+                self.wallclock_windows.push_back((wall_now, 1));
+                while self.wallclock_windows.len() > MAX_WALL_BUCKETS {
+                    self.wallclock_windows.pop_front();
+                }
+            } else if let Some(last) = self.wallclock_windows.back_mut() {
+                last.1 += 1;
+            }
+        }
+
+        // Block-timestamp window tracking (legacy, used as secondary signal)
         let should_create_new = if let Some(last) = self.block_windows.back() {
             timestamp.saturating_sub(last.start_timestamp) >= WINDOW_DURATION_SECS
         } else {
@@ -540,43 +641,92 @@ impl EmissionController {
         }
     }
 
-    /// Weighted smoothed block rate (recent windows weighted higher)
-    /// Returns blocks/second. Falls back to 1.0 bps if no data.
+    /// Block rate measurement using wall-clock sliding window (primary) with fallbacks.
+    ///
+    /// v8.0.3: CRITICAL FIX — Sliding window wall-clock rate measurement.
+    ///
+    /// ## Problem History
+    /// - v8.0.1: Block-timestamp rate inflated by turbo-sync → -96% deviation.
+    /// - v8.0.2: Cumulative wall-clock rate (total_blocks / total_elapsed). Fixed turbo-sync
+    ///   timestamp inflation, BUT the cumulative counter includes turbo-sync BURST blocks
+    ///   (thousands of historical blocks arriving in minutes on node startup). The burst
+    ///   inflates the cumulative rate 2-3× for hours/days, causing persistent under-emission
+    ///   (-52% deviation after 8 hours because reward was calculated for 0.43 bps when
+    ///   true production was 0.2 bps).
+    ///
+    /// ## Solution (v8.0.3)
+    /// Use a 30-minute SLIDING WINDOW of wall-clock time. Each 10-second bucket records
+    /// how many blocks arrived in that real-time interval. Turbo-sync burst blocks all
+    /// land in a few buckets, which age out within minutes. After 30 minutes, the window
+    /// reflects only genuine block production.
+    ///
+    /// Priority: sliding window (≥60s data) > cumulative wall-clock (≥30s) > block-timestamp > default
     pub fn calculate_smoothed_rate(&self) -> f64 {
-        if self.block_windows.is_empty() {
-            return 1.0; // Conservative default: 1 block/sec
+        let wall_now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        // Primary: wall-clock SLIDING WINDOW rate (immune to turbo-sync burst)
+        if self.wallclock_windows.len() >= 2 {
+            let first_ts = self.wallclock_windows.front().unwrap().0;
+            let window_elapsed = wall_now.saturating_sub(first_ts).max(1) as f64;
+
+            // Need at least 60 seconds of window data for stability
+            if window_elapsed >= 60.0 {
+                let total_blocks: u64 = self.wallclock_windows.iter().map(|&(_, c)| c).sum();
+                let window_rate = total_blocks as f64 / window_elapsed;
+                let clamped = window_rate.clamp(0.001, 50.0);
+                debug!(
+                    "📊 Wall-clock WINDOW rate: {:.4} bps ({} blocks in {:.0}s, {} buckets)",
+                    clamped, total_blocks, window_elapsed, self.wallclock_windows.len()
+                );
+                return clamped;
+            }
         }
 
-        let mut total_weight = 0.0_f64;
-        let mut weighted_rate = 0.0_f64;
-
-        for (i, window) in self.block_windows.iter().enumerate() {
-            let weight = (i + 1) as f64;
-            weighted_rate += window.block_rate() * weight;
-            total_weight += weight;
+        // Secondary: cumulative wall-clock rate (for early startup < 60s window)
+        if self.wallclock_start_epoch > 0 {
+            let wall_elapsed = wall_now.saturating_sub(self.wallclock_start_epoch).max(1) as f64;
+            if wall_elapsed >= 30.0 && self.wallclock_blocks_tracked >= 2 {
+                let wall_rate = self.wallclock_blocks_tracked as f64 / wall_elapsed;
+                let clamped = wall_rate.clamp(0.001, 50.0);
+                debug!(
+                    "📊 Wall-clock cumulative rate: {:.4} bps ({} blocks in {:.0}s)",
+                    clamped, self.wallclock_blocks_tracked, wall_elapsed
+                );
+                return clamped;
+            }
         }
 
-        if total_weight <= 0.0 { return 1.0; }
-        (weighted_rate / total_weight).clamp(0.001, 100_000.0)
+        // Tertiary: block-timestamp global rate (for cold-start < 30s)
+        if self.block_windows.len() >= 2 {
+            let first = self.block_windows.front().unwrap();
+            let last = self.block_windows.back().unwrap();
+            let total_time = last.end_timestamp.saturating_sub(first.start_timestamp).max(1) as f64;
+            let total_blocks: u64 = self.block_windows.iter().map(|w| w.block_count).sum();
+            let rate = total_blocks as f64 / total_time;
+            return rate.clamp(0.001, 50.0);
+        }
+
+        // No data: conservative default (will be corrected quickly)
+        1.0
     }
 
     /// Economic block rate (non-empty blocks only, filters spam)
+    /// v8.0.2: Uses wall-clock time as primary signal (same as smoothed_rate)
     pub fn calculate_economic_rate(&self) -> f64 {
-        if self.block_windows.is_empty() {
-            return 1.0; // Conservative default
+        // For economic rate, use the smoothed rate as base (wall-clock)
+        // and scale by the non-empty fraction from windows
+        if self.block_windows.len() >= 2 {
+            let total_blocks: u64 = self.block_windows.iter().map(|w| w.block_count).sum();
+            let total_non_empty: u64 = self.block_windows.iter().map(|w| w.non_empty_blocks).sum();
+            if total_blocks > 0 {
+                let non_empty_fraction = total_non_empty as f64 / total_blocks as f64;
+                return (self.calculate_smoothed_rate() * non_empty_fraction).clamp(0.001, 50.0);
+            }
         }
-
-        let mut total_weight = 0.0_f64;
-        let mut weighted_rate = 0.0_f64;
-
-        for (i, window) in self.block_windows.iter().enumerate() {
-            let weight = (i + 1) as f64;
-            weighted_rate += window.economic_rate() * weight;
-            total_weight += weight;
-        }
-
-        if total_weight <= 0.0 { return 1.0; }
-        (weighted_rate / total_weight).clamp(0.001, 100_000.0)
+        self.calculate_smoothed_rate()
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -641,9 +791,30 @@ impl EmissionController {
             -((target_cumulative - actual) as f64 / target_cumulative as f64)
         };
 
-        // Apply smoothed correction
-        // factor = 1.0 - smoothing × error_fraction
-        let factor = 1.0 - CORRECTION_SMOOTHING * error_fraction;
+        // v8.0.3: PID correction with aggressive catch-up for large deviations.
+        //
+        // Base: factor = 1.0 - α × error (proportional term, α = 0.8)
+        // Boost: when |error| > 10%, add a quadratic term to accelerate convergence:
+        //   factor += sign(error) × β × error²  (β = 2.0)
+        //
+        // Example: error = -37% (under-emitted)
+        //   Base: 1.0 + 0.8 × 0.37 = 1.296
+        //   Boost: 2.0 × 0.37² = 0.274
+        //   Total: 1.296 + 0.274 = 1.570 (57% boost instead of 29.6%)
+        //
+        // This halves convergence time from ~13h to ~6h for typical startup deficits.
+        let mut factor = 1.0 - CORRECTION_SMOOTHING * error_fraction;
+
+        // Quadratic acceleration for deviations > 10%
+        if error_fraction.abs() > 0.10 {
+            let quadratic_boost = 2.0 * error_fraction * error_fraction;
+            // Sign: if under-emitted (negative error), boost UP (add); if over, boost DOWN (subtract)
+            if error_fraction < 0.0 {
+                factor += quadratic_boost; // under-emitted → emit more
+            } else {
+                factor -= quadratic_boost; // over-emitted → emit less
+            }
+        }
 
         let clamped = factor.clamp(CORRECTION_FACTOR_MIN, CORRECTION_FACTOR_MAX);
 
@@ -887,6 +1058,121 @@ impl EmissionController {
 
     /// Get total cumulative emission
     pub fn total_cumulative_emission(&self) -> u128 { self.total_cumulative_emission }
+
+    /// v8.0.3: Get rate measurement diagnostics for ultra-advanced analytics
+    pub fn get_rate_diagnostics(&self) -> RateDiagnostics {
+        let wall_now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        // Sliding window stats
+        let (window_rate, window_blocks, window_elapsed_secs, window_buckets) =
+            if self.wallclock_windows.len() >= 2 {
+                let first_ts = self.wallclock_windows.front().unwrap().0;
+                let elapsed = wall_now.saturating_sub(first_ts).max(1) as f64;
+                let blocks: u64 = self.wallclock_windows.iter().map(|&(_, c)| c).sum();
+                (blocks as f64 / elapsed, blocks, elapsed, self.wallclock_windows.len())
+            } else {
+                (0.0, 0, 0.0, self.wallclock_windows.len())
+            };
+
+        // Cumulative wall-clock stats
+        let cumulative_elapsed = if self.wallclock_start_epoch > 0 {
+            wall_now.saturating_sub(self.wallclock_start_epoch).max(1)
+        } else { 0 };
+        let cumulative_rate = if cumulative_elapsed > 30 {
+            self.wallclock_blocks_tracked as f64 / cumulative_elapsed as f64
+        } else { 0.0 };
+
+        // Block-timestamp rate
+        let block_ts_rate = if !self.block_windows.is_empty() {
+            let total: u64 = self.block_windows.iter().map(|w| w.block_count).sum();
+            let window_secs = self.block_windows.len() as f64 * 60.0;
+            if window_secs > 0.0 { total as f64 / window_secs } else { 0.0 }
+        } else { 0.0 };
+
+        // Determine which method is active
+        let active_method = if self.wallclock_windows.len() >= 2 && window_elapsed_secs >= 60.0 {
+            "sliding_window".to_string()
+        } else if cumulative_elapsed > 30 {
+            "cumulative".to_string()
+        } else if !self.block_windows.is_empty() {
+            "block_timestamp".to_string()
+        } else {
+            "default".to_string()
+        };
+
+        // Confidence: sliding window with 10+ min > 80%, cumulative > 60%, block_ts > 40%, default 20%
+        let confidence_pct = if active_method == "sliding_window" {
+            let minutes = window_elapsed_secs / 60.0;
+            ((minutes / 30.0) * 100.0).clamp(50.0, 99.9)
+        } else if active_method == "cumulative" {
+            60.0_f64.min(80.0)
+        } else if active_method == "block_timestamp" {
+            40.0
+        } else {
+            20.0
+        };
+
+        // PI controller internals
+        let now_secs = wall_now;
+        let elapsed = now_secs.saturating_sub(self.genesis_timestamp);
+        let target_cumulative = target_cumulative_at_time(elapsed);
+
+        let error_fraction = if target_cumulative > 0 {
+            if self.total_cumulative_emission > target_cumulative {
+                (self.total_cumulative_emission - target_cumulative) as f64 / target_cumulative as f64
+            } else {
+                -((target_cumulative - self.total_cumulative_emission) as f64 / target_cumulative as f64)
+            }
+        } else { 0.0 };
+
+        // Convergence ETA: at current correction rate, how long to close the gap?
+        let current_rate = self.calculate_smoothed_rate();
+        let reward = if current_rate > 0.001 {
+            let annual = annual_emission(self.current_era);
+            let blocks_per_year = current_rate * SECONDS_PER_YEAR as f64;
+            let base = if blocks_per_year > 0.0 { annual as f64 / blocks_per_year } else { 0.0 };
+            base * self.calculate_correction_factor(now_secs)
+        } else { 0.0 };
+
+        // Current emission rate (QUG/sec) and target rate
+        let actual_rate_qug_per_sec = reward * current_rate;
+        let target_rate_qug_per_sec = annual_emission(self.current_era) as f64 / SECONDS_PER_YEAR as f64;
+        let gap_qug = if self.total_cumulative_emission < target_cumulative {
+            (target_cumulative - self.total_cumulative_emission) as f64
+        } else { 0.0 };
+
+        let convergence_eta_secs = if actual_rate_qug_per_sec > target_rate_qug_per_sec && gap_qug > 0.0 {
+            let catch_up_rate = actual_rate_qug_per_sec - target_rate_qug_per_sec;
+            if catch_up_rate > 0.0 { (gap_qug / catch_up_rate) as u64 } else { u64::MAX }
+        } else { u64::MAX };
+
+        RateDiagnostics {
+            active_method,
+            confidence_pct,
+            window_rate_bps: window_rate,
+            window_blocks,
+            window_elapsed_secs,
+            window_buckets,
+            cumulative_rate_bps: cumulative_rate,
+            cumulative_blocks: self.wallclock_blocks_tracked,
+            cumulative_elapsed_secs: cumulative_elapsed as f64,
+            block_timestamp_rate_bps: block_ts_rate,
+            block_timestamp_windows: self.block_windows.len(),
+            smoothed_rate_bps: current_rate,
+            correction_factor: self.calculate_correction_factor(now_secs),
+            correction_smoothing: CORRECTION_SMOOTHING,
+            correction_max: CORRECTION_FACTOR_MAX,
+            correction_min: CORRECTION_FACTOR_MIN,
+            error_fraction_pct: error_fraction * 100.0,
+            convergence_eta_secs: if convergence_eta_secs == u64::MAX { None } else { Some(convergence_eta_secs) },
+            actual_emission_rate_qug_per_hour: actual_rate_qug_per_sec * 3600.0 / 1e24,
+            target_emission_rate_qug_per_hour: target_rate_qug_per_sec * 3600.0 / 1e24,
+            phase: format!("{:?}", self.phase),
+        }
+    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // UTILITY

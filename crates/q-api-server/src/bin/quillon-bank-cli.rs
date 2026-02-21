@@ -1,8 +1,9 @@
 //! Quillon Bank CLI - Bank Administration Tool
 //!
-//! v3.9.1-beta: Command-line interface for bank administrators to:
+//! v8.0.0: Command-line interface for bank administrators to:
 //! - View and respond to user messages
-//! - Manage loan applications
+//! - Manage loan applications (approve/reject)
+//! - Manage user identities
 //! - Issue and approve death certificates
 //! - Execute inheritance transfers
 //!
@@ -12,6 +13,7 @@
 //!   quillon-bank-cli messages unread                  # Show unread messages
 //!   quillon-bank-cli loans list                       # List all loan applications
 //!   quillon-bank-cli loans approve <loan_id>          # Approve a loan
+//!   quillon-bank-cli loans reject <loan_id>           # Reject a loan
 //!   quillon-bank-cli identity list                    # List all identities
 //!   quillon-bank-cli identity approve <wallet>        # Approve identity verification
 //!   quillon-bank-cli death-cert list                  # List death certificates
@@ -29,7 +31,7 @@ const DEFAULT_API_URL: &str = "http://localhost:8080";
 #[derive(Parser)]
 #[command(name = "quillon-bank-cli")]
 #[command(about = "Quillon Bank Administration CLI", long_about = None)]
-#[command(version = "3.9.1-beta")]
+#[command(version = "8.0.0")]
 struct Cli {
     /// API server URL
     #[arg(short, long, default_value = DEFAULT_API_URL)]
@@ -150,10 +152,11 @@ struct ApiResponse<T> {
     error: Option<String>,
 }
 
+/// Bank message - the `from` field is an enum serialized as "user" or "bank"
 #[derive(Debug, Deserialize, Serialize)]
 struct BankMessage {
     id: String,
-    from: String,
+    from: serde_json::Value, // Server sends enum {"user"} or {"bank"}, handle flexibly
     wallet_address: String,
     content: String,
     subject: Option<String>,
@@ -162,26 +165,68 @@ struct BankMessage {
     read: bool,
 }
 
+impl BankMessage {
+    fn from_str(&self) -> &str {
+        match &self.from {
+            serde_json::Value::String(s) => s.as_str(),
+            _ => "unknown",
+        }
+    }
+}
+
+/// Loan application matching server's response format
 #[derive(Debug, Deserialize)]
 struct LoanApplication {
-    id: String,
+    loan_id: String,
     borrower_address: String,
-    amount: f64,
-    collateral: f64,
+    #[serde(deserialize_with = "deserialize_loan_amount")]
+    loan_amount: f64,
+    collateral_amount: f64,
+    #[serde(default)]
+    collateral_type: String,
+    #[serde(default)]
+    term_months: u32,
     interest_rate: f64,
+    #[serde(default)]
+    monthly_payment: f64,
     status: String,
     created_at: i64,
+}
+
+/// Flexible u128/string/number deserializer for loan amounts
+fn deserialize_loan_amount<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = serde_json::Value::deserialize(deserializer)?;
+    match v {
+        serde_json::Value::Number(n) => Ok(n.as_f64().unwrap_or(0.0)),
+        serde_json::Value::String(s) => s.parse::<f64>().map_err(serde::de::Error::custom),
+        _ => Ok(0.0),
+    }
+}
+
+/// Wrapper for loan applications response: {"applications": [...]}
+#[derive(Debug, Deserialize)]
+struct LoanApplicationsData {
+    applications: Vec<LoanApplication>,
 }
 
 #[derive(Debug, Deserialize)]
 struct UserIdentity {
     wallet_address: String,
     display_name: Option<String>,
+    #[serde(default)]
+    email_hash: Option<String>,
     created_at: i64,
     verified: bool,
     kyc_level: u8,
     is_deceased: bool,
+    #[serde(default)]
+    death_certificate_id: Option<String>,
     beneficiary_address: Option<String>,
+    #[serde(default)]
+    last_active: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -192,7 +237,11 @@ struct DeathCertificate {
     issued_at: i64,
     approved: bool,
     approved_by: Option<String>,
+    #[serde(default)]
+    approved_at: Option<i64>,
     executed: bool,
+    #[serde(default)]
+    executed_at: Option<i64>,
     reason: String,
 }
 
@@ -205,6 +254,48 @@ struct InheritanceInfo {
 }
 
 // ============================================================================
+// Helper: Build admin client with X-Admin-Local header
+// ============================================================================
+
+/// Send a GET request with localhost admin bypass header
+async fn admin_get(client: &Client, url: &str) -> Result<reqwest::Response, reqwest::Error> {
+    client
+        .get(url)
+        .header("X-Admin-Local", "true")
+        .send()
+        .await
+}
+
+/// Send a POST request with localhost admin bypass header
+async fn admin_post(
+    client: &Client,
+    url: &str,
+    body: &serde_json::Value,
+) -> Result<reqwest::Response, reqwest::Error> {
+    client
+        .post(url)
+        .header("X-Admin-Local", "true")
+        .json(body)
+        .send()
+        .await
+}
+
+/// Send a POST request with localhost admin bypass header (string body for Json<String>)
+async fn admin_post_string(
+    client: &Client,
+    url: &str,
+    body: &str,
+) -> Result<reqwest::Response, reqwest::Error> {
+    client
+        .post(url)
+        .header("X-Admin-Local", "true")
+        .header("Content-Type", "application/json")
+        .body(format!("\"{}\"", body))
+        .send()
+        .await
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -214,10 +305,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::new();
     let api_url = cli.api_url;
 
-    println!("{}", "╔════════════════════════════════════════════════════════════╗".cyan());
-    println!("{}", "║             🏦 Quillon Bank Administration CLI             ║".cyan());
-    println!("{}", "║                     v3.9.1-beta                             ║".cyan());
-    println!("{}", "╚════════════════════════════════════════════════════════════╝".cyan());
+    println!(
+        "{}",
+        "╔════════════════════════════════════════════════════════════╗".cyan()
+    );
+    println!(
+        "{}",
+        "║             🏦 Quillon Bank Administration CLI             ║".cyan()
+    );
+    println!(
+        "{}",
+        "║                        v8.0.0                              ║".cyan()
+    );
+    println!(
+        "{}",
+        "╚════════════════════════════════════════════════════════════╝".cyan()
+    );
     println!();
 
     match cli.command {
@@ -251,24 +354,36 @@ async fn handle_messages(
                 format!("{}/api/v1/quillon-bank/messages/admin/list", api_url)
             };
 
-            let response: Vec<BankMessage> = client.get(&url).send().await?.json().await?;
+            let response = admin_get(client, &url).await?;
+            let messages: Vec<BankMessage> = response.json().await?;
 
-            if response.is_empty() {
+            if messages.is_empty() {
                 println!("{}", "No messages found.".yellow());
             } else {
-                for msg in response {
-                    let from_label = if msg.from == "user" {
+                for msg in messages {
+                    let from_str = msg.from_str();
+                    let from_label = if from_str == "user" {
                         "👤 User".blue()
                     } else {
                         "🏦 Bank".green()
                     };
-                    let read_status = if msg.read { "✓".green() } else { "●".red() };
+                    let read_status = if msg.read {
+                        "✓".green()
+                    } else {
+                        "●".red()
+                    };
                     let time = chrono::DateTime::from_timestamp_millis(msg.timestamp)
                         .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
                         .unwrap_or_else(|| "Unknown".to_string());
 
                     println!();
-                    println!("{} {} [{}] {}", read_status, from_label, time, msg.id.dimmed());
+                    println!(
+                        "{} {} [{}] {}",
+                        read_status,
+                        from_label,
+                        time,
+                        msg.id.dimmed()
+                    );
                     println!("  Wallet: {}", msg.wallet_address.yellow());
                     if let Some(subject) = &msg.subject {
                         println!("  Subject: {}", subject.cyan());
@@ -283,17 +398,21 @@ async fn handle_messages(
             println!("{}", "─".repeat(60));
 
             let url = format!("{}/api/v1/quillon-bank/messages/admin/list", api_url);
-            let response: Vec<BankMessage> = client.get(&url).send().await?.json().await?;
+            let response = admin_get(client, &url).await?;
+            let messages: Vec<BankMessage> = response.json().await?;
 
-            let unread: Vec<_> = response
+            let unread: Vec<_> = messages
                 .into_iter()
-                .filter(|m| !m.read && m.from == "user")
+                .filter(|m| !m.read && m.from_str() == "user")
                 .collect();
 
             if unread.is_empty() {
-                println!("{}", "No unread messages! 🎉".green());
+                println!("{}", "No unread messages!".green());
             } else {
-                println!("{} unread message(s):", unread.len().to_string().red().bold());
+                println!(
+                    "{} unread message(s):",
+                    unread.len().to_string().red().bold()
+                );
                 for msg in unread {
                     let time = chrono::DateTime::from_timestamp_millis(msg.timestamp)
                         .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
@@ -310,26 +429,29 @@ async fn handle_messages(
             }
         }
 
-        MessageAction::Respond { wallet, message, subject } => {
+        MessageAction::Respond {
+            wallet,
+            message,
+            subject,
+        } => {
             println!("{}", "📤 Sending Bank Response".green().bold());
             println!("{}", "─".repeat(60));
             println!("To: {}", wallet.yellow());
             println!("Message: {}", message);
 
-            let url = format!("{}/api/v1/quillon-bank/messages/admin/respond", api_url);
+            let url = format!(
+                "{}/api/v1/quillon-bank/messages/admin/respond",
+                api_url
+            );
             let body = serde_json::json!({
+                "message_id": "",
                 "wallet_address": wallet,
                 "content": message,
                 "subject": subject,
             });
 
-            let response: ApiResponse<BankMessage> = client
-                .post(&url)
-                .json(&body)
-                .send()
-                .await?
-                .json()
-                .await?;
+            let response: ApiResponse<BankMessage> =
+                admin_post(client, &url, &body).await?.json().await?;
 
             if response.success {
                 println!();
@@ -338,7 +460,10 @@ async fn handle_messages(
                     println!("Message ID: {}", msg.id);
                 }
             } else {
-                println!("{}", format!("❌ Failed: {}", response.error.unwrap_or_default()).red());
+                println!(
+                    "{}",
+                    format!("❌ Failed: {}", response.error.unwrap_or_default()).red()
+                );
             }
         }
     }
@@ -369,12 +494,22 @@ async fn handle_loans(
             println!("{}", "─".repeat(60));
 
             let url = format!("{}/api/v1/quillon-bank/lending/applications", api_url);
-            let response: Vec<LoanApplication> = client.get(&url).send().await?.json().await?;
+            // Server returns ApiResponse<{"applications": [...]}>
+            let api_resp: ApiResponse<LoanApplicationsData> =
+                client.get(&url).send().await?.json().await?;
+
+            let all_loans = api_resp
+                .data
+                .map(|d| d.applications)
+                .unwrap_or_default();
 
             let loans: Vec<_> = if show_pending_only {
-                response.into_iter().filter(|l| l.status == "pending").collect()
+                all_loans
+                    .into_iter()
+                    .filter(|l| l.status == "pending")
+                    .collect()
             } else {
-                response
+                all_loans
             };
 
             if loans.is_empty() {
@@ -382,18 +517,33 @@ async fn handle_loans(
             } else {
                 for loan in loans {
                     let status_color = match loan.status.as_str() {
-                        "approved" | "active" => loan.status.green(),
+                        "approved" | "active" | "paid" => loan.status.green(),
                         "pending" => loan.status.yellow(),
                         "rejected" | "liquidated" => loan.status.red(),
                         _ => loan.status.normal(),
                     };
 
+                    let amount_display = loan.loan_amount / 1e24;
+                    let time = chrono::DateTime::from_timestamp(loan.created_at, 0)
+                        .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                        .unwrap_or_else(|| "Unknown".to_string());
+
                     println!();
-                    println!("Loan ID: {} [{}]", loan.id.cyan(), status_color);
+                    println!(
+                        "Loan ID: {} [{}]",
+                        loan.loan_id.cyan(),
+                        status_color
+                    );
                     println!("  Borrower: {}", loan.borrower_address.yellow());
-                    println!("  Amount: {} QUG", loan.amount);
-                    println!("  Collateral: {} QUG", loan.collateral);
-                    println!("  Interest: {}%", loan.interest_rate);
+                    println!("  Amount: {:.4} QUGUSD", amount_display);
+                    println!(
+                        "  Collateral: {:.4} {} QUG",
+                        loan.collateral_amount, loan.collateral_type
+                    );
+                    println!("  Interest: {:.2}%", loan.interest_rate);
+                    println!("  Term: {} months", loan.term_months);
+                    println!("  Monthly Payment: {:.4} QUGUSD", loan.monthly_payment);
+                    println!("  Applied: {}", time);
                 }
             }
         }
@@ -405,18 +555,21 @@ async fn handle_loans(
             let url = format!("{}/api/v1/quillon-bank/lending/approve", api_url);
             let body = serde_json::json!({ "loan_id": loan_id });
 
-            let response: ApiResponse<serde_json::Value> = client
-                .post(&url)
-                .json(&body)
-                .send()
-                .await?
-                .json()
-                .await?;
+            let response: ApiResponse<serde_json::Value> =
+                admin_post(client, &url, &body).await?.json().await?;
 
             if response.success {
                 println!("{}", "✅ Loan approved successfully!".green().bold());
+                if let Some(data) = &response.data {
+                    if let Some(disbursed) = data.get("qugusd_disbursed") {
+                        println!("  QUGUSD Disbursed: {}", disbursed);
+                    }
+                }
             } else {
-                println!("{}", format!("❌ Failed: {}", response.error.unwrap_or_default()).red());
+                println!(
+                    "{}",
+                    format!("❌ Failed: {}", response.error.unwrap_or_default()).red()
+                );
             }
         }
 
@@ -427,8 +580,23 @@ async fn handle_loans(
                 println!("Reason: {}", r);
             }
 
-            // Note: Rejection endpoint would need to be added to API
-            println!("{}", "⚠️  Loan rejection endpoint not yet implemented.".yellow());
+            let url = format!("{}/api/v1/quillon-bank/lending/reject", api_url);
+            let body = serde_json::json!({
+                "loan_id": loan_id,
+                "reason": reason.unwrap_or_else(|| "No reason provided".to_string()),
+            });
+
+            let response: ApiResponse<serde_json::Value> =
+                admin_post(client, &url, &body).await?.json().await?;
+
+            if response.success {
+                println!("{}", "✅ Loan rejected successfully.".green().bold());
+            } else {
+                println!(
+                    "{}",
+                    format!("❌ Failed: {}", response.error.unwrap_or_default()).red()
+                );
+            }
         }
     }
 
@@ -457,28 +625,82 @@ async fn handle_identity(
             );
             println!("{}", "─".repeat(60));
 
-            // Note: Would need a list endpoint
-            println!("{}", "⚠️  Identity list endpoint not yet implemented.".yellow());
-            println!("Use: quillon-bank-cli identity view <wallet> to view specific identity");
+            let url = format!(
+                "{}/api/v1/quillon-bank/identity/admin/list",
+                api_url
+            );
+            let api_resp: ApiResponse<Vec<UserIdentity>> =
+                admin_get(client, &url).await?.json().await?;
+
+            let all_identities = api_resp.data.unwrap_or_default();
+            let identities: Vec<_> = if show_pending_only {
+                all_identities
+                    .into_iter()
+                    .filter(|i| !i.verified)
+                    .collect()
+            } else {
+                all_identities
+            };
+
+            if identities.is_empty() {
+                println!("{}", "No identities found.".yellow());
+            } else {
+                for identity in identities {
+                    let verified_status = if identity.verified {
+                        "✅ Verified".green()
+                    } else {
+                        "❌ Pending".red()
+                    };
+                    let time =
+                        chrono::DateTime::from_timestamp_millis(identity.created_at)
+                            .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                            .unwrap_or_else(|| "Unknown".to_string());
+
+                    println!();
+                    println!(
+                        "Wallet: {} [{}]",
+                        identity.wallet_address.yellow(),
+                        verified_status
+                    );
+                    if let Some(name) = &identity.display_name {
+                        println!("  Name: {}", name);
+                    }
+                    println!("  KYC Level: {}", identity.kyc_level);
+                    if identity.is_deceased {
+                        println!("  Status: {}", "💀 Deceased".red());
+                    }
+                    if let Some(beneficiary) = &identity.beneficiary_address {
+                        println!("  Beneficiary: {}", beneficiary);
+                    }
+                    println!("  Registered: {}", time);
+                }
+            }
         }
 
         IdentityAction::Approve { wallet } => {
             println!("{}", "✅ Approving Identity".green().bold());
             println!("Wallet: {}", wallet.yellow());
 
-            let url = format!("{}/api/v1/quillon-bank/identity/admin/approve", api_url);
-            let response: ApiResponse<bool> = client
-                .post(&url)
-                .json(&wallet)
-                .send()
-                .await?
-                .json()
-                .await?;
+            let url = format!(
+                "{}/api/v1/quillon-bank/identity/admin/approve",
+                api_url
+            );
+            let response: ApiResponse<bool> =
+                admin_post_string(client, &url, &wallet).await?.json().await?;
 
             if response.success && response.data == Some(true) {
                 println!("{}", "✅ Identity verified successfully!".green().bold());
             } else {
-                println!("{}", format!("❌ Failed: {}", response.error.unwrap_or("Identity not found".to_string())).red());
+                println!(
+                    "{}",
+                    format!(
+                        "❌ Failed: {}",
+                        response
+                            .error
+                            .unwrap_or("Identity not found".to_string())
+                    )
+                    .red()
+                );
             }
         }
 
@@ -486,8 +708,12 @@ async fn handle_identity(
             println!("{}", "🪪 Identity Details".green().bold());
             println!("{}", "─".repeat(60));
 
-            let url = format!("{}/api/v1/quillon-bank/identity/{}", api_url, wallet);
-            let response: ApiResponse<Option<UserIdentity>> = client.get(&url).send().await?.json().await?;
+            let url = format!(
+                "{}/api/v1/quillon-bank/identity/{}",
+                api_url, wallet
+            );
+            let response: ApiResponse<Option<UserIdentity>> =
+                client.get(&url).send().await?.json().await?;
 
             if let Some(Some(identity)) = response.data {
                 println!("Wallet: {}", identity.wallet_address.yellow());
@@ -496,12 +722,20 @@ async fn handle_identity(
                 }
                 println!(
                     "Verified: {}",
-                    if identity.verified { "✅ Yes".green() } else { "❌ No".red() }
+                    if identity.verified {
+                        "✅ Yes".green()
+                    } else {
+                        "❌ No".red()
+                    }
                 );
                 println!("KYC Level: {}", identity.kyc_level);
                 println!(
                     "Deceased: {}",
-                    if identity.is_deceased { "💀 Yes".red() } else { "No".normal() }
+                    if identity.is_deceased {
+                        "💀 Yes".red()
+                    } else {
+                        "No".normal()
+                    }
                 );
                 if let Some(beneficiary) = &identity.beneficiary_address {
                     println!("Beneficiary: {}", beneficiary);
@@ -537,37 +771,120 @@ async fn handle_death_cert(
             );
             println!("{}", "─".repeat(60));
 
-            // Note: Would need a list endpoint
-            println!("{}", "⚠️  Death certificate list endpoint not yet implemented.".yellow());
+            let url = format!(
+                "{}/api/v1/quillon-bank/identity/admin/death-certificate/list",
+                api_url
+            );
+            let api_resp: ApiResponse<Vec<DeathCertificate>> =
+                admin_get(client, &url).await?.json().await?;
+
+            let all_certs = api_resp.data.unwrap_or_default();
+            let certs: Vec<_> = if show_pending_only {
+                all_certs
+                    .into_iter()
+                    .filter(|c| !c.approved)
+                    .collect()
+            } else {
+                all_certs
+            };
+
+            if certs.is_empty() {
+                println!("{}", "No death certificates found.".yellow());
+            } else {
+                for cert in certs {
+                    let status = if cert.executed {
+                        "Executed".green()
+                    } else if cert.approved {
+                        "Approved".yellow()
+                    } else {
+                        "Pending".red()
+                    };
+                    let time =
+                        chrono::DateTime::from_timestamp_millis(cert.issued_at)
+                            .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                            .unwrap_or_else(|| "Unknown".to_string());
+
+                    println!();
+                    println!("Cert ID: {} [{}]", cert.id.cyan(), status);
+                    println!("  Deceased: {}", cert.deceased_wallet.red());
+                    println!("  Beneficiary: {}", cert.beneficiary_wallet.green());
+                    println!("  Reason: {}", cert.reason);
+                    println!("  Issued: {}", time);
+                    if let Some(by) = &cert.approved_by {
+                        println!("  Approved by: {}", by);
+                    }
+                }
+            }
         }
 
         DeathCertAction::Approve { cert_id } => {
             println!("{}", "✅ Approving Death Certificate".green().bold());
             println!("Certificate ID: {}", cert_id.cyan());
 
-            let url = format!("{}/api/v1/quillon-bank/identity/admin/death-certificate/approve", api_url);
-            let response: ApiResponse<bool> = client
-                .post(&url)
-                .json(&cert_id)
-                .send()
-                .await?
-                .json()
-                .await?;
+            let url = format!(
+                "{}/api/v1/quillon-bank/identity/admin/death-certificate/approve",
+                api_url
+            );
+            let response: ApiResponse<bool> =
+                admin_post_string(client, &url, &cert_id).await?.json().await?;
 
             if response.success && response.data == Some(true) {
                 println!("{}", "✅ Death certificate approved!".green().bold());
                 println!("The deceased's identity has been marked accordingly.");
-                println!("Run 'inheritance execute {}' to transfer assets.", cert_id);
+                println!(
+                    "Run 'inheritance execute {}' to transfer assets.",
+                    cert_id
+                );
             } else {
-                println!("{}", format!("❌ Failed: {}", response.error.unwrap_or("Certificate not found".to_string())).red());
+                println!(
+                    "{}",
+                    format!(
+                        "❌ Failed: {}",
+                        response
+                            .error
+                            .unwrap_or("Certificate not found".to_string())
+                    )
+                    .red()
+                );
             }
         }
 
         DeathCertAction::View { cert_id } => {
             println!("{}", "💀 Death Certificate Details".green().bold());
             println!("{}", "─".repeat(60));
-            println!("Certificate ID: {}", cert_id.cyan());
-            println!("{}", "⚠️  Certificate view endpoint not yet implemented.".yellow());
+
+            let url = format!(
+                "{}/api/v1/quillon-bank/identity/death-certificate/{}",
+                api_url, cert_id
+            );
+            let response: ApiResponse<Option<DeathCertificate>> =
+                client.get(&url).send().await?.json().await?;
+
+            if let Some(Some(cert)) = response.data {
+                let status = if cert.executed {
+                    "Executed".green()
+                } else if cert.approved {
+                    "Approved (pending execution)".yellow()
+                } else {
+                    "Pending approval".red()
+                };
+
+                println!("Certificate ID: {}", cert.id.cyan());
+                println!("Status: {}", status);
+                println!("Deceased Wallet: {}", cert.deceased_wallet.red());
+                println!("Beneficiary Wallet: {}", cert.beneficiary_wallet.green());
+                println!("Reason: {}", cert.reason);
+                let time =
+                    chrono::DateTime::from_timestamp_millis(cert.issued_at)
+                        .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
+                        .unwrap_or_else(|| "Unknown".to_string());
+                println!("Issued: {}", time);
+                if let Some(by) = &cert.approved_by {
+                    println!("Approved by: {}", by);
+                }
+            } else {
+                println!("{}", "Certificate not found.".yellow());
+            }
         }
     }
 
@@ -588,19 +905,33 @@ async fn handle_inheritance(
             println!("{}", "💰 Inheritance Information".green().bold());
             println!("{}", "─".repeat(60));
 
-            let url = format!("{}/api/v1/quillon-bank/identity/inheritance/{}", api_url, wallet);
-            let response: ApiResponse<Option<InheritanceInfo>> = client.get(&url).send().await?.json().await?;
+            let url = format!(
+                "{}/api/v1/quillon-bank/identity/inheritance/{}",
+                api_url, wallet
+            );
+            let response: ApiResponse<Option<InheritanceInfo>> =
+                client.get(&url).send().await?.json().await?;
 
             if let Some(Some(info)) = response.data {
                 println!("Deceased Wallet: {}", info.deceased_wallet.red());
                 println!("Beneficiary Wallet: {}", info.beneficiary_wallet.green());
-                println!("Total Balance: {} QUG", info.total_balance as f64 / 1e24);
+                println!(
+                    "Total Balance: {:.4} QUG",
+                    info.total_balance as f64 / 1e24
+                );
                 println!(
                     "Transfer Ready: {}",
-                    if info.transfer_ready { "✅ Yes".green() } else { "❌ No (pending approval)".yellow() }
+                    if info.transfer_ready {
+                        "✅ Yes".green()
+                    } else {
+                        "❌ No (pending approval)".yellow()
+                    }
                 );
             } else {
-                println!("{}", "No inheritance information found for this wallet.".yellow());
+                println!(
+                    "{}",
+                    "No inheritance information found for this wallet.".yellow()
+                );
             }
         }
 
@@ -620,23 +951,32 @@ async fn handle_inheritance(
                 return Ok(());
             }
 
-            let url = format!("{}/api/v1/quillon-bank/identity/admin/transfer", api_url);
-            let response: ApiResponse<String> = client
-                .post(&url)
-                .json(&cert_id)
-                .send()
-                .await?
-                .json()
-                .await?;
+            let url = format!(
+                "{}/api/v1/quillon-bank/identity/admin/transfer",
+                api_url
+            );
+            let response: ApiResponse<String> =
+                admin_post_string(client, &url, &cert_id)
+                    .await?
+                    .json()
+                    .await?;
 
             if response.success {
                 println!();
-                println!("{}", "✅ Inheritance transfer executed successfully!".green().bold());
+                println!(
+                    "{}",
+                    "✅ Inheritance transfer executed successfully!"
+                        .green()
+                        .bold()
+                );
                 if let Some(msg) = response.data {
                     println!("{}", msg);
                 }
             } else {
-                println!("{}", format!("❌ Failed: {}", response.error.unwrap_or_default()).red());
+                println!(
+                    "{}",
+                    format!("❌ Failed: {}", response.error.unwrap_or_default()).red()
+                );
             }
         }
     }

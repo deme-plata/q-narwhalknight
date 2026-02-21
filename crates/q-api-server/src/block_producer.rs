@@ -434,9 +434,11 @@ impl BlockProducer {
 
         // v7.3.2: PRE-GENESIS GUARD - Dynamic genesis timestamp based on network
         // mainnet2026.1.1 (rehearsal): Feb 18, 2026 00:00 UTC
+        // mainnet2026.1.3 (emission fix): Feb 20, 2026 00:00 UTC
         // mainnet2026.2 (production): Feb 22, 2026 12:00 UTC
         let genesis_ts = match self.config.network_id_str.as_str() {
             "mainnet2026.1.1" => q_storage::emission_controller::REHEARSAL_GENESIS_TIMESTAMP,
+            "mainnet2026.1.3" => q_storage::emission_controller::REHEARSAL3_GENESIS_TIMESTAMP,
             _ => q_storage::emission_controller::GENESIS_TIMESTAMP,
         };
         let now_ts = chrono::Utc::now().timestamp() as u64;

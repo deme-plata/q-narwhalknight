@@ -68,6 +68,7 @@ pub fn create_public_routes() -> Router<Arc<AppState>> {
         .route("/identity/:wallet_address", get(get_user_identity))
         .route("/identity/register", post(register_identity))
         .route("/identity/death-certificate", post(issue_death_certificate))
+        .route("/identity/death-certificate/:cert_id", get(get_death_certificate))
         .route("/identity/inheritance/:wallet_address", get(get_inheritance_info))
 }
 
@@ -85,6 +86,7 @@ pub fn create_protected_routes() -> Router<Arc<AppState>> {
         .route("/stablecoin/peg/adjust", post(adjust_peg))
         // Lending Operations (FOUNDER-ONLY)
         .route("/lending/approve", post(approve_loan))
+        .route("/lending/reject", post(reject_loan))
         .route("/lending/liquidate", post(liquidate_loan))
         // Account Management (FOUNDER-ONLY)
         .route("/accounts/approve", post(approve_account))
@@ -97,7 +99,9 @@ pub fn create_protected_routes() -> Router<Arc<AppState>> {
         .route("/messages/admin/respond", post(bank_respond_message))
         .route("/messages/admin/list", get(list_all_user_messages))
         // v3.9.1-beta: Identity Admin (FOUNDER-ONLY)
+        .route("/identity/admin/list", get(list_all_identities))
         .route("/identity/admin/approve", post(approve_identity))
+        .route("/identity/admin/death-certificate/list", get(list_all_death_certificates))
         .route("/identity/admin/death-certificate/approve", post(approve_death_certificate))
         .route("/identity/admin/transfer", post(execute_inheritance_transfer))
 }
@@ -326,7 +330,7 @@ pub async fn mint_qnkusd(
     // We need to convert back to human-readable for collateral ratio calculation
     let amount_usd = (request.amount as f64) / 1e24; // Convert base units to USD
 
-    // v4.0.4: Use live vault QUG price instead of hardcoded $42.50
+    // v4.0.4: Use live vault QUG price instead of hardcoded $3000.00
     let qug_price = state.collateral_vault.read().await.qug_price_usd;
     let collateral_value_usd = match &collateral_type {
         AssetType::ORB => request.collateral_amount * qug_price,
@@ -528,8 +532,17 @@ pub async fn burn_qnkusd(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    // Calculate collateral returned based on current ratio
-    let collateral_returned = (request.amount as f64) / 70_000.0; // Estimate based on BTC price
+    // Calculate collateral returned based on collateral type
+    let collateral_returned = match &collateral_type {
+        AssetType::ORB => {
+            let qug_price = state.collateral_vault.read().await.qug_price_usd;
+            if qug_price > 0.0 { (request.amount as f64) / qug_price } else { 0.0 }
+        }
+        AssetType::BTC => (request.amount as f64) / 70_000.0,
+        AssetType::ETH => (request.amount as f64) / 3_500.0,
+        AssetType::USDC => request.amount as f64,
+        _ => 0.0,
+    };
 
     let response = serde_json::json!({
         "amount_burned": request.amount,
@@ -926,6 +939,57 @@ pub async fn approve_loan(
     )))
 }
 
+/// Reject a loan application (FOUNDER-ONLY)
+pub async fn reject_loan(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<serde_json::Value>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let loan_id = request
+        .get("loan_id")
+        .and_then(|v| v.as_str())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let reason = request
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("No reason provided");
+
+    info!("❌ Rejecting loan: {} (reason: {})", loan_id, reason);
+
+    let mut pending_loans = state.pending_loan_applications.write().await;
+    let loan = pending_loans
+        .get_mut(loan_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if loan.status != "pending" {
+        error!("Cannot reject loan with status: {}", loan.status);
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    loan.status = "rejected".to_string();
+    let rejected_loan = loan.clone();
+    drop(pending_loans);
+
+    // Persist updated loan to RocksDB
+    if let Ok(loan_bytes) = bincode::serialize(&rejected_loan) {
+        if let Err(e) = state
+            .storage_engine
+            .save_loan_application(loan_id, &loan_bytes)
+            .await
+        {
+            error!("Failed to persist rejected loan: {}", e);
+        }
+    }
+
+    info!("✅ Loan {} rejected", loan_id);
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "success": true,
+        "loan_id": loan_id,
+        "status": "rejected",
+        "reason": reason,
+    }))))
+}
+
 async fn get_loans_at_risk(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
@@ -1076,7 +1140,7 @@ pub async fn apply_loan(
     }
 
     // 3. Calculate interest rate based on collateral ratio and term
-    // v4.0.4: Use live vault QUG price instead of hardcoded $42.50
+    // v4.0.4: Use live vault QUG price instead of hardcoded $3000.00
     let qug_price: f64 = state.collateral_vault.read().await.qug_price_usd;
     const MINIMUM_COLLATERAL_RATIO: f64 = 1.5; // 150%
 
@@ -1406,18 +1470,46 @@ pub async fn payback_loan(
 }
 
 async fn list_accounts(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let wallet_balances = state.wallet_balances.read().await;
+    let accounts: Vec<serde_json::Value> = wallet_balances
+        .iter()
+        .filter(|(_, &balance)| balance > 0)
+        .map(|(addr, &balance)| {
+            serde_json::json!({
+                "address": format!("qnk{}", hex::encode(addr)),
+                "balance_qug": balance as f64 / 1e24,
+            })
+        })
+        .collect();
+
+    let count = accounts.len();
     Ok(Json(ApiResponse::success(
-        serde_json::json!({"accounts": []}),
+        serde_json::json!({"accounts": accounts, "count": count}),
     )))
 }
 
 async fn get_pending_accounts(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let identities = state.user_identities.read().await;
+    let pending: Vec<serde_json::Value> = identities
+        .iter()
+        .filter(|i| !i.verified)
+        .map(|i| {
+            serde_json::json!({
+                "wallet_address": i.wallet_address,
+                "display_name": i.display_name,
+                "created_at": i.created_at,
+                "kyc_level": i.kyc_level,
+            })
+        })
+        .collect();
+
+    let count = pending.len();
     Ok(Json(ApiResponse::success(
-        serde_json::json!({"pending": []}),
+        serde_json::json!({"pending": pending, "count": count}),
     )))
 }
 
@@ -1448,11 +1540,43 @@ pub async fn allocate_reserves(
 }
 
 async fn calculate_profits(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(
-        serde_json::json!({"profits": {}}),
-    )))
+    let pending_loans = state.pending_loan_applications.read().await;
+
+    let mut total_interest_earned: f64 = 0.0;
+    let mut total_principal_repaid: f64 = 0.0;
+    let mut paid_loan_count: u64 = 0;
+
+    for loan in pending_loans.values() {
+        if loan.status == "paid" || loan.amount_paid > 0 {
+            let principal = loan.loan_amount as f64 / 1e24;
+            let interest_rate = loan.interest_rate / 100.0;
+            let total_interest = principal * interest_rate * (loan.term_months as f64 / 12.0);
+            let total_owed = principal + total_interest;
+            let paid = loan.amount_paid as f64 / 1e24;
+
+            // Interest is earned proportionally to amount paid
+            let interest_portion = if total_owed > 0.0 {
+                total_interest * (paid / total_owed).min(1.0)
+            } else {
+                0.0
+            };
+
+            total_interest_earned += interest_portion;
+            total_principal_repaid += (paid - interest_portion).max(0.0);
+            if loan.status == "paid" {
+                paid_loan_count += 1;
+            }
+        }
+    }
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "total_interest_earned_qugusd": total_interest_earned,
+        "total_principal_repaid_qugusd": total_principal_repaid,
+        "paid_loans": paid_loan_count,
+        "total_revenue_qugusd": total_interest_earned,
+    }))))
 }
 
 pub async fn distribute_profits(
@@ -1465,17 +1589,93 @@ pub async fn distribute_profits(
 }
 
 async fn risk_assessment(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(
-        serde_json::json!({"assessment": {}}),
-    )))
+    let pending_loans = state.pending_loan_applications.read().await;
+    let qug_price: f64 = state.collateral_vault.read().await.qug_price_usd;
+    const LIQUIDATION_THRESHOLD: f64 = 1.2;
+    const WARNING_THRESHOLD: f64 = 1.5;
+
+    let mut at_risk_count = 0u64;
+    let mut at_risk_value = 0.0f64;
+    let mut warning_count = 0u64;
+    let mut total_active_loans = 0u64;
+    let mut total_loan_value = 0.0f64;
+
+    for loan in pending_loans.values() {
+        if loan.status == "approved" {
+            total_active_loans += 1;
+            let loan_amount_usd = loan.loan_amount as f64 / 1e24;
+            total_loan_value += loan_amount_usd;
+            let collateral_value_usd = loan.collateral_amount * qug_price;
+            let ratio = if loan_amount_usd > 0.0 {
+                collateral_value_usd / loan_amount_usd
+            } else {
+                f64::MAX
+            };
+
+            if ratio < LIQUIDATION_THRESHOLD {
+                at_risk_count += 1;
+                at_risk_value += loan_amount_usd;
+            } else if ratio < WARNING_THRESHOLD {
+                warning_count += 1;
+            }
+        }
+    }
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "total_active_loans": total_active_loans,
+        "total_loan_value_usd": total_loan_value,
+        "at_risk_count": at_risk_count,
+        "at_risk_value_usd": at_risk_value,
+        "warning_count": warning_count,
+        "qug_price_usd": qug_price,
+        "liquidation_threshold": LIQUIDATION_THRESHOLD * 100.0,
+        "warning_threshold": WARNING_THRESHOLD * 100.0,
+    }))))
 }
 
 async fn liquidation_queue(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(serde_json::json!({"queue": []}))))
+    let pending_loans = state.pending_loan_applications.read().await;
+    let qug_price: f64 = state.collateral_vault.read().await.qug_price_usd;
+    const LIQUIDATION_THRESHOLD: f64 = 1.2;
+
+    let queue: Vec<serde_json::Value> = pending_loans
+        .values()
+        .filter(|loan| loan.status == "approved")
+        .filter_map(|loan| {
+            let loan_amount_usd = loan.loan_amount as f64 / 1e24;
+            let collateral_value_usd = loan.collateral_amount * qug_price;
+            let ratio = if loan_amount_usd > 0.0 {
+                collateral_value_usd / loan_amount_usd
+            } else {
+                f64::MAX
+            };
+
+            if ratio < LIQUIDATION_THRESHOLD {
+                Some(serde_json::json!({
+                    "loan_id": loan.loan_id,
+                    "borrower_address": loan.borrower_address,
+                    "loan_amount_usd": loan_amount_usd,
+                    "collateral_qug": loan.collateral_amount,
+                    "collateral_value_usd": collateral_value_usd,
+                    "current_ratio": ratio * 100.0,
+                    "shortfall_usd": (loan_amount_usd * LIQUIDATION_THRESHOLD) - collateral_value_usd,
+                }))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let count = queue.len();
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "queue": queue,
+        "count": count,
+        "qug_price": qug_price,
+    }))))
 }
 
 pub async fn execute_liquidations(
@@ -1488,19 +1688,74 @@ pub async fn execute_liquidations(
 }
 
 async fn daily_summary(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(
-        serde_json::json!({"summary": {}}),
-    )))
+    let now = chrono::Utc::now().timestamp_millis();
+    let day_ago = now - 86_400_000; // 24 hours in milliseconds
+
+    let messages = state.bank_messages.read().await;
+    let messages_today = messages.iter().filter(|m| m.timestamp > day_ago).count();
+    let unread_messages = messages.iter().filter(|m| !m.read && m.from == MessageSender::User).count();
+
+    let loans = state.pending_loan_applications.read().await;
+    let new_loans_today = loans.values().filter(|l| l.created_at > day_ago / 1000).count();
+    let active_loans = loans.values().filter(|l| l.status == "approved").count();
+    let pending_loans = loans.values().filter(|l| l.status == "pending").count();
+
+    let node_status = state.node_status.read().await;
+    let block_height = node_status.current_height;
+    let connected_peers = node_status.connected_peers;
+    drop(node_status);
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "date": chrono::Utc::now().format("%Y-%m-%d").to_string(),
+        "messages_today": messages_today,
+        "unread_messages": unread_messages,
+        "new_loan_applications": new_loans_today,
+        "active_loans": active_loans,
+        "pending_loans": pending_loans,
+        "block_height": block_height,
+        "connected_peers": connected_peers,
+    }))))
 }
 
 async fn customer_analytics(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    Ok(Json(ApiResponse::success(
-        serde_json::json!({"analytics": {}}),
-    )))
+    let wallet_balances = state.wallet_balances.read().await;
+    let active_wallets: Vec<_> = wallet_balances.iter().filter(|(_, &b)| b > 0).collect();
+    let total_wallets = active_wallets.len();
+    let total_balance: u128 = active_wallets.iter().map(|(_, &b)| b).sum();
+    let avg_balance = if total_wallets > 0 {
+        (total_balance as f64 / 1e24) / total_wallets as f64
+    } else {
+        0.0
+    };
+    drop(wallet_balances);
+
+    let loans = state.pending_loan_applications.read().await;
+    let total_loans = loans.len();
+    let active_loans = loans.values().filter(|l| l.status == "approved").count();
+    let paid_loans = loans.values().filter(|l| l.status == "paid").count();
+    let unique_borrowers: std::collections::HashSet<_> = loans.values().map(|l| &l.borrower_address).collect();
+    drop(loans);
+
+    let identities = state.user_identities.read().await;
+    let registered_identities = identities.len();
+    let verified_identities = identities.iter().filter(|i| i.verified).count();
+    drop(identities);
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "total_wallets": total_wallets,
+        "total_balance_qug": total_balance as f64 / 1e24,
+        "average_balance_qug": avg_balance,
+        "total_loan_applications": total_loans,
+        "active_loans": active_loans,
+        "paid_loans": paid_loans,
+        "unique_borrowers": unique_borrowers.len(),
+        "registered_identities": registered_identities,
+        "verified_identities": verified_identities,
+    }))))
 }
 
 // ============================================================================
@@ -2087,6 +2342,32 @@ async fn approve_death_certificate(
     Ok(Json(ApiResponse::success(false)))
 }
 
+/// List all registered identities (FOUNDER-ONLY)
+async fn list_all_identities(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<Vec<UserIdentity>>>, StatusCode> {
+    let identities = state.user_identities.read().await;
+    Ok(Json(ApiResponse::success(identities.clone())))
+}
+
+/// List all death certificates (FOUNDER-ONLY)
+async fn list_all_death_certificates(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<Vec<DeathCertificate>>>, StatusCode> {
+    let certs = state.death_certificates.read().await;
+    Ok(Json(ApiResponse::success(certs.clone())))
+}
+
+/// Get a specific death certificate by ID (PUBLIC)
+async fn get_death_certificate(
+    State(state): State<Arc<AppState>>,
+    Path(cert_id): Path<String>,
+) -> Result<Json<ApiResponse<Option<DeathCertificate>>>, StatusCode> {
+    let certs = state.death_certificates.read().await;
+    let cert = certs.iter().find(|c| c.id == cert_id).cloned();
+    Ok(Json(ApiResponse::success(cert)))
+}
+
 /// Execute inheritance transfer (FOUNDER-ONLY)
 async fn execute_inheritance_transfer(
     State(state): State<Arc<AppState>>,
@@ -2116,38 +2397,111 @@ async fn execute_inheritance_transfer(
         Err(e) => return Ok(Json(ApiResponse::error(format!("Invalid beneficiary wallet: {}", e)))),
     };
 
+    // Check for active (unpaid) loans - block transfer if any exist
+    {
+        let loans = state.pending_loan_applications.read().await;
+        let active_loans: Vec<_> = loans
+            .values()
+            .filter(|l| {
+                let borrower_norm = l.borrower_address.to_lowercase().replace("qnk", "");
+                let deceased_norm = cert.deceased_wallet.to_lowercase().replace("qnk", "");
+                borrower_norm == deceased_norm && (l.status == "approved" || l.status == "pending")
+            })
+            .collect();
+
+        if !active_loans.is_empty() {
+            let loan_ids: Vec<_> = active_loans.iter().map(|l| l.loan_id.as_str()).collect();
+            return Ok(Json(ApiResponse::error(format!(
+                "Cannot transfer: {} active/pending loan(s) exist: {}",
+                active_loans.len(),
+                loan_ids.join(", ")
+            ))));
+        }
+    }
+
     let balance = {
         let balances = state.wallet_balances.read().await;
         balances.get(&deceased_bytes).copied().unwrap_or(0)
     };
 
-    if balance == 0 {
-        return Ok(Json(ApiResponse::error("No balance to transfer".to_string())));
-    }
-
-    // Execute the transfer
+    // Transfer QUG balance
     {
         let mut balances = state.wallet_balances.write().await;
-        // Remove from deceased
         balances.insert(deceased_bytes, 0);
-        // Add to beneficiary
         let current = balances.get(&beneficiary_bytes).copied().unwrap_or(0);
         balances.insert(beneficiary_bytes, current + balance);
+    }
+
+    // Persist QUG balance changes
+    if let Err(e) = state.storage_engine.save_wallet_balance(&deceased_bytes, 0).await {
+        error!("Failed to persist deceased QUG balance: {}", e);
+    }
+    if let Err(e) = state.storage_engine.save_wallet_balance(
+        &beneficiary_bytes,
+        state.wallet_balances.read().await.get(&beneficiary_bytes).copied().unwrap_or(0),
+    ).await {
+        error!("Failed to persist beneficiary QUG balance: {}", e);
+    }
+
+    // Transfer ALL token balances (QUGUSD, custom tokens, etc.)
+    let mut transferred_tokens = Vec::new();
+    {
+        let mut token_balances = state.token_balances.write().await;
+        // Collect keys matching deceased address
+        let deceased_keys: Vec<_> = token_balances
+            .keys()
+            .filter(|(addr, _)| addr == &deceased_bytes)
+            .cloned()
+            .collect();
+
+        for (_, token_addr) in &deceased_keys {
+            let token_balance = token_balances.get(&(deceased_bytes, *token_addr)).copied().unwrap_or(0);
+            if token_balance > 0 {
+                // Remove from deceased
+                token_balances.insert((deceased_bytes, *token_addr), 0);
+                // Add to beneficiary
+                let current = token_balances.get(&(beneficiary_bytes, *token_addr)).copied().unwrap_or(0);
+                token_balances.insert((beneficiary_bytes, *token_addr), current + token_balance);
+
+                transferred_tokens.push((token_addr.clone(), token_balance));
+
+                // Persist token balance changes
+                if let Err(e) = state.storage_engine.save_token_balance(&deceased_bytes, token_addr, 0).await {
+                    error!("Failed to persist deceased token balance: {}", e);
+                }
+                if let Err(e) = state.storage_engine.save_token_balance(
+                    &beneficiary_bytes, token_addr, current + token_balance,
+                ).await {
+                    error!("Failed to persist beneficiary token balance: {}", e);
+                }
+            }
+        }
     }
 
     // Mark certificate as executed
     cert.executed = true;
     cert.executed_at = Some(chrono::Utc::now().timestamp_millis());
 
+    // Persist updated certificate
+    let cert_clone = cert.clone();
+    drop(certs);
+    if let Ok(data) = serde_json::to_vec(&cert_clone) {
+        let kv = state.storage_engine.get_kv();
+        let _ = kv.put(q_storage::CF_DEATH_CERTIFICATES, cert_clone.id.as_bytes(), &data).await;
+    }
+
+    let mut summary = format!("Transferred {:.4} QUG", balance as f64 / 1e24);
+    if !transferred_tokens.is_empty() {
+        summary.push_str(&format!(" + {} token type(s)", transferred_tokens.len()));
+    }
+    summary.push_str(" to beneficiary");
+
     info!(
-        "✅ Inheritance transfer complete: {} QUG from {} to {}",
-        balance as f64 / 1e24,
-        cert.deceased_wallet,
-        cert.beneficiary_wallet
+        "✅ Inheritance transfer complete: {} from {} to {}",
+        summary,
+        cert_clone.deceased_wallet,
+        cert_clone.beneficiary_wallet
     );
 
-    Ok(Json(ApiResponse::success(format!(
-        "Transferred {} QUG to beneficiary",
-        balance as f64 / 1e24
-    ))))
+    Ok(Json(ApiResponse::success(summary)))
 }

@@ -209,6 +209,19 @@ impl GenesisCheckpointValidator {
             },
         );
 
+        // v8.0.1: Mainnet 2026.1.3 - Emission rehearsal with rate fix
+        genesis_checkpoints.insert(
+            NetworkId::Mainnet2026_1_3,
+            GenesisCheckpoint {
+                network_id: NetworkId::Mainnet2026_1_3,
+                genesis_block_hash: [0u8; 32],
+                genesis_height: 1,
+                genesis_prev_hash: [0u8; 32],
+                network_name: "mainnet2026.1.3".to_string(),
+                description: "Q-NarwhalKnight Mainnet 2026.1.3 - Emission rehearsal with rate fix".to_string(),
+            },
+        );
+
         // v7.3.0: Mainnet 2026.2 - Fresh directory relaunch with zero contamination
         genesis_checkpoints.insert(
             NetworkId::Mainnet2026_2,

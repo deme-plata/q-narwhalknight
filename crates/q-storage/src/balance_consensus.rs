@@ -41,12 +41,13 @@ use crate::emission_controller::EmissionController;
 pub const GENESIS_TIMESTAMP: u64 = 1771761600;
 
 /// v7.3.2: Get the active genesis timestamp based on current network
+/// v8.0.1: Added mainnet2026.1.3 support
 pub fn active_genesis_timestamp() -> u64 {
     let network = std::env::var("Q_NETWORK_ID").unwrap_or_default();
-    if network == "mainnet2026.1.1" {
-        crate::emission_controller::REHEARSAL_GENESIS_TIMESTAMP
-    } else {
-        GENESIS_TIMESTAMP
+    match network.as_str() {
+        "mainnet2026.1.1" => crate::emission_controller::REHEARSAL_GENESIS_TIMESTAMP,
+        "mainnet2026.1.3" => crate::emission_controller::REHEARSAL3_GENESIS_TIMESTAMP,
+        _ => GENESIS_TIMESTAMP,
     }
 }
 
@@ -1257,6 +1258,12 @@ impl BalanceConsensusEngine {
     pub async fn get_correction_factor(&self) -> f64 {
         let controller = self.emission_controller.read().await;
         controller.correction_factor()
+    }
+
+    /// v8.0.3: Get rate measurement diagnostics for ultra-advanced analytics
+    pub async fn get_rate_diagnostics(&self) -> crate::emission_controller::RateDiagnostics {
+        let controller = self.emission_controller.read().await;
+        controller.get_rate_diagnostics()
     }
 
     /// v7.1.0: Serialize emission controller state for persistence

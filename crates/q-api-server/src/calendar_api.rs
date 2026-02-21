@@ -637,7 +637,7 @@ async fn get_community_events_handler(
 
 /// Publish a calendar event via P2P gossipsub
 async fn publish_calendar_event_p2p(state: &Arc<AppState>, event: &CalendarEvent) {
-    let network_id = std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "mainnet2026.1".to_string());
+    let network_id = std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "mainnet2026.2".to_string());
     let topic = format!("/qnk/{}/calendar", network_id);
 
     match serde_json::to_vec(event) {

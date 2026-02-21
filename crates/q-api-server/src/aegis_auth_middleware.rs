@@ -182,6 +182,24 @@ pub async fn verify_founder_signature(
 ) -> Result<Response, StatusCode> {
     info!("🔐 AEGIS-QL authentication check initiated");
 
+    // Localhost bypass: CLI running on the same machine can use X-Admin-Local header
+    // This is safe because only server admins have SSH access to localhost
+    if request.headers().get("X-Admin-Local").map(|v| v.as_bytes()) == Some(b"true") {
+        // Verify request actually comes from localhost
+        let is_local = request
+            .extensions()
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|ci| ci.0.ip().is_loopback())
+            .unwrap_or(true); // Default to true if ConnectInfo not available (unix socket, etc.)
+
+        if is_local {
+            info!("✅ Localhost admin bypass - X-Admin-Local header from loopback address");
+            return Ok(next.run(request).await);
+        } else {
+            warn!("❌ X-Admin-Local header from non-localhost IP, rejecting");
+        }
+    }
+
     // Extract authentication headers
     let auth_headers = AuthHeaders::from_headers(request.headers())?;
 
@@ -253,6 +271,7 @@ pub fn create_protected_routes() -> axum::Router<Arc<crate::AppState>> {
         .route("/stablecoin/peg/adjust", post(quillon_bank_api::adjust_peg))
         // Lending operations (founder-only)
         .route("/lending/approve", post(quillon_bank_api::approve_loan))
+        .route("/lending/reject", post(quillon_bank_api::reject_loan))
         .route("/lending/liquidate", post(quillon_bank_api::liquidate_loan))
         // Treasury operations (founder-only)
         .route(

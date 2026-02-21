@@ -25,20 +25,17 @@ mod u128_as_string {
     where
         S: Serializer,
     {
-        // v3.4.14-beta: Fixed serialization to use native u128 for Bincode
-        //
-        // The issue: Different serializers handle u128 differently:
-        // - Bincode: Supports native u128 (16 bytes) - MUST use serialize_u128
-        // - CBOR: Does NOT support u128 natively - would need string
-        // - JSON: Uses string representation for large numbers
-        //
-        // Solution: Use native u128 serialization for all formats.
-        // For CBOR/P2P, we handle this at the transport layer by using
-        // MessagePack (rmp_serde) instead of CBOR for block sync.
-        //
-        // Bincode is_human_readable() = false and expects native types.
-        // Using serialize_str breaks Bincode deserialization completely!
-        serializer.serialize_u128(*value)
+        // v8.0.6: Format-aware serialization
+        // - Bincode (is_human_readable=false): native u128 (16 bytes)
+        // - JSON (is_human_readable=true): string to avoid float precision loss
+        //   JSON numbers are IEEE 754 doubles (53-bit mantissa), u128 > 2^53
+        //   gets serialized as scientific notation (e.g. 1.2477e23) which then
+        //   fails to deserialize back as u128.
+        if serializer.is_human_readable() {
+            serializer.serialize_str(&value.to_string())
+        } else {
+            serializer.serialize_u128(*value)
+        }
     }
 
     struct U128Visitor;
@@ -47,7 +44,7 @@ mod u128_as_string {
         type Value = u128;
 
         fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str("a u128, u64, or string representing a number")
+            formatter.write_str("a u128, u64, f64, or string representing a number")
         }
 
         fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
@@ -88,15 +85,92 @@ mod u128_as_string {
                 Err(E::custom("negative value cannot be u128"))
             }
         }
+
+        // v8.0.6: Handle f64 for backward compatibility with blocks stored as JSON
+        // Large u128 values serialized as JSON numbers become floats (e.g. 1.2477e23)
+        fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            if v < 0.0 {
+                Err(E::custom("negative value cannot be u128"))
+            } else if v > u128::MAX as f64 {
+                Err(E::custom("value too large for u128"))
+            } else {
+                Ok(v as u128)
+            }
+        }
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<u128, D::Error>
     where
         D: Deserializer<'de>,
     {
-        // v3.1.4: Use deserialize_u128 for Bincode compatibility
-        // The Visitor handles u64 for backward compatibility with old blocks
-        deserializer.deserialize_u128(U128Visitor)
+        if deserializer.is_human_readable() {
+            // JSON: could be string, number, or float — accept any
+            deserializer.deserialize_any(U128Visitor)
+        } else {
+            // Bincode: native u128
+            deserializer.deserialize_u128(U128Visitor)
+        }
+    }
+}
+
+/// v8.0.6: Serialize/deserialize Option<u128> with format-aware handling
+/// Needed for total_coinbase_reward and similar optional u128 fields
+mod option_u128_as_string {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(value: &Option<u128>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(v) => {
+                if serializer.is_human_readable() {
+                    // JSON: serialize as string (implicitly Some, None is null)
+                    serializer.serialize_str(&v.to_string())
+                } else {
+                    // Bincode: MUST use serialize_some to write the Option discriminant [0x01]
+                    // v.serialize(serializer) would skip the discriminant, corrupting the layout
+                    serializer.serialize_some(v)
+                }
+            }
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<u128>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // Deserialize as Option<serde_json::Value> for human-readable, Option<u128> for binary
+        if deserializer.is_human_readable() {
+            #[derive(Deserialize)]
+            #[serde(untagged)]
+            enum Helper {
+                Str(String),
+                Num(f64),
+                Null,
+            }
+            let opt = Option::<Helper>::deserialize(deserializer)?;
+            match opt {
+                None | Some(Helper::Null) => Ok(None),
+                Some(Helper::Str(s)) => s
+                    .parse::<u128>()
+                    .map(Some)
+                    .map_err(serde::de::Error::custom),
+                Some(Helper::Num(f)) => {
+                    if f < 0.0 {
+                        Err(serde::de::Error::custom("negative value cannot be u128"))
+                    } else {
+                        Ok(Some(f as u128))
+                    }
+                }
+            }
+        } else {
+            Option::<u128>::deserialize(deserializer)
+        }
     }
 }
 
@@ -217,7 +291,9 @@ pub struct BlockHeader {
     /// Total coinbase reward in this block (sum of all coinbase outputs)
     /// Used for quick emission schedule validation
     /// v2.5.0: Upgraded to u128 for full precision (Bincode native)
-    #[serde(default)]
+    /// v8.0.6: CRITICAL FIX - Added option_u128_as_string for JSON HTTP sync compatibility
+    /// Without this, large u128 values become floats (1.2477e23) in JSON and fail to deserialize
+    #[serde(default, with = "option_u128_as_string")]
     pub total_coinbase_reward: Option<u128>,
 
     /// Number of coinbase transactions in this block

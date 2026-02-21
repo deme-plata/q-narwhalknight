@@ -113,6 +113,10 @@ pub struct MiningPool {
 
     /// Current block reward (updated from emission controller)
     current_block_reward: Arc<RwLock<u64>>,
+
+    /// Payout handler - called to credit miner balances on-chain
+    /// Takes Vec<(wallet_address, amount_atomic)>, returns tx_hash
+    payout_handler: Arc<RwLock<Option<Arc<dyn Fn(Vec<(String, u64)>) -> String + Send + Sync>>>>,
 }
 
 /// Internal statistics tracking
@@ -171,6 +175,7 @@ impl MiningPool {
             start_time: std::time::Instant::now(),
             on_block_found: None,
             current_block_reward: Arc::new(RwLock::new(290_000)), // ~0.00029 QUG default
+            payout_handler: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -403,6 +408,23 @@ impl MiningPool {
             callback(block_found);
         }
 
+        // Auto-trigger payout if configured
+        if self.config.payout.auto_payout {
+            match self.process_payouts().await {
+                Ok(Some(batch)) => {
+                    tracing::info!(
+                        batch_id = batch.id,
+                        recipients = batch.payouts.len(),
+                        "Auto-payout triggered after block found"
+                    );
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::error!(error = %e, "Auto-payout failed after block found");
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -417,6 +439,11 @@ impl MiningPool {
     /// Update block reward from emission controller
     pub fn set_block_reward(&self, reward: u64) {
         *self.current_block_reward.write() = reward;
+    }
+
+    /// Set payout handler for crediting miner balances on-chain
+    pub fn set_payout_handler(&self, handler: Arc<dyn Fn(Vec<(String, u64)>) -> String + Send + Sync>) {
+        *self.payout_handler.write() = Some(handler);
     }
 
     /// Payout processing loop
@@ -453,18 +480,32 @@ impl MiningPool {
 
     /// Process pending payouts
     pub async fn process_payouts(&self) -> PoolResult<Option<crate::payout::BatchPayout>> {
-        // This would integrate with the Q-NarwhalKnight transaction system
-        // For now, use a mock transaction sender
-        let result = self.payout_processor.process_payouts(|outputs| async move {
-            // TODO: Integrate with actual blockchain transaction creation
-            // For now, simulate successful transaction
-            let tx_hash = format!("mock_tx_{}", chrono::Utc::now().timestamp());
-            tracing::info!(
-                tx_hash = %tx_hash,
-                outputs = outputs.len(),
-                "Simulated payout transaction"
-            );
-            Ok(tx_hash)
+        let handler = self.payout_handler.read().clone();
+        let result = self.payout_processor.process_payouts(|outputs| {
+            let handler = handler.clone();
+            async move {
+                match handler {
+                    Some(h) => {
+                        let tx_hash = h(outputs.clone());
+                        tracing::info!(
+                            tx_hash = %tx_hash,
+                            outputs = outputs.len(),
+                            "Pool payout transaction submitted"
+                        );
+                        Ok(tx_hash)
+                    }
+                    None => {
+                        // Fallback: log and return placeholder
+                        let tx_hash = format!("pool_payout_{}", chrono::Utc::now().timestamp());
+                        tracing::warn!(
+                            tx_hash = %tx_hash,
+                            outputs = outputs.len(),
+                            "Pool payout handler not set - rewards credited internally only"
+                        );
+                        Ok(tx_hash)
+                    }
+                }
+            }
         }).await?;
 
         Ok(result)

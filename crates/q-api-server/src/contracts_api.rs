@@ -768,6 +768,13 @@ pub async fn deploy_contract(
                                         op_addr.copy_from_slice(&op_bytes);
                                         let old = wallet_balances.get(&op_addr).copied().unwrap_or(0);
                                         wallet_balances.insert(op_addr, old + operator_share);
+                                        // v8.1.1: Track fee earnings (convert from 24-decimal to micro-QUG)
+                                        let micro_qug = (operator_share / 1_000_000_000_000_000_000) as u64; // 1e24 / 1e6 = 1e18
+                                        crate::admin_settings_api::record_operator_fee(&state, micro_qug);
+                                        tracing::info!(
+                                            "💰 Operator fee earned: {:.6} QUG (deployment fee share)",
+                                            operator_share as f64 / 1e24
+                                        );
                                     }
                                 }
                             }

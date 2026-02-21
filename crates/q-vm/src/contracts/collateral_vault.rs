@@ -87,7 +87,7 @@ impl CollateralVault {
         Self {
             locked_qug: HashMap::new(),
             minted_qugusd: HashMap::new(),
-            qug_price_usd: 42.50, // Default price $42.50 (will be updated by oracle)
+            qug_price_usd: 3000.00, // Default price $3000.00 (will be updated by oracle)
             total_qug_locked: 0,
             total_qugusd_minted: 0,
             last_price_update: chrono::Utc::now().timestamp(),
@@ -579,7 +579,7 @@ mod tests {
         let vault = CollateralVault::new();
         assert_eq!(vault.total_qug_locked, 0);
         assert_eq!(vault.total_qugusd_minted, 0);
-        assert_eq!(vault.qug_price_usd, 42.50);
+        assert_eq!(vault.qug_price_usd, 3000.00);
     }
 
     #[test]
@@ -587,11 +587,11 @@ mod tests {
         let mut vault = CollateralVault::new();
         let user = [1u8; 32];
 
-        // Lock 1000 QUG ($42,500 at $42.50/QUG)
+        // Lock 1000 QUG ($3,000,000 at $3000.00/QUG)
         let qug_amount = 1000 * ONE_QUG; // 1000 QUG in base units
         let result = vault.mint_qugusd(user, qug_amount).unwrap();
 
-        // Should mint $42,500 / 1.5 = $28,333.33 QUGUSD
+        // Should mint $3,000,000 / 1.5 = $2,000,000 QUGUSD
         assert_eq!(result.qug_locked, qug_amount);
         // Expected: 28333.333... QUGUSD in base units
         let expected_qugusd = (28333.333333333333 * BASE_UNITS_DIVISOR) as u128;
@@ -632,7 +632,7 @@ mod tests {
         let qug_amount = 1000 * ONE_QUG;
         vault.mint_qugusd(user, qug_amount).unwrap();
 
-        // Drop QUG price to trigger liquidation ($42.50 -> $6.50)
+        // Drop QUG price to trigger liquidation ($3000.00 -> $6.50)
         vault.update_price(35.0).unwrap(); // 15% drop first
         vault.update_price(30.0).unwrap(); // Another drop
         vault.update_price(25.0).unwrap(); // Keep dropping
@@ -662,7 +662,7 @@ mod tests {
         let mut vault = CollateralVault::new();
 
         // Try to update price by > 20%
-        let result = vault.update_price(55.0); // ~29% increase from 42.50
+        let result = vault.update_price(55.0); // ~29% increase from 3000.00
         assert!(result.is_err());
 
         // Small change should work (15% increase)

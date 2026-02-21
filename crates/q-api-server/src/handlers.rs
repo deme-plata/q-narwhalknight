@@ -182,7 +182,7 @@ use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
 pub use crate::wallet_auth::AuthenticatedWallet;
-use crate::{AppState, PendingMixingRequest, StreamEvent};
+use crate::{AppState, PendingMixingRequest, StreamEvent, VERSION};
 use crate::transaction_utils; // v2.4.0-beta: Consensus-verified transactions
 use q_storage::BalanceStorage; // Import trait for get_balance method
 
@@ -190,6 +190,11 @@ use q_storage::BalanceStorage; // Import trait for get_balance method
 /// Balances are stored with 24 decimal precision (10^24 base units per QUG)
 /// Use this constant for converting raw u128 balances to human-readable f64
 const QUG_DISPLAY_DIVISOR: f64 = 1_000_000_000_000_000_000_000_000.0; // 10^24
+
+/// Server notice broadcast to all miners via challenge/submit responses.
+/// Set to "" to disable. Miners will see this on every challenge poll and solution submit.
+/// IMPORTANT: Change this message and redeploy to notify miners of urgent changes.
+const MINING_SERVER_NOTICE: &str = "⚠️ IMPORTANT: Please connect via https://quillon.xyz (not direct IP:8080). Direct IP access will be blocked soon for security. Update your miner --server to https://quillon.xyz";
 
 // ============================================================================
 // API RESPONSE WRAPPER
@@ -248,9 +253,16 @@ pub async fn health_check(
     let current_height = state
         .current_height_atomic
         .load(std::sync::atomic::Ordering::Relaxed);
-    let network_height = state
+    let raw_network_height = state
         .highest_network_height
         .load(std::sync::atomic::Ordering::Relaxed);
+    // v8.0.8: Cap network_height to prevent rogue peers from poisoning status
+    let max_reasonable = (current_height * 3).max(current_height + 500_000);
+    let network_height = if raw_network_height > max_reasonable {
+        current_height
+    } else {
+        raw_network_height
+    };
     let peers = state
         .libp2p_peer_count
         .as_ref()
@@ -593,9 +605,16 @@ pub async fn node_status(
     // Get sync status for miners
     // v1.0.10.1-beta: Changed to SeqCst for cross-thread visibility
     // v1.0.70-beta: Use real_current_height instead of stale status.current_height
-    let network_height = state
+    let raw_network_height = state
         .highest_network_height
         .load(std::sync::atomic::Ordering::SeqCst);
+    // v8.0.8: Cap network_height to prevent rogue peers from showing fake sync status
+    let max_reasonable = (real_current_height * 3).max(real_current_height + 500_000);
+    let network_height = if raw_network_height > max_reasonable {
+        real_current_height // Treat as synced if network height is suspiciously high
+    } else {
+        raw_network_height
+    };
     let is_syncing = network_height > 0 && real_current_height + 10 < network_height;
     let blocks_behind = if network_height > real_current_height {
         network_height - real_current_height
@@ -775,13 +794,13 @@ pub fn calculate_block_reward_adaptive(
 pub const GENESIS_TIMESTAMP: u64 = 1771761600; // Unix timestamp for Feb 22, 2026 12:00:00 UTC (Mainnet 2026.2)
 
 /// v7.3.2: Get the active genesis timestamp based on current network
-/// Returns REHEARSAL_GENESIS_TIMESTAMP for mainnet2026.1.1, else GENESIS_TIMESTAMP
+/// v8.0.1: Added mainnet2026.1.3 support
 pub fn active_genesis_timestamp() -> u64 {
     let network = std::env::var("Q_NETWORK_ID").unwrap_or_default();
-    if network == "mainnet2026.1.1" {
-        q_storage::emission_controller::REHEARSAL_GENESIS_TIMESTAMP
-    } else {
-        GENESIS_TIMESTAMP
+    match network.as_str() {
+        "mainnet2026.1.1" => q_storage::emission_controller::REHEARSAL_GENESIS_TIMESTAMP,
+        "mainnet2026.1.3" => q_storage::emission_controller::REHEARSAL3_GENESIS_TIMESTAMP,
+        _ => GENESIS_TIMESTAMP,
     }
 }
 
@@ -1035,14 +1054,17 @@ pub async fn get_emission_stats(
     // Correction factor from emission controller
     let correction_factor = bc.get_correction_factor().await;
 
+    // v8.0.3: Rate measurement diagnostics for ultra-advanced mode
+    let rate_diagnostics = bc.get_rate_diagnostics().await;
+
     // Per-block reward at current rate
     let reward_per_block_f64 = summary.current_reward_per_block as f64 / QUG_DIVISOR;
 
     // Calculate dynamic reward for current rate
-    // v7.3.3: Use 1.0 bps minimum (not 0.1) to avoid showing ABSOLUTE_MAX (0.5 QUG) as reward
-    // when block rate is near-zero. 1.0 bps = ~31.5M blocks/year = ~0.083 QUG/block for era 0.
-    let display_rate = if summary.block_rate < 1.0 { 1.0 } else { summary.block_rate };
-    let dynamic_reward = emission_controller::base_reward_for_rate(era, display_rate);
+    // v8.0.2: Show actual reward from emission controller (no display_rate override)
+    // The wall-clock rate measurement provides accurate rates even during turbo-sync
+    let actual_rate = if summary.block_rate < 0.01 { 1.0 } else { summary.block_rate };
+    let dynamic_reward = emission_controller::base_reward_for_rate(era, actual_rate);
     let dynamic_reward_f64 = dynamic_reward as f64 / QUG_DIVISOR;
 
     let response = serde_json::json!({
@@ -1055,7 +1077,8 @@ pub async fn get_emission_stats(
             "annual_target_qug": annual_emission_f64,
             "daily_target_qug": summary.daily_target as f64 / QUG_DIVISOR,
             "today_emitted_qug": summary.today_emitted as f64 / QUG_DIVISOR,
-            "today_blocks": summary.today_blocks,
+            "today_blocks": state.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed),
+            "today_solutions": summary.today_blocks,
             "today_deviation_pct": summary.today_deviation_pct,
             "block_rate_bps": summary.block_rate,
             "days_tracked": summary.days_tracked,
@@ -1081,6 +1104,30 @@ pub async fn get_emission_stats(
             "halving_interval_years": 4,
             "total_eras": 64,
             "total_emission_years": 256,
+        },
+        // v8.0.3: Ultra-advanced rate measurement diagnostics
+        "rate_diagnostics": {
+            "active_method": rate_diagnostics.active_method,
+            "confidence_pct": rate_diagnostics.confidence_pct,
+            "window_rate_bps": rate_diagnostics.window_rate_bps,
+            "window_blocks": rate_diagnostics.window_blocks,
+            "window_elapsed_secs": rate_diagnostics.window_elapsed_secs,
+            "window_buckets": rate_diagnostics.window_buckets,
+            "cumulative_rate_bps": rate_diagnostics.cumulative_rate_bps,
+            "cumulative_blocks": rate_diagnostics.cumulative_blocks,
+            "cumulative_elapsed_secs": rate_diagnostics.cumulative_elapsed_secs,
+            "block_timestamp_rate_bps": rate_diagnostics.block_timestamp_rate_bps,
+            "block_timestamp_windows": rate_diagnostics.block_timestamp_windows,
+            "smoothed_rate_bps": rate_diagnostics.smoothed_rate_bps,
+            "correction_factor": rate_diagnostics.correction_factor,
+            "correction_smoothing": rate_diagnostics.correction_smoothing,
+            "correction_max": rate_diagnostics.correction_max,
+            "correction_min": rate_diagnostics.correction_min,
+            "error_fraction_pct": rate_diagnostics.error_fraction_pct,
+            "convergence_eta_secs": rate_diagnostics.convergence_eta_secs,
+            "actual_emission_rate_qug_per_hour": rate_diagnostics.actual_emission_rate_qug_per_hour,
+            "target_emission_rate_qug_per_hour": rate_diagnostics.target_emission_rate_qug_per_hour,
+            "phase": rate_diagnostics.phase,
         },
     });
 
@@ -5330,7 +5377,7 @@ pub async fn hashpower_security_metrics(
     // v1.4.5-beta: ORACLE-INTEGRATED MARKET CAP CALCULATION
     // ═══════════════════════════════════════════════════════════════════════
     // Market Cap = QUG Price × Circulating Supply
-    // - QUG Price: From CollateralVault oracle (default $42.50)
+    // - QUG Price: From CollateralVault oracle (default $3000.00)
     // - Circulating Supply: total_minted_supply (tracked from mining rewards)
 
     let (qug_price_usd, circulating_supply_qug) = {
@@ -6415,7 +6462,7 @@ pub async fn get_oracle_price(
                 let mut total_weight = 0.0;
 
                 // v4.0.3: Get QUG price from pool reserves first, oracle second
-                // Previously used oracle that always returned $42.50, causing price mismatch
+                // Previously used oracle that always returned $3000.00, causing price mismatch
                 // between SSE updates (pool-based) and oracle refreshes (hardcoded)
                 let qug_usd_price = {
                     // Primary: derive from QUG/QUGUSD pool (same method as swap handler)
@@ -6445,7 +6492,8 @@ pub async fn get_oracle_price(
                             break;
                         }
                     }
-                    if pool_qug_price > 0.0 {
+                    // v8.0.1: Reject stale pool prices from old $42.50 era
+                    if pool_qug_price >= 100.0 {
                         pool_qug_price
                     } else {
                         // Fallback: Quillon Bank oracle or vault price
@@ -6627,7 +6675,7 @@ pub async fn get_oracle_feeds(
             "name": "Quillon",
             "base": "QUG",
             "quote": "USD",
-            "price": 42.50,
+            "price": 3000.00,
             "change_24h": 12.8,
             "volume_24h": 1_850_000.0,
             "market_cap": 625_000_000.0,
@@ -6868,24 +6916,19 @@ pub async fn get_mesh_peers(
     let local_height = state.current_height_atomic.load(std::sync::atomic::Ordering::SeqCst);
 
     // Get real peer data from turbo_sync registry if available
-    let peers: Vec<serde_json::Value> = if let Some(ref turbo_sync) = state.turbo_sync {
+    let mut peers: Vec<serde_json::Value> = if let Some(ref turbo_sync) = state.turbo_sync {
         let registry = turbo_sync.get_peer_registry_info().await;
 
         // v6.0.3: Use local_height as reference for sync status, not network_height.
-        // network_height can be transiently ahead (from peer announcements) making all
-        // peers look "behind" even when they're fully synced. local_height is the ground truth.
         let reference_height = local_height.max(network_height);
 
         registry.into_iter().map(|(peer_id, height)| {
-            // Calculate real sync progress: peer's height vs reference
             let sync_progress = if reference_height > 0 {
                 ((height as f64 / reference_height as f64) * 100.0).min(100.0)
             } else {
                 100.0
             };
 
-            // v6.0.3: More lenient sync status — peers within 50 blocks are "synced"
-            // (blocks arrive every ~1s, so 50 blocks = ~50s of natural lag)
             let sync_status = if height + 50 >= reference_height {
                 "synced"
             } else if height + 500 >= reference_height {
@@ -6903,9 +6946,31 @@ pub async fn get_mesh_peers(
             })
         }).collect()
     } else {
-        // Fallback: no turbo_sync available
         vec![]
     };
+
+    // v1.0.3: Fallback — if turbo_sync registry is empty but libp2p has connections,
+    // show connected peers from node_status (gossipsub queue congestion can cause
+    // peer-height messages to be dropped while libp2p connections remain healthy)
+    if peers.is_empty() {
+        let libp2p_peer_count = if let Some(ref pc) = state.libp2p_peer_count {
+            pc.load(std::sync::atomic::Ordering::Relaxed)
+        } else {
+            let status = state.node_status.read().await;
+            status.connected_peers as usize
+        };
+        if libp2p_peer_count > 0 {
+            for i in 0..libp2p_peer_count {
+                peers.push(serde_json::json!({
+                    "peer_id": format!("libp2p-peer-{}", i + 1),
+                    "height": local_height,
+                    "sync_progress": 100.0,
+                    "sync_status": "synced",
+                    "is_real_data": false
+                }));
+            }
+        }
+    }
 
     Ok(Json(ApiResponse::success(serde_json::json!({
         "peers": peers,
@@ -7942,13 +8007,12 @@ pub async fn submit_mining_solution(
     State(state): State<Arc<AppState>>,
     Json(request): Json<MiningSolutionRequest>,
 ) -> Result<Json<ApiResponse<MiningSolutionResponse>>, StatusCode> {
-    // v1.0.2: SYNC GATE — O(1) atomic check, reject mining while node is far behind
+    // v1.0.2: SYNC GATE — O(1) atomic check, return 503 so nginx routes to synced upstream
     {
         use std::sync::atomic::Ordering::Relaxed;
         let local_h = state.current_height_atomic.load(Relaxed);
         let net_h = state.highest_network_height.load(Relaxed);
-        if net_h > 0 && local_h + 10_000 < net_h {
-            // Rate-limited log: once per 10 seconds via atomic timestamp
+        if net_h > 0 && local_h + 10 < net_h {
             static LAST_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let now_secs = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -7957,13 +8021,11 @@ pub async fn submit_mining_solution(
             let prev = LAST_LOG.load(Relaxed);
             if now_secs >= prev + 10 && LAST_LOG.compare_exchange(prev, now_secs, Relaxed, Relaxed).is_ok() {
                 warn!(
-                    "[SYNC GATE] Rejecting mining submissions: node at {} / network at {} ({} behind)",
+                    "[SYNC GATE] Rejecting mining (503): node at {} / network at {} ({} behind)",
                     local_h, net_h, net_h - local_h
                 );
             }
-            return Ok(Json(ApiResponse::error(
-                format!("Node is syncing ({} blocks behind) — mining paused until sync completes", net_h - local_h),
-            )));
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
         }
     }
 
@@ -8481,6 +8543,32 @@ pub async fn submit_mining_solution(
         current_balance as f64 / QUG_DISPLAY_DIVISOR
     );
 
+    // v1.0.3: Check miner version and log if outdated
+    let server_ver = VERSION;
+    let update_available = if let Some(ref miner_ver) = request.miner_version {
+        if miner_ver != server_ver {
+            // Rate-limited log: once per 60 seconds per unique version
+            static LAST_VER_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let prev = LAST_VER_LOG.load(std::sync::atomic::Ordering::Relaxed);
+            if now_secs >= prev + 60 && LAST_VER_LOG.compare_exchange(prev, now_secs, std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed).is_ok() {
+                info!(
+                    "📦 Outdated miner detected: {} running v{} (server v{})",
+                    &request.miner_address[..16], miner_ver, server_ver
+                );
+            }
+            true
+        } else {
+            false
+        }
+    } else {
+        // No version sent — old miner, always flag
+        true
+    };
+
     Ok(Json(ApiResponse::success(MiningSolutionResponse {
         accepted: true,
         reward: miner_reward,
@@ -8491,6 +8579,9 @@ pub async fn submit_mining_solution(
         message:
             "⛏️ Solution accepted - reward will be credited when block is produced"
                 .to_string(),
+        server_notice: MINING_SERVER_NOTICE.to_string(),
+        server_version: server_ver.to_string(),
+        update_available,
     })))
 }
 
@@ -8554,9 +8645,16 @@ pub async fn get_mining_challenge(
 
         // Check 2: Is network height known? (discovery phase)
         // Use highest_network_height from AppState (atomic, tracks highest seen from peers)
-        let network_height = state
+        // v8.0.8: Cap to prevent rogue peers from blocking mining with fake heights
+        let raw_net_height = state
             .highest_network_height
             .load(std::sync::atomic::Ordering::Acquire);
+        let max_reasonable_mining = (local_height * 3).max(local_height + 500_000);
+        let network_height = if raw_net_height > max_reasonable_mining {
+            local_height // Treat as synced when network height is suspiciously high
+        } else {
+            raw_net_height
+        };
 
         // ✅ v2.7.0-beta: Skip network height check if effective solo mining is enabled
         // Fresh nodes with 0 height need time to discover network, but syncing nodes are OK
@@ -8573,21 +8671,17 @@ pub async fn get_mining_challenge(
         }
 
         // Check 3: Are we synced? (sync validation)
-        // ✅ v2.7.0-beta: Use effective_solo_mining for consistency
+        // v1.0.2: Return 503 when significantly behind so nginx routes to synced upstream
+        // Only Q_ALLOW_SOLO_MINING=true (explicit bootstrap) bypasses this — NOT is_established_node
         let blocks_behind = network_height.saturating_sub(local_height);
 
-        if blocks_behind > 100 && !effective_solo_mining {
+        if blocks_behind > 10 && !allow_solo_mining {
             warn!(
-                "🚫 [MINING-DIAG] Challenge rejected: blocks_behind={} | local={} | network={} | effective_solo={}",
-                blocks_behind, local_height, network_height, effective_solo_mining
+                "🚫 [MINING-DIAG] Challenge rejected (503): blocks_behind={} | local={} | network={} | solo={}",
+                blocks_behind, local_height, network_height, allow_solo_mining
             );
-            // Calculate ETA for sync completion (rough estimate: ~1000 blocks/minute)
             let eta_minutes = blocks_behind / 1000;
-            return Ok(Json(ApiResponse::error(format!(
-                "Node syncing: {} blocks behind network (ETA: ~{} min). Current: {}, Network: {}. \
-                 Mining will resume automatically when sync completes.",
-                blocks_behind, eta_minutes.max(1), local_height, network_height
-            ))));
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
         }
 
         // Check 4: Safety check for implausibly low heights (corrupted database detection)
@@ -8647,6 +8741,8 @@ pub async fn get_mining_challenge(
                         vdf_iterations: challenge.vdf_iterations,
                         block_reward: challenge.block_reward,
                         expires_at: challenge.expires_at,
+                        server_notice: MINING_SERVER_NOTICE.to_string(),
+                        server_version: VERSION.to_string(),
                     })));
                 } else if age_seconds < 150 {
                     // Grace period (120-150s): Warn but still return cached challenge
@@ -8662,6 +8758,8 @@ pub async fn get_mining_challenge(
                         vdf_iterations: challenge.vdf_iterations,
                         block_reward: challenge.block_reward,
                         expires_at: challenge.expires_at,
+                        server_notice: MINING_SERVER_NOTICE.to_string(),
+                        server_version: VERSION.to_string(),
                     })));
                 } else {
                     // Challenge is too old (>150s) - force regeneration
@@ -8740,6 +8838,8 @@ pub async fn get_mining_challenge(
         vdf_iterations: cached_challenge.vdf_iterations,
         block_reward: cached_challenge.block_reward,
         expires_at: cached_challenge.expires_at,
+        server_notice: MINING_SERVER_NOTICE.to_string(),
+        server_version: VERSION.to_string(),
     })))
 }
 
@@ -8831,6 +8931,11 @@ pub struct MiningChallengeResponse {
     pub vdf_iterations: u32,
     pub block_reward: f64,
     pub expires_at: chrono::DateTime<chrono::Utc>,
+    /// Server notice broadcast to all miners (empty string = no notice)
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub server_notice: String,
+    /// v1.0.3: Server version — miner can compare to detect updates
+    pub server_version: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -8855,6 +8960,10 @@ pub struct MiningSolutionRequest {
     pub aegis_signature: Option<String>, // Hex-encoded AEGIS-KL signature
     #[serde(default)]
     pub aegis_public_key: Option<String>, // Hex-encoded AEGIS-KL public key
+
+    // v1.0.3: Miner version for update notifications
+    #[serde(default)]
+    pub miner_version: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -8866,6 +8975,14 @@ pub struct MiningSolutionResponse {
     pub new_balance_qnk: f64,
     pub block_height: u64,
     pub message: String,
+    /// Server notice broadcast to all miners (empty string = no notice)
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub server_notice: String,
+    /// v1.0.3: Server version — miner can compare and show update notice
+    pub server_version: String,
+    /// v1.0.3: True if miner is running an older version than the server
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub update_available: bool,
 }
 
 #[cfg(test)]
@@ -9538,7 +9655,7 @@ pub async fn execute_swap(
     {
         // Use oracle-based pricing for QUG<->QUGUSD swaps when no pool exists
         let vault = state.collateral_vault.read().await;
-        let qug_price_usd = vault.qug_price_usd; // e.g., $42.50
+        let qug_price_usd = vault.qug_price_usd; // e.g., $3000.00
         drop(vault);
 
         // Calculate swap with 0.3% fee
@@ -10343,7 +10460,8 @@ pub async fn execute_swap(
             };
             if qug_amount > 0 && qugusd_amount > 0 {
                 let effective_price = qugusd_amount as f64 / qug_amount as f64;
-                if effective_price > 0.0 && effective_price < 1_000_000.0 {
+                // v8.0.1: Reject stale prices from old $42.50 era
+                if effective_price >= 100.0 && effective_price < 1_000_000.0 {
                     let mut vault = state.collateral_vault.write().await;
                     vault.qug_price_usd = effective_price;
                     vault.last_price_update = chrono::Utc::now().timestamp();
@@ -10979,7 +11097,7 @@ pub async fn execute_swap(
 
     // 📊 v4.0.1: Track 24h volume in USD (not raw token units)
     // Bug fix: was dividing by QUG_DISPLAY_DIVISOR (1e24) always, ignoring token decimals
-    // and not converting to USD. User swaps 20 QUG @ $42.5 = $850, but showed ~$20.
+    // and not converting to USD. User swaps 20 QUG @ $3000 = $60000, but showed ~$20.
     {
         let now = chrono::Utc::now().timestamp();
         let day_ago = now - 86400;
@@ -11037,15 +11155,12 @@ pub async fn execute_swap(
     }
 
     // 📈 v3.7.4-beta: Record price in persistent consensus-verified price history
-    // CRITICAL: Only record the to_token's USD price. The from_token's price does NOT change
-    // from this swap. Recording from_token's price as the inverse swap ratio pollutes
-    // price history with non-USD values (e.g., QUG "price" = 1000 BONKG/QUG).
     if !use_oracle {
         let now_ms = chrono::Utc::now().timestamp_millis();
         let current_height = state.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
 
         // v4.0.15: ALL amounts are in 24-decimal format. Use 24 for both, not pool.tokenX_decimals.
-        // Record USD price for to_token only
+        // Record USD price for to_token
         // price_usd = (from_amount / to_amount) * from_token_usd
         if let Err(e) = state.price_history_indexer.record_price_from_swap(
             &to_token_addr,
@@ -11058,6 +11173,20 @@ pub async fn execute_swap(
             current_height,
         ).await {
             debug!("⚠️ [PRICE HISTORY] Failed to record to_token price: {}", e);
+        }
+
+        // v8.1.3: Also record from_token (QUG) price using its known USD value.
+        // Without this, QUG price chart is always blank because QUG is typically the
+        // FROM token and only to_token was being recorded.
+        if from_token_usd > 0.0 {
+            if let Err(e) = state.storage_engine.save_price_snapshot(
+                &from_token_addr,
+                now_ms,
+                from_token_usd,
+                current_height,
+            ).await {
+                debug!("⚠️ [PRICE HISTORY] Failed to record from_token price: {}", e);
+            }
         }
     }
 
@@ -13533,6 +13662,13 @@ pub async fn get_token_price_history(
 ) -> Result<Json<ApiResponse<Vec<PriceDataPoint>>>, StatusCode> {
     let timeframe = params.get("timeframe").map(|s| s.as_str()).unwrap_or("24H");
 
+    // v8.1.2: Normalize frontend token IDs to canonical symbols
+    let token_id = match token_id.to_lowercase().as_str() {
+        "native-qug" => "QUG".to_string(),
+        "qugusd-stable" => "QUGUSD".to_string(),
+        _ => token_id,
+    };
+
     info!("📈 Fetching price history for token: {} (timeframe: {})", token_id, timeframe);
 
     // Determine candle interval based on timeframe
@@ -13589,6 +13725,8 @@ pub async fn get_token_price_history(
             } else {
                 None
             })
+    } else if token_upper == "QUG" {
+        Some([0u8; 32]) // v8.1.2: QUG native token = all zeros
     } else if token_upper == "QUGUSD" {
         Some(q_types::QUGUSD_TOKEN_ADDRESS)
     } else {
@@ -13700,7 +13838,13 @@ pub async fn get_token_transactions(
     State(state): State<Arc<AppState>>,
     Path(token_id): Path<String>,
 ) -> Result<Json<ApiResponse<Vec<SwapHistoryRecord>>>, StatusCode> {
-    let token_upper = token_id.to_uppercase();
+    // v8.1.2: Normalize frontend token IDs to canonical symbols
+    let normalized = match token_id.to_lowercase().as_str() {
+        "native-qug" => "QUG".to_string(),
+        "qugusd-stable" => "QUGUSD".to_string(),
+        _ => token_id.clone(),
+    };
+    let token_upper = normalized.to_uppercase();
 
     info!("📜 Fetching transactions for token: {} (consensus + cache)", token_upper);
 

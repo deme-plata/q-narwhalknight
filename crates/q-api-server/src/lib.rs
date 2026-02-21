@@ -974,6 +974,14 @@ pub struct AppState {
     // Default 5 bps = 0.05% of swap amount extracted as protocol revenue
     pub dex_protocol_fee_bps: Arc<std::sync::atomic::AtomicU64>,
 
+    // v8.1.1: Operator fee earnings tracking (atomic u64, in units of 1e-18 QUG for precision)
+    // Tracks total fees earned by this node's operator wallet this session
+    pub operator_fees_earned_session: Arc<std::sync::atomic::AtomicU64>,
+    // Total lifetime earnings (loaded from DB on startup, persisted periodically)
+    pub operator_fees_earned_total: Arc<std::sync::atomic::AtomicU64>,
+    // Number of fee-generating transactions processed
+    pub operator_fee_tx_count: Arc<std::sync::atomic::AtomicU64>,
+
     // ⚡ v0.9.66-beta: Lock-free current blockchain height for fast mining challenge generation
     // Updated atomically when blocks are produced, avoids RwLock contention on node_status
     pub current_height_atomic: Arc<std::sync::atomic::AtomicU64>,
@@ -1765,41 +1773,20 @@ impl AppState {
             }
         }
 
-        // v7.2.12: Clear stale QUGUSD token_balances from testnet — BOTH in-memory AND RocksDB
-        // v6.5.1 only cleared in-memory, but stablecoin_api reads directly from RocksDB (v2.9.21),
-        // so the testnet QUGUSD balances would reappear on every API request.
+        // v8.1.2: REMOVED unconditional QUGUSD wipe (was v7.2.12)
+        // BUG FIX: The old code deleted ALL users' QUGUSD balances on every restart!
+        // It was meant for testnet→mainnet transition but ran unconditionally.
+        // QUGUSD token_balances are now preserved across restarts like all other tokens.
         {
             use q_types::QUGUSD_TOKEN_ADDRESS;
-            let mut removed_from_memory = 0usize;
-            let mut removed_from_rocksdb = 0usize;
-
-            // Collect QUGUSD wallet addresses before removing (for RocksDB cleanup)
-            let qugusd_wallets: Vec<[u8; 32]> = token_balances
+            let qugusd_count = token_balances
                 .iter()
                 .filter(|((_wallet, token_addr), _)| *token_addr == QUGUSD_TOKEN_ADDRESS)
-                .map(|((wallet, _), _)| *wallet)
-                .collect();
-
-            // Remove from in-memory HashMap
-            let before = token_balances.len();
-            token_balances.retain(|(_wallet, token_addr), _balance| {
-                *token_addr != QUGUSD_TOKEN_ADDRESS
-            });
-            removed_from_memory = before - token_balances.len();
-
-            // Also delete from RocksDB so stablecoin_api (which reads RocksDB directly) won't find them
-            for wallet in &qugusd_wallets {
-                if let Err(e) = storage_engine.delete_token_balance(wallet, &QUGUSD_TOKEN_ADDRESS).await {
-                    tracing::warn!("⚠️ Failed to delete QUGUSD from RocksDB for wallet {}: {}", hex::encode(&wallet[..8]), e);
-                } else {
-                    removed_from_rocksdb += 1;
-                }
-            }
-
-            if removed_from_memory > 0 || removed_from_rocksdb > 0 {
+                .count();
+            if qugusd_count > 0 {
                 tracing::info!(
-                    "🧹 Cleared {} stale QUGUSD entries (memory={}, RocksDB={})",
-                    removed_from_memory.max(removed_from_rocksdb), removed_from_memory, removed_from_rocksdb
+                    "✅ [v8.1.2] Preserved {} QUGUSD token_balance entries across restart",
+                    qugusd_count
                 );
             }
         }
@@ -2018,13 +2005,13 @@ impl AppState {
                             persisted_vault.qug_price_usd
                         );
                         // v4.0.4: Keep persisted vault price as-is (was updated from AMM during trading).
-                        // Previously forced to $42.50 on restart, which destroyed price discovery.
-                        if persisted_vault.qug_price_usd <= 0.0 {
+                        // v8.0.1: Migrate from old $42.50 default to $3000.00 default.
+                        if persisted_vault.qug_price_usd <= 0.0 || persisted_vault.qug_price_usd < 100.0 {
                             tracing::warn!(
-                                "💱 Vault QUG price was invalid (${:.6}), resetting to default $42.50",
+                                "💱 Vault QUG price was outdated/invalid (${:.6}), migrating to $3000.00",
                                 persisted_vault.qug_price_usd
                             );
-                            persisted_vault.qug_price_usd = 42.50;
+                            persisted_vault.qug_price_usd = 3000.00;
                         } else {
                             tracing::info!(
                                 "💱 Loaded vault QUG price: ${:.4} (preserved from last session)",
@@ -2064,19 +2051,16 @@ impl AppState {
                             tracing::info!("✅ Vault corruption fixed - totals now match actual balances");
                         }
 
-                        // v7.2.13: Clear testnet minted_qugusd from vault on every startup
-                        // QUGUSD minting on mainnet hasn't started, so ALL minted_qugusd is testnet.
+                        // v8.1.2: REMOVED unconditional vault wipe (was v7.2.13)
+                        // BUG FIX: The old code destroyed ALL CDP positions on every restart!
+                        // Users who minted QUGUSD via collateral lost their positions.
                         if !persisted_vault.minted_qugusd.is_empty() {
-                            let stale_count = persisted_vault.minted_qugusd.len();
-                            let stale_total: u128 = persisted_vault.minted_qugusd.values().sum();
+                            let count = persisted_vault.minted_qugusd.len();
+                            let total: u128 = persisted_vault.minted_qugusd.values().sum();
                             tracing::info!(
-                                "🧹 [GENESIS FILTER] Clearing {} stale minted_qugusd entries (total={:.2}) from CollateralVault",
-                                stale_count, stale_total as f64 / 1e24
+                                "✅ [v8.1.2] Preserved {} minted_qugusd entries (total={:.2} QUGUSD) in CollateralVault",
+                                count, total as f64 / 1e24
                             );
-                            persisted_vault.minted_qugusd.clear();
-                            persisted_vault.total_qugusd_minted = 0;
-                            persisted_vault.locked_qug.clear();
-                            persisted_vault.total_qug_locked = 0;
                         }
 
                         Arc::new(RwLock::new(persisted_vault))
@@ -2131,6 +2115,16 @@ impl AppState {
                     }
                     break;
                 }
+            }
+            // v8.0.1: If pool has old $42.50 price, delete it so it gets recreated at $3000
+            if pool_price > 0.0 && pool_price < 100.0 {
+                tracing::warn!(
+                    "💱 [STARTUP v8.0.1] Pool QUG price ${:.4} is outdated (< $100), removing stale pool for recreation at $3000",
+                    pool_price
+                );
+                liquidity_pools_map.remove("pool-qug-qugusd-bootstrap");
+                let _ = storage_engine.delete_liquidity_pool("pool-qug-qugusd-bootstrap").await;
+                pool_price = 0.0; // Force pool recreation below
             }
             if pool_price > 0.0 && pool_price < 1_000_000.0 {
                 vault_w.qug_price_usd = pool_price;
@@ -2218,20 +2212,14 @@ impl AppState {
             }
         }
 
-        // ✅ v0.9.99-beta: Initialize Adaptive Block Rewards System
-        // Ensures constant 2,625,000 QUG/year (Era 0) emission regardless of throughput (1-10,000+ bps)
+        // Initialize Adaptive Block Rewards System (for non-production new() path)
         let genesis_timestamp = q_storage::balance_consensus::active_genesis_timestamp();
         let dev_wallet = crate::aegis_auth_middleware::FOUNDER_WALLET.to_string();
         let balance_consensus_engine = Arc::new(q_storage::BalanceConsensusEngine::new(
             genesis_timestamp,
             dev_wallet,
         ));
-        tracing::info!("✅ v0.9.99-beta: Adaptive Block Rewards initialized");
-        tracing::info!("   📊 Emission: 2,625,000 QUG/year Era 0 (~7,187 QUG/day), halving every 4 years");
-        tracing::info!("   ⏰ Halving: Every 4 years (time-based)");
-        tracing::info!("   🎯 Supply cap: 21,000,000 QUG");
-        tracing::info!("   📅 Timeline: 256 years to full emission");
-        tracing::info!("   📅 Genesis: {} (active_genesis_timestamp)", genesis_timestamp);
+        tracing::info!("✅ Adaptive Block Rewards initialized (new() path, genesis: {})", genesis_timestamp);
 
         Ok(Self {
             config,
@@ -2353,6 +2341,9 @@ impl AppState {
             dev_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(100)), // v7.1.5: 100 bps = 1%
             node_operator_fee_promille: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v7.3.1: disabled by default
             dex_protocol_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(5)), // v7.3.1: 5 bps = 0.05% protocol fee from swaps
+            operator_fees_earned_session: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v8.1.1
+            operator_fees_earned_total: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v8.1.1
+            operator_fee_tx_count: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v8.1.1
             current_height_atomic: Arc::new(std::sync::atomic::AtomicU64::new(initial_height)), // ⚡ v0.9.66-beta: Lock-free height
             height_state: q_storage::HeightState::new(initial_height), // 🚀 v1.0.2-beta: HeightState cache - Eliminates binary search storm
             shutdown_tx: {
@@ -2443,12 +2434,12 @@ impl AppState {
                     total_validators: 8, // ✅ v1.0.17-beta: Restored to 8 (deadlock was NOT in producer contention)
                     network_id_str: std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| {
                         let now = chrono::Utc::now().timestamp() as u64;
-                        if now >= 1771761600 { "mainnet2026.2".to_string() } else { "mainnet2026.1.1".to_string() }
+                        if now >= 1771761600 { "mainnet2026.2".to_string() } else { "mainnet2026.1.3".to_string() }
                     }),
                 };
 
                 // Create pool with 8 parallel producers for true parallelism
-                let num_producers = 2; // 🔧 v1.0.17-beta-v5: Reduced to 2 to eliminate CPU saturation deadlock
+                let num_producers = 4; // 🔧 v8.0.9: Increased to 4 for 10+ bps target with interval=0
 
                 // ✅ v0.9.92-beta DEADLOCK FIX: Use LOCK-FREE producer pool with channel-based architecture
                 // This completely eliminates the RwLock deadlock that caused 9+ hour stalls
@@ -2713,10 +2704,49 @@ impl AppState {
             emergency_paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             emergency_pause_reason: Arc::new(RwLock::new(None)),
             emergency_pause_timestamp: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            // 📬 v3.9.1-beta: Bank messaging and identity systems
-            bank_messages: Arc::new(RwLock::new(Vec::new())),
-            user_identities: Arc::new(RwLock::new(Vec::new())),
-            death_certificates: Arc::new(RwLock::new(Vec::new())),
+            // 📬 v3.9.1-beta: Bank messaging and identity systems (loaded from RocksDB)
+            bank_messages: {
+                let mut loaded_messages = Vec::new();
+                if let Ok(entries) = storage_engine.load_bank_messages().await {
+                    for (_key, value) in entries {
+                        if let Ok(msg) = serde_json::from_slice::<crate::quillon_bank_api::BankMessage>(&value) {
+                            loaded_messages.push(msg);
+                        }
+                    }
+                    if !loaded_messages.is_empty() {
+                        tracing::info!("📬 Loaded {} bank messages from RocksDB", loaded_messages.len());
+                    }
+                }
+                Arc::new(RwLock::new(loaded_messages))
+            },
+            user_identities: {
+                let mut loaded_identities = Vec::new();
+                if let Ok(entries) = storage_engine.load_user_identities().await {
+                    for (_key, value) in entries {
+                        if let Ok(id) = serde_json::from_slice::<crate::quillon_bank_api::UserIdentity>(&value) {
+                            loaded_identities.push(id);
+                        }
+                    }
+                    if !loaded_identities.is_empty() {
+                        tracing::info!("🪪 Loaded {} user identities from RocksDB", loaded_identities.len());
+                    }
+                }
+                Arc::new(RwLock::new(loaded_identities))
+            },
+            death_certificates: {
+                let mut loaded_certs = Vec::new();
+                if let Ok(entries) = storage_engine.load_death_certificates().await {
+                    for (_key, value) in entries {
+                        if let Ok(cert) = serde_json::from_slice::<crate::quillon_bank_api::DeathCertificate>(&value) {
+                            loaded_certs.push(cert);
+                        }
+                    }
+                    if !loaded_certs.is_empty() {
+                        tracing::info!("💀 Loaded {} death certificates from RocksDB", loaded_certs.len());
+                    }
+                }
+                Arc::new(RwLock::new(loaded_certs))
+            },
             // 🔐 v4.2.0: VAULT RWA redemptions
             vault_redemptions: Arc::new(RwLock::new(Vec::new())),
             // v5.1.0: FORGE RWA redemptions
@@ -2748,6 +2778,10 @@ impl AppState {
         >,
         libp2p_discovery: Option<Arc<tokio::sync::Mutex<q_network::UnifiedNetworkManager>>>,
         libp2p_command_tx: Option<tokio::sync::mpsc::UnboundedSender<q_network::NetworkCommand>>,
+        // v8.0.2: Accept pre-created balance_consensus_engine from main.rs
+        // This fixes the dual-controller bug where lib.rs and main.rs each created separate engines,
+        // causing the block_producer_pool to use an empty/stale engine while the API used the correct one.
+        balance_consensus_engine: Arc<q_storage::BalanceConsensusEngine>,
     ) -> anyhow::Result<Self> {
         // Extract config values before using config (v0.0.22-beta Quick Win #4)
         let is_validator = config.is_validator;
@@ -3009,41 +3043,20 @@ impl AppState {
             }
         }
 
-        // v7.2.12: Clear stale QUGUSD token_balances from testnet — BOTH in-memory AND RocksDB
-        // v6.5.1 only cleared in-memory, but stablecoin_api reads directly from RocksDB (v2.9.21),
-        // so the testnet QUGUSD balances would reappear on every API request.
+        // v8.1.2: REMOVED unconditional QUGUSD wipe (was v7.2.12)
+        // BUG FIX: The old code deleted ALL users' QUGUSD balances on every restart!
+        // It was meant for testnet→mainnet transition but ran unconditionally.
+        // QUGUSD token_balances are now preserved across restarts like all other tokens.
         {
             use q_types::QUGUSD_TOKEN_ADDRESS;
-            let mut removed_from_memory = 0usize;
-            let mut removed_from_rocksdb = 0usize;
-
-            // Collect QUGUSD wallet addresses before removing (for RocksDB cleanup)
-            let qugusd_wallets: Vec<[u8; 32]> = token_balances
+            let qugusd_count = token_balances
                 .iter()
                 .filter(|((_wallet, token_addr), _)| *token_addr == QUGUSD_TOKEN_ADDRESS)
-                .map(|((wallet, _), _)| *wallet)
-                .collect();
-
-            // Remove from in-memory HashMap
-            let before = token_balances.len();
-            token_balances.retain(|(_wallet, token_addr), _balance| {
-                *token_addr != QUGUSD_TOKEN_ADDRESS
-            });
-            removed_from_memory = before - token_balances.len();
-
-            // Also delete from RocksDB so stablecoin_api (which reads RocksDB directly) won't find them
-            for wallet in &qugusd_wallets {
-                if let Err(e) = storage_engine.delete_token_balance(wallet, &QUGUSD_TOKEN_ADDRESS).await {
-                    tracing::warn!("⚠️ Failed to delete QUGUSD from RocksDB for wallet {}: {}", hex::encode(&wallet[..8]), e);
-                } else {
-                    removed_from_rocksdb += 1;
-                }
-            }
-
-            if removed_from_memory > 0 || removed_from_rocksdb > 0 {
+                .count();
+            if qugusd_count > 0 {
                 tracing::info!(
-                    "🧹 Cleared {} stale QUGUSD entries (memory={}, RocksDB={})",
-                    removed_from_memory.max(removed_from_rocksdb), removed_from_memory, removed_from_rocksdb
+                    "✅ [v8.1.2] Preserved {} QUGUSD token_balance entries across restart",
+                    qugusd_count
                 );
             }
         }
@@ -3246,13 +3259,13 @@ impl AppState {
                             persisted_vault.qug_price_usd
                         );
                         // v4.0.4: Keep persisted vault price as-is (was updated from AMM during trading).
-                        // Previously forced to $42.50 on restart, which destroyed price discovery.
-                        if persisted_vault.qug_price_usd <= 0.0 {
+                        // v8.0.1: Migrate from old $42.50 default to $3000.00 default.
+                        if persisted_vault.qug_price_usd <= 0.0 || persisted_vault.qug_price_usd < 100.0 {
                             tracing::warn!(
-                                "💱 Vault QUG price was invalid (${:.6}), resetting to default $42.50",
+                                "💱 Vault QUG price was outdated/invalid (${:.6}), migrating to $3000.00",
                                 persisted_vault.qug_price_usd
                             );
-                            persisted_vault.qug_price_usd = 42.50;
+                            persisted_vault.qug_price_usd = 3000.00;
                         } else {
                             tracing::info!(
                                 "💱 Loaded vault QUG price: ${:.4} (preserved from last session)",
@@ -3292,19 +3305,16 @@ impl AppState {
                             tracing::info!("✅ Vault corruption fixed - totals now match actual balances");
                         }
 
-                        // v7.2.13: Clear testnet minted_qugusd from vault on every startup
-                        // QUGUSD minting on mainnet hasn't started, so ALL minted_qugusd is testnet.
+                        // v8.1.2: REMOVED unconditional vault wipe (was v7.2.13)
+                        // BUG FIX: The old code destroyed ALL CDP positions on every restart!
+                        // Users who minted QUGUSD via collateral lost their positions.
                         if !persisted_vault.minted_qugusd.is_empty() {
-                            let stale_count = persisted_vault.minted_qugusd.len();
-                            let stale_total: u128 = persisted_vault.minted_qugusd.values().sum();
+                            let count = persisted_vault.minted_qugusd.len();
+                            let total: u128 = persisted_vault.minted_qugusd.values().sum();
                             tracing::info!(
-                                "🧹 [GENESIS FILTER] Clearing {} stale minted_qugusd entries (total={:.2}) from CollateralVault",
-                                stale_count, stale_total as f64 / 1e24
+                                "✅ [v8.1.2] Preserved {} minted_qugusd entries (total={:.2} QUGUSD) in CollateralVault",
+                                count, total as f64 / 1e24
                             );
-                            persisted_vault.minted_qugusd.clear();
-                            persisted_vault.total_qugusd_minted = 0;
-                            persisted_vault.locked_qug.clear();
-                            persisted_vault.total_qug_locked = 0;
                         }
 
                         Arc::new(RwLock::new(persisted_vault))
@@ -3359,6 +3369,16 @@ impl AppState {
                     }
                     break;
                 }
+            }
+            // v8.0.1: If pool has old $42.50 price, delete it so it gets recreated at $3000
+            if pool_price > 0.0 && pool_price < 100.0 {
+                tracing::warn!(
+                    "💱 [STARTUP v8.0.1] Pool QUG price ${:.4} is outdated (< $100), removing stale pool for recreation at $3000",
+                    pool_price
+                );
+                liquidity_pools_map.remove("pool-qug-qugusd-bootstrap");
+                let _ = storage_engine.delete_liquidity_pool("pool-qug-qugusd-bootstrap").await;
+                pool_price = 0.0; // Force pool recreation below
             }
             if pool_price > 0.0 && pool_price < 1_000_000.0 {
                 vault_w.qug_price_usd = pool_price;
@@ -3446,20 +3466,11 @@ impl AppState {
             }
         }
 
-        // ✅ v0.9.99-beta: Initialize Adaptive Block Rewards System
-        // Ensures constant 2,625,000 QUG/year (Era 0) emission regardless of throughput (1-10,000+ bps)
-        let genesis_timestamp = q_storage::balance_consensus::active_genesis_timestamp();
-        let dev_wallet = crate::aegis_auth_middleware::FOUNDER_WALLET.to_string();
-        let balance_consensus_engine = Arc::new(q_storage::BalanceConsensusEngine::new(
-            genesis_timestamp,
-            dev_wallet,
-        ));
-        tracing::info!("✅ v0.9.99-beta: Adaptive Block Rewards initialized");
-        tracing::info!("   📊 Emission: 2,625,000 QUG/year Era 0 (~7,187 QUG/day), halving every 4 years");
-        tracing::info!("   ⏰ Halving: Every 4 years (time-based)");
-        tracing::info!("   🎯 Supply cap: 21,000,000 QUG");
-        tracing::info!("   📅 Timeline: 256 years to full emission");
-        tracing::info!("   📅 Genesis: {} (active_genesis_timestamp)", genesis_timestamp);
+        // v8.0.2: balance_consensus_engine is now passed in from main.rs
+        // This eliminates the dual-controller bug where lib.rs created its own engine
+        // that diverged from main.rs's engine (which has restored emission state).
+        // The block_producer_pool (LockFreeProducerPool) and API endpoints now use the SAME engine.
+        tracing::info!("✅ v8.0.2: Using unified balance_consensus_engine from main.rs (no dual-controller)");
 
         Ok(Self {
             config,
@@ -3538,6 +3549,9 @@ impl AppState {
             dev_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(100)), // v7.1.5: 100 bps = 1%
             node_operator_fee_promille: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v7.3.1: disabled by default
             dex_protocol_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(5)), // v7.3.1: 5 bps = 0.05% protocol fee from swaps
+            operator_fees_earned_session: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v8.1.1
+            operator_fees_earned_total: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v8.1.1
+            operator_fee_tx_count: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v8.1.1
             current_height_atomic: Arc::new(std::sync::atomic::AtomicU64::new(initial_height)), // ⚡ v0.9.66-beta: Lock-free height
             height_state: q_storage::HeightState::new(initial_height), // 🚀 v1.0.2-beta: HeightState cache - Eliminates binary search storm
             shutdown_tx: {
@@ -3726,12 +3740,12 @@ impl AppState {
                     total_validators: 8, // ✅ v1.0.17-beta: Restored to 8 (deadlock was NOT in producer contention)
                     network_id_str: std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| {
                         let now = chrono::Utc::now().timestamp() as u64;
-                        if now >= 1771761600 { "mainnet2026.2".to_string() } else { "mainnet2026.1.1".to_string() }
+                        if now >= 1771761600 { "mainnet2026.2".to_string() } else { "mainnet2026.1.3".to_string() }
                     }),
                 };
 
                 // Create pool with 8 parallel producers for true parallelism
-                let num_producers = 2; // 🔧 v1.0.17-beta-v5: Reduced to 2 to eliminate CPU saturation deadlock
+                let num_producers = 4; // 🔧 v8.0.9: Increased to 4 for 10+ bps target with interval=0
 
                 // ✅ v0.9.92-beta DEADLOCK FIX: Use LOCK-FREE producer pool with channel-based architecture
                 // This completely eliminates the RwLock deadlock that caused 9+ hour stalls
@@ -3996,10 +4010,49 @@ impl AppState {
             emergency_paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             emergency_pause_reason: Arc::new(RwLock::new(None)),
             emergency_pause_timestamp: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            // 📬 v3.9.1-beta: Bank messaging and identity systems
-            bank_messages: Arc::new(RwLock::new(Vec::new())),
-            user_identities: Arc::new(RwLock::new(Vec::new())),
-            death_certificates: Arc::new(RwLock::new(Vec::new())),
+            // 📬 v3.9.1-beta: Bank messaging and identity systems (loaded from RocksDB)
+            bank_messages: {
+                let mut loaded_messages = Vec::new();
+                if let Ok(entries) = storage_engine.load_bank_messages().await {
+                    for (_key, value) in entries {
+                        if let Ok(msg) = serde_json::from_slice::<crate::quillon_bank_api::BankMessage>(&value) {
+                            loaded_messages.push(msg);
+                        }
+                    }
+                    if !loaded_messages.is_empty() {
+                        tracing::info!("📬 Loaded {} bank messages from RocksDB", loaded_messages.len());
+                    }
+                }
+                Arc::new(RwLock::new(loaded_messages))
+            },
+            user_identities: {
+                let mut loaded_identities = Vec::new();
+                if let Ok(entries) = storage_engine.load_user_identities().await {
+                    for (_key, value) in entries {
+                        if let Ok(id) = serde_json::from_slice::<crate::quillon_bank_api::UserIdentity>(&value) {
+                            loaded_identities.push(id);
+                        }
+                    }
+                    if !loaded_identities.is_empty() {
+                        tracing::info!("🪪 Loaded {} user identities from RocksDB", loaded_identities.len());
+                    }
+                }
+                Arc::new(RwLock::new(loaded_identities))
+            },
+            death_certificates: {
+                let mut loaded_certs = Vec::new();
+                if let Ok(entries) = storage_engine.load_death_certificates().await {
+                    for (_key, value) in entries {
+                        if let Ok(cert) = serde_json::from_slice::<crate::quillon_bank_api::DeathCertificate>(&value) {
+                            loaded_certs.push(cert);
+                        }
+                    }
+                    if !loaded_certs.is_empty() {
+                        tracing::info!("💀 Loaded {} death certificates from RocksDB", loaded_certs.len());
+                    }
+                }
+                Arc::new(RwLock::new(loaded_certs))
+            },
             // 🔐 v4.2.0: VAULT RWA redemptions
             vault_redemptions: Arc::new(RwLock::new(Vec::new())),
             // v5.1.0: FORGE RWA redemptions

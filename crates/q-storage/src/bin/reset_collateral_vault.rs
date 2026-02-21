@@ -99,7 +99,7 @@ fn main() -> Result<()> {
         println!("   The server will create a fresh CollateralVault with:");
         println!("   - total_qug_locked: 0");
         println!("   - total_qugusd_minted: 0");
-        println!("   - qug_price_usd: $42.50");
+        println!("   - qug_price_usd: $3000.00");
     } else {
         println!("ℹ️  No collateral_vault key found - vault is already clean");
     }

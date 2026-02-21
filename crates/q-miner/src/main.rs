@@ -109,6 +109,12 @@ pub struct MiningChallenge {
     pub vdf_iterations: u32,
     pub block_reward: f64,
     pub expires_at: DateTime<Utc>,
+    /// Server notice broadcast to miners (None = no notice)
+    #[serde(default)]
+    pub server_notice: Option<String>,
+    /// v1.0.3: Server version for update detection
+    #[serde(default)]
+    pub server_version: Option<String>,
 }
 
 // API response wrapper
@@ -1192,11 +1198,21 @@ fn mining_thread(
         }
     }
 
+    // Track last server notice to avoid spamming logs
+    let mut last_server_notice = String::new();
+
     // Fetch initial mining challenge
     let mut current_challenge = match tokio_handle.block_on(fetch_mining_challenge(api_url)) {
         Ok(challenge) => {
             info!("📋 Thread {} fetched challenge: block #{}, reward: {} QNK",
                  thread_id, challenge.block_height, challenge.block_reward);
+            // Display server notice if present
+            if let Some(ref notice) = challenge.server_notice {
+                if !notice.is_empty() {
+                    warn!("📢 SERVER NOTICE: {}", notice);
+                    last_server_notice = notice.clone();
+                }
+            }
             challenge
         }
         Err(e) => {
@@ -1245,6 +1261,14 @@ fn mining_thread(
                         }
                     }
                     current_challenge = new_challenge;
+
+                    // Display server notice if new/changed
+                    if let Some(ref notice) = current_challenge.server_notice {
+                        if !notice.is_empty() && *notice != last_server_notice {
+                            warn!("📢 SERVER NOTICE: {}", notice);
+                            last_server_notice = notice.clone();
+                        }
+                    }
 
                     if let Ok(hash) = hex_to_bytes(&current_challenge.challenge_hash) {
                         challenge_hash = hash;
@@ -1308,7 +1332,8 @@ fn mining_thread(
                     "challenge_hash": hex::encode(challenge_hash),
                     "hash_rate": hashrate_khs,
                     "miner_id": miner_id,
-                    "worker_name": miner_name
+                    "worker_name": miner_name,
+                    "miner_version": env!("CARGO_PKG_VERSION")
                 });
 
                 // Submit solution via tokio (non-blocking — spawns onto tokio runtime)
@@ -1331,6 +1356,22 @@ fn mining_thread(
                                 if let Some(data) = result.get("data") {
                                     if let Some(reward) = data.get("reward_qnk") {
                                         info!("✅ Solution accepted! Earned {} QNK", reward);
+                                    }
+                                    // v1.0.3: Show update notification if server has newer version
+                                    if data.get("update_available").and_then(|v| v.as_bool()).unwrap_or(false) {
+                                        if let Some(sv) = data.get("server_version").and_then(|v| v.as_str()) {
+                                            warn!("╔══════════════════════════════════════════════════╗");
+                                            warn!("║  📦 UPDATE AVAILABLE: Server is running v{}  ", sv);
+                                            warn!("║  You are running v{}. Please update your miner.", env!("CARGO_PKG_VERSION"));
+                                            warn!("║  Download: https://quillon.xyz/downloads/         ");
+                                            warn!("╚══════════════════════════════════════════════════╝");
+                                        }
+                                    }
+                                    // Show server notices (e.g. "use https://quillon.xyz")
+                                    if let Some(notice) = data.get("server_notice").and_then(|v| v.as_str()) {
+                                        if !notice.is_empty() {
+                                            warn!("[SERVER] {}", notice);
+                                        }
                                     }
                                 }
                             }
@@ -1627,7 +1668,38 @@ async fn fetch_mining_challenge(api_url: &str) -> Result<MiningChallenge> {
         anyhow::bail!("API returned error: {}", error_msg);
     }
 
-    api_response.data.ok_or_else(|| anyhow::anyhow!("Missing challenge data in API response"))
+    let challenge = api_response.data.ok_or_else(|| anyhow::anyhow!("Missing challenge data in API response"))?;
+
+    // v1.0.3: Check server version and notify if update available
+    if let Some(ref sv) = challenge.server_version {
+        let my_ver = env!("CARGO_PKG_VERSION");
+        if sv != my_ver {
+            // Use a static flag to only show once per session
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static SHOWN: AtomicBool = AtomicBool::new(false);
+            if !SHOWN.swap(true, Ordering::Relaxed) {
+                warn!("╔══════════════════════════════════════════════════╗");
+                warn!("║  📦 UPDATE AVAILABLE                             ║");
+                warn!("║  Server version: v{:<36}║", sv);
+                warn!("║  Your version:   v{:<36}║", my_ver);
+                warn!("║  Download: https://quillon.xyz/downloads/         ║");
+                warn!("╚══════════════════════════════════════════════════╝");
+            }
+        }
+    }
+
+    // Show server notices
+    if let Some(ref notice) = challenge.server_notice {
+        if !notice.is_empty() {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static NOTICE_SHOWN: AtomicBool = AtomicBool::new(false);
+            if !NOTICE_SHOWN.swap(true, Ordering::Relaxed) {
+                warn!("[SERVER] {}", notice);
+            }
+        }
+    }
+
+    Ok(challenge)
 }
 
 /// Decode hex string to byte array

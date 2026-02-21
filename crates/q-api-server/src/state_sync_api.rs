@@ -972,7 +972,8 @@ async fn merge_http_snapshot(app_state: &Arc<AppState>, snapshot: &FullStateSnap
                     };
                     if qug_r > 0.0 {
                         let pool_price = usd_r / qug_r;
-                        if pool_price > 0.0 && pool_price < 1_000_000.0 {
+                        // v8.0.1: Reject stale pool prices from old $42.50 era
+                        if pool_price >= 100.0 && pool_price < 1_000_000.0 {
                             let mut vault = app_state.collateral_vault.write().await;
                             let old_price = vault.qug_price_usd;
                             vault.qug_price_usd = pool_price;

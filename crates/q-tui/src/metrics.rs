@@ -35,6 +35,8 @@ pub struct Metrics {
     pub mining_enabled: bool,
     pub hashrate: f64,
     pub blocks_mined: u64,
+    pub active_miners: usize,
+    pub last_block_timestamp: u64,
 
     // Sync status
     pub is_syncing: bool,
@@ -42,6 +44,13 @@ pub struct Metrics {
     pub sync_current_height: u64,
     pub sync_target_height: u64,
     pub sync_speed_blocks_per_sec: f32,
+
+    // Node identity
+    pub network_id: String,
+    pub version: String,
+    pub network_height: u64,
+    pub total_supply: f64,
+    pub emission_rate: f64,
 
     // Distributed AI metrics
     pub ai_enabled: bool,
@@ -79,11 +88,18 @@ impl Default for Metrics {
             mining_enabled: false,
             hashrate: 0.0,
             blocks_mined: 0,
+            active_miners: 0,
+            last_block_timestamp: 0,
             is_syncing: false,
             sync_progress_percent: 0.0,
             sync_current_height: 0,
             sync_target_height: 0,
             sync_speed_blocks_per_sec: 0.0,
+            network_id: String::new(),
+            version: String::new(),
+            network_height: 0,
+            total_supply: 0.0,
+            emission_rate: 0.0,
             ai_enabled: false,
             ai_nodes_available: 0,
             ai_total_requests: 0,

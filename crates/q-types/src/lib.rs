@@ -3736,6 +3736,11 @@ pub enum NetworkId {
     #[serde(rename = "mainnet2026.1.1")]
     Mainnet2026_1_1,
 
+    /// Mainnet 2026.1.3: Emission rehearsal with rate fix (Feb 20, 2026)
+    /// Fixes single-block window rate measurement bug causing 86% under-emission
+    #[serde(rename = "mainnet2026.1.3")]
+    Mainnet2026_1_3,
+
     /// Mainnet 2026.2: Fresh directory relaunch with zero contamination (February 22, 2026)
     #[serde(rename = "mainnet2026.2")]
     Mainnet2026_2,
@@ -3769,6 +3774,7 @@ impl NetworkId {
             NetworkId::Mainnet2026 => "mainnet2026",
             NetworkId::Mainnet2026_1 => "mainnet2026.1",
             NetworkId::Mainnet2026_1_1 => "mainnet2026.1.1",
+            NetworkId::Mainnet2026_1_3 => "mainnet2026.1.3",
             NetworkId::Mainnet2026_2 => "mainnet2026.2",
         }
     }
@@ -3800,6 +3806,7 @@ impl NetworkId {
             NetworkId::Mainnet2026 => "Q-NarwhalKnight Mainnet 2026",
             NetworkId::Mainnet2026_1 => "Q-NarwhalKnight Mainnet 2026.1",
             NetworkId::Mainnet2026_1_1 => "Q-NarwhalKnight Mainnet 2026.1.1 (Rehearsal)",
+            NetworkId::Mainnet2026_1_3 => "Q-NarwhalKnight Mainnet 2026.1.3 (Emission Rehearsal 3)",
             NetworkId::Mainnet2026_2 => "Q-NarwhalKnight Mainnet 2026.2",
         }
     }
@@ -3831,6 +3838,7 @@ impl NetworkId {
             NetworkId::Mainnet2026 => 8080,
             NetworkId::Mainnet2026_1 => 8080,
             NetworkId::Mainnet2026_1_1 => 8080,
+            NetworkId::Mainnet2026_1_3 => 8080,
             NetworkId::Mainnet2026_2 => 8080,
         }
     }
@@ -3862,6 +3870,7 @@ impl NetworkId {
             NetworkId::Mainnet2026 => 9001,
             NetworkId::Mainnet2026_1 => 9001,
             NetworkId::Mainnet2026_1_1 => 9001,
+            NetworkId::Mainnet2026_1_3 => 9001,
             NetworkId::Mainnet2026_2 => 9001,
         }
     }
@@ -4110,6 +4119,7 @@ impl std::str::FromStr for NetworkId {
             "mainnet2026" | "mainnet-2026" => Ok(NetworkId::Mainnet2026),
             "mainnet2026.1" | "mainnet-2026.1" | "mainnet-2026-1" | "mainnet2026_1" => Ok(NetworkId::Mainnet2026_1),
             "mainnet2026.1.1" | "mainnet-2026.1.1" | "mainnet-2026-1-1" | "mainnet2026_1_1" => Ok(NetworkId::Mainnet2026_1_1),
+            "mainnet2026.1.3" | "mainnet-2026.1.3" | "mainnet-2026-1-3" | "mainnet2026_1_3" => Ok(NetworkId::Mainnet2026_1_3),
             "mainnet2026.2" | "mainnet-2026.2" | "mainnet-2026-2" | "mainnet2026_2" => Ok(NetworkId::Mainnet2026_2),
             _ => Err(format!("Invalid network ID: {}", s)),
         }
@@ -4217,6 +4227,7 @@ impl NetworkConfig {
             NetworkId::Mainnet2026 => Self::mainnet(),
             NetworkId::Mainnet2026_1 => Self::mainnet(),
             NetworkId::Mainnet2026_1_1 => Self::mainnet(),
+            NetworkId::Mainnet2026_1_3 => Self::mainnet(),
             NetworkId::Mainnet2026_2 => Self::mainnet(),
         }
     }

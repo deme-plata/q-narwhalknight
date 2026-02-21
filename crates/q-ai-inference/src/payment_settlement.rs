@@ -24,7 +24,7 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 /// Default price per token in QUG base units (24-decimal)
-/// 0.0001 QUG = ~$0.004 at $42.50/QUG
+/// 0.0001 QUG = ~$0.30 at $3000/QUG
 pub const DEFAULT_PRICE_PER_TOKEN: u128 = 100_000_000_000_000_000_000; // 0.0001 * 1e24
 
 /// Verifier reward percentage of total inference fee (basis points)
