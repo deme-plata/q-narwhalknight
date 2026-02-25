@@ -12,9 +12,11 @@ export component DashboardScreen inherits Rectangle {
     in property <string> qug-balance: "0.00";
     in property <string> qug-value-usd: "$0.00";
     in property <[TokenInfo]> tokens: [];
+    in-out property <bool> copy-feedback: false;
 
     callback navigate(int);
     callback copy-address();
+    callback send-token(string); // symbol of token to send
 
     background: Theme.bg-primary;
 
@@ -38,7 +40,7 @@ export component DashboardScreen inherits Rectangle {
 
         // Wallet Address Card
         Card {
-            height: 52px;
+            height: 56px;
 
             HorizontalLayout {
                 padding-left: Theme.spacing-md;
@@ -57,11 +59,12 @@ export component DashboardScreen inherits Rectangle {
                         color: Theme.text-secondary;
                         font-size: Theme.font-sm;
                         overflow: elide;
+                        max-width: 280px;
                     }
                 }
 
                 Rectangle {
-                    width: 60px;
+                    width: 72px;
                     border-radius: Theme.radius-sm;
                     background: copy-touch.has-hover ? Theme.bg-hover : transparent;
 
@@ -70,9 +73,10 @@ export component DashboardScreen inherits Rectangle {
                     }
 
                     Text {
-                        text: "Copy";
-                        color: Theme.accent-blue;
+                        text: root.copy-feedback ? "Copied!" : "Copy";
+                        color: root.copy-feedback ? Theme.accent-green : Theme.accent-blue;
                         font-size: Theme.font-sm;
+                        font-weight: root.copy-feedback ? 700 : 400;
                         vertical-alignment: center;
                         horizontal-alignment: center;
                     }
@@ -82,7 +86,7 @@ export component DashboardScreen inherits Rectangle {
 
         // QUG Balance Card
         Card {
-            height: 120px;
+            height: 130px;
 
             VerticalLayout {
                 padding: Theme.spacing-lg;
@@ -112,26 +116,39 @@ export component DashboardScreen inherits Rectangle {
         }
 
         // Custom Tokens
-        Text {
-            text: "My Tokens";
-            color: Theme.text-primary;
-            font-size: Theme.font-lg;
-            font-weight: 600;
+        HorizontalLayout {
+            alignment: space-between;
+            height: 24px;
+
+            Text {
+                text: "My Tokens";
+                color: Theme.text-primary;
+                font-size: Theme.font-lg;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+
+            if root.tokens.length > 0 : Text {
+                text: root.tokens.length + " token" + (root.tokens.length > 1 ? "s" : "");
+                color: Theme.text-muted;
+                font-size: Theme.font-xs;
+                vertical-alignment: center;
+            }
         }
 
         // Token list (scrollable)
         Flickable {
-            viewport-height: root.tokens.length * 64px;
+            viewport-height: root.tokens.length * 72px;
 
             VerticalLayout {
                 spacing: Theme.spacing-sm;
 
                 for token[i] in root.tokens : Card {
-                    height: 56px;
+                    height: 64px;
 
                     HorizontalLayout {
                         padding-left: Theme.spacing-md;
-                        padding-right: Theme.spacing-md;
+                        padding-right: Theme.spacing-sm;
                         alignment: space-between;
 
                         VerticalLayout {
@@ -149,20 +166,51 @@ export component DashboardScreen inherits Rectangle {
                             }
                         }
 
-                        VerticalLayout {
-                            alignment: center;
-                            horizontal-stretch: 0;
-                            Text {
-                                text: token.balance;
-                                color: Theme.text-primary;
-                                font-size: Theme.font-md;
-                                horizontal-alignment: right;
+                        HorizontalLayout {
+                            spacing: Theme.spacing-sm;
+                            alignment: end;
+
+                            VerticalLayout {
+                                alignment: center;
+                                horizontal-stretch: 0;
+                                Text {
+                                    text: token.balance;
+                                    color: Theme.text-primary;
+                                    font-size: Theme.font-md;
+                                    horizontal-alignment: right;
+                                }
+                                Text {
+                                    text: token.value-usd;
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.font-xs;
+                                    horizontal-alignment: right;
+                                }
                             }
-                            Text {
-                                text: token.value-usd;
-                                color: Theme.text-secondary;
-                                font-size: Theme.font-xs;
-                                horizontal-alignment: right;
+
+                            // Send button for each token
+                            Rectangle {
+                                width: 52px;
+                                height: 32px;
+                                border-radius: Theme.radius-sm;
+                                background: send-touch.has-hover ? Theme.accent-green.darker(15%) : Theme.accent-green;
+                                animate background { duration: 150ms; }
+
+                                VerticalLayout {
+                                    alignment: center;
+                                }
+
+                                send-touch := TouchArea {
+                                    clicked => { root.send-token(token.symbol); }
+                                }
+
+                                Text {
+                                    text: "Send";
+                                    color: Theme.text-primary;
+                                    font-size: Theme.font-xs;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: center;
+                                }
                             }
                         }
                     }

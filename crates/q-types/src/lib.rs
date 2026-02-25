@@ -3744,6 +3744,11 @@ pub enum NetworkId {
     /// Mainnet 2026.2: Fresh directory relaunch with zero contamination (February 22, 2026)
     #[serde(rename = "mainnet2026.2")]
     Mainnet2026_2,
+
+    /// Mainnet Genesis: Production mainnet launch (February 22, 2026 12:00 UTC)
+    /// Block producer fix (challenge height = tip+1), clean network isolation
+    #[serde(rename = "mainnet-genesis")]
+    MainnetGenesis,
 }
 
 impl NetworkId {
@@ -3776,6 +3781,7 @@ impl NetworkId {
             NetworkId::Mainnet2026_1_1 => "mainnet2026.1.1",
             NetworkId::Mainnet2026_1_3 => "mainnet2026.1.3",
             NetworkId::Mainnet2026_2 => "mainnet2026.2",
+            NetworkId::MainnetGenesis => "mainnet-genesis",
         }
     }
 
@@ -3808,6 +3814,7 @@ impl NetworkId {
             NetworkId::Mainnet2026_1_1 => "Q-NarwhalKnight Mainnet 2026.1.1 (Rehearsal)",
             NetworkId::Mainnet2026_1_3 => "Q-NarwhalKnight Mainnet 2026.1.3 (Emission Rehearsal 3)",
             NetworkId::Mainnet2026_2 => "Q-NarwhalKnight Mainnet 2026.2",
+            NetworkId::MainnetGenesis => "Q-NarwhalKnight Mainnet Genesis",
         }
     }
 
@@ -3840,6 +3847,7 @@ impl NetworkId {
             NetworkId::Mainnet2026_1_1 => 8080,
             NetworkId::Mainnet2026_1_3 => 8080,
             NetworkId::Mainnet2026_2 => 8080,
+            NetworkId::MainnetGenesis => 8080,
         }
     }
 
@@ -3872,6 +3880,7 @@ impl NetworkId {
             NetworkId::Mainnet2026_1_1 => 9001,
             NetworkId::Mainnet2026_1_3 => 9001,
             NetworkId::Mainnet2026_2 => 9001,
+            NetworkId::MainnetGenesis => 9001,
         }
     }
 
@@ -4121,6 +4130,7 @@ impl std::str::FromStr for NetworkId {
             "mainnet2026.1.1" | "mainnet-2026.1.1" | "mainnet-2026-1-1" | "mainnet2026_1_1" => Ok(NetworkId::Mainnet2026_1_1),
             "mainnet2026.1.3" | "mainnet-2026.1.3" | "mainnet-2026-1-3" | "mainnet2026_1_3" => Ok(NetworkId::Mainnet2026_1_3),
             "mainnet2026.2" | "mainnet-2026.2" | "mainnet-2026-2" | "mainnet2026_2" => Ok(NetworkId::Mainnet2026_2),
+            "mainnet-genesis" | "mainnetgenesis" | "mainnet_genesis" => Ok(NetworkId::MainnetGenesis),
             _ => Err(format!("Invalid network ID: {}", s)),
         }
     }
@@ -4128,8 +4138,8 @@ impl std::str::FromStr for NetworkId {
 
 impl Default for NetworkId {
     fn default() -> Self {
-        // ✅ v7.3.0: MAINNET 2026.2 - Fresh directory relaunch with zero contamination
-        NetworkId::Mainnet2026_2
+        // v8.1.6: MAINNET GENESIS - Production mainnet launch
+        NetworkId::MainnetGenesis
     }
 }
 
@@ -4171,31 +4181,29 @@ impl NetworkConfig {
     /// Create mainnet configuration
     pub fn mainnet() -> Self {
         Self {
-            network_id: NetworkId::Mainnet2026_2,
+            network_id: NetworkId::MainnetGenesis,
             genesis_hash: [
-                // Mainnet 2026.2 genesis hash (SHA3-256 prefix of "mainnet2026.2")
-                0x6d, 0x61, 0x69, 0x6e, 0x6e, 0x65, 0x74, 0x32,  // "mainnet2"
-                0x30, 0x32, 0x36, 0x2e, 0x32, 0x00, 0x00, 0x00,  // "026.2\0\0\0"
+                // Mainnet Genesis hash (ASCII prefix of "mainnet-genesis")
+                0x6d, 0x61, 0x69, 0x6e, 0x6e, 0x65, 0x74, 0x2d,  // "mainnet-"
+                0x67, 0x65, 0x6e, 0x65, 0x73, 0x69, 0x73, 0x00,  // "genesis\0"
                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             ],
             launch_time: DateTime::parse_from_rfc3339("2026-02-22T12:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            version: "v7.3.0-mainnet2026.2".to_string(),
-            chain_id: 1000, // Mainnet 2026.2 chain ID
+            version: format!("v{}-mainnet-genesis", env!("CARGO_PKG_VERSION")),
+            chain_id: 1000, // Mainnet Genesis chain ID
             api_port: 8080,
             p2p_port: 9001,
             // Multiple bootstrap nodes for redundancy
             bootstrap_peers: vec![
-                // Primary bootstrap node - Server Beta (185.182.185.227)
-                "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWBHTC9FhwwXmvH7YA17YHTLdcxbtLWg2U5xEtxSeqX7jc".to_string(),
-                // Backup bootstrap node - Server Gamma (109.205.176.60)
-                "/ip4/109.205.176.60/tcp/9001/p2p/12D3KooWFqPX9TkvF43eyDeH9wwxYTSfnBn8AobLJeA7xRnmpPcv".to_string(),
-                // Tertiary bootstrap node - Server Delta (5.79.79.158)
-                "/ip4/5.79.79.158/tcp/9001/p2p/12D3KooWQZZAyLA4VQmwNozCBTZXXoWfvKE86ebbaPhSKu6XVmJJ".to_string(),
-                // Quaternary bootstrap node - Server Alpha (161.35.219.10)
-                "/ip4/161.35.219.10/tcp/9001/p2p/12D3KooWPwin4nJcU9PzsxNgUVXj5e6zDnACr84H7RZ1XzmnARsY".to_string(),
+                // Primary bootstrap node - Server Beta (185.182.185.227) - Mainnet Genesis
+                "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH".to_string(),
+                // Backup bootstrap node - Server Gamma (109.205.176.60) - Mainnet Genesis
+                "/ip4/109.205.176.60/tcp/9001/p2p/12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH".to_string(),
+                // Tertiary bootstrap node - Server Delta (5.79.79.158) - Mainnet Genesis
+                "/ip4/5.79.79.158/tcp/9001/p2p/12D3KooWLJJRvqo6mBoHLpgxVbGKfW3Jv39ziU4kz1adKFv93JbK".to_string(),
             ],
         }
     }
@@ -4229,6 +4237,7 @@ impl NetworkConfig {
             NetworkId::Mainnet2026_1_1 => Self::mainnet(),
             NetworkId::Mainnet2026_1_3 => Self::mainnet(),
             NetworkId::Mainnet2026_2 => Self::mainnet(),
+            NetworkId::MainnetGenesis => Self::mainnet(),
         }
     }
 
@@ -4741,25 +4750,25 @@ mod network_separation_tests {
 
     #[test]
     fn test_network_config_testnet() {
-        // v7.3.0: testnet() now returns mainnet2026.2 config
+        // v8.1.6: testnet() now returns mainnet-genesis config
         let config = NetworkConfig::testnet();
-        assert_eq!(config.network_id, NetworkId::Mainnet2026_2);
+        assert_eq!(config.network_id, NetworkId::MainnetGenesis);
         assert_eq!(config.chain_id, 1000);
         assert_eq!(config.api_port, 8080);
         assert_eq!(config.p2p_port, 9001);
-        assert_eq!(config.version, "v7.3.0-mainnet2026.2");
-        assert_eq!(&config.genesis_hash[..8], b"mainnet2");
+        assert!(config.version.ends_with("-mainnet-genesis"));
+        assert_eq!(&config.genesis_hash[..8], b"mainnet-");
     }
 
     #[test]
     fn test_network_config_mainnet() {
         let config = NetworkConfig::mainnet();
-        assert_eq!(config.network_id, NetworkId::Mainnet2026_2);
+        assert_eq!(config.network_id, NetworkId::MainnetGenesis);
         assert_eq!(config.chain_id, 1000);
         assert_eq!(config.api_port, 8080);
         assert_eq!(config.p2p_port, 9001);
-        assert_eq!(config.version, "v7.3.0-mainnet2026.2");
-        assert_eq!(&config.genesis_hash[..8], b"mainnet2");
+        assert!(config.version.ends_with("-mainnet-genesis"));
+        assert_eq!(&config.genesis_hash[..8], b"mainnet-");
         let expected = DateTime::parse_from_rfc3339("2026-02-22T12:00:00Z").unwrap();
         assert_eq!(config.launch_time, expected.with_timezone(&Utc));
     }
@@ -4775,8 +4784,8 @@ mod network_separation_tests {
 
     #[test]
     fn test_network_config_from_network_id() {
-        let mainnet = NetworkConfig::from_network_id(NetworkId::Mainnet2026_2);
-        assert_eq!(mainnet.network_id, NetworkId::Mainnet2026_2);
+        let mainnet = NetworkConfig::from_network_id(NetworkId::MainnetGenesis);
+        assert_eq!(mainnet.network_id, NetworkId::MainnetGenesis);
         assert_eq!(mainnet.genesis_hash, NetworkConfig::mainnet().genesis_hash);
     }
 
@@ -4910,9 +4919,9 @@ mod network_separation_tests {
         assert!(!testnet.bootstrap_peers.is_empty(), "Should have bootstrap peers for out-of-box connectivity");
         assert_eq!(testnet.bootstrap_peers.len(), 3, "Should have 3 bootstrap peers");
         assert!(testnet.bootstrap_peers[0].contains("185.182.185.227"), "First bootstrap peer should be Server Beta");
-        assert!(testnet.bootstrap_peers[0].contains("12D3KooWBHTC9FhwwXmvH7YA17YHTLdcxbtLWg2U5xEtxSeqX7jc"), "Bootstrap should include Beta peer ID");
+        assert!(testnet.bootstrap_peers[0].contains("12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH"), "Bootstrap should include Beta peer ID");
         assert!(testnet.bootstrap_peers[1].contains("109.205.176.60"), "Second bootstrap peer should be Server Gamma");
-        assert!(testnet.bootstrap_peers[1].contains("12D3KooWFqPX9TkvF43eyDeH9wwxYTSfnBn8AobLJeA7xRnmpPcv"), "Bootstrap should include Gamma peer ID");
+        assert!(testnet.bootstrap_peers[1].contains("12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH"), "Bootstrap should include Gamma peer ID");
         assert!(testnet.bootstrap_peers[2].contains("5.79.79.158"), "Third bootstrap peer should be Server Delta");
         assert!(testnet.bootstrap_peers[2].contains("12D3KooWQZZAyLA4VQmwNozCBTZXXoWfvKE86ebbaPhSKu6XVmJJ"), "Bootstrap should include Delta peer ID");
         assert!(testnet.bootstrap_peers[3].contains("161.35.219.10"), "Fourth bootstrap peer should be Server Alpha");

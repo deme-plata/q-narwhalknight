@@ -157,7 +157,7 @@ export default function MiningScreen() {
 
     let isMounted = true;
     fetchPoolData();
-    const interval = setInterval(fetchPoolData, 30000);
+    const interval = setInterval(fetchPoolData, 15000);
 
     // SSE listener for real-time pool updates
     const eventSource = new EventSource(`/api/v1/stream/events?filter=${walletAddress || ''}`);
@@ -224,12 +224,27 @@ export default function MiningScreen() {
     return `${mins}m`;
   };
 
+  // Dynamic stratum host derived from current page
+  const stratumHost = typeof window !== 'undefined' ? window.location.hostname : 'pool.quillon.xyz';
+  const stratumPort = poolStats?.stratum_port || 3333;
+  const stratumUrl = `stratum+tcp://${stratumHost}:${stratumPort}`;
+
   // Copy stratum URL
   const copyStratumUrl = () => {
-    const url = `stratum+tcp://pool.quillon.xyz:${poolStats?.stratum_port || 3333}`;
-    navigator.clipboard.writeText(url);
+    navigator.clipboard.writeText(stratumUrl);
     setCopiedStratum(true);
     setTimeout(() => setCopiedStratum(false), 2000);
+  };
+
+  // State for copy mining command button
+  const [copiedMiningCmd, setCopiedMiningCmd] = useState(false);
+
+  // Copy full pool mining command
+  const copyPoolMiningCommand = () => {
+    const cmd = `./q-miner --pool ${stratumUrl} --wallet ${walletAddress || 'YOUR_WALLET'} --threads $(nproc)`;
+    navigator.clipboard.writeText(cmd);
+    setCopiedMiningCmd(true);
+    setTimeout(() => setCopiedMiningCmd(false), 2000);
   };
 
   const handleDownloadMiner = (platform: 'linux' | 'linux-arm64' | 'windows' | 'macos-intel' | 'macos-arm') => {
@@ -258,7 +273,7 @@ export default function MiningScreen() {
     ? `${window.location.protocol}//${window.location.host}`
     : 'http://localhost:8080';
 
-  const miningCommand = `./q-miner --mode solo --wallet ${walletAddress} --threads 4 --intensity 7 --server ${currentServerUrl}`;
+  const miningCommand = `./q-miner-v2.5.0 --mode solo --wallet ${walletAddress} --threads 4 --intensity 7 --server ${currentServerUrl}`;
 
   const tabs = [
     { id: 'pool' as MiningTab, label: 'Pool Mining', icon: Users, color: 'quantum-purple' },
@@ -358,7 +373,26 @@ export default function MiningScreen() {
                     <Users className="w-8 h-8 text-quantum-purple" />
                   </div>
                   <div>
-                    <h2 className="text-2xl font-bold text-white">Pool Mining Dashboard</h2>
+                    <h2 className="text-2xl font-bold text-white flex items-center gap-2">
+                      Pool Mining Dashboard
+                      {/* Pool Health Indicator */}
+                      <span
+                        className={`inline-block w-3 h-3 rounded-full ${
+                          poolStats && poolStats.uptime_seconds > 0 && poolStats.workers > 0
+                            ? 'bg-green-400 shadow-lg shadow-green-400/50'
+                            : poolStats && poolStats.uptime_seconds > 0 && poolStats.workers === 0
+                            ? 'bg-yellow-400 shadow-lg shadow-yellow-400/50 animate-pulse'
+                            : 'bg-red-500 shadow-lg shadow-red-500/50'
+                        }`}
+                        title={
+                          poolStats && poolStats.uptime_seconds > 0 && poolStats.workers > 0
+                            ? 'Pool healthy - workers active'
+                            : poolStats && poolStats.uptime_seconds > 0 && poolStats.workers === 0
+                            ? 'Pool online - no workers connected'
+                            : 'Pool offline or unreachable'
+                        }
+                      />
+                    </h2>
                     <p className="text-gray-400">
                       {poolStats ? `${poolStats.name} - ${poolStats.version}` : 'PPLNS Stratum Mining Pool'}
                     </p>
@@ -491,7 +525,7 @@ export default function MiningScreen() {
                     <div>
                       <span className="text-gray-500 text-sm block">Stratum URL</span>
                       <code className="text-quantum-cyan font-mono">
-                        stratum+tcp://pool.quillon.xyz:{poolStats?.stratum_port || 3333}
+                        {stratumUrl}
                       </code>
                     </div>
                     <motion.button
@@ -516,9 +550,31 @@ export default function MiningScreen() {
                   <div className="bg-quantum-dark/50 rounded-lg p-3">
                     <span className="text-gray-500 text-sm block">Example Miner Command</span>
                     <code className="text-quantum-green font-mono text-sm block overflow-x-auto">
-                      ./q-miner --mode pool --server stratum+tcp://pool.quillon.xyz:{poolStats?.stratum_port || 3333} --wallet {walletAddress || 'YOUR_WALLET'}.rig1
+                      ./q-miner --mode pool --server {stratumUrl} --wallet {walletAddress || 'YOUR_WALLET'}.rig1
                     </code>
                   </div>
+                  {/* Copy Mining Command Button */}
+                  <motion.button
+                    onClick={copyPoolMiningCommand}
+                    className="w-full mt-3 bg-gradient-to-r from-quantum-purple/20 to-quantum-cyan/20 hover:from-quantum-purple/30 hover:to-quantum-cyan/30 border border-quantum-purple/40 rounded-lg px-4 py-3 flex items-center justify-center gap-2 transition-all"
+                    whileHover={{ scale: 1.01 }}
+                    whileTap={{ scale: 0.99 }}
+                  >
+                    {copiedMiningCmd ? (
+                      <>
+                        <Check className="w-4 h-4 text-quantum-green" />
+                        <span className="text-quantum-green font-medium text-sm">Copied!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Terminal className="w-4 h-4 text-quantum-purple" />
+                        <span className="text-white font-medium text-sm">Copy Mining Command</span>
+                        <code className="text-gray-500 text-xs ml-2 hidden md:inline">
+                          ./q-miner --pool {stratumUrl} --wallet ... --threads $(nproc)
+                        </code>
+                      </>
+                    )}
+                  </motion.button>
                 </div>
               </div>
 
@@ -581,6 +637,36 @@ export default function MiningScreen() {
                       )}
                     </div>
                   </div>
+                  {/* Payout Progress Bar */}
+                  {(() => {
+                    const minPayout = poolStats?.min_payout || 10000000;
+                    const progressPct = Math.min((pendingBalance.pending_balance / minPayout) * 100, 100);
+                    return (
+                      <div className="mt-4">
+                        <div className="flex items-center justify-between text-xs text-gray-400 mb-1">
+                          <span>Payout Progress</span>
+                          <span>{progressPct.toFixed(1)}% of {formatQUG(minPayout)} QUG minimum</span>
+                        </div>
+                        <div className="w-full bg-quantum-dark/60 rounded-full h-3 overflow-hidden border border-quantum-green/20">
+                          <motion.div
+                            className={`h-full rounded-full ${
+                              progressPct >= 100
+                                ? 'bg-gradient-to-r from-quantum-green to-quantum-cyan'
+                                : progressPct >= 75
+                                ? 'bg-gradient-to-r from-quantum-green/80 to-quantum-cyan/80'
+                                : 'bg-gradient-to-r from-quantum-green/60 to-quantum-cyan/60'
+                            }`}
+                            initial={{ width: 0 }}
+                            animate={{ width: `${progressPct}%` }}
+                            transition={{ duration: 0.8, ease: 'easeOut' }}
+                          />
+                        </div>
+                        {progressPct >= 100 && (
+                          <p className="text-quantum-green text-xs mt-1 font-medium">Payout threshold reached - payout will be processed soon</p>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
 
@@ -788,7 +874,7 @@ export default function MiningScreen() {
                       <strong>Fixed Supply:</strong> 21,000,000 QUG total (hard cap, immutable)
                     </p>
                     <p>
-                      <strong>Block Reward:</strong> 0.5 QUG initially, halves every 210,000 blocks (~4 years)
+                      <strong>Block Reward:</strong> Adaptive per block (Era 0: ~0.08 QUG at 1 bps), time-based halving every 4 years
                     </p>
                   </div>
                 </div>
@@ -819,14 +905,14 @@ export default function MiningScreen() {
                     <div className="bg-quantum-dark/50 rounded-lg p-4 border border-quantum-cyan/20 relative">
                       <p className="text-quantum-cyan text-sm font-bold mb-3">Linux x86_64</p>
                       <div className="space-y-1 font-mono text-xs text-gray-300 overflow-x-auto">
-                        <code className="block">wget https://quillon.xyz/downloads/q-miner-linux-x64</code>
-                        <code className="block">chmod +x q-miner-linux-x64</code>
-                        <code className="block text-quantum-green mt-2">./q-miner-linux-x64 --mode solo \</code>
+                        <code className="block">wget https://quillon.xyz/downloads/q-miner-v2.5.0</code>
+                        <code className="block">chmod +x q-miner-v2.5.0</code>
+                        <code className="block text-quantum-green mt-2">./q-miner-v2.5.0 --mode solo \</code>
                         <code className="block text-quantum-green pl-2">--wallet {walletAddress || 'YOUR_WALLET'} \</code>
                         <code className="block text-quantum-green pl-2">--server {currentServerUrl}</code>
                       </div>
                       <button
-                        onClick={() => copyCommand(`wget https://quillon.xyz/downloads/q-miner-linux-x64 && chmod +x q-miner-linux-x64 && ./q-miner-linux-x64 --mode solo --wallet ${walletAddress || 'YOUR_WALLET'} --server ${currentServerUrl}`)}
+                        onClick={() => copyCommand(`wget https://quillon.xyz/downloads/q-miner-v2.5.0 && chmod +x q-miner-v2.5.0 && ./q-miner-v2.5.0 --mode solo --wallet ${walletAddress || 'YOUR_WALLET'} --server ${currentServerUrl}`)}
                         className="absolute top-3 right-3 bg-quantum-cyan/20 hover:bg-quantum-cyan/30 text-quantum-cyan px-2 py-1 rounded text-xs transition-colors"
                       >
                         Copy
@@ -1021,7 +1107,7 @@ export default function MiningScreen() {
               <h3 className="text-lg font-bold text-white mb-2 flex items-center gap-2">
                 <Download className="w-5 h-5 text-quantum-cyan" />
                 Miner Downloads
-                <span className="text-xs font-medium px-2 py-0.5 bg-quantum-green/20 text-quantum-green rounded-full">v7.3.3</span>
+                <span className="text-xs font-medium px-2 py-0.5 bg-quantum-green/20 text-quantum-green rounded-full">v2.3.0</span>
               </h3>
               <p className="text-sm text-gray-400 mb-4">Native threads, jemalloc/mimalloc allocator, batched atomic counters</p>
 
@@ -1071,8 +1157,8 @@ export default function MiningScreen() {
                 <h4 className="text-sm font-bold text-quantum-cyan mb-3">Quick Start (wget)</h4>
                 <div className="space-y-2">
                   <div className="bg-quantum-dark/80 rounded-lg p-2 font-mono text-xs text-gray-300 flex items-center justify-between">
-                    <code>wget https://quillon.xyz/downloads/q-miner-linux-x64 && chmod +x q-miner-linux-x64</code>
-                    <button onClick={() => copyCommand('wget https://quillon.xyz/downloads/q-miner-linux-x64 && chmod +x q-miner-linux-x64')} className="text-quantum-cyan hover:text-white ml-2 flex-shrink-0 text-xs px-2">Copy</button>
+                    <code>wget https://quillon.xyz/downloads/q-miner-v2.5.0 && chmod +x q-miner-v2.5.0</code>
+                    <button onClick={() => copyCommand('wget https://quillon.xyz/downloads/q-miner-v2.5.0 && chmod +x q-miner-v2.5.0')} className="text-quantum-cyan hover:text-white ml-2 flex-shrink-0 text-xs px-2">Copy</button>
                   </div>
                   <div className="bg-quantum-dark/80 rounded-lg p-2 font-mono text-xs text-gray-300 flex items-center justify-between">
                     <code>wget https://quillon.xyz/downloads/q-miner-linux-arm64 && chmod +x q-miner-linux-arm64</code>
@@ -1239,7 +1325,7 @@ export default function MiningScreen() {
                     </div>
                     <div className="p-2">
                       <p className="font-medium text-gray-300">Network ID</p>
-                      <code className="text-xs text-quantum-orange">mainnet2026.2</code>
+                      <code className="text-xs text-quantum-orange">mainnet-genesis</code>
                     </div>
                   </div>
                 </div>

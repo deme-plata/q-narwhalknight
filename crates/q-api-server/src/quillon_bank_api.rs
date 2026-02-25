@@ -15,10 +15,12 @@ use tracing::{debug, error, info};
 
 use crate::handlers::parse_wallet_address;
 use crate::privacy_proof_generator::apply_privacy_proofs; // v3.4.16: Auto privacy by default
+use crate::streaming::StreamEvent;
 use crate::AppState;
 use chrono::Utc;
 use q_quillon_bank::{AssetType, QuillonBankSystem};
-use q_types::{ApiResponse, Transaction};
+use q_types::{ApiResponse, DeliveryMethod, EmailMessage, Transaction};
+use uuid::Uuid;
 
 /// Create Quillon Bank API router with AEGIS-QL protection for sensitive operations
 pub fn create_quillon_bank_router() -> Router<Arc<AppState>> {
@@ -104,6 +106,8 @@ pub fn create_protected_routes() -> Router<Arc<AppState>> {
         .route("/identity/admin/death-certificate/list", get(list_all_death_certificates))
         .route("/identity/admin/death-certificate/approve", post(approve_death_certificate))
         .route("/identity/admin/transfer", post(execute_inheritance_transfer))
+        // v8.1.4: Email broadcasting (FOUNDER-ONLY)
+        .route("/email/broadcast", post(broadcast_bank_email))
 }
 
 // ============================================================================
@@ -738,7 +742,7 @@ pub struct LoanApplication {
     pub monthly_payment: f64,
     pub status: String, // "pending", "approved", "rejected"
     pub created_at: i64,
-    #[serde(default)]
+    #[serde(default, serialize_with = "q_types::u128_serde::serialize", deserialize_with = "q_types::u128_serde::deserialize")]
     pub amount_paid: u128, // Track total amount paid back (in base units)
 }
 
@@ -759,15 +763,17 @@ async fn get_loan_applications(
     let applications: Vec<serde_json::Value> = pending_loans
         .values()
         .map(|loan| {
+            // Sanitize f64 values — NaN/Infinity causes serde_json::json! to panic
+            let safe_f64 = |v: f64| if v.is_finite() { v } else { 0.0 };
             serde_json::json!({
                 "loan_id": loan.loan_id,
                 "borrower_address": loan.borrower_address,
-                "loan_amount": loan.loan_amount,
-                "collateral_amount": loan.collateral_amount,
+                "loan_amount": loan.loan_amount.to_string(),
+                "collateral_amount": safe_f64(loan.collateral_amount),
                 "collateral_type": loan.collateral_type,
                 "term_months": loan.term_months,
-                "interest_rate": loan.interest_rate,
-                "monthly_payment": loan.monthly_payment,
+                "interest_rate": safe_f64(loan.interest_rate),
+                "monthly_payment": safe_f64(loan.monthly_payment),
                 "status": loan.status,
                 "created_at": loan.created_at,
             })
@@ -1733,17 +1739,21 @@ async fn customer_analytics(
     };
     drop(wallet_balances);
 
-    let loans = state.pending_loan_applications.read().await;
-    let total_loans = loans.len();
-    let active_loans = loans.values().filter(|l| l.status == "approved").count();
-    let paid_loans = loans.values().filter(|l| l.status == "paid").count();
-    let unique_borrowers: std::collections::HashSet<_> = loans.values().map(|l| &l.borrower_address).collect();
-    drop(loans);
+    let (total_loans, active_loans, paid_loans, unique_borrower_count) = {
+        let loans = state.pending_loan_applications.read().await;
+        let total = loans.len();
+        let active = loans.values().filter(|l| l.status == "approved").count();
+        let paid = loans.values().filter(|l| l.status == "paid").count();
+        let unique: std::collections::HashSet<String> = loans.values().map(|l| l.borrower_address.clone()).collect();
+        (total, active, paid, unique.len())
+    };
 
-    let identities = state.user_identities.read().await;
-    let registered_identities = identities.len();
-    let verified_identities = identities.iter().filter(|i| i.verified).count();
-    drop(identities);
+    let (registered_identities, verified_identities) = {
+        let identities = state.user_identities.read().await;
+        let total = identities.len();
+        let verified = identities.iter().filter(|i| i.verified).count();
+        (total, verified)
+    };
 
     Ok(Json(ApiResponse::success(serde_json::json!({
         "total_wallets": total_wallets,
@@ -1752,7 +1762,7 @@ async fn customer_analytics(
         "total_loan_applications": total_loans,
         "active_loans": active_loans,
         "paid_loans": paid_loans,
-        "unique_borrowers": unique_borrowers.len(),
+        "unique_borrowers": unique_borrower_count,
         "registered_identities": registered_identities,
         "verified_identities": verified_identities,
     }))))
@@ -2504,4 +2514,93 @@ async fn execute_inheritance_transfer(
     );
 
     Ok(Json(ApiResponse::success(summary)))
+}
+
+// ============================================================================
+// v8.1.4: Email Broadcasting (FOUNDER-ONLY)
+// ============================================================================
+
+#[derive(Deserialize)]
+pub struct BroadcastEmailRequest {
+    pub subject: String,
+    pub body: String,
+    #[serde(default)]
+    pub body_html: Option<String>,
+}
+
+/// Broadcast an email to all email-registered wallets on this node.
+/// The email lands in each user's "quillon-bank" folder (not inbox).
+pub async fn broadcast_bank_email(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BroadcastEmailRequest>,
+) -> Result<Json<ApiResponse<String>>, StatusCode> {
+    info!("📧 Bank email broadcast requested: subject={}", req.subject);
+
+    // Get all wallets that have email activity
+    let wallets = state
+        .storage_engine
+        .get_all_email_wallets()
+        .await
+        .map_err(|e| {
+            error!("Failed to get email wallets: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    if wallets.is_empty() {
+        return Ok(Json(ApiResponse::success("No email users found — 0 emails sent".to_string())));
+    }
+
+    let thread_id = Uuid::new_v4().to_string();
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mut sent_count = 0u64;
+
+    for wallet in &wallets {
+        let email = EmailMessage {
+            id: Uuid::new_v4().to_string(),
+            from_wallet: [0u8; 32],
+            from_email: Some("bank@quillon.xyz".to_string()),
+            to_wallet: Some(*wallet),
+            to_email: None,
+            subject: req.subject.clone(),
+            body: req.body.clone(),
+            body_html: req.body_html.clone(),
+            encrypted: false,
+            signature: Vec::new(),
+            timestamp,
+            read: false,
+            folder: "quillon-bank".to_string(),
+            thread_id: Some(thread_id.clone()),
+            in_reply_to: None,
+            crypto_transfer: None,
+            delivery_method: DeliveryMethod::P2PGossipsub,
+        };
+
+        if let Err(e) = state.storage_engine.save_email(&email).await {
+            error!("Failed to save broadcast email to wallet {}: {}", hex::encode(wallet), e);
+            continue;
+        }
+
+        // Emit SSE event so the user's UI updates in real-time
+        let _ = state
+            .event_broadcaster
+            .broadcast(StreamEvent::EmailReceived {
+                email_id: email.id.clone(),
+                from_address: "bank@quillon.xyz".to_string(),
+                subject: req.subject.clone(),
+                preview: req.body.chars().take(100).collect(),
+                has_crypto: false,
+                crypto_amount: None,
+                crypto_token: None,
+                timestamp: chrono::Utc::now(),
+            })
+            .await;
+
+        sent_count += 1;
+    }
+
+    info!("📧 Bank broadcast complete: {} emails sent to {} wallets", sent_count, wallets.len());
+    Ok(Json(ApiResponse::success(format!("Broadcast sent to {} email users", sent_count))))
 }

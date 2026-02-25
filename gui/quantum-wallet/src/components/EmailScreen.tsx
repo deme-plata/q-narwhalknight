@@ -147,7 +147,7 @@ interface SendEmailRequest {
   reply_to?: string;
 }
 
-type Folder = 'inbox' | 'sent' | 'drafts' | 'trash';
+type Folder = 'inbox' | 'sent' | 'drafts' | 'trash' | 'quillon-bank';
 
 // ============================================================================
 // EmailScreen Component
@@ -175,6 +175,7 @@ export default function EmailScreen() {
   const [sending, setSending] = useState(false);
   const [replyTo, setReplyTo] = useState<string | undefined>();
   const [sendSuccess, setSendSuccess] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
 
   // Settings modal state
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -297,6 +298,7 @@ export default function EmailScreen() {
   const handleSend = async () => {
     if (!composeTo.trim() || !composeSubject.trim()) return;
     setSending(true);
+    setSendError(null);
     try {
       const request: SendEmailRequest = {
         to: composeTo.trim(),
@@ -311,6 +313,10 @@ export default function EmailScreen() {
         request.reply_to = replyTo;
       }
       const response = await qnkAPI.sendEmail(request);
+      if (response?.error) {
+        setSendError(response.error);
+        return;
+      }
       if (response?.data?.email_id) {
         setSendSuccess(true);
         setTimeout(() => {
@@ -324,9 +330,12 @@ export default function EmailScreen() {
           setReplyTo(undefined);
           fetchEmails();
         }, 1200);
+      } else {
+        setSendError('Failed to send — no email ID returned');
       }
-    } catch (e) {
+    } catch (e: any) {
       console.error('Failed to send email:', e);
+      setSendError(e?.message || 'Network error — check your connection');
     } finally {
       setSending(false);
     }
@@ -338,9 +347,13 @@ export default function EmailScreen() {
       setEmails(prev => prev.map(e =>
         e.id === emailId ? { ...e, read: true } : e
       ));
-      fetchUnreadCount();
-      // v7.3.4: Notify Dashboard to update unread badge
-      window.dispatchEvent(new Event('email-read'));
+      // v8.2.10: Fetch authoritative count from API, then notify Dashboard
+      // with the real number instead of a generic "decrement by 1" event.
+      // This prevents stale-read races and count drift.
+      const response = await qnkAPI.getEmailUnreadCount();
+      const count = response?.data?.count ?? 0;
+      setUnreadCount(count);
+      window.dispatchEvent(new CustomEvent('email-unread-count', { detail: { count } }));
     } catch (e) {
       console.error('Failed to mark read:', e);
     }
@@ -406,6 +419,7 @@ export default function EmailScreen() {
 
   const folders = [
     { id: 'inbox' as Folder, label: 'Inbox', icon: Inbox, count: unreadCount },
+    { id: 'quillon-bank' as Folder, label: 'Quillon Bank', icon: Shield, count: 0 },
     { id: 'sent' as Folder, label: 'Sent', icon: Send, count: 0 },
     { id: 'drafts' as Folder, label: 'Drafts', icon: Archive, count: 0 },
     { id: 'trash' as Folder, label: 'Trash', icon: Trash2, count: 0 },
@@ -750,8 +764,9 @@ export default function EmailScreen() {
               setCryptoToken={setCryptoToken}
               sending={sending}
               sendSuccess={sendSuccess}
+              sendError={sendError}
               onSend={handleSend}
-              onClose={() => setComposing(false)}
+              onClose={() => { setComposing(false); setSendError(null); }}
               composeRef={composeRef}
             />
           ) : selectedEmail ? (
@@ -1195,11 +1210,8 @@ function useAIAssistant() {
               onToken(fullText);
             }
           } catch {
-            if (data !== '[DONE]') {
-              fullText += data;
-              setAiStreamText(fullText);
-              onToken(fullText);
-            }
+            // JSON parse failed — skip this chunk to avoid double-appending raw data
+            console.warn('Failed to parse SSE chunk, skipping:', data?.substring(0, 80));
           }
         }
       }
@@ -1253,7 +1265,7 @@ function ComposePanel({
   cryptoEnabled, setCryptoEnabled,
   cryptoAmount, setCryptoAmount,
   cryptoToken, setCryptoToken,
-  sending, sendSuccess, onSend, onClose, composeRef,
+  sending, sendSuccess, sendError, onSend, onClose, composeRef,
 }: {
   composeTo: string; setComposeTo: (v: string) => void;
   composeSubject: string; setComposeSubject: (v: string) => void;
@@ -1261,7 +1273,7 @@ function ComposePanel({
   cryptoEnabled: boolean; setCryptoEnabled: (v: boolean) => void;
   cryptoAmount: string; setCryptoAmount: (v: string) => void;
   cryptoToken: string; setCryptoToken: (v: string) => void;
-  sending: boolean; sendSuccess: boolean; onSend: () => void; onClose: () => void;
+  sending: boolean; sendSuccess: boolean; sendError: string | null; onSend: () => void; onClose: () => void;
   composeRef: React.RefObject<HTMLTextAreaElement | null>;
 }) {
   const [aiPanelOpen, setAiPanelOpen] = useState(false);
@@ -1781,6 +1793,14 @@ function ComposePanel({
             )}
           </motion.button>
         </div>
+
+        {/* Error display */}
+        {sendError && (
+          <div className="mt-2 px-4 py-2 rounded-lg bg-red-500/15 border border-red-500/30 text-red-400 text-xs flex items-center gap-2">
+            <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" />
+            <span>{sendError}</span>
+          </div>
+        )}
       </div>
     </motion.div>
   );

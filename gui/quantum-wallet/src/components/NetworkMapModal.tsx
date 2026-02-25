@@ -842,7 +842,7 @@ export default function NetworkMapModal({ isOpen, onClose, peers: peerCount, blo
                   <p className="text-amber-300/60 text-sm">
                     {isReady ? (
                       <>
-                        {connectionCount} connections • {topics.length} topics •
+                        {connectionCount > 0 ? connectionCount : (peerCount || 0)} connections • {topics.length} topics •
                         {pqStatus?.loaded ? ' PQ-Hybrid' : ' Noise'} encrypted
                         {txStats.starkProofSubmissions > 0 && ' • ZK-STARK active'}
                         {isTorBrowser ? ' • Tor privacy' : ''}

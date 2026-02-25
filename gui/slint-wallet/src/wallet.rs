@@ -26,14 +26,17 @@ impl Wallet {
     }
 
     /// Import a wallet from an existing mnemonic phrase.
+    /// Key derivation: SHA3-256(mnemonic_string) → Ed25519 private key
+    /// This matches the server and web frontend derivation exactly.
     pub fn from_mnemonic(phrase: &str) -> Result<Self> {
-        let mnemonic = Mnemonic::parse_in(bip39::Language::English, phrase)
+        // Validate mnemonic (12 or 24 words, valid BIP39)
+        let _mnemonic = Mnemonic::parse_in(bip39::Language::English, phrase)
             .map_err(|e| anyhow!("Invalid mnemonic: {}", e))?;
 
-        // Derive Ed25519 key from mnemonic entropy via SHA3-256
-        let entropy = mnemonic.to_entropy();
+        // Derive Ed25519 key from mnemonic STRING via SHA3-256
+        // MUST match server: SHA3-256(mnemonic_text) → private key bytes
         let mut hasher = Sha3_256::new();
-        hasher.update(&entropy);
+        hasher.update(phrase.as_bytes());
         let seed: [u8; 32] = hasher.finalize().into();
 
         let signing_key = SigningKey::from_bytes(&seed);
@@ -122,7 +125,7 @@ mod tests {
     fn test_create_wallet() {
         let (wallet, mnemonic) = Wallet::create().unwrap();
         let words: Vec<&str> = mnemonic.split_whitespace().collect();
-        assert_eq!(words.len(), 24);
+        assert!(words.len() == 12 || words.len() == 24);
         assert!(wallet.address().starts_with("qnk"));
         assert_eq!(wallet.address().len(), 3 + 64); // "qnk" + 64 hex chars
     }

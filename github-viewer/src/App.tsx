@@ -71,10 +71,14 @@ function App() {
   }
 
   function handleDownloadRepo() {
-    window.open(
-      'https://github.com/deme-plata/q-narwhalknight/archive/refs/heads/main.zip',
-      '_blank'
-    );
+    // Copy git clone command to clipboard and show notification
+    navigator.clipboard.writeText('git clone https://code.quillon.xyz/repo.git').then(() => {
+      const el = document.createElement('div');
+      el.className = 'fixed bottom-6 right-6 bg-cyan-500/20 border border-cyan-500/50 px-6 py-3 rounded-lg text-cyan-400 font-mono text-sm z-50 backdrop-blur-sm';
+      el.innerHTML = '&#x2705; Clone command copied to clipboard!<br/><code class="text-cyan-300">git clone https://code.quillon.xyz/repo.git</code>';
+      document.body.appendChild(el);
+      setTimeout(() => el.remove(), 4000);
+    });
   }
 
   if (loading) {
@@ -150,32 +154,79 @@ function App() {
             />
           ) : (
             <div className="flex-1 flex items-center justify-center">
-              <div className="text-center max-w-lg">
+              <div className="text-center max-w-2xl">
                 <div className="text-6xl mb-4">🔮</div>
-                <h2 className="text-2xl font-bold text-cyan-400 font-mono mb-2">
-                  Quillon Source Code Viewer
+                <h2 className="text-3xl font-bold text-cyan-400 font-mono mb-1">
+                  Q-NarwhalKnight
                 </h2>
-                <p className="text-gray-400 font-mono text-sm mb-6">
-                  Select a file from the explorer to view its contents
+                <p className="text-gray-500 font-mono text-sm mb-6">
+                  Quantum-Enhanced DAG-BFT Consensus &middot; v8.0.0-mainnet &middot; 80+ crates
                 </p>
-                <div className="grid grid-cols-2 gap-4 text-left">
-                  <div className="bg-cyan-500/10 p-4 rounded-lg border border-cyan-500/30">
-                    <div className="text-cyan-400 font-mono text-xs mb-1">Core Consensus</div>
-                    <div className="text-gray-300 font-mono text-xs">crates/q-dag-knight/</div>
+
+                {/* Quick Start Cards */}
+                <div className="grid grid-cols-3 gap-3 text-left mb-6">
+                  <div className="bg-cyan-500/10 p-4 rounded-lg border border-cyan-500/30 hover:border-cyan-500/60 transition-colors cursor-pointer group"
+                       onClick={() => handleFileSelect('crates/q-dag-knight/src/ordering_rules.rs')}>
+                    <div className="text-cyan-400 font-mono text-xs mb-1 group-hover:text-cyan-300">DAG-Knight Consensus</div>
+                    <div className="text-gray-400 font-mono text-[10px]">crates/q-dag-knight/</div>
                   </div>
-                  <div className="bg-magenta-500/10 p-4 rounded-lg border border-magenta-500/30">
-                    <div className="text-magenta-400 font-mono text-xs mb-1">API Server</div>
-                    <div className="text-gray-300 font-mono text-xs">crates/q-api-server/</div>
+                  <div className="bg-purple-500/10 p-4 rounded-lg border border-purple-500/30 hover:border-purple-500/60 transition-colors cursor-pointer group"
+                       onClick={() => handleFileSelect('crates/q-api-server/src/main.rs')}>
+                    <div className="text-purple-400 font-mono text-xs mb-1 group-hover:text-purple-300">API Server</div>
+                    <div className="text-gray-400 font-mono text-[10px]">crates/q-api-server/</div>
                   </div>
-                  <div className="bg-green-500/10 p-4 rounded-lg border border-green-500/30">
-                    <div className="text-green-400 font-mono text-xs mb-1">Crypto</div>
-                    <div className="text-gray-300 font-mono text-xs">crates/q-quantum-crypto/</div>
+                  <div className="bg-green-500/10 p-4 rounded-lg border border-green-500/30 hover:border-green-500/60 transition-colors cursor-pointer group"
+                       onClick={() => handleFileSelect('crates/q-miner/src/main.rs')}>
+                    <div className="text-green-400 font-mono text-xs mb-1 group-hover:text-green-300">Miner</div>
+                    <div className="text-gray-400 font-mono text-[10px]">crates/q-miner/</div>
                   </div>
-                  <div className="bg-yellow-500/10 p-4 rounded-lg border border-yellow-500/30">
-                    <div className="text-yellow-400 font-mono text-xs mb-1">Networking</div>
-                    <div className="text-gray-300 font-mono text-xs">crates/q-network/</div>
+                  <div className="bg-orange-500/10 p-4 rounded-lg border border-orange-500/30 hover:border-orange-500/60 transition-colors cursor-pointer group"
+                       onClick={() => handleFileSelect('crates/q-storage/src/lib.rs')}>
+                    <div className="text-orange-400 font-mono text-xs mb-1 group-hover:text-orange-300">Storage (RocksDB)</div>
+                    <div className="text-gray-400 font-mono text-[10px]">crates/q-storage/</div>
+                  </div>
+                  <div className="bg-yellow-500/10 p-4 rounded-lg border border-yellow-500/30 hover:border-yellow-500/60 transition-colors cursor-pointer group"
+                       onClick={() => handleFileSelect('crates/q-network/src/unified_network_manager.rs')}>
+                    <div className="text-yellow-400 font-mono text-xs mb-1 group-hover:text-yellow-300">P2P Network</div>
+                    <div className="text-gray-400 font-mono text-[10px]">crates/q-network/</div>
+                  </div>
+                  <div className="bg-pink-500/10 p-4 rounded-lg border border-pink-500/30 hover:border-pink-500/60 transition-colors cursor-pointer group"
+                       onClick={() => handleFileSelect('crates/q-crypto-advanced/src/lib.rs')}>
+                    <div className="text-pink-400 font-mono text-xs mb-1 group-hover:text-pink-300">Post-Quantum Crypto</div>
+                    <div className="text-gray-400 font-mono text-[10px]">crates/q-crypto-advanced/</div>
                   </div>
                 </div>
+
+                {/* MCP Integration Banner */}
+                <div className="bg-gradient-to-r from-cyan-500/10 via-purple-500/10 to-cyan-500/10 border border-cyan-500/30 rounded-xl p-5 text-left">
+                  <div className="flex items-center gap-3 mb-3">
+                    <div className="w-8 h-8 bg-gradient-to-br from-cyan-500 to-purple-500 rounded-lg flex items-center justify-center text-white text-sm font-bold">AI</div>
+                    <div>
+                      <div className="text-cyan-400 font-mono text-sm font-bold">Claude Code MCP Integration</div>
+                      <div className="text-gray-500 font-mono text-[10px]">Browse, search, and contribute using AI</div>
+                    </div>
+                  </div>
+                  <pre className="bg-[#0a0e27] rounded-lg p-3 text-[11px] font-mono overflow-x-auto border border-cyan-500/20">
+                    <span className="text-gray-500">// Add to ~/.claude/settings.json</span>{'\n'}
+                    <span className="text-cyan-300">{`"mcpServers": {`}</span>{'\n'}
+                    <span className="text-green-300">{`  "quillon-code": {`}</span>{'\n'}
+                    <span className="text-yellow-300">{`    "type": "sse",`}</span>{'\n'}
+                    <span className="text-yellow-300">{`    "url": "https://code.quillon.xyz/mcp/sse"`}</span>{'\n'}
+                    <span className="text-green-300">{`  }`}</span>{'\n'}
+                    <span className="text-cyan-300">{`}`}</span>
+                  </pre>
+                  <div className="flex gap-2 mt-3 flex-wrap">
+                    <span className="px-2 py-0.5 bg-cyan-500/20 text-cyan-400 rounded text-[10px] font-mono">read_file</span>
+                    <span className="px-2 py-0.5 bg-cyan-500/20 text-cyan-400 rounded text-[10px] font-mono">search_code</span>
+                    <span className="px-2 py-0.5 bg-cyan-500/20 text-cyan-400 rounded text-[10px] font-mono">list_branches</span>
+                    <span className="px-2 py-0.5 bg-cyan-500/20 text-cyan-400 rounded text-[10px] font-mono">view_diff</span>
+                    <span className="px-2 py-0.5 bg-green-500/20 text-green-400 rounded text-[10px] font-mono">submit_contribution</span>
+                  </div>
+                </div>
+
+                <p className="text-gray-600 font-mono text-xs mt-4">
+                  Select a file from the explorer or click a crate above to start browsing
+                </p>
               </div>
             </div>
           )}

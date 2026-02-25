@@ -2226,6 +2226,7 @@ export default function ExplorerScreen() {
       daily_target_qug: number;
       today_emitted_qug: number;
       today_blocks: number;
+      today_solutions?: number;
       today_deviation_pct: number;
       block_rate_bps: number;
       days_tracked: number;
@@ -2252,6 +2253,38 @@ export default function ExplorerScreen() {
       deviation_pct: number;
       cumulative_supply_qug: number;
     }>;
+    // v8.0.3: Rate measurement diagnostics for ultra-advanced mode
+    rate_diagnostics?: {
+      active_method: string;
+      confidence_pct: number;
+      window_rate_bps: number;
+      window_blocks: number;
+      window_elapsed_secs: number;
+      window_buckets: number;
+      cumulative_rate_bps: number;
+      cumulative_blocks: number;
+      cumulative_elapsed_secs: number;
+      block_timestamp_rate_bps: number;
+      block_timestamp_windows: number;
+      smoothed_rate_bps: number;
+      correction_factor: number;
+      correction_smoothing: number;
+      correction_max: number;
+      correction_min: number;
+      error_fraction_pct: number;
+      convergence_eta_secs: number | null;
+      actual_emission_rate_qug_per_hour: number;
+      target_emission_rate_qug_per_hour: number;
+      phase: string;
+    };
+    schedule?: {
+      era_0_annual: number;
+      era_0_daily: number;
+      era_1_annual: number;
+      halving_interval_years: number;
+      total_eras: number;
+      total_emission_years: number;
+    };
   } | null>(null);
 
   // Hashpower security state (v1.3.0-beta)
@@ -3244,6 +3277,7 @@ export default function ExplorerScreen() {
             // Live data from emission API
             const todayEmitted = emissionStats?.summary.today_emitted_qug ?? 0;
             const todayBlocks = emissionStats?.summary.today_blocks ?? 0;
+            const todaySolutions = emissionStats?.summary.today_solutions ?? 0;
             const todayDeviation = emissionStats?.summary.today_deviation_pct ?? 0;
             const blockRate = emissionStats?.summary.block_rate_bps ?? 0;
             const totalSupply = emissionStats?.summary.total_supply_qug ?? 0;
@@ -3282,7 +3316,7 @@ export default function ExplorerScreen() {
                       />
                     </div>
                     <div className="flex justify-between text-[10px] text-gray-500 mt-1">
-                      <span>{todayBlocks.toLocaleString()} blocks</span>
+                      <span>Height {todayBlocks.toLocaleString()}</span>
                       <span>Halving in {daysToHalving.toLocaleString()}d</span>
                     </div>
                     <div className="text-[10px] text-amber-400/60 mt-1">Click for full analytics</div>
@@ -3342,7 +3376,7 @@ export default function ExplorerScreen() {
                       <div className="bg-cyan-500/10 rounded-lg p-2.5 text-center border border-cyan-500/20">
                         <div className="text-[10px] text-gray-400 uppercase tracking-wider">Block Rate</div>
                         <div className="text-sm font-bold text-cyan-300 font-mono">{blockRate.toFixed(2)} bps</div>
-                        <div className="text-[9px] text-gray-500">{todayBlocks.toLocaleString()} blocks</div>
+                        <div className="text-[9px] text-gray-500">Height {todayBlocks.toLocaleString()} · {todaySolutions.toLocaleString()} solutions</div>
                       </div>
                       <div className="bg-purple-500/10 rounded-lg p-2.5 text-center border border-purple-500/20">
                         <div className="text-[10px] text-gray-400 uppercase tracking-wider">Block Reward</div>
@@ -3839,6 +3873,302 @@ export default function ExplorerScreen() {
                         })}
                       </div>
                     </div>
+
+                    {/* ═══ ROW 9: ULTRA-ADVANCED — Rate Measurement Diagnostics + Convergence Tracker ═══ */}
+                    {emissionStats?.rate_diagnostics && (() => {
+                      const rd = emissionStats.rate_diagnostics!;
+                      const confidenceColor = rd.confidence_pct >= 90 ? 'text-green-400' : rd.confidence_pct >= 60 ? 'text-yellow-300' : 'text-red-400';
+                      const confidenceBg = rd.confidence_pct >= 90 ? 'bg-green-500/10 border-green-500/20' : rd.confidence_pct >= 60 ? 'bg-yellow-500/10 border-yellow-500/20' : 'bg-red-500/10 border-red-500/20';
+                      const methodIcon = rd.active_method === 'sliding_window' ? '🎯' : rd.active_method === 'cumulative_wallclock' ? '⏱️' : '📐';
+                      const phaseColor = rd.phase === 'Converged' ? 'text-green-400' : rd.phase === 'Converging' ? 'text-cyan-300' : rd.phase === 'Startup' ? 'text-yellow-300' : 'text-gray-400';
+                      const emitRatio = rd.target_emission_rate_qug_per_hour > 0 ? rd.actual_emission_rate_qug_per_hour / rd.target_emission_rate_qug_per_hour : 0;
+                      const emitAccuracy = Math.min(emitRatio, 2 - emitRatio) * 100; // mirror around 100%
+                      const emitAccuracyColor = emitAccuracy >= 95 ? 'text-green-400' : emitAccuracy >= 80 ? 'text-yellow-300' : 'text-red-400';
+                      // Convergence ETA
+                      const etaStr = rd.convergence_eta_secs != null
+                        ? rd.convergence_eta_secs < 60 ? `${rd.convergence_eta_secs}s`
+                        : rd.convergence_eta_secs < 3600 ? `${Math.floor(rd.convergence_eta_secs / 60)}m ${rd.convergence_eta_secs % 60}s`
+                        : `${(rd.convergence_eta_secs / 3600).toFixed(1)}h`
+                        : '∞';
+
+                      return (
+                        <div className="bg-gradient-to-br from-gray-900/80 to-gray-800/40 rounded-xl p-4 mb-3 border border-cyan-500/20 relative overflow-hidden">
+                          {/* Animated scanner line */}
+                          <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-cyan-400/60 to-transparent"
+                               style={{ animation: 'pulse 3s ease-in-out infinite' }} />
+
+                          <div className="flex items-center justify-between mb-3">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[10px] font-bold text-cyan-300 uppercase tracking-widest">Ultra-Advanced Diagnostics</span>
+                              <span className={`px-1.5 py-0.5 rounded text-[8px] font-bold ${confidenceBg} ${confidenceColor} border`}>
+                                {rd.confidence_pct.toFixed(0)}% CONFIDENCE
+                              </span>
+                            </div>
+                            <div className={`flex items-center gap-1 text-[9px] font-mono ${phaseColor}`}>
+                              <span className="relative flex h-2 w-2">
+                                <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${rd.phase === 'Converged' ? 'bg-green-400' : 'bg-cyan-400'}`} />
+                                <span className={`relative inline-flex rounded-full h-2 w-2 ${rd.phase === 'Converged' ? 'bg-green-500' : 'bg-cyan-500'}`} />
+                              </span>
+                              {rd.phase}
+                            </div>
+                          </div>
+
+                          {/* Top row: Emission Accuracy Score + Convergence ETA */}
+                          <div className="grid grid-cols-2 gap-2 mb-3">
+                            {/* Emission Accuracy — Big number */}
+                            <div className="bg-black/30 rounded-lg p-3 border border-gray-700/30 text-center">
+                              <div className="text-[9px] text-gray-500 uppercase tracking-wider mb-1">Emission Accuracy</div>
+                              <div className={`text-3xl font-black font-mono ${emitAccuracyColor}`}>
+                                {emitAccuracy.toFixed(2)}%
+                              </div>
+                              <div className="text-[8px] text-gray-500 mt-1">
+                                {rd.actual_emission_rate_qug_per_hour.toFixed(4)} / {rd.target_emission_rate_qug_per_hour.toFixed(4)} QUG/hr
+                              </div>
+                              {/* Accuracy gauge bar */}
+                              <div className="mt-2 h-1.5 bg-gray-700/50 rounded-full overflow-hidden">
+                                <div className={`h-full rounded-full transition-all duration-1000 ${emitAccuracy >= 95 ? 'bg-gradient-to-r from-green-500 to-emerald-400' : emitAccuracy >= 80 ? 'bg-gradient-to-r from-yellow-500 to-amber-400' : 'bg-gradient-to-r from-red-500 to-rose-400'}`}
+                                     style={{ width: `${Math.min(emitAccuracy, 100)}%` }} />
+                              </div>
+                              <div className="flex justify-between text-[7px] text-gray-600 mt-0.5">
+                                <span>0%</span>
+                                <span>50%</span>
+                                <span className="text-green-600">95%+</span>
+                                <span>100%</span>
+                              </div>
+                            </div>
+
+                            {/* Convergence ETA + PI Controller State */}
+                            <div className="bg-black/30 rounded-lg p-3 border border-gray-700/30 text-center">
+                              <div className="text-[9px] text-gray-500 uppercase tracking-wider mb-1">Convergence ETA</div>
+                              <div className={`text-3xl font-black font-mono ${rd.convergence_eta_secs != null && rd.convergence_eta_secs < 300 ? 'text-green-400' : 'text-cyan-300'}`}>
+                                {etaStr}
+                              </div>
+                              <div className="text-[8px] text-gray-500 mt-1">
+                                Error: {rd.error_fraction_pct >= 0 ? '+' : ''}{rd.error_fraction_pct.toFixed(2)}% from budget
+                              </div>
+                              {/* PI controller mini visualization */}
+                              <div className="mt-2 flex items-center gap-1">
+                                <span className="text-[7px] text-gray-500 w-6">PI:</span>
+                                <div className="flex-1 relative h-3 bg-gray-700/40 rounded-full overflow-hidden">
+                                  {/* Zero line in center */}
+                                  <div className="absolute left-1/2 top-0 bottom-0 w-px bg-white/20" />
+                                  {/* Error bar */}
+                                  {(() => {
+                                    const errClamped = Math.max(-100, Math.min(100, rd.error_fraction_pct));
+                                    const barWidth = Math.abs(errClamped) / 2;
+                                    const barLeft = errClamped >= 0 ? 50 : 50 - barWidth;
+                                    const barColor = Math.abs(errClamped) < 5 ? 'bg-green-500' : Math.abs(errClamped) < 20 ? 'bg-yellow-500' : 'bg-red-500';
+                                    return <div className={`absolute top-0.5 bottom-0.5 ${barColor} rounded-full`} style={{ left: `${barLeft}%`, width: `${barWidth}%` }} />;
+                                  })()}
+                                </div>
+                                <span className="text-[7px] text-gray-500 w-8 text-right">×{rd.correction_factor.toFixed(2)}</span>
+                              </div>
+                              <div className="flex justify-between text-[7px] text-gray-600 mt-0.5">
+                                <span>-100%</span>
+                                <span>0</span>
+                                <span>+100%</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Middle row: 3-Method Rate Comparison */}
+                          <div className="bg-black/20 rounded-lg p-3 mb-3 border border-gray-700/20">
+                            <div className="text-[9px] text-gray-400 uppercase tracking-wider mb-2 flex items-center gap-1">
+                              Rate Measurement Methods
+                              <span className="text-[8px] text-gray-600">(active: {methodIcon} {rd.active_method.replace(/_/g, ' ')})</span>
+                            </div>
+                            <div className="grid grid-cols-3 gap-2">
+                              {/* Method 1: Sliding Window */}
+                              <div className={`rounded-lg p-2 border text-center ${rd.active_method === 'sliding_window' ? 'bg-cyan-500/10 border-cyan-500/30' : 'bg-gray-800/40 border-gray-700/30'}`}>
+                                <div className="text-[8px] text-gray-400 flex items-center justify-center gap-0.5">
+                                  🎯 Sliding Window
+                                  {rd.active_method === 'sliding_window' && <span className="text-cyan-400 font-bold">◀</span>}
+                                </div>
+                                <div className={`text-sm font-bold font-mono mt-0.5 ${rd.active_method === 'sliding_window' ? 'text-cyan-300' : 'text-gray-400'}`}>
+                                  {rd.window_rate_bps > 0 ? rd.window_rate_bps.toFixed(4) : '—'} bps
+                                </div>
+                                <div className="text-[7px] text-gray-500 mt-0.5">
+                                  {rd.window_blocks} blks / {rd.window_elapsed_secs > 0 ? (rd.window_elapsed_secs / 60).toFixed(0) : '—'}m
+                                </div>
+                                <div className="text-[7px] text-gray-600">{rd.window_buckets} buckets (10s each)</div>
+                              </div>
+
+                              {/* Method 2: Cumulative Wall-clock */}
+                              <div className={`rounded-lg p-2 border text-center ${rd.active_method === 'cumulative_wallclock' ? 'bg-purple-500/10 border-purple-500/30' : 'bg-gray-800/40 border-gray-700/30'}`}>
+                                <div className="text-[8px] text-gray-400 flex items-center justify-center gap-0.5">
+                                  ⏱️ Cumulative
+                                  {rd.active_method === 'cumulative_wallclock' && <span className="text-purple-400 font-bold">◀</span>}
+                                </div>
+                                <div className={`text-sm font-bold font-mono mt-0.5 ${rd.active_method === 'cumulative_wallclock' ? 'text-purple-300' : 'text-gray-400'}`}>
+                                  {rd.cumulative_rate_bps > 0 ? rd.cumulative_rate_bps.toFixed(4) : '—'} bps
+                                </div>
+                                <div className="text-[7px] text-gray-500 mt-0.5">
+                                  {rd.cumulative_blocks} blks / {rd.cumulative_elapsed_secs > 0 ? (rd.cumulative_elapsed_secs / 3600).toFixed(1) : '—'}h
+                                </div>
+                                <div className="text-[7px] text-gray-600">since node boot</div>
+                              </div>
+
+                              {/* Method 3: Block Timestamp */}
+                              <div className={`rounded-lg p-2 border text-center ${rd.active_method === 'block_timestamp' ? 'bg-amber-500/10 border-amber-500/30' : 'bg-gray-800/40 border-gray-700/30'}`}>
+                                <div className="text-[8px] text-gray-400 flex items-center justify-center gap-0.5">
+                                  📐 Block Timestamp
+                                  {rd.active_method === 'block_timestamp' && <span className="text-amber-400 font-bold">◀</span>}
+                                </div>
+                                <div className={`text-sm font-bold font-mono mt-0.5 ${rd.active_method === 'block_timestamp' ? 'text-amber-300' : 'text-gray-400'}`}>
+                                  {rd.block_timestamp_rate_bps > 0 ? rd.block_timestamp_rate_bps.toFixed(4) : '—'} bps
+                                </div>
+                                <div className="text-[7px] text-gray-500 mt-0.5">
+                                  {rd.block_timestamp_windows} windows
+                                </div>
+                                <div className="text-[7px] text-gray-600">chain timestamps</div>
+                              </div>
+                            </div>
+
+                            {/* Rate comparison SVG sparkline — all 3 rates as lines */}
+                            <svg viewBox="0 0 300 40" className="w-full mt-2">
+                              {/* Background grid */}
+                              {[0, 10, 20, 30, 40].map(y => (
+                                <line key={y} x1="0" y1={y} x2="300" y2={y} stroke="#1F2937" strokeWidth="0.5" />
+                              ))}
+                              {/* Max rate for scaling */}
+                              {(() => {
+                                const rates = [rd.window_rate_bps, rd.cumulative_rate_bps, rd.block_timestamp_rate_bps].filter(r => r > 0);
+                                const maxR = Math.max(...rates, 0.5);
+                                const minR = 0;
+                                const scale = (r: number) => 38 - ((r - minR) / (maxR - minR)) * 34;
+                                return (
+                                  <>
+                                    {/* Window rate — cyan dot */}
+                                    {rd.window_rate_bps > 0 && (
+                                      <circle cx="100" cy={scale(rd.window_rate_bps)} r="4" fill="#06B6D4" opacity="0.8">
+                                        <animate attributeName="r" values="4;5;4" dur="2s" repeatCount="indefinite" />
+                                      </circle>
+                                    )}
+                                    {/* Cumulative — purple dot */}
+                                    {rd.cumulative_rate_bps > 0 && (
+                                      <circle cx="150" cy={scale(rd.cumulative_rate_bps)} r="4" fill="#A855F7" opacity="0.8" />
+                                    )}
+                                    {/* Block timestamp — amber dot */}
+                                    {rd.block_timestamp_rate_bps > 0 && (
+                                      <circle cx="200" cy={scale(rd.block_timestamp_rate_bps)} r="4" fill="#F59E0B" opacity="0.8" />
+                                    )}
+                                    {/* Smoothed rate — white dashed line */}
+                                    <line x1="20" y1={scale(rd.smoothed_rate_bps)} x2="280" y2={scale(rd.smoothed_rate_bps)}
+                                      stroke="white" strokeWidth="0.5" strokeDasharray="4,3" opacity="0.4" />
+                                    <text x="282" y={scale(rd.smoothed_rate_bps) + 2} fill="white" fontSize="5" opacity="0.5">smoothed</text>
+                                    {/* Labels */}
+                                    <text x="100" y={scale(rd.window_rate_bps) - 6} fill="#06B6D4" fontSize="5" textAnchor="middle">window</text>
+                                    <text x="150" y={scale(rd.cumulative_rate_bps) - 6} fill="#A855F7" fontSize="5" textAnchor="middle">cumul.</text>
+                                    <text x="200" y={scale(rd.block_timestamp_rate_bps) - 6} fill="#F59E0B" fontSize="5" textAnchor="middle">timestamp</text>
+                                  </>
+                                );
+                              })()}
+                            </svg>
+                          </div>
+
+                          {/* Bottom row: PI Controller Deep-Dive + Emission Budget Burn Rate */}
+                          <div className="grid grid-cols-2 gap-2">
+                            {/* PI Controller Parameters */}
+                            <div className="bg-black/20 rounded-lg p-2.5 border border-gray-700/20">
+                              <div className="text-[9px] text-gray-400 uppercase tracking-wider mb-1.5">PI Controller Parameters</div>
+                              <div className="space-y-1">
+                                {[
+                                  { label: 'Correction Factor', value: rd.correction_factor.toFixed(6), color: Math.abs(rd.correction_factor - 1.0) < 0.1 ? 'text-green-400' : 'text-yellow-300' },
+                                  { label: 'Smoothing (α)', value: rd.correction_smoothing.toFixed(2), color: 'text-gray-300' },
+                                  { label: 'Max Bound', value: rd.correction_max.toFixed(1), color: 'text-gray-300' },
+                                  { label: 'Min Bound', value: rd.correction_min.toFixed(2), color: 'text-gray-300' },
+                                  { label: 'Budget Error', value: `${rd.error_fraction_pct >= 0 ? '+' : ''}${rd.error_fraction_pct.toFixed(4)}%`, color: Math.abs(rd.error_fraction_pct) < 5 ? 'text-green-400' : 'text-yellow-300' },
+                                ].map(({ label, value, color }) => (
+                                  <div key={label} className="flex items-center justify-between">
+                                    <span className="text-[8px] text-gray-500">{label}</span>
+                                    <span className={`text-[9px] font-mono ${color}`}>{value}</span>
+                                  </div>
+                                ))}
+                              </div>
+                              {/* Formula */}
+                              <div className="mt-2 pt-1.5 border-t border-gray-700/30 text-[7px] text-gray-600 font-mono">
+                                CF = 1.0 - α × (actual - target) / target
+                              </div>
+                            </div>
+
+                            {/* Emission Budget Burn Rate */}
+                            <div className="bg-black/20 rounded-lg p-2.5 border border-gray-700/20">
+                              <div className="text-[9px] text-gray-400 uppercase tracking-wider mb-1.5">Emission Budget Health</div>
+                              {(() => {
+                                const targetPerHr = rd.target_emission_rate_qug_per_hour;
+                                const actualPerHr = rd.actual_emission_rate_qug_per_hour;
+                                const burnRate = targetPerHr > 0 ? actualPerHr / targetPerHr : 0;
+                                const burnColor = Math.abs(burnRate - 1.0) < 0.05 ? 'text-green-400' : Math.abs(burnRate - 1.0) < 0.15 ? 'text-yellow-300' : 'text-red-400';
+                                const burnLabel = burnRate > 1.05 ? 'Over-burning' : burnRate < 0.95 ? 'Under-burning' : 'On budget';
+                                const budgetDev = emissionStats?.summary.budget_deviation_pct ?? 0;
+                                const cumulTarget = emissionStats?.summary.cumulative_target_qug ?? 0;
+                                const cumulActual = emissionStats?.summary.total_supply_qug ?? 0;
+                                return (
+                                  <div className="space-y-1.5">
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-[8px] text-gray-500">Burn Rate</span>
+                                      <span className={`text-[10px] font-bold font-mono ${burnColor}`}>{(burnRate * 100).toFixed(1)}%</span>
+                                    </div>
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-[8px] text-gray-500">Status</span>
+                                      <span className={`text-[8px] font-bold ${burnColor}`}>{burnLabel}</span>
+                                    </div>
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-[8px] text-gray-500">QUG/hour (actual)</span>
+                                      <span className="text-[9px] font-mono text-gray-300">{actualPerHr.toFixed(4)}</span>
+                                    </div>
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-[8px] text-gray-500">QUG/hour (target)</span>
+                                      <span className="text-[9px] font-mono text-gray-300">{targetPerHr.toFixed(4)}</span>
+                                    </div>
+                                    {/* Budget deviation bar */}
+                                    <div className="pt-1 border-t border-gray-700/30">
+                                      <div className="flex items-center justify-between mb-0.5">
+                                        <span className="text-[7px] text-gray-500">Cumulative</span>
+                                        <span className={`text-[8px] font-mono ${Math.abs(budgetDev) < 5 ? 'text-green-400' : 'text-yellow-300'}`}>
+                                          {budgetDev >= 0 ? '+' : ''}{budgetDev.toFixed(2)}%
+                                        </span>
+                                      </div>
+                                      <div className="flex gap-1 items-center">
+                                        <div className="flex-1 h-1 bg-blue-500/30 rounded-full" />
+                                        <span className="text-[6px] text-gray-600">{cumulTarget.toFixed(1)}</span>
+                                      </div>
+                                      <div className="flex gap-1 items-center mt-0.5">
+                                        <div className="flex-1 h-1 rounded-full" style={{
+                                          width: `${cumulTarget > 0 ? Math.min((cumulActual / cumulTarget) * 100, 150) : 0}%`,
+                                          background: Math.abs(budgetDev) < 5 ? '#22C55E' : budgetDev > 0 ? '#F59E0B' : '#06B6D4'
+                                        }} />
+                                        <span className="text-[6px] text-gray-600">{cumulActual.toFixed(1)}</span>
+                                      </div>
+                                    </div>
+                                  </div>
+                                );
+                              })()}
+                            </div>
+                          </div>
+
+                          {/* Health summary footer */}
+                          <div className="mt-3 pt-2 border-t border-gray-700/30 flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                              {[
+                                { label: 'Rate', ok: rd.confidence_pct >= 80 },
+                                { label: 'Budget', ok: Math.abs(rd.error_fraction_pct) < 10 },
+                                { label: 'PI', ok: Math.abs(rd.correction_factor - 1.0) < 0.5 },
+                                { label: 'Emission', ok: emitAccuracy >= 85 },
+                              ].map(({ label, ok }) => (
+                                <div key={label} className="flex items-center gap-0.5">
+                                  <span className={`text-[8px] ${ok ? 'text-green-400' : 'text-red-400'}`}>{ok ? '●' : '○'}</span>
+                                  <span className="text-[7px] text-gray-500">{label}</span>
+                                </div>
+                              ))}
+                            </div>
+                            <span className="text-[7px] text-gray-600 font-mono">
+                              v8.0.3 · sliding-window · {rd.window_buckets}×10s = {(rd.window_elapsed_secs / 60).toFixed(0)}min
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })()}
 
                     {/* ═══ FOOTER: Mathematical Proof + Whitepaper ═══ */}
                     <div className="pt-3 border-t border-gray-700/50">

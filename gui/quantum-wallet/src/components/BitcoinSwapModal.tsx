@@ -66,7 +66,7 @@ const BitcoinSwapModal = ({ isOpen, onClose, walletAddress }: BitcoinSwapModalPr
 
   // Exchange rates — fetch dynamically
   const [btcUsdRate, setBtcUsdRate] = useState(97000);
-  const [qugUsdRate, setQugUsdRate] = useState(42.5);
+  const [qugUsdRate, setQugUsdRate] = useState(3000);
 
   useEffect(() => {
     // Fetch QUG price from oracle
@@ -94,7 +94,7 @@ const BitcoinSwapModal = ({ isOpen, onClose, walletAddress }: BitcoinSwapModalPr
     if (isOpen) fetchRates();
   }, [isOpen]);
 
-  const BTC_QNK_RATE = qugUsdRate > 0 ? btcUsdRate / qugUsdRate : 2282; // 1 BTC = ~2282 QNK at $97k/$42.50
+  const BTC_QNK_RATE = qugUsdRate > 0 ? btcUsdRate / qugUsdRate : 32; // 1 BTC = ~32 QNK at $97k/$3000
   const BTC_USD_RATE = btcUsdRate;
 
   const handleAmountChange = (value: string, field: 'btc' | 'qnk') => {

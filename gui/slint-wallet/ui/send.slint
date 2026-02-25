@@ -1,147 +1,553 @@
 import { Theme, QButton, QInput, Card } from "theme.slint";
 
+export struct AddressEntry {
+    label: string,
+    address: string,
+}
+
 export component SendScreen inherits Rectangle {
     in-out property <string> recipient: "";
     in-out property <string> amount: "";
     in-out property <string> memo: "";
+    in-out property <string> seed-phrase: "";
+    in-out property <string> contact-label: "";
     in property <string> balance-display: "0.00 QUG";
     in-out property <string> status-message: "";
     in property <bool> sending: false;
+    in property <bool> needs-seed-phrase: false;
+    in property <[AddressEntry]> contacts: [];
+    in-out property <bool> show-confirm: false;
+    in property <string> confirm-amount: "";
+    in property <string> confirm-recipient: "";
+    in-out property <bool> contact-saved: false;
+    property <bool> contacts-expanded: false;
+
+    // Token selector
+    in property <[string]> available-tokens: ["QUG"];
+    in-out property <string> selected-token: "QUG";
+    property <bool> token-selector-open: false;
+
+    // Fee display
+    in property <string> current-fee: "0.001";
+    in property <string> fee-tier: "FAST";
 
     callback send-transaction();
     callback go-back();
+    callback save-contact();
+    callback select-token(string);
 
     background: Theme.bg-primary;
 
-    VerticalLayout {
-        padding: Theme.spacing-md;
-        spacing: Theme.spacing-md;
-
-        // Header
-        HorizontalLayout {
-            height: 40px;
+    // ── Main content ──
+    Flickable {
+        VerticalLayout {
+            padding: Theme.spacing-md;
             spacing: Theme.spacing-sm;
 
-            Rectangle {
-                width: 40px;
-                border-radius: Theme.radius-sm;
-                background: back-touch.has-hover ? Theme.bg-hover : transparent;
+            // Header
+            HorizontalLayout {
+                height: 40px;
+                spacing: Theme.spacing-sm;
 
-                back-touch := TouchArea {
-                    clicked => { root.go-back(); }
+                Rectangle {
+                    width: 40px;
+                    border-radius: Theme.radius-sm;
+                    background: back-touch.has-hover ? Theme.bg-hover : transparent;
+
+                    back-touch := TouchArea {
+                        clicked => { root.go-back(); }
+                    }
+
+                    Text {
+                        text: "<";
+                        color: Theme.text-primary;
+                        font-size: Theme.font-xl;
+                        vertical-alignment: center;
+                        horizontal-alignment: center;
+                    }
                 }
 
                 Text {
-                    text: "<";
+                    text: "Send " + root.selected-token;
                     color: Theme.text-primary;
                     font-size: Theme.font-xl;
+                    font-weight: 700;
                     vertical-alignment: center;
-                    horizontal-alignment: center;
                 }
             }
 
-            Text {
-                text: "Send QUG";
-                color: Theme.text-primary;
-                font-size: Theme.font-xl;
-                font-weight: 700;
-                vertical-alignment: center;
+            // Token selector (only if multiple tokens available)
+            if root.available-tokens.length > 1 : Card {
+                VerticalLayout {
+                    padding: Theme.spacing-sm;
+                    spacing: 2px;
+
+                    // Clickable header showing current selection
+                    Rectangle {
+                        height: 36px;
+
+                        HorizontalLayout {
+                            padding-left: Theme.spacing-md;
+                            padding-right: Theme.spacing-md;
+                            alignment: space-between;
+
+                            Text {
+                                text: "Coin: " + root.selected-token;
+                                color: Theme.accent-cyan;
+                                font-size: Theme.font-md;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+
+                            Text {
+                                text: root.token-selector-open ? "-" : "+";
+                                color: Theme.text-muted;
+                                font-size: Theme.font-lg;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        TouchArea {
+                            clicked => { root.token-selector-open = !root.token-selector-open; }
+                        }
+                    }
+
+                    // Token options (expanded)
+                    if root.token-selector-open : VerticalLayout {
+                        spacing: 1px;
+
+                        for tok in root.available-tokens : Rectangle {
+                            height: 38px;
+                            border-radius: Theme.radius-sm;
+                            background: tok == root.selected-token
+                                ? Theme.accent-blue.with-alpha(0.15)
+                                : (tok-touch.has-hover ? Theme.bg-hover : transparent);
+
+                            tok-touch := TouchArea {
+                                clicked => {
+                                    root.selected-token = tok;
+                                    root.token-selector-open = false;
+                                    root.select-token(tok);
+                                }
+                            }
+
+                            HorizontalLayout {
+                                padding-left: Theme.spacing-md;
+                                spacing: Theme.spacing-sm;
+
+                                Text {
+                                    text: tok;
+                                    color: tok == root.selected-token ? Theme.accent-blue : Theme.text-primary;
+                                    font-size: Theme.font-md;
+                                    font-weight: tok == root.selected-token ? 600 : 400;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Balance info
+            Card {
+                height: 50px;
+                HorizontalLayout {
+                    padding-left: Theme.spacing-md;
+                    padding-right: Theme.spacing-md;
+                    alignment: space-between;
+
+                    Text {
+                        text: "Available Balance";
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-sm;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.balance-display;
+                        color: Theme.accent-green;
+                        font-size: Theme.font-md;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            // ── Address Book / Contacts ──
+            Card {
+                VerticalLayout {
+                    padding: Theme.spacing-sm;
+                    spacing: 2px;
+
+                    // Clickable header
+                    Rectangle {
+                        height: 30px;
+
+                        HorizontalLayout {
+                            padding-left: Theme.spacing-sm;
+
+                            Text {
+                                text: "Contacts";
+                                color: Theme.accent-cyan;
+                                font-size: Theme.font-sm;
+                                font-weight: 500;
+                                vertical-alignment: center;
+                            }
+
+                            if root.contacts.length > 0 : Text {
+                                text: " (" + root.contacts.length + ")";
+                                color: Theme.text-muted;
+                                font-size: Theme.font-sm;
+                                vertical-alignment: center;
+                            }
+
+                            Rectangle { horizontal-stretch: 1; }
+
+                            Text {
+                                text: root.contacts-expanded ? "-" : "+";
+                                color: Theme.text-muted;
+                                font-size: Theme.font-lg;
+                                vertical-alignment: center;
+                                width: 24px;
+                                horizontal-alignment: center;
+                            }
+                        }
+
+                        TouchArea {
+                            clicked => { root.contacts-expanded = !root.contacts-expanded; }
+                        }
+                    }
+
+                    // Contact list (expanded)
+                    if root.contacts-expanded : VerticalLayout {
+                        spacing: 1px;
+
+                        if root.contacts.length == 0 : Text {
+                            text: "No saved contacts. Send a transaction to save the recipient.";
+                            color: Theme.text-muted;
+                            font-size: Theme.font-xs;
+                            wrap: word-wrap;
+                            horizontal-alignment: center;
+                        }
+
+                        for contact in root.contacts : Rectangle {
+                            height: 38px;
+                            border-radius: Theme.radius-sm;
+                            background: ct.has-hover ? Theme.bg-hover : transparent;
+
+                            ct := TouchArea {
+                                clicked => {
+                                    root.recipient = contact.address;
+                                    root.contacts-expanded = false;
+                                }
+                            }
+
+                            HorizontalLayout {
+                                padding-left: Theme.spacing-md;
+                                padding-right: Theme.spacing-md;
+                                spacing: Theme.spacing-sm;
+
+                                Text {
+                                    text: contact.label;
+                                    color: Theme.accent-cyan;
+                                    font-size: Theme.font-sm;
+                                    font-weight: 500;
+                                    vertical-alignment: center;
+                                    width: 90px;
+                                }
+
+                                Text {
+                                    text: contact.address;
+                                    color: Theme.text-muted;
+                                    font-size: 10px;
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Recipient
+            Card {
+                VerticalLayout {
+                    padding: Theme.spacing-md;
+                    spacing: Theme.spacing-sm;
+
+                    Text {
+                        text: "Recipient Address";
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-sm;
+                    }
+                    QInput {
+                        text <=> root.recipient;
+                        placeholder: "qnk...";
+                    }
+                }
+            }
+
+            // Amount
+            Card {
+                VerticalLayout {
+                    padding: Theme.spacing-md;
+                    spacing: Theme.spacing-sm;
+
+                    Text {
+                        text: "Amount (" + root.selected-token + ")";
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-sm;
+                    }
+                    QInput {
+                        text <=> root.amount;
+                        placeholder: "0.00";
+                    }
+                }
+            }
+
+            // Memo
+            Card {
+                VerticalLayout {
+                    padding: Theme.spacing-md;
+                    spacing: Theme.spacing-sm;
+
+                    Text {
+                        text: "Memo (optional)";
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-sm;
+                    }
+                    QInput {
+                        text <=> root.memo;
+                        placeholder: "Payment for...";
+                    }
+                }
+            }
+
+            // Seed phrase (only for OAuth2 first-time)
+            if root.needs-seed-phrase : Card {
+                VerticalLayout {
+                    padding: Theme.spacing-md;
+                    spacing: Theme.spacing-sm;
+
+                    Text {
+                        text: "Seed Phrase (one-time, remembered for session)";
+                        color: #f59e0b;
+                        font-size: Theme.font-sm;
+                    }
+                    QInput {
+                        text <=> root.seed-phrase;
+                        placeholder: "Enter your 12 or 24 word seed phrase...";
+                    }
+                }
+            }
+
+            // Fee display
+            Card {
+                height: 44px;
+                HorizontalLayout {
+                    padding-left: Theme.spacing-md;
+                    padding-right: Theme.spacing-md;
+                    alignment: space-between;
+
+                    HorizontalLayout {
+                        spacing: Theme.spacing-xs;
+                        Text {
+                            text: "Fee:";
+                            color: Theme.text-muted;
+                            font-size: Theme.font-sm;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: root.current-fee + " QUG";
+                            color: Theme.text-secondary;
+                            font-size: Theme.font-sm;
+                            font-weight: 500;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    Rectangle {
+                        width: 64px;
+                        height: 24px;
+                        border-radius: 12px;
+                        background: root.fee-tier == "INSTANT" ? Theme.accent-green.with-alpha(0.2)
+                            : (root.fee-tier == "FAST" ? Theme.accent-blue.with-alpha(0.2)
+                            : Theme.accent-yellow.with-alpha(0.2));
+
+                        VerticalLayout {
+                            alignment: center;
+                            Text {
+                                text: root.fee-tier;
+                                color: root.fee-tier == "INSTANT" ? Theme.accent-green
+                                    : (root.fee-tier == "FAST" ? Theme.accent-blue
+                                    : Theme.accent-yellow);
+                                font-size: 10px;
+                                font-weight: 600;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Error message (only errors, success shows confirm modal)
+            if root.status-message != "" : Text {
+                text: root.status-message;
+                color: Theme.accent-red;
+                font-size: Theme.font-sm;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+            }
+
+            // Send button
+            QButton {
+                label: root.sending ? "Sending..." : "Send " + root.selected-token;
+                button-color: Theme.accent-green;
+                enabled: !root.sending;
+                clicked => { root.send-transaction(); }
             }
         }
+    }
 
-        // Balance info
-        Card {
-            height: 50px;
+    // ═══ Confirm Overlay (on top of everything) ═══
+    if root.show-confirm : Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        background: #000000.with-alpha(0.65);
+
+        // Block clicks from reaching content below
+        TouchArea {}
+
+        VerticalLayout {
+            alignment: center;
+
             HorizontalLayout {
-                padding-left: Theme.spacing-md;
-                padding-right: Theme.spacing-md;
-                alignment: space-between;
+                alignment: center;
 
-                Text {
-                    text: "Available Balance";
-                    color: Theme.text-secondary;
-                    font-size: Theme.font-sm;
-                    vertical-alignment: center;
-                }
-                Text {
-                    text: root.balance-display;
-                    color: Theme.accent-green;
-                    font-size: Theme.font-md;
-                    font-weight: 600;
-                    vertical-alignment: center;
+                Rectangle {
+                    width: 320px;
+                    background: Theme.bg-card;
+                    border-radius: Theme.radius-lg;
+                    border-width: 2px;
+                    border-color: Theme.accent-green;
+
+                    VerticalLayout {
+                        padding: Theme.spacing-lg;
+                        spacing: Theme.spacing-md;
+
+                        // Green checkmark
+                        HorizontalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 56px;
+                                height: 56px;
+                                border-radius: 28px;
+                                background: Theme.accent-green.with-alpha(0.15);
+
+                                Text {
+                                    text: "OK";
+                                    color: Theme.accent-green;
+                                    font-size: 20px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: center;
+                                }
+                            }
+                        }
+
+                        Text {
+                            text: "Transaction Confirmed!";
+                            color: Theme.text-primary;
+                            font-size: Theme.font-lg;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                        }
+
+                        Text {
+                            text: root.confirm-amount + " " + root.selected-token;
+                            color: Theme.accent-green;
+                            font-size: Theme.font-xl;
+                            font-weight: 600;
+                            horizontal-alignment: center;
+                        }
+
+                        Text {
+                            text: "To: " + root.confirm-recipient;
+                            color: Theme.text-secondary;
+                            font-size: 10px;
+                            horizontal-alignment: center;
+                            overflow: elide;
+                        }
+
+                        // Save contact section
+                        if !root.contact-saved : Card {
+                            VerticalLayout {
+                                padding: Theme.spacing-sm;
+                                spacing: Theme.spacing-xs;
+
+                                Text {
+                                    text: "Save to contacts?";
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.font-xs;
+                                }
+
+                                HorizontalLayout {
+                                    spacing: Theme.spacing-xs;
+
+                                    QInput {
+                                        text <=> root.contact-label;
+                                        placeholder: "Contact name";
+                                        horizontal-stretch: 1;
+                                    }
+
+                                    Rectangle {
+                                        width: 64px;
+                                        height: 44px;
+                                        border-radius: Theme.radius-sm;
+                                        background: save-ta.has-hover ? Theme.accent-blue.darker(15%) : Theme.accent-blue;
+
+                                        save-ta := TouchArea {
+                                            clicked => { root.save-contact(); }
+                                        }
+
+                                        Text {
+                                            text: "Save";
+                                            color: Theme.text-primary;
+                                            font-size: Theme.font-sm;
+                                            font-weight: 600;
+                                            vertical-alignment: center;
+                                            horizontal-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if root.contact-saved : Text {
+                            text: "Contact saved!";
+                            color: Theme.accent-green;
+                            font-size: Theme.font-sm;
+                            horizontal-alignment: center;
+                        }
+
+                        // Done button
+                        QButton {
+                            label: "Done";
+                            button-color: Theme.accent-green;
+                            clicked => {
+                                root.amount = "";
+                                root.memo = "";
+                                root.contact-label = "";
+                                root.contact-saved = false;
+                                root.show-confirm = false;
+                                root.status-message = "";
+                            }
+                        }
+                    }
                 }
             }
-        }
-
-        // Recipient
-        Card {
-            VerticalLayout {
-                padding: Theme.spacing-md;
-                spacing: Theme.spacing-sm;
-
-                Text {
-                    text: "Recipient Address";
-                    color: Theme.text-secondary;
-                    font-size: Theme.font-sm;
-                }
-                QInput {
-                    text <=> root.recipient;
-                    placeholder: "qnk...";
-                }
-            }
-        }
-
-        // Amount
-        Card {
-            VerticalLayout {
-                padding: Theme.spacing-md;
-                spacing: Theme.spacing-sm;
-
-                Text {
-                    text: "Amount (QUG)";
-                    color: Theme.text-secondary;
-                    font-size: Theme.font-sm;
-                }
-                QInput {
-                    text <=> root.amount;
-                    placeholder: "0.00";
-                }
-            }
-        }
-
-        // Memo
-        Card {
-            VerticalLayout {
-                padding: Theme.spacing-md;
-                spacing: Theme.spacing-sm;
-
-                Text {
-                    text: "Memo (optional)";
-                    color: Theme.text-secondary;
-                    font-size: Theme.font-sm;
-                }
-                QInput {
-                    text <=> root.memo;
-                    placeholder: "Payment for...";
-                }
-            }
-        }
-
-        // Status message
-        if root.status-message != "" : Text {
-            text: root.status-message;
-            color: root.status-message == "Transaction sent!" ? Theme.accent-green : Theme.accent-red;
-            font-size: Theme.font-sm;
-            horizontal-alignment: center;
-            wrap: word-wrap;
-        }
-
-        // Send button
-        QButton {
-            label: root.sending ? "Sending..." : "Send Transaction";
-            button-color: Theme.accent-green;
-            enabled: !root.sending;
-            clicked => { root.send-transaction(); }
         }
     }
 }

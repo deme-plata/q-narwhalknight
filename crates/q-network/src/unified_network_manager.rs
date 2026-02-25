@@ -42,6 +42,10 @@ lazy_static::lazy_static! {
     /// Bootstrap endpoint health cache for latency-based ordering
     pub static ref BOOTSTRAP_HEALTH_CACHE: crate::peer_latency::BootstrapHealthCache =
         crate::peer_latency::BootstrapHealthCache::new();
+    /// v8.4.0: Global peer bandwidth tiers from handshake
+    /// Maps peer_id string → reported bandwidth in Mbps
+    /// Read by turbo_sync gravity-assist to seed initial bandwidth estimates
+    pub static ref PEER_BANDWIDTH_TIERS: DashMap<String, u32> = DashMap::new();
 }
 
 use crate::connection_manager::{PeerInfo, DiscoveryMethod};
@@ -77,31 +81,33 @@ use q_types::QBlock;
 
 /// 🔧 v4.2.0-beta: MULTIPLE HARDCODED BOOTSTRAP PEERS - Mainnet safety
 /// This ensures nodes can connect even when one bootstrap node is down
-/// Server Beta (185.182.185.227) = Primary production bootstrap
-/// Server Gamma (109.205.176.60) = Secondary production bootstrap
+/// v8.4.0: 1Gbit servers listed FIRST for faster initial sync
+/// Server Gamma (109.205.176.60) = 1Gbit (preferred for sync)
+/// Server Delta (5.79.79.158) = 1Gbit (preferred for sync)
+/// Server Beta (185.182.185.227) = 100Mbit (DHT coordinator, gossipsub anchor)
 pub const HARDCODED_BOOTSTRAP_PEERS: &[&str] = &[
-    // Server Beta - Primary production bootstrap (quillon.xyz) - Mainnet
-    "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWBHTC9FhwwXmvH7YA17YHTLdcxbtLWg2U5xEtxSeqX7jc",
-    // Server Gamma - Secondary production bootstrap (109.205.176.60) - Mainnet
-    "/ip4/109.205.176.60/tcp/9001/p2p/12D3KooWFqPX9TkvF43eyDeH9wwxYTSfnBn8AobLJeA7xRnmpPcv",
-    // Server Delta - Tertiary production bootstrap (5.79.79.158) - Mainnet
-    "/ip4/5.79.79.158/tcp/9001/p2p/12D3KooWQZZAyLA4VQmwNozCBTZXXoWfvKE86ebbaPhSKu6XVmJJ",
-    // Server Alpha - Quaternary bootstrap (161.35.219.10) - Mainnet
-    "/ip4/161.35.219.10/tcp/9001/p2p/12D3KooWPwin4nJcU9PzsxNgUVXj5e6zDnACr84H7RZ1XzmnARsY",
+    // v8.4.0: 1Gbit servers FIRST — new nodes sync from these, offloading Beta
+    // Server Gamma - 1Gbit (preferred for sync)
+    "/ip4/109.205.176.60/tcp/9001/p2p/12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH",
+    // Server Delta - 1Gbit (preferred for sync)
+    "/ip4/5.79.79.158/tcp/9001/p2p/12D3KooWLJJRvqo6mBoHLpgxVbGKfW3Jv39ziU4kz1adKFv93JbK",
+    // Server Beta - 100Mbit (DHT coordinator, gossipsub anchor)
+    "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH",
 ];
 
 /// v4.2.0-beta: Bootstrap HTTP API endpoints for dynamic peer ID discovery
 /// Used when hardcoded peer IDs are stale or missing (e.g., new server first boot)
 /// Also used to discover correct P2P port when it differs from hardcoded 9001
+/// v8.4.0: 1Gbit servers first for faster HTTP discovery and state sync
 pub const BOOTSTRAP_HTTP_ENDPOINTS: &[&str] = &[
-    "http://185.182.185.227:8080",
-    "http://109.205.176.60:8080",
-    "http://5.79.79.158:8080",
-    "http://161.35.219.10:8080",
+    "http://109.205.176.60:8080",   // Gamma - 1Gbit
+    "http://5.79.79.158:8080",      // Delta - 1Gbit
+    "http://185.182.185.227:8080",  // Beta  - 100Mbit
+    "http://161.35.219.10:8080",    // Alpha - 1Gbit (canary)
 ];
 
 /// Legacy single bootstrap peer constant (for backwards compatibility)
-pub const HARDCODED_BOOTSTRAP_PEER: &str = "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWBHTC9FhwwXmvH7YA17YHTLdcxbtLWg2U5xEtxSeqX7jc";
+pub const HARDCODED_BOOTSTRAP_PEER: &str = "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH";
 
 /// v5.1.0: Load bootstrap peers from config.toml in data directory
 fn load_config_bootstrap_peers(data_dir: &str) -> Vec<String> {
@@ -1036,6 +1042,9 @@ pub struct UnifiedNetworkManager {
     /// v1.3.3-beta: Retry queue for failed sync requests with exponential backoff
     /// Stores (height, retry_count, next_retry_time) for failed heights that should be retried
     sync_retry_queue: Arc<std::sync::Mutex<Vec<(u64, u8, std::time::Instant)>>>,
+    /// v1.0.2-safe: Track strike count for chronically slow peers
+    /// After 5 strikes in 60s, disconnect the peer to free internal libp2p send buffers
+    slow_peer_strikes: DashMap<PeerId, (u32, std::time::Instant)>,
 }
 
 // SAFETY: UnifiedNetworkManager is Sync because:
@@ -1294,15 +1303,25 @@ impl UnifiedNetworkManager {
         // 🔥 v2.0.0: Configure connection limits (libp2p 0.56)
         use libp2p::connection_limits::{ConnectionLimits, Behaviour as ConnLimitsBehaviour};
 
+        // v8.4.0: Bootstrap nodes get higher connection limits to handle more peers
+        let is_bootstrap = std::env::var("Q_IS_BOOTSTRAP").unwrap_or_default() == "1";
+        let (max_established_total, max_established_incoming) = if is_bootstrap {
+            (500, 400)  // Bootstrap: handle more peers (1Gbit servers have bandwidth)
+        } else {
+            (300, 256)  // Regular nodes: current limits
+        };
+
         let limits = ConnectionLimits::default()
             .with_max_pending_incoming(Some(64))
             .with_max_pending_outgoing(Some(64))
-            .with_max_established_incoming(Some(256))
+            .with_max_established_incoming(Some(max_established_incoming as u32))
             .with_max_established_outgoing(Some(256))
             .with_max_established_per_peer(Some(8))
-            .with_max_established(Some(300));  // 🔥 v2.0.0: Total connection cap for memory safety
+            .with_max_established(Some(max_established_total as u32));
 
-        info!("🔒 Connection limits configured: max 300 total, 256 established connections, 8 per peer");
+        info!("🔒 Connection limits configured: max {} total, {} incoming, 8 per peer{}",
+              max_established_total, max_established_incoming,
+              if is_bootstrap { " (BOOTSTRAP MODE)" } else { "" });
 
         // 🔥 v1.0.17-beta: Build swarm using SwarmBuilder pattern
         use libp2p::SwarmBuilder;
@@ -1414,6 +1433,13 @@ impl UnifiedNetworkManager {
                     .and_then(|v| v.parse::<u64>().ok())
                     .unwrap_or(default_heartbeat_ms)
                     .max(50).min(1000);  // Clamp to safe range
+
+                // v8.4.0: Bootstrap servers are network infrastructure — increase mesh capacity
+                let (default_mesh_n, default_flood) = if is_bootstrap {
+                    (default_mesh_n.max(16), true) // Bootstrap: higher mesh, always flood
+                } else {
+                    (default_mesh_n, default_flood)
+                };
 
                 let mesh_n = std::env::var("Q_GOSSIPSUB_MESH_N")
                     .ok()
@@ -1720,15 +1746,34 @@ impl UnifiedNetworkManager {
                 warn!("   Set Q_EXTERNAL_WSS_ADDRESS=/dns4/quillon.xyz/tcp/9443/wss");
             }
 
-            // 🌐 WebSocket listeners for browser clients (same port as TCP)
-            let ws_ipv4_addr = format!("/ip4/0.0.0.0/tcp/{}/ws", p2p_port).parse()?;
+            // 🌐 v8.2.4: WebSocket listener on SEPARATE port (fixes SO_REUSEPORT race)
+            // Previously WS shared port 9001 with TCP — SO_REUSEPORT routed all browser
+            // connections to TCP listener, causing 100% WebSocket handshake failures.
+            // Fix: Use Q_WS_PORT env (default: p2p_port + 1, i.e. 9002) for WS only.
+            let ws_port = std::env::var("Q_WS_PORT")
+                .ok()
+                .and_then(|s| s.parse::<u16>().ok())
+                .unwrap_or(p2p_port + 1);
+            let ws_ipv4_addr = format!("/ip4/0.0.0.0/tcp/{}/ws", ws_port).parse()?;
             match swarm.listen_on(ws_ipv4_addr) {
                 Ok(listener_id) => {
-                    info!("🌐 [LISTENER] ✅ WebSocket IPv4 listener started successfully: {:?}", listener_id);
-                    info!("   Address: ws://0.0.0.0:{}/ws (for browser clients)", p2p_port);
+                    info!("🌐 [LISTENER] ✅ WebSocket IPv4 listener started on SEPARATE port: {:?}", listener_id);
+                    info!("   Address: ws://0.0.0.0:{}/ws (for browser clients)", ws_port);
+                    info!("   TCP (node-to-node): port {}", p2p_port);
+                    info!("   WS  (browser P2P):  port {}", ws_port);
                 }
                 Err(e) => {
-                    warn!("⚠️  [LISTENER] WebSocket IPv4 listener failed (not critical for node-to-node): {:?}", e);
+                    warn!("⚠️  [LISTENER] WebSocket IPv4 listener failed on port {}: {:?}", ws_port, e);
+                    // Fallback: try same port as TCP (old behavior)
+                    let ws_fallback = format!("/ip4/0.0.0.0/tcp/{}/ws", p2p_port).parse()?;
+                    match swarm.listen_on(ws_fallback) {
+                        Ok(lid) => {
+                            info!("🌐 [LISTENER] ✅ WebSocket fallback on shared port {}: {:?}", p2p_port, lid);
+                        }
+                        Err(e2) => {
+                            warn!("⚠️  [LISTENER] WebSocket fallback also failed: {:?}", e2);
+                        }
+                    }
                 }
             }
         } else {
@@ -2071,6 +2116,8 @@ impl UnifiedNetworkManager {
             tor_enabled,
             // v1.3.3-beta: Exponential backoff retry queue for failed sync requests
             sync_retry_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
+            // v1.0.2-safe: SlowPeer strike tracking for disconnect-on-chronic-failure
+            slow_peer_strikes: DashMap::new(),
         })
     }
 
@@ -2154,10 +2201,15 @@ impl UnifiedNetworkManager {
                     // Retrieve the stored response channel
                     if let Some(channel) = self.pending_response_channels.lock().unwrap().remove(&async_req_id) {
                         let block_count = response.blocks.len();
+                        let height_range = if block_count > 0 {
+                            format!("{}-{}", response.start_height, response.end_height)
+                        } else {
+                            "empty".to_string()
+                        };
                         if let Err(e) = self.swarm.behaviour_mut().block_sync.send_response(channel, response) {
                             error!("❌ [BLOCK-PACK ASYNC] Failed to send response for request {}: {:?}", async_req_id, e);
                         } else {
-                            info!("✅ [BLOCK-PACK ASYNC] Sent {} blocks for async request {}", block_count, async_req_id);
+                            info!("✅ [BLOCK-PACK ASYNC] Sent {} blocks (heights {}) for request {}", block_count, height_range, async_req_id);
                         }
                     } else {
                         warn!("⚠️ [BLOCK-PACK ASYNC] No pending channel for request {} (may have timed out)", async_req_id);
@@ -2308,10 +2360,15 @@ impl UnifiedNetworkManager {
                                 }
                             }
 
-                          for bootstrap_url in &discovery_urls {
+                          // v8.4.0: Order discovery URLs by health cache (lowest latency + highest success first)
+                          let discovery_url_refs: Vec<&str> = discovery_urls.iter().map(|s| s.as_str()).collect();
+                          let ordered_urls = BOOTSTRAP_HEALTH_CACHE.get_ordered_endpoints(&discovery_url_refs);
+
+                          for bootstrap_url in &ordered_urls {
                             if reconnect_attempted { break; }
                             info!("🔄 [AUTO-RECONNECT] Trying bootstrap endpoint: {}", bootstrap_url);
                                 let url = format!("{}/api/v1/status", bootstrap_url);
+                                let req_start = std::time::Instant::now();
                                 match reqwest::Client::new()
                                     .get(&url)
                                     .timeout(std::time::Duration::from_secs(5))
@@ -2343,6 +2400,13 @@ impl UnifiedNetworkManager {
                                                                 } else {
                                                                     info!("✅ [AUTO-RECONNECT] Dial initiated to fresh bootstrap");
                                                                     reconnect_attempted = true;
+                                                                    // v8.4.0: Record success for health-based ordering
+                                                                    let rtt = req_start.elapsed();
+                                                                    let pid_str = json.get("data")
+                                                                        .and_then(|d| d.get("peer_id"))
+                                                                        .and_then(|p| p.as_str())
+                                                                        .unwrap_or("unknown");
+                                                                    BOOTSTRAP_HEALTH_CACHE.record_success(bootstrap_url, rtt, pid_str);
 
                                                                     // Update stored bootstrap peers with fresh address
                                                                     if let Some(peer_id) = addr.iter().find_map(|p| {
@@ -2380,9 +2444,13 @@ impl UnifiedNetworkManager {
                                     }
                                     Ok(response) => {
                                         warn!("⚠️ [AUTO-RECONNECT] Bootstrap URL returned status: {}", response.status());
+                                        // v8.4.0: Record failure for health-based ordering
+                                        BOOTSTRAP_HEALTH_CACHE.record_failure(bootstrap_url);
                                     }
                                     Err(e) => {
                                         warn!("⚠️ [AUTO-RECONNECT] Failed to reach {}: {}", bootstrap_url, e);
+                                        // v8.4.0: Record failure for health-based ordering
+                                        BOOTSTRAP_HEALTH_CACHE.record_failure(bootstrap_url);
                                     }
                                 }
                           } // end for bootstrap_url in discovery_urls
@@ -2395,8 +2463,28 @@ impl UnifiedNetworkManager {
                     } else {
                         // 🔧 v2.4.8: Reset disconnection counter when connected
                         consecutive_no_peers = 0;
-                        info!("✅ [P2P HEALTH] {} connected peer(s), {} established - Network healthy",
-                              peer_count, established);
+
+                        // v8.3.0: Check if we have outbound connections to bootstrap.
+                        // With only inbound peers, request-response can't initiate block downloads.
+                        let bootstrap_peers = self.bootstrap_peers.read().await;
+                        let bootstrap_connected = bootstrap_peers.keys()
+                            .filter(|pid| **pid != self.local_peer_id && self.swarm.is_connected(pid))
+                            .count();
+
+                        if bootstrap_connected == 0 && established > 0 {
+                            warn!("⚠️ [P2P v8.3.0] {} peers but NOT connected to any bootstrap node!", established);
+                            warn!("   Sync may stall. Dialing bootstrap peers...");
+                            for (pid, addr) in bootstrap_peers.iter() {
+                                if *pid == self.local_peer_id { continue; }
+                                if self.swarm.is_connected(pid) { continue; }
+                                info!("🔄 [OUTBOUND DIAL] Dialing bootstrap {} at {}", pid, addr);
+                                let _ = self.swarm.dial(addr.clone());
+                            }
+                        }
+                        drop(bootstrap_peers);
+
+                        info!("✅ [P2P HEALTH] {} peer(s), {} established, {} bootstrap connected",
+                              peer_count, established, bootstrap_connected);
                     }
                 }
                 // Process network commands from API
@@ -2978,8 +3066,30 @@ impl UnifiedNetworkManager {
                 warn!("⚠️ [GOSSIPSUB MESH] Peer {} does not support gossipsub protocol!", peer_id);
                 warn!("   This peer cannot participate in mesh-based message propagation");
             }
+            // v1.0.2-safe: Handle SlowPeer — disconnect after 5 strikes in 60s
+            // Frees internal libp2p send buffers for chronically slow peers,
+            // preventing backpressure from propagating to the entire event loop
+            QNarwhalEvent::Gossipsub(gossipsub::Event::SlowPeer { peer_id, ref failed_messages }) => {
+                let now = std::time::Instant::now();
+                let mut entry = self.slow_peer_strikes.entry(peer_id).or_insert((0, now));
+                if now.duration_since(entry.1) > Duration::from_secs(60) {
+                    // Reset window
+                    *entry = (1, now);
+                } else {
+                    entry.0 += 1;
+                }
+                let strikes = entry.0;
+                drop(entry);
+                if strikes >= 5 {
+                    warn!("🔌 Disconnecting slow peer {} ({} strikes, {:?})", peer_id, strikes, failed_messages);
+                    let _ = self.swarm.disconnect_peer_id(peer_id);
+                    self.slow_peer_strikes.remove(&peer_id);
+                } else {
+                    debug!("⚠️ SlowPeer {} strike {}/5: {:?}", peer_id, strikes, failed_messages);
+                }
+            }
             QNarwhalEvent::Gossipsub(event) => {
-                // Log all gossipsub events at INFO level for debugging mesh formation
+                // Log all other gossipsub events at INFO level for debugging mesh formation
                 info!("📢 [GOSSIPSUB] Event: {:?}", event);
             }
             QNarwhalEvent::BlockSync(block_sync_event) => {
@@ -3062,9 +3172,16 @@ impl UnifiedNetworkManager {
                             }
                             Message::Response { request_id, response } => {
                                 // v1.0.45-beta: Update known network height for progress display
+                                // v8.1.6: Sanity check — reject cross-chain height poisoning
+                                // A rogue peer (e.g. old mainnet2026.1.1 at 204K) can claim a high
+                                // peer_height in its block-pack response while returning 0 blocks.
                                 if response.peer_height > 0 {
                                     let current = self.known_network_height.load(std::sync::atomic::Ordering::Relaxed);
-                                    if response.peer_height > current {
+                                    let max_reasonable = (current * 5).max(current + 50_000);
+                                    if response.peer_height > max_reasonable {
+                                        warn!("🚫 [BLOCK-PACK] Rejecting suspicious peer_height {} from {} (known: {}, max: {})",
+                                              response.peer_height, peer, current, max_reasonable);
+                                    } else if response.peer_height > current {
                                         self.known_network_height.store(response.peer_height, std::sync::atomic::Ordering::Relaxed);
                                     }
                                 }
@@ -3173,43 +3290,35 @@ impl UnifiedNetworkManager {
                         }
                     }
                     Event::OutboundFailure { peer, request_id, error, connection_id: _ } => {
-                        // 🔧 v1.0.89-beta: Enhanced debugging for DialFailure
-                        error!("❌ [BLOCK-PACK] ================================================");
-                        error!("❌ [BLOCK-PACK] OUTBOUND FAILURE to peer: {}", peer);
-                        error!("❌ [BLOCK-PACK] Request ID: {:?}", request_id);
-                        error!("❌ [BLOCK-PACK] Error type: {:?}", error);
+                        // v8.1.5: Reduced log verbosity — was spamming ERROR for every failed block-pack
+                        // Only the main failure line stays at ERROR; diagnostics at WARN/DEBUG
+                        let error_str = format!("{:?}", error);
+                        warn!("⚠️ [BLOCK-PACK] Outbound failure to {}: {}", peer, error_str);
+                        debug!("   [BLOCK-PACK] Request ID: {:?}", request_id);
 
-                        // Log connection state for this peer
+                        // Log connection state at debug level
                         let is_connected = self.swarm.is_connected(&peer);
-                        error!("❌ [BLOCK-PACK] Peer connected?: {}", is_connected);
+                        debug!("   [BLOCK-PACK] Peer connected?: {}", is_connected);
 
-                        // Log all addresses we have for this peer in the address book
-                        // Note: No direct API to get addresses from swarm, so we check our own cache
-                        if let Ok(peer_addrs) = self.peer_addresses.try_read() {
-                            if let Some(addrs) = peer_addrs.get(&peer) {
-                                error!("❌ [BLOCK-PACK] Our cached addresses for peer: {:?}", addrs);
-                            } else {
-                                error!("❌ [BLOCK-PACK] NO cached addresses for peer!");
+                        if !is_connected {
+                            // Only log detailed diagnostics when peer is actually disconnected
+                            if let Ok(peer_addrs) = self.peer_addresses.try_read() {
+                                if peer_addrs.get(&peer).is_none() {
+                                    warn!("   [BLOCK-PACK] NO cached addresses for peer {}", peer);
+                                }
                             }
                         }
 
-                        // Log network state
-                        let conn_info = self.swarm.network_info();
-                        error!("❌ [BLOCK-PACK] Network state:");
-                        error!("   - Pending outgoing: {}", conn_info.connection_counters().num_pending_outgoing());
-                        error!("   - Established: {}", conn_info.connection_counters().num_established());
-                        error!("   - Total connections: {:?}", conn_info.connection_counters());
-
-                        // Log all connected peers
-                        let connected_peers: Vec<_> = self.swarm.connected_peers().collect();
-                        error!("❌ [BLOCK-PACK] Currently connected peers ({}):", connected_peers.len());
-                        for cp in &connected_peers {
-                            error!("   - {}", cp);
+                        // v8.1.5: Don't count InvalidData errors as peer failures
+                        // These are usually version mismatches or oversized responses, not misbehavior
+                        let is_parse_error = error_str.contains("InvalidData")
+                            || error_str.contains("parse response")
+                            || error_str.contains("too large");
+                        if is_parse_error {
+                            debug!("   [BLOCK-PACK] Parse/size error — NOT counting as peer failure");
+                        } else {
+                            self.mark_peer_failure(peer);
                         }
-                        error!("❌ [BLOCK-PACK] ================================================");
-
-                        // ✅ v0.9.73-beta: Mark peer as failed (timeout/incompatible)
-                        self.mark_peer_failure(peer);
 
                         // v1.3.3-beta: Add failed heights to retry queue with exponential backoff
                         // Instead of just clearing outstanding requests, schedule them for retry
@@ -3288,6 +3397,11 @@ impl UnifiedNetworkManager {
                                     match &result {
                                         crate::handshake_validator::HandshakeResult::Success => {
                                             info!("✅ [HANDSHAKE] Peer {} validated successfully", peer);
+                                            // v8.4.0: Store peer's reported bandwidth tier for gravity-assist
+                                            if request.bandwidth_tier_mbps > 0 {
+                                                PEER_BANDWIDTH_TIERS.insert(peer.to_string(), request.bandwidth_tier_mbps);
+                                                info!("📡 [BANDWIDTH] Peer {} reports {} Mbps", peer, request.bandwidth_tier_mbps);
+                                            }
                                         }
                                         crate::handshake_validator::HandshakeResult::IncompatibleProtocol { ours, theirs } => {
                                             warn!("❌ [HANDSHAKE] Peer {} has incompatible protocol: ours={}, theirs={}",
@@ -4933,15 +5047,18 @@ impl UnifiedNetworkManager {
                     None  // No peer specified, will use fallback
                 };
 
-                // v2.1.7-DELTA-V: FALLBACK - If specified peer is unreachable, use ANY connected peer
+                // v8.2.0: ROUND-ROBIN FALLBACK - Rotate through connected peers
+                // v2.1.7 always picked connected_peers[0] which caused sync stall
+                // when that one peer returned 0 blocks. Now we rotate through all
+                // connected peers using an atomic counter.
+                static FALLBACK_PEER_IDX: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
                 let final_target = if target_peer.is_some() {
                     target_peer
                 } else if !connected_peers.is_empty() {
-                    warn!("🔄 [v2.1.7 FALLBACK] Specified peer unreachable, using connected peer instead");
-                    for (i, peer) in connected_peers.iter().take(5).enumerate() {
-                        info!("   Available peer #{}: {}", i + 1, peer);
-                    }
-                    Some(connected_peers[0])
+                    let idx = FALLBACK_PEER_IDX.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % connected_peers.len();
+                    warn!("🔄 [v8.2.0 ROUND-ROBIN FALLBACK] Specified peer unreachable, using connected peer #{}/{}", idx + 1, connected_peers.len());
+                    info!("   Selected: {}", connected_peers[idx]);
+                    Some(connected_peers[idx])
                 } else {
                     error!("❌ [TURBO SYNC DIRECT] No connected peers available!");
                     error!("   Ensure bootstrap node is reachable: 185.182.185.227:9001");

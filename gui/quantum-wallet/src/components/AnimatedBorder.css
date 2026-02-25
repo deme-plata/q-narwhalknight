@@ -199,6 +199,11 @@
   padding: calc(10% + 20px) 11% 12% 11%;
 }
 
+/* Carbon Fiber - extra top padding to clear medallion ornament */
+[data-theme="carbonfiber"] .animated-border-container > .border-content {
+  padding: calc(6% + 40px) 8% 17% 8%;
+}
+
 /* Edge (Frameless) - no frame, content fills entire screen */
 [data-theme="frameless"] .animated-border-container > .border-content {
   padding: 0 !important;
@@ -624,6 +629,45 @@
     linear-gradient(to right, black 0%, black 7%, transparent 10%),
     linear-gradient(to left, black 0%, black 7%, transparent 10%);
   mask-composite: add;
+}
+
+/* ═══ Carbon Fiber - metallic corners with top medallion ═══ */
+[data-theme="carbonfiber"] .border-frame-corners {
+  -webkit-mask-image:
+    /* Top corners - metallic panel brackets */
+    radial-gradient(ellipse 34% 34% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 34% 34% at 100% 0%, black 50%, transparent 100%),
+    /* Bottom corners */
+    radial-gradient(ellipse 30% 40% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 100% 100%, black 50%, transparent 100%),
+    /* Top center medallion */
+    radial-gradient(ellipse 22% 22% at 50% 0%, black 50%, transparent 100%),
+    /* Bottom center emblem */
+    radial-gradient(ellipse 22% 24% at 50% 100%, black 50%, transparent 100%),
+    /* Top edge bar - metallic rail */
+    linear-gradient(to bottom, black 0%, black 4.5%, transparent 7%);
+  -webkit-mask-composite: source-over;
+
+  mask-image:
+    radial-gradient(ellipse 34% 34% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 34% 34% at 100% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 100% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 22% 22% at 50% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 22% 24% at 50% 100%, black 50%, transparent 100%),
+    linear-gradient(to bottom, black 0%, black 4.5%, transparent 7%);
+  mask-composite: add;
+}
+
+/* Carbon Fiber - subtle red/chrome pulse on frame */
+@keyframes carbonPulse {
+  0%, 100% { filter: brightness(1) saturate(1.05) drop-shadow(0 0 6px rgba(220, 38, 38, 0.08)); }
+  50% { filter: brightness(1.12) saturate(1.25) drop-shadow(0 0 14px rgba(220, 38, 38, 0.2)); }
+}
+
+[data-theme="carbonfiber"] .border-frame img,
+[data-theme="carbonfiber"] .border-frame-corners img {
+  animation: carbonPulse 5s ease-in-out infinite !important;
 }
 
 /* Ornate - dark obsidian with gold gleam animation */

@@ -8,7 +8,7 @@
 
 use axum::{
     async_trait,
-    extract::{FromRequestParts, State},
+    extract::{FromRequestParts, OriginalUri, State},
     http::{request::Parts, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -198,7 +198,14 @@ impl FromRequestParts<std::sync::Arc<crate::AppState>> for AuthenticatedWallet {
 
         // Generate authentication challenge message
         // Message format: SHA3-256(address + timestamp + request_path)
-        let backend_path = parts.uri.path();
+        // v8.2.8: Use OriginalUri to get the full path BEFORE axum nest() strips the prefix.
+        // Without this, nested routes like /api/v1/email/send get stripped to /send,
+        // causing a path mismatch with the frontend which signs the full path.
+        let backend_path = parts
+            .extensions
+            .get::<OriginalUri>()
+            .map(|ou| ou.path().to_string())
+            .unwrap_or_else(|| parts.uri.path().to_string());
         let mut hasher = Sha3_256::new();
         hasher.update(&address);
         hasher.update(&auth.timestamp.to_le_bytes());
@@ -287,8 +294,8 @@ fn verify_ed25519(auth: &AuthHeader, address: &Address, message: &[u8]) -> Resul
     public_key
         .verify(message, &signature)
         .map_err(|e| {
-            // v3.4.5: Log signature verification failures for debugging
-            tracing::debug!(
+            // v8.1.3: Upgraded to warn! for visibility in production logs
+            tracing::warn!(
                 "🔐 [AUTH FAIL] Ed25519 signature verification failed for address {}: {:?}",
                 hex::encode(address),
                 e

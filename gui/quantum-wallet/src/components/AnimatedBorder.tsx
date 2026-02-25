@@ -24,6 +24,7 @@ export type BorderTheme =
   | 'cyberpunk'
   | 'gothic'
   | 'ornate'
+  | 'carbonfiber'
   | 'frameless';
 
 export interface ThemeConfig {
@@ -125,6 +126,11 @@ export const THEME_LIST: ThemeConfig[] = [
     bgCard: 'rgba(22, 19, 15, 0.38)', font: '"Uncial Antiqua", cursive',
   },
   {
+    id: 'carbonfiber', name: 'Carbon Fiber', accent: '#dc2626', accentAlt: '#a0a0a8',
+    textPrimary: '#e0dfe0', textSecondary: '#8a8a90', borderGlow: '#991b1b',
+    bgCard: 'rgba(14, 14, 16, 0.4)', font: '"Barlow", sans-serif',
+  },
+  {
     id: 'frameless', name: 'Edge', accent: '#6366f1', accentAlt: '#818cf8',
     textPrimary: '#e0e7ff', textSecondary: '#a5b4fc', borderGlow: '#4f46e5',
     bgCard: 'rgba(30, 27, 75, 0.15)', font: '"Inter", system-ui, sans-serif',
@@ -197,6 +203,7 @@ const AnimatedBorder: React.FC<AnimatedBorderProps> = ({
       'Syncopate:wght@400;700',
       'Cormorant+Garamond:wght@400;600;700',
       'Uncial+Antiqua',
+      'Barlow:wght@400;600;700',
     ];
     const link = document.createElement('link');
     link.rel = 'stylesheet';

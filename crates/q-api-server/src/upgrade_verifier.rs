@@ -374,7 +374,7 @@ async fn check_version_compatibility(reference_url: &str) -> (bool, String) {
             Ok(version) => {
                 let local_version = env!("CARGO_PKG_VERSION");
                 let local_network = std::env::var("Q_NETWORK_ID")
-                    .unwrap_or_else(|_| "mainnet2026.2".to_string());
+                    .unwrap_or_else(|_| "mainnet-genesis".to_string());
 
                 if let Some(data) = version.data {
                     let ref_network = data.network_id.unwrap_or_default();

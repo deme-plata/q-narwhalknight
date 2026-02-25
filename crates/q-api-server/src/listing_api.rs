@@ -748,3 +748,677 @@ pub async fn listing_confirm_stripe(
 pub struct StripeConfirmRequest {
     pub payment_intent_id: String,
 }
+
+// ============================================================================
+// v8.2.8: XLIST CROWDFUNDING CAMPAIGNS
+// ============================================================================
+//
+// Community crowdfunding for exchange listings.
+// Anyone can contribute QUG, QUGUSD, or Stripe USD toward a shared goal.
+//
+// THE GAME:
+//   Phase 1 "Funding"  — progress bar fills, leaderboard ranks contributors
+//   Phase 2 "Endgame"  — target hit! Celebration + listing purchase triggered
+//   Phase 3 "Perks"    — contributors unlock tier-based rewards
+//
+// CONTRIBUTOR TIERS (based on % of total raised):
+//   Diamond (≥5%)   — 3× airdrop multiplier, governance vote, name on listing announcement
+//   Gold    (≥1%)   — 2× airdrop multiplier, governance vote
+//   Silver  (≥0.1%) — 1.5× airdrop multiplier
+//   Bronze  (any)   — 1× airdrop multiplier, supporter badge
+//
+// EARLY BIRD: First 50 contributors get +0.5× bonus multiplier regardless of amount
+
+const CAMPAIGN_PREFIX: &str = "xlist_campaign_";
+const CONTRIBUTION_PREFIX: &str = "xlist_contrib_";
+
+/// A crowdfunding campaign targeting a specific exchange listing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListingCampaign {
+    pub campaign_id: String,
+    pub exchange_name: String,
+    pub exchange_logo: Option<String>,
+    pub target_usd: f64,
+    pub raised_usd: f64,
+    pub contributor_count: u32,
+    pub early_bird_slots: u32,
+    pub early_bird_claimed: u32,
+    pub status: CampaignStatus,
+    pub tier: ListingTier,
+    pub description: String,
+    pub perks: Vec<PerkTier>,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub funded_at: Option<u64>,
+    pub listed_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CampaignStatus {
+    /// Accepting contributions
+    Funding,
+    /// Target reached, processing listing
+    Funded,
+    /// Exchange listing confirmed
+    Listed,
+    /// Campaign cancelled, refunds available
+    Cancelled,
+}
+
+/// A single contribution to a campaign
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Contribution {
+    pub contribution_id: String,
+    pub campaign_id: String,
+    pub wallet: String,
+    pub amount_usd: f64,
+    pub payment_method: PaymentMethod,
+    pub raw_amount: String,
+    pub stripe_payment_intent_id: Option<String>,
+    pub is_early_bird: bool,
+    pub created_at: u64,
+}
+
+/// Perk tier definition
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PerkTier {
+    pub name: String,
+    pub min_percent: f64,
+    pub airdrop_multiplier: f64,
+    pub governance_vote: bool,
+    pub badge: String,
+    pub perks: Vec<String>,
+}
+
+/// Contributor summary with computed perks
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContributorSummary {
+    pub wallet: String,
+    pub total_usd: f64,
+    pub contribution_count: u32,
+    pub percent_of_total: f64,
+    pub tier_name: String,
+    pub airdrop_multiplier: f64,
+    pub is_early_bird: bool,
+    pub rank: u32,
+    pub badges: Vec<String>,
+}
+
+fn default_perks() -> Vec<PerkTier> {
+    vec![
+        PerkTier {
+            name: "Diamond".into(),
+            min_percent: 5.0,
+            airdrop_multiplier: 3.0,
+            governance_vote: true,
+            badge: "💎".into(),
+            perks: vec![
+                "3× airdrop multiplier on listing".into(),
+                "Governance vote on next exchange".into(),
+                "Name in listing announcement".into(),
+                "VIP Discord role".into(),
+                "Priority access to future campaigns".into(),
+            ],
+        },
+        PerkTier {
+            name: "Gold".into(),
+            min_percent: 1.0,
+            airdrop_multiplier: 2.0,
+            governance_vote: true,
+            badge: "🥇".into(),
+            perks: vec![
+                "2× airdrop multiplier on listing".into(),
+                "Governance vote on next exchange".into(),
+                "Gold Discord role".into(),
+            ],
+        },
+        PerkTier {
+            name: "Silver".into(),
+            min_percent: 0.1,
+            airdrop_multiplier: 1.5,
+            governance_vote: false,
+            badge: "🥈".into(),
+            perks: vec![
+                "1.5× airdrop multiplier on listing".into(),
+                "Silver Discord role".into(),
+            ],
+        },
+        PerkTier {
+            name: "Bronze".into(),
+            min_percent: 0.0,
+            airdrop_multiplier: 1.0,
+            governance_vote: false,
+            badge: "🥉".into(),
+            perks: vec![
+                "1× airdrop multiplier".into(),
+                "Supporter badge".into(),
+            ],
+        },
+    ]
+}
+
+fn compute_contributor_tier(percent: f64, perks: &[PerkTier]) -> (&PerkTier, f64) {
+    for perk in perks {
+        if percent >= perk.min_percent {
+            return (perk, perk.airdrop_multiplier);
+        }
+    }
+    (&perks[perks.len() - 1], 1.0)
+}
+
+// Persistence helpers
+async fn persist_campaign(state: &AppState, campaign: &ListingCampaign) {
+    let key = format!("{}{}", CAMPAIGN_PREFIX, campaign.campaign_id);
+    match serde_json::to_vec(campaign) {
+        Ok(data) => {
+            let kv = state.storage_engine.get_kv();
+            if let Err(e) = kv.put_sync(q_storage::CF_MANIFEST, key.as_bytes(), &data).await {
+                warn!("Failed to persist campaign {}: {}", campaign.campaign_id, e);
+            }
+        }
+        Err(e) => warn!("Failed to serialize campaign: {}", e),
+    }
+}
+
+async fn persist_contribution(state: &AppState, contrib: &Contribution) {
+    let key = format!("{}{}_{}", CONTRIBUTION_PREFIX, contrib.campaign_id, contrib.contribution_id);
+    match serde_json::to_vec(contrib) {
+        Ok(data) => {
+            let kv = state.storage_engine.get_kv();
+            if let Err(e) = kv.put_sync(q_storage::CF_MANIFEST, key.as_bytes(), &data).await {
+                warn!("Failed to persist contribution {}: {}", contrib.contribution_id, e);
+            }
+        }
+        Err(e) => warn!("Failed to serialize contribution: {}", e),
+    }
+}
+
+pub async fn load_campaigns_from_db(state: &AppState) -> Vec<ListingCampaign> {
+    let mut campaigns = Vec::new();
+    let prefix = CAMPAIGN_PREFIX.as_bytes();
+    let kv = state.storage_engine.get_kv();
+    match kv.scan_prefix(q_storage::CF_MANIFEST, prefix).await {
+        Ok(entries) => {
+            for (_key, value) in entries {
+                if let Ok(c) = serde_json::from_slice::<ListingCampaign>(&value) {
+                    campaigns.push(c);
+                }
+            }
+        }
+        Err(e) => warn!("Failed to load campaigns: {}", e),
+    }
+    campaigns
+}
+
+pub async fn load_contributions_for_campaign(state: &AppState, campaign_id: &str) -> Vec<Contribution> {
+    let mut contribs = Vec::new();
+    let prefix = format!("{}{}_", CONTRIBUTION_PREFIX, campaign_id);
+    let kv = state.storage_engine.get_kv();
+    match kv.scan_prefix(q_storage::CF_MANIFEST, prefix.as_bytes()).await {
+        Ok(entries) => {
+            for (_key, value) in entries {
+                if let Ok(c) = serde_json::from_slice::<Contribution>(&value) {
+                    contribs.push(c);
+                }
+            }
+        }
+        Err(e) => warn!("Failed to load contributions for {}: {}", campaign_id, e),
+    }
+    contribs
+}
+
+// ============================================================================
+// v8.4.0: Seed default exchange listing campaigns
+// ============================================================================
+
+/// Seed initial exchange listing campaigns if none exist in the database.
+/// Based on real quotes from listing agents (Kim Peterson, Feb 2026).
+pub async fn seed_default_campaigns(state: &AppState) {
+    let existing = state.listing_campaigns.read().await;
+    if !existing.is_empty() {
+        info!("📋 [XLIST] {} campaigns already exist, skipping seed", existing.len());
+        return;
+    }
+    drop(existing);
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let campaigns = vec![
+        ListingCampaign {
+            campaign_id: "XLIST-MEXC-2026".to_string(),
+            exchange_name: "MEXC".to_string(),
+            exchange_logo: Some("https://altcoinsbox.com/wp-content/uploads/2023/01/mexc-logo.webp".to_string()),
+            target_usd: 60_000.0,
+            raised_usd: 0.0,
+            contributor_count: 0,
+            early_bird_slots: 100,
+            early_bird_claimed: 0,
+            status: CampaignStatus::Funding,
+            tier: ListingTier::Gold,
+            description: "Get QUG listed on MEXC — a top-15 exchange with 10M+ users. \
+                MEXC is the best launchpad for new L1 projects with deep liquidity and global reach. \
+                Quote: $60,000 USDT via verified listing agent. \
+                Every contributor earns airdrop multipliers and governance votes on the next exchange target.".to_string(),
+            perks: default_perks(),
+            created_at: now,
+            updated_at: now,
+            funded_at: None,
+            listed_at: None,
+        },
+        ListingCampaign {
+            campaign_id: "XLIST-BITMART-2026".to_string(),
+            exchange_name: "BitMart".to_string(),
+            exchange_logo: Some("https://altcoinsbox.com/wp-content/uploads/2023/01/bitmart-logo.webp".to_string()),
+            target_usd: 30_000.0,
+            raised_usd: 0.0,
+            contributor_count: 0,
+            early_bird_slots: 75,
+            early_bird_claimed: 0,
+            status: CampaignStatus::Funding,
+            tier: ListingTier::Silver,
+            description: "Get QUG listed on BitMart — a popular tier-2 exchange in the top 30 on CMC. \
+                BitMart has strong retail volume and a proven track record for new coin launches. \
+                Quote: $30,000 USDT. Building exchange presence before targeting tier-1.".to_string(),
+            perks: default_perks(),
+            created_at: now,
+            updated_at: now,
+            funded_at: None,
+            listed_at: None,
+        },
+        ListingCampaign {
+            campaign_id: "XLIST-LBANK-2026".to_string(),
+            exchange_name: "LBank".to_string(),
+            exchange_logo: Some("https://altcoinsbox.com/wp-content/uploads/2023/01/lbank-logo.webp".to_string()),
+            target_usd: 20_000.0,
+            raised_usd: 0.0,
+            contributor_count: 0,
+            early_bird_slots: 50,
+            early_bird_claimed: 0,
+            status: CampaignStatus::Funding,
+            tier: ListingTier::Bronze,
+            description: "Get QUG listed on LBank — an accessible tier-2 exchange with fast onboarding. \
+                LBank is a great first CEX listing to establish market presence and get tracked on CoinGecko/CMC. \
+                Quote: $20,000 USDT. Lowest barrier to entry for our first exchange listing.".to_string(),
+            perks: default_perks(),
+            created_at: now,
+            updated_at: now,
+            funded_at: None,
+            listed_at: None,
+        },
+    ];
+
+    let count = campaigns.len();
+    for campaign in &campaigns {
+        persist_campaign(state, campaign).await;
+    }
+
+    let mut lock = state.listing_campaigns.write().await;
+    *lock = campaigns;
+
+    info!("🚀 [XLIST] Seeded {} exchange listing campaigns (MEXC $60K, BitMart $30K, LBank $20K)", count);
+}
+
+// ============================================================================
+// API Handlers — Crowdfunding
+// ============================================================================
+
+/// GET /api/v1/contracts/listing/campaigns — List all campaigns
+pub async fn campaign_list(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let campaigns = {
+        let lock = state.listing_campaigns.read().await;
+        lock.clone()
+    };
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "campaigns": campaigns,
+        "active_count": campaigns.iter().filter(|c| c.status == CampaignStatus::Funding).count(),
+        "total_raised_usd": campaigns.iter().map(|c| c.raised_usd).sum::<f64>(),
+    }))))
+}
+
+/// GET /api/v1/contracts/listing/campaigns/:id — Campaign details + leaderboard
+pub async fn campaign_details(
+    Path(campaign_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let campaigns = state.listing_campaigns.read().await;
+    let campaign = campaigns.iter().find(|c| c.campaign_id == campaign_id);
+
+    let Some(campaign) = campaign else {
+        return Ok(Json(ApiResponse::error("Campaign not found".into())));
+    };
+
+    let contributions = load_contributions_for_campaign(&state, &campaign_id).await;
+
+    // Aggregate per wallet
+    let mut wallet_totals: std::collections::HashMap<String, (f64, u32, bool)> = std::collections::HashMap::new();
+    for c in &contributions {
+        let entry = wallet_totals.entry(c.wallet.clone()).or_insert((0.0, 0, false));
+        entry.0 += c.amount_usd;
+        entry.1 += 1;
+        if c.is_early_bird {
+            entry.2 = true;
+        }
+    }
+
+    let mut leaderboard: Vec<ContributorSummary> = wallet_totals
+        .into_iter()
+        .map(|(wallet, (total_usd, count, early_bird))| {
+            let percent = if campaign.raised_usd > 0.0 {
+                (total_usd / campaign.raised_usd) * 100.0
+            } else {
+                0.0
+            };
+            let (tier, mut multiplier) = compute_contributor_tier(percent, &campaign.perks);
+            if early_bird {
+                multiplier += 0.5; // Early bird bonus
+            }
+            ContributorSummary {
+                wallet: wallet.clone(),
+                total_usd,
+                contribution_count: count,
+                percent_of_total: percent,
+                tier_name: tier.name.clone(),
+                airdrop_multiplier: multiplier,
+                is_early_bird: early_bird,
+                rank: 0,
+                badges: {
+                    let mut b = vec![tier.badge.clone()];
+                    if early_bird { b.push("🐦".into()); }
+                    b
+                },
+            }
+        })
+        .collect();
+
+    leaderboard.sort_by(|a, b| b.total_usd.partial_cmp(&a.total_usd).unwrap_or(std::cmp::Ordering::Equal));
+    for (i, entry) in leaderboard.iter_mut().enumerate() {
+        entry.rank = (i + 1) as u32;
+    }
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "campaign": campaign,
+        "leaderboard": leaderboard,
+        "contribution_count": contributions.len(),
+        "progress_percent": (campaign.raised_usd / campaign.target_usd * 100.0).min(100.0),
+        "remaining_usd": (campaign.target_usd - campaign.raised_usd).max(0.0),
+        "is_funded": campaign.status == CampaignStatus::Funded || campaign.status == CampaignStatus::Listed,
+    }))))
+}
+
+/// POST /api/v1/contracts/listing/campaigns/contribute — Contribute to a campaign
+#[derive(Debug, Deserialize)]
+pub struct ContributeRequest {
+    pub campaign_id: String,
+    pub payment_method: PaymentMethod,
+    pub amount_usd: f64,
+}
+
+pub async fn campaign_contribute(
+    auth: AuthenticatedWallet,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ContributeRequest>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let wallet = auth.address;
+    let wallet_hex = hex::encode(&wallet);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    if req.amount_usd < 1.0 {
+        return Ok(Json(ApiResponse::error("Minimum contribution is $1".into())));
+    }
+    if req.amount_usd > 100_000.0 {
+        return Ok(Json(ApiResponse::error("Maximum single contribution is $100,000".into())));
+    }
+
+    // Find campaign
+    let mut campaigns = state.listing_campaigns.write().await;
+    let campaign = campaigns.iter_mut().find(|c| c.campaign_id == req.campaign_id);
+    let Some(campaign) = campaign else {
+        return Ok(Json(ApiResponse::error("Campaign not found".into())));
+    };
+
+    if campaign.status != CampaignStatus::Funding {
+        return Ok(Json(ApiResponse::error(
+            format!("Campaign is {:?}, not accepting contributions", campaign.status),
+        )));
+    }
+
+    // Cap contribution to remaining amount
+    let remaining = campaign.target_usd - campaign.raised_usd;
+    let actual_amount = req.amount_usd.min(remaining);
+
+    // Process payment
+    let (stripe_intent_id, payment_status) = match req.payment_method {
+        PaymentMethod::Qug => {
+            // Deduct QUG at current price
+            let qug_price = {
+                let vault = state.collateral_vault.read().await;
+                vault.qug_price_usd
+            };
+            if qug_price <= 0.0 {
+                return Ok(Json(ApiResponse::error("QUG price unavailable".into())));
+            }
+            let qug_needed_f64 = actual_amount / qug_price;
+            let qug_needed = (qug_needed_f64 * 1e24) as u128;
+            let mut balances = state.wallet_balances.write().await;
+            let balance = balances.get(&wallet).copied().unwrap_or(0u128);
+            if balance < qug_needed {
+                let have_display = balance as f64 / 1e24;
+                return Ok(Json(ApiResponse::error(
+                    format!("Insufficient QUG. Need {:.4} QUG (${:.2}), have {:.4} QUG", qug_needed_f64, actual_amount, have_display),
+                )));
+            }
+            *balances.entry(wallet).or_insert(0u128) -= qug_needed;
+            info!("💰 [XLIST CROWDFUND] {} contributed {:.4} QUG (${:.2}) to campaign {}",
+                &wallet_hex[..16], qug_needed_f64, actual_amount, campaign.campaign_id);
+            (None, "paid")
+        }
+        PaymentMethod::Qugusd => {
+            let qugusd_addr = q_types::QUGUSD_TOKEN_ADDRESS;
+            let balance_key = (wallet, qugusd_addr);
+            let amount_base = (actual_amount * 1e24) as u128;
+            let mut token_bals = state.token_balances.write().await;
+            let balance = token_bals.get(&balance_key).copied().unwrap_or(0);
+            if balance < amount_base {
+                let have_display = balance as f64 / 1e24;
+                return Ok(Json(ApiResponse::error(
+                    format!("Insufficient QUGUSD. Need ${:.2}, have ${:.2}", actual_amount, have_display),
+                )));
+            }
+            *token_bals.entry(balance_key).or_insert(0) -= amount_base;
+            info!("💰 [XLIST CROWDFUND] {} contributed ${:.2} QUGUSD to campaign {}",
+                &wallet_hex[..16], actual_amount, campaign.campaign_id);
+            (None, "paid")
+        }
+        PaymentMethod::StripeUsd => {
+            // Create Stripe PaymentIntent
+            if let Some(stripe_client) = &state.stripe_client {
+                let amount_cents = (actual_amount * 100.0) as i64;
+                let mut create_intent =
+                    stripe::CreatePaymentIntent::new(amount_cents, stripe::Currency::USD);
+                create_intent.metadata = Some(std::collections::HashMap::from([
+                    ("type".into(), "xlist_crowdfund".into()),
+                    ("campaign_id".into(), campaign.campaign_id.clone()),
+                    ("wallet".into(), wallet_hex.clone()),
+                ]));
+                match stripe::PaymentIntent::create(stripe_client, create_intent).await {
+                    Ok(intent) => {
+                        let intent_id = intent.id.to_string();
+                        let _client_secret = intent.client_secret.clone();
+                        (Some(intent_id), "pending_payment")
+                    }
+                    Err(e) => {
+                        error!("Stripe PaymentIntent creation failed: {}", e);
+                        return Ok(Json(ApiResponse::error("Payment processing error".into())));
+                    }
+                }
+            } else {
+                return Ok(Json(ApiResponse::error("Stripe payments not configured".into())));
+            }
+        }
+    };
+
+    let is_early_bird = campaign.early_bird_claimed < campaign.early_bird_slots;
+    if is_early_bird {
+        campaign.early_bird_claimed += 1;
+    }
+
+    let contribution_id = format!("XC-{}-{}", now, &wallet_hex[..16.min(wallet_hex.len())]);
+    let contribution = Contribution {
+        contribution_id: contribution_id.clone(),
+        campaign_id: campaign.campaign_id.clone(),
+        wallet: wallet_hex.clone(),
+        amount_usd: actual_amount,
+        payment_method: req.payment_method.clone(),
+        raw_amount: format!("{:.2}", actual_amount),
+        stripe_payment_intent_id: stripe_intent_id.clone(),
+        is_early_bird,
+        created_at: now,
+    };
+
+    // Update campaign totals (only if payment is confirmed, not pending stripe)
+    if payment_status == "paid" {
+        campaign.raised_usd += actual_amount;
+        campaign.contributor_count += 1;
+        campaign.updated_at = now;
+
+        // Check if funded
+        if campaign.raised_usd >= campaign.target_usd {
+            campaign.status = CampaignStatus::Funded;
+            campaign.funded_at = Some(now);
+            info!("🎉 [XLIST CROWDFUND] Campaign {} FUNDED! ${:.2} raised for {}",
+                campaign.campaign_id, campaign.raised_usd, campaign.exchange_name);
+        }
+    }
+
+    let campaign_snapshot = campaign.clone();
+    persist_campaign(&state, &campaign_snapshot).await;
+    persist_contribution(&state, &contribution).await;
+
+    let progress = (campaign_snapshot.raised_usd / campaign_snapshot.target_usd * 100.0).min(100.0);
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "contribution_id": contribution_id,
+        "amount_usd": actual_amount,
+        "payment_status": payment_status,
+        "stripe_client_secret": stripe_intent_id,
+        "is_early_bird": is_early_bird,
+        "campaign_progress": progress,
+        "campaign_raised": campaign_snapshot.raised_usd,
+        "campaign_target": campaign_snapshot.target_usd,
+        "is_funded": campaign_snapshot.status == CampaignStatus::Funded,
+    }))))
+}
+
+/// POST /api/v1/contracts/listing/campaigns/create — Admin creates a campaign
+#[derive(Debug, Deserialize)]
+pub struct CreateCampaignRequest {
+    pub exchange_name: String,
+    pub exchange_logo: Option<String>,
+    pub target_usd: f64,
+    pub tier: ListingTier,
+    pub description: String,
+    pub early_bird_slots: Option<u32>,
+}
+
+pub async fn campaign_create(
+    auth: AuthenticatedWallet,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateCampaignRequest>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    // Admin only
+    if auth.address != q_types::BANK_MASTER_ACCOUNT {
+        return Ok(Json(ApiResponse::error("Admin only".into())));
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let campaign_id = format!("XLIST-{}-{}", req.exchange_name.to_uppercase().replace(' ', ""), now);
+
+    let campaign = ListingCampaign {
+        campaign_id: campaign_id.clone(),
+        exchange_name: req.exchange_name,
+        exchange_logo: req.exchange_logo,
+        target_usd: req.target_usd,
+        raised_usd: 0.0,
+        contributor_count: 0,
+        early_bird_slots: req.early_bird_slots.unwrap_or(50),
+        early_bird_claimed: 0,
+        status: CampaignStatus::Funding,
+        tier: req.tier,
+        description: req.description,
+        perks: default_perks(),
+        created_at: now,
+        updated_at: now,
+        funded_at: None,
+        listed_at: None,
+    };
+
+    persist_campaign(&state, &campaign).await;
+    state.listing_campaigns.write().await.push(campaign.clone());
+
+    info!("🚀 [XLIST CROWDFUND] New campaign created: {} — ${:.0} target for {}",
+        campaign_id, campaign.target_usd, campaign.exchange_name);
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "campaign": campaign,
+    }))))
+}
+
+/// GET /api/v1/contracts/listing/campaigns/:id/my-perks — Get caller's perks
+pub async fn campaign_my_perks(
+    Path(campaign_id): Path<String>,
+    auth: AuthenticatedWallet,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let wallet_hex = hex::encode(auth.address);
+    let campaigns = state.listing_campaigns.read().await;
+    let campaign = campaigns.iter().find(|c| c.campaign_id == campaign_id);
+
+    let Some(campaign) = campaign else {
+        return Ok(Json(ApiResponse::error("Campaign not found".into())));
+    };
+
+    let contributions = load_contributions_for_campaign(&state, &campaign_id).await;
+    let my_contribs: Vec<&Contribution> = contributions.iter().filter(|c| c.wallet == wallet_hex).collect();
+
+    if my_contribs.is_empty() {
+        return Ok(Json(ApiResponse::success(serde_json::json!({
+            "contributed": false,
+            "message": "You haven't contributed to this campaign yet",
+        }))));
+    }
+
+    let total_usd: f64 = my_contribs.iter().map(|c| c.amount_usd).sum();
+    let percent = if campaign.raised_usd > 0.0 { (total_usd / campaign.raised_usd) * 100.0 } else { 0.0 };
+    let is_early_bird = my_contribs.iter().any(|c| c.is_early_bird);
+    let (tier, mut multiplier) = compute_contributor_tier(percent, &campaign.perks);
+    if is_early_bird { multiplier += 0.5; }
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "contributed": true,
+        "total_usd": total_usd,
+        "contribution_count": my_contribs.len(),
+        "percent_of_total": percent,
+        "tier": tier.name,
+        "badge": tier.badge,
+        "airdrop_multiplier": multiplier,
+        "is_early_bird": is_early_bird,
+        "governance_vote": tier.governance_vote,
+        "perks": tier.perks,
+        "campaign_status": campaign.status,
+        "is_funded": campaign.status == CampaignStatus::Funded || campaign.status == CampaignStatus::Listed,
+    }))))
+}

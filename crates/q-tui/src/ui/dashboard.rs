@@ -17,8 +17,8 @@ pub fn render(f: &mut Frame, app: &App) {
             Constraint::Length(3),   // Header
             Constraint::Length(4),   // Sync Progress Bar
             Constraint::Length(9),   // Metrics cards
-            Constraint::Length(7),   // TPS Chart or AI Metrics
-            Constraint::Min(6),      // Logs (smaller when syncing)
+            Constraint::Length(9),   // APOLLO Control Systems (replaces TPS during sync)
+            Constraint::Min(4),      // Logs (smaller when syncing)
             Constraint::Length(3),   // Footer
         ]
     } else {
@@ -52,7 +52,20 @@ pub fn render(f: &mut Frame, app: &App) {
     render_metrics_grid(f, chunks[idx], app);
     idx += 1;
 
-    render_tps_or_ai_metrics(f, chunks[idx], app);
+    // Always show APOLLO control systems — they track live network state even when synced
+    {
+        let m = app.metrics.read().unwrap();
+        let has_apollo_data = m.apollo_kalman_confidence > 0.0
+            || m.apollo_peers_tracked > 0
+            || m.apollo_pid_current_bps > 0.0
+            || m.is_syncing;
+        drop(m);
+        if has_apollo_data {
+            render_apollo_control_systems(f, chunks[idx], app);
+        } else {
+            render_tps_or_ai_metrics(f, chunks[idx], app);
+        }
+    }
     idx += 1;
 
     render_recent_logs(f, chunks[idx], app);
@@ -65,7 +78,19 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
     let metrics = app.metrics.read().unwrap();
 
     let status_text = if metrics.is_syncing {
-        Span::styled("SYNCING", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        let mode_label = match metrics.apollo_sync_mode {
+            1 => "TURBO",
+            2 => "ENDGAME",
+            3 => "MICRO",
+            _ => "SYNCING",
+        };
+        let mode_color = match metrics.apollo_sync_mode {
+            1 => Color::Yellow,
+            2 => Color::Magenta,
+            3 => Color::Cyan,
+            _ => Color::Yellow,
+        };
+        Span::styled(mode_label, Style::default().fg(mode_color).add_modifier(Modifier::BOLD))
     } else if metrics.peer_count > 0 {
         Span::styled("SYNCED", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
     } else {
@@ -84,9 +109,21 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
         format!(" ({}) ", metrics.network_id)
     };
 
+    let peer_color = if metrics.peer_count > 0 { Color::Green } else { Color::Red };
+
     let header = Paragraph::new(Line::from(vec![
-        Span::styled("Q-NarwhalKnight ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::raw(format!("v{}{}│ ", version_str, net_str)),
+        Span::styled("Peers: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{}", metrics.peer_count),
+            Style::default().fg(peer_color).add_modifier(Modifier::BOLD)
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!("{}", version_str),
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        ),
+        Span::styled(net_str, Style::default().fg(Color::DarkGray)),
+        Span::raw(" │ "),
         status_text,
         Span::raw(" │ Uptime: "),
         Span::styled(
@@ -94,7 +131,10 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(Color::Green)
         ),
         Span::raw(" │ "),
-        Span::styled("[Q] Quit", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("Net Height: {}", metrics.network_height),
+            Style::default().fg(Color::Blue)
+        ),
     ]))
     .block(Block::default().borders(Borders::ALL).style(Style::default().fg(Color::Cyan)))
     .alignment(Alignment::Left);
@@ -195,9 +235,24 @@ fn render_metrics_grid(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(network, chunks[0]);
     }
 
+    // Helper: format number with comma separators
+    let fmt_num = |n: u64| -> String {
+        let s = n.to_string();
+        let mut result = String::new();
+        for (i, c) in s.chars().rev().enumerate() {
+            if i > 0 && i % 3 == 0 { result.push(','); }
+            result.push(c);
+        }
+        result.chars().rev().collect()
+    };
+
     // Blockchain metrics
     let last_block_display = if metrics.last_block_secs == 0 && metrics.block_height == 0 {
         "N/A".to_string()
+    } else if metrics.last_block_secs > 3600 {
+        format!("{}h ago", metrics.last_block_secs / 3600)
+    } else if metrics.last_block_secs > 60 {
+        format!("{}m ago", metrics.last_block_secs / 60)
     } else {
         format!("{}s ago", metrics.last_block_secs)
     };
@@ -209,18 +264,25 @@ fn render_metrics_grid(f: &mut Frame, area: Rect, app: &App) {
         Color::Yellow
     };
 
+    // Height with sync progress indicator
+    let height_display = if metrics.is_syncing && metrics.sync_progress_percent > 0.0 {
+        format!("{} ({:.1}%)", fmt_num(metrics.block_height), metrics.sync_progress_percent)
+    } else {
+        fmt_num(metrics.block_height)
+    };
+
     let mut blockchain_items = vec![
         ListItem::new(Line::from(vec![
             Span::raw("Height:      "),
             Span::styled(
-                format!("{}", metrics.block_height),
+                height_display,
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
             ),
         ])),
         ListItem::new(Line::from(vec![
             Span::raw("Net Height:  "),
             Span::styled(
-                format!("{}", metrics.network_height),
+                fmt_num(metrics.network_height),
                 Style::default().fg(Color::Blue)
             ),
         ])),
@@ -351,38 +413,101 @@ fn render_sync_progress(f: &mut Frame, area: Rect, app: &App) {
     let metrics = app.metrics.read().unwrap();
 
     let progress = metrics.sync_progress_percent.clamp(0.0, 100.0);
-    let bar_width = (area.width as f32 * progress / 100.0) as u16;
+    // bar_width accounts for left/right border (2 chars)
+    let inner_width = area.width.saturating_sub(2);
+    let bar_width = (inner_width as f32 * progress / 100.0) as u16;
 
-    let eta_str = if metrics.sync_speed_blocks_per_sec > 0.0 {
+    let speed = metrics.sync_speed_blocks_per_sec;
+    let eta_str = if speed > 0.5 {
         let blocks_remaining = metrics.sync_target_height.saturating_sub(metrics.sync_current_height) as f32;
-        let secs_remaining = blocks_remaining / metrics.sync_speed_blocks_per_sec;
+        let secs_remaining = blocks_remaining / speed;
         let mins = (secs_remaining / 60.0) as u32;
         if mins > 60 {
             format!("ETA: {}h {}m", mins / 60, mins % 60)
-        } else {
+        } else if mins > 0 {
             format!("ETA: {}m", mins)
+        } else {
+            format!("ETA: <1m")
         }
-    } else {
+    } else if metrics.sync_current_height > 0 {
         "Calculating...".to_string()
+    } else {
+        "Starting...".to_string()
+    };
+
+    // Format speed nicely
+    let speed_str = if speed >= 1000.0 {
+        format!("{:.1}K blk/s", speed / 1000.0)
+    } else if speed >= 1.0 {
+        format!("{:.0} blk/s", speed)
+    } else if speed > 0.0 {
+        format!("{:.1} blk/s", speed)
+    } else {
+        "-- blk/s".to_string()
+    };
+
+    // Format heights with comma separators
+    let fmt_num = |n: u64| -> String {
+        let s = n.to_string();
+        let mut result = String::new();
+        for (i, c) in s.chars().rev().enumerate() {
+            if i > 0 && i % 3 == 0 { result.push(','); }
+            result.push(c);
+        }
+        result.chars().rev().collect()
+    };
+
+    // Sync mode badge
+    let mode_badge = match metrics.apollo_sync_mode {
+        1 => Span::styled("[TURBO] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        2 => Span::styled("[ENDGAME] ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+        3 => Span::styled("[MICRO] ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        _ => Span::styled("[SYNC] ", Style::default().fg(Color::DarkGray)),
+    };
+
+    // Chunk progress string
+    let chunks_str = if metrics.apollo_chunks_total > 0 {
+        format!("Chunks: {}/{} ({}fly/{}q)",
+            metrics.apollo_chunks_completed, metrics.apollo_chunks_total,
+            metrics.apollo_in_flight, metrics.apollo_queued)
+    } else {
+        String::new()
     };
 
     let sync_text = vec![
         Line::from(vec![
-            Span::raw("Syncing: "),
+            mode_badge,
             Span::styled(
-                format!("{}/{} ", metrics.sync_current_height, metrics.sync_target_height),
-                Style::default().fg(Color::Cyan)
+                fmt_num(metrics.sync_current_height),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
             ),
-            Span::raw(format!("({:.1}%) │ Speed: {:.1} blocks/s │ {}",
-                progress, metrics.sync_speed_blocks_per_sec, eta_str)),
+            Span::styled(
+                format!("/{}", fmt_num(metrics.sync_target_height)),
+                Style::default().fg(Color::DarkGray)
+            ),
+            Span::raw(" "),
+            Span::styled(
+                format!("({:.1}%)", progress),
+                Style::default().fg(if progress > 50.0 { Color::Green } else { Color::Yellow })
+            ),
+            Span::raw(" │ "),
+            Span::styled(speed_str, Style::default().fg(Color::Cyan)),
+            Span::raw(" │ "),
+            Span::styled(eta_str, Style::default().fg(Color::Magenta)),
+            if !chunks_str.is_empty() {
+                Span::raw(" │ ")
+            } else {
+                Span::raw("")
+            },
+            Span::styled(chunks_str, Style::default().fg(Color::DarkGray)),
         ]),
         Line::from(vec![
             Span::styled(
                 "█".repeat(bar_width as usize),
-                Style::default().fg(Color::Green)
+                Style::default().fg(if progress > 90.0 { Color::Green } else if progress > 50.0 { Color::Cyan } else { Color::Yellow })
             ),
             Span::styled(
-                "░".repeat((area.width.saturating_sub(bar_width + 2)) as usize),
+                "░".repeat(inner_width.saturating_sub(bar_width) as usize),
                 Style::default().fg(Color::DarkGray)
             ),
         ]),
@@ -399,6 +524,7 @@ fn render_sync_progress(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(sync_widget, area);
 }
 
+/// 🚀 v1.0.2: APOLLO Control Systems panel — shown during sync instead of TPS chart
 fn render_tps_or_ai_metrics(f: &mut Frame, area: Rect, app: &App) {
     let metrics = app.metrics.read().unwrap();
 
@@ -444,6 +570,227 @@ fn render_ai_metrics(f: &mut Frame, area: Rect, app: &App) {
         );
 
     f.render_widget(ai_widget, area);
+}
+
+fn render_apollo_control_systems(f: &mut Frame, area: Rect, app: &App) {
+    let metrics = app.metrics.read().unwrap();
+
+    // Split into 3 columns: Kalman Predictor | PID Controller | Gravity Assist
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(38),
+            Constraint::Percentage(30),
+            Constraint::Percentage(32),
+        ])
+        .split(area);
+
+    // --- Kalman Network Predictor ---
+    let bw = metrics.apollo_kalman_bandwidth_mbps;
+    let lat = metrics.apollo_kalman_latency_ms;
+    let confidence = metrics.apollo_kalman_confidence;
+    let loss = metrics.apollo_kalman_loss_pct;
+    let conf_color = if confidence > 0.7 { Color::Green } else if confidence > 0.3 { Color::Yellow } else { Color::Red };
+    let conf_bar_w = ((confidence * 14.0).round() as usize).min(14);
+    let bw_color = if bw > 50.0 { Color::Green } else if bw > 10.0 { Color::Cyan } else if bw > 0.0 { Color::Yellow } else { Color::DarkGray };
+    let bw_arrow = if bw > 50.0 { ">>>" } else if bw > 10.0 { ">>" } else if bw > 0.0 { ">" } else { "--" };
+
+    let kalman_items = vec![
+        ListItem::new(Line::from(vec![
+            Span::raw("BW:   "),
+            Span::styled(
+                format!("{:.1} Mbps ", bw),
+                Style::default().fg(bw_color).add_modifier(Modifier::BOLD)
+            ),
+            Span::styled(bw_arrow, Style::default().fg(bw_color)),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::raw("Lat:  "),
+            Span::styled(
+                format!("{:.0}ms", lat),
+                Style::default().fg(if lat < 100.0 { Color::Green } else if lat < 500.0 { Color::Yellow } else { Color::Red })
+            ),
+            Span::raw("  Loss: "),
+            Span::styled(
+                format!("{:.1}%", loss),
+                Style::default().fg(if loss < 2.0 { Color::Green } else if loss < 10.0 { Color::Yellow } else { Color::Red })
+            ),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::raw("Chnk: "),
+            Span::styled(
+                format!("{}KB", metrics.apollo_kalman_optimal_chunk_kb),
+                Style::default().fg(Color::Magenta)
+            ),
+            Span::raw("  Par: "),
+            Span::styled(
+                format!("{}x", metrics.apollo_kalman_concurrency),
+                Style::default().fg(Color::Cyan)
+            ),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::raw("Conf: "),
+            Span::styled(
+                "\u{2588}".repeat(conf_bar_w),
+                Style::default().fg(conf_color)
+            ),
+            Span::styled(
+                "\u{2591}".repeat(14_usize.saturating_sub(conf_bar_w)),
+                Style::default().fg(Color::DarkGray)
+            ),
+            Span::raw(" "),
+            Span::styled(
+                format!("{}%", (confidence * 100.0).round() as u64),
+                Style::default().fg(conf_color)
+            ),
+        ])),
+    ];
+
+    let kalman_widget = List::new(kalman_items)
+        .block(Block::default().borders(Borders::ALL)
+            .title(Span::styled("KALMAN Predictor", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)))
+            .style(Style::default().fg(Color::Blue)));
+    f.render_widget(kalman_widget, cols[0]);
+
+    // --- PID Rate Controller ---
+    let pid_target = metrics.apollo_pid_target_bps;
+    let pid_current = metrics.apollo_pid_current_bps;
+    let pid_drift = if pid_target > 0.0 { (pid_current - pid_target) / pid_target * 100.0 } else { 0.0 };
+    let drift_color = if pid_drift.abs() < 10.0 { Color::Green } else if pid_drift.abs() < 30.0 { Color::Yellow } else { Color::Red };
+    let pid_avg_err = metrics.apollo_pid_error;
+
+    // Utilization bar: how close current is to target
+    let util_ratio = if pid_target > 0.0 { (pid_current / pid_target).min(2.0) } else { 0.0 };
+    let util_bar_w = ((util_ratio * 7.0).round() as usize).min(14);
+    let util_color = if util_ratio > 1.2 { Color::Red } else if util_ratio > 0.8 { Color::Green } else { Color::Yellow };
+
+    let mode_label = match metrics.apollo_sync_mode {
+        1 => ("TURBO", Color::Yellow),
+        2 => ("ENDGAME", Color::Magenta),
+        3 => ("MICRO", Color::Cyan),
+        _ => ("IDLE", Color::Green),
+    };
+
+    let pid_items = vec![
+        ListItem::new(Line::from(vec![
+            Span::raw("Tgt: "),
+            Span::styled(format!("{:.0}", pid_target), Style::default().fg(Color::White)),
+            Span::raw(" Act: "),
+            Span::styled(
+                format!("{:.0} BPS", pid_current),
+                Style::default().fg(util_color).add_modifier(Modifier::BOLD)
+            ),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::raw("Drft "),
+            Span::styled(
+                format!("{:+.1}%", pid_drift),
+                Style::default().fg(drift_color)
+            ),
+            Span::raw(" Err: "),
+            Span::styled(
+                format!("{:.1}", pid_avg_err),
+                Style::default().fg(if pid_avg_err.abs() < 50.0 { Color::Green } else { Color::Yellow })
+            ),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::raw("Rate "),
+            Span::styled(
+                "\u{2588}".repeat(util_bar_w),
+                Style::default().fg(util_color)
+            ),
+            Span::styled(
+                "\u{2591}".repeat(14_usize.saturating_sub(util_bar_w)),
+                Style::default().fg(Color::DarkGray)
+            ),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::raw("Mode "),
+            Span::styled(mode_label.0, Style::default().fg(mode_label.1).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                if pid_drift.abs() < 5.0 { " STABLE" } else if pid_drift > 0.0 { " ABOVE" } else { " BELOW" },
+                Style::default().fg(drift_color)
+            ),
+        ])),
+    ];
+
+    let pid_widget = List::new(pid_items)
+        .block(Block::default().borders(Borders::ALL)
+            .title(Span::styled("PID Controller", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)))
+            .style(Style::default().fg(Color::Green)));
+    f.render_widget(pid_widget, cols[1]);
+
+    // --- Gravity Assist (Peer Momentum) ---
+    let peers_tracked = metrics.apollo_peers_tracked;
+    let in_flight = metrics.apollo_in_flight;
+    let queued = metrics.apollo_queued;
+    let completed = metrics.apollo_chunks_completed;
+    let total = metrics.apollo_chunks_total;
+    let chunk_pct = if total > 0 { completed as f64 / total as f64 * 100.0 } else { 0.0 };
+    let best_peer = &metrics.apollo_gravity_best_peer;
+    let best_heat = metrics.apollo_gravity_best_heat;
+
+    // Heat visualization bar
+    let heat_bar_w = ((best_heat * 14.0).round() as usize).min(14);
+    let heat_color = if best_heat > 0.7 { Color::Red } else if best_heat > 0.3 { Color::Yellow } else if best_heat > 0.0 { Color::Cyan } else { Color::DarkGray };
+
+    let gravity_items = vec![
+        ListItem::new(Line::from(vec![
+            Span::raw("Peers "),
+            Span::styled(
+                format!("{}", peers_tracked),
+                Style::default().fg(if peers_tracked > 3 { Color::Green } else if peers_tracked > 0 { Color::Yellow } else { Color::Red }).add_modifier(Modifier::BOLD)
+            ),
+            Span::raw(" Fly:"),
+            Span::styled(format!("{}", in_flight), Style::default().fg(Color::Cyan)),
+            Span::raw(" Q:"),
+            Span::styled(format!("{}", queued), Style::default().fg(Color::DarkGray)),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::raw("Chnk "),
+            Span::styled(
+                format!("{}/{}", completed, total),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            ),
+            Span::raw(" "),
+            Span::styled(
+                format!("{:.0}%", chunk_pct),
+                Style::default().fg(if chunk_pct > 90.0 { Color::Green } else if chunk_pct > 50.0 { Color::Cyan } else { Color::Yellow })
+            ),
+        ])),
+        ListItem::new(Line::from(if !best_peer.is_empty() {
+            vec![
+                Span::raw("Best "),
+                Span::styled(format!("{}.. ", best_peer), Style::default().fg(Color::Yellow)),
+            ]
+        } else {
+            vec![
+                Span::raw("Best "),
+                Span::styled("--", Style::default().fg(Color::DarkGray)),
+            ]
+        })),
+        ListItem::new(Line::from(vec![
+            Span::raw("Heat "),
+            Span::styled(
+                "\u{2588}".repeat(heat_bar_w),
+                Style::default().fg(heat_color)
+            ),
+            Span::styled(
+                "\u{2591}".repeat(14_usize.saturating_sub(heat_bar_w)),
+                Style::default().fg(Color::DarkGray)
+            ),
+            Span::styled(
+                if in_flight > 0 { " ACT" } else if peers_tracked > 0 { " RDY" } else { " IDL" },
+                Style::default().fg(if in_flight > 0 { Color::Green } else { Color::DarkGray })
+            ),
+        ])),
+    ];
+
+    let gravity_widget = List::new(gravity_items)
+        .block(Block::default().borders(Borders::ALL)
+            .title(Span::styled("GRAVITY Assist", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)))
+            .style(Style::default().fg(Color::Magenta)));
+    f.render_widget(gravity_widget, cols[2]);
 }
 
 fn render_footer(f: &mut Frame, area: Rect, _app: &App) {

@@ -3,12 +3,11 @@
 # [build]
 # rustflags = ["--cfg", "tokio_unstable"]
 
-# v7.4.3: target-cpu=native enables AVX2/AVX-512 SIMD for blake3 mining hash
-# This unlocks hardware-accelerated parallel hashing on modern CPUs
-# On AMD EPYC/Ryzen: AVX2 = 8-wide SIMD (2x throughput)
-# On Intel Xeon w/ AVX-512: 16-wide SIMD (4x throughput for blake3)
+# v8.0.8: Use x86-64-v2 baseline for portable binaries (SSE4.2, POPCNT)
+# blake3 has runtime CPU detection — auto-uses AVX2/AVX-512 if available
+# For local nodes wanting max perf: RUSTFLAGS="-C target-cpu=native" cargo build
 [target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "target-cpu=native"]
+rustflags = ["-C", "target-cpu=x86-64-v2"]
 
 [target.x86_64-pc-windows-gnu]
 linker = "x86_64-w64-mingw32-gcc"
@@ -28,3 +27,6 @@ CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER = "x86_64-w64-mingw32-gcc"
 CC_aarch64_unknown_linux_gnu = "aarch64-linux-gnu-gcc"
 CXX_aarch64_unknown_linux_gnu = "aarch64-linux-gnu-g++"
 PKG_CONFIG_ALLOW_CROSS = "1"
+# Force lzma-sys to build liblzma from vendored source (system pkg-config
+# returns Linux paths that break Windows cross-compilation)
+LZMA_API_STATIC = "1"

@@ -3,6 +3,8 @@ pub mod dashboard;
 pub mod logs;
 pub mod menu;
 pub mod network;
+pub mod physics;
+pub mod stats;
 
 use crate::app::{App, ViewMode};
 use ratatui::Frame;
@@ -13,6 +15,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
         ViewMode::Dashboard => dashboard::render(f, app),
         ViewMode::FullLogs => logs::render(f, app),
         ViewMode::Network => network::render(f, app),
+        ViewMode::Stats => stats::render(f, app),
+        ViewMode::Physics => physics::render(f, app),
         ViewMode::Menu => menu::render(f, app),
         ViewMode::Bounty => bounty::render(f, app),
     }

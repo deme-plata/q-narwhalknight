@@ -64,7 +64,7 @@ members = [
 , "sdk/rust", "crates/q-ai-inference", "crates/q-crypto-advanced", "crates/q-index-fund", "crates/q-mining-pool", "crates/q-temporal-shield", "crates/q-bitnet-ffi", "crates/q-consensus-guard", "crates/q-bio-dsl", "crates/q-eternal-cypher"]  # v1.0.54: FROST threshold sigs, AEGIS-256, Circle STARKs, Index Fund, Mining Pool, TemporalShield-STARK, BitNet 1.58-bit FFI, BioDSL biological programming, Eternal Cypher unified crypto framework
 
 [workspace.package]
-version = "8.1.3"  # v8.1.3: Fix DEX transaction history + QUG price chart
+version = "8.4.2"  # v8.4.2: Deterministic balance consensus — disable gossip/state-sync balance paths, add integrity hash
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"
@@ -93,8 +93,8 @@ async-trait = "0.1"
 
 # Web framework
 axum = { version = "0.7", features = ["ws"] }
-tower = "0.4"
-tower-http = { version = "0.5", features = ["cors", "trace", "fs"] }
+tower = { version = "0.4", features = ["limit"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "fs", "timeout"] }
 hyper = "1.0"
 
 # Networking - Enhanced for real network connectivity (libp2p 0.56 upgrade)

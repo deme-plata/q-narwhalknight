@@ -29,6 +29,48 @@ import { getConnectionInfo } from '../services/api';
 
 const MASTER_WALLET = 'efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723';
 
+/** Server-side detailed sync status (from /api/v1/sync/detailed) */
+interface DetailedSyncStatus {
+  sync_mode: string;
+  local_height: number;
+  network_height: number;
+  gap: number;
+  total_chunks: number;
+  completed_chunks: number;
+  in_flight: number;
+  queued: number;
+  chunk_progress_pct: number;
+  blocks_per_second: number;
+  bytes_downloaded_mb: number;
+  compression_ratio: number;
+  active_streams: number;
+  failed_chunks: number;
+  retried_chunks: number;
+  peer_count: number;
+  best_peer_height: number;
+  is_fully_synced: boolean;
+  eta_seconds: number | null;
+  // v8.2.8: Apollo subsystem metrics
+  apollo_kalman_bandwidth_mbps?: number;
+  apollo_kalman_latency_ms?: number;
+  apollo_kalman_confidence?: number;
+  apollo_kalman_optimal_chunk_kb?: number;
+  apollo_kalman_loss_pct?: number;
+  apollo_kalman_timeout_ms?: number;
+  apollo_kalman_concurrency?: number;
+  apollo_kalman_jitter_ms?: number;
+  apollo_kalman_samples?: number;
+  apollo_pid_target_bps?: number;
+  apollo_pid_current_bps?: number;
+  apollo_pid_error?: number;
+  apollo_pid_kp?: number;
+  apollo_pid_ki?: number;
+  apollo_pid_kd?: number;
+  apollo_peers_tracked?: number;
+  apollo_gravity_best_peer?: string;
+  apollo_gravity_best_heat?: number;
+}
+
 interface NodeStatus {
   name: string;
   url: string;
@@ -39,6 +81,7 @@ interface NodeStatus {
   peers: number;
   uptime_secs: number;
   status: string;
+  sync_details?: DetailedSyncStatus;
 }
 
 /** Computed sync metrics (client-side) */
@@ -225,11 +268,41 @@ function KGauge({ value, label, size = 'sm' }: { value: number; label: string; s
 /** K-metrics breakdown bar for a single node */
 function KMetricsBar({ metrics }: { metrics: NodeKMetrics }) {
   const factors = [
-    { key: 'G', value: metrics.genetic_stability, label: 'Genetic', exp: 0.25 },
-    { key: 'Q', value: metrics.quantum_coherence, label: 'Coherence', exp: 0.20 },
-    { key: 'T', value: metrics.thermodynamic_efficiency, label: 'Thermo', exp: 0.20 },
-    { key: 'I', value: metrics.information_density, label: 'Info', exp: 0.15 },
-    { key: 'R', value: metrics.network_resilience, label: 'Resilience', exp: 0.20 },
+    { key: 'G', value: metrics.genetic_stability, label: 'Genetic Stability', exp: 0.25,
+      tooltip: (v: number) => {
+        const pct = (v * 100).toFixed(0);
+        const grade = v > 0.9 ? 'Excellent — all servers share the same DNA' : v > 0.7 ? 'Good — minor version drift, but compatible' : v > 0.5 ? 'Warning — version mismatch detected' : 'Critical — servers running incompatible versions';
+        return `G — Genetic Stability: ${v.toFixed(2)} (${pct}%, weight 25%)\n\n${grade}\n\nIn biology, genetic stability means an organism's DNA copies faithfully without mutations. In a distributed network, the "DNA" is the software version. When all 4 servers run the exact same binary (same commit hash, same consensus rules), G = 1.0. When versions diverge — say Beta is on v7.2.12 and Gamma is on v7.2.11 — the score drops because they might disagree on how to validate blocks.\n\nWhy this matters: Version mismatch is the #1 cause of network splits in blockchain systems. If one node accepts a block that another node rejects (because of different validation rules), the chain forks — and users on different forks see different balances. This is catastrophic.\n\nThis has the highest weight (25%) in the K-formula because everything else is pointless if the servers can't agree on the rules of the game.`;
+      }
+    },
+    { key: 'Q', value: metrics.quantum_coherence, label: 'Quantum Coherence', exp: 0.20,
+      tooltip: (v: number) => {
+        const pct = (v * 100).toFixed(0);
+        const grade = v > 0.9 ? 'Excellent — node is in perfect lockstep with the network' : v > 0.7 ? 'Good — minor height lag, catching up' : v > 0.5 ? 'Warning — falling behind the network' : 'Critical — node may be on a different fork';
+        return `Q — Quantum Coherence: ${v.toFixed(2)} (${pct}%, weight 20%)\n\n${grade}\n\nIn quantum physics, "coherence" describes particles that remain entangled — their states are perfectly correlated no matter how far apart they are. Measure one, and you instantly know the other. In a blockchain network, coherence means all nodes agree on the current state: same block height, same transaction history, same account balances.\n\nHow it's measured: The system compares this node's block height to the network's highest known height. If Beta is at block 205,490 and Gamma is at 205,488, the gap is only 2 blocks — Q stays high (~0.98). But if Gamma falls 500 blocks behind, Q drops sharply because the node's "state" has decoherent from the network's consensus reality.\n\nAnalogy: Imagine a classroom where the teacher writes on the board and all students copy simultaneously. High Q means every student's notebook matches the board exactly. Low Q means some students stopped copying 10 minutes ago — their notes are outdated and potentially wrong.`;
+      }
+    },
+    { key: 'T', value: metrics.thermodynamic_efficiency, label: 'Thermodynamic Efficiency', exp: 0.20,
+      tooltip: (v: number) => {
+        const pct = (v * 100).toFixed(0);
+        const grade = v > 0.9 ? 'Excellent — lean and efficient, minimal waste' : v > 0.7 ? 'Good — normal operating conditions' : v > 0.5 ? 'Warning — resource pressure building (check RAM/CPU)' : 'Critical — node is overloaded or starving for resources';
+        return `T — Thermodynamic Efficiency: ${v.toFixed(2)} (${pct}%, weight 20%)\n\n${grade}\n\nIn thermodynamics, efficiency = useful work output / total energy input. A car engine that converts 30% of fuel into motion has 30% thermodynamic efficiency — the other 70% becomes waste heat. Similarly, a blockchain node takes in resources (CPU cycles, RAM, disk I/O, network bandwidth) and produces useful work (validated blocks, served API requests, propagated transactions).\n\nHow it's measured: The system tracks CPU usage, memory consumption, disk I/O latency, and compares them against the node's actual throughput (blocks produced, transactions processed). A node using 90% CPU but producing blocks at full speed is efficient. A node using 90% CPU but barely producing blocks is wasting energy — maybe it's stuck in a garbage collection loop, or swapping to disk.\n\nReal-world impact: Server Gamma has only 8GB RAM + 4GB swap. When it hits swap, disk I/O skyrockets and block production stalls — T drops to 0.1 even though CPU looks "fine." This single factor can drag the entire K-Parameter below the safety threshold, correctly signaling "don't deploy to this overloaded node."`;
+      }
+    },
+    { key: 'I', value: metrics.information_density, label: 'Information Density', exp: 0.15,
+      tooltip: (v: number) => {
+        const pct = (v * 100).toFixed(0);
+        const grade = v > 0.9 ? 'Excellent — high signal, low noise' : v > 0.7 ? 'Good — healthy data throughput' : v > 0.5 ? 'Moderate — throughput below expected levels' : 'Low — node may be idle or processing mostly empty blocks';
+        return `I — Information Density: ${v.toFixed(2)} (${pct}%, weight 15%)\n\n${grade}\n\nIn Claude Shannon's Information Theory, "information density" measures how much meaningful signal exists versus noise. A book full of random letters has zero information density. A book full of coherent sentences has high density. Similarly, a blockchain node has high information density when it's processing blocks full of real transactions, and low density when it's producing empty blocks or sitting idle.\n\nHow it's measured: The system looks at transaction throughput (transactions per second), block fill rate (% of block capacity used), and unique peer interactions. A node that processes 100 TPS with full blocks scores higher than one processing 5 TPS with mostly empty blocks.\n\nWhy lowest weight (15%): Information density naturally fluctuates with network activity. At 3 AM when few users are online, all nodes have low I — but that's normal, not a problem. The system doesn't penalize nodes for low traffic. This factor matters most during high-activity periods: if the network is doing 200 TPS but one node only sees 50 TPS, that node's I drops, correctly flagging a potential P2P message delivery problem.`;
+      }
+    },
+    { key: 'R', value: metrics.network_resilience, label: 'Network Resilience', exp: 0.20,
+      tooltip: (v: number) => {
+        const pct = (v * 100).toFixed(0);
+        const grade = v > 0.9 ? 'Excellent — battle-hardened, recovers instantly from disruptions' : v > 0.7 ? 'Good — stable connections, handles minor issues' : v > 0.5 ? 'Warning — connection instability or recent disconnections' : 'Critical — node is isolated or repeatedly losing peers';
+        return `R — Network Resilience: ${v.toFixed(2)} (${pct}%, weight 20%)\n\n${grade}\n\nIn ecology, "resilience" measures how quickly an ecosystem recovers after a disturbance — a forest that regrows after a fire is resilient. In networking, resilience measures a node's ability to maintain connections, recover from outages, and route around failures.\n\nHow it's measured: The system tracks peer connection count (how many other nodes is this one talking to), connection uptime (how long have those connections been stable), reconnection speed (when a peer drops, how quickly does the node re-establish contact), and message delivery success rate (what % of P2P gossipsub messages actually arrive).\n\nReal-world example: During a transatlantic cable disruption, Server Beta (Netherlands) might lose contact with Server Delta (US) for 30 seconds. A resilient node (R > 0.9) automatically discovers an alternative routing path through Server Gamma within 2 seconds. A fragile node (R < 0.5) stays disconnected and starts falling behind in block height — which then drags down Q (coherence) too.\n\nThis cascading effect is why R has a 20% weight: network failures are the second most common cause of deployment problems, right after version mismatch (G).`;
+      }
+    },
   ];
 
   return (
@@ -237,16 +310,16 @@ function KMetricsBar({ metrics }: { metrics: NodeKMetrics }) {
       {factors.map(f => {
         const color = f.value > 0.8 ? 'bg-emerald-500' : f.value > 0.5 ? 'bg-amber-500' : 'bg-red-500';
         return (
-          <div key={f.key} className="flex-1 group relative">
-            <div className="h-1.5 rounded-full bg-slate-700/50 overflow-hidden">
-              <div className={`h-full rounded-full ${color} transition-all duration-700`}
-                style={{ width: `${f.value * 100}%` }} />
-            </div>
-            <div className="opacity-0 group-hover:opacity-100 absolute -top-10 left-1/2 -translate-x-1/2
-              bg-slate-900/95 border border-amber-500/30 rounded-lg px-2 py-1.5 text-[9px] text-amber-200/80 whitespace-nowrap z-[9999] pointer-events-none transition-opacity shadow-lg shadow-amber-900/20">
-              <span className="font-bold text-amber-300">{f.key}</span>={f.value.toFixed(2)} <span className="text-amber-200/50">(weight ^{f.exp})</span>
-              <div className="text-[8px] text-amber-200/50 mt-0.5">{f.label} factor</div>
-            </div>
+          <div key={f.key} className="flex-1 min-w-0">
+            <KTooltip wide text={f.tooltip(f.value)}>
+              <div className="cursor-help">
+                <div className="h-1.5 rounded-full bg-slate-700/50 overflow-hidden">
+                  <div className={`h-full rounded-full ${color} transition-all duration-700`}
+                    style={{ width: `${f.value * 100}%` }} />
+                </div>
+                <div className="text-[7px] text-amber-200/40 text-center mt-0.5 font-bold">{f.key}</div>
+              </div>
+            </KTooltip>
           </div>
         );
       })}
@@ -294,13 +367,36 @@ function formatEta(secs: number): string {
   return `~${h}h${m}m`;
 }
 
+function SyncModeBadge({ mode }: { mode: string }) {
+  const config: Record<string, { label: string; color: string; bg: string }> = {
+    fully_synced: { label: 'SYNCED', color: 'text-emerald-300', bg: 'bg-emerald-500/20' },
+    turbo: { label: 'TURBO', color: 'text-blue-300', bg: 'bg-blue-500/20' },
+    endgame: { label: 'ENDGAME', color: 'text-amber-300', bg: 'bg-amber-500/20' },
+    micro: { label: 'MICRO', color: 'text-cyan-300', bg: 'bg-cyan-500/20' },
+    idle: { label: 'IDLE', color: 'text-slate-400', bg: 'bg-slate-500/20' },
+  };
+  const c = config[mode] || config.idle;
+  return (
+    <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${c.color} ${c.bg}`}>
+      {c.label}
+    </span>
+  );
+}
+
 function ServerCard({ node, isActive, role, syncMetrics }: { node: NodeStatus; isActive: boolean; role: 'canary' | 'primary' | 'backup' | 'bootstrap'; syncMetrics?: SyncMetrics }) {
+  const [expanded, setExpanded] = useState(false);
+  const sd = node.sync_details;
   const roleConfig = {
     canary: { label: 'CANARY', color: 'text-purple-300', bg: 'bg-purple-500/20', border: 'border-purple-400/40' },
     primary: { label: 'PRIMARY', color: 'text-emerald-300', bg: 'bg-emerald-500/20', border: 'border-emerald-400/40' },
     bootstrap: { label: 'BOOTSTRAP', color: 'text-cyan-300', bg: 'bg-cyan-500/20', border: 'border-cyan-400/40' },
     backup: { label: 'BACKUP', color: 'text-blue-300', bg: 'bg-blue-500/20', border: 'border-blue-400/40' },
   }[role];
+
+  // Prefer server-side speed/ETA when available
+  const displaySpeed = sd && sd.blocks_per_second > 0 ? sd.blocks_per_second : (syncMetrics?.speed ?? 0);
+  const displayEta = sd?.eta_seconds ?? (syncMetrics && syncMetrics.eta_secs > 0 ? syncMetrics.eta_secs : null);
+  const isSyncing = sd ? sd.total_chunks > 0 && sd.completed_chunks < sd.total_chunks : false;
 
   return (
     <div className={`rounded-xl border p-3 relative ${
@@ -329,10 +425,12 @@ function ServerCard({ node, isActive, role, syncMetrics }: { node: NodeStatus; i
           <span className="font-semibold text-amber-50">{node.name}</span>
         </div>
         <div className="flex items-center gap-1.5">
+          {sd && <SyncModeBadge mode={sd.sync_mode} />}
           <StatusIcon status={node.status} />
           <span className={`text-xs font-medium ${
             node.status === 'ready' ? 'text-emerald-400' :
             node.status === 'syncing' ? 'text-amber-400' :
+            node.status === 'recovering' ? 'text-blue-400' :
             node.status === 'offline' ? 'text-red-400' :
             'text-blue-400'
           }`}>
@@ -349,6 +447,11 @@ function ServerCard({ node, isActive, role, syncMetrics }: { node: NodeStatus; i
         <div className="flex items-center gap-1.5 text-amber-200/70">
           <Layers className="w-3 h-3" />
           <span>{formatNumber(node.height)}</span>
+          {(node as any)._recovering && (
+            <span className="text-[9px] text-blue-400" title={`Verified: ${formatNumber((node as any)._verifiedHeight)}`}>
+              (catching up)
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-1.5 text-amber-200/70">
           <Users className="w-3 h-3" />
@@ -365,17 +468,17 @@ function ServerCard({ node, isActive, role, syncMetrics }: { node: NodeStatus; i
         <div className="mt-3">
           <div className="flex justify-between text-[10px] text-amber-200/50 mb-1">
             <span className="flex items-center gap-1">
-              {syncMetrics && syncMetrics.speed > 0 ? (
-                <><TrendingUp className="w-2.5 h-2.5 text-emerald-400" />{syncMetrics.speed.toLocaleString()} blk/s</>
+              {displaySpeed > 0 ? (
+                <><TrendingUp className="w-2.5 h-2.5 text-emerald-400" />{Math.round(displaySpeed).toLocaleString()} blk/s</>
               ) : (
                 'Sync'
               )}
             </span>
             <span className="flex items-center gap-1.5">
-              {syncMetrics && syncMetrics.eta_secs > 0 && (
-                <span className="text-amber-300/70">ETA: {formatEta(syncMetrics.eta_secs)}</span>
+              {displayEta != null && displayEta > 0 && (
+                <span className="text-amber-300/70">ETA: {formatEta(displayEta)}</span>
               )}
-              {syncMetrics && syncMetrics.eta_secs === -1 && (
+              {(sd?.is_fully_synced || (syncMetrics && syncMetrics.eta_secs === -1)) && (
                 <span className="text-emerald-400">synced</span>
               )}
               <span>{(syncMetrics?.sync_pct ?? (node.height / node.network_height) * 100).toFixed(1)}%</span>
@@ -395,6 +498,80 @@ function ServerCard({ node, isActive, role, syncMetrics }: { node: NodeStatus; i
             <div className="text-[9px] text-amber-200/40 mt-0.5 text-right">
               {syncMetrics.gap.toLocaleString()} blocks behind
             </div>
+          )}
+        </div>
+      )}
+
+      {/* Chunk progress (only when actively syncing) */}
+      {sd && isSyncing && (
+        <div className="mt-2">
+          <div className="flex justify-between text-[10px] text-amber-200/50 mb-1">
+            <span>Chunks: {sd.completed_chunks}/{sd.total_chunks} ({sd.chunk_progress_pct.toFixed(1)}%)</span>
+            <span>In-flight: {sd.in_flight} | Queue: {sd.queued}</span>
+          </div>
+          <div className="w-full h-1 bg-slate-700/50 rounded-full overflow-hidden">
+            <div
+              className="h-full rounded-full bg-gradient-to-r from-blue-500 to-cyan-400 transition-all duration-500"
+              style={{ width: `${Math.min(sd.chunk_progress_pct, 100)}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Expandable details (click to toggle) */}
+      {sd && node.online && (
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="mt-2 w-full flex items-center justify-center gap-1 text-[9px] text-amber-200/40 hover:text-amber-200/70 transition-colors"
+        >
+          {expanded ? <ChevronDown className="w-2.5 h-2.5" /> : <ChevronRight className="w-2.5 h-2.5" />}
+          {expanded ? 'Hide details' : 'Show details'}
+        </button>
+      )}
+      {expanded && sd && (
+        <div className="mt-1.5 pt-1.5 border-t border-slate-700/50 grid grid-cols-3 gap-x-3 gap-y-1 text-[9px] text-amber-200/50">
+          <span>Speed: {sd.blocks_per_second > 0 ? `${Math.round(sd.blocks_per_second)} blk/s` : 'N/A'}</span>
+          <span>DL: {sd.bytes_downloaded_mb > 0 ? `${sd.bytes_downloaded_mb.toFixed(1)} MB` : '0'}</span>
+          <span>Ratio: {sd.compression_ratio > 0 ? `${sd.compression_ratio.toFixed(1)}x` : 'N/A'}</span>
+          <span>Streams: {sd.active_streams}</span>
+          <span>Failed: {sd.failed_chunks}</span>
+          <span>Retried: {sd.retried_chunks}</span>
+          <span>Peers: {sd.peer_count}</span>
+          <span>Best: {sd.best_peer_height > 0 ? formatNumber(sd.best_peer_height) : 'N/A'}</span>
+          <span>ETA: {sd.eta_seconds != null && sd.eta_seconds > 0 ? formatEta(sd.eta_seconds) : 'N/A'}</span>
+          {/* v8.2.8: Apollo Subsystem Metrics */}
+          {(sd.apollo_kalman_samples ?? 0) > 0 && (
+            <>
+              <span className="col-span-3 mt-1 text-cyan-300/70 font-bold border-t border-cyan-800/30 pt-1">APOLLO Kalman</span>
+              <span>BW: {(sd.apollo_kalman_bandwidth_mbps ?? 0).toFixed(1)} Mbps</span>
+              <span>Lat: {(sd.apollo_kalman_latency_ms ?? 0).toFixed(1)} ms</span>
+              <span>Conf: {((sd.apollo_kalman_confidence ?? 0) * 100).toFixed(0)}%</span>
+              <span>Chunk: {sd.apollo_kalman_optimal_chunk_kb ?? 0} KB</span>
+              <span>Loss: {(sd.apollo_kalman_loss_pct ?? 0).toFixed(2)}%</span>
+              <span>Jitter: {(sd.apollo_kalman_jitter_ms ?? 0).toFixed(1)} ms</span>
+              <span>Timeout: {sd.apollo_kalman_timeout_ms ?? 0} ms</span>
+              <span>Conc: {sd.apollo_kalman_concurrency ?? 0}</span>
+              <span>Samples: {sd.apollo_kalman_samples ?? 0}</span>
+            </>
+          )}
+          {(sd.apollo_pid_target_bps ?? 0) > 0 && (
+            <>
+              <span className="col-span-3 mt-1 text-green-300/70 font-bold border-t border-green-800/30 pt-1">APOLLO PID Controller</span>
+              <span>Target: {Math.round(sd.apollo_pid_target_bps ?? 0)} bps</span>
+              <span>Current: {(sd.apollo_pid_current_bps ?? 0).toFixed(1)} bps</span>
+              <span>Error: {(sd.apollo_pid_error ?? 0).toFixed(3)}</span>
+              <span>Kp: {(sd.apollo_pid_kp ?? 0).toFixed(3)}</span>
+              <span>Ki: {(sd.apollo_pid_ki ?? 0).toFixed(3)}</span>
+              <span>Kd: {(sd.apollo_pid_kd ?? 0).toFixed(3)}</span>
+            </>
+          )}
+          {(sd.apollo_peers_tracked ?? 0) > 0 && (
+            <>
+              <span className="col-span-3 mt-1 text-purple-300/70 font-bold border-t border-purple-800/30 pt-1">APOLLO Gravity Assist</span>
+              <span>Tracked: {sd.apollo_peers_tracked} peers</span>
+              <span>Best: {sd.apollo_gravity_best_peer || 'N/A'}</span>
+              <span>Heat: {(sd.apollo_gravity_best_heat ?? 0).toFixed(2)}</span>
+            </>
           )}
         </div>
       )}
@@ -420,6 +597,8 @@ export default function DeployControlPanel() {
   const [devFeeMsg, setDevFeeMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [syncMetricsMap, setSyncMetricsMap] = useState<Record<string, SyncMetrics>>({});
   const prevHeightsRef = useRef<Record<string, { height: number; ts: number }>>({});
+  // v8.2.9: Peak height tracking — never show a height decrease (prevents "rollback" scare)
+  const peakHeightsRef = useRef<Record<string, number>>({});
   const eventSourceRef = useRef<EventSource | null>(null);
 
   // Tab state
@@ -571,6 +750,26 @@ export default function DeployControlPanel() {
               online: false, version: '', height: 0, network_height: 0,
               peers: 0, uptime_secs: 0, status: 'offline',
             };
+          }
+          // v8.2.9: Enforce peak heights — NEVER show a height decrease
+          // This prevents the "rollback scare" when a node restarts and syncs back up
+          for (const [key, node] of Object.entries({ alpha: data.alpha, beta: data.beta, gamma: data.gamma, delta: data.delta }) as [string, any][]) {
+            if (!node || !node.online || node.height === 0) continue;
+            const prevPeak = peakHeightsRef.current[key] || 0;
+            if (node.height > prevPeak) {
+              peakHeightsRef.current[key] = node.height;
+            } else if (node.height < prevPeak && prevPeak > 0) {
+              // Node restarted and is catching up — show peak height and "recovering" status
+              node._recovering = true;
+              node._peakHeight = prevPeak;
+              node._verifiedHeight = node.height;
+              // Show the peak height so users never see a decrease
+              node.height = prevPeak;
+              // Override status to "recovering" so it's clear what's happening
+              if (node.status === 'syncing' || node.status === 'ready') {
+                node.status = 'recovering';
+              }
+            }
           }
           setDeployStatus(data);
           setLastRefresh(new Date());
@@ -1193,11 +1392,11 @@ export default function DeployControlPanel() {
                               <span className={`text-xs font-bold uppercase tracking-wider ${getPhaseInfo(convergence.cosmic_phase).color}`}>
                                 {getPhaseInfo(convergence.cosmic_phase).name}
                               </span>
-                              <KTooltip text="Cosmic Phase — Borrowed from cosmology, this label describes where the network sits in its deployment lifecycle. Just like the universe progresses through distinct eras (radiation era, matter era, dark energy era), a distributed network progresses through Isolation → Convergence → Aeon Transition → Harmony as servers adopt new software. The phase determines how cautious the system should be about rolling out changes.">
+                              <KTooltip wide text={`Cosmic Phase — Where is the network in its deployment lifecycle?\n\nJust as the universe progresses through distinct eras — the radiation era (hot chaos), the matter era (structure forming), the dark energy era (accelerating expansion) — a distributed blockchain network progresses through four phases as servers adopt new software:\n\n1. Isolation — Servers are independent islands, like separate galaxies before first contact. New binaries are being tested in sandboxed environments (Alpha Docker, Delta canary). No production traffic is affected. Risk level: none.\n\n2. Convergence — Servers begin synchronizing, like galaxies merging. Gamma receives the new binary and proves it can reach the same blockchain state as Beta. This is the "peer review" phase. Risk level: low.\n\n3. Aeon Transition — The critical handoff moment, like a star collapsing into a new state. Beta (the production primary) is being upgraded while Gamma temporarily serves all user traffic. Named after Penrose's Conformal Cyclic Cosmology, where the boundary between cosmic epochs is a moment of transformation. Risk level: moderate.\n\n4. Harmony — All servers converged. Same version, same height, same consensus. Like planets in orbital resonance, every node reinforces the others. This is the target state. Risk level: zero.\n\nThe phase automatically advances as servers pass health checks. You cannot skip phases.`}>
                                 <span className="text-[9px] text-amber-200/40 cursor-help border-b border-dotted border-amber-200/20">Cosmic Phase</span>
                               </KTooltip>
                             </div>
-                            <KTooltip wide text="K-Kristensen Convergence Readiness — A composite health metric inspired by the Drake Equation in astrobiology. Just as the Drake Equation multiplies several probability factors to estimate how many civilizations exist in our galaxy, the K-Parameter multiplies five independent node-health factors (Genetic stability, Quantum coherence, Thermodynamic efficiency, Information density, and network Resilience) to produce a single readiness score between 0 and 1. A score near 1.0 means the network is perfectly healthy and ready for deployment. The name honors the mathematical tradition of using single-letter parameters (like Boltzmann's k) to capture complex system behavior in one elegant number.">
+                            <KTooltip wide text={`K-Kristensen Convergence Readiness — Is it safe to deploy right now?\n\nThis single number (0 to 1) answers the most important question in distributed systems: "If I push new code, will the network break?"\n\nThe K-Parameter is inspired by the Drake Equation from astrobiology. Frank Drake estimated the number of alien civilizations by multiplying independent probability factors: star formation rate × fraction with planets × fraction with life × ... The insight was that one formula could compress enormous complexity into a single meaningful number.\n\nThe K-Parameter does the same thing for network health:\n\nk = G^0.25 × Q^0.20 × T^0.20 × I^0.15 × R^0.20\n\nFive colored progress bars, five independent health factors:\n  G (green)  = Genetic Stability — version compatibility\n  Q (cyan)   = Quantum Coherence — state synchronization\n  T (orange) = Thermodynamic Efficiency — resource usage\n  I (blue)   = Information Density — data throughput\n  R (purple) = Network Resilience — connection stability\n\nBecause the factors are MULTIPLIED (not averaged), one zero kills the entire score — like a chain breaking at its weakest link. This is intentional: a node that is perfectly efficient but running an incompatible version (G=0) should score zero.\n\nThe exponents (0.25, 0.20, etc.) are weights. G has the highest weight because version mismatch causes the worst failures. I has the lowest because throughput naturally varies with traffic.\n\nScoring: >0.85 = safe to deploy, 0.50-0.85 = proceed with caution, <0.50 = investigate before touching anything.`}>
                               <div className="text-[10px] text-amber-200/50 mt-0.5 cursor-help border-b border-dotted border-amber-200/20 inline-block">
                                 K-Kristensen Convergence Readiness
                               </div>
@@ -1816,7 +2015,7 @@ export default function DeployControlPanel() {
                             const body: any = {
                               amount: amt,
                               collateral_type: 'QUG',
-                              collateral_amount: parseFloat(mintCollateral) || parseFloat(mintAmount) / 42.5 * 1.5,
+                              collateral_amount: parseFloat(mintCollateral) || parseFloat(mintAmount) / 3000 * 1.5,
                             };
                             if (mintWallet) body.wallet_address = mintWallet;
                             setBankSection('log');

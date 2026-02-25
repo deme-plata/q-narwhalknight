@@ -357,26 +357,43 @@ fn default_token_decimals() -> u8 {
     24 // Default to 24 for QUG/QUGUSD (existing pools assumed to be QUG pairs)
 }
 
-/// v7.2.5: Bootstrap bridge token AMM pools (wBTC/QUG, wZEC/QUG, wIRON/QUG)
+/// v7.2.5: Bootstrap bridge token AMM pools (wBTC/QUG, wZEC/QUG, wIRON/QUG, wETH/QUG)
+/// v8.2.7: Dynamic oracle prices — fetches live BTC/ETH/ZEC prices from CoinGecko/Binance
 /// Called during AppState initialization to create cross-chain trading pairs
 pub async fn bootstrap_bridge_pools(
     liquidity_pools_map: &mut HashMap<String, LiquidityPool>,
     storage_engine: &std::sync::Arc<q_storage::StorageEngine>,
     qug_price: f64,
+    oracle: Option<&q_quillon_bank::oracle_integration::BankingOracleIntegration>,
 ) {
+    // v8.2.7: Fetch LIVE prices from oracle (CoinGecko → Binance fallback)
+    use q_quillon_bank::AssetType;
+    let btc_price = if let Some(orc) = oracle {
+        let p = orc.get_price_f64(&AssetType::BTC).await;
+        if p > 0.0 { p } else { 97_000.0 }
+    } else { 97_000.0 };
+    let eth_price = if let Some(orc) = oracle {
+        let p = orc.get_price_f64(&AssetType::ETH).await;
+        if p > 0.0 { p } else { 3_400.0 }
+    } else { 3_400.0 };
+    let zec_price = if let Some(orc) = oracle {
+        let p = orc.get_price_f64(&AssetType::ZEC).await;
+        if p > 0.0 { p } else { 55.0 }
+    } else { 55.0 };
+    let iron_price = 0.008; // Iron Fish not on major exchanges
+
+    tracing::info!("💹 [ORACLE] Bridge pool prices: BTC=${:.0}, ETH=${:.0}, ZEC=${:.2}, IRON=${:.4}",
+        btc_price, eth_price, zec_price, iron_price);
+
     // Bridge pool definitions: (pool_id, wrapped_symbol, native_price_usd, initial_amount_native)
-    let bridge_pools: [(&str, &str, f64, f64); 3] = [
-        ("pool-qug-wbtc-bridge", "wBTC", 97_000.0, 0.25),   // 0.25 BTC @ ~$97K
-        ("pool-qug-wzec-bridge", "wZEC", 55.0, 100.0),       // 100 ZEC @ ~$55
-        ("pool-qug-wiron-bridge", "wIRON", 0.008, 50_000.0), // 50K IRON @ ~$0.008
+    let bridge_pools: [(&str, &str, f64, f64); 4] = [
+        ("pool-qug-wbtc-bridge", "wBTC", btc_price, 0.25),    // 0.25 BTC
+        ("pool-qug-weth-bridge", "wETH", eth_price, 2.0),     // 2.0 ETH
+        ("pool-qug-wzec-bridge", "wZEC", zec_price, 100.0),   // 100 ZEC
+        ("pool-qug-wiron-bridge", "wIRON", iron_price, 50_000.0),  // 50K IRON
     ];
 
     for (pool_id, symbol, native_price_usd, native_amount) in &bridge_pools {
-        if liquidity_pools_map.contains_key(*pool_id) {
-            tracing::debug!("🌉 Bridge pool {} already exists, skipping bootstrap", pool_id);
-            continue;
-        }
-
         // Calculate QUG equivalent: native_amount * native_price / qug_price
         let qug_equivalent = native_amount * native_price_usd / qug_price;
         let bootstrap_qug: u128 = (qug_equivalent * 1e24) as u128;
@@ -385,30 +402,39 @@ pub async fn bootstrap_bridge_pools(
         // Store reserves in 24-decimal format internally (8-dec → 24-dec)
         let reserve_wrapped_24: u128 = bootstrap_wrapped * 10u128.pow(16);
 
-        let pool = LiquidityPool {
-            pool_id: pool_id.to_string(),
-            token0: "QUG".to_string(),
-            token1: symbol.to_string(),
-            reserve0: bootstrap_qug,
-            reserve1: reserve_wrapped_24,
-            provider: [0u8; 32], // System-owned bridge liquidity
-            created_at: chrono::Utc::now(),
-            lp_token_supply: ((bootstrap_qug as f64 * reserve_wrapped_24 as f64).sqrt()) as u128,
-            token0_decimals: 24,
-            token1_decimals: 24, // Internal reserves always 24-decimal
-        };
-
-        liquidity_pools_map.insert(pool_id.to_string(), pool.clone());
-        if let Ok(pool_bytes) = serde_json::to_vec(&pool) {
-            if let Err(e) = storage_engine.save_liquidity_pool(pool_id, &pool_bytes).await {
-                tracing::warn!("⚠️ Failed to persist bootstrap {} pool: {}", symbol, e);
+        // v8.2.9: ALWAYS update bridge pools with fresh oracle prices on restart
+        // Old behavior skipped existing pools, causing stale prices for months
+        if let Some(existing) = liquidity_pools_map.get_mut(*pool_id) {
+            let old_r0 = existing.reserve0;
+            existing.reserve0 = bootstrap_qug;
+            existing.reserve1 = reserve_wrapped_24;
+            existing.lp_token_supply = ((bootstrap_qug as f64 * reserve_wrapped_24 as f64).sqrt()) as u128;
+            tracing::info!("🔄 [BRIDGE] Updated {} reserves with live price: ${:.0} (QUG reserve: {:.2} → {:.2})",
+                symbol, native_price_usd, old_r0 as f64 / 1e24, bootstrap_qug as f64 / 1e24);
+        } else {
+            let pool = LiquidityPool {
+                pool_id: pool_id.to_string(),
+                token0: "QUG".to_string(),
+                token1: symbol.to_string(),
+                reserve0: bootstrap_qug,
+                reserve1: reserve_wrapped_24,
+                provider: [0u8; 32], // System-owned bridge liquidity
+                created_at: chrono::Utc::now(),
+                lp_token_supply: ((bootstrap_qug as f64 * reserve_wrapped_24 as f64).sqrt()) as u128,
+                token0_decimals: 24,
+                token1_decimals: 24, // Internal reserves always 24-decimal
+            };
+            liquidity_pools_map.insert(pool_id.to_string(), pool.clone());
+            tracing::info!("🌉 [BRIDGE] Created new {} pool with live price: ${:.0}", symbol, native_price_usd);
+        }
+        // Persist updated/created pool to DB
+        if let Some(p) = liquidity_pools_map.get(*pool_id) {
+            if let Ok(pool_bytes) = serde_json::to_vec(p) {
+                if let Err(e) = storage_engine.save_liquidity_pool(pool_id, &pool_bytes).await {
+                    tracing::warn!("⚠️ Failed to persist bridge {} pool: {}", symbol, e);
+                }
             }
         }
-        tracing::info!(
-            "🌉 [STARTUP v7.2.5] Created bridge pool {}: {:.4} QUG / {:.4} {} (${:.2}/{} @ ${:.2}/QUG)",
-            pool_id, qug_equivalent, native_amount, symbol,
-            native_price_usd, symbol, qug_price
-        );
     }
 }
 
@@ -426,6 +452,11 @@ pub struct MiningSubmission {
     pub miner_id: Option<String>,
     /// v3.3.3-beta: Human-readable miner name (e.g., "Server Alpha", "Mining Rig 1")
     pub worker_name: Option<String>,
+    /// v1.0.2: Deferred VDF verification — challenge hash bytes for background validation
+    /// Moved from HTTP handler to background processor for 10x throughput improvement
+    pub challenge_hash_bytes: Option<[u8; 32]>,
+    /// v1.0.2: Miner version for update check (moved from HTTP-only to background SSE)
+    pub miner_version: Option<String>,
 }
 
 // v7.0.0: FaucetState impl removed — faucet eliminated
@@ -986,6 +1017,10 @@ pub struct AppState {
     // Updated atomically when blocks are produced, avoids RwLock contention on node_status
     pub current_height_atomic: Arc<std::sync::atomic::AtomicU64>,
 
+    // v8.2.9: Peak height — maximum height ever reached, never decreases
+    // Prevents "rollback scare" in admin panel when node restarts and syncs back up
+    pub peak_height_atomic: Arc<std::sync::atomic::AtomicU64>,
+
     // 🚀 v1.0.2-beta: HeightState cache - Eliminates binary search storm during shutdown
     // Cached height value (lock-free reads) with time-based freshness and shutdown mode
     pub height_state: q_storage::HeightState,
@@ -1203,6 +1238,12 @@ pub struct AppState {
     // OAuth2 Provider for third-party integrations
     pub oauth2_storage: Arc<oauth2_provider::OAuth2Storage>,
 
+    // v8.1.7: OAuth2 Key Vault — Server-side encrypted signing keys for custodial transactions
+    // When an OAuth2 user sends a tx, the server uses the vault key to sign automatically
+    // (no mnemonic needed). Keys are AES-256-GCM encrypted with the server's node signing key.
+    // Key: wallet address [u8;32], Value: encrypted Ed25519 private key bytes
+    pub oauth2_key_vault: Arc<RwLock<HashMap<[u8; 32], Vec<u8>>>>,
+
     // v7.4.0: Peer JWT public keys for cross-node token verification
     pub peer_jwt_keys: Arc<dashmap::DashMap<String, oauth2_provider::PeerJwtKeyInfo>>,
 
@@ -1364,6 +1405,9 @@ pub struct AppState {
 
     // v6.5.0: Exchange Listing RWA packages (Gold/Silver/Bronze)
     pub listing_orders: Arc<RwLock<Vec<listing_api::ListingOrder>>>,
+
+    // v8.2.8: XLIST Crowdfunding campaigns
+    pub listing_campaigns: Arc<RwLock<Vec<listing_api::ListingCampaign>>>,
 
     // v5.1.1: Node start time for uptime tracking in health endpoint
     pub start_time: std::time::Instant,
@@ -2171,12 +2215,15 @@ impl AppState {
         }
         tracing::info!("💰 CollateralVault initialized - QUG/QUGUSD stablecoin system ready");
 
-        // v7.2.5: Bootstrap bridge token pools (wBTC/QUG, wZEC/QUG, wIRON/QUG)
+        // v8.2.7: Bootstrap bridge pools with LIVE oracle prices (CoinGecko/Binance)
         {
             let vault_r = collateral_vault.read().await;
             let qug_price = vault_r.qug_price_usd;
             drop(vault_r);
-            bootstrap_bridge_pools(&mut liquidity_pools_map, &storage_engine, qug_price).await;
+            let bank_r = quillon_bank.read().await;
+            let oracle_ref = bank_r.oracle_integration.as_ref();
+            bootstrap_bridge_pools(&mut liquidity_pools_map, &storage_engine, qug_price, Some(oracle_ref)).await;
+            drop(bank_r);
         }
 
         // Load existing loan applications from persistent storage
@@ -2345,6 +2392,7 @@ impl AppState {
             operator_fees_earned_total: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v8.1.1
             operator_fee_tx_count: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v8.1.1
             current_height_atomic: Arc::new(std::sync::atomic::AtomicU64::new(initial_height)), // ⚡ v0.9.66-beta: Lock-free height
+            peak_height_atomic: Arc::new(std::sync::atomic::AtomicU64::new(initial_height)), // v8.2.9: Peak height (never decreases)
             height_state: q_storage::HeightState::new(initial_height), // 🚀 v1.0.2-beta: HeightState cache - Eliminates binary search storm
             shutdown_tx: {
                 let (tx, _rx) = tokio::sync::broadcast::channel(1);
@@ -2434,7 +2482,7 @@ impl AppState {
                     total_validators: 8, // ✅ v1.0.17-beta: Restored to 8 (deadlock was NOT in producer contention)
                     network_id_str: std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| {
                         let now = chrono::Utc::now().timestamp() as u64;
-                        if now >= 1771761600 { "mainnet2026.2".to_string() } else { "mainnet2026.1.3".to_string() }
+                        if now >= 1771761600 { "mainnet-genesis".to_string() } else { "mainnet2026.1.3".to_string() }
                     }),
                 };
 
@@ -2576,6 +2624,15 @@ impl AppState {
                 let oauth2 = Arc::new(oauth2_provider::OAuth2Storage::with_storage(storage_engine.clone()));
                 oauth2.load_clients_from_disk().await;
                 oauth2
+            },
+
+            // v8.1.7: OAuth2 Key Vault — load encrypted signing keys from RocksDB
+            oauth2_key_vault: {
+                let vault_keys = storage_engine.load_vault_keys().await.unwrap_or_default();
+                if !vault_keys.is_empty() {
+                    tracing::info!("🔐 [VAULT] Loaded {} custodial signing keys from RocksDB", vault_keys.len());
+                }
+                Arc::new(RwLock::new(vault_keys))
             },
 
             // v7.4.0: Peer JWT public keys for cross-node token verification
@@ -2753,6 +2810,8 @@ impl AppState {
             forge_redemptions: Arc::new(RwLock::new(Vec::new())),
             // v6.5.0: Exchange Listing RWA orders
             listing_orders: Arc::new(RwLock::new(Vec::new())),
+            // v8.2.8: XLIST Crowdfunding campaigns
+            listing_campaigns: Arc::new(RwLock::new(Vec::new())),
             // v5.1.1: Node start time
             start_time: std::time::Instant::now(),
             // v5.1.1: Deploy admin state
@@ -3425,12 +3484,15 @@ impl AppState {
         }
         tracing::info!("💰 CollateralVault initialized - QUG/QUGUSD stablecoin system ready");
 
-        // v7.2.5: Bootstrap bridge token pools (wBTC/QUG, wZEC/QUG, wIRON/QUG)
+        // v8.2.7: Bootstrap bridge pools with LIVE oracle prices (CoinGecko/Binance)
         {
             let vault_r = collateral_vault.read().await;
             let qug_price = vault_r.qug_price_usd;
             drop(vault_r);
-            bootstrap_bridge_pools(&mut liquidity_pools_map, &storage_engine, qug_price).await;
+            let bank_r = quillon_bank.read().await;
+            let oracle_ref = bank_r.oracle_integration.as_ref();
+            bootstrap_bridge_pools(&mut liquidity_pools_map, &storage_engine, qug_price, Some(oracle_ref)).await;
+            drop(bank_r);
         }
 
         // Load existing loan applications from persistent storage
@@ -3553,6 +3615,7 @@ impl AppState {
             operator_fees_earned_total: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v8.1.1
             operator_fee_tx_count: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v8.1.1
             current_height_atomic: Arc::new(std::sync::atomic::AtomicU64::new(initial_height)), // ⚡ v0.9.66-beta: Lock-free height
+            peak_height_atomic: Arc::new(std::sync::atomic::AtomicU64::new(initial_height)), // v8.2.9: Peak height (never decreases)
             height_state: q_storage::HeightState::new(initial_height), // 🚀 v1.0.2-beta: HeightState cache - Eliminates binary search storm
             shutdown_tx: {
                 let (tx, _rx) = tokio::sync::broadcast::channel(1);
@@ -3740,7 +3803,7 @@ impl AppState {
                     total_validators: 8, // ✅ v1.0.17-beta: Restored to 8 (deadlock was NOT in producer contention)
                     network_id_str: std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| {
                         let now = chrono::Utc::now().timestamp() as u64;
-                        if now >= 1771761600 { "mainnet2026.2".to_string() } else { "mainnet2026.1.3".to_string() }
+                        if now >= 1771761600 { "mainnet-genesis".to_string() } else { "mainnet2026.1.3".to_string() }
                     }),
                 };
 
@@ -3882,6 +3945,15 @@ impl AppState {
                 let oauth2 = Arc::new(oauth2_provider::OAuth2Storage::with_storage(storage_engine.clone()));
                 oauth2.load_clients_from_disk().await;
                 oauth2
+            },
+
+            // v8.1.7: OAuth2 Key Vault — load encrypted signing keys from RocksDB
+            oauth2_key_vault: {
+                let vault_keys = storage_engine.load_vault_keys().await.unwrap_or_default();
+                if !vault_keys.is_empty() {
+                    tracing::info!("🔐 [VAULT] Loaded {} custodial signing keys from RocksDB", vault_keys.len());
+                }
+                Arc::new(RwLock::new(vault_keys))
             },
 
             // v7.4.0: Peer JWT public keys for cross-node token verification
@@ -4059,6 +4131,8 @@ impl AppState {
             forge_redemptions: Arc::new(RwLock::new(Vec::new())),
             // v6.5.0: Exchange Listing RWA orders
             listing_orders: Arc::new(RwLock::new(Vec::new())),
+            // v8.2.8: XLIST Crowdfunding campaigns
+            listing_campaigns: Arc::new(RwLock::new(Vec::new())),
             // v5.1.1: Node start time
             start_time: std::time::Instant::now(),
             // v5.1.1: Deploy admin state

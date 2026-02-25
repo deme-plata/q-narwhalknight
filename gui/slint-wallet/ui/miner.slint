@@ -7,6 +7,9 @@ export component MinerScreen inherits Rectangle {
     in property <string> difficulty: "0";
     in property <string> miner-address: "";
     in property <string> reward-per-block: "0";
+    in property <string> miner-status: "";
+    in property <string> thread-count: "0";
+    in-out property <bool> pool-mode: false;
 
     callback toggle-mining();
     callback go-back();
@@ -51,7 +54,7 @@ export component MinerScreen inherits Rectangle {
 
         // Mining status
         Card {
-            height: 140px;
+            height: 160px;
 
             VerticalLayout {
                 padding: Theme.spacing-lg;
@@ -82,6 +85,16 @@ export component MinerScreen inherits Rectangle {
                     color: root.mining ? Theme.accent-green : Theme.text-muted;
                     font-size: Theme.font-lg;
                     font-weight: 600;
+                    horizontal-alignment: center;
+                }
+
+                // Status message
+                if root.miner-status != "" : Text {
+                    text: root.miner-status;
+                    color: root.miner-status == "Block found!" ? Theme.accent-yellow
+                        : (root.miner-status == "Waiting for sync..." ? Theme.accent-yellow
+                        : Theme.text-muted);
+                    font-size: Theme.font-sm;
                     horizontal-alignment: center;
                 }
             }
@@ -146,7 +159,7 @@ export component MinerScreen inherits Rectangle {
             }
         }
 
-        // Difficulty & Reward
+        // Difficulty, Reward & Threads
         Card {
             VerticalLayout {
                 padding: Theme.spacing-md;
@@ -190,6 +203,23 @@ export component MinerScreen inherits Rectangle {
                 HorizontalLayout {
                     alignment: space-between;
                     Text {
+                        text: "Mining Threads";
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-sm;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.thread-count;
+                        color: Theme.accent-cyan;
+                        font-size: Theme.font-sm;
+                        font-weight: 500;
+                        vertical-alignment: center;
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: space-between;
+                    Text {
                         text: "Mining Address";
                         color: Theme.text-secondary;
                         font-size: Theme.font-sm;
@@ -203,6 +233,80 @@ export component MinerScreen inherits Rectangle {
                         max-width: 200px;
                         vertical-alignment: center;
                     }
+                }
+            }
+        }
+
+        // Mining mode selector
+        Card {
+            VerticalLayout {
+                padding: Theme.spacing-md;
+                spacing: Theme.spacing-sm;
+
+                Text {
+                    text: "Mining Mode";
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-sm;
+                    font-weight: 600;
+                }
+
+                HorizontalLayout {
+                    spacing: Theme.spacing-sm;
+
+                    // Solo button
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 36px;
+                        border-radius: Theme.radius-sm;
+                        background: !root.pool-mode ? Theme.accent-cyan.with-alpha(0.2) : Theme.bg-hover;
+                        border-width: !root.pool-mode ? 1px : 0px;
+                        border-color: Theme.accent-cyan;
+
+                        TouchArea {
+                            clicked => { root.pool-mode = false; }
+                        }
+
+                        Text {
+                            text: "Solo";
+                            color: !root.pool-mode ? Theme.accent-cyan : Theme.text-muted;
+                            font-size: Theme.font-sm;
+                            font-weight: !root.pool-mode ? 700 : 400;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                        }
+                    }
+
+                    // Pool button
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 36px;
+                        border-radius: Theme.radius-sm;
+                        background: root.pool-mode ? Theme.accent-yellow.with-alpha(0.2) : Theme.bg-hover;
+                        border-width: root.pool-mode ? 1px : 0px;
+                        border-color: Theme.accent-yellow;
+
+                        TouchArea {
+                            clicked => { root.pool-mode = true; }
+                        }
+
+                        Text {
+                            text: "Pool";
+                            color: root.pool-mode ? Theme.accent-yellow : Theme.text-muted;
+                            font-size: Theme.font-sm;
+                            font-weight: root.pool-mode ? 700 : 400;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+
+                Text {
+                    text: root.pool-mode
+                        ? "Share rewards with pool (PPLNS)"
+                        : "Keep 100% of block rewards";
+                    color: Theme.text-muted;
+                    font-size: Theme.font-xs;
+                    horizontal-alignment: center;
                 }
             }
         }

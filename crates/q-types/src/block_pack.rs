@@ -9,10 +9,15 @@ use libp2p::request_response::Codec;
 use serde::{Deserialize, Serialize};
 use std::io;
 
-/// Maximum blocks per request to prevent DoS
-/// v1.0.46-beta: Increased from 1000 to 5000 for faster sync
-/// Q-NarwhalKnight blocks are small (~2-5KB), so 5000 blocks = ~10-25MB per response
-pub const MAX_BLOCKS_PER_REQUEST: usize = 5000;
+/// Maximum blocks per request to prevent DoS and oversized responses
+/// v8.1.5: Reduced from 5000 to 1000 — 5000 blocks serialized to ~211MB in bincode
+/// which caused "Failed to parse response" errors on client nodes.
+/// 1000 blocks ≈ 40-50MB per response, much more reliable over the network.
+pub const MAX_BLOCKS_PER_REQUEST: usize = 1000;
+
+/// Maximum response size in bytes (100MB safety limit)
+/// v8.1.5: Prevents OOM from malicious or oversized responses
+pub const MAX_RESPONSE_BYTES: usize = 100 * 1024 * 1024;
 
 /// Block pack request for efficient blockchain sync
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,8 +230,19 @@ impl Codec for BlockPackCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
+        // v8.1.5: Bounded read — reject responses over MAX_RESPONSE_BYTES (100MB)
+        // Previously unbounded read_to_end() allowed 211MB+ responses that failed to parse
         let mut buf = Vec::new();
-        io.read_to_end(&mut buf).await?;
+        let mut limited = io.take(MAX_RESPONSE_BYTES as u64 + 1);
+        limited.read_to_end(&mut buf).await?;
+
+        if buf.len() > MAX_RESPONSE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Response too large: {} bytes (max {}MB). Peer may need to reduce batch size.",
+                    buf.len(), MAX_RESPONSE_BYTES / 1024 / 1024),
+            ));
+        }
 
         Self::parse_response(&buf)
     }
@@ -261,8 +277,15 @@ impl Codec for BlockPackCodec {
         // CBOR cannot serialize u128 values, causing "The number can't be stored in CBOR"
         // errors for blocks 199,002+ after the u64→u128 migration.
         // Bincode natively supports u128 and is already used for block storage.
+        let block_count = res.blocks.len();
         let bytes = bincode::serialize(&res)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+        // v8.1.5: Log response size for debugging oversized responses
+        let size_mb = bytes.len() as f64 / (1024.0 * 1024.0);
+        if size_mb > 10.0 {
+            eprintln!("⚠️ [BLOCK-PACK] Large response: {} blocks = {:.1}MB bincode", block_count, size_mb);
+        }
 
         io.write_all(&bytes).await?;
         io.flush().await

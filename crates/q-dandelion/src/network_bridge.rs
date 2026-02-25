@@ -50,7 +50,7 @@ pub struct NetworkBridgeConfig {
 impl Default for NetworkBridgeConfig {
     fn default() -> Self {
         Self {
-            network_id: "mainnet2026.2".to_string(),
+            network_id: "mainnet-genesis".to_string(),
             fluff_topic: "/qnk/mainnet2026/mempool-txs".to_string(),
             stem_topic: "/qnk/mainnet2026/dandelion-stem".to_string(),
             fluff_rate_limit: 100,

@@ -3979,6 +3979,172 @@ html, body {
 [data-theme="cozywizard"] .to-purple-800 { --tw-gradient-to: #d9a050 !important; }
 [data-theme="cozywizard"] .to-pink-500, [data-theme="cozywizard"] .to-pink-600 { --tw-gradient-to: #e8a44a !important; }
 
+/* ============================================
+   CARBON FIBER THEME (data-theme="carbonfiber")
+   Dark carbon weave, red pinstripe + chrome accents
+   ============================================ */
+
+/* Carbon Fiber: TopBar - dark carbon with red accent line */
+[data-theme="carbonfiber"] .topbar-main {
+  min-height: 100px !important;
+  padding-top: 30px !important;
+  background: linear-gradient(135deg, rgba(10, 10, 12, 0.85) 0%, rgba(16, 16, 18, 0.7) 50%, rgba(10, 10, 12, 0.85) 100%) !important;
+  border-color: rgba(220, 38, 38, 0.18) !important;
+  box-shadow: 0 4px 30px rgba(220, 38, 38, 0.06), inset 0 -1px 0 rgba(220, 38, 38, 0.1) !important;
+  display: flex !important;
+  align-items: center !important;
+}
+
+/* Carbon Fiber: global background - pitch black carbon */
+[data-theme="carbonfiber"] body {
+  background: #060608 !important;
+}
+
+/* Carbon Fiber: page background - carbon weave pattern + red ambient haze */
+[data-theme="carbonfiber"] .min-h-full {
+  background:
+    /* Simulated carbon fiber weave pattern */
+    repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(255, 255, 255, 0.007) 2px,
+      rgba(255, 255, 255, 0.007) 4px
+    ),
+    repeating-linear-gradient(
+      90deg,
+      transparent,
+      transparent 2px,
+      rgba(255, 255, 255, 0.007) 2px,
+      rgba(255, 255, 255, 0.007) 4px
+    ),
+    /* Red ambient glow */
+    radial-gradient(ellipse at 20% 10%, rgba(220, 38, 38, 0.03) 0%, transparent 50%),
+    radial-gradient(ellipse at 80% 30%, rgba(153, 27, 27, 0.02) 0%, transparent 50%),
+    radial-gradient(ellipse at 50% 80%, rgba(220, 38, 38, 0.02) 0%, transparent 60%),
+    linear-gradient(180deg, rgba(6, 6, 8, 0.99) 0%, rgba(10, 10, 12, 0.99) 100%) !important;
+}
+
+/* Carbon Fiber: card backgrounds - dark carbon tint */
+[data-theme="carbonfiber"] .bg-slate-800\/50,
+[data-theme="carbonfiber"] .bg-slate-800\/60,
+[data-theme="carbonfiber"] .bg-slate-900\/50,
+[data-theme="carbonfiber"] .bg-slate-900\/60 {
+  background-color: rgba(14, 14, 16, 0.6) !important;
+  border-color: rgba(220, 38, 38, 0.1) !important;
+}
+
+/* Carbon Fiber: accent text - racing red */
+[data-theme="carbonfiber"] .text-amber-400,
+[data-theme="carbonfiber"] .text-amber-500 {
+  color: #dc2626 !important;
+  text-shadow: 0 0 8px rgba(220, 38, 38, 0.35), 0 0 20px rgba(220, 38, 38, 0.1);
+}
+
+/* Carbon Fiber: search input */
+[data-theme="carbonfiber"] .topbar-main input {
+  background: rgba(12, 12, 14, 0.7) !important;
+  border-color: rgba(160, 160, 168, 0.15) !important;
+}
+
+[data-theme="carbonfiber"] .topbar-main input:focus {
+  border-color: rgba(220, 38, 38, 0.5) !important;
+  box-shadow: 0 0 15px rgba(220, 38, 38, 0.12) !important;
+}
+
+/* Carbon Fiber: gradient buttons - red racing */
+[data-theme="carbonfiber"] button.bg-gradient-to-r {
+  background: linear-gradient(135deg, #991b1b, #dc2626) !important;
+  box-shadow: 0 0 12px rgba(220, 38, 38, 0.15) !important;
+}
+
+[data-theme="carbonfiber"] button.bg-gradient-to-r:hover {
+  box-shadow: 0 0 24px rgba(220, 38, 38, 0.35) !important;
+}
+
+/* Carbon Fiber: border accents - red/chrome glow */
+[data-theme="carbonfiber"] .border-amber-500\/30 {
+  border-color: rgba(220, 38, 38, 0.12) !important;
+  box-shadow: inset 0 0 6px rgba(220, 38, 38, 0.03);
+}
+
+[data-theme="carbonfiber"] .border-amber-500\/40 {
+  border-color: rgba(220, 38, 38, 0.18) !important;
+}
+
+/* Carbon Fiber: divider lines - chrome/silver */
+[data-theme="carbonfiber"] .bg-gradient-to-b.from-transparent {
+  background: linear-gradient(to bottom, transparent, rgba(160, 160, 168, 0.2), transparent) !important;
+}
+
+/* Carbon Fiber: scrollbar - dark red */
+[data-theme="carbonfiber"] ::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, #991b1b, #5c1010) !important;
+}
+
+[data-theme="carbonfiber"] ::-webkit-scrollbar-track {
+  background: rgba(6, 6, 8, 0.9) !important;
+}
+
+/* Carbon Fiber: profile dropdown */
+[data-theme="carbonfiber"] .fixed.top-16.right-4 {
+  background: linear-gradient(135deg, rgba(10, 10, 12, 0.97), rgba(16, 16, 18, 0.97)) !important;
+  border-color: rgba(220, 38, 38, 0.15) !important;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.6), 0 0 30px rgba(220, 38, 38, 0.04) !important;
+}
+
+/* Carbon Fiber: modals - dark carbon */
+[data-theme="carbonfiber"] [class*="from-slate-900"][class*="via-slate-800"] {
+  background: linear-gradient(135deg, rgba(6, 6, 8, 0.98), rgba(12, 12, 14, 0.98), rgba(6, 6, 8, 0.98)) !important;
+  border-color: rgba(220, 38, 38, 0.15) !important;
+}
+
+/* Carbon Fiber: spark particle overlay - red embers */
+[data-theme="carbonfiber"] #root::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9991;
+  background:
+    radial-gradient(circle 1px at 20% 15%, rgba(220, 38, 38, 0.3) 0%, transparent 100%),
+    radial-gradient(circle 1.5px at 75% 20%, rgba(160, 160, 168, 0.15) 0%, transparent 100%),
+    radial-gradient(circle 1px at 40% 65%, rgba(220, 38, 38, 0.15) 0%, transparent 100%),
+    radial-gradient(circle 0.5px at 65% 50%, rgba(160, 160, 168, 0.2) 0%, transparent 100%),
+    radial-gradient(circle 1px at 30% 80%, rgba(153, 27, 27, 0.15) 0%, transparent 100%),
+    radial-gradient(circle 0.8px at 55% 30%, rgba(220, 38, 38, 0.2) 0%, transparent 100%);
+  animation: carbonEmberDrift 14s ease-in-out infinite;
+}
+
+@keyframes carbonEmberDrift {
+  0%, 100% { opacity: 0.3; transform: translateY(0); }
+  50% { opacity: 0.6; transform: translateY(-2px); }
+}
+
+/* Carbon Fiber: frame glow override - subtle red */
+[data-theme="carbonfiber"] .border-frame img {
+  filter: drop-shadow(0 0 18px rgba(220, 38, 38, 0.15)) !important;
+}
+
+/* Carbon Fiber: selection color */
+[data-theme="carbonfiber"] ::selection {
+  background: rgba(220, 38, 38, 0.3);
+  color: #fecaca;
+}
+
+/* Carbon Fiber: purple overrides for DEX/mining screens */
+[data-theme="carbonfiber"] .bg-purple-900\/20, [data-theme="carbonfiber"] .bg-purple-900\/30 {
+  background-color: rgba(220, 38, 38, 0.08) !important;
+}
+[data-theme="carbonfiber"] .text-purple-300, [data-theme="carbonfiber"] .text-purple-400 { color: #dc2626 !important; }
+[data-theme="carbonfiber"] .border-purple-500\/20, [data-theme="carbonfiber"] .border-purple-500\/30,
+[data-theme="carbonfiber"] .border-purple-500\/40 { border-color: rgba(220, 38, 38, 0.15) !important; }
+[data-theme="carbonfiber"] .from-purple-500, [data-theme="carbonfiber"] .from-purple-600,
+[data-theme="carbonfiber"] .from-purple-900 { --tw-gradient-from: #7f1d1d !important; }
+[data-theme="carbonfiber"] .to-purple-500, [data-theme="carbonfiber"] .to-purple-700,
+[data-theme="carbonfiber"] .to-purple-800 { --tw-gradient-to: #dc2626 !important; }
+[data-theme="carbonfiber"] .to-pink-500, [data-theme="carbonfiber"] .to-pink-600 { --tw-gradient-to: #b91c1c !important; }
+
 /* Bounty Modal gradient animation */
 @keyframes bountyGradientShift {
   0% { background-position: 0% 50%; }

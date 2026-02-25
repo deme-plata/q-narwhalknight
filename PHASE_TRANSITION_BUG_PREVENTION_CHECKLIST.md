@@ -13,6 +13,7 @@
 **Updated**: 2026-02-14 Phase 22 transition revealed THREE MORE BUGS (#18-20): systemd service file not updated (stale data dir), drop-in overrides conflict, running process environment not verified after restart, frontend localStorage balance cache survives phase transition
 **Updated**: 2026-02-15 Phase 24 transition added 3-server cleanup steps (#33-36): Alpha Docker cleanup, Alpha env file creation, Gamma/Beta service file updates, encryption key removal on ALL servers
 **Updated**: 2026-02-18 Mainnet 2026.1.1 rehearsal revealed SIX MORE BUGS (#22-27): LZ4 compress/decompress mismatch, lockfree_producer error propagation, save_qblock timestamp filter, systemd deployment race, staggered start chain forks, binary version mismatch
+**Updated**: 2026-02-22 Mainnet 2026.1.3 user connectivity failure revealed BUG #28: ALL hardcoded bootstrap peer IDs were stale after identity regeneration. External nodes could not establish stable P2P connections.
 **Purpose**: Prevent recurrence of NetworkId parsing bugs AND chain forks during phase transitions
 **References**:
 - `PHASE_8_NETWORK_ISOLATION_BUG.md` - Bugs #1 & #2 analysis
@@ -2559,6 +2560,39 @@ Beta/Gamma ran `mainnet2026.1.1`. They could corrupt the Feb 22 launch if not fi
 - **Fix**: Replaced both hardcoded values with `q_storage::balance_consensus::active_genesis_timestamp()`
 - **Prevention**: Search for ALL instances of hardcoded constants (`grep -rn "1700000000"`)
   before considering a fix complete. Dual-engine architectures are especially dangerous.
+
+### Bug #37: Stale Bootstrap Peer IDs After Identity Regeneration (Found 2026-02-22)
+
+- **Severity**: CRITICAL (external nodes CANNOT connect to network)
+- **Locations** (ALL must be updated simultaneously):
+  - `crates/q-network/src/unified_network_manager.rs:82-91` — `HARDCODED_BOOTSTRAP_PEERS`
+  - `crates/q-network/src/unified_network_manager.rs:104` — `HARDCODED_BOOTSTRAP_PEER`
+  - `crates/q-api-server/src/main.rs:197-202` — `is_allowed_balance_update_origin()`
+  - `crates/q-storage/src/turbo_sync.rs:2348` — `BOOTSTRAP_PEER` constant
+  - `crates/q-types/src/lib.rs:4190-4198` — `NetworkConfig::testnet()` bootstrap_peers
+  - `crates/q-types/src/lib.rs:4911-4913` — test assertions for peer IDs
+  - `gui/quantum-wallet/src/libp2p/config.ts:30` — frontend WebSocket bootstrap
+  - `gui/quantum-wallet/src/libp2p/torConfig.ts` — Tor bridge peer IDs
+  - `CLAUDE.md` — documentation bootstrap peer IDs section
+- **Problem**: When servers regenerate their libp2p identity (e.g., new data directory,
+  network ID change), the peer ID changes. But 6+ files still contain the OLD peer IDs.
+  libp2p connections fail because the peer ID in the multiaddress doesn't match the actual
+  identity. Nodes can sometimes connect briefly via dynamic discovery (Q_BOOTSTRAP_URL)
+  but connections drop because the DHT caches the wrong peer ID.
+- **Symptom**: User node shows "Peer 12D3KooW... is NOT connected and has 0 cached addresses"
+  and "Cannot dial peer without knowing its address" even though turbo sync requests are
+  briefly sent. Tried from HK, Singapore, and US — all fail identically.
+- **Fix**: Updated ALL 6 source files with current peer IDs fetched via:
+  ```bash
+  curl -s http://185.182.185.227:8080/api/v1/status | jq -r '.data.peer_id'  # Beta
+  curl -s http://109.205.176.60:8080/api/v1/status | jq -r '.data.peer_id'   # Gamma
+  curl -s http://5.79.79.158:8080/api/v1/status | jq -r '.data.peer_id'      # Delta
+  ```
+- **Prevention Checklist Item**: After ANY network/data directory change:
+  1. Fetch current peer IDs from ALL servers using the curl commands above
+  2. `grep -rn "12D3KooW" crates/ gui/quantum-wallet/src/libp2p/` to find ALL occurrences
+  3. Update every occurrence to match the LIVE peer IDs
+  4. Rebuild, deploy, and verify new nodes can connect
 
 ---
 

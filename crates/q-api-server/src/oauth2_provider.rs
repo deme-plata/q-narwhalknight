@@ -683,7 +683,7 @@ pub async fn register_client(
             let network_id = std::env::var("Q_NETWORK_ID")
                 .ok()
                 .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                .unwrap_or(q_types::NetworkId::Mainnet2026_2);
+                .unwrap_or(q_types::NetworkId::MainnetGenesis);
             let timestamp = Utc::now().timestamp();
             let sign_msg = format!("oauth2-client:{}:{}:{}", peer_id, broadcast_client.client_id, timestamp);
 

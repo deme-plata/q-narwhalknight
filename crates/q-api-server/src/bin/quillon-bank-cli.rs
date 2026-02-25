@@ -68,6 +68,11 @@ enum Commands {
         #[command(subcommand)]
         action: InheritanceAction,
     },
+    /// Broadcast emails to all email-registered users
+    Email {
+        #[command(subcommand)]
+        action: EmailAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -139,6 +144,19 @@ enum InheritanceAction {
     View { wallet: String },
     /// Execute approved inheritance transfer
     Execute { cert_id: String },
+}
+
+#[derive(Subcommand)]
+enum EmailAction {
+    /// Broadcast an email to all email-registered users
+    Broadcast {
+        /// Email subject line
+        #[arg(short, long)]
+        subject: String,
+        /// Email body text
+        #[arg(short, long)]
+        body: String,
+    },
 }
 
 // ============================================================================
@@ -329,6 +347,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Identity { action } => handle_identity(&client, &api_url, action).await?,
         Commands::DeathCert { action } => handle_death_cert(&client, &api_url, action).await?,
         Commands::Inheritance { action } => handle_inheritance(&client, &api_url, action).await?,
+        Commands::Email { action } => handle_email(&client, &api_url, action).await?,
     }
 
     Ok(())
@@ -971,6 +990,69 @@ async fn handle_inheritance(
                 );
                 if let Some(msg) = response.data {
                     println!("{}", msg);
+                }
+            } else {
+                println!(
+                    "{}",
+                    format!("❌ Failed: {}", response.error.unwrap_or_default()).red()
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Email Handlers
+// ============================================================================
+
+async fn handle_email(
+    client: &Client,
+    api_url: &str,
+    action: EmailAction,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match action {
+        EmailAction::Broadcast { subject, body } => {
+            println!("{}", "📧 Broadcasting Bank Email".green().bold());
+            println!("{}", "─".repeat(60));
+            println!("  Subject: {}", subject.cyan());
+            let preview = if body.len() > 80 {
+                format!("{}...", &body[..80])
+            } else {
+                body.clone()
+            };
+            println!("  Body:    {}", preview);
+            println!();
+
+            print!("Send broadcast to ALL email users? [y/N] ");
+            io::stdout().flush()?;
+            let mut confirm = String::new();
+            io::stdin().read_line(&mut confirm)?;
+            if confirm.trim().to_lowercase() != "y" {
+                println!("{}", "Cancelled.".yellow());
+                return Ok(());
+            }
+
+            let payload = serde_json::json!({
+                "subject": subject,
+                "body": body,
+            });
+
+            let response: ApiResponse<String> =
+                admin_post(client, &format!("{}/api/v1/quillon-bank/email/broadcast", api_url), &payload)
+                    .await?
+                    .json()
+                    .await?;
+
+            if response.success {
+                println!();
+                println!(
+                    "{}",
+                    "✅ Broadcast sent successfully!".green().bold()
+                );
+                if let Some(msg) = response.data {
+                    println!("  {}", msg);
                 }
             } else {
                 println!(

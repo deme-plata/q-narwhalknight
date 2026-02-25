@@ -9,6 +9,7 @@ import NitroSuccessModal from './NitroSuccessModal';
 import MintQUGUSDModal from './MintQUGUSDModal';
 import SwapSuccessModal from './SwapSuccessModal';
 import MarketAnalyzerPanel from './MarketAnalyzerPanel';
+import XListCrowdfundModal from './XListCrowdfundModal';
 import { qnkAPI } from '../services/api';
 
 // v3.1.1: Helper to safely parse u128 values that may come as strings from the API
@@ -269,6 +270,29 @@ interface Token {
     takerFee: number;
     makerFee: number;
   };
+  // v8.2.8: XLIST crowdfunding campaign tokens
+  isCrowdfund?: boolean;
+  campaignData?: {
+    campaign_id: string;
+    exchange_name: string;
+    exchange_logo: string;
+    target_usd: number;
+    raised_usd: number;
+    contributor_count: number;
+    early_bird_slots: number;
+    early_bird_claimed: number;
+    status: 'funding' | 'funded' | 'listed' | 'cancelled';
+    tier: string;
+    description: string;
+    perks: {
+      reduced_trading_fees: boolean;
+      governance_voting: boolean;
+      airdrop_multiplier: number;
+      early_access: boolean;
+      vip_support: boolean;
+      nft_badge: boolean;
+    };
+  };
 }
 
 export default function DexScreen() {
@@ -306,6 +330,9 @@ export default function DexScreen() {
     transactionHash?: string;
   } | null>(null);
   const [refreshTrigger, setRefreshTrigger] = useState(0); // Trigger for refetching tokens
+  // v8.2.8: Swap processing state for loading animation
+  const [isSwapping, setIsSwapping] = useState(false);
+  const [swapPhase, setSwapPhase] = useState<'verifying' | 'executing' | 'confirming' | 'idle'>('idle');
 
   // v2.3.7-beta: Ref to track when a swap just completed - prevents SSE from overwriting correct local state
   const swapJustCompletedRef = useRef(false);
@@ -313,6 +340,10 @@ export default function DexScreen() {
   // v2.9.6-beta: Ref to always have the latest tokens for swap balance calculation
   // This avoids stale closure issues where the callback captures old token values
   const tokensRef = useRef<Token[]>([]);
+
+  // v8.2.8: XLIST Crowdfunding campaigns
+  const [xlistCampaigns, setXlistCampaigns] = useState<any[]>([]);
+  const [selectedCampaign, setSelectedCampaign] = useState<any | null>(null);
 
   // 💰 v2.4.8-beta: DCA (Dollar Cost Averaging) State
   const [showDcaModal, setShowDcaModal] = useState(false);
@@ -774,6 +805,55 @@ export default function DexScreen() {
       };
     }
   }, [dexMode, fetchPerpMarket, fetchPerpPositions, fetchOrderBook, fetchLimitOrders]);
+
+  // v8.2.8: Fetch XLIST crowdfunding campaigns and inject as special DEX tokens
+  useEffect(() => {
+    const fetchCampaigns = async () => {
+      try {
+        const resp = await fetch('/api/v1/listing/campaigns');
+        if (resp.ok) {
+          const data = await resp.json();
+          const campaigns = data.campaigns || data || [];
+          setXlistCampaigns(campaigns);
+          // Inject campaigns as special XLIST tokens into the token list
+          if (campaigns.length > 0) {
+            const xlistTokens: Token[] = campaigns.map((c: any) => ({
+              id: `xlist-${c.campaign_id}`,
+              symbol: `XLIST`,
+              name: `${c.exchange_name} Listing Fund`,
+              balance: 0,
+              price: c.raised_usd / Math.max(c.contributor_count, 1),
+              change1h: 0,
+              change24h: c.contributor_count > 0 ? ((c.raised_usd / c.target_usd) * 100) : 0,
+              change7d: 0,
+              volume24h: c.raised_usd,
+              liquidity: c.target_usd,
+              icon: c.exchange_logo || '\u{1F3E6}',
+              marketCap: c.raised_usd,
+              totalSupply: c.target_usd,
+              circulatingSupply: c.raised_usd,
+              holders: c.contributor_count,
+              features: { reflection: false, autoLiquidity: false, buybackAndBurn: false, antiWhale: false, quantumSecured: false },
+              fees: { buy: 0, sell: 0, transfer: 0 },
+              description: c.description || `Community crowdfunding to list QUG on ${c.exchange_name}`,
+              isCrowdfund: true,
+              campaignData: c,
+            }));
+            setTokens(prev => {
+              // Remove old XLIST tokens, then prepend new ones
+              const nonXlist = prev.filter(t => !t.id.startsWith('xlist-'));
+              return [...xlistTokens, ...nonXlist];
+            });
+          }
+        }
+      } catch (e) {
+        console.log('[DexScreen] No XLIST campaigns available:', e);
+      }
+    };
+    fetchCampaigns();
+    const interval = setInterval(fetchCampaigns, 30000); // Refresh every 30s
+    return () => clearInterval(interval);
+  }, []);
 
   // DEX Settings Modal State
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
@@ -1316,7 +1396,8 @@ export default function DexScreen() {
         }
 
         // Fetch real price from oracle API with all time periods
-        let qugPrice = 42.50;
+        // v8.0.1: Default to 0 — only show a price if the oracle returns one
+        let qugPrice = 0;
         let qugChange1h = 0;
         let qugChange24h = 0;
         let qugChange7d = 0;
@@ -1356,9 +1437,9 @@ export default function DexScreen() {
         }
 
         // v2.3.8-beta: Fetch REAL network supply stats (circulating supply + holders count)
-        let qugCirculatingSupply = 77000; // Fallback estimate
+        let qugCirculatingSupply = 0; // v8.0.1: Default to 0 (no blocks = no circulating supply)
         let qugTotalSupply = 21000000; // Max supply
-        let qugHolders = 66; // Fallback estimate
+        let qugHolders = 0; // v8.0.1: Default to 0 until API returns real data
         try {
           const supplyResponse = await qnkAPI.getNetworkSupply();
           if (supplyResponse.success && supplyResponse.data) {
@@ -1683,17 +1764,10 @@ export default function DexScreen() {
           // Wait for all balance fetches to complete
           const apiTokens = await Promise.all(apiTokensPromises);
 
-          // ✅ FILTER: Only show tokens that have liquidity pools (liquidity > 0)
-          // Exception: Bridge tokens (wBTC, wZEC, wIRON, wETH) always shown so users can add liquidity
-          const bridgeSymbols = ['wBTC', 'wZEC', 'wIRON', 'wETH'];
-          const tokensWithLiquidity = apiTokens.filter(token => {
-            const isBridge = bridgeSymbols.includes(token.symbol);
-            const hasLiquidity = token.liquidity > 0;
-            if (!hasLiquidity && !isBridge) {
-              console.log(`🚫 Filtering out ${token.symbol} - no liquidity pool exists`);
-            }
-            return hasLiquidity || isBridge;
-          });
+          // v8.2.8: Show ALL tokens (bridge, custom, listed) so users can add liquidity
+          // Previously filtered out tokens without liquidity pools, but that prevented
+          // newly listed tokens from appearing in the DEX token selector
+          const tokensWithLiquidity = apiTokens;
 
           console.log(`✅ Filtered tokens: ${tokensWithLiquidity.length} with liquidity, ${apiTokens.length - tokensWithLiquidity.length} without liquidity`);
           enrichedTokens = [...nativeTokens, ...tokensWithLiquidity];
@@ -2855,6 +2929,15 @@ export default function DexScreen() {
             onClose={handleCloseModal}
           />
         )
+      )}
+
+      {/* v8.2.8: XLIST Crowdfund Modal */}
+      {selectedCampaign && (
+        <XListCrowdfundModal
+          campaign={selectedCampaign}
+          onClose={() => setSelectedCampaign(null)}
+          walletAddress={localStorage.getItem('walletAddress') || ''}
+        />
       )}
 
       {/* Liquidity Modal */}
@@ -4964,6 +5047,10 @@ export default function DexScreen() {
                     return tokenId;
                   };
 
+                  // v8.2.8: Start swap loading animation
+                  setIsSwapping(true);
+                  setSwapPhase('verifying');
+
                   try{
 
                     // ✅ PROPER FIX: Calculate expected output using constant product formula (x * y = k)
@@ -5024,6 +5111,7 @@ export default function DexScreen() {
 
                       // v2.4.0: Add NaN protection for zero reserves
                       if (reserveIn <= 0 || reserveOut <= 0) {
+                        setIsSwapping(false); setSwapPhase('idle');
                         alert('Pool has insufficient liquidity');
                         return;
                       }
@@ -5031,6 +5119,7 @@ export default function DexScreen() {
                       // Constant product formula
                       expectedOutput = (amountInWithFee * reserveOut) / (reserveIn + amountInWithFee);
                       if (!isFinite(expectedOutput) || isNaN(expectedOutput)) {
+                        setIsSwapping(false); setSwapPhase('idle');
                         alert('Invalid swap calculation - please try a different amount');
                         return;
                       }
@@ -5055,12 +5144,14 @@ export default function DexScreen() {
 
                       // v3.2.22-beta: CRITICAL - Never use 1:1 fallback which causes massive financial loss
                       if (!fromPrice || fromPrice <= 0 || !toPrice || toPrice <= 0) {
+                        setIsSwapping(false); setSwapPhase('idle');
                         alert('❌ Cannot determine safe exchange rate. Please try again later.');
                         return;
                       }
 
                       expectedOutput = parseFloat(swapAmount) * (fromPrice / toPrice);
                       if (!isFinite(expectedOutput) || isNaN(expectedOutput) || expectedOutput <= 0) {
+                        setIsSwapping(false); setSwapPhase('idle');
                         alert('❌ Invalid price calculation. Please refresh prices and try again.');
                         return;
                       }
@@ -5079,12 +5170,14 @@ export default function DexScreen() {
                       const toPrice = toToken.price;
 
                       if (!fromPrice || fromPrice <= 0 || !toPrice || toPrice <= 0) {
+                        setIsSwapping(false); setSwapPhase('idle');
                         alert('❌ Cannot determine safe exchange rate for this pair. Please add liquidity first.');
                         return;
                       }
 
                       expectedOutput = parseFloat(swapAmount) * (fromPrice / toPrice);
                       if (!isFinite(expectedOutput) || isNaN(expectedOutput) || expectedOutput <= 0) {
+                        setIsSwapping(false); setSwapPhase('idle');
                         alert('❌ Invalid price calculation. This token pair may not be tradeable.');
                         return;
                       }
@@ -5121,6 +5214,7 @@ export default function DexScreen() {
 
                     // Validate amount doesn't exceed u128 max
                     if (amountInBigInt > U128_MAX) {
+                      setIsSwapping(false); setSwapPhase('idle');
                       alert('❌ Amount exceeds maximum supported. Please reduce the amount.');
                       return;
                     }
@@ -5140,6 +5234,7 @@ export default function DexScreen() {
                       minAmountOut: minOutputStr
                     });
 
+                    setSwapPhase('executing');
                     const response = await qnkAPI.executeSwap({
                       from_token: fromTokenFormatted,
                       to_token: toTokenFormatted,
@@ -5147,6 +5242,8 @@ export default function DexScreen() {
                       min_amount_out: minOutputStr, // String to preserve u128 precision
                       wallet_address: walletAddress,
                     });
+
+                    setSwapPhase('confirming');
 
                     if (response.success && response.data) {
                       // v2.4.0: NaN protection for amount_out
@@ -5165,6 +5262,7 @@ export default function DexScreen() {
                         toAmount: isFinite(amountOut) ? amountOut : expectedOutput,
                         transactionHash: response.data.transaction_id
                       });
+                      setIsSwapping(false); setSwapPhase('idle');
                       setShowSwapSuccess(true);
                       // Reset swap amount
                       setSwapAmount('');
@@ -5352,6 +5450,8 @@ export default function DexScreen() {
                         setRefreshTrigger(prev => prev + 1);
                       }, 15000);
                     } else {
+                      // v8.2.8: Clear swap loading state
+                      setIsSwapping(false); setSwapPhase('idle');
                       // v2.3.29-beta: Clear cooldown on API error
                       console.error('❌ Swap API error:', response.error);
                       console.error('❌ Full response:', response);
@@ -5362,6 +5462,8 @@ export default function DexScreen() {
                       alert(`❌ Swap failed: ${response.error || 'Unknown error'}`);
                     }
                   } catch (error) {
+                    // v8.2.8: Clear swap loading state
+                    setIsSwapping(false); setSwapPhase('idle');
                     // v2.3.29-beta: Clear cooldown on exception
                     console.error('❌ Swap exception:', error);
                     console.error('❌ Swap request details:', {
@@ -5377,9 +5479,22 @@ export default function DexScreen() {
                     alert(`❌ Swap failed: ${error instanceof Error ? error.message : 'Please try again'}`);
                   }
                 }}
-                className="w-full py-4 bg-gradient-to-r from-quantum-cyan to-quantum-purple rounded-xl font-bold text-white hover:shadow-lg hover:shadow-quantum-cyan/50 transition-all"
+                disabled={isSwapping}
+                className={`w-full py-4 rounded-xl font-bold text-white transition-all ${
+                  isSwapping
+                    ? 'bg-gray-700 cursor-not-allowed opacity-70'
+                    : 'bg-gradient-to-r from-quantum-cyan to-quantum-purple hover:shadow-lg hover:shadow-quantum-cyan/50'
+                }`}
               >
-                Swap Tokens
+                {isSwapping ? (
+                  <span className="flex items-center justify-center gap-3">
+                    <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                    </svg>
+                    {swapPhase === 'verifying' ? 'Verifying...' : swapPhase === 'executing' ? 'Executing Swap...' : 'Confirming...'}
+                  </span>
+                ) : 'Swap Tokens'}
               </button>
 
               {/* 💰 v2.4.8-beta: DCA Button */}
@@ -5565,16 +5680,26 @@ export default function DexScreen() {
                         className={`border-b border-white/5 hover:bg-white/5 transition-colors cursor-pointer ${
                           nitroBoostTokens.has(token.id) ? 'nitro-boost-active' : ''
                         }`}
-                        onClick={() => setSelectedToken(token)}
+                        onClick={() => {
+                          if (token.isCrowdfund && token.campaignData) {
+                            setSelectedCampaign(token.campaignData);
+                          } else {
+                            setSelectedToken(token);
+                          }
+                        }}
                       >
                         <td className="py-3 px-3">
                           <div className="flex items-center gap-2">
                             <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm overflow-hidden flex-shrink-0 ${
-                              (token as any).isBridgeToken
+                              token.isCrowdfund
+                                ? 'bg-gradient-to-br from-cyan-500 to-blue-600 ring-1 ring-cyan-400/50'
+                                : (token as any).isBridgeToken
                                 ? 'bg-gradient-to-br from-amber-500 to-orange-600 ring-1 ring-amber-400/50'
                                 : 'bg-gradient-to-br from-quantum-cyan to-quantum-purple'
                             }`}>
-                              {(token.icon === 'qug-logo' || token.icon === 'qugusd-logo' || token.icon === 'usd-logo') ? (
+                              {token.isCrowdfund ? (
+                                <span className="text-base">{token.campaignData?.exchange_logo || '\u{1F3E6}'}</span>
+                              ) : (token.icon === 'qug-logo' || token.icon === 'qugusd-logo' || token.icon === 'usd-logo') ? (
                                 <div className="relative w-5 h-5">
                                   <div className="absolute inset-0 rounded-full" style={{ background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 25%, #FFA500 50%, #FFD700 75%, #D4AF37 100%)', padding: '1px' }}>
                                     <div className="w-full h-full bg-gradient-to-b from-slate-900 via-blue-950 to-slate-900 rounded-full flex items-center justify-center p-0.5">
@@ -5593,11 +5718,52 @@ export default function DexScreen() {
                                 {token.isPerp && <span className="px-1 rounded bg-pink-600/50 text-[10px] font-bold text-pink-200">PERP</span>}
                                 {['wBTC', 'wZEC', 'wIRON', 'wETH'].includes(token.symbol) && <span className="px-1 rounded bg-amber-500/50 text-[10px] font-bold text-amber-200">BRIDGE</span>}
                                 {boostedTokens.has(token.id) && <span className="px-1 rounded bg-orange-500/50 text-[10px] font-bold text-orange-200">NITRO</span>}
+                                {token.isCrowdfund && <span className="px-1 rounded bg-cyan-500/50 text-[10px] font-bold text-cyan-200 animate-pulse">XLIST</span>}
                               </div>
-                              <div className="text-xs text-gray-500 truncate">{token.name}</div>
+                              <div className="text-xs text-gray-500 truncate">
+                                {token.isCrowdfund ? (
+                                  <span className="text-cyan-400/70">{Math.round((token.campaignData?.raised_usd || 0) / (token.campaignData?.target_usd || 1) * 100)}% funded &middot; {token.campaignData?.contributor_count || 0} backers</span>
+                                ) : token.name}
+                              </div>
                             </div>
                           </div>
                         </td>
+                        {token.isCrowdfund ? (
+                          <>
+                            {/* XLIST: Show funding progress bar spanning multiple columns */}
+                            <td colSpan={4} className="py-3 px-2">
+                              <div className="flex items-center gap-2">
+                                <div className="flex-1 h-2 bg-gray-800 rounded-full overflow-hidden">
+                                  <div
+                                    className="h-full rounded-full transition-all duration-1000"
+                                    style={{
+                                      width: `${Math.min(100, (token.campaignData?.raised_usd || 0) / (token.campaignData?.target_usd || 1) * 100)}%`,
+                                      background: 'linear-gradient(90deg, #00d4ff, #7b61ff, #00d4ff)',
+                                      backgroundSize: '200% 100%',
+                                      animation: 'shimmer 2s ease-in-out infinite',
+                                    }}
+                                  />
+                                </div>
+                                <span className="text-cyan-400 text-xs font-bold whitespace-nowrap">
+                                  ${(token.campaignData?.raised_usd || 0).toLocaleString()} / ${(token.campaignData?.target_usd || 0).toLocaleString()}
+                                </span>
+                              </div>
+                            </td>
+                            <td className="py-3 px-2 text-right text-cyan-300 text-xs font-bold whitespace-nowrap">
+                              {token.campaignData?.status === 'funded' ? 'FUNDED' : token.campaignData?.status === 'listed' ? 'LISTED' : 'LIVE'}
+                            </td>
+                            <td className="py-3 px-2 text-right text-white text-xs whitespace-nowrap">
+                              ${(token.campaignData?.target_usd || 0).toLocaleString()}
+                            </td>
+                            <td className="py-3 px-2 text-right text-gray-400 text-xs whitespace-nowrap">-</td>
+                            <td className="py-3 px-2 text-right text-gray-400 text-xs whitespace-nowrap">${(token.campaignData?.raised_usd || 0).toLocaleString()}</td>
+                            <td className="py-3 px-2 text-right text-cyan-400 text-xs whitespace-nowrap font-medium">{token.campaignData?.contributor_count || 0}</td>
+                            <td className="py-3 px-2 text-right text-gray-500 text-xs whitespace-nowrap">
+                              {token.campaignData?.early_bird_slots ? `${token.campaignData.early_bird_slots - (token.campaignData.early_bird_claimed || 0)} slots` : '-'}
+                            </td>
+                          </>
+                        ) : (
+                          <>
                         <td className="py-3 px-2 text-right text-white font-medium whitespace-nowrap text-xs">${formatPrice(token.price)}</td>
                         <td className="py-3 px-2 text-right">
                           <span className={`font-medium text-xs ${token.change1h > 0 ? 'text-quantum-green' : token.change1h < 0 ? 'text-red-500' : 'text-gray-500'}`}>
@@ -5630,8 +5796,21 @@ export default function DexScreen() {
                             return `${mins}m`;
                           })() : '-'}
                         </td>
+                          </>
+                        )}
                         <td className="py-3 px-3 text-right" onClick={(e) => e.stopPropagation()}>
                           <div className="flex items-center justify-end gap-1">
+                            {token.isCrowdfund ? (
+                              <motion.button
+                                onClick={() => token.campaignData && setSelectedCampaign(token.campaignData)}
+                                className="px-3 py-1.5 bg-gradient-to-r from-cyan-500 to-blue-600 rounded-lg text-white text-xs font-bold hover:shadow-lg hover:shadow-cyan-500/30 transition-all"
+                                whileHover={{ scale: 1.05 }}
+                                whileTap={{ scale: 0.95 }}
+                              >
+                                Fund
+                              </motion.button>
+                            ) : (
+                            <>
                             <motion.button
                               onClick={() => { setSwapFrom(token.symbol); setIsSwapCollapsed(false); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
                               className="px-2 py-1 bg-gradient-to-r from-quantum-cyan to-quantum-purple rounded-lg text-white text-xs font-medium hover:shadow-lg transition-all"
@@ -5670,6 +5849,8 @@ export default function DexScreen() {
                             >
                               🤖
                             </motion.button>
+                            </>
+                            )}
                           </div>
                         </td>
                       </motion.tr>
@@ -6110,6 +6291,109 @@ export default function DexScreen() {
         type="activation"
         data={successModalData}
       />
+
+      {/* v8.2.8: Swap Processing Overlay */}
+      <AnimatePresence>
+        {isSwapping && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 backdrop-blur-md"
+          >
+            <motion.div
+              initial={{ scale: 0.8, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.8, opacity: 0 }}
+              className="relative bg-gray-900/95 border border-quantum-cyan/30 rounded-2xl p-8 max-w-sm w-full mx-4 shadow-2xl shadow-quantum-cyan/20"
+            >
+              {/* Animated ring */}
+              <div className="flex justify-center mb-6">
+                <div className="relative w-24 h-24">
+                  {/* Outer spinning ring */}
+                  <motion.div
+                    animate={{ rotate: 360 }}
+                    transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
+                    className="absolute inset-0 rounded-full border-4 border-transparent border-t-quantum-cyan border-r-quantum-purple"
+                  />
+                  {/* Inner counter-spinning ring */}
+                  <motion.div
+                    animate={{ rotate: -360 }}
+                    transition={{ duration: 3, repeat: Infinity, ease: "linear" }}
+                    className="absolute inset-2 rounded-full border-4 border-transparent border-b-green-400 border-l-blue-400"
+                  />
+                  {/* Center icon */}
+                  <div className="absolute inset-0 flex items-center justify-center">
+                    <motion.div
+                      animate={{ scale: [1, 1.2, 1] }}
+                      transition={{ duration: 1.5, repeat: Infinity }}
+                    >
+                      {swapPhase === 'verifying' && (
+                        <svg className="w-8 h-8 text-quantum-cyan" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                        </svg>
+                      )}
+                      {swapPhase === 'executing' && (
+                        <svg className="w-8 h-8 text-quantum-purple" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                        </svg>
+                      )}
+                      {swapPhase === 'confirming' && (
+                        <svg className="w-8 h-8 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                      )}
+                    </motion.div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Phase text */}
+              <motion.h3
+                key={swapPhase}
+                initial={{ y: 10, opacity: 0 }}
+                animate={{ y: 0, opacity: 1 }}
+                className="text-xl font-bold text-center text-white mb-2"
+              >
+                {swapPhase === 'verifying' && 'Verifying Trade'}
+                {swapPhase === 'executing' && 'Executing Swap'}
+                {swapPhase === 'confirming' && 'Confirming Transaction'}
+              </motion.h3>
+              <p className="text-sm text-gray-400 text-center mb-4">
+                {swapPhase === 'verifying' && 'Checking pool liquidity & calculating optimal route...'}
+                {swapPhase === 'executing' && 'Broadcasting swap to the AMM engine...'}
+                {swapPhase === 'confirming' && 'Waiting for on-chain confirmation...'}
+              </p>
+
+              {/* Progress steps */}
+              <div className="flex items-center justify-center gap-2 mt-4">
+                {['verifying', 'executing', 'confirming'].map((phase, i) => (
+                  <div key={phase} className="flex items-center gap-2">
+                    <motion.div
+                      className={`w-3 h-3 rounded-full ${
+                        phase === swapPhase
+                          ? 'bg-quantum-cyan shadow-lg shadow-quantum-cyan/50'
+                          : ['verifying', 'executing', 'confirming'].indexOf(swapPhase) > i
+                            ? 'bg-green-400'
+                            : 'bg-gray-600'
+                      }`}
+                      animate={phase === swapPhase ? { scale: [1, 1.3, 1] } : {}}
+                      transition={{ duration: 0.8, repeat: Infinity }}
+                    />
+                    {i < 2 && (
+                      <div className={`w-8 h-0.5 ${
+                        ['verifying', 'executing', 'confirming'].indexOf(swapPhase) > i
+                          ? 'bg-green-400'
+                          : 'bg-gray-600'
+                      }`} />
+                    )}
+                  </div>
+                ))}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Swap Success Modal */}
       {swapSuccessData && (

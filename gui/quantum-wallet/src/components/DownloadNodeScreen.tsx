@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { Download, Server, Shield, Zap, Terminal, CheckCircle, Code, BookOpen, Rocket, Cpu, Pickaxe } from 'lucide-react';
+import { Download, Server, Shield, Zap, Terminal, CheckCircle, Code, BookOpen, Rocket, Cpu, Pickaxe, Wallet } from 'lucide-react';
 
 export default function DownloadNodeScreen() {
   return (
@@ -18,7 +18,7 @@ export default function DownloadNodeScreen() {
         </p>
         <div className="inline-flex items-center gap-2 px-4 py-2 bg-quantum-cyan/20 border border-quantum-cyan/50 rounded-full">
           <span className="w-2 h-2 bg-quantum-cyan rounded-full animate-pulse"></span>
-          <span className="text-sm font-bold text-quantum-cyan">v7.3.0 • Post-Quantum + DAG-Knight + DeFi Stack</span>
+          <span className="text-sm font-bold text-quantum-cyan">v8.1.2 • Post-Quantum + DAG-Knight + DeFi Stack</span>
         </div>
       </motion.div>
 
@@ -135,15 +135,15 @@ export default function DownloadNodeScreen() {
 
           <div className="space-y-3">
             <a
-              href="/downloads/q-api-server-v7.3.0"
+              href="/downloads/q-api-server-v8.1.6"
               download="q-api-server"
               className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-quantum-cyan to-quantum-purple rounded-xl font-bold text-white hover:shadow-lg hover:shadow-quantum-cyan/50 transition-all"
             >
               <Download className="w-5 h-5" />
-              Download Linux Binary (v7.3.0)
+              Download Linux Binary (v8.1.6)
             </a>
             <p className="text-center text-sm text-gray-200">
-              Size: ~140 MB | Bitcoin-Style 21M Emission + P2P Gossipsub + DeFi Stack
+              Size: ~83 MB | Bitcoin-Style 21M Emission + P2P Gossipsub + DeFi Stack
             </p>
           </div>
 
@@ -151,13 +151,21 @@ export default function DownloadNodeScreen() {
           <div className="mt-6 p-4 bg-quantum-dark/50 rounded-xl border border-quantum-purple/20">
             <p className="text-sm font-mono text-gray-100 mb-2">Quick Start:</p>
             <pre className="text-xs text-quantum-cyan overflow-x-auto">
-{`wget https://quillon.xyz/downloads/q-api-server-v7.3.0
-chmod +x q-api-server-v7.3.0
-./q-api-server-v7.3.0 --port 8080`}
+{`wget https://quillon.xyz/downloads/q-api-server-v8.1.6
+chmod +x q-api-server-v8.1.6
+./q-api-server-v8.1.6 --port 8080 --tui --admin-wallet YOUR_WALLET_ADDRESS`}
             </pre>
             <p className="text-xs text-quantum-green mt-2">
               WarpSync auto-discovers peers & syncs 900K+ blocks in minutes
             </p>
+            <div className="mt-3 p-3 bg-emerald-900/30 border border-emerald-700/40 rounded-lg">
+              <p className="text-xs text-emerald-300 font-semibold mb-1">Node Admin Panel & Fee Earnings</p>
+              <p className="text-xs text-gray-300">
+                Use <span className="text-quantum-cyan font-mono">--admin-wallet</span> with your wallet address to enable the admin panel.
+                Open <span className="text-quantum-cyan font-mono">http://localhost:8080</span> in your browser to access the Node Settings
+                gear icon, view sync status, manage OAuth2 clients, and track your fee earnings.
+              </p>
+            </div>
           </div>
         </motion.div>
 
@@ -212,7 +220,7 @@ chmod +x q-api-server-v7.3.0
               Download Windows Package (ZIP)
             </a>
             <p className="text-center text-sm text-gray-200">
-              Size: 77 MB (compressed) | Node + DLLs included
+              Size: 44 MB (compressed) | Node + Miner + DLLs included
             </p>
           </div>
 
@@ -223,7 +231,7 @@ chmod +x q-api-server-v7.3.0
 {`# 1. Extract the ZIP to a folder
 # 2. Open PowerShell in that folder
 # 3. Run:
-.\\q-api-server-windows-x64.exe --port 9090 --p2p-port 9001`}
+.\\q-api-server.exe --port 9090 --p2p-port 9001`}
             </pre>
             <p className="text-xs text-gray-100 mt-2">
               Tip: Use port 9090 to avoid permission issues, or run as Administrator for port 8080
@@ -282,30 +290,51 @@ chmod +x q-api-server-v7.3.0
             </div>
 
             <div className="space-y-3">
-              <a
-                href="/downloads/q-miner-linux-x64"
-                download="q-miner-linux-x64"
-                className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-orange-500 to-rose-500 rounded-xl font-bold text-white hover:shadow-lg hover:shadow-orange-500/50 transition-all"
-              >
-                <Download className="w-5 h-5" />
-                Download Miner — Linux x64
-              </a>
+              {/* Native CPU-Optimized (Modern CPUs) */}
+              <div className="p-3 bg-gradient-to-r from-yellow-500/10 to-orange-500/10 border border-yellow-500/30 rounded-xl">
+                <p className="text-xs text-yellow-300 font-bold mb-2 uppercase tracking-wider">Native CPU Optimized — Modern CPUs</p>
+                <a
+                  href="/downloads/q-miner-linux-x64-native"
+                  download="q-miner-linux-x64-native"
+                  className="w-full flex items-center justify-center gap-3 px-6 py-3 bg-gradient-to-r from-yellow-500 to-orange-500 rounded-xl font-bold text-white hover:shadow-lg hover:shadow-yellow-500/50 transition-all"
+                >
+                  <Download className="w-5 h-5" />
+                  Linux x64 — Native (AVX2/AVX-512, LTO)
+                </a>
+                <p className="text-xs text-white/60 mt-1 text-center">Compiled with target-cpu=native, fat LTO, codegen-units=1 — up to 30% faster hashing</p>
+              </div>
+
+              {/* Legacy (Portable) */}
+              <div className="p-3 bg-black/20 border border-white/10 rounded-xl">
+                <p className="text-xs text-white/50 font-bold mb-2 uppercase tracking-wider">Legacy — Portable (Older CPUs)</p>
+                <a
+                  href="/downloads/q-miner-linux-x64-legacy"
+                  download="q-miner-linux-x64-legacy"
+                  className="w-full flex items-center justify-center gap-3 px-5 py-3 bg-gradient-to-r from-orange-500/70 to-rose-500/70 rounded-xl font-bold text-white hover:shadow-lg hover:shadow-orange-500/30 transition-all text-sm"
+                >
+                  <Download className="w-5 h-5" />
+                  Linux x64 — Legacy (x86-64-v2)
+                </a>
+                <p className="text-xs text-white/50 mt-1 text-center">Compatible with all x86-64 CPUs (2009+). Use this if the native version crashes.</p>
+              </div>
+
+              {/* Windows */}
               <a
                 href="/downloads/q-miner-windows-x64.exe"
                 download="q-miner-windows-x64.exe"
-                className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-purple-500 to-blue-500 rounded-xl font-bold text-white hover:shadow-lg hover:shadow-purple-500/50 transition-all"
+                className="w-full flex items-center justify-center gap-3 px-6 py-3 bg-gradient-to-r from-purple-500 to-blue-500 rounded-xl font-bold text-white hover:shadow-lg hover:shadow-purple-500/50 transition-all"
               >
                 <Download className="w-5 h-5" />
                 Download Miner — Windows x64
               </a>
-              <p className="text-center text-xs text-white/70">v7.3.3 — std::thread mining, jemalloc/mimalloc, batched atomics</p>
+              <p className="text-center text-xs text-white/70">v2.5.0 — std::thread mining, jemalloc/mimalloc, batched atomics</p>
 
               <div className="p-4 bg-black/30 rounded-xl border border-orange-400/30">
-                <p className="text-sm font-mono text-white mb-2">Linux Quick Start:</p>
+                <p className="text-sm font-mono text-white mb-2">Linux Quick Start (Native):</p>
                 <pre className="text-xs text-white overflow-x-auto whitespace-pre-wrap">
-{`wget https://quillon.xyz/downloads/q-miner-linux-x64
-chmod +x q-miner-linux-x64
-./q-miner-linux-x64 \\
+{`wget https://quillon.xyz/downloads/q-miner-linux-x64-native
+chmod +x q-miner-linux-x64-native
+./q-miner-linux-x64-native \\
   --mode solo \\
   --wallet YOUR_WALLET_ADDRESS \\
   --threads 4 \\
@@ -318,6 +347,94 @@ chmod +x q-miner-linux-x64
 {`# Download from browser or:
 Invoke-WebRequest -Uri https://quillon.xyz/downloads/q-miner-windows-x64.exe -OutFile q-miner.exe
 .\\q-miner.exe --mode solo --wallet YOUR_WALLET_ADDRESS --threads 4 --server https://quillon.xyz`}
+                </pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      </motion.div>
+
+      {/* Slint Native Wallet */}
+      <motion.div
+        className="p-8 bg-gradient-to-br from-emerald-500/30 via-teal-500/20 to-quantum-cyan/20 backdrop-blur-xl border border-emerald-500/40 rounded-2xl relative overflow-hidden"
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.37 }}
+      >
+        <div className="absolute top-0 right-0 w-48 h-48 bg-emerald-500/10 rounded-full blur-3xl -translate-y-1/2 translate-x-1/2"></div>
+        <div className="absolute bottom-0 left-0 w-32 h-32 bg-teal-500/10 rounded-full blur-2xl translate-y-1/2 -translate-x-1/2"></div>
+
+        <div className="relative">
+          <div className="flex items-center gap-4 mb-6">
+            <div className="w-16 h-16 bg-gradient-to-br from-emerald-400/40 to-teal-500/40 rounded-xl flex items-center justify-center">
+              <Wallet className="w-8 h-8 text-emerald-300" />
+            </div>
+            <div>
+              <div className="flex items-center gap-3">
+                <h2 className="text-2xl font-bold text-white">Slint Native Wallet</h2>
+                <span className="px-3 py-1 bg-emerald-500/40 text-white text-xs font-bold rounded-full uppercase animate-pulse">NEW</span>
+              </div>
+              <p className="text-white">Lightweight native desktop wallet — no browser required</p>
+            </div>
+          </div>
+
+          <div className="grid md:grid-cols-2 gap-6">
+            <div className="space-y-4">
+              <div className="flex items-start gap-3">
+                <CheckCircle className="w-5 h-5 text-emerald-400 flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-emerald-200 font-semibold">Native Performance</p>
+                  <p className="text-sm text-white">Built with Slint UI framework in pure Rust — instant startup, minimal resources</p>
+                </div>
+              </div>
+              <div className="flex items-start gap-3">
+                <CheckCircle className="w-5 h-5 text-teal-400 flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-teal-200 font-semibold">Send, Receive & Multi-Token</p>
+                  <p className="text-sm text-white">Full wallet with QR codes, transaction history, token selector, address book, and built-in miner</p>
+                </div>
+              </div>
+              <div className="flex items-start gap-3">
+                <CheckCircle className="w-5 h-5 text-cyan-400 flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-cyan-200 font-semibold">Connect to Any Node</p>
+                  <p className="text-sm text-white">Points to quillon.xyz by default or your own local node</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <a
+                href="/downloads/slint-wallet-linux-x86_64"
+                download="slint-wallet-linux-x86_64"
+                className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-emerald-500 to-teal-500 rounded-xl font-bold text-white hover:shadow-lg hover:shadow-emerald-500/50 transition-all"
+              >
+                <Download className="w-5 h-5" />
+                Download Wallet — Linux x64
+              </a>
+              <a
+                href="/downloads/slint-wallet-windows-x64.exe"
+                download="slint-wallet-windows-x64.exe"
+                className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-teal-500 to-cyan-500 rounded-xl font-bold text-white hover:shadow-lg hover:shadow-teal-500/50 transition-all"
+              >
+                <Download className="w-5 h-5" />
+                Download Wallet — Windows x64
+              </a>
+              <p className="text-center text-xs text-white/70">v8.1.6 — Linux: ~16 MB | Windows: ~11 MB — OpenGL auto-fallback included</p>
+
+              <div className="p-4 bg-black/30 rounded-xl border border-emerald-400/30">
+                <p className="text-sm font-mono text-white mb-2">Linux Quick Start:</p>
+                <pre className="text-xs text-white overflow-x-auto whitespace-pre-wrap">
+{`wget https://quillon.xyz/downloads/slint-wallet-linux-x86_64
+chmod +x slint-wallet-linux-x86_64
+./slint-wallet-linux-x86_64`}
+                </pre>
+              </div>
+              <div className="p-4 bg-black/30 rounded-xl border border-teal-400/30">
+                <p className="text-sm font-mono text-white mb-2">Windows:</p>
+                <pre className="text-xs text-white overflow-x-auto whitespace-pre-wrap">
+{`# Download slint-wallet-windows-x64.exe
+# Double-click to launch — no install needed`}
                 </pre>
               </div>
             </div>
@@ -347,7 +464,7 @@ Invoke-WebRequest -Uri https://quillon.xyz/downloads/q-miner-windows-x64.exe -Ou
 {`# Install Rust if needed: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 git clone https://code.quillon.xyz/repo.git q-narwhalknight && cd q-narwhalknight
 cargo build --release --package q-api-server
-./target/release/q-api-server --port 8080`}
+./target/release/q-api-server --port 8080 --tui`}
           </pre>
         </div>
       </motion.div>

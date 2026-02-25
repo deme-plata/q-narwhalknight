@@ -47,6 +47,16 @@ interface OperatorFees {
   founder_wallet_balance_qug: number;
 }
 
+interface FeeEarnings {
+  admin_wallet: string;
+  fee_share_promille: number;
+  fee_share_percent: string;
+  session_earnings_qug: number;
+  total_earnings_qug: number;
+  fee_tx_count: number;
+  node_uptime_secs: number;
+}
+
 interface NodeUpdateInfo {
   current_version: string;
   latest_version: string | null;
@@ -88,6 +98,7 @@ export default function NodeSettingsModal() {
   const [nodeInfo, setNodeInfo] = useState<NodeInfo | null>(null);
   const [operatorFees, setOperatorFees] = useState<OperatorFees | null>(null);
   const [updateInfo, setUpdateInfo] = useState<NodeUpdateInfo | null>(null);
+  const [feeEarnings, setFeeEarnings] = useState<FeeEarnings | null>(null);
   const [loading, setLoading] = useState(false);
   const [revoking, setRevoking] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -142,14 +153,21 @@ export default function NodeSettingsModal() {
     } catch { /* ignore - non-critical */ }
   }, []);
 
+  const fetchFeeEarnings = useCallback(async () => {
+    try {
+      const res = await fetch('/api/v1/admin/fee-earnings', { headers: getAuthHeaders() });
+      if (res.ok) setFeeEarnings(await res.json());
+    } catch { /* ignore - non-critical */ }
+  }, []);
+
   // Fetch data when modal opens
   useEffect(() => {
     if (!isOpen) return;
     setLoading(true);
     setError(null);
-    Promise.all([fetchSettings(), fetchConsents(), fetchNodeInfo(), fetchOperatorFees(), fetchUpdateInfo()])
+    Promise.all([fetchSettings(), fetchConsents(), fetchNodeInfo(), fetchOperatorFees(), fetchUpdateInfo(), fetchFeeEarnings()])
       .finally(() => setLoading(false));
-  }, [isOpen, fetchSettings, fetchConsents, fetchNodeInfo, fetchOperatorFees, fetchUpdateInfo]);
+  }, [isOpen, fetchSettings, fetchConsents, fetchNodeInfo, fetchOperatorFees, fetchUpdateInfo, fetchFeeEarnings]);
 
   const handleRevoke = async (clientId: string) => {
     setRevoking(clientId);
@@ -168,7 +186,7 @@ export default function NodeSettingsModal() {
 
   const handleRefresh = () => {
     setLoading(true);
-    Promise.all([fetchSettings(), fetchConsents(), fetchNodeInfo(), fetchOperatorFees(), fetchUpdateInfo()])
+    Promise.all([fetchSettings(), fetchConsents(), fetchNodeInfo(), fetchOperatorFees(), fetchUpdateInfo(), fetchFeeEarnings()])
       .finally(() => setLoading(false));
   };
 
@@ -279,7 +297,7 @@ export default function NodeSettingsModal() {
                   <span className="ml-3 text-slate-400">Loading...</span>
                 </div>
               ) : activeTab === 'overview' ? (
-                <OverviewTab settings={settings} syncPct={syncPct} />
+                <OverviewTab settings={settings} syncPct={syncPct} feeEarnings={feeEarnings} />
               ) : activeTab === 'oauth2' ? (
                 <OAuth2Tab
                   settings={settings}
@@ -331,7 +349,7 @@ function StatCard({ icon, label, value, sub }: { icon: React.ReactNode; label: s
   );
 }
 
-function OverviewTab({ settings, syncPct }: { settings: AdminSettings | null; syncPct: number }) {
+function OverviewTab({ settings, syncPct, feeEarnings }: { settings: AdminSettings | null; syncPct: number; feeEarnings: FeeEarnings | null }) {
   if (!settings) return <p className="text-slate-400">No data available</p>;
 
   return (
@@ -358,6 +376,40 @@ function OverviewTab({ settings, syncPct }: { settings: AdminSettings | null; sy
           label="Peers"
           value={String(settings.peers)}
         />
+      </div>
+
+      {/* Fee Earnings */}
+      <div className="bg-gradient-to-br from-emerald-900/30 to-slate-800/50 border border-emerald-700/40 rounded-xl p-4">
+        <h3 className="text-sm font-semibold text-emerald-300 mb-3 flex items-center gap-2">
+          <DollarSign className="w-4 h-4 text-emerald-400" /> Fee Earnings
+        </h3>
+        {feeEarnings ? (
+          <div className="grid grid-cols-3 gap-3">
+            <div className="text-center">
+              <div className="text-lg font-bold text-emerald-300">{feeEarnings.total_earnings_qug.toFixed(4)}</div>
+              <div className="text-xs text-slate-500">Total Earned (QUG)</div>
+            </div>
+            <div className="text-center">
+              <div className="text-lg font-bold text-white">{feeEarnings.session_earnings_qug.toFixed(4)}</div>
+              <div className="text-xs text-slate-500">This Session</div>
+            </div>
+            <div className="text-center">
+              <div className="text-lg font-bold text-white">{feeEarnings.fee_tx_count}</div>
+              <div className="text-xs text-slate-500">Fee Transactions</div>
+            </div>
+          </div>
+        ) : (
+          <div className="text-center py-2">
+            <div className="text-sm text-slate-400">No earnings data yet</div>
+            <div className="text-xs text-slate-500 mt-1">Fees are earned when users trade on the DEX through your node</div>
+          </div>
+        )}
+        {feeEarnings && (
+          <div className="mt-3 pt-3 border-t border-slate-700/50 flex items-center justify-between">
+            <span className="text-xs text-slate-500">Your fee share: {feeEarnings.fee_share_percent}</span>
+            <span className="text-xs text-slate-500">Uptime: {formatUptime(feeEarnings.node_uptime_secs)}</span>
+          </div>
+        )}
       </div>
 
       {/* Sync progress */}

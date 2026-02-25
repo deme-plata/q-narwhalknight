@@ -1128,7 +1128,7 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
         const coin = walletBalances.find(c => c.symbol === selectedCoin);
         const coinPriceUsd = coin?.usdValue && coin?.balance > 0
           ? coin.usdValue / coin.balance
-          : (selectedCoin === 'QUG' ? 42.5 : 1.0);
+          : (selectedCoin === 'QUG' ? 3000 : 1.0);
         const txValueUsd = parseFloat(amount) * coinPriceUsd;
         const confirmations = calculateConfirmations(txValueUsd);
 

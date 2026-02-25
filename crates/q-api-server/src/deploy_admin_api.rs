@@ -61,6 +61,9 @@ pub struct NodeDeployStatus {
     pub peers: usize,
     pub uptime_secs: u64,
     pub status: String, // "ready", "syncing", "starting", "offline"
+    /// v1.0.2: Detailed sync status (chunks, speed, ETA) — None if unavailable
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_details: Option<q_storage::DetailedSyncStatus>,
 }
 
 /// Combined deploy status for all servers
@@ -104,7 +107,7 @@ impl DeployState {
 }
 
 /// Extract wallet address from request headers (same pattern as other admin APIs)
-fn extract_wallet_from_headers(headers: &HeaderMap) -> Option<String> {
+pub fn extract_wallet_from_headers(headers: &HeaderMap) -> Option<String> {
     // Try X-Wallet-Auth header first
     if let Some(auth) = headers.get("x-wallet-auth") {
         if let Ok(auth_str) = auth.to_str() {
@@ -164,12 +167,31 @@ pub async fn deploy_status(
     let beta_uptime = state.start_time.elapsed().as_secs();
     let beta_version = env!("CARGO_PKG_VERSION").to_string();
 
+    // v8.2.9: Update peak height (only increases, never decreases)
+    let peak = state.peak_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
+    if beta_height > peak {
+        state.peak_height_atomic.store(beta_height, std::sync::atomic::Ordering::Relaxed);
+    }
+    // Report the max of current and peak — users never see a decrease
+    let display_height = beta_height.max(peak);
+
     let beta_status = if beta_height == 0 {
         "starting"
     } else if beta_network_height > 0 && beta_height + 10 < beta_network_height {
-        "syncing"
+        if peak > beta_height {
+            "recovering" // v8.2.9: Node restarted, catching up to previous peak
+        } else {
+            "syncing"
+        }
     } else {
         "ready"
+    };
+
+    // v1.0.2: Get detailed sync status from local TurboSync
+    let beta_sync_details = if let Some(ref turbo_sync) = state.turbo_sync {
+        Some(turbo_sync.get_detailed_sync_status().await)
+    } else {
+        None
     };
 
     let beta = NodeDeployStatus {
@@ -177,11 +199,12 @@ pub async fn deploy_status(
         url: "https://quillon.xyz".to_string(),
         online: true,
         version: beta_version.clone(),
-        height: beta_height,
+        height: display_height, // v8.2.9: Use peak height — never show a decrease
         network_height: beta_network_height,
         peers: beta_peers,
         uptime_secs: beta_uptime,
         status: beta_status.to_string(),
+        sync_details: beta_sync_details,
     };
 
     // Get Alpha, Gamma, and Delta status via HTTP (parallel)
@@ -205,15 +228,35 @@ pub async fn deploy_status(
     })))
 }
 
-/// Fetch status from a remote node
+/// Fetch status from a remote node (health + sync details in parallel)
 async fn fetch_node_status(name: &str, base_url: &str) -> NodeDeployStatus {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .unwrap_or_default();
 
-    let url = format!("{}/api/v1/health", base_url);
-    match client.get(&url).send().await {
+    let health_url = format!("{}/api/v1/health", base_url);
+    let sync_url = format!("{}/api/v1/sync/detailed", base_url);
+
+    // Fetch health and sync details in parallel
+    let (health_res, sync_res) = tokio::join!(
+        client.get(&health_url).send(),
+        client.get(&sync_url).send(),
+    );
+
+    // Parse sync details (best-effort — None if endpoint doesn't exist on old versions)
+    let sync_details: Option<q_storage::DetailedSyncStatus> = match sync_res {
+        Ok(resp) if resp.status().is_success() => {
+            #[derive(Deserialize)]
+            struct SyncResp {
+                data: Option<q_storage::DetailedSyncStatus>,
+            }
+            resp.json::<SyncResp>().await.ok().and_then(|r| r.data)
+        }
+        _ => None,
+    };
+
+    match health_res {
         Ok(resp) if resp.status().is_success() => {
             #[derive(Deserialize)]
             struct HealthResp {
@@ -242,6 +285,7 @@ async fn fetch_node_status(name: &str, base_url: &str) -> NodeDeployStatus {
                             peers: data.peers.unwrap_or(0),
                             uptime_secs: data.uptime_secs.unwrap_or(0),
                             status: data.status.unwrap_or_else(|| "ready".to_string()),
+                            sync_details,
                         }
                     } else {
                         // Legacy health endpoint returns "OK"
@@ -255,6 +299,7 @@ async fn fetch_node_status(name: &str, base_url: &str) -> NodeDeployStatus {
                             peers: 0,
                             uptime_secs: 0,
                             status: "ready".to_string(),
+                            sync_details,
                         }
                     }
                 }
@@ -268,6 +313,7 @@ async fn fetch_node_status(name: &str, base_url: &str) -> NodeDeployStatus {
                     peers: 0,
                     uptime_secs: 0,
                     status: "ready".to_string(),
+                    sync_details: None,
                 },
             }
         }
@@ -281,6 +327,7 @@ async fn fetch_node_status(name: &str, base_url: &str) -> NodeDeployStatus {
             peers: 0,
             uptime_secs: 0,
             status: "offline".to_string(),
+            sync_details: None,
         },
     }
 }
@@ -1066,12 +1113,25 @@ pub async fn deploy_convergence(
     let beta_uptime = state.start_time.elapsed().as_secs();
     let beta_version = env!("CARGO_PKG_VERSION").to_string();
 
+    // v8.2.9: Same peak height logic as deploy_status
+    let conv_peak = state.peak_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
+    if beta_height > conv_peak {
+        state.peak_height_atomic.store(beta_height, std::sync::atomic::Ordering::Relaxed);
+    }
+    let conv_display_height = beta_height.max(conv_peak);
+
     let beta_status_str = if beta_height == 0 {
         "starting"
     } else if beta_network_height > 0 && beta_height + 10 < beta_network_height {
-        "syncing"
+        if conv_peak > beta_height { "recovering" } else { "syncing" }
     } else {
         "ready"
+    };
+
+    let conv_beta_sync_details = if let Some(ref turbo_sync) = state.turbo_sync {
+        Some(turbo_sync.get_detailed_sync_status().await)
+    } else {
+        None
     };
 
     let beta = NodeDeployStatus {
@@ -1079,11 +1139,12 @@ pub async fn deploy_convergence(
         url: "https://quillon.xyz".to_string(),
         online: true,
         version: beta_version.clone(),
-        height: beta_height,
+        height: conv_display_height, // v8.2.9: Use peak height — never show a decrease
         network_height: beta_network_height,
         peers: beta_peers,
         uptime_secs: beta_uptime,
         status: beta_status_str.to_string(),
+        sync_details: conv_beta_sync_details,
     };
 
     let (alpha, gamma, delta) = tokio::join!(

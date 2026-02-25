@@ -141,7 +141,7 @@ const TokenBar = memo(function TokenBar({ onTokenClick }: TokenBarProps) {
         }
 
         // Fetch real QUG price from oracle
-        let qugPrice = 42.50;
+        let qugPrice = 3000.00;
         let qugChange = 12.8;
         try {
           const oracleResponse = await qnkAPI.getOraclePrice('QUG/USD');

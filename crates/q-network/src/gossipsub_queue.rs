@@ -454,7 +454,9 @@ lazy_static! {
         let throttle = ThrottleMode::from_env();
         let config = match throttle {
             ThrottleMode::Full => {
-                // Full throttle: no rate limiting on any priority
+                // Full throttle: minimal rate limiting — only cap high-priority (peer-height)
+                // v1.0.2-safe: rate_limit_high_ms=5 (200/sec max) prevents O(N²) forwarding
+                // amplification with 60+ peers each announcing heights every 5s
                 QueueConfig {
                     max_queue_size: std::env::var("Q_GOSSIPSUB_QUEUE_SIZE")
                         .ok()
@@ -462,7 +464,7 @@ lazy_static! {
                         .unwrap_or(50_000),
                     max_message_age_secs: 60,
                     rate_limit_critical_ms: 0,
-                    rate_limit_high_ms: 0,
+                    rate_limit_high_ms: 5,
                     rate_limit_normal_ms: 0,
                     rate_limit_low_ms: 0,
                     rate_limit_lowest_ms: 0,

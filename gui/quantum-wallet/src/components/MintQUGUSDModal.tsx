@@ -21,7 +21,7 @@ export default function MintQUGUSDModal({ isOpen, onClose, userQUGBalance, onSuc
   const [txId, setTxId] = useState<string>('');
 
   // v2.3.6-beta: Fetch real QUG price from AMM oracle instead of hardcoded value
-  const [qugPrice, setQugPrice] = useState<number>(42.50); // Default fallback
+  const [qugPrice, setQugPrice] = useState<number>(3000.00); // Default fallback
   const [priceLoading, setPriceLoading] = useState(false);
   const [priceSource, setPriceSource] = useState<string>('default');
 

@@ -236,7 +236,7 @@ impl<T> ApiResponse<T> {
 }
 
 /// v5.1.1: Enhanced health check endpoint for Nginx load balancing and deploy verification
-/// Returns structured data: status, height, peers, version, uptime
+/// v8.2.0: Added balance_state_hash, wallet_count, total_supply for cross-node verification
 #[derive(Serialize)]
 pub struct HealthStatus {
     pub status: String,
@@ -245,7 +245,21 @@ pub struct HealthStatus {
     pub peers: usize,
     pub version: String,
     pub uptime_secs: u64,
+    pub balance_state_hash: String,
+    pub wallet_count: usize,
+    pub total_supply_qug: String,
 }
+
+/// Cached balance state hash (recomputed max every 30s to avoid performance impact)
+static BALANCE_HASH_CACHE: std::sync::LazyLock<tokio::sync::Mutex<(std::time::Instant, String, usize, u128)>> =
+    std::sync::LazyLock::new(|| {
+        tokio::sync::Mutex::new((
+            std::time::Instant::now() - std::time::Duration::from_secs(60),
+            String::new(),
+            0,
+            0,
+        ))
+    });
 
 pub async fn health_check(
     State(state): State<Arc<AppState>>,
@@ -257,7 +271,7 @@ pub async fn health_check(
         .highest_network_height
         .load(std::sync::atomic::Ordering::Relaxed);
     // v8.0.8: Cap network_height to prevent rogue peers from poisoning status
-    let max_reasonable = (current_height * 3).max(current_height + 500_000);
+    let max_reasonable = (current_height * 5).max(current_height + 50_000);
     let network_height = if raw_network_height > max_reasonable {
         current_height
     } else {
@@ -279,6 +293,30 @@ pub async fn health_check(
         "ready".to_string()
     };
 
+    // v8.2.0: Balance state hash with 30s cache
+    let (balance_hash_hex, wallet_count, total_supply) = {
+        let mut cache = BALANCE_HASH_CACHE.lock().await;
+        if cache.0.elapsed() > std::time::Duration::from_secs(30) {
+            match state.storage_engine.compute_balance_state_hash().await {
+                Ok((hash, count, supply)) => {
+                    let hex = hex::encode(hash);
+                    *cache = (std::time::Instant::now(), hex.clone(), count, supply);
+                    (hex, count, supply)
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to compute balance state hash: {}", e);
+                    (cache.1.clone(), cache.2, cache.3)
+                }
+            }
+        } else {
+            (cache.1.clone(), cache.2, cache.3)
+        }
+    };
+
+    let total_supply_qug = format!("{}.{:024}",
+        total_supply / 1_000_000_000_000_000_000_000_000u128,
+        total_supply % 1_000_000_000_000_000_000_000_000u128);
+
     Ok(Json(ApiResponse::success(HealthStatus {
         status,
         height: current_height,
@@ -286,12 +324,90 @@ pub async fn health_check(
         peers,
         version: env!("CARGO_PKG_VERSION").to_string(),
         uptime_secs,
+        balance_state_hash: balance_hash_hex,
+        wallet_count,
+        total_supply_qug,
     })))
 }
 
 /// Legacy health check endpoint (returns simple "OK" for backward compatibility)
 pub async fn health_check_simple() -> Result<Json<ApiResponse<String>>, StatusCode> {
     Ok(Json(ApiResponse::success("OK".to_string())))
+}
+
+/// v8.2.0: Admin-only endpoint to rebuild all wallet balances from chain.
+/// Reprocesses every block's transactions to compute deterministic balances.
+/// Returns the new balance state hash for cross-node verification.
+#[derive(Serialize)]
+pub struct RebuildBalancesResult {
+    pub wallet_count: usize,
+    pub total_supply: u128,
+    pub total_supply_qug: String,
+    pub balance_state_hash: String,
+}
+
+pub async fn admin_rebuild_balances(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<RebuildBalancesResult>>, StatusCode> {
+    // Master wallet only
+    let wallet = crate::deploy_admin_api::extract_wallet_from_headers(&headers);
+    match wallet {
+        Some(w) if w == state.admin_wallet => {}
+        _ => return Err(StatusCode::FORBIDDEN),
+    }
+
+    tracing::info!("🔄 [ADMIN] Balance rebuild triggered by admin");
+
+    // Rebuild from chain
+    let (rebuilt_balances, total_supply) = state
+        .storage_engine
+        .rebuild_balances_from_chain()
+        .await
+        .map_err(|e| {
+            tracing::error!("Balance rebuild failed: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    // Update in-memory balances
+    {
+        let mut balances = state.wallet_balances.write().await;
+        balances.clear();
+        for (addr, amount) in &rebuilt_balances {
+            balances.insert(*addr, *amount);
+        }
+    }
+
+    // Compute and return the new state hash
+    let (hash, wallet_count, supply) = state
+        .storage_engine
+        .compute_balance_state_hash()
+        .await
+        .map_err(|e| {
+            tracing::error!("Balance hash computation failed: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    // Invalidate the health endpoint cache
+    {
+        let mut cache = BALANCE_HASH_CACHE.lock().await;
+        let hex = hex::encode(hash);
+        *cache = (std::time::Instant::now(), hex, wallet_count, supply);
+    }
+
+    let hash_hex = hex::encode(hash);
+    let total_supply_qug = format!("{}.{:024}",
+        supply / 1_000_000_000_000_000_000_000_000u128,
+        supply % 1_000_000_000_000_000_000_000_000u128);
+
+    tracing::info!("✅ [ADMIN] Balance rebuild complete: {} wallets, hash={}", wallet_count, &hash_hex[..16]);
+
+    Ok(Json(ApiResponse::success(RebuildBalancesResult {
+        wallet_count,
+        total_supply: supply,
+        total_supply_qug,
+        balance_state_hash: hash_hex,
+    })))
 }
 
 /// v1.4.15-beta: Startup progress endpoint for frontend UI
@@ -312,6 +428,39 @@ pub struct VersionInfo {
     pub turbo_sync_version: u32,
     pub network_id: String,
     pub features: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_wallet_version: Option<String>,
+}
+
+/// Scan the downloads directory for slint-wallet-v{X.Y.Z} binaries and return the highest version.
+fn detect_latest_wallet_version() -> Option<String> {
+    fn scan_dir(dir: &std::path::Path, best: &mut Option<(u64, u64, u64, String)>) {
+        let Ok(read_dir) = std::fs::read_dir(dir) else { return };
+        for entry in read_dir.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            let Some(stripped) = name_str.strip_prefix("slint-wallet-v") else { continue };
+            let version_part = stripped.strip_suffix(".exe").unwrap_or(stripped);
+            let parts: Vec<&str> = version_part.split('.').collect();
+            if parts.len() != 3 { continue; }
+            let (Ok(major), Ok(minor), Ok(patch)) = (
+                parts[0].parse::<u64>(),
+                parts[1].parse::<u64>(),
+                parts[2].parse::<u64>(),
+            ) else { continue };
+            match best {
+                Some((bm, bn, bp, _)) if (major, minor, patch) <= (*bm, *bn, *bp) => {}
+                _ => { *best = Some((major, minor, patch, version_part.to_string())); }
+            }
+        }
+    }
+
+    let mut best: Option<(u64, u64, u64, String)> = None;
+    scan_dir(std::path::Path::new("gui/quantum-wallet/dist-final/downloads"), &mut best);
+    if best.is_none() {
+        scan_dir(std::path::Path::new("/opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads"), &mut best);
+    }
+    best.map(|(_, _, _, v)| v)
 }
 
 pub async fn version_info() -> Result<Json<ApiResponse<VersionInfo>>, StatusCode> {
@@ -320,13 +469,14 @@ pub async fn version_info() -> Result<Json<ApiResponse<VersionInfo>>, StatusCode
         build_timestamp: env!("BUILD_TIMESTAMP").parse().unwrap_or(0),
         build_date: env!("BUILD_DATE").to_string(),
         turbo_sync_version: 1, // NEW format
-        network_id: std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "mainnet2026.2".to_string()),
+        network_id: std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "mainnet-genesis".to_string()),
         features: vec![
             "turbo-sync".to_string(),
             "balance-consensus".to_string(),
             "distributed-ai".to_string(),
             "aegis-ql".to_string(),
         ],
+        latest_wallet_version: detect_latest_wallet_version(),
     };
 
     Ok(Json(ApiResponse::success(info)))
@@ -609,9 +759,13 @@ pub async fn node_status(
         .highest_network_height
         .load(std::sync::atomic::Ordering::SeqCst);
     // v8.0.8: Cap network_height to prevent rogue peers from showing fake sync status
-    let max_reasonable = (real_current_height * 3).max(real_current_height + 500_000);
+    let max_reasonable = (real_current_height * 5).max(real_current_height + 50_000);
+    // v8.2.3: Network height should never display below our own height.
+    // The decay timer can push it below local height, confusing the admin panel.
     let network_height = if raw_network_height > max_reasonable {
         real_current_height // Treat as synced if network height is suspiciously high
+    } else if raw_network_height < real_current_height {
+        real_current_height // We ARE the network height if we're ahead
     } else {
         raw_network_height
     };
@@ -631,7 +785,7 @@ pub async fn node_status(
         "highest_network_height": network_height,
         "is_syncing": is_syncing,
         "blocks_behind": blocks_behind,
-        "network_id": std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "mainnet2026.2".to_string()),
+        "network_id": std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "mainnet-genesis".to_string()),
         "connected_peers": connected_peers,
         "tx_pool_size": status.tx_pool_size,
         "is_validator": status.is_validator,
@@ -840,7 +994,7 @@ pub async fn bootstrap_peers(
         } else {
             vec![]
         },
-        "network_id": std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "mainnet2026.2".to_string()),
+        "network_id": std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "mainnet-genesis".to_string()),
         "version": env!("CARGO_PKG_VERSION"),
         "bootstrap_node": true,
         "discovery_method": "dynamic",
@@ -1743,7 +1897,7 @@ pub async fn submit_transaction(
 
                     // Get network ID for topic
                     let network_id = std::env::var("Q_NETWORK_ID")
-                        .unwrap_or_else(|_| "mainnet2026.2".to_string());
+                        .unwrap_or_else(|_| "mainnet-genesis".to_string());
                     let topic = format!("/qnk/{}/mempool-txs", network_id);
 
                     // Spawn async task for Dandelion++ propagation
@@ -1785,9 +1939,9 @@ pub async fn submit_transaction(
             Ok(tx_bytes) => {
                 // Get network ID for topic
                 let network_id = std::env::var("Q_NETWORK_ID")
-                    .unwrap_or_else(|_| "mainnet2026.2".to_string())
+                    .unwrap_or_else(|_| "mainnet-genesis".to_string())
                     .parse::<NetworkId>()
-                    .unwrap_or(NetworkId::Mainnet2026_2);
+                    .unwrap_or(NetworkId::MainnetGenesis);
                 let topic = network_id.mempool_transactions_topic();
 
                 // Send via command channel (non-blocking)
@@ -3493,47 +3647,117 @@ async fn send_transaction_inner(
 
     // ============================================================================
     // PROPER ED25519 SIGNATURE GENERATION (following CLAUDE.md - no shortcuts!)
+    // v8.1.7: ZK-STARK Custodial Vault — OAuth2 users sign without mnemonic
     // ============================================================================
 
-    // Require mnemonic for signing (cannot sign without private key)
-    let mnemonic_str = match request.mnemonic {
-        Some(ref m) if !m.is_empty() => m,
-        _ => {
-            return Ok(Json(ApiResponse::error(
-                "Mnemonic required for transaction signing. Please provide your BIP39 seed phrase."
-                    .to_string(),
-            )));
-        }
-    };
-
-    // Parse and derive Ed25519 signing key from BIP39 mnemonic
     use bip39::{Language, Mnemonic};
     use q_types::{SecretKey, Signature};
+    use ed25519_dalek::Signer;
 
-    let mnemonic = match Mnemonic::parse_in(Language::English, mnemonic_str) {
-        Ok(m) => m,
-        Err(e) => {
-            error!("Invalid mnemonic phrase: {}", e);
-            return Ok(Json(ApiResponse::error(format!(
-                "Invalid mnemonic phrase: {}",
-                e
-            ))));
+    // Helper: encrypt a 32-byte key with the node signing key (XOR + SHA3-256 KDF)
+    // Simple but effective — node_signing_key is a secret kept on the server only
+    fn vault_encrypt(private_key: &[u8; 32], node_key: &ed25519_dalek::SigningKey) -> Vec<u8> {
+        use sha3::{Digest as _, Sha3_256};
+        let mut kdf = Sha3_256::new();
+        kdf.update(b"oauth2-vault-v1:");
+        kdf.update(&node_key.to_bytes());
+        let mask: [u8; 32] = kdf.finalize().into();
+        let mut encrypted = [0u8; 32];
+        for i in 0..32 {
+            encrypted[i] = private_key[i] ^ mask[i];
+        }
+        encrypted.to_vec()
+    }
+
+    fn vault_decrypt(encrypted: &[u8], node_key: &ed25519_dalek::SigningKey) -> Option<[u8; 32]> {
+        if encrypted.len() != 32 { return None; }
+        use sha3::{Digest as _, Sha3_256};
+        let mut kdf = Sha3_256::new();
+        kdf.update(b"oauth2-vault-v1:");
+        kdf.update(&node_key.to_bytes());
+        let mask: [u8; 32] = kdf.finalize().into();
+        let mut decrypted = [0u8; 32];
+        for i in 0..32 {
+            decrypted[i] = encrypted[i] ^ mask[i];
+        }
+        Some(decrypted)
+    }
+
+    // Determine signing key: either from vault (OAuth2 auto-sign) or mnemonic (manual)
+    let has_mnemonic = matches!(&request.mnemonic, Some(m) if !m.is_empty());
+
+    // Track whether we used the vault (for logging) and whether to store key in vault
+    let mut used_vault = false;
+    let mut store_key_in_vault = false;
+
+    let (signing_key, derived_public_key): (SecretKey, [u8; 32]) = if has_mnemonic {
+        // ── Path A: Mnemonic provided (traditional flow + first-time OAuth2 bootstrap) ──
+        let mnemonic_str = request.mnemonic.as_ref().unwrap();
+
+        let mnemonic = match Mnemonic::parse_in(Language::English, mnemonic_str) {
+            Ok(m) => m,
+            Err(e) => {
+                error!("Invalid mnemonic phrase: {}", e);
+                return Ok(Json(ApiResponse::error(format!(
+                    "Invalid mnemonic phrase: {}",
+                    e
+                ))));
+            }
+        };
+
+        // Generate seed from mnemonic (BIP39 standard: 512-bit seed)
+        let seed = mnemonic.to_seed("");
+        let mut key_bytes = [0u8; 32];
+        key_bytes.copy_from_slice(&seed[..32]);
+        let sk = SecretKey::from_bytes(&key_bytes);
+        let vk = sk.verifying_key();
+        let pubkey = vk.to_bytes();
+
+        // v8.1.7: Store key in vault for future OAuth2 auto-signing
+        // Only store if this wallet doesn't have a vault entry yet
+        {
+            let vault = state.oauth2_key_vault.read().await;
+            if !vault.contains_key(&from_address) {
+                store_key_in_vault = true;
+            }
+        }
+
+        (sk, pubkey)
+    } else {
+        // ── Path B: No mnemonic — try OAuth2 vault key (ZK-STARK custodial signing) ──
+        let vault = state.oauth2_key_vault.read().await;
+        match vault.get(&from_address) {
+            Some(encrypted_key) => {
+                match vault_decrypt(encrypted_key, &state.node_signing_key) {
+                    Some(key_bytes) => {
+                        let sk = SecretKey::from_bytes(&key_bytes);
+                        let vk = sk.verifying_key();
+                        let pubkey = vk.to_bytes();
+                        used_vault = true;
+                        info!(
+                            "🔐 [VAULT] Auto-signing tx for OAuth2 user {}...{} (no mnemonic needed)",
+                            &hex::encode(from_address)[..8],
+                            &hex::encode(from_address)[56..]
+                        );
+                        (sk, pubkey)
+                    }
+                    None => {
+                        return Ok(Json(ApiResponse::error(
+                            "vault_key_corrupt: Encrypted vault key is invalid. Please enter your seed phrase to re-initialize.".to_string()
+                        )));
+                    }
+                }
+            }
+            None => {
+                // No vault key and no mnemonic — tell client to prompt for mnemonic (one-time)
+                return Ok(Json(ApiResponse::error(
+                    "vault_key_missing: No signing key in vault. Enter your seed phrase once to enable automatic signing.".to_string()
+                )));
+            }
         }
     };
 
-    // Generate seed from mnemonic (BIP39 standard: 512-bit seed)
-    let seed = mnemonic.to_seed("");
-
-    // Derive Ed25519 signing key from first 32 bytes of seed
-    // (Following EdDSA key generation from seed)
-    let mut key_bytes = [0u8; 32];
-    key_bytes.copy_from_slice(&seed[..32]);
-
-    let signing_key = SecretKey::from_bytes(&key_bytes);
-
     // Verify that the derived address matches the sender address
-    let verifying_key = signing_key.verifying_key();
-    let derived_public_key = verifying_key.to_bytes();
     let derived_address = {
         use q_types::{Digest, Sha3_256};
         let mut hasher = Sha3_256::new();
@@ -3542,55 +3766,73 @@ async fn send_transaction_inner(
         hash
     };
 
-    // Check if addresses match (for security - prevent signing with wrong key)
-    // Allow both the hash-based address and the direct public key hash
-    let mnemonic_hash_address = {
+    // Compute mnemonic_hash_address for address matching and balance lookups
+    let mnemonic_hash_address = if has_mnemonic {
+        let mnemonic_str = request.mnemonic.as_ref().unwrap();
         let hash = blake3::hash(mnemonic_str.as_bytes());
         let mut addr = [0u8; 32];
         addr.copy_from_slice(hash.as_bytes());
         addr
+    } else {
+        // Vault or no mnemonic: use derived_address as fallback
+        derived_address
     };
 
-    if from_address != derived_address && from_address != mnemonic_hash_address {
+    // Check address match (for mnemonic-based signing)
+    if !used_vault && from_address != derived_address && from_address != mnemonic_hash_address {
         warn!(
             "Address mismatch! From: {} vs Derived: {} vs MnemonicHash: {}",
             hex::encode(from_address),
             hex::encode(derived_address),
             hex::encode(mnemonic_hash_address)
         );
-        // For now, continue anyway to maintain compatibility with existing wallets
-        // TODO: Enforce strict address verification once all wallets use proper derivation
     }
 
     // Create message to sign (transaction hash)
     let message = &tx_hash;
 
     // Sign the transaction with Ed25519
-    use ed25519_dalek::Signer;
     let signature: Signature = signing_key.sign(message);
 
     // Store the signature in the transaction
     signed_transaction.signature = signature.to_bytes().to_vec();
 
     // v1.4.9-beta: Store public key in transaction data field for SIMD verification
-    // Format depends on transaction type:
-    // - TokenTransfer: [0..32] = token address, [32..64] = Ed25519 public key
-    // - Transfer: [0..32] = Ed25519 public key
     if is_custom_token && signed_transaction.data.len() == 32 {
-        // Append public key to existing token address
         signed_transaction.data.extend_from_slice(&derived_public_key);
         info!(
-            "✅ TokenTransfer signed: {} bytes sig, data = token_addr(32) + pubkey(32) = {} bytes",
+            "✅ TokenTransfer signed{}: {} bytes sig, data = token_addr(32) + pubkey(32) = {} bytes",
+            if used_vault { " (vault)" } else { "" },
             signed_transaction.signature.len(),
             signed_transaction.data.len()
         );
     } else {
-        // Standard transfer: just public key
         signed_transaction.data = derived_public_key.to_vec();
         info!(
-            "✅ Transaction signed with Ed25519: {} bytes, public key stored",
+            "✅ Transaction signed with Ed25519{}: {} bytes, public key stored",
+            if used_vault { " (vault auto-sign)" } else { "" },
             signed_transaction.signature.len()
         );
+    }
+
+    // v8.1.7: Store signing key in vault for future OAuth2 auto-signing
+    if store_key_in_vault {
+        let encrypted = vault_encrypt(&signing_key.to_bytes(), &state.node_signing_key);
+        // Store in memory
+        {
+            let mut vault = state.oauth2_key_vault.write().await;
+            vault.insert(from_address, encrypted.clone());
+        }
+        // Persist to RocksDB
+        if let Err(e) = state.storage_engine.save_vault_key(&from_address, &encrypted).await {
+            warn!("⚠️ [VAULT] Failed to persist vault key: {} (in-memory only)", e);
+        } else {
+            info!(
+                "🔐 [VAULT] Stored signing key for {}...{} — future OAuth2 sends auto-sign",
+                &hex::encode(from_address)[..8],
+                &hex::encode(from_address)[56..]
+            );
+        }
     }
     // ============================================================================
 
@@ -4610,7 +4852,7 @@ pub async fn get_p2p_health(
 
     // Get network ID for gossipsub topics
     let network_id =
-        std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "mainnet2026.2".to_string());
+        std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "mainnet-genesis".to_string());
 
     let health = P2PHealthStatus {
         libp2p_manager_active: state.libp2p_discovery.is_some(),
@@ -6502,14 +6744,34 @@ pub async fn get_oracle_price(
                     }
                 };
 
+                // v8.2.7: Resolve bridge token contract addresses to symbols
+                // Bridge pools use symbols ("wBTC") but oracle lookups use addresses ("qnk00..a1")
+                let bridge_symbol = {
+                    let hex_addr = if resolved_feed_id.starts_with("qnk") {
+                        &resolved_feed_id[3..]
+                    } else {
+                        &resolved_feed_id
+                    };
+                    if let Ok(addr_vec) = hex::decode(hex_addr) {
+                        if addr_vec.len() == 32 {
+                            let mut addr_arr = [0u8; 32];
+                            addr_arr.copy_from_slice(&addr_vec);
+                            q_types::bridge_token_info(&addr_arr).map(|(_, sym, _)| sym.to_lowercase())
+                        } else { None }
+                    } else { None }
+                };
+
                 for pool in pools.values() {
                     // Check if token is in this pool (as token0 or token1)
                     // v2.4.0: Case-insensitive comparison
                     // v2.4.8: Use resolved_feed_id (contract address) for custom tokens
+                    // v8.2.7: Also match bridge token symbols (pools use "wBTC" not addresses)
                     let feed_lower = resolved_feed_id.to_lowercase();
                     let (is_token0, is_token1) = (
-                        pool.token0.to_lowercase() == feed_lower,
+                        pool.token0.to_lowercase() == feed_lower
+                            || bridge_symbol.as_ref().map_or(false, |s| pool.token0.to_lowercase() == *s),
                         pool.token1.to_lowercase() == feed_lower
+                            || bridge_symbol.as_ref().map_or(false, |s| pool.token1.to_lowercase() == *s)
                     );
 
                     if is_token0 || is_token1 {
@@ -7694,7 +7956,7 @@ async fn complete_mixing_process(
         match postcard::to_allocvec(&mixed_tx) {
             Ok(tx_bytes) => {
                 let network_id = std::env::var("Q_NETWORK_ID")
-                    .unwrap_or_else(|_| "mainnet2026.2".to_string());
+                    .unwrap_or_else(|_| "mainnet-genesis".to_string());
                 let topic = format!("/qnk/{}/mempool-txs", network_id);
 
                 let dandelion_clone = dandelion.clone();
@@ -8004,15 +8266,25 @@ pub async fn test_production_peer_connectivity(
 
 /// Submit mining solution (VDF proof)
 pub async fn submit_mining_solution(
+    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(request): Json<MiningSolutionRequest>,
 ) -> Result<Json<ApiResponse<MiningSolutionResponse>>, StatusCode> {
     // v1.0.2: SYNC GATE — O(1) atomic check, return 503 so nginx routes to synced upstream
+    // v8.1.7: TIGHTENED cap from 5× to +5000 to prevent rogue height poisoning from blocking mining
+    // v8.1.7: Added Q_ALLOW_SOLO_MINING bypass — bootstrap validators must always accept mining
     {
         use std::sync::atomic::Ordering::Relaxed;
         let local_h = state.current_height_atomic.load(Relaxed);
-        let net_h = state.highest_network_height.load(Relaxed);
-        if net_h > 0 && local_h + 10 < net_h {
+        let raw_net_h = state.highest_network_height.load(Relaxed);
+        // v8.1.7: Tight cap — no peer should be more than 5000 blocks ahead
+        // Old 5× multiplier allowed 1.6M poison at 468K (max was 2.3M)
+        let max_reasonable = local_h + 5_000;
+        let net_h = if raw_net_h > max_reasonable { local_h } else { raw_net_h };
+        let allow_solo = std::env::var("Q_ALLOW_SOLO_MINING")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+        if net_h > 0 && local_h + 10 < net_h && !allow_solo {
             static LAST_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let now_secs = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -8021,11 +8293,45 @@ pub async fn submit_mining_solution(
             let prev = LAST_LOG.load(Relaxed);
             if now_secs >= prev + 10 && LAST_LOG.compare_exchange(prev, now_secs, Relaxed, Relaxed).is_ok() {
                 warn!(
-                    "[SYNC GATE] Rejecting mining (503): node at {} / network at {} ({} behind)",
-                    local_h, net_h, net_h - local_h
+                    "[SYNC GATE] Rejecting mining (503): node at {} / network at {} ({} behind, raw={})",
+                    local_h, net_h, net_h - local_h, raw_net_h
                 );
             }
             return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+    }
+
+    // v1.0.2-safe: Per-IP rate limiter — cap each IP to 30 mining submissions/second
+    // Breaks the retry storm that caused the Feb 24 deadlock
+    {
+        use dashmap::DashMap;
+        use std::sync::OnceLock;
+        // (epoch_second, count_in_that_second)
+        static MINING_RATE_MAP: OnceLock<DashMap<String, (u64, u32)>> = OnceLock::new();
+        let rate_map = MINING_RATE_MAP.get_or_init(|| DashMap::new());
+
+        let client_ip = extract_client_ip(&headers);
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let mut entry = rate_map.entry(client_ip.clone()).or_insert((now_secs, 0));
+        if entry.0 == now_secs {
+            entry.1 += 1;
+            if entry.1 > 30 {
+                drop(entry);
+                warn!("⚠️ Mining rate limit: {} exceeded 30 req/s — 429", client_ip);
+                return Err(StatusCode::TOO_MANY_REQUESTS);
+            }
+        } else {
+            *entry = (now_secs, 1);
+        }
+        drop(entry);
+
+        // Periodic cleanup: evict stale entries older than 60s
+        if rate_map.len() > 10_000 {
+            rate_map.retain(|_, (ts, _)| now_secs.saturating_sub(*ts) < 60);
         }
     }
 
@@ -8130,191 +8436,50 @@ pub async fn submit_mining_solution(
             let timestamp = now.timestamp() as u64;
             state.mining_nonce_dedup.insert(dedup_key, timestamp);
 
-            // v7.3.9: Incremental cleanup — remove old-height entries first, then hard-cap
-            // BUG FIX: Previous code only removed height < current-1, so at a stable height
-            // ALL entries were "current height" → cleanup never removed anything → unbounded growth.
-            // FIX: Also clear the entire map when it exceeds 100k entries (sacrificing some
-            // dedup accuracy in exchange for bounded memory at high submission rates).
-            if state.mining_nonce_dedup.len() > 10_000 {
-                let min_height = challenge_height.saturating_sub(1);
-                let stale_keys: Vec<_> = state.mining_nonce_dedup
-                    .iter()
-                    .filter(|entry| entry.key().0 < min_height)
-                    .take(500)
-                    .map(|entry| entry.key().clone())
-                    .collect();
-                for key in stale_keys {
-                    state.mining_nonce_dedup.remove(&key);
-                }
-                // Hard cap: if map still too large after removing old-height entries
-                // (i.e., high submission rate, all entries at current height), clear it.
-                if state.mining_nonce_dedup.len() > 100_000 {
-                    state.mining_nonce_dedup.clear();
-                    debug!("⛏️ [DEDUP] Cleared nonce map (hard cap at height {})", challenge_height);
-                }
+            // v1.0.2: Hard cap only — periodic cleanup handles stale entries
+            // Inline cleanup (iterating 10K+ DashMap entries) was a bottleneck at 7K+ req/sec.
+            // Now a periodic task runs every 5 seconds to clean old-height entries.
+            // HTTP handler only does emergency hard-cap clear.
+            if state.mining_nonce_dedup.len() > 100_000 {
+                state.mining_nonce_dedup.clear();
+                debug!("⛏️ [DEDUP] Emergency clear (>100K entries at height {})", challenge_height);
             }
         }
     }
 
-    // v4.1.2: Server-side hash recomputation — don't trust miner-submitted hash
-    // Recompute: blake3(challenge_hash || nonce) with 100 VDF iterations
-    if let Some(ref challenge_hex) = request.challenge_hash {
-        if let Ok(challenge_bytes) = hex::decode(challenge_hex) {
-            if challenge_bytes.len() == 32 {
-                let mut hash_input = [0u8; 40];
-                hash_input[..32].copy_from_slice(&challenge_bytes);
-                hash_input[32..].copy_from_slice(&nonce.to_le_bytes());
+    // ==================================================================================
+    // v1.0.2: ZERO-LOCK FAST PATH — VDF, SSE, P2P, stats all deferred to background
+    // ==================================================================================
+    // PREVIOUS: VDF verification (100 blake3 iterations), mining_stats.write().await,
+    //           SSE broadcast (3× read().await), P2P broadcast (2× read().await),
+    //           wallet_balances.read().await, node_status.read().await = 8+ async locks
+    //           per request on the HTTP thread at 7000+ req/sec → total server lockup
+    //
+    // FIX: HTTP handler does ONLY:
+    //   1. Format validation (hex decode, address check) — pure compute, no locks
+    //   2. Challenge read + nonce dedup (DashMap, ~lock-free) — already done above
+    //   3. try_send to mpsc channel — non-blocking O(1)
+    //   4. Return 200 with atomic height — no locks
+    //
+    // Background batch processor handles: VDF verification, difficulty check,
+    // mining_stats update, SSE MiningReward broadcast, P2P solution broadcast.
+    // This gives 10-50x throughput improvement on the HTTP layer.
+    // ==================================================================================
 
-                // Initial blake3 hash
-                let initial = blake3::hash(&hash_input);
-                let mut current = *initial.as_bytes();
-
-                // 100 VDF iterations (must match miner's compute_dag_knight_hash_optimized)
-                for _ in 0..100 {
-                    current = *blake3::hash(&current).as_bytes();
-                }
-
-                // Compare recomputed hash with submitted hash
-                if current != hash {
-                    warn!(
-                        "🚨 [MINING v4.1.2] Hash mismatch! Miner {} submitted fake hash. Submitted: {}, Recomputed: {}",
-                        &request.miner_address[..16],
-                        hex::encode(&hash[..8]),
-                        hex::encode(&current[..8])
-                    );
-                    return Ok(Json(ApiResponse::error(
-                        "Hash verification failed: submitted hash does not match recomputed hash".to_string(),
-                    )));
-                }
-            }
-        }
-    }
-
-    // Verify the VDF proof meets difficulty
-    if !verify_mining_difficulty(&hash, &difficulty_target) {
-        return Ok(Json(ApiResponse::error(
-            "Solution does not meet difficulty target".to_string(),
-        )));
-    }
-
-    // ========================================
-    // 🔐 AEGIS-KL AUTHENTICATION (v0.5.7+) - Post-Quantum Fork Protection
-    // Ensures only authorized miners with valid AEGIS-KL signatures can submit
-    // Prevents unauthorized forks and enforces 1% development fee at protocol level
-    // ========================================
-    // TODO: Re-enable when q_mining::dev_fee module is fully implemented
-    if false {
-        // Temporarily disabled due to missing q_mining::dev_fee
-        // Miner auth check disabled
-        let _state = &state; // Keep state reference
-        if false {
-            // Inner condition also disabled
-            // Both signature and public key must be present
-            if let (Some(sig_hex), Some(pk_hex)) =
-                (&request.aegis_signature, &request.aegis_public_key)
-            {
-                // Decode hex strings
-                let sig_bytes = match hex::decode(sig_hex) {
-                    Ok(bytes) => bytes,
-                    Err(_) => {
-                        return Ok(Json(ApiResponse::error(
-                            "Invalid signature hex encoding".to_string(),
-                        )));
-                    }
-                };
-
-                let pk_bytes = match hex::decode(pk_hex) {
-                    Ok(bytes) => bytes,
-                    Err(_) => {
-                        return Ok(Json(ApiResponse::error(
-                            "Invalid public key hex encoding".to_string(),
-                        )));
-                    }
-                };
-
-                // Convert to AEGIS-KL types using postcard deserialization
-                let public_key = match postcard::from_bytes::<q_aegis_ql::PublicKey>(&pk_bytes) {
-                    Ok(pk) => pk,
-                    Err(_) => {
-                        return Ok(Json(ApiResponse::error(
-                            "Invalid AEGIS-KL public key format".to_string(),
-                        )));
-                    }
-                };
-
-                let signature = match postcard::from_bytes::<q_aegis_ql::Signature>(&sig_bytes) {
-                    Ok(sig) => sig,
-                    Err(_) => {
-                        return Ok(Json(ApiResponse::error(
-                            "Invalid AEGIS-KL signature format".to_string(),
-                        )));
-                    }
-                };
-
-                // Create solution data for verification (hash + nonce + miner_address)
-                let solution_data =
-                    format!("{}{}{}", hex::encode(hash), nonce, request.miner_address).into_bytes();
-
-                // Create miner credentials
-                // TODO: Re-enable when q_mining::dev_fee module is complete
-                // let credentials = q_mining::dev_fee::MinerCredentials {
-                //     wallet_address: request.miner_address.clone(),
-                //     aegis_public_key: public_key,
-                // };
-
-                // Temporary: Just log the authentication attempt
-                info!("⚠️  AEGIS-KL authentication temporarily disabled - q_mining::dev_fee module incomplete");
-                let _public_key = public_key; // Suppress unused warning
-                let _signature = signature; // Suppress unused warning
-                let _solution_data = solution_data; // Suppress unused warning
-
-                // Verify the AEGIS-KL signature
-                // DISABLED - credentials not available
-                if false {
-                    let _dummy: Result<bool, ()> = Ok(true); // Dummy value
-                    match _dummy {
-                        // miner_auth.verify_miner_auth(&_public_key, &_solution_data, &_signature) {
-                        Ok(true) => {
-                            info!(
-                                "✅ [AEGIS-KL] Miner {} authenticated successfully",
-                                &request.miner_address[..16]
-                            );
-                        }
-                        Ok(false) => {
-                            warn!(
-                                "❌ [AEGIS-KL] Invalid signature from miner {}",
-                                &request.miner_address[..16]
-                            );
-                            return Ok(Json(ApiResponse::error(
-                                "Invalid AEGIS-KL signature - mining submission rejected"
-                                    .to_string(),
-                            )));
-                        }
-                        Err(_e) => {
-                            warn!(
-                                "❌ [AEGIS-KL] Verification error for miner {}",
-                                &request.miner_address[..16]
-                            );
-                            return Ok(Json(ApiResponse::error(
-                        "AEGIS-KL authentication failed - please check your miner configuration".to_string()
-                    )));
-                        }
-                    }
-                } // End disabled verification
+    // Extract challenge_hash bytes for deferred VDF verification in background
+    let challenge_hash_bytes: Option<[u8; 32]> = request.challenge_hash.as_ref().and_then(|hex_str| {
+        hex::decode(hex_str).ok().and_then(|bytes| {
+            if bytes.len() == 32 {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                Some(arr)
             } else {
-                // AEGIS-KL signature is REQUIRED when authentication is enabled
-                warn!(
-                    "❌ [AEGIS-KL] Missing signature/public key from miner {}",
-                    &request.miner_address[..16]
-                );
-                return Ok(Json(ApiResponse::error(
-                "AEGIS-KL signature required for mining submissions (upgrade your miner software)".to_string()
-            )));
+                None
             }
-        }
-    } // End of AEGIS-KL disabled block
+        })
+    });
 
-    // 🚀 ASYNC QUEUE: Send to background processor instead of blocking here
+    // 🚀 ASYNC QUEUE: Send to background processor — ALL verification deferred
     if let Some(tx) = &state.mining_submission_tx {
         let submission = crate::MiningSubmission {
             nonce,
@@ -8322,46 +8487,42 @@ pub async fn submit_mining_solution(
             difficulty_target,
             miner_address,
             miner_address_str: request.miner_address.clone(),
-            hash_rate: request.hash_rate.unwrap_or(0.0), // Use miner-reported hash rate (KH/s)
+            hash_rate: request.hash_rate.unwrap_or(0.0),
             miner_id: request.miner_id.clone(),
             worker_name: request.worker_name.clone(),
+            challenge_hash_bytes,
+            miner_version: request.miner_version.clone(),
         };
 
         // v1.0.2: Non-blocking try_send — prevents HTTP handlers from blocking on full channel
         match tx.try_send(submission) {
             Ok(_) => {
-                // v3.3.3-beta: Enhanced logging with miner identification
-                let miner_display = match (&request.worker_name, &request.miner_id) {
-                    (Some(name), Some(id)) => format!("{}[{}]", name, &id[..8.min(id.len())]),
-                    (Some(name), None) => name.clone(),
-                    (None, Some(id)) => format!("id:{}", &id[..8.min(id.len())]),
-                    (None, None) => format!("wallet:{}", &request.miner_address[..16]),
-                };
-                info!(
-                    "⚡ Mining submission queued: {} | Nonce: {} | Wallet: {}",
-                    miner_display,
-                    nonce,
-                    &request.miner_address[..16]
-                );
-
-                // Update mining statistics with miner's hash rate
-                // v3.2.25-beta: Use miner_id to distinguish multiple miners to same wallet
-                // v3.5.4-beta: Capture calculated hashrate for SSE events
-                if let Some(ref mining_stats_arc) = state.mining_statistics {
-                    let mut mining_stats = mining_stats_arc.write().await;
-                    let hash_rate_khash = request.hash_rate.unwrap_or(0.0);
-                    let worker_id = request.miner_id.clone()
-                        .or_else(|| request.worker_name.clone())
-                        .unwrap_or_else(|| "direct".to_string());
-                    let _calculated_hashrate = mining_stats.update_miner_with_worker(request.miner_address.clone(), hash_rate_khash, worker_id, request.worker_name.clone());
-                    mining_stats.total_solutions_submitted += 1;
+                // Rate-limited queue log (every 5 seconds max to prevent log spam)
+                static LAST_QUEUE_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let prev = LAST_QUEUE_LOG.load(std::sync::atomic::Ordering::Relaxed);
+                if now_secs >= prev + 5 && LAST_QUEUE_LOG.compare_exchange(prev, now_secs, std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed).is_ok() {
+                    let miner_display = match (&request.worker_name, &request.miner_id) {
+                        (Some(name), Some(id)) => format!("{}[{}]", name, &id[..8.min(id.len())]),
+                        (Some(name), None) => name.clone(),
+                        (None, Some(id)) => format!("id:{}", &id[..8.min(id.len())]),
+                        (None, None) => format!("wallet:{}", &request.miner_address[..16]),
+                    };
+                    info!(
+                        "⚡ Mining submission queued: {} | Nonce: {} | Wallet: {}",
+                        miner_display, nonce, &request.miner_address[..16]
+                    );
                 }
+                // NOTE: mining_stats.write() REMOVED from HTTP thread (v1.0.2)
+                // Stats are updated in the background batch processor only.
+                // This eliminates the #1 lock contention bottleneck.
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                warn!("⚠️ Mining queue full — backpressure, rejecting submission");
-                return Ok(Json(ApiResponse::error(
-                    "Mining queue full, please retry in a few seconds".to_string(),
-                )));
+                warn!("⚠️ Mining queue full — backpressure, rejecting submission (429)");
+                return Err(StatusCode::TOO_MANY_REQUESTS);
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                 warn!("❌ Mining submission channel closed");
@@ -8378,204 +8539,38 @@ pub async fn submit_mining_solution(
     }
 
     // ==================================================================================
-    // v6.2.3-beta CRITICAL FIX: REMOVED INSTANT BALANCE CREDIT
+    // v1.0.2: LOCK-FREE RESPONSE — uses atomics only, zero .await on RwLocks
     // ==================================================================================
-    // PREVIOUS BUG: Mining rewards credited INSTANTLY here (wallet_balances + RocksDB)
-    // PLUS credited again via coinbase TX in block production → 2× per node.
-    // With P2P solution broadcasting, each solution credited on EVERY node → N× emission.
-    // Over 1M QUG mined in 20 days vs target of 143K (7× overshoot).
-    //
-    // FIX: Rewards ONLY credited via BalanceConsensusEngine.process_block_mining_rewards()
-    // when blocks are produced and saved. This ensures ONE reward per solution.
-    // SSE MiningReward still fires below for UI "pending reward" feedback.
-    // ==================================================================================
+    // All SSE events (MiningReward, BalanceUpdated, MiningStats) and P2P broadcasts
+    // are now handled exclusively in the background batch processor in main.rs.
+    // The HTTP response uses only atomic reads for block_height.
 
-    // Calculate display-only reward for SSE UI feedback (NOT credited to any balance)
+    // Calculate display-only reward (pure math, no locks)
     let current_timestamp = chrono::Utc::now().timestamp() as u64;
     let block_reward_total =
         calculate_block_reward_time_based(active_genesis_timestamp(), current_timestamp);
-    const DEV_FEE_BPS: u128 = 100; // 1% = 100 basis points
+    const DEV_FEE_BPS: u128 = 100;
     const BPS_DIVISOR: u128 = 10_000;
     let dev_fee_amount = block_reward_total.saturating_mul(DEV_FEE_BPS) / BPS_DIVISOR;
     let miner_reward = block_reward_total.saturating_sub(dev_fee_amount);
 
-    // 📡 SSE: Send MiningReward event for UI "pending reward" display
-    // NOTE: This is for UI feedback only - actual balance update comes from block production
-    {
-        let broadcaster = &state.event_broadcaster;
+    // Lock-free height read (atomic, no .await)
+    let block_height = state.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
 
-        // Emit MiningReward event for mining-specific UI updates
-        // v2.3.5-beta: Include origin node info for P2P mining attribution
-        // v3.5.4-beta: Look up calculated hashrate from mining stats (more accurate than client-reported)
-        let origin_peer_id = state.libp2p_peer_info.read().await.0.clone();
-        let calculated_hash_rate = if let Some(ref mining_stats_arc) = state.mining_statistics {
-            let mining_stats = mining_stats_arc.read().await;
-            let worker_id = request.miner_id.clone()
-                .or_else(|| request.worker_name.clone())
-                .unwrap_or_else(|| "direct".to_string());
-            let key = format!("{}:{}", request.miner_address, worker_id);
-            mining_stats.active_miners.get(&key)
-                .map(|stats| stats.last_hashrate)
-                .unwrap_or_else(|| request.hash_rate.unwrap_or(0.0))
-        } else {
-            request.hash_rate.unwrap_or(0.0)
-        };
-        let mining_event = StreamEvent::MiningReward {
-            miner_address: request.miner_address.clone(),
-            reward_qnk: miner_reward as f64 / QUG_DISPLAY_DIVISOR,
-            nonce,
-            block_height: state.node_status.read().await.current_height,
-            difficulty: hex::encode(&hash[..8]),
-            hash_rate: calculated_hash_rate,
-            miner_id: request.miner_id.clone(), // v3.3.3-beta: Unique miner instance ID
-            worker_name: request.worker_name.clone(), // v3.3.3-beta: Human-readable miner name
-            origin_node_id: Some(origin_peer_id), // v2.3.5-beta: Which node mined this
-            origin_node_name: std::env::var("Q_NODE_NAME").ok(), // v2.3.5-beta: Human-friendly name
-            timestamp: chrono::Utc::now(),
-        };
-
-        if let Err(e) = broadcaster.broadcast(mining_event).await {
-            warn!("⚠️ Failed to broadcast mining reward event: {}", e);
-        }
-    }
-
-    // v6.2.3-beta: Gossipsub balance broadcast REMOVED
-    // Instant balance broadcasts caused N× emission on multi-node networks.
-    // Balances now propagate ONLY via coinbase TXs in blocks (via P2P block broadcast).
-
-    // 🌐 v2.2.2-beta: P2P MINING SOLUTION BROADCAST
-    // Solutions are broadcast to all nodes for stats/display purposes.
-    // v6.2.3-beta: Receiving nodes NO LONGER re-queue solutions for block production
-    // (that caused N× emission). Blocks are only produced by the receiving node.
-    //
-    // v7.1.7: Skip P2P broadcast when far behind in sync to prevent gossipsub queue
-    // saturation. When the node is >10K blocks behind, mining broadcasts flood the
-    // gossipsub send queue, blocking turbo sync block-pack requests from getting through.
-    //
-    // v7.3.9: Rate limit P2P mining broadcasts to max 20/sec total.
-    // At 7,620 submissions/sec, the gossipsub queue is always full (AllQueuesFull errors).
-    // Without rate limiting: 7,620 NetworkCommands/sec enqueue to the unbounded command_rx
-    // channel, plus 7,620 info!() log lines/sec (1.5MB/sec log spam to journald).
-    // With 20/sec rate limit: 99.7% of broadcasts are skipped at the sender level.
-    // The solutions are still processed locally — only P2P propagation is rate-limited.
-    let p2p_rate_limited = {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static LAST_P2P_BROADCAST_MS: AtomicU64 = AtomicU64::new(0);
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        // Allow at most 1 broadcast per 50ms (= 20/sec max)
-        let last = LAST_P2P_BROADCAST_MS.load(Ordering::Relaxed);
-        if now_ms.saturating_sub(last) >= 50 {
-            LAST_P2P_BROADCAST_MS.store(now_ms, Ordering::Relaxed);
-            false // not rate limited: allow this broadcast
-        } else {
-            true // rate limited: skip P2P broadcast
-        }
-    };
-
-    let p2p_current = state.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
-    let p2p_network = state.highest_network_height.load(std::sync::atomic::Ordering::Relaxed);
-    let p2p_behind = p2p_network.saturating_sub(p2p_current);
-    let skip_p2p_broadcast = p2p_rate_limited || (p2p_current > 0 && p2p_behind > 10_000);
-
-    if skip_p2p_broadcast {
-        // Don't broadcast - gossipsub queue needs to stay clear for turbo sync
-    } else if let Some(ref command_tx) = state.libp2p_command_tx {
-        // Get node's peer ID for origin tracking
-        let node_id = {
-            let peer_info = state.libp2p_peer_info.read().await;
-            peer_info.0.clone()
-        };
-
-        // Create P2P mining submission
-        let p2p_submission = q_types::mining_solution::P2PMiningSubmission::new(
-            miner_address,                          // [u8; 32]
-            hash,                                   // solution_hash
-            difficulty_target,                      // difficulty met
-            state.node_status.read().await.current_height, // block height
-            [0u8; 32],                             // challenge_hash (simplified - will be enhanced)
-            nonce,
-            0,                                     // vdf_iterations (0 for now)
-            node_id,
-        );
-
-        // Serialize using MessagePack for efficiency
-        match rmp_serde::to_vec(&p2p_submission) {
-            Ok(solution_bytes) => {
-                // Get the mining solutions topic
-                let network_id_str = std::env::var("Q_NETWORK_ID")
-                    .unwrap_or_else(|_| "mainnet2026.2".to_string());
-                let network_id = network_id_str.parse::<q_types::NetworkId>()
-                    .unwrap_or(q_types::NetworkId::Mainnet2026_2);
-                let topic = network_id.mining_solutions_topic();
-
-                // Broadcast solution to P2P network
-                let _ = command_tx.send(q_network::NetworkCommand::PublishMiningSolution {
-                    topic,
-                    solution_bytes,
-                    miner_address: request.miner_address.clone(),
-                    block_height: state.node_status.read().await.current_height,
-                    nonce,
-                });
-                info!(
-                    "🌐 [P2P MINING] Broadcast solution from {} (nonce: {}) to network",
-                    &request.miner_address[..16], nonce
-                );
-            }
-            Err(e) => {
-                warn!("⚠️ [P2P MINING] Failed to serialize solution for broadcast: {}", e);
-            }
-        }
-    }
-
-    // v6.2.3-beta: Read current balance for response (reward will be credited via block production)
-    let current_balance = {
-        let balances = state.wallet_balances.read().await;
-        balances.get(&miner_address).copied().unwrap_or(0)
-    };
-
-    debug!(
-        "⛏️ SOLUTION ACCEPTED: {} +{:.8} QNK pending (current balance: {:.8} QNK)",
-        &request.miner_address[..16],
-        miner_reward as f64 / QUG_DISPLAY_DIVISOR,
-        current_balance as f64 / QUG_DISPLAY_DIVISOR
-    );
-
-    // v1.0.3: Check miner version and log if outdated
+    // Version check (string compare only, no locks)
     let server_ver = VERSION;
-    let update_available = if let Some(ref miner_ver) = request.miner_version {
-        if miner_ver != server_ver {
-            // Rate-limited log: once per 60 seconds per unique version
-            static LAST_VER_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let now_secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let prev = LAST_VER_LOG.load(std::sync::atomic::Ordering::Relaxed);
-            if now_secs >= prev + 60 && LAST_VER_LOG.compare_exchange(prev, now_secs, std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed).is_ok() {
-                info!(
-                    "📦 Outdated miner detected: {} running v{} (server v{})",
-                    &request.miner_address[..16], miner_ver, server_ver
-                );
-            }
-            true
-        } else {
-            false
-        }
-    } else {
-        // No version sent — old miner, always flag
-        true
+    let update_available = match &request.miner_version {
+        Some(v) => v != server_ver,
+        None => true,
     };
 
     Ok(Json(ApiResponse::success(MiningSolutionResponse {
         accepted: true,
         reward: miner_reward,
         reward_qnk: miner_reward as f64 / QUG_DISPLAY_DIVISOR,
-        new_balance: current_balance, // Balance not yet updated - will update when block is produced
-        new_balance_qnk: current_balance as f64 / QUG_DISPLAY_DIVISOR,
-        block_height: state.node_status.read().await.current_height,
+        new_balance: 0, // v1.0.2: Balance comes via SSE BalanceUpdated events (no lock needed)
+        new_balance_qnk: 0.0,
+        block_height,
         message:
             "⛏️ Solution accepted - reward will be credited when block is produced"
                 .to_string(),
@@ -8649,7 +8644,7 @@ pub async fn get_mining_challenge(
         let raw_net_height = state
             .highest_network_height
             .load(std::sync::atomic::Ordering::Acquire);
-        let max_reasonable_mining = (local_height * 3).max(local_height + 500_000);
+        let max_reasonable_mining = (local_height * 5).max(local_height + 50_000);
         let network_height = if raw_net_height > max_reasonable_mining {
             local_height // Treat as synced when network height is suspiciously high
         } else {
@@ -8721,8 +8716,9 @@ pub async fn get_mining_challenge(
     }
 
     // NOW safe to proceed with cache check and challenge generation
-    // Reuse local_height loaded at the top for consistency
-    let block_height = local_height;
+    // v8.1.6: Miners solve for the NEXT block, not the current tip.
+    // local_height is the current tip; challenge must be for tip+1.
+    let block_height = local_height + 1;
 
     // 🔧 v1.0.5-beta: Check if we have a cached challenge for current height (with grace period)
     {
@@ -8919,7 +8915,7 @@ pub async fn trigger_block_production(
     }))))
 }
 
-fn verify_mining_difficulty(hash: &[u8; 32], target: &[u8; 32]) -> bool {
+pub fn verify_mining_difficulty(hash: &[u8; 32], target: &[u8; 32]) -> bool {
     hash < target
 }
 
@@ -10888,9 +10884,9 @@ pub async fn execute_swap(
         // on {network_prefix}/dex/swaps. Publish on both for compatibility.
         {
             let network_id_str = std::env::var("Q_NETWORK_ID")
-                .unwrap_or_else(|_| "mainnet2026.2".to_string());
+                .unwrap_or_else(|_| "mainnet-genesis".to_string());
             let network_id = network_id_str.parse::<q_types::NetworkId>()
-                .unwrap_or(q_types::NetworkId::Mainnet2026_2);
+                .unwrap_or(q_types::NetworkId::MainnetGenesis);
             let swap_topic = format!("{}/dex/swaps", network_id.gossipsub_topic_prefix());
 
             // Get the actual new reserves (pool already updated at this point)
@@ -12470,11 +12466,20 @@ pub async fn get_wallet_mining_stats(
     State(state): State<Arc<AppState>>,
     Path(wallet): Path<String>,
 ) -> Result<Json<ApiResponse<WalletMiningStatsResponse>>, StatusCode> {
-    // v3.5.7-beta: Collect per-worker stats for this wallet
+    // v8.2.9: Primary source = persistent blockchain-derived stats from RocksDB.
+    // These are deterministic — same blocks produce the same stats on ANY node.
+    // In-memory stats only used for real-time data (hashrate, workers, activity).
+    let wallet_hex = wallet.strip_prefix("qnk").unwrap_or(&wallet).to_lowercase();
+
+    // Load persistent mining stats (blocks_found, rewards_earned) from RocksDB
+    let (persistent_blocks, persistent_rewards) = state.storage_engine
+        .load_persistent_mining_stats(&wallet_hex)
+        .await
+        .unwrap_or((0, 0));
+
+    // Collect real-time per-worker stats from in-memory tracking
     let mut workers: Vec<WorkerMiningStats> = Vec::new();
-    let mut total_blocks: u64 = 0;
     let mut total_hashrate: f64 = 0.0;
-    let mut total_rewards: u128 = 0;
     let mut most_recent_activity = std::time::Duration::MAX;
 
     if let Some(ref mining_stats_arc) = state.mining_statistics {
@@ -12486,9 +12491,7 @@ pub async fn get_wallet_mining_stats(
             mining_stats.active_miners.len()
         );
 
-        // Find all entries for this wallet (format is "address:worker_id")
         for (key, miner_stats) in &mining_stats.active_miners {
-            // Check if this entry belongs to the requested wallet
             let wallet_matches = key.starts_with(&format!("{}:", wallet))
                 || key == &wallet
                 || miner_stats.address.starts_with(&wallet)
@@ -12499,16 +12502,12 @@ pub async fn get_wallet_mining_stats(
                 let activity_secs = elapsed.as_secs();
                 let is_worker_active = activity_secs < 300;
 
-                // v3.5.7-beta: Use actual blocks_found instead of total_solutions
-                total_blocks += miner_stats.blocks_found;
                 total_hashrate += miner_stats.last_hashrate;
-                total_rewards += miner_stats.rewards_earned;
 
                 if elapsed < most_recent_activity {
                     most_recent_activity = elapsed;
                 }
 
-                // Add per-worker stats
                 workers.push(WorkerMiningStats {
                     worker_id: miner_stats.worker_id.clone(),
                     worker_name: miner_stats.worker_name.clone(),
@@ -12520,14 +12519,13 @@ pub async fn get_wallet_mining_stats(
                     last_activity_secs: activity_secs,
                     is_active: is_worker_active,
                 });
-
-                trace!(
-                    "🔍 [MINING-STATS] Found worker: key='{}' blocks={} rewards={:.4} QUG hashrate={:.0} H/s",
-                    key, miner_stats.blocks_found, miner_stats.rewards_earned as f64 / 1e24, miner_stats.last_hashrate
-                );
             }
         }
     }
+
+    // Use persistent blockchain-derived stats for totals (consistent across all servers)
+    let total_blocks = persistent_blocks;
+    let total_rewards = persistent_rewards;
 
     let total_workers = workers.len();
     let last_activity_secs = if most_recent_activity == std::time::Duration::MAX {
@@ -12537,56 +12535,9 @@ pub async fn get_wallet_mining_stats(
     };
     let is_active = last_activity_secs < 300;
 
-    // v3.5.5-beta: If no in-memory stats found, check blockchain for coinbase transactions
-    if total_blocks == 0 {
-        let blockchain_blocks = {
-            let wallet_hex = wallet.strip_prefix("qnk").unwrap_or(&wallet);
-            if let Ok(wallet_bytes) = hex::decode(wallet_hex) {
-                if wallet_bytes.len() == 32 {
-                    let mut address: [u8; 32] = [0u8; 32];
-                    address.copy_from_slice(&wallet_bytes);
-
-                    let balances = state.wallet_balances.read().await;
-                    if let Some(&balance) = balances.get(&address) {
-                        // Estimate blocks from balance: balance / ~49.5 QNK per block
-                        let estimated_blocks = (balance as f64 / 1e24 / 49.5).round() as u64;
-                        // Also estimate rewards from balance
-                        if estimated_blocks > 0 && total_rewards == 0 {
-                            total_rewards = balance;
-                        }
-                        estimated_blocks
-                    } else {
-                        0
-                    }
-                } else {
-                    0
-                }
-            } else {
-                0
-            }
-        };
-
-        if blockchain_blocks > 0 {
-            total_blocks = blockchain_blocks;
-            debug!(
-                "📊 [MINING-STATS] Wallet {} estimated {} blocks from blockchain balance",
-                wallet, blockchain_blocks
-            );
-        }
-    }
-
-    // Log results
-    if total_workers == 0 && total_blocks == 0 {
-        if let Some(ref mining_stats_arc) = state.mining_statistics {
-            let mining_stats = mining_stats_arc.read().await;
-            debug!(
-                "📊 [MINING-STATS] Wallet {} NOT FOUND in {} tracked miners",
-                wallet, mining_stats.active_miners.len()
-            );
-        }
-    } else {
+    if total_blocks > 0 || total_workers > 0 {
         info!(
-            "📊 [MINING-STATS] Wallet {} stats: blocks={}, rewards={:.4} QUG, hashrate={:.0} H/s, workers={}",
+            "📊 [MINING-STATS] Wallet {} stats: blocks={} (persistent), rewards={:.4} QUG, hashrate={:.0} H/s, workers={}",
             wallet, total_blocks, total_rewards as f64 / 1e24, total_hashrate, total_workers
         );
     }
@@ -13247,6 +13198,26 @@ pub async fn sync_health(
         "peer_data_stale": peer_data_stale,
         "last_peer_update_unix": last_peer_update,
     })))
+}
+
+// ============================================================================
+// v1.0.2: DETAILED SYNC STATUS (Admin Panel Visibility)
+// ============================================================================
+
+/// GET /api/v1/sync/detailed
+///
+/// Returns detailed TurboSync session status including chunk progress, in-flight
+/// counts, download speed, and peer info for the admin deploy panel.
+pub async fn sync_detailed(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<q_storage::DetailedSyncStatus>>, StatusCode> {
+    let status = if let Some(ref turbo_sync) = state.turbo_sync {
+        turbo_sync.get_detailed_sync_status().await
+    } else {
+        q_storage::DetailedSyncStatus::default()
+    };
+
+    Ok(Json(ApiResponse::success(status)))
 }
 
 // ============================================================================

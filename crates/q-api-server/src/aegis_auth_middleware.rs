@@ -287,6 +287,11 @@ pub fn create_protected_routes() -> axum::Router<Arc<crate::AppState>> {
             "/risk/liquidations/execute",
             post(quillon_bank_api::execute_liquidations),
         )
+        // v8.1.4: Email broadcasting (founder-only)
+        .route(
+            "/email/broadcast",
+            post(quillon_bank_api::broadcast_bank_email),
+        )
 }
 
 #[cfg(test)]

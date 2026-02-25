@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Sparkles, Key, AlertCircle, Search, HelpCircle, X, Shield, Zap, Lock, Globe, Pickaxe, Download, Monitor, Laptop, Terminal as TerminalIcon, Blocks, Activity, Cpu, Users, Clock, ChevronDown, Hash, TrendingUp } from 'lucide-react';
+import { Sparkles, Key, AlertCircle, Search, HelpCircle, X, Shield, Zap, Lock, Globe, Pickaxe, Download, Monitor, Laptop, Terminal as TerminalIcon, Blocks, Activity, Cpu, Users, Clock, ChevronDown, Hash, TrendingUp, Wallet } from 'lucide-react';
 import { qnkAPI } from '../services/api';
 import { storeWallet, walletSession, verifyPasswordHash, hasPasswordHash } from '../services/walletAuth';
 import ExplorerSearchBar from './ExplorerSearchBar';
@@ -442,6 +442,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
   const [showInfoModal, setShowInfoModal] = useState(false);
   const [showMinerModal, setShowMinerModal] = useState(false);
   const [showNodeModal, setShowNodeModal] = useState(false);
+  const [showSlintModal, setShowSlintModal] = useState(false);
   const [isMetaMaskConnecting, setIsMetaMaskConnecting] = useState(false);
   const [hasMetaMask, setHasMetaMask] = useState(false);
   // Persisted Tor onion address - fetched from backend, fallback to hardcoded
@@ -539,7 +540,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
             const latest = history[history.length - 1];
             const supply = latest?.cumulative_supply_qug || 0;
             if (supply > 0) {
-              const price = qugPrice || 42.5;
+              const price = qugPrice || 3000;
               setQugMarketCap(supply * price);
             }
           }
@@ -551,7 +552,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
           if (supplyData?.network_hashrate_formatted) setNetworkHashrate(supplyData.network_hashrate_formatted);
           // Also use supply data for market cap if available
           if (supplyData?.total_mined && supplyData.total_mined > 0) {
-            const price = qugPrice || 42.5;
+            const price = qugPrice || 3000;
             setQugMarketCap(supplyData.total_mined * price);
           }
         }
@@ -732,6 +733,11 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
       // 4. Set a password derived from the signature (so user doesn't need to type one)
       const pwBytes = sigBytes.slice(32, 64);
       const autoPassword = `mm_${pwBytes.slice(0, 16)}`;
+
+      // v8.3.0: Persist auto-password in sessionStorage so sendTransaction()
+      // can silently decrypt the mnemonic without showing a password prompt.
+      // sessionStorage is cleared on browser close — same lifetime as the session.
+      sessionStorage.setItem('metamaskAutoPassword', autoPassword);
 
       // 5. Auto-fill and authenticate
       setSeedPhrase(mnemonic);
@@ -943,6 +949,31 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
 
         {/* Help, Mining & Tor Icons - Top Right */}
         <div className="absolute top-4 right-4 flex items-center gap-2 z-50">
+          {/* Slint Native Wallet Icon */}
+          <motion.button
+            className="relative p-2 bg-emerald-600/30 hover:bg-emerald-600/50 border border-emerald-400/50 rounded-full transition-all cursor-pointer group backdrop-blur-sm overflow-hidden"
+            whileHover={{ scale: 1.15, rotate: 8, y: -2 }}
+            whileTap={{ scale: 0.9, rotate: -5 }}
+            initial={{ opacity: 0, scale: 0, x: 30 }}
+            animate={{ opacity: 1, scale: 1, x: 0 }}
+            transition={{ delay: 0.15, type: "spring", stiffness: 260, damping: 15 }}
+            title="Slint Native Wallet"
+            onClick={() => setShowSlintModal(true)}
+          >
+            {/* Animated ring pulse */}
+            <motion.div
+              className="absolute inset-0 rounded-full border-2 border-emerald-400/40"
+              animate={{ scale: [1, 1.4, 1], opacity: [0.6, 0, 0.6] }}
+              transition={{ duration: 2.5, repeat: Infinity, ease: "easeInOut" }}
+            />
+            <Wallet className="w-7 h-7 text-emerald-400 relative z-10" />
+            <div className="absolute inset-0 rounded-full bg-emerald-500/0 group-hover:bg-emerald-500/20 transition-all blur-md" />
+            {/* NEW badge */}
+            <span className="absolute -top-1 -right-1 w-4 h-4 bg-emerald-500 rounded-full flex items-center justify-center z-20 border border-emerald-300/80">
+              <span className="text-[6px] font-black text-white leading-none">N</span>
+            </span>
+          </motion.button>
+
           {/* Mining Download Icon */}
           <motion.button
             className="p-2 bg-amber-600/30 hover:bg-amber-600/50 border border-amber-400/50 rounded-full transition-all cursor-pointer group backdrop-blur-sm"
@@ -1393,6 +1424,11 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
                     type="password"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && validateSeedPhrase(seedPhrase).valid && password && !isAuthenticating) {
+                        handleAuthenticate();
+                      }
+                    }}
                     className="w-full px-4 py-3 bg-slate-900/70 border-2 border-amber-500/30 rounded-xl text-amber-50 placeholder-slate-400 focus:outline-none focus:border-amber-400 focus:shadow-[0_0_15px_rgba(251,191,36,0.3)] transition-all backdrop-blur-sm"
                     placeholder="Enter password for wallet encryption..."
                     required
@@ -1753,7 +1789,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
               <div className="space-y-3">
                 {/* Linux x64 */}
                 <a
-                  href="/downloads/q-api-server-v6.0.4-beta"
+                  href="/downloads/q-api-server-v8.0.1"
                   download="q-api-server"
                   className="w-full p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-cyan-500/20 hover:border-cyan-500/40 rounded-xl transition-all flex items-center gap-4 group block"
                 >
@@ -1816,9 +1852,9 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
               <div className="mt-3 p-3 bg-slate-800/40 rounded-xl border border-cyan-500/10">
                 <h3 className="text-sm font-bold text-cyan-300 mb-2">Quick Start (Linux)</h3>
                 <code className="text-[11px] text-cyan-100/70 block whitespace-pre-wrap break-all font-mono leading-relaxed">
-{`wget https://quillon.xyz/downloads/q-api-server-v6.0.4-beta
-chmod +x q-api-server-v6.0.4-beta
-./q-api-server-v6.0.4-beta --port 8080`}
+{`wget https://quillon.xyz/downloads/q-api-server-v8.0.1
+chmod +x q-api-server-v8.0.1
+./q-api-server-v8.0.1 --port 8080`}
                 </code>
                 <div className="text-[10px] text-emerald-400/70 mt-2">WarpSync auto-discovers peers & syncs 900K+ blocks in minutes</div>
               </div>
@@ -1981,9 +2017,9 @@ cargo build --release --package q-api-server
               <div className="mt-5 p-4 bg-slate-800/40 rounded-xl border border-amber-500/10">
                 <h3 className="text-sm font-bold text-amber-300 mb-2">Quick Start (Linux)</h3>
                 <code className="text-xs text-amber-100/70 block whitespace-pre-wrap break-all font-mono">
-{`wget https://quillon.xyz/downloads/q-miner-linux-x64
-chmod +x q-miner-linux-x64
-./q-miner-linux-x64 --mode solo --wallet YOUR_WALLET --threads 4 --server https://quillon.xyz`}
+{`wget https://quillon.xyz/downloads/q-miner-v2.5.0
+chmod +x q-miner-v2.5.0
+./q-miner-v2.5.0 --mode solo --wallet YOUR_WALLET --threads 4 --server https://quillon.xyz`}
                 </code>
               </div>
 
@@ -1992,6 +2028,202 @@ chmod +x q-miner-linux-x64
                 <motion.button
                   onClick={() => setShowMinerModal(false)}
                   className="px-8 py-3 bg-gradient-to-r from-amber-600 to-yellow-600 rounded-xl text-slate-900 font-bold hover:shadow-[0_0_30px_rgba(251,191,36,0.5)] transition-all"
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                >
+                  Close
+                </motion.button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Slint Native Wallet Modal */}
+      <AnimatePresence>
+        {showSlintModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-[100] overflow-y-auto py-8"
+            onClick={() => setShowSlintModal(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.85, opacity: 0, y: 30, rotateX: 8 }}
+              animate={{ scale: 1, opacity: 1, y: 0, rotateX: 0 }}
+              exit={{ scale: 0.85, opacity: 0, y: 30 }}
+              transition={{ type: "spring", stiffness: 300, damping: 25 }}
+              className="relative bg-gradient-to-br from-slate-900 via-emerald-950/50 to-slate-900 border-2 border-emerald-500/40 rounded-2xl p-6 max-w-lg w-full mx-4 shadow-2xl overflow-hidden"
+              onClick={(e) => e.stopPropagation()}
+              style={{ boxShadow: '0 0 80px rgba(16, 185, 129, 0.25), 0 0 160px rgba(16, 185, 129, 0.08)' }}
+            >
+              {/* Animated background orbs */}
+              <div className="absolute top-0 right-0 w-64 h-64 bg-emerald-500/[0.08] rounded-full blur-3xl -translate-y-1/3 translate-x-1/3 pointer-events-none" />
+              <div className="absolute bottom-0 left-0 w-48 h-48 bg-teal-500/[0.08] rounded-full blur-3xl translate-y-1/3 -translate-x-1/3 pointer-events-none" />
+              <motion.div
+                className="absolute top-1/2 left-1/2 w-32 h-32 rounded-full pointer-events-none"
+                style={{ background: 'radial-gradient(circle, rgba(52,211,153,0.12) 0%, transparent 70%)' }}
+                animate={{ x: ['-50%', '-30%', '-60%', '-50%'], y: ['-50%', '-70%', '-30%', '-50%'], scale: [1, 1.3, 0.8, 1] }}
+                transition={{ duration: 8, repeat: Infinity, ease: "easeInOut" }}
+              />
+
+              {/* Modal Header */}
+              <div className="relative flex items-center justify-between mb-5">
+                <div className="flex items-center gap-4">
+                  <motion.div
+                    className="w-14 h-14 rounded-xl bg-gradient-to-br from-emerald-500/40 to-teal-500/40 border border-emerald-400/60 flex items-center justify-center relative"
+                    whileHover={{ rotate: [0, -5, 5, 0], scale: 1.05 }}
+                    transition={{ duration: 0.5 }}
+                  >
+                    <Wallet className="w-8 h-8 text-emerald-300" />
+                    <motion.div
+                      className="absolute inset-0 rounded-xl border-2 border-emerald-400/30"
+                      animate={{ opacity: [0.3, 0.8, 0.3] }}
+                      transition={{ duration: 2, repeat: Infinity }}
+                    />
+                  </motion.div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h2 className="text-2xl font-bold bg-gradient-to-r from-emerald-400 via-teal-300 to-cyan-400 bg-clip-text text-transparent">
+                        Slint Wallet
+                      </h2>
+                      <motion.span
+                        className="px-2 py-0.5 bg-emerald-500/30 border border-emerald-400/40 text-emerald-300 text-[10px] font-bold rounded-full uppercase"
+                        animate={{ opacity: [0.7, 1, 0.7] }}
+                        transition={{ duration: 1.5, repeat: Infinity }}
+                      >
+                        NEW
+                      </motion.span>
+                    </div>
+                    <p className="text-emerald-300/60 text-sm">Native desktop wallet — pure Rust, no browser</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowSlintModal(false)}
+                  className="p-2 hover:bg-emerald-500/20 rounded-lg transition-colors"
+                >
+                  <X className="w-6 h-6 text-emerald-400" />
+                </button>
+              </div>
+
+              {/* Feature Cards */}
+              <div className="relative grid grid-cols-3 gap-2 mb-5">
+                <motion.div
+                  className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-xl text-center"
+                  whileHover={{ scale: 1.05, borderColor: 'rgba(52,211,153,0.5)' }}
+                >
+                  <Zap className="w-5 h-5 text-emerald-400 mx-auto mb-1" />
+                  <div className="text-sm font-bold text-emerald-300">Instant</div>
+                  <div className="text-[10px] text-emerald-400/60">Sub-second startup</div>
+                </motion.div>
+                <motion.div
+                  className="p-3 bg-teal-500/10 border border-teal-500/20 rounded-xl text-center"
+                  whileHover={{ scale: 1.05, borderColor: 'rgba(20,184,166,0.5)' }}
+                >
+                  <Shield className="w-5 h-5 text-teal-400 mx-auto mb-1" />
+                  <div className="text-sm font-bold text-teal-300">PQ-Safe</div>
+                  <div className="text-[10px] text-teal-400/60">Dilithium5 + Kyber</div>
+                </motion.div>
+                <motion.div
+                  className="p-3 bg-cyan-500/10 border border-cyan-500/20 rounded-xl text-center"
+                  whileHover={{ scale: 1.05, borderColor: 'rgba(6,182,212,0.5)' }}
+                >
+                  <Pickaxe className="w-5 h-5 text-cyan-400 mx-auto mb-1" />
+                  <div className="text-sm font-bold text-cyan-300">Mine</div>
+                  <div className="text-[10px] text-cyan-400/60">Built-in miner</div>
+                </motion.div>
+              </div>
+
+              {/* Feature List */}
+              <div className="relative space-y-2 mb-5">
+                <motion.div
+                  className="flex items-center gap-3 p-2 rounded-lg bg-slate-800/40 border border-slate-700/40"
+                  initial={{ opacity: 0, x: -20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: 0.3 }}
+                >
+                  <div className="w-9 h-9 rounded-lg bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center shrink-0">
+                    <span className="text-emerald-400 text-[10px] font-bold">16M</span>
+                  </div>
+                  <span className="text-sm text-slate-200">Tiny binary — runs on anything</span>
+                </motion.div>
+                <motion.div
+                  className="flex items-center gap-3 p-2 rounded-lg bg-slate-800/40 border border-slate-700/40"
+                  initial={{ opacity: 0, x: -20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: 0.4 }}
+                >
+                  <div className="w-9 h-9 rounded-lg bg-teal-500/20 border border-teal-500/30 flex items-center justify-center shrink-0">
+                    <span className="text-teal-400 text-[10px] font-bold">QR</span>
+                  </div>
+                  <span className="text-sm text-slate-200">Send & receive with QR codes</span>
+                </motion.div>
+                <motion.div
+                  className="flex items-center gap-3 p-2 rounded-lg bg-slate-800/40 border border-slate-700/40"
+                  initial={{ opacity: 0, x: -20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: 0.5 }}
+                >
+                  <div className="w-9 h-9 rounded-lg bg-cyan-500/20 border border-cyan-500/30 flex items-center justify-center shrink-0">
+                    <span className="text-cyan-400 text-[10px] font-bold">P2P</span>
+                  </div>
+                  <span className="text-sm text-slate-200">Connects to quillon.xyz or your own node</span>
+                </motion.div>
+              </div>
+
+              {/* Download Buttons */}
+              <div className="relative space-y-3">
+                <motion.a
+                  href="/downloads/slint-wallet-linux-x86_64"
+                  download="slint-wallet-linux-x86_64"
+                  className="w-full p-4 bg-gradient-to-r from-emerald-600/80 to-teal-600/80 hover:from-emerald-500 hover:to-teal-500 border border-emerald-400/30 rounded-xl transition-all flex items-center gap-4 group block"
+                  whileHover={{ scale: 1.02, x: 4 }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  <div className="w-10 h-10 rounded-lg bg-emerald-400/20 flex items-center justify-center shrink-0">
+                    <TerminalIcon className="w-5 h-5 text-emerald-300" />
+                  </div>
+                  <div className="text-left flex-1">
+                    <div className="font-bold text-white">Linux x86_64</div>
+                    <div className="text-xs text-emerald-200/60">Ubuntu 20.04+ / Debian 11+ / RHEL 8+</div>
+                  </div>
+                  <Download className="w-5 h-5 text-emerald-300/60 group-hover:text-white transition-colors" />
+                </motion.a>
+
+                <motion.a
+                  href="/downloads/slint-wallet-windows-x64.exe"
+                  download="slint-wallet-windows-x64.exe"
+                  className="w-full p-4 bg-gradient-to-r from-teal-600/80 to-cyan-600/80 hover:from-teal-500 hover:to-cyan-500 border border-teal-400/30 rounded-xl transition-all flex items-center gap-4 group block"
+                  whileHover={{ scale: 1.02, x: 4 }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  <div className="w-10 h-10 rounded-lg bg-blue-500/20 flex items-center justify-center shrink-0">
+                    <Monitor className="w-5 h-5 text-blue-400" />
+                  </div>
+                  <div className="text-left flex-1">
+                    <div className="font-bold text-white">Windows x64</div>
+                    <div className="text-xs text-teal-200/60">Windows 10/11 — no install, just run</div>
+                  </div>
+                  <Download className="w-5 h-5 text-teal-300/60 group-hover:text-white transition-colors" />
+                </motion.a>
+              </div>
+
+              {/* Quick Start */}
+              <div className="relative mt-4 p-3 bg-slate-800/50 rounded-xl border border-emerald-500/15">
+                <h3 className="text-sm font-bold text-emerald-300 mb-2">Quick Start (Linux)</h3>
+                <code className="text-[11px] text-emerald-100/70 block whitespace-pre-wrap break-all font-mono leading-relaxed">
+{`wget https://quillon.xyz/downloads/slint-wallet-linux-x86_64
+chmod +x slint-wallet-linux-x86_64
+./slint-wallet-linux-x86_64`}
+                </code>
+              </div>
+
+              {/* Close Button */}
+              <div className="relative mt-5 flex justify-center">
+                <motion.button
+                  onClick={() => setShowSlintModal(false)}
+                  className="px-8 py-3 bg-gradient-to-r from-emerald-600 to-teal-600 rounded-xl text-white font-bold hover:shadow-[0_0_30px_rgba(16,185,129,0.5)] transition-all"
                   whileHover={{ scale: 1.05 }}
                   whileTap={{ scale: 0.95 }}
                 >

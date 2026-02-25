@@ -427,8 +427,8 @@ pub async fn claim_swap(
                     &state.node_cypher,
                     &{
                         let nid: q_types::NetworkId = std::env::var("Q_NETWORK_ID")
-                            .unwrap_or_else(|_| "mainnet2026.2".to_string())
-                            .parse().unwrap_or(q_types::NetworkId::Mainnet2026_2);
+                            .unwrap_or_else(|_| "mainnet-genesis".to_string())
+                            .parse().unwrap_or(q_types::NetworkId::MainnetGenesis);
                         nid.bridge_attestations_topic()
                     },
                     crate::bridge_committee::BridgeChainId::Bitcoin,

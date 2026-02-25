@@ -119,7 +119,7 @@ name = "test_qwen3vl_inference"
 path = "examples/test_qwen3vl_inference.rs"
 
 [features]
-default = ["llama-cpp", "legacy-mistralrs"]  # v5.1.0: llama-cpp-2 primary, mistral.rs fallback
+default = ["legacy-mistralrs"]  # v8.2.8: llama-cpp REMOVED — starves tokio at 0.3 tok/s
 # v5.1.0: llama.cpp engine via llama-cpp-2 FFI (10-50x faster than mistral.rs)
 # NOTE: Cannot be enabled with bitnet-native (native library link conflict)
 llama-cpp = ["llama-cpp-2"]

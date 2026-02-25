@@ -37,7 +37,7 @@ const LoanApplicationModal: React.FC<LoanApplicationModalProps> = ({
   const [totalRepayment, setTotalRepayment] = useState<number>(0);
 
   // Fetch live QUG price from oracle
-  const [qugPrice, setQugPrice] = useState<number>(42.50);
+  const [qugPrice, setQugPrice] = useState<number>(3000.00);
   useEffect(() => {
     fetch('/api/v1/defi/oracle/price/QUG/USD')
       .then(r => r.json())
@@ -45,7 +45,7 @@ const LoanApplicationModal: React.FC<LoanApplicationModalProps> = ({
         const price = data?.data?.price || data?.price;
         if (price && price > 0) setQugPrice(price);
       })
-      .catch(() => {}); // Fallback to default $42.50
+      .catch(() => {}); // Fallback to default $3000.00
   }, []);
   const QUG_PRICE = qugPrice;
 

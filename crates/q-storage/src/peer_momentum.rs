@@ -264,6 +264,42 @@ impl PeerMomentumManager {
         }
     }
 
+    /// v8.4.0: Seed a peer's bandwidth_velocity from handshake-reported tier
+    /// Called once after handshake completes. Only seeds if no measurements yet (cold start).
+    /// This gives gravity-assist an initial bandwidth signal before any actual transfers.
+    pub fn seed_bandwidth_from_handshake(&self, peer_id: &str, bandwidth_mbps: u32) {
+        if bandwidth_mbps == 0 {
+            return; // Unknown bandwidth, don't seed
+        }
+        // Convert Mbps to bytes/sec, conservative 70% of reported
+        let bps = bandwidth_mbps as f64 * 1_000_000.0 / 8.0 * 0.7;
+        self.peers
+            .entry(peer_id.to_string())
+            .and_modify(|m| {
+                if m.bandwidth_velocity == 0.0 {
+                    // Only seed if no measurements yet (cold start)
+                    m.bandwidth_velocity = bps;
+                    info!(
+                        "🌍 [GRAVITY ASSIST] Seeded peer {} bandwidth from handshake: {} Mbps → {:.1} MB/s",
+                        &peer_id[..peer_id.len().min(12)],
+                        bandwidth_mbps,
+                        bps / 1_000_000.0
+                    );
+                }
+            })
+            .or_insert_with(|| {
+                let mut m = PeerMomentum::new(peer_id.to_string());
+                m.bandwidth_velocity = bps;
+                info!(
+                    "🌍 [GRAVITY ASSIST] Seeded new peer {} bandwidth from handshake: {} Mbps → {:.1} MB/s",
+                    &peer_id[..peer_id.len().min(12)],
+                    bandwidth_mbps,
+                    bps / 1_000_000.0
+                );
+                m
+            });
+    }
+
     /// Record failure from peer
     pub fn record_failure(&self, peer_id: &str) {
         if let Some(mut momentum) = self.peers.get_mut(peer_id) {

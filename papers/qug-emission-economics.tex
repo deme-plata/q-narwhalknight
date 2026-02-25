@@ -69,7 +69,7 @@
 \pagestyle{fancy}
 \fancyhf{}
 \fancyhead[L]{\small Q-NarwhalKnight Emission Economics}
-\fancyhead[R]{\small v7.0.0}
+\fancyhead[R]{\small v8.0.2}
 \fancyfoot[C]{\thepage}
 
 % ═══════════════════════════════════════════════════════════════════
@@ -91,7 +91,7 @@ with Decentralized Consensus Verification}
 \vspace{2cm}
 
 {\large
-\textbf{Version 7.0.0} --- February 2026\\[0.5cm]
+\textbf{Version 8.0.2} --- February 2026\\[0.5cm]
 Q-NarwhalKnight Protocol Team\\
 \texttt{quillon.xyz}
 }
@@ -99,7 +99,7 @@ Q-NarwhalKnight Protocol Team\\
 \vspace{2cm}
 
 \begin{tcolorbox}[colback=blue!5,colframe=qugblue,title=\textbf{Abstract}]
-We present a complete mathematical framework for the QUG emission schedule---a 256-year deflationary monetary policy modeled after Bitcoin's halving mechanism but enhanced with \emph{adaptive throughput correction} and \emph{budget-based error recovery}. The emission controller uses pure \texttt{u128} integer arithmetic for all monetary calculations, guaranteeing deterministic cross-platform consensus. Every node independently verifies every block reward against the same mathematical formula, making the monetary policy fully decentralized and trustless. We prove supply convergence to exactly 21,000,000 QUG, analyze the economic properties (deflation, stock-to-flow, scarcity schedule), and provide 256-year simulation results demonstrating $<0.01\%$ cumulative deviation from target across all tested block rates (0.1--1000 blocks/sec).
+We present a complete mathematical framework for the QUG emission schedule---a 256-year deflationary monetary policy modeled after Bitcoin's halving mechanism but enhanced with \emph{adaptive throughput correction}, \emph{budget-based error recovery}, and \emph{wall-clock rate measurement}. The emission controller uses pure \texttt{u128} integer arithmetic for all monetary calculations, guaranteeing deterministic cross-platform consensus. Every node independently verifies every block reward against the same mathematical formula, making the monetary policy fully decentralized and trustless. v8.0.2 introduces wall-clock rate measurement to eliminate turbo-sync timestamp inflation artifacts that caused 96\% under-emission in early network operation. We prove supply convergence to exactly 21,000,000 QUG, analyze the economic properties (deflation, stock-to-flow, scarcity schedule), and provide 256-year simulation results demonstrating $<0.01\%$ cumulative deviation from target across all tested block rates (0.1--1000 blocks/sec).
 \end{tcolorbox}
 
 \vfill
@@ -247,7 +247,7 @@ where $C(t)$ is the actual cumulative emission. Positive $\delta$ means over-emi
 \begin{equation}
     f(t) = \text{clamp}\left(1 - \alpha \cdot \frac{\delta(t)}{C^*(t)}, \; f_{\min}, \; f_{\max}\right)
 \end{equation}
-where $\alpha = 0.15$ is the smoothing coefficient, $f_{\min} = 0.01$, $f_{\max} = 3.0$.
+where $\alpha = 0.8$ is the smoothing coefficient (v8.0.2: raised from 0.15 for faster convergence with accurate wall-clock rates), $f_{\min} = 0.01$, $f_{\max} = 5.0$ (v8.0.2: raised from 3.0 to allow catch-up from turbo-sync-induced under-emission).
 \end{definition}
 
 The corrected reward is:
@@ -264,7 +264,7 @@ At each step, the correction reduces the error by factor $(1 - \alpha \cdot \tex
 \[
 |\delta(t + \Delta t)| \leq (1 - \alpha) \cdot |\delta(t)| + O(\Delta t^2)
 \]
-where higher-order terms arise from rate measurement noise. With $\alpha = 0.15$, the half-life of error correction is approximately $\frac{\ln 2}{0.15} \approx 4.6$ adjustment cycles. $\square$
+where higher-order terms arise from rate measurement noise. With $\alpha = 0.8$, the half-life of error correction is approximately $\frac{\ln 2}{0.8} \approx 0.87$ adjustment cycles---significantly faster than the original $\alpha = 0.15$ (half-life $\approx 4.6$ cycles). The higher $\alpha$ is justified by v8.0.2's wall-clock rate measurement, which eliminates the primary source of measurement noise (turbo-sync timestamp inflation), making aggressive correction safe. $\square$
 \end{proof}
 
 \subsection{Safety Bounds}
@@ -272,10 +272,11 @@ where higher-order terms arise from rate measurement noise. With $\alpha = 0.15$
 The correction factor is bounded to prevent catastrophic behavior:
 
 \begin{itemize}
-    \item $f_{\max} = 3.0$: At most triple the base reward (catch-up from severe under-emission).
+    \item $f_{\max} = 5.0$: At most quintuple the base reward (catch-up from severe under-emission; v8.0.2 raised from 3.0 to accommodate turbo-sync recovery).
     \item $f_{\min} = 0.01$: Near-zero reward (correct severe over-emission without halting).
     \item \textbf{Budget cap}: $R_{\text{adj}} \leq \frac{E_k - C_k^{\text{era}}}{\text{remaining\_blocks}}$ where $C_k^{\text{era}}$ is emission so far in the current era.
-    \item \textbf{Hard cap}: $R_{\text{adj}} \leq 0.1$ QUG (absolute maximum per block).
+    \item \textbf{Dynamic rate cap}: $R_{\text{adj}} \leq 2 \times R_{\text{ideal}}(\lambda, k)$ where $R_{\text{ideal}}$ is the uncorrected reward (v7.2.8: replaces fixed 0.1 QUG cap).
+    \item \textbf{Absolute cap}: $R_{\text{adj}} \leq 0.5$ QUG (hard safety limit per block).
     \item \textbf{Supply cap}: $R_{\text{adj}} \leq S - C(t)$ (never exceed 21M total).
 \end{itemize}
 
@@ -317,22 +318,23 @@ The emission system is \textbf{fully decentralized}---no trusted coordinator, or
 \begin{tcolorbox}[colback=green!5,colframe=quggreen,title=\textbf{Key Insight: No Trust Required}]
 Because the reward formula depends only on:
 \begin{itemize}
-    \item Genesis timestamp (hardcoded constant: 1,771,113,600)
+    \item Genesis timestamp (hardcoded constant: 1,771,761,600)
     \item Current block timestamp (in the block header)
-    \item Measured block rate (computed locally by each node)
+    \item Measured block rate (computed locally by each node via wall-clock time)
 \end{itemize}
 Any node can independently compute and verify the expected reward. A malicious block producer cannot inflate rewards without detection.
 \end{tcolorbox}
 
 \subsection{Consensus on Block Rate}
 
-Nodes may have slightly different measured block rates due to network latency. This is acceptable because:
+Nodes may have slightly different measured block rates due to network latency and sync state. This is acceptable because:
 
 \begin{enumerate}
-    \item The \textbf{sliding window} (1000 windows $\times$ 10 seconds $\approx$ 2.7 hours) smooths out short-term variance.
-    \item The \textbf{error correction} system automatically compensates for any rate mismatch.
+    \item The \textbf{wall-clock rate} (v8.0.2) tracks actual block arrival time, smoothing out bursts.
+    \item The \textbf{error correction} system ($\alpha = 0.8$) aggressively compensates for any rate mismatch.
     \item Nodes validate rewards with a \textbf{tolerance band}, not exact equality.
     \item Over time, all honest nodes converge to the same rate estimate (they see the same blocks).
+    \item The \textbf{correction factor} ($f_{\max} = 5.0$) provides sufficient headroom to recover from startup-phase rate inaccuracy.
 \end{enumerate}
 
 % ═══════════════════════════════════════════════════════════════════
@@ -593,30 +595,67 @@ This is implemented in the \texttt{target\_cumulative\_at\_time()} function with
 \section{Block Rate Measurement}
 % ═══════════════════════════════════════════════════════════════════
 
-\subsection{Sliding Window Algorithm}
+Accurate block rate measurement is the most critical input to the adaptive reward formula. An overestimated rate produces too-small rewards (under-emission); an underestimated rate produces too-large rewards (over-emission). v8.0.2 introduces a dual-signal architecture that eliminates a class of measurement artifacts.
 
-The emission controller maintains a sliding window of block production events:
+\subsection{The Turbo-Sync Problem (v7.x)}
+
+\begin{tcolorbox}[colback=red!5,colframe=qugred,title=\textbf{Bug: 96\% Under-Emission (v8.0.1)}]
+When a node joins the network, it performs \emph{turbo sync}---downloading thousands of historical blocks in rapid succession. These blocks carry their original timestamps (minutes to hours in the past) but arrive at the node within seconds.
+
+Block-timestamp-based rate measurement interprets this as: ``1000 blocks arrived spanning 30 minutes of timestamps $\Rightarrow$ rate = 0.56 bps.'' But the \emph{real-time} network rate might be only 0.1 bps. The 5.6$\times$ overestimate drives the reward down by 5.6$\times$, causing severe under-emission.
+
+Even after sync completes, the inflated windows persist in the sliding buffer for $\sim$2.7 hours, continuing to bias the rate upward.
+\end{tcolorbox}
+
+\subsection{Wall-Clock Rate Measurement (v8.0.2)}
+
+\begin{definition}[Wall-Clock Block Rate]
+Let $t_0$ be the wall-clock time (via \texttt{SystemTime::now()}) when the first block is tracked after node startup, and $n$ the count of blocks tracked since. The wall-clock rate is:
+\begin{equation}
+    \lambda_{\text{wall}} = \frac{n}{\max(t_{\text{now}} - t_0, \; 1)}
+\end{equation}
+This measures how fast blocks are \emph{actually arriving at this node}, regardless of their embedded timestamps.
+\end{definition}
+
+The wall-clock rate is the \textbf{primary signal} when at least 30 seconds of data is available ($t_{\text{now}} - t_0 \geq 30$). It is fundamentally immune to turbo-sync inflation because synced blocks all arrive at nearly the same wall-clock instant---they appear as a burst that is correctly reflected in the rate.
+
+\subsection{Block-Timestamp Fallback}
+
+For cold-start scenarios (first 30 seconds after boot), the wall-clock signal has insufficient data. The controller falls back to a \textbf{global block-timestamp rate}:
+
+\begin{equation}
+    \lambda_{\text{ts}} = \frac{\sum_w \text{block\_count}_w}{t_{\text{last}} - t_{\text{first}}}
+\end{equation}
+
+where $t_{\text{first}}$ and $t_{\text{last}}$ are the earliest and latest block timestamps across all windows.
+
+\subsection{Sliding Window (Secondary Signal)}
+
+The emission controller also maintains a sliding window of block-timestamp events as a secondary signal and for the economic rate calculation (non-empty block fraction):
 
 \begin{itemize}
     \item \textbf{Window size}: 10 seconds per window
     \item \textbf{Window count}: 1000 windows ($\approx$ 2.7 hours of history)
-    \item \textbf{Measurement}: Each window records (block\_count, start\_time, end\_time)
-    \item \textbf{Rate}: $\lambda_w = \text{block\_count}_w / \text{duration}_w$ blocks/second
+    \item \textbf{Per-window cap}: 50 bps maximum (filters turbo-sync batches)
+    \item \textbf{Primary use}: Computing the non-empty block fraction for spam filtering
 \end{itemize}
 
-\subsection{Weighted Average}
+\subsection{Rate Selection Priority}
 
-Recent windows receive more weight (linearly increasing):
+\begin{enumerate}
+    \item \textbf{Wall-clock rate} (primary): Used when $\geq 30$s of wall-clock data and $\geq 2$ blocks tracked. Clamped to $[0.001, 50.0]$ bps.
+    \item \textbf{Block-timestamp global rate} (fallback): Used during cold-start ($< 30$s). Clamped to $[0.001, 50.0]$ bps.
+    \item \textbf{Conservative default}: 1.0 bps (no data at all). Intentionally higher than typical rates to produce lower rewards, preventing over-emission during startup.
+\end{enumerate}
 
+\subsection{Economic Rate}
+
+The economic rate filters out empty/spam blocks:
 \begin{equation}
-    \lambda = \frac{\sum_{i=0}^{n-1} (i+1) \cdot \lambda_i}{\sum_{i=0}^{n-1} (i+1)} = \frac{\sum_{i=0}^{n-1} (i+1) \cdot \lambda_i}{n(n+1)/2}
+    \lambda_{\text{econ}} = \lambda_{\text{wall}} \times \frac{\text{non\_empty\_blocks}}{\text{total\_blocks}}
 \end{equation}
 
-This makes the rate estimate responsive to throughput changes while filtering noise.
-
-\subsection{Default Rate (Cold Start)}
-
-When the emission controller has no block history (node just started), it uses a \textbf{conservative default of 1.0 blocks/second}. This is intentionally higher than typical network rates to produce \emph{lower rewards} during cold start, preventing over-emission.
+where the non-empty fraction is computed from the sliding window buffer. Note: the \emph{smoothed rate} (all blocks) is used for reward calculation, since all blocks---including empty ones---receive coinbase rewards. The economic rate is used only for analytics.
 
 % ═══════════════════════════════════════════════════════════════════
 \section{Simulation Results}
@@ -906,8 +945,11 @@ Key functions:
     \item \texttt{daily\_emission(k)} --- Pure function: era $\to$ daily emission
     \item \texttt{target\_cumulative\_at\_time(elapsed\_secs)} --- Pure function: time $\to$ target cumulative
     \item \texttt{base\_reward\_for\_rate(era, block\_rate\_bps)} --- Pure function: (era, rate) $\to$ reward
+    \item \texttt{dynamic\_max\_reward(era, block\_rate\_bps)} --- Rate-adaptive safety cap ($2\times$ ideal reward)
+    \item \texttt{calculate\_smoothed\_rate(\&self)} --- Wall-clock primary, block-timestamp fallback (v8.0.2)
+    \item \texttt{calculate\_economic\_rate(\&self)} --- Smoothed rate $\times$ non-empty fraction
     \item \texttt{calculate\_adaptive\_reward(\&self, ...)} --- Stateful: applies error correction
-    \item \texttt{calculate\_correction\_factor(\&self, timestamp)} --- PI controller
+    \item \texttt{calculate\_correction\_factor(\&self, timestamp)} --- PI controller ($\alpha = 0.8$)
 \end{itemize}
 
 All pure functions are deterministic and can be called by any node without shared state.

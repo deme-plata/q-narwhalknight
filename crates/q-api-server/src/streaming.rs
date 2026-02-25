@@ -818,9 +818,15 @@ pub async fn sse_events(
             }
 
             // Normal SSE event loop (continues after initial balance sent)
+            // v8.2.3: Use timeout on recv to allow Axum to detect dead connections.
+            // Without timeout, rx.recv() blocks forever and CLOSE-WAIT sockets accumulate
+            // because the stream never yields for Axum to attempt a keepalive write.
             loop {
-                match rx.recv().await {
-                    Ok(event) => {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    rx.recv()
+                ).await {
+                    Ok(Ok(event)) => {
                         // Filter event based on wallet address
                         if !is_event_relevant(&event, &filter) {
                             // Skip this event, continue to next
@@ -847,7 +853,7 @@ pub async fn sse_events(
                             }
                         }
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         return match e {
                             tokio::sync::broadcast::error::RecvError::Lagged(n) => {
                                 warn!("SSE client lagged behind by {} events, continuing", n);
@@ -863,6 +869,15 @@ pub async fn sse_events(
                                 None // End the stream
                             }
                         };
+                    }
+                    Err(_timeout) => {
+                        // v8.2.3: Timeout expired — yield a heartbeat event so Axum
+                        // attempts to write to the socket. If the client is gone, the write
+                        // will fail and Axum will drop this stream, cleaning up the CLOSE-WAIT.
+                        return Some((
+                            Ok(Event::default().comment("heartbeat")),
+                            (rx, filter, None, None),
+                        ));
                     }
                 }
             }

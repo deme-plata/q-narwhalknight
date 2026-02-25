@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Shield, Palette, Activity, Globe, Lock, Eye, Zap, LogOut, Clock, Info, Key, Download, EyeOff, Cloud, Code, Trash2, RefreshCw, AlertCircle, Server, ArrowDownToLine } from 'lucide-react';
 import { qnkAPI } from '../services/api';
+import { walletSession } from '../services/walletAuth';
 
 interface SettingsScreenProps {
   onLogout?: () => void;
@@ -152,6 +153,55 @@ export default function SettingsScreen({ onLogout }: SettingsScreenProps) {
   };
 
   const openPasswordModal = (action: 'private-key' | 'mnemonic' | 'download') => {
+    const isMetaMask = !!localStorage.getItem('metamaskLinked');
+
+    if (isMetaMask) {
+      // MetaMask users have no user-set password — use in-memory session data
+      const session = walletSession.getSession();
+      if (!session) {
+        setPasswordError('Session expired. Please log out and log back in with MetaMask.');
+        return;
+      }
+
+      const privateKeyHex = Array.from(session.privateKey)
+        .map(b => b.toString(16).padStart(2, '0'))
+        .join('');
+
+      if (action === 'private-key') {
+        setPrivateKeyValue(privateKeyHex);
+        setShowPrivateKey(true);
+      } else if (action === 'mnemonic') {
+        if (session.mnemonic) {
+          setMnemonicValue(session.mnemonic);
+          setShowMnemonic(true);
+        } else {
+          setPasswordError('Mnemonic not available. Please log out and re-login with MetaMask.');
+        }
+      } else if (action === 'download') {
+        const mnemonic = session.mnemonic || '';
+        const keyFileContent = JSON.stringify({
+          version: '1.0',
+          address: session.address,
+          private_key: privateKeyHex,
+          mnemonic: mnemonic,
+          created_at: new Date().toISOString(),
+          quantum_suite: 'Q1-Dilithium5-Kyber1024',
+        }, null, 2);
+
+        const blob = new Blob([keyFileContent], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `quantum-wallet-${session.address.slice(0, 8)}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
+      return; // Skip password modal
+    }
+
+    // Non-MetaMask: normal password flow
     setPasswordModalAction(action);
     setShowPasswordModal(true);
     setPasswordError('');

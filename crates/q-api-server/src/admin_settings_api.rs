@@ -140,7 +140,7 @@ pub async fn admin_settings(
         height,
         network_height,
         peers,
-        network_id: std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "mainnet2026.2".to_string()),
+        network_id: std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "mainnet-genesis".to_string()),
         oauth2_clients: client_count,
         oauth2_active_tokens: active_tokens,
         oauth2_consents: consent_count,
@@ -260,7 +260,7 @@ pub async fn node_info(
         height,
         network_height,
         peers,
-        network_id: std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "mainnet2026.2".to_string()),
+        network_id: std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "mainnet-genesis".to_string()),
         mining_healthy,
     }))
 }

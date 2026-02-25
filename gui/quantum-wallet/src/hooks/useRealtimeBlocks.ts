@@ -162,6 +162,9 @@ export function useRealtimeBlocks(): UseRealtimeBlocksResult {
     verificationEnabled: true, // v3.5.10: Light client verification enabled by default
   })
 
+  // Track highest accepted block height for rogue peer detection
+  const highestAcceptedHeightRef = useRef<number>(0)
+
   /**
    * Handle incoming block messages
    * v3.5.10: Now async for light client verification
@@ -212,6 +215,25 @@ export function useRealtimeBlocks(): UseRealtimeBlocksResult {
           phase: block.header?.phase,
         }))
         return
+      }
+
+      // HEIGHT SANITY CHECK: Reject blocks from rogue peers with unreasonable heights
+      // Mirror server-side logic: max_reasonable = max(our_height * 3, our_height + 500_000)
+      const ourHeight = Math.max(lastHttpBlockHeight.current, highestAcceptedHeightRef.current)
+      if (ourHeight > 0) {
+        const maxReasonable = Math.max(ourHeight * 3, ourHeight + 500_000)
+        if (block.header.height > maxReasonable) {
+          console.warn(
+            `🚨 [REALTIME BLOCKS] REJECTED rogue block at height ${block.header.height.toLocaleString()} ` +
+            `(our height: ${ourHeight.toLocaleString()}, max reasonable: ${maxReasonable.toLocaleString()}). ` +
+            `Likely from a rogue peer.`
+          )
+          return
+        }
+      }
+      // Update highest accepted height
+      if (block.header.height > highestAcceptedHeightRef.current) {
+        highestAcceptedHeightRef.current = block.header.height
       }
 
       // Log block summary in dev mode
@@ -547,7 +569,7 @@ export function useRealtimeBlocks(): UseRealtimeBlocksResult {
           header: {
             height: apiBlock.height || 0,
             phase: apiBlock.phase || 19,
-            networkId: apiBlock.network_id || 'mainnet2026.2',
+            networkId: apiBlock.network_id || 'mainnet-genesis',
             prevBlockHash: apiBlock.prev_hash ? hexToUint8Array(apiBlock.prev_hash) : emptyHash,
             solutionsRoot: apiBlock.solutions_root ? hexToUint8Array(apiBlock.solutions_root) : emptyHash,
             txRoot: apiBlock.tx_root ? hexToUint8Array(apiBlock.tx_root) : emptyHash,

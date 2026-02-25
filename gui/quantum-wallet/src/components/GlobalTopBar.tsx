@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
-import { motion } from 'framer-motion';
-import { Search, Loader, Zap, Gift } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { Search, Loader, Zap, Gift, Hash, Blocks, User, X, Copy, Check, CheckCircle, Shield } from 'lucide-react';
 import { qnkAPI, type MiningRewardEvent } from '../services/api';
+import { TICKER_SYMBOL } from '../constants/ticker';
 import NetworkSelector from './NetworkSelector';
 
 interface GlobalTopBarProps {
@@ -9,15 +10,12 @@ interface GlobalTopBarProps {
 }
 
 interface SearchResult {
-  type: 'block' | 'transaction' | 'wallet';
+  type: 'transaction' | 'block' | 'address' | 'hint';
   id: string;
-  height?: number;
+  title: string;
+  subtitle?: string;
   hash?: string;
-  amount?: number;
-  timestamp?: string;
-  from?: string;
-  to?: string;
-  balance?: number;
+  data?: any;
 }
 
 export default function GlobalTopBar({ authenticated = false }: GlobalTopBarProps) {
@@ -25,9 +23,12 @@ export default function GlobalTopBar({ authenticated = false }: GlobalTopBarProp
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [showResults, setShowResults] = useState(false);
+  const [selectedDetail, setSelectedDetail] = useState<SearchResult | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
   const [miningHashRate, setMiningHashRate] = useState(0);
   const [isMining, setIsMining] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
+  const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const walletAddress = localStorage.getItem('walletAddress') || '';
 
   // SSE for mining hash rate updates
@@ -37,13 +38,12 @@ export default function GlobalTopBar({ authenticated = false }: GlobalTopBarProp
     const eventSource = qnkAPI.subscribeToMiningRewards(
       walletAddress,
       (reward: MiningRewardEvent) => {
-        // Update hash rate from mining reward events
         if (reward.hash_rate > 0) {
           setMiningHashRate(reward.hash_rate);
           setIsMining(true);
         }
       },
-      () => {} // Balance updates handled by MiningDashboard
+      () => {}
     );
 
     eventSourceRef.current = eventSource;
@@ -55,135 +55,176 @@ export default function GlobalTopBar({ authenticated = false }: GlobalTopBarProp
     };
   }, [walletAddress, authenticated]);
 
-  // Debounced search effect
-  useEffect(() => {
-    const searchTimeout = setTimeout(() => {
-      if (searchQuery.trim().length >= 3) { // Start searching after 3 characters
-        handleSearch(searchQuery);
-      } else if (searchQuery.trim().length === 0) {
-        setSearchResults([]);
-        setShowResults(false);
-      }
-    }, 300); // 300ms debounce delay
+  const copyToClipboard = (text: string, id: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedId(id);
+    setTimeout(() => setCopiedId(null), 2000);
+  };
 
-    return () => clearTimeout(searchTimeout);
-  }, [searchQuery]);
-
-  const handleSearch = async (query: string) => {
-    if (!query.trim()) {
+  const performSearch = async (query: string) => {
+    if (query.length < 2) {
       setSearchResults([]);
-      setShowResults(false);
       return;
     }
 
     setIsSearching(true);
-    setShowResults(true);
+    const results: SearchResult[] = [];
 
     try {
-      const results: SearchResult[] = [];
+      // Auto-detect search type
+      let searchType = '';
+      if (query.match(/^tx_[a-f0-9]+/i) || query.match(/^[a-f0-9]{64}$/i)) searchType = 'transaction';
+      else if (query.match(/^qnk[a-z0-9]{39}$/i)) searchType = 'address';
+      else if (query.match(/^\d+$/)) searchType = 'block';
 
-      // Check if query is a number (potential block height)
-      const blockHeight = parseInt(query);
-      if (!isNaN(blockHeight) && blockHeight >= 0) {
-        try {
-          const blockResponse = await qnkAPI.getBlock(blockHeight);
-          if (blockResponse.success && blockResponse.data) {
-            results.push({
-              type: 'block',
-              id: `block-${blockHeight}`,
-              height: blockHeight,
-              hash: `0x${Math.random().toString(16).substr(2, 10)}`,
-              timestamp: new Date().toISOString()
-            });
-          }
-        } catch (error) {
-          console.log('Block search failed:', error);
-        }
-      }
-
-      // Check if query looks like a wallet address (starts with 'qnk')
-      if (query.toLowerCase().startsWith('qnk') && query.length > 10) {
-        try {
-          const balanceResponse = await qnkAPI.getWalletBalance(query);
-          if (balanceResponse.success && balanceResponse.data) {
-            results.push({
-              type: 'wallet',
-              id: query,
-              balance: balanceResponse.data.balance_qnk || 0,
-              timestamp: new Date().toISOString()
-            });
-          }
-        } catch (error) {
-          console.log('Wallet search failed:', error);
-        }
-      }
-
-      // Check if query looks like a transaction hash (partial or full hex)
-      if (/^[a-fA-F0-9]{8,64}$/.test(query)) {
-        try {
-          // Search through recent transactions for the hash - NO MOCK DATA
-          const transactionsResponse = await qnkAPI.getRecentTransactions(100);
-          if (transactionsResponse.success && transactionsResponse.data) {
-            const foundTx = transactionsResponse.data.find((tx: any) =>
-              tx.id === query || tx.hash === query ||
-              (tx.id && tx.id.includes(query)) || (tx.hash && tx.hash.includes(query))
-            );
-
-            if (foundTx) {
-              // Only show limited info for privacy - ZK-SNARK/STARK protection
-              results.push({
-                type: 'transaction',
-                id: foundTx.hash || foundTx.id,
-                hash: foundTx.hash || foundTx.id,
-                amount: undefined, // PRIVACY: Hide amount unless user owns the transaction
-                from: undefined,   // PRIVACY: Hide addresses for quantum privacy
-                to: undefined,     // PRIVACY: Hide addresses for quantum privacy
-                timestamp: foundTx.timestamp_formatted || new Date(foundTx.timestamp * 1000).toLocaleString()
-              });
+      if (searchType === 'block') {
+        const blockNum = parseInt(query);
+        const blockResponse = await qnkAPI.getBlock(blockNum);
+        if (blockResponse.success && blockResponse.data) {
+          results.push({
+            type: 'block',
+            id: blockNum.toString(),
+            title: `Block #${blockNum}`,
+            subtitle: `${Array.isArray(blockResponse.data) ? blockResponse.data.length : 0} transactions`,
+            data: {
+              height: blockNum,
+              tx_count: Array.isArray(blockResponse.data) ? blockResponse.data.length : 0,
+              hash: blockResponse.data[0]?.hash || 'N/A',
+              transactions: blockResponse.data
             }
-          }
-        } catch (error) {
-          console.log('Transaction search failed:', error);
+          });
+        } else {
+          results.push({
+            type: 'block',
+            id: 'not-found',
+            title: 'Block Not Found',
+            subtitle: `Block #${blockNum} does not exist yet`
+          });
         }
+      } else if (searchType === 'transaction') {
+        const txResponse = await qnkAPI.getTransactionByHash(query);
+        if (txResponse.success && txResponse.data) {
+          const txData = txResponse.data;
+          const amount = txData.amount ? (Number(txData.amount) / 1e24) : 0;
+          results.push({
+            type: 'transaction',
+            id: query,
+            title: 'Transaction Found',
+            subtitle: txData.status || 'confirmed',
+            hash: txData.hash || query,
+            data: {
+              hash: txData.hash || query,
+              amount,
+              status: txData.status || 'confirmed',
+              timestamp: txData.timestamp ? new Date(txData.timestamp * 1000).toLocaleString() : 'N/A',
+              from: txData.from || 'N/A',
+              to: txData.to || 'N/A',
+              block_height: txData.block_height,
+              confirmations: txData.confirmations,
+              fee: txData.fee ? (Number(txData.fee) / 1e24) : 0,
+              token_type: txData.token_type
+            }
+          });
+        } else {
+          results.push({
+            type: 'transaction',
+            id: 'not-found',
+            title: 'Transaction Not Found',
+            subtitle: `${query.substring(0, 16)}...${query.length > 48 ? query.substring(48) : ''}`
+          });
+        }
+      } else if (searchType === 'address') {
+        const balanceResponse = await qnkAPI.getWalletBalance(query);
+        if (balanceResponse.success && balanceResponse.data) {
+          results.push({
+            type: 'address',
+            id: query,
+            title: 'Wallet Address',
+            subtitle: `Balance: ${(balanceResponse.data.balance_qnk || 0).toFixed(4)} ${TICKER_SYMBOL}`,
+            hash: query,
+            data: {
+              address: query,
+              balance: balanceResponse.data.balance_qnk || 0,
+              nonce: balanceResponse.data.nonce || 0
+            }
+          });
+        } else {
+          results.push({
+            type: 'address',
+            id: query,
+            title: 'New Wallet Address',
+            subtitle: `Balance: 0 ${TICKER_SYMBOL}`,
+            hash: query,
+            data: { address: query, balance: 0, nonce: 0 }
+          });
+        }
+      } else if (query.length >= 2) {
+        // Show helpful search hints
+        results.push({
+          type: 'hint',
+          id: 'hint-block',
+          title: 'Search by block number',
+          subtitle: 'Enter a number (e.g. 12345)'
+        });
+        results.push({
+          type: 'hint',
+          id: 'hint-tx',
+          title: 'Search by transaction hash',
+          subtitle: 'Enter a 64-character hex hash'
+        });
+        results.push({
+          type: 'hint',
+          id: 'hint-address',
+          title: 'Search by wallet address',
+          subtitle: 'Enter address starting with "qnk"'
+        });
       }
-
-      // No fallback mock results - only show real data per CLAUDE.md
-
-      setSearchResults(results);
     } catch (error) {
       console.error('Search failed:', error);
-      setSearchResults([]);
-    } finally {
-      setIsSearching(false);
+      results.push({
+        type: 'hint',
+        id: 'error',
+        title: 'Search Failed',
+        subtitle: 'Unable to connect to the network'
+      });
     }
+
+    setSearchResults(results);
+    setIsSearching(false);
   };
 
-  const handleSearchSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    // Search is now handled automatically by useEffect
-  };
-
-  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const value = e.target.value;
+  // Debounced search
+  const handleInputChange = (value: string) => {
     setSearchQuery(value);
-
-    // Show results dropdown when typing
     if (value.trim().length > 0) {
       setShowResults(true);
     } else {
       setShowResults(false);
+      setSearchResults([]);
+    }
+
+    if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
+    searchTimeoutRef.current = setTimeout(() => {
+      performSearch(value.trim());
+    }, 250);
+  };
+
+  const getResultIcon = (type: SearchResult['type']) => {
+    switch (type) {
+      case 'transaction': return <Hash className="w-4 h-4" />;
+      case 'block': return <Blocks className="w-4 h-4" />;
+      case 'address': return <User className="w-4 h-4" />;
+      default: return <Search className="w-4 h-4" />;
     }
   };
 
-  const formatHash = (hash: string) => {
-    if (hash.length > 16) {
-      return `${hash.substr(0, 8)}...${hash.substr(-8)}`;
+  const getResultColor = (type: SearchResult['type']) => {
+    switch (type) {
+      case 'transaction': return 'text-pink-400';
+      case 'block': return 'text-cyan-400';
+      case 'address': return 'text-green-400';
+      default: return 'text-amber-400';
     }
-    return hash;
-  };
-
-  const formatAmount = (amount: number) => {
-    return amount.toFixed(4);
   };
 
   const formatHashRate = (hashRate: number) => {
@@ -191,22 +232,6 @@ export default function GlobalTopBar({ authenticated = false }: GlobalTopBarProp
     if (hashRate >= 1e6) return `${(hashRate / 1e6).toFixed(2)} MH/s`;
     if (hashRate >= 1e3) return `${(hashRate / 1e3).toFixed(2)} KH/s`;
     return `${hashRate.toFixed(2)} H/s`;
-  };
-
-  const handleResultClick = (result: SearchResult) => {
-    setShowResults(false);
-    setSearchQuery('');
-
-    if (result.type === 'transaction') {
-      // Navigate to explorer with transaction hash
-      window.location.href = `/explorer/tx/${result.hash}`;
-    } else if (result.type === 'block') {
-      // Navigate to explorer (could add block-specific routes)
-      window.location.href = `/explorer`;
-    } else if (result.type === 'wallet') {
-      // Navigate to explorer (could add wallet-specific routes)
-      window.location.href = `/explorer`;
-    }
   };
 
   return (
@@ -221,9 +246,7 @@ export default function GlobalTopBar({ authenticated = false }: GlobalTopBarProp
                 whileHover={{ scale: 1.05 }}
               >
                 <div className="relative w-10 h-10">
-                  {/* Cosmic glow effect */}
                   <div className="absolute inset-0 bg-gradient-to-b from-amber-500/20 via-orange-500/20 to-yellow-500/20 rounded-full blur-lg animate-pulse" />
-                  {/* Gold border ring */}
                   <div className="absolute inset-0 rounded-full" style={{
                     background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 25%, #FFA500 50%, #FFD700 75%, #D4AF37 100%)',
                     padding: '2px'
@@ -244,95 +267,97 @@ export default function GlobalTopBar({ authenticated = false }: GlobalTopBarProp
 
             {/* Search Bar */}
             <div className="flex-1 max-w-2xl mx-8 relative">
-              <form onSubmit={handleSearchSubmit} className="relative">
-                <div className="relative">
-                  <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
-                  <input
-                    type="text"
-                    value={searchQuery}
-                    onChange={handleInputChange}
-                    onFocus={() => searchQuery.length >= 3 && setShowResults(true)}
-                    onBlur={() => setTimeout(() => setShowResults(false), 200)}
-                    placeholder="Search blocks, transactions, or wallet addresses..."
-                    className="w-full pl-10 pr-4 py-2 bg-quantum-indigo/30 border border-quantum-purple/30 rounded-xl text-white placeholder-gray-400 focus:outline-none focus:border-quantum-cyan focus:ring-1 focus:ring-quantum-cyan transition-all"
-                  />
-                  {isSearching && (
-                    <div className="absolute right-3 top-1/2 transform -translate-y-1/2">
-                      <Loader className="w-4 h-4 text-quantum-cyan animate-spin" />
-                    </div>
-                  )}
-                </div>
-              </form>
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-amber-400/60" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => handleInputChange(e.target.value)}
+                  onFocus={() => {
+                    if (searchQuery.length >= 2) setShowResults(true);
+                  }}
+                  onBlur={() => setTimeout(() => setShowResults(false), 200)}
+                  placeholder="Search tx hash, block height, or wallet address..."
+                  className="w-full pl-10 pr-4 py-2 bg-slate-900/50 border border-amber-500/20 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-amber-400/60 focus:shadow-[0_0_12px_rgba(251,191,36,0.15)] transition-all"
+                />
+                {isSearching && (
+                  <motion.div
+                    animate={{ rotate: 360 }}
+                    transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+                    className="absolute right-3 top-1/2 transform -translate-y-1/2"
+                  >
+                    <Search className="w-4 h-4 text-amber-400" />
+                  </motion.div>
+                )}
+              </div>
 
               {/* Search Results Dropdown */}
-              {showResults && (
-                <motion.div
-                  initial={{ opacity: 0, y: -10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="absolute top-full left-0 right-0 mt-2 bg-quantum-indigo/90 backdrop-blur-xl border border-quantum-purple/30 rounded-xl shadow-2xl max-h-96 overflow-y-auto z-50"
-                >
-                  {searchResults.length > 0 ? (
-                    <div className="p-2">
-                      {searchResults.map((result) => (
+              <AnimatePresence>
+                {showResults && (searchResults.length > 0 || isSearching || searchQuery.length >= 2) && (
+                  <motion.div
+                    initial={{ opacity: 0, y: -10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -10 }}
+                    className="absolute top-full left-0 right-0 mt-2 backdrop-blur-xl rounded-xl shadow-2xl max-h-96 overflow-y-auto z-50"
+                    style={{
+                      background: 'linear-gradient(135deg, rgba(15, 10, 40, 0.98) 0%, rgba(30, 20, 60, 0.98) 100%)',
+                      border: '1px solid rgba(212, 175, 55, 0.25)',
+                      boxShadow: '0 10px 40px rgba(0, 0, 0, 0.5), 0 0 20px rgba(212, 175, 55, 0.1)'
+                    }}
+                  >
+                    {searchResults.length > 0 ? (
+                      searchResults.map((result, index) => (
                         <motion.div
-                          key={result.id}
-                          className="p-3 hover:bg-quantum-purple/20 rounded-lg cursor-pointer transition-colors"
-                          whileHover={{ scale: 1.02 }}
-                          onClick={() => handleResultClick(result)}
+                          key={`${result.type}-${result.id}-${index}`}
+                          initial={{ opacity: 0, x: -10 }}
+                          animate={{ opacity: 1, x: 0 }}
+                          transition={{ delay: index * 0.04 }}
+                          className="flex items-center gap-3 p-3 border-b last:border-b-0 cursor-pointer transition-colors hover:bg-white/5"
+                          style={{ borderColor: 'rgba(212, 175, 55, 0.08)' }}
+                          onClick={() => {
+                            if (result.data) {
+                              setSelectedDetail(result);
+                            }
+                            setShowResults(false);
+                            setSearchQuery('');
+                          }}
                         >
-                          {result.type === 'block' && (
-                            <div>
-                              <div className="text-quantum-cyan font-medium">Block #{result.height}</div>
-                              <div className="text-gray-300 text-sm">Hash: {formatHash(result.hash || '')}</div>
-                              <div className="text-gray-400 text-xs">{new Date(result.timestamp || '').toLocaleString()}</div>
-                            </div>
-                          )}
-
-                          {result.type === 'wallet' && (
-                            <div>
-                              <div className="text-quantum-green font-medium">Wallet Address</div>
-                              <div className="text-gray-300 text-sm">{formatHash(result.id)}</div>
-                              <div className="text-quantum-yellow text-sm">Balance: {formatAmount(result.balance || 0)} QNK</div>
-                            </div>
-                          )}
-
-                          {result.type === 'transaction' && (
-                            <div>
-                              <div className="text-quantum-pink font-medium">🔒 Private Transaction</div>
-                              <div className="text-gray-300 text-sm">Hash: {formatHash(result.hash || '')}</div>
-                              <div className="text-quantum-purple text-sm">🛡️ ZK-SNARK Protected</div>
-                              <div className="text-gray-400 text-xs">
-                                Details hidden for quantum privacy
-                              </div>
-                            </div>
-                          )}
+                          <div
+                            className="p-1.5 rounded-lg flex-shrink-0"
+                            style={{
+                              background: 'linear-gradient(135deg, rgba(212, 175, 55, 0.15), rgba(255, 215, 0, 0.1))',
+                              border: '1px solid rgba(212, 175, 55, 0.2)'
+                            }}
+                          >
+                            <div className={getResultColor(result.type)}>{getResultIcon(result.type)}</div>
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="text-amber-100/90 font-medium text-sm truncate">{result.title}</div>
+                            {result.subtitle && (
+                              <div className="text-amber-300/40 text-xs truncate">{result.subtitle}</div>
+                            )}
+                          </div>
                         </motion.div>
-                      ))}
-                    </div>
-                  ) : isSearching ? (
-                    <div className="p-4 text-center text-gray-400">
-                      <Loader className="w-5 h-5 animate-spin mx-auto mb-2" />
-                      Searching quantum ledger...
-                    </div>
-                  ) : searchQuery && searchQuery.length >= 3 ? (
-                    <div className="p-4 text-center text-gray-400">
-                      No results found for "{searchQuery}"
-                    </div>
-                  ) : searchQuery && searchQuery.length < 3 ? (
-                    <div className="p-4 text-center text-gray-400">
-                      Type at least 3 characters to search...
-                    </div>
-                  ) : null}
-                </motion.div>
-              )}
+                      ))
+                    ) : isSearching ? (
+                      <div className="p-4 text-center text-gray-400">
+                        <Loader className="w-5 h-5 animate-spin mx-auto mb-2 text-amber-400/60" />
+                        <span className="text-sm">Searching quantum ledger...</span>
+                      </div>
+                    ) : searchQuery.length >= 2 ? (
+                      <div className="p-4 text-center text-gray-500 text-sm">
+                        No results found for "{searchQuery}"
+                      </div>
+                    ) : null}
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
 
             {/* Mining Hash Rate Indicator & Status */}
             <div className="flex items-center gap-4">
-              {/* Network Selector Component */}
               <NetworkSelector />
 
-              {/* Bounty Campaign Button */}
               <motion.a
                 href="https://bounty.quillon.xyz"
                 target="_blank"
@@ -344,7 +369,6 @@ export default function GlobalTopBar({ authenticated = false }: GlobalTopBarProp
                 <span className="text-amber-300 text-sm font-semibold">Bounty Campaign</span>
               </motion.a>
 
-              {/* Mining Hash Rate (SSE Real-Time) */}
               {authenticated && isMining && miningHashRate > 0 && (
                 <motion.div
                   initial={{ opacity: 0, x: 20 }}
@@ -359,7 +383,6 @@ export default function GlobalTopBar({ authenticated = false }: GlobalTopBarProp
                 </motion.div>
               )}
 
-              {/* Connection Status Indicator */}
               {authenticated ? (
                 <div className="flex items-center gap-2 text-quantum-green text-sm">
                   <div className="w-2 h-2 bg-quantum-green rounded-full animate-pulse" />
@@ -375,6 +398,155 @@ export default function GlobalTopBar({ authenticated = false }: GlobalTopBarProp
           </div>
         </div>
       </div>
+
+      {/* Detail Modal (same as ExplorerSearchBar) */}
+      <AnimatePresence>
+        {selectedDetail && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-start justify-center z-[9999] overflow-y-auto py-8"
+            onClick={() => setSelectedDetail(null)}
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 border-2 border-amber-500/30 rounded-2xl p-6 max-w-lg w-full mx-4 shadow-2xl my-auto"
+              onClick={(e) => e.stopPropagation()}
+              style={{ boxShadow: '0 0 40px rgba(212, 175, 55, 0.2)' }}
+            >
+              {/* Modal Header */}
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-amber-500/20 rounded-lg">
+                    {selectedDetail.type === 'transaction' && <Hash className="w-6 h-6 text-amber-400" />}
+                    {selectedDetail.type === 'block' && <Blocks className="w-6 h-6 text-amber-400" />}
+                    {selectedDetail.type === 'address' && <User className="w-6 h-6 text-amber-400" />}
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-bold text-amber-100">{selectedDetail.title}</h3>
+                    <p className="text-amber-300/60 text-sm">{selectedDetail.type.toUpperCase()}</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setSelectedDetail(null)}
+                  className="p-2 hover:bg-amber-500/20 rounded-lg transition-colors"
+                >
+                  <X className="w-5 h-5 text-amber-400" />
+                </button>
+              </div>
+
+              {/* Transaction Details */}
+              {selectedDetail.type === 'transaction' && selectedDetail.data && (
+                <div className="space-y-4">
+                  <div className="flex items-center gap-2 p-3 bg-green-500/10 border border-green-500/30 rounded-lg">
+                    <CheckCircle className="w-5 h-5 text-green-400" />
+                    <span className="text-green-400 font-medium capitalize">{selectedDetail.data.status}</span>
+                    {selectedDetail.data.confirmations && (
+                      <span className="text-green-300/60 text-sm">({selectedDetail.data.confirmations} confirmations)</span>
+                    )}
+                  </div>
+
+                  <div className="grid gap-3">
+                    <div className="p-3 bg-slate-800/50 rounded-lg">
+                      <div className="text-amber-300/60 text-xs mb-1">Transaction Hash</div>
+                      <div className="flex items-center gap-2">
+                        <code className="text-amber-100 text-xs font-mono break-all flex-1">{selectedDetail.data.hash}</code>
+                        <button
+                          onClick={() => copyToClipboard(selectedDetail.data.hash, 'modal-hash')}
+                          className="p-1.5 hover:bg-amber-500/20 rounded transition-colors flex-shrink-0"
+                        >
+                          {copiedId === 'modal-hash' ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4 text-amber-400" />}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="p-3 bg-slate-800/50 rounded-lg">
+                        <div className="text-amber-300/60 text-xs mb-1">Block</div>
+                        <div className="text-amber-100 font-medium">#{selectedDetail.data.block_height || 'Pending'}</div>
+                      </div>
+                      <div className="p-3 bg-slate-800/50 rounded-lg">
+                        <div className="text-amber-300/60 text-xs mb-1">Time</div>
+                        <div className="text-amber-100 font-medium text-xs">{selectedDetail.data.timestamp}</div>
+                      </div>
+                    </div>
+
+                    <div className="p-3 bg-purple-500/10 border border-purple-500/30 rounded-lg">
+                      <div className="flex items-center gap-2 text-purple-300 text-sm">
+                        <Shield className="w-4 h-4" />
+                        <span>ZK-STARK Privacy: Transaction details are encrypted</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Block Details */}
+              {selectedDetail.type === 'block' && selectedDetail.data && (
+                <div className="space-y-4">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="p-3 bg-slate-800/50 rounded-lg">
+                      <div className="text-amber-300/60 text-xs mb-1">Block Height</div>
+                      <div className="text-xl font-bold text-amber-100">#{selectedDetail.data.height}</div>
+                    </div>
+                    <div className="p-3 bg-slate-800/50 rounded-lg">
+                      <div className="text-amber-300/60 text-xs mb-1">Transactions</div>
+                      <div className="text-xl font-bold text-amber-100">{selectedDetail.data.tx_count}</div>
+                    </div>
+                  </div>
+
+                  {selectedDetail.data.hash && selectedDetail.data.hash !== 'N/A' && (
+                    <div className="p-3 bg-slate-800/50 rounded-lg">
+                      <div className="text-amber-300/60 text-xs mb-1">Block Hash</div>
+                      <div className="flex items-center gap-2">
+                        <code className="text-amber-100 text-xs font-mono break-all flex-1">{selectedDetail.data.hash}</code>
+                        <button
+                          onClick={() => copyToClipboard(selectedDetail.data.hash, 'modal-block-hash')}
+                          className="p-1.5 hover:bg-amber-500/20 rounded transition-colors flex-shrink-0"
+                        >
+                          {copiedId === 'modal-block-hash' ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4 text-amber-400" />}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Address Details */}
+              {selectedDetail.type === 'address' && selectedDetail.data && (
+                <div className="space-y-4">
+                  <div className="p-3 bg-slate-800/50 rounded-lg">
+                    <div className="text-amber-300/60 text-xs mb-1">Address</div>
+                    <div className="flex items-center gap-2">
+                      <code className="text-amber-100 text-sm font-mono break-all flex-1">{selectedDetail.data.address}</code>
+                      <button
+                        onClick={() => copyToClipboard(selectedDetail.data.address, 'modal-address')}
+                        className="p-1.5 hover:bg-amber-500/20 rounded transition-colors flex-shrink-0"
+                      >
+                        {copiedId === 'modal-address' ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4 text-amber-400" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="p-3 bg-slate-800/50 rounded-lg">
+                      <div className="text-amber-300/60 text-xs mb-1">Balance</div>
+                      <div className="text-xl font-bold text-amber-100">{selectedDetail.data.balance?.toFixed(4)} {TICKER_SYMBOL}</div>
+                    </div>
+                    <div className="p-3 bg-slate-800/50 rounded-lg">
+                      <div className="text-amber-300/60 text-xs mb-1">Nonce</div>
+                      <div className="text-xl font-bold text-amber-100">{selectedDetail.data.nonce}</div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </>
   );
 }

@@ -154,7 +154,7 @@ impl CheckpointManager {
 
         // Load network-specific checkpoints
         match network_id {
-            "mainnet2026" | "mainnet2026.1" | "mainnet2026.2" | "mainnet" => {
+            "mainnet2026" | "mainnet2026.1" | "mainnet2026.2" | "mainnet-genesis" | "mainnet" => {
                 // Mainnet checkpoints (to be populated after launch)
                 info!("📍 Loading mainnet checkpoints");
             }

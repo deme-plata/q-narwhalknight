@@ -14,14 +14,23 @@ struct ApiWrapper<T> {
     error: Option<String>,
 }
 
-/// HTTP client that authenticates requests using the wallet's Ed25519 keys.
+/// Authentication mode for the API client.
+enum AuthMode {
+    /// Wallet-based auth using Ed25519 signature (X-Wallet-Auth header).
+    Wallet(Arc<Wallet>),
+    /// OAuth2 Bearer token auth (Authorization: Bearer header).
+    Bearer { token: String, address: String },
+}
+
+/// HTTP client that authenticates requests using either wallet signatures or OAuth2 Bearer tokens.
 pub struct ApiClient {
     client: Client,
     base_url: String,
-    wallet: Arc<Wallet>,
+    auth: AuthMode,
 }
 
 impl ApiClient {
+    /// Create an API client using wallet-based Ed25519 signature authentication.
     pub fn new(base_url: &str, wallet: Arc<Wallet>) -> Self {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(15))
@@ -31,19 +40,63 @@ impl ApiClient {
         Self {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
-            wallet,
+            auth: AuthMode::Wallet(wallet),
         }
     }
 
-    /// GET request with wallet auth header, unwraps {"data":...} wrapper.
+    /// Create an API client using OAuth2 Bearer token authentication.
+    /// This mode supports balance queries, history, and send transactions
+    /// without requiring a local private key.
+    pub fn from_bearer(base_url: &str, token: String, address: String) -> Self {
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .expect("Failed to build HTTP client");
+
+        Self {
+            client,
+            base_url: base_url.trim_end_matches('/').to_string(),
+            auth: AuthMode::Bearer { token, address },
+        }
+    }
+
+    /// Get the wallet address for this client.
+    pub fn address(&self) -> &str {
+        match &self.auth {
+            AuthMode::Wallet(w) => w.address(),
+            AuthMode::Bearer { address, .. } => address,
+        }
+    }
+
+    /// Returns true if this client has a local wallet (can sign locally).
+    pub fn has_wallet(&self) -> bool {
+        matches!(&self.auth, AuthMode::Wallet(_))
+    }
+
+    /// Get the base URL for this client.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// Get wallet address as hex (without qnk prefix), for SSE query parameter.
+    pub fn address_hex(&self) -> &str {
+        let addr = self.address();
+        if addr.starts_with("qnk") { &addr[3..] } else { addr }
+    }
+
+    /// GET request with auth header, unwraps {"data":...} wrapper.
     async fn get_auth<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
         let url = format!("{}{}", self.base_url, path);
-        let auth = self.wallet.auth_header(path);
 
-        let resp = self
-            .client
-            .get(&url)
-            .header("X-Wallet-Auth", &auth)
+        let req = self.client.get(&url);
+        let req = match &self.auth {
+            AuthMode::Wallet(wallet) => req.header("X-Wallet-Auth", wallet.auth_header(path)),
+            AuthMode::Bearer { token, .. } => {
+                req.header("Authorization", format!("Bearer {}", token))
+            }
+        };
+
+        let resp = req
             .send()
             .await
             .map_err(|e| anyhow!("Request failed: {}", e))?;
@@ -102,12 +155,16 @@ impl ApiClient {
         body: &B,
     ) -> Result<T> {
         let url = format!("{}{}", self.base_url, path);
-        let auth = self.wallet.auth_header(path);
 
-        let resp = self
-            .client
-            .post(&url)
-            .header("X-Wallet-Auth", &auth)
+        let req = self.client.post(&url);
+        let req = match &self.auth {
+            AuthMode::Wallet(wallet) => req.header("X-Wallet-Auth", wallet.auth_header(path)),
+            AuthMode::Bearer { token, .. } => {
+                req.header("Authorization", format!("Bearer {}", token))
+            }
+        };
+
+        let resp = req
             .json(body)
             .send()
             .await
@@ -133,52 +190,194 @@ impl ApiClient {
 
     /// Fetch node sync status.
     pub async fn get_status(&self) -> Result<StatusResponse> {
-        self.get_public("/api/v1/status").await
+        self.get_public("/api/v1/node/status").await
     }
 
     /// Fetch QUG wallet balance.
+    /// v8.0.1: Uses correct endpoint with address in URL path.
     pub async fn get_balance(&self) -> Result<BalanceResponse> {
-        self.get_auth("/api/v1/wallet/balance").await
+        let path = format!("/api/v1/wallets/{}/balance", self.address());
+        self.get_auth(&path).await
     }
 
-    /// Fetch all custom token balances.
-    pub async fn get_token_balances(&self) -> Result<MultiTokenBalanceResponse> {
-        self.get_auth("/api/v1/multi-token-balance").await
+    /// Fetch all token balances. Server returns tokens as HashMap<symbol, {balance, usd_value, name, ...}>.
+    pub async fn get_token_balances(&self) -> Result<Vec<crate::models::TokenBalanceDisplay>> {
+        let path = "/api/v1/wallet/tokens";
+        let raw: serde_json::Value = self.get_auth(path).await?;
+
+        let mut result = Vec::new();
+        if let Some(tokens_obj) = raw.get("tokens").and_then(|t| t.as_object()) {
+            for (symbol, info) in tokens_obj {
+                let balance = info
+                    .get("balance")
+                    .and_then(|b| b.as_str())
+                    .unwrap_or("0")
+                    .to_string();
+                let usd_value = info
+                    .get("usd_value")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                let name = info
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or(symbol)
+                    .to_string();
+
+                // Skip tokens with zero balance
+                let bal_f64: f64 = balance.parse().unwrap_or(0.0);
+                if bal_f64.abs() < 1e-12 {
+                    continue;
+                }
+
+                result.push(crate::models::TokenBalanceDisplay {
+                    symbol: symbol.clone(),
+                    name,
+                    balance,
+                    usd_value,
+                });
+            }
+        }
+        println!("[Tokens] Parsed {} tokens with non-zero balance", result.len());
+        Ok(result)
     }
 
-    /// Send a transaction.
+    /// Send a transaction via the /transactions/send endpoint.
+    /// v8.1.7: OAuth2 Bearer users auto-sign via server vault (no mnemonic needed).
+    /// Mnemonic is only sent on first use to seed the vault, or for wallet-auth mode.
     pub async fn send_transaction(
         &self,
         to: &str,
         amount: &str,
         memo: Option<String>,
+        mnemonic: Option<String>,
     ) -> Result<serde_json::Value> {
-        let tx = TransactionRequest {
-            from: self.wallet.address().to_string(),
-            to: to.to_string(),
-            amount: amount.to_string(),
-            fee: "0".to_string(),
-            nonce: chrono::Utc::now().timestamp_millis() as u64,
-            signature: String::new(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            memo,
+        let amount_f64: f64 = amount.parse().unwrap_or(0.0);
+
+        // v8.1.7: For Bearer (OAuth2) mode, omit mnemonic to trigger vault auto-signing.
+        // Server returns "vault_key_missing" error if no vault entry exists yet.
+        let send_mnemonic = match &self.auth {
+            AuthMode::Bearer { .. } => mnemonic, // Send mnemonic only if explicitly provided
+            AuthMode::Wallet(_) => mnemonic,     // Wallet mode always sends mnemonic
         };
 
-        let tx_data = format!("{}:{}:{}:{}", tx.from, tx.to, tx.amount, tx.nonce);
-        let tx_hash = blake3::hash(tx_data.as_bytes());
-        let signature = self.wallet.sign_transaction(tx_hash.as_bytes());
+        let body = serde_json::json!({
+            "from": self.address(),
+            "to": to,
+            "amount": amount_f64,
+            "memo": memo,
+            "token_type": "QUG",
+            "mnemonic": send_mnemonic,
+        });
 
-        let signed_tx = TransactionRequest {
-            signature,
-            ..tx
-        };
-
-        self.post_auth("/api/v1/transactions", &signed_tx).await
+        self.post_auth("/api/v1/transactions/send", &body).await
     }
 
     /// Fetch transaction history.
+    /// v8.0.8: Robust parsing — logs raw response, parses records individually.
     pub async fn get_history(&self) -> Result<Vec<TransactionRecord>> {
-        self.get_auth("/api/v1/transactions/history").await
+        let path = format!("/api/v1/wallet/{}/history", self.address());
+        let url = format!("{}{}", self.base_url, path);
+
+        let req = self.client.get(&url);
+        // Try with auth first (some servers require it)
+        let req = match &self.auth {
+            AuthMode::Wallet(wallet) => req.header("X-Wallet-Auth", wallet.auth_header(&path)),
+            AuthMode::Bearer { token, .. } => {
+                req.header("Authorization", format!("Bearer {}", token))
+            }
+        };
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| anyhow!("History request failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("History HTTP {}: {}", status, body));
+        }
+
+        let body = resp.text().await.unwrap_or_default();
+        let preview_len = body.len().min(500);
+        println!(
+            "[History] Raw response ({} bytes): {}",
+            body.len(),
+            &body[..preview_len]
+        );
+
+        // Parse as JSON value first
+        let parsed: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| anyhow!("History JSON parse error: {}", e))?;
+
+        // Find the array of transactions
+        let arr = if let Some(data) = parsed.get("data") {
+            if let Some(arr) = data.as_array() {
+                arr
+            } else if let Some(arr) = data.get("transactions").and_then(|t| t.as_array()) {
+                arr
+            } else {
+                eprintln!("[History] Unexpected data format: {:?}", data);
+                return Ok(vec![]);
+            }
+        } else if let Some(arr) = parsed.as_array() {
+            arr
+        } else {
+            eprintln!("[History] No 'data' field in response");
+            return Ok(vec![]);
+        };
+
+        // Parse each record individually (one bad record won't kill all)
+        let mut records = Vec::new();
+        for (i, item) in arr.iter().enumerate() {
+            match serde_json::from_value::<TransactionRecord>(item.clone()) {
+                Ok(r) => records.push(r),
+                Err(e) => {
+                    let raw = item.to_string();
+                    eprintln!(
+                        "[History] Skip record {}: {} — {}",
+                        i,
+                        e,
+                        &raw[..raw.len().min(200)]
+                    );
+                }
+            }
+        }
+        println!("[History] Parsed {}/{} records", records.len(), arr.len());
+        Ok(records)
+    }
+
+    /// Fetch address book entries. Server returns {"addresses": [...], "total": N}.
+    pub async fn get_address_book(&self) -> Result<Vec<crate::models::AddressBookEntry>> {
+        let raw: serde_json::Value = self.get_auth("/api/v1/addressbook").await?;
+        // Server wraps in {"addresses": [...], "total": N}
+        let arr = raw
+            .get("addresses")
+            .and_then(|a| a.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let mut entries = Vec::new();
+        for item in arr {
+            match serde_json::from_value::<crate::models::AddressBookEntry>(item) {
+                Ok(e) => entries.push(e),
+                Err(e) => eprintln!("[AddressBook] Skip entry: {}", e),
+            }
+        }
+        println!("[AddressBook] Parsed {} entries", entries.len());
+        Ok(entries)
+    }
+
+    /// Save an address to the address book.
+    pub async fn save_address(&self, address: &str, label: &str) -> Result<serde_json::Value> {
+        let body = serde_json::json!({
+            "address": address,
+            "label": label,
+            "favorite": false,
+            "tags": [],
+            "notes": "",
+        });
+        self.post_auth("/api/v1/addressbook", &body).await
     }
 
     /// Fetch current mining challenge.
@@ -192,5 +391,192 @@ impl ApiClient {
         submission: &MiningSubmission,
     ) -> Result<serde_json::Value> {
         self.post_auth("/api/v1/mining/submit", submission).await
+    }
+
+    /// Submit a pool share (for PPLNS pool mining mode).
+    pub async fn submit_pool_share(
+        &self,
+        wallet: &str,
+        worker: &str,
+        share_id: &str,
+        difficulty: f64,
+        block_height: u64,
+        nonce: u64,
+    ) -> Result<serde_json::Value> {
+        let body = serde_json::json!({
+            "wallet": wallet,
+            "worker": worker,
+            "share_id": share_id,
+            "difficulty": difficulty,
+            "block_height": block_height,
+            "nonce": nonce,
+            "timestamp": chrono::Utc::now().timestamp(),
+        });
+        let url = format!("{}/api/v1/pool/submit-share", self.base_url);
+        let resp = self.client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| anyhow!("Pool share submit failed: {}", e))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("Pool share HTTP {}: {}", status, text));
+        }
+        resp.json().await.map_err(|e| anyhow!("Pool share parse: {}", e))
+    }
+
+    /// Register this wallet as an OAuth2 client with the connected node.
+    /// Only works with wallet-auth mode (requires Ed25519 signature).
+    pub async fn register_oauth2_client(&self) -> Result<()> {
+        if !self.has_wallet() {
+            return Ok(()); // Bearer clients skip registration
+        }
+
+        let client_id = "slint-wallet";
+
+        let registration = serde_json::json!({
+            "name": "Quillon Desktop Wallet",
+            "description": "Native Slint wallet OAuth2 client",
+            "website": format!("http://127.0.0.1:{}", 17655),
+            "redirect_uris": [
+                format!("http://127.0.0.1:{}/callback", 17655),
+                format!("http://localhost:{}/callback", 17655),
+                "http://127.0.0.1:17655/callback",
+                "http://localhost:17655/callback",
+            ],
+            "client_id": client_id,
+            "scopes": ["read:balance", "read:history", "read:tokens", "send:transaction"],
+        });
+
+        let result: Result<serde_json::Value> =
+            self.post_auth("/api/v1/oauth2/register", &registration).await;
+
+        match result {
+            Ok(_) => {
+                println!("[OAuth] Registered wallet as OAuth2 client: {}", client_id);
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!("[OAuth] Client registration note: {}", e);
+                Ok(())
+            }
+        }
+    }
+
+    /// Exchange an OAuth2 authorization code for an access token (PKCE flow).
+    /// This is a static method — no wallet auth needed; PKCE code_verifier proves possession.
+    pub async fn exchange_oauth2_token(
+        base_url: &str,
+        code: &str,
+        redirect_uri: &str,
+        code_verifier: &str,
+    ) -> Result<crate::models::OAuthTokenResponse> {
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .map_err(|e| anyhow!("HTTP client error: {}", e))?;
+
+        let url = format!("{}/api/v1/oauth2/token", base_url.trim_end_matches('/'));
+
+        let body = serde_json::json!({
+            "grant_type": "authorization_code",
+            "client_id": "slint-wallet",
+            "code": code,
+            "redirect_uri": redirect_uri,
+            "code_verifier": code_verifier,
+        });
+
+        let resp = client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| anyhow!("Token exchange request failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("Token exchange HTTP {}: {}", status, text));
+        }
+
+        let wrapper: ApiWrapper<crate::models::OAuthTokenResponse> = resp
+            .json()
+            .await
+            .map_err(|e| anyhow!("Token response parse error: {}", e))?;
+
+        if let Some(err) = wrapper.error.filter(|e| !e.is_empty()) {
+            return Err(anyhow!("Token exchange error: {}", err));
+        }
+
+        wrapper.data.ok_or_else(|| anyhow!("No data in token response"))
+    }
+
+    /// Fetch user info using a Bearer access token (no wallet auth).
+    pub async fn get_userinfo_with_token(
+        base_url: &str,
+        access_token: &str,
+    ) -> Result<crate::models::OAuthUserInfo> {
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .map_err(|e| anyhow!("HTTP client error: {}", e))?;
+
+        let url = format!("{}/api/v1/oauth2/userinfo", base_url.trim_end_matches('/'));
+
+        let resp = client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .send()
+            .await
+            .map_err(|e| anyhow!("Userinfo request failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("Userinfo HTTP {}: {}", status, text));
+        }
+
+        let wrapper: ApiWrapper<crate::models::OAuthUserInfo> = resp
+            .json()
+            .await
+            .map_err(|e| anyhow!("Userinfo parse error: {}", e))?;
+
+        if let Some(err) = wrapper.error.filter(|e| !e.is_empty()) {
+            return Err(anyhow!("Userinfo error: {}", err));
+        }
+
+        wrapper.data.ok_or_else(|| anyhow!("No data in userinfo response"))
+    }
+
+    /// Submit OAuth2 consent to the backend and receive an authorization code.
+    /// Only works with wallet-auth mode (requires Ed25519 signature).
+    pub async fn authorize_oauth2(
+        &self,
+        client_id: &str,
+        scopes: &[String],
+        redirect_uri: &str,
+        code_challenge: Option<&str>,
+        code_challenge_method: Option<&str>,
+    ) -> Result<String> {
+        let consent = serde_json::json!({
+            "wallet_address": self.address(),
+            "client_id": client_id,
+            "scopes": scopes,
+            "approved": true,
+            "auth_request_id": format!("slint-{}", chrono::Utc::now().timestamp_millis()),
+            "redirect_uri": redirect_uri,
+            "code_challenge": code_challenge,
+            "code_challenge_method": code_challenge_method,
+        });
+
+        let resp: serde_json::Value =
+            self.post_auth("/api/v1/oauth2/consent", &consent).await?;
+
+        resp.get("auth_code")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow!("No auth_code in consent response"))
     }
 }

@@ -91,6 +91,14 @@ impl BankingOracleIntegration {
         self.fetch_price(asset).await
     }
 
+    /// v8.2.7: Get price as f64 for bridge pool integration
+    pub async fn get_price_f64(&self, asset: &AssetType) -> f64 {
+        match self.get_price(asset).await {
+            Ok(bd) => bd.to_string().parse::<f64>().unwrap_or(0.0),
+            Err(_) => 0.0,
+        }
+    }
+
     /// Update all asset prices
     async fn update_all_prices(&self) -> Result<()> {
         let assets = vec![
@@ -115,6 +123,12 @@ impl BankingOracleIntegration {
         let price = match asset {
             AssetType::BTC => self.fetch_crypto_price("bitcoin").await?,
             AssetType::ETH => self.fetch_crypto_price("ethereum").await?,
+            AssetType::ZEC => self.fetch_crypto_price("zcash").await?,
+            AssetType::IRON => {
+                // Iron Fish not on CoinGecko — use approximate price
+                use std::str::FromStr;
+                BigDecimal::from_str("0.008").unwrap_or_else(|_| BigDecimal::from(0))
+            },
             AssetType::USDC => BigDecimal::from(1), // Stablecoin always $1
             AssetType::Gold => self.fetch_gold_price().await?,
             AssetType::ORB => {
@@ -155,8 +169,12 @@ impl BankingOracleIntegration {
                 if response.status().is_success() {
                     let json: serde_json::Value = response.json().await?;
                     if let Some(price) = json[coin_id]["usd"].as_f64() {
-                        info!("💹 Fetched {} price: ${}", coin_id, price);
-                        return Ok(BigDecimal::from(price as i64));
+                        info!("💹 Fetched {} price: ${:.2}", coin_id, price);
+                        // v8.2.7: Use string parsing to preserve decimal precision
+                        // (was: BigDecimal::from(price as i64) which truncated decimals)
+                        use std::str::FromStr;
+                        return Ok(BigDecimal::from_str(&format!("{:.2}", price))
+                            .unwrap_or_else(|_| BigDecimal::from(price as i64)));
                     }
                 }
                 Err(anyhow!("Failed to parse price from CoinGecko"))
@@ -173,6 +191,7 @@ impl BankingOracleIntegration {
         let symbol = match coin_id {
             "bitcoin" => "BTCUSDT",
             "ethereum" => "ETHUSDT",
+            "zcash" => "ZECUSDT",
             _ => return Err(anyhow!("Unsupported coin for Binance")),
         };
 
@@ -184,8 +203,10 @@ impl BankingOracleIntegration {
                     let json: serde_json::Value = response.json().await?;
                     if let Some(price_str) = json["price"].as_str() {
                         if let Ok(price) = price_str.parse::<f64>() {
-                            info!("💹 Fetched {} price from Binance: ${}", symbol, price);
-                            return Ok(BigDecimal::from(price as i64));
+                            info!("💹 Fetched {} price from Binance: ${:.2}", symbol, price);
+                            use std::str::FromStr;
+                            return Ok(BigDecimal::from_str(&format!("{:.2}", price))
+                                .unwrap_or_else(|_| BigDecimal::from(price as i64)));
                         }
                     }
                 }

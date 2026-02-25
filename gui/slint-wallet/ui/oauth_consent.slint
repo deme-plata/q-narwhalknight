@@ -1,0 +1,188 @@
+import { Theme, QButton, Card } from "theme.slint";
+
+export struct OAuthScope {
+    name: string,
+    description: string,
+    checked: bool,
+}
+
+export component OAuthConsentScreen inherits Rectangle {
+    in property <string> client-name: "Unknown App";
+    in property <string> client-id: "";
+    in property <[OAuthScope]> scopes: [];
+    in property <string> wallet-address: "";
+    in property <string> redirect-uri: "";
+
+    callback approve();
+    callback deny();
+
+    background: Theme.bg-primary;
+
+    VerticalLayout {
+        alignment: center;
+        padding: Theme.spacing-lg;
+        spacing: Theme.spacing-md;
+
+        // Title
+        Text {
+            text: "Authorization Request";
+            color: Theme.accent-cyan;
+            font-size: Theme.font-xl;
+            font-weight: 700;
+            horizontal-alignment: center;
+        }
+
+        // App card
+        Card {
+            height: self.preferred-height;
+            VerticalLayout {
+                padding: Theme.spacing-md;
+                spacing: Theme.spacing-sm;
+
+                Text {
+                    text: root.client-name;
+                    color: Theme.text-primary;
+                    font-size: Theme.font-lg;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                }
+
+                Text {
+                    text: "wants to access your wallet";
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-md;
+                    horizontal-alignment: center;
+                }
+
+                // Wallet address badge
+                Rectangle {
+                    height: 36px;
+                    border-radius: Theme.radius-sm;
+                    background: Theme.bg-input;
+                    border-width: 1px;
+                    border-color: Theme.border;
+
+                    Text {
+                        text: root.wallet-address;
+                        color: Theme.accent-blue;
+                        font-size: Theme.font-xs;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+            }
+        }
+
+        // Scopes card
+        Card {
+            height: self.preferred-height;
+            VerticalLayout {
+                padding: Theme.spacing-md;
+                spacing: Theme.spacing-sm;
+
+                Text {
+                    text: "Requested Permissions";
+                    color: Theme.text-primary;
+                    font-size: Theme.font-md;
+                    font-weight: 600;
+                }
+
+                for scope[i] in root.scopes : Rectangle {
+                    height: 40px;
+                    border-radius: Theme.radius-sm;
+                    background: Theme.bg-secondary;
+
+                    HorizontalLayout {
+                        padding-left: Theme.spacing-sm;
+                        padding-right: Theme.spacing-sm;
+                        spacing: Theme.spacing-sm;
+
+                        // Checkmark icon
+                        VerticalLayout {
+                            alignment: center;
+                            width: 20px;
+                            Rectangle {
+                                width: 20px;
+                                height: 20px;
+                                border-radius: 4px;
+                                background: Theme.accent-green.with-alpha(0.2);
+
+                                Text {
+                                    text: "\u{2713}";
+                                    color: Theme.accent-green;
+                                    font-size: Theme.font-sm;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        VerticalLayout {
+                            alignment: center;
+                            Text {
+                                text: scope.name;
+                                color: Theme.text-primary;
+                                font-size: Theme.font-sm;
+                                font-weight: 500;
+                            }
+                            Text {
+                                text: scope.description;
+                                color: Theme.text-muted;
+                                font-size: Theme.font-xs;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Redirect URI info
+        Card {
+            height: self.preferred-height;
+            VerticalLayout {
+                padding: Theme.spacing-sm;
+                spacing: 4px;
+
+                Text {
+                    text: "Redirect to:";
+                    color: Theme.text-muted;
+                    font-size: Theme.font-xs;
+                }
+                Text {
+                    text: root.redirect-uri;
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-xs;
+                    overflow: elide;
+                }
+            }
+        }
+
+        // Buttons
+        HorizontalLayout {
+            spacing: Theme.spacing-md;
+
+            QButton {
+                label: "Deny";
+                button-color: Theme.accent-red;
+                horizontal-stretch: 1;
+                clicked => { root.deny(); }
+            }
+
+            QButton {
+                label: "Approve";
+                button-color: Theme.accent-green;
+                horizontal-stretch: 1;
+                clicked => { root.approve(); }
+            }
+        }
+
+        // Security note
+        Text {
+            text: "This app will NOT have access to your private keys.";
+            color: Theme.text-muted;
+            font-size: Theme.font-xs;
+            horizontal-alignment: center;
+        }
+    }
+}

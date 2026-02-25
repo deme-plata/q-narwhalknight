@@ -419,6 +419,31 @@ export interface EmissionDailyRecord {
   cumulative_supply_qug: number;
 }
 
+// v8.0.3: Rate measurement diagnostics for ultra-advanced analytics
+export interface RateDiagnostics {
+  active_method: string;        // "sliding_window" | "cumulative" | "block_timestamp" | "default"
+  confidence_pct: number;       // 0-100 confidence in rate measurement
+  window_rate_bps: number;      // Sliding window rate (blocks/sec)
+  window_blocks: number;        // Total blocks in window
+  window_elapsed_secs: number;  // Window span in seconds
+  window_buckets: number;       // Number of 10s buckets
+  cumulative_rate_bps: number;  // Cumulative wall-clock rate
+  cumulative_blocks: number;    // Total cumulative blocks
+  cumulative_elapsed_secs: number;
+  block_timestamp_rate_bps: number;
+  block_timestamp_windows: number;
+  smoothed_rate_bps: number;    // Final smoothed rate used for rewards
+  correction_factor: number;    // PI correction factor
+  correction_smoothing: number; // Smoothing constant (0.8)
+  correction_max: number;       // Max correction cap
+  correction_min: number;       // Min correction cap
+  error_fraction_pct: number;   // Budget error as percentage
+  convergence_eta_secs: number | null;  // ETA to close emission gap
+  actual_emission_rate_qug_per_hour: number;
+  target_emission_rate_qug_per_hour: number;
+  phase: string;                // EmissionPhase name
+}
+
 export interface EmissionStats {
   summary: {
     total_supply_qug: number;
@@ -456,6 +481,8 @@ export interface EmissionStats {
     total_eras: number;
     total_emission_years: number;
   };
+  // v8.0.3: Ultra-advanced rate diagnostics
+  rate_diagnostics?: RateDiagnostics;
 }
 
 // v3.5.0-beta: Wallet-specific mining statistics (survives page refresh)
@@ -1155,35 +1182,49 @@ class QNarwhalKnightAPI {
       const encryptedMnemonic = localStorage.getItem('walletEncryptedMnemonic');
 
       if (encryptedMnemonic) {
-        try {
-          // Use the SessionTimeoutContext to request password with modal
-          const { getGlobalPasswordRequester } = await import('../contexts/SessionTimeoutContext');
-          const passwordRequester = getGlobalPasswordRequester();
+        // v8.3.0: MetaMask users have an auto-generated password stored in sessionStorage.
+        // Use it silently instead of prompting the user (they never saw this password).
+        const metamaskPw = sessionStorage.getItem('metamaskAutoPassword');
+        if (metamaskPw) {
+          try {
+            mnemonic = await recoverMnemonic(metamaskPw);
+            console.log('✅ Mnemonic recovered silently via MetaMask auto-password');
+          } catch {
+            console.warn('⚠️ MetaMask auto-password failed, falling back to modal');
+          }
+        }
 
-          // v3.6.12-beta: Wait for modal instead of using browser prompt
-          const actualRequester = passwordRequester || await waitForPasswordPrompt(3000);
+        if (!mnemonic) {
+          try {
+            // Use the SessionTimeoutContext to request password with modal
+            const { getGlobalPasswordRequester } = await import('../contexts/SessionTimeoutContext');
+            const passwordRequester = getGlobalPasswordRequester();
 
-          if (!actualRequester) {
-            // If modal still not available, return error instead of browser prompt
-            console.error('❌ Password modal not initialized for mnemonic recovery');
+            // v3.6.12-beta: Wait for modal instead of using browser prompt
+            const actualRequester = passwordRequester || await waitForPasswordPrompt(3000);
+
+            if (!actualRequester) {
+              // If modal still not available, return error instead of browser prompt
+              console.error('❌ Password modal not initialized for mnemonic recovery');
+              return {
+                success: false,
+                data: null,
+                error: 'Password modal not ready. Please refresh the page and try again.',
+                timestamp: new Date().toISOString(),
+              };
+            }
+
+            // Use modal to request password
+            mnemonic = await actualRequester();
+            console.log('✅ Mnemonic recovered via modal');
+          } catch (error) {
             return {
               success: false,
               data: null,
-              error: 'Password modal not ready. Please refresh the page and try again.',
+              error: error instanceof Error ? error.message : 'Failed to decrypt wallet. Incorrect password.',
               timestamp: new Date().toISOString(),
             };
           }
-
-          // Use modal to request password
-          mnemonic = await actualRequester();
-          console.log('✅ Mnemonic recovered via modal');
-        } catch (error) {
-          return {
-            success: false,
-            data: null,
-            error: error instanceof Error ? error.message : 'Failed to decrypt wallet. Incorrect password.',
-            timestamp: new Date().toISOString(),
-          };
         }
       } else {
         // No encrypted mnemonic found
@@ -1199,36 +1240,52 @@ class QNarwhalKnightAPI {
       const encryptedMnemonic = localStorage.getItem('walletEncryptedMnemonic');
 
       if (encryptedMnemonic) {
-        try {
-          // Use the SessionTimeoutContext to request password with modal
-          const { getGlobalPasswordRequester } = await import('../contexts/SessionTimeoutContext');
-          const passwordRequester = getGlobalPasswordRequester();
+        // v8.3.0: MetaMask users — try auto-password first
+        const metamaskPw = sessionStorage.getItem('metamaskAutoPassword');
+        if (metamaskPw) {
+          try {
+            mnemonic = await recoverMnemonic(metamaskPw);
+            // Also restore the session so future calls don't need to decrypt again
+            const keyPair = await keypairFromMnemonic(mnemonic);
+            walletSession.setSession(keyPair.privateKey, keyPair.address, mnemonic);
+            console.log('✅ Session restored silently via MetaMask auto-password');
+          } catch {
+            console.warn('⚠️ MetaMask auto-password failed, falling back to modal');
+          }
+        }
 
-          // v3.6.12-beta: Wait for modal instead of using browser prompt
-          const actualRequester = passwordRequester || await waitForPasswordPrompt(3000);
+        if (!mnemonic) {
+          try {
+            // Use the SessionTimeoutContext to request password with modal
+            const { getGlobalPasswordRequester } = await import('../contexts/SessionTimeoutContext');
+            const passwordRequester = getGlobalPasswordRequester();
 
-          if (!actualRequester) {
-            // If modal still not available, return error instead of browser prompt
-            console.error('❌ Password modal not initialized for session recovery');
+            // v3.6.12-beta: Wait for modal instead of using browser prompt
+            const actualRequester = passwordRequester || await waitForPasswordPrompt(3000);
+
+            if (!actualRequester) {
+              // If modal still not available, return error instead of browser prompt
+              console.error('❌ Password modal not initialized for session recovery');
+              return {
+                success: false,
+                data: null,
+                error: 'Password modal not ready. Please refresh the page and try again.',
+                timestamp: new Date().toISOString(),
+              };
+            }
+
+            // Use modal to request password
+            // The SessionTimeoutContext handles decryption and session restoration internally
+            mnemonic = await actualRequester();
+            console.log('✅ Mnemonic recovered via modal');
+          } catch (error) {
             return {
               success: false,
               data: null,
-              error: 'Password modal not ready. Please refresh the page and try again.',
+              error: error instanceof Error ? error.message : 'Failed to decrypt wallet. Incorrect password.',
               timestamp: new Date().toISOString(),
             };
           }
-
-          // Use modal to request password
-          // The SessionTimeoutContext handles decryption and session restoration internally
-          mnemonic = await actualRequester();
-          console.log('✅ Mnemonic recovered via modal');
-        } catch (error) {
-          return {
-            success: false,
-            data: null,
-            error: error instanceof Error ? error.message : 'Failed to decrypt wallet. Incorrect password.',
-            timestamp: new Date().toISOString(),
-          };
         }
       } else {
         // No encrypted mnemonic found - user must log in again

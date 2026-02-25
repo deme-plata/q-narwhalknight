@@ -112,7 +112,7 @@ pub async fn get_full_state(
         .load(std::sync::atomic::Ordering::SeqCst);
 
     let our_network_id = std::env::var("Q_NETWORK_ID")
-        .unwrap_or_else(|_| "mainnet2026.2".to_string());
+        .unwrap_or_else(|_| "mainnet-genesis".to_string());
 
     let snapshot = FullStateSnapshot {
         contracts,
@@ -250,7 +250,7 @@ async fn do_p2p_state_sync(app_state: &Arc<AppState>) -> anyhow::Result<bool> {
     let network_id = std::env::var("Q_NETWORK_ID")
         .ok()
         .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-        .unwrap_or(q_types::NetworkId::Mainnet2026_2);
+        .unwrap_or(q_types::NetworkId::MainnetGenesis);
     let topic = network_id.state_sync_requests_topic();
 
     info!(
@@ -472,7 +472,7 @@ pub async fn handle_state_sync_request(
     let network_id = std::env::var("Q_NETWORK_ID")
         .ok()
         .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-        .unwrap_or(q_types::NetworkId::Mainnet2026_2);
+        .unwrap_or(q_types::NetworkId::MainnetGenesis);
     let topic = network_id.state_sync_responses_topic();
 
     if let Some(ref network_tx) = app_state.libp2p_command_tx {
@@ -704,26 +704,14 @@ async fn merge_p2p_response(
         }
     }
 
-    // ---- Merge wallet balances (add-only) ----
-    {
-        let mut balances = app_state.wallet_balances.write().await;
-        for (addr_hex, amount_str) in &response.wallet_balances {
-            let addr_bytes = match hex_to_32bytes(addr_hex) {
-                Some(b) => b,
-                None => continue,
-            };
-            let amount: u128 = match amount_str.parse() {
-                Ok(a) => a,
-                Err(_) => continue,
-            };
-            if !balances.contains_key(&addr_bytes) && amount > 0 {
-                if let Err(e) = app_state.storage_engine.save_wallet_balance(&addr_bytes, amount).await {
-                    warn!("🔄 [STATE SYNC] Failed to persist wallet balance {}: {}", addr_hex, e);
-                }
-                balances.insert(addr_bytes, amount);
-                result.wallets_added += 1;
-            }
-        }
+    // ---- Wallet balances: SKIPPED (v8.2.0 deterministic balance consensus) ----
+    // Wallet balances are now computed deterministically from block coinbase transactions only.
+    // Importing wallet balances from P2P state sync caused divergence between nodes when
+    // peers had different balance states (from gossip timing, missed messages, etc.).
+    // The block-based path (process_block_mining_rewards) is the single source of truth.
+    if !response.wallet_balances.is_empty() {
+        debug!("🔒 [STATE SYNC] Skipping {} wallet balances from P2P state sync (deterministic mode)",
+               response.wallet_balances.len());
     }
 
     // ---- Merge token balances (add-only) ----
@@ -865,7 +853,7 @@ async fn merge_http_snapshot(app_state: &Arc<AppState>, snapshot: &FullStateSnap
 
     // v7.3.0: Reject snapshots from different networks (prevents cross-network contamination)
     let our_network_id = std::env::var("Q_NETWORK_ID")
-        .unwrap_or_else(|_| "mainnet2026.2".to_string());
+        .unwrap_or_else(|_| "mainnet-genesis".to_string());
     match &snapshot.network_id {
         Some(their_network_id) if their_network_id != &our_network_id => {
             warn!("🚫 [STATE SYNC HTTP] REJECTED snapshot: network_id mismatch (ours={}, theirs={})",
@@ -996,26 +984,13 @@ async fn merge_http_snapshot(app_state: &Arc<AppState>, snapshot: &FullStateSnap
         }
     }
 
-    // ---- Merge wallet balances ----
-    {
-        let mut balances = app_state.wallet_balances.write().await;
-        for (addr_hex, amount_str) in &snapshot.wallet_balances {
-            let addr_bytes = match hex_to_32bytes(addr_hex) {
-                Some(b) => b,
-                None => continue,
-            };
-            let amount: u128 = match amount_str.parse() {
-                Ok(a) => a,
-                Err(_) => continue,
-            };
-            if !balances.contains_key(&addr_bytes) && amount > 0 {
-                if let Err(e) = app_state.storage_engine.save_wallet_balance(&addr_bytes, amount).await {
-                    warn!("🔄 [STATE SYNC HTTP] Failed to persist wallet: {}", e);
-                }
-                balances.insert(addr_bytes, amount);
-                result.wallets_added += 1;
-            }
-        }
+    // ---- Wallet balances: SKIPPED (v8.2.0 deterministic balance consensus) ----
+    // Wallet balances are now computed deterministically from block coinbase transactions only.
+    // Importing wallet balances from HTTP state sync caused divergence between nodes.
+    // The block-based path (process_block_mining_rewards) is the single source of truth.
+    if !snapshot.wallet_balances.is_empty() {
+        debug!("🔒 [STATE SYNC HTTP] Skipping {} wallet balances from HTTP state sync (deterministic mode)",
+               snapshot.wallet_balances.len());
     }
 
     // ---- Merge token balances ----

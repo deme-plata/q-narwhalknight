@@ -232,7 +232,10 @@ tikv-jemallocator = "0.6"
 # v1.0.60-beta: Post-quantum mining-vrf enabled via q-mining dependency
 # 🔐 v1.3.12-beta: q-crypto-advanced is now REQUIRED for SQIsign consensus
 # ✨ v2.2.1-beta: Mining pool ALWAYS enabled - Stratum + PPLNS
-default = ["tui", "llama-cpp"]
+default = ["tui"]
+# v8.2.8: llama-cpp REMOVED from defaults — each inference takes 600-930s at 0.3 tok/s,
+# starving the tokio runtime and making the entire API unresponsive.
+# BitNet (q-bitnet-ffi) remains available. Re-enable with: --features llama-cpp
 # v6.2.0: resonance DISABLED - causes OOM (coupling_matrix leaks ~200MB/round,
 # energy minimization always produces NaN, falls back to DAG-Knight anyway)
 tui = ["q-tui"]

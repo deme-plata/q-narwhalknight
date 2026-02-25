@@ -505,7 +505,7 @@ async fn get_folder(
         None => return Ok(Json(ApiResponse::error("Authentication required".to_string()))),
     };
 
-    let valid_folders = ["inbox", "sent", "drafts", "trash"];
+    let valid_folders = ["inbox", "sent", "drafts", "trash", "quillon-bank"];
     if !valid_folders.contains(&folder.as_str()) {
         return Ok(Json(ApiResponse::error(format!("Invalid folder: {}", folder))));
     }
@@ -709,7 +709,7 @@ The Quillon Team"#,
         encrypted: false,
         signature: Vec::new(),
         timestamp: now,
-        read: false,
+        read: true, // v8.2.9: Welcome email is pre-read — no persistent notification badge
         folder: "inbox".to_string(),
         thread_id: Some(email_id.clone()),
         in_reply_to: None,
@@ -734,20 +734,8 @@ The Quillon Team"#,
     let data = serde_json::to_vec(&settings).unwrap_or_default();
     let _ = state.storage_engine.save_email_settings(&wallet_hex, &data).await;
 
-    // Emit SSE
-    let _ = state
-        .event_broadcaster
-        .broadcast(StreamEvent::EmailReceived {
-            email_id: email_id.clone(),
-            from_address: "system@quillon.xyz".to_string(),
-            subject: "Welcome to Quillon Mail".to_string(),
-            preview: "Welcome to Quillon Mail — the world's first decentralized...".to_string(),
-            has_crypto: false,
-            crypto_amount: None,
-            crypto_token: None,
-            timestamp: chrono::Utc::now(),
-        })
-        .await;
+    // v8.2.9: No SSE broadcast for welcome email — it's pre-read and shouldn't
+    // trigger the unread notification badge or email-received event listener
 
     info!("📧 Welcome email sent to {}", &wallet_hex[..8]);
     Ok(Json(ApiResponse::success(true)))
@@ -1007,7 +995,7 @@ async fn process_crypto_transfer(
 
 /// Publish email via P2P gossipsub for wallet-to-wallet delivery
 async fn publish_email_p2p(state: &Arc<AppState>, email: &EmailMessage) -> Result<(), String> {
-    let network_id = std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "mainnet2026.2".to_string());
+    let network_id = std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "mainnet-genesis".to_string());
     let topic = format!("/qnk/{}/email", network_id);
 
     let email_bytes = serde_json::to_vec(email).map_err(|e| format!("Serialize error: {}", e))?;

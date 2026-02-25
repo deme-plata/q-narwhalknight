@@ -1,0 +1,166 @@
+import { Theme } from "theme.slint";
+
+export component UpdateBar inherits Rectangle {
+    // State: 0=hidden, 1=available, 2=downloading, 3=ready, 4=error
+    in property <int> update-state: 0;
+    in property <string> update-version: "";
+    in property <float> update-progress: 0;   // 0.0 to 1.0
+    in property <string> update-status: "";    // e.g. "4.2/16.0 MB"
+    in property <string> update-error: "";
+
+    callback start-download();
+    callback restart-now();
+    callback dismiss-error();
+
+    property <bool> shown: update-state > 0;
+    height: shown ? 44px : 0px;
+    clip: true;
+    background: Theme.bg-secondary;
+    border-width: shown ? 1px : 0px;
+    border-color: Theme.border;
+    opacity: shown ? 1.0 : 0.0;
+    animate height { duration: 250ms; easing: ease-out; }
+    animate opacity { duration: 250ms; }
+
+    // Progress fill (downloading state)
+    if update-state == 2 : Rectangle {
+        x: 0;
+        y: 0;
+        width: parent.width * clamp(root.update-progress, 0, 1);
+        height: parent.height;
+        background: Theme.accent-purple.with-alpha(0.15);
+        animate width { duration: 300ms; }
+    }
+
+    // Ready state green fill
+    if update-state == 3 : Rectangle {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: parent.height;
+        background: Theme.accent-green.with-alpha(0.08);
+    }
+
+    HorizontalLayout {
+        padding-left: Theme.spacing-md;
+        padding-right: Theme.spacing-sm;
+        spacing: Theme.spacing-sm;
+        alignment: space-between;
+
+        // Left side: status dot + text
+        HorizontalLayout {
+            spacing: Theme.spacing-sm;
+            vertical-stretch: 0;
+
+            // Status dot
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 8px;
+                    height: 8px;
+                    border-radius: 4px;
+                    background: root.update-state == 1 ? Theme.accent-purple :
+                                root.update-state == 2 ? Theme.accent-purple :
+                                root.update-state == 3 ? Theme.accent-green :
+                                root.update-state == 4 ? Theme.accent-red :
+                                transparent;
+                    animate background { duration: 200ms; }
+                }
+            }
+
+            // Status text
+            VerticalLayout {
+                alignment: center;
+                Text {
+                    text: root.update-state == 1 ? "Update v" + root.update-version + " available" :
+                          root.update-state == 2 ? "Downloading... " + root.update-status :
+                          root.update-state == 3 ? "v" + root.update-version + " ready!" :
+                          root.update-state == 4 ? root.update-error :
+                          "";
+                    color: root.update-state == 4 ? Theme.accent-red :
+                           root.update-state == 3 ? Theme.accent-green :
+                           Theme.text-primary;
+                    font-size: Theme.font-sm;
+                    overflow: elide;
+                }
+            }
+        }
+
+        // Right side: action button
+        VerticalLayout {
+            alignment: center;
+
+            // Available: [Update] button
+            if root.update-state == 1 : Rectangle {
+                width: 72px;
+                height: 28px;
+                border-radius: Theme.radius-sm;
+                background: touch-update.has-hover ? Theme.accent-purple.darker(15%) : Theme.accent-purple;
+                animate background { duration: 150ms; }
+
+                touch-update := TouchArea {
+                    clicked => { root.start-download(); }
+                }
+                Text {
+                    text: "Update";
+                    color: Theme.text-primary;
+                    font-size: Theme.font-sm;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            // Downloading: percentage text
+            if root.update-state == 2 : Text {
+                text: round(root.update-progress * 100) + "%";
+                color: Theme.accent-purple;
+                font-size: Theme.font-sm;
+                font-weight: 600;
+                horizontal-alignment: center;
+            }
+
+            // Ready: [Restart] button
+            if root.update-state == 3 : Rectangle {
+                width: 72px;
+                height: 28px;
+                border-radius: Theme.radius-sm;
+                background: touch-restart.has-hover ? Theme.accent-green.darker(15%) : Theme.accent-green;
+                animate background { duration: 150ms; }
+
+                touch-restart := TouchArea {
+                    clicked => { root.restart-now(); }
+                }
+                Text {
+                    text: "Restart";
+                    color: Theme.text-primary;
+                    font-size: Theme.font-sm;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            // Error: [Retry] button
+            if root.update-state == 4 : Rectangle {
+                width: 60px;
+                height: 28px;
+                border-radius: Theme.radius-sm;
+                background: touch-retry.has-hover ? Theme.accent-red.darker(15%) : Theme.accent-red.with-alpha(0.7);
+                animate background { duration: 150ms; }
+
+                touch-retry := TouchArea {
+                    clicked => { root.dismiss-error(); }
+                }
+                Text {
+                    text: "Retry";
+                    color: Theme.text-primary;
+                    font-size: Theme.font-sm;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}

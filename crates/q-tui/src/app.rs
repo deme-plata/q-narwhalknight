@@ -10,6 +10,8 @@ pub enum ViewMode {
     Dashboard,
     FullLogs,
     Network,
+    Stats,
+    Physics,
     Menu,
     Bounty,
 }
@@ -184,6 +186,12 @@ impl App {
             KeyCode::Char('b') | KeyCode::Char('B') => {
                 self.view_mode = ViewMode::Bounty;
             }
+            KeyCode::Char('s') | KeyCode::Char('S') => {
+                self.view_mode = ViewMode::Stats;
+            }
+            KeyCode::Char('f') | KeyCode::Char('F') => {
+                self.view_mode = ViewMode::Physics;
+            }
             KeyCode::Char('p') | KeyCode::Char('P') => {
                 self.logs_paused = !self.logs_paused;
             }
@@ -236,7 +244,9 @@ impl App {
         self.view_mode = match self.view_mode {
             ViewMode::Dashboard => ViewMode::FullLogs,
             ViewMode::FullLogs => ViewMode::Network,
-            ViewMode::Network => ViewMode::Bounty,
+            ViewMode::Network => ViewMode::Stats,
+            ViewMode::Stats => ViewMode::Physics,
+            ViewMode::Physics => ViewMode::Bounty,
             ViewMode::Bounty => ViewMode::Dashboard,
             ViewMode::Menu => ViewMode::Dashboard,
         };

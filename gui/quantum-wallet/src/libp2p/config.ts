@@ -6,12 +6,8 @@
  */
 
 // Network configuration
-// v7.3.2-browser: Auto-detect network based on current time
-// Before Feb 22, 2026 12:00 UTC → mainnet2026.1.1 (rehearsal)
-// After Feb 22, 2026 12:00 UTC → mainnet2026.2 (production)
-export const NETWORK_ID = Date.now() / 1000 >= 1771761600
-  ? 'mainnet2026.2'
-  : 'mainnet2026.1.1'
+// v8.1.6: mainnet-genesis — production mainnet (Feb 22, 2026 12:00 UTC)
+export const NETWORK_ID = 'mainnet-genesis'
 export const PROTOCOL_VERSION = '6.6.0'
 
 /**
@@ -27,10 +23,10 @@ export const BOOTSTRAP_PEERS = [
   // Server Beta (EU) - WebSocket Bootstrap
   // Port 9443: nginx WSS proxy → libp2p WebSocket listener on port 9001
   // PeerID: will be updated after Mainnet servers start (Mainnet)
-  '/dns4/quillon.xyz/tcp/9443/wss/p2p/12D3KooWBHTC9FhwwXmvH7YA17YHTLdcxbtLWg2U5xEtxSeqX7jc',
+  '/dns4/quillon.xyz/tcp/9443/wss/p2p/12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH',
 
   // TODO: Fix Tor bridge on port 9444 (websockify → SOCKS5 → Tor)
-  // '/dns4/quillon.xyz/tcp/9444/wss/p2p/12D3KooWBHTC9FhwwXmvH7YA17YHTLdcxbtLWg2U5xEtxSeqX7jc',
+  // '/dns4/quillon.xyz/tcp/9444/wss/p2p/12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH',
 ]
 
 /**

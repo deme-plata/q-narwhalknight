@@ -169,7 +169,7 @@ export function decodeBlock(data: Uint8Array): QBlock | null {
 
       height = headerArray[0] || 0
       phase = headerArray[1] || 19
-      networkId = headerArray[2] || (Date.now() / 1000 >= 1771761600 ? 'mainnet2026.2' : 'mainnet2026.1.1')
+      networkId = headerArray[2] || ('mainnet-genesis')
       prevBlockHash = headerArray[3] || []
       solutionsRoot = headerArray[4] || []
       txRoot = headerArray[5] || []
@@ -205,7 +205,7 @@ export function decodeBlock(data: Uint8Array): QBlock | null {
 
       height = headerObj.height || 0
       phase = headerObj.phase || 19
-      networkId = headerObj.network_id || (Date.now() / 1000 >= 1771761600 ? 'mainnet2026.2' : 'mainnet2026.1.1')
+      networkId = headerObj.network_id || ('mainnet-genesis')
       prevBlockHash = headerObj.prev_block_hash || []
       solutionsRoot = headerObj.solutions_root || []
       txRoot = headerObj.tx_root || []
@@ -527,7 +527,7 @@ export function decodeBlock(data: Uint8Array): QBlock | null {
         header: {
           height: parsed.header?.height || 0,
           phase: parsed.header?.phase || 5,
-          networkId: parsed.header?.network_id || (Date.now() / 1000 >= 1771761600 ? 'mainnet2026.2' : 'mainnet2026.1.1'),
+          networkId: parsed.header?.network_id || ('mainnet-genesis'),
           prevBlockHash: hexToUint8Array(parsed.header?.prev_block_hash || ''),
           solutionsRoot: hexToUint8Array(parsed.header?.solutions_root || ''),
           txRoot: hexToUint8Array(parsed.header?.tx_root || ''),

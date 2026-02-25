@@ -2,23 +2,25 @@ import { Theme } from "theme.slint";
 import { LoginScreen } from "login.slint";
 import { DashboardScreen, TokenInfo } from "dashboard.slint";
 import { ReceiveScreen } from "receive.slint";
-import { SendScreen } from "send.slint";
+import { SendScreen, AddressEntry } from "send.slint";
 import { HistoryScreen, TxRecord } from "history.slint";
 import { MinerScreen } from "miner.slint";
 import { SyncBar } from "sync_bar.slint";
+import { UpdateBar } from "update_bar.slint";
 import { NavButton } from "theme.slint";
+import { OAuthConsentScreen, OAuthScope } from "oauth_consent.slint";
 
-export { TokenInfo, TxRecord }
+export { TokenInfo, TxRecord, OAuthScope, AddressEntry }
 
 export component AppWindow inherits Window {
     title: "Q-NarwhalKnight Wallet";
-    min-width: 420px;
-    min-height: 680px;
-    preferred-width: 460px;
-    preferred-height: 780px;
+    min-width: 440px;
+    min-height: 720px;
+    preferred-width: 480px;
+    preferred-height: 820px;
     background: Theme.bg-primary;
 
-    // Screen state: 0=login, 1=dashboard, 2=send, 3=history, 4=miner, 5=receive
+    // Screen state: 0=login, 1=dashboard, 2=send, 3=history, 4=miner, 5=receive, 6=oauth-consent
     in-out property <int> active-screen: 0;
 
     // Login properties
@@ -33,10 +35,23 @@ export component AppWindow inherits Window {
     in property <string> qug-value-usd: "$0.00";
     in property <[TokenInfo]> tokens: [];
 
+    // Dashboard state
+    in-out property <bool> copy-feedback: false;
+
     // Send properties
     in property <string> send-balance-display: "0.00 QUG";
     in-out property <string> send-status: "";
     in property <bool> sending: false;
+    in property <bool> needs-seed-phrase: false;
+    in property <[AddressEntry]> address-book: [];
+    in-out property <bool> show-send-confirm: false;
+    in property <string> confirm-amount: "";
+    in property <[string]> available-tokens: ["QUG"];
+    in-out property <string> selected-token: "QUG";
+    in property <string> confirm-recipient: "";
+    in-out property <bool> contact-saved: false;
+    in property <string> current-fee: "0.001";
+    in property <string> fee-tier: "FAST";
 
     // History properties
     in property <[TxRecord]> transactions: [];
@@ -48,6 +63,9 @@ export component AppWindow inherits Window {
     in property <string> blocks-found: "0";
     in property <string> difficulty: "N/A";
     in property <string> reward-per-block: "0";
+    in property <string> miner-status: "";
+    in property <string> thread-count: "0";
+    in-out property <bool> pool-mode: false;
 
     // Receive / QR code properties
     in property <image> qr-code-image;
@@ -58,14 +76,38 @@ export component AppWindow inherits Window {
     in property <string> network-height: "0";
     in property <float> sync-percent: 0;
 
+    // OAuth consent properties
+    in property <string> oauth-client-name: "";
+    in property <string> oauth-client-id: "";
+    in property <[OAuthScope]> oauth-scopes: [];
+    in property <string> oauth-redirect-uri: "";
+
+    // Auto-update properties
+    in property <int> update-state: 0;          // 0=hidden, 1=available, 2=downloading, 3=ready, 4=error
+    in property <string> update-version: "";
+    in property <float> update-progress: 0;
+    in property <string> update-status: "";
+    in property <string> update-error: "";
+    callback start-update-download();
+    callback restart-for-update();
+    callback dismiss-update-error();
+
     // Callbacks
     callback create-wallet();
     callback import-wallet(string);
     callback confirm-created();
-    callback send-transaction(string, string, string);
+    callback send-transaction(string, string, string, string);
     callback refresh-history();
     callback toggle-mining();
     callback copy-address();
+    callback oauth-approve();
+    callback oauth-deny();
+    callback open-oauth-browser();
+    callback save-contact(string, string);
+    callback load-address-book();
+    callback send-token(string);
+    callback select-token(string);
+    callback copy-text(string);
 
     VerticalLayout {
         // Main content area
@@ -81,6 +123,7 @@ export component AppWindow inherits Window {
                 create-wallet => { root.create-wallet(); }
                 import-wallet(m) => { root.import-wallet(m); }
                 confirm-created => { root.confirm-created(); }
+                open-oauth-browser => { root.open-oauth-browser(); }
             }
 
             if root.active-screen == 1 : DashboardScreen {
@@ -88,20 +131,40 @@ export component AppWindow inherits Window {
                 qug-balance: root.qug-balance;
                 qug-value-usd: root.qug-value-usd;
                 tokens: root.tokens;
+                copy-feedback: root.copy-feedback;
 
-                navigate(screen) => { root.active-screen = screen; }
+                navigate(screen) => {
+                    root.active-screen = screen;
+                    if screen == 3 { root.refresh-history(); }
+                    if screen == 2 { root.load-address-book(); }
+                }
                 copy-address => { root.copy-address(); }
+                send-token(symbol) => { root.send-token(symbol); }
             }
 
             if root.active-screen == 2 : SendScreen {
                 balance-display: root.send-balance-display;
                 status-message <=> root.send-status;
                 sending: root.sending;
+                needs-seed-phrase: root.needs-seed-phrase;
+                contacts: root.address-book;
+                show-confirm <=> root.show-send-confirm;
+                confirm-amount: root.confirm-amount;
+                confirm-recipient: root.confirm-recipient;
+                contact-saved <=> root.contact-saved;
+                available-tokens: root.available-tokens;
+                selected-token <=> root.selected-token;
+                current-fee: root.current-fee;
+                fee-tier: root.fee-tier;
 
                 send-transaction => {
-                    root.send-transaction(self.recipient, self.amount, self.memo);
+                    root.send-transaction(self.recipient, self.amount, self.memo, self.seed-phrase);
                 }
                 go-back => { root.active-screen = 1; }
+                save-contact => {
+                    root.save-contact(self.recipient, self.contact-label);
+                }
+                select-token(symbol) => { root.select-token(symbol); }
             }
 
             if root.active-screen == 3 : HistoryScreen {
@@ -110,6 +173,7 @@ export component AppWindow inherits Window {
 
                 go-back => { root.active-screen = 1; }
                 refresh => { root.refresh-history(); }
+                copy-text(text) => { root.copy-text(text); }
             }
 
             if root.active-screen == 4 : MinerScreen {
@@ -119,6 +183,9 @@ export component AppWindow inherits Window {
                 difficulty: root.difficulty;
                 reward-per-block: root.reward-per-block;
                 miner-address: root.wallet-address;
+                miner-status: root.miner-status;
+                thread-count: root.thread-count;
+                pool-mode <=> root.pool-mode;
 
                 toggle-mining => { root.toggle-mining(); }
                 go-back => { root.active-screen = 1; }
@@ -132,11 +199,22 @@ export component AppWindow inherits Window {
                 copy-address => { root.copy-address(); }
                 go-back => { root.active-screen = 1; }
             }
+
+            if root.active-screen == 6 : OAuthConsentScreen {
+                client-name: root.oauth-client-name;
+                client-id: root.oauth-client-id;
+                scopes: root.oauth-scopes;
+                wallet-address: root.wallet-address;
+                redirect-uri: root.oauth-redirect-uri;
+
+                approve => { root.oauth-approve(); }
+                deny => { root.oauth-deny(); }
+            }
         }
 
         // Bottom nav bar (only shown when logged in)
         if root.active-screen > 0 : HorizontalLayout {
-            height: 44px;
+            height: 52px;
             padding-left: Theme.spacing-sm;
             padding-right: Theme.spacing-sm;
             spacing: Theme.spacing-xs;
@@ -157,13 +235,13 @@ export component AppWindow inherits Window {
                 label: "Send";
                 active: root.active-screen == 2;
                 horizontal-stretch: 1;
-                clicked => { root.active-screen = 2; }
+                clicked => { root.active-screen = 2; root.load-address-book(); }
             }
             NavButton {
                 label: "History";
                 active: root.active-screen == 3;
                 horizontal-stretch: 1;
-                clicked => { root.active-screen = 3; }
+                clicked => { root.active-screen = 3; root.refresh-history(); }
             }
             NavButton {
                 label: "Miner";
@@ -179,6 +257,19 @@ export component AppWindow inherits Window {
             current-height: root.current-height;
             network-height: root.network-height;
             sync-percent: root.sync-percent;
+        }
+
+        // Auto-update bar (below sync bar, only shown when update available)
+        if root.active-screen > 0 : UpdateBar {
+            update-state: root.update-state;
+            update-version: root.update-version;
+            update-progress: root.update-progress;
+            update-status: root.update-status;
+            update-error: root.update-error;
+
+            start-download => { root.start-update-download(); }
+            restart-now => { root.restart-for-update(); }
+            dismiss-error => { root.dismiss-update-error(); }
         }
     }
 }

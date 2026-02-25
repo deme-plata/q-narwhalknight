@@ -217,7 +217,7 @@ mod tests {
 
     #[test]
     fn test_all_topics() {
-        let topics = PoolTopics::new("mainnet2026.2");
+        let topics = PoolTopics::new("mainnet-genesis");
         let all = topics.all_topics();
 
         // v2.3.5-beta: Now 11 topics (8 original + 3 share ledger topics)

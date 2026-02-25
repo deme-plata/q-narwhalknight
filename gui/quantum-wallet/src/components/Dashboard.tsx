@@ -136,7 +136,7 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend }: DashboardProps) 
     // v6.5.0: Phase-aware cache clearing — purge stale balances on network phase change
     try {
       const lastPhase = localStorage.getItem('lastNetworkPhase');
-      const currentPhase = 'mainnet2026.2';
+      const currentPhase = 'mainnet2026.1.3';
       if (lastPhase && lastPhase !== currentPhase) {
         console.log(`🔄 Phase transition detected: ${lastPhase} → ${currentPhase}. Clearing balance caches.`);
         localStorage.removeItem('cachedBalance');
@@ -246,11 +246,9 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend }: DashboardProps) 
         if (value > (highestKnownBalancesRef.current['QUG'] || 0)) {
           highestKnownBalancesRef.current['QUG'] = value;
         }
-        // IMMEDIATELY dispatch to App.tsx - don't wait for API
-        console.log('🚀 [INSTANT SYNC] Dispatching cached balance to App.tsx on mount:', value);
-        window.dispatchEvent(new CustomEvent('balance-update', {
-          detail: { balance: value, source: 'Dashboard.mount.instant' }
-        }));
+        // v8.1.6: Removed — App.tsx reads cachedBalance from localStorage directly on mount.
+        // Dispatching balance-update here caused zigzag by competing with App.tsx SSE updates.
+        console.log('ℹ️ [Dashboard] Cached balance on mount:', value, '(App.tsx reads it directly)');
       }
     }
   }, []); // Run once on mount
@@ -305,7 +303,7 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend }: DashboardProps) 
 
   // v7.1.4: Show welcome modal only ONCE. Versioned key + no polling interval.
   useEffect(() => {
-    const key = 'mainnet2026.2_welcomed_v2';
+    const key = 'mainnet-genesis_welcomed_v2';
     if (localStorage.getItem(key) || localStorage.getItem('mainnetWelcomeSeen')) {
       // Already seen — mark both keys (belt-and-suspenders) and bail
       localStorage.setItem(key, 'true');
@@ -346,16 +344,19 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend }: DashboardProps) 
     fetchUnread();
     const interval = setInterval(fetchUnread, 60000); // refresh every 60s as fallback
 
+    // v8.2.10: Always re-fetch authoritative count from API instead of
+    // blind +1/-1. SSE email-received events are broadcast to ALL connected
+    // clients (not filtered per-wallet), so incrementing caused phantom
+    // badges for emails meant for other users or already-read emails.
     const handleEmailReceived = () => {
-      setUnreadEmailCount(prev => prev + 1);
+      fetchUnread();
     };
     const handleUnreadCount = (e: Event) => {
       const detail = (e as CustomEvent).detail;
       if (detail?.count !== undefined) setUnreadEmailCount(detail.count);
     };
     const handleEmailRead = () => {
-      // When user reads an email inside EmailScreen, decrement
-      setUnreadEmailCount(prev => Math.max(0, prev - 1));
+      fetchUnread();
     };
 
     window.addEventListener('email-received', handleEmailReceived);
@@ -712,17 +713,25 @@ Provide a brief analysis (under 250 tokens) covering:
         savedHistory = {};
       }
 
-      // Merge saved history with new data point
+      // Merge saved history with new data point (deduplicate tiny changes)
       const qugSavedHistory = savedHistory['QUG'] || [];
-      let qugHistory: BalanceHistoryPoint[] = [
-        ...qugSavedHistory,
-        { timestamp: now, balance: qugBalance }
-      ].slice(-20); // Keep last 20 points
+      const qugLastPoint = qugSavedHistory[qugSavedHistory.length - 1];
+      let qugHistory: BalanceHistoryPoint[];
+      // Only add a new point if balance changed by >0.5% or >10s since last point
+      const qugShouldAdd = !qugLastPoint
+        || (qugLastPoint.balance > 0 && Math.abs(qugBalance - qugLastPoint.balance) / qugLastPoint.balance > 0.005)
+        || (qugLastPoint.balance === 0 && qugBalance > 0)
+        || (now - qugLastPoint.timestamp > 10000 && qugBalance !== qugLastPoint.balance);
+      if (qugShouldAdd) {
+        qugHistory = [...qugSavedHistory, { timestamp: now, balance: qugBalance }].slice(-20);
+      } else {
+        qugHistory = qugSavedHistory.length >= 2 ? qugSavedHistory : [...qugSavedHistory, { timestamp: now, balance: qugBalance }].slice(-20);
+      }
 
       // Ensure at least 2 points for graph rendering
       if (qugHistory.length < 2) {
         qugHistory = [
-          { timestamp: now - 60000, balance: qugBalance }, // 1 minute ago
+          { timestamp: now - 60000, balance: qugBalance },
           { timestamp: now, balance: qugBalance }
         ];
       }
@@ -897,15 +906,9 @@ Provide a brief analysis (under 250 tokens) covering:
 
       setWalletBalances(balances);
 
-      // 🚨 v2.3.7-beta: SYNC FIX - Notify App.tsx of the QUG balance update
-      // This ensures TopBar "Total Balance" stays in sync with Dashboard "My Wallets"
-      const qugWallet = balances.find(b => b.symbol === 'QUG');
-      if (qugWallet) {
-        console.log('🔄 [SYNC] Dispatching balance-update event to App.tsx:', qugWallet.balance);
-        window.dispatchEvent(new CustomEvent('balance-update', {
-          detail: { balance: qugWallet.balance, source: 'Dashboard.fetchWalletBalances' }
-        }));
-      }
+      // v8.1.6: Removed balance-update dispatch to App.tsx.
+      // App.tsx has its own SSE connection for balance updates.
+      // Dispatching from API fetch created a competing stale source causing zigzag.
     };
 
     const fetchRecentTransactionsCore = async () => {
@@ -1642,10 +1645,18 @@ Provide a brief analysis (under 250 tokens) covering:
           return wallets.map(wallet => {
             if (wallet.symbol === 'QUG') {
               console.log(`🔥 Dashboard: Updating QUG balance: ${wallet.balance} -> ${newBalance}`);
+              const prev = wallet.history || [];
+              const last = prev[prev.length - 1];
+              const pctDiff = last && last.balance > 0
+                ? Math.abs(newBalance - last.balance) / last.balance : 1;
+              // Always add for DEX swaps (big changes), skip tiny noise
+              const newHistory = (pctDiff < 0.005 && last && Date.now() - last.timestamp < 3000)
+                ? prev
+                : [...prev, { timestamp: Date.now(), balance: newBalance }].slice(-20);
               return {
                 ...wallet,
                 balance: newBalance,
-                history: [...(wallet.history || []), { timestamp: Date.now(), balance: newBalance }].slice(-20)
+                history: newHistory
               };
             }
             return wallet;
@@ -1670,24 +1681,16 @@ Provide a brief analysis (under 250 tokens) covering:
         qugusdBalance
       });
 
-      // Update walletBalances state with the cached correct values
+      // Update walletBalances state with the cached correct values (no history point for cooldown sync)
       setWalletBalances(wallets => {
         return wallets.map(wallet => {
           if (wallet.symbol === 'QUG' && qugBalance !== null && !isNaN(qugBalance)) {
             console.log(`🔄 Dashboard: Syncing QUG state after cooldown: ${wallet.balance} -> ${qugBalance}`);
-            return {
-              ...wallet,
-              balance: qugBalance,
-              history: [...(wallet.history || []), { timestamp: Date.now(), balance: qugBalance }].slice(-20)
-            };
+            return { ...wallet, balance: qugBalance };
           }
           if (wallet.symbol === 'QUGUSD' && qugusdBalance !== null && !isNaN(qugusdBalance)) {
             console.log(`🔄 Dashboard: Syncing QUGUSD state after cooldown: ${wallet.balance} -> ${qugusdBalance}`);
-            return {
-              ...wallet,
-              balance: qugusdBalance,
-              history: [...(wallet.history || []), { timestamp: Date.now(), balance: qugusdBalance }].slice(-20)
-            };
+            return { ...wallet, balance: qugusdBalance };
           }
           return wallet;
         });
@@ -1724,10 +1727,18 @@ Provide a brief analysis (under 250 tokens) covering:
   }); // Intentionally no deps - but now guarded by ref to prevent infinite loop
 
   // Listen for real-time balance updates from SSE (via App.tsx custom event)
+  // v8.0.3: Track last accepted balance per symbol to prevent zigzag from competing sources
+  const lastAcceptedBalanceRef = useRef<Record<string, { balance: number; timestamp: number }>>({});
+
   useEffect(() => {
     const handleWalletBalanceUpdate = (event: Event) => {
       const customEvent = event as CustomEvent;
-      const { symbol, balance: incomingBalance, reason } = customEvent.detail;
+      const { symbol, balance: incomingBalance, reason, infoOnly } = customEvent.detail;
+
+      // v8.0.3: Skip info-only events (pending-mining-reward uses balance-updated SSE for actual balance)
+      if (infoOnly) {
+        return;
+      }
 
       // v2.3.13-beta: DEX swaps are ALWAYS trusted - simplified logic
       const isDexSwap = reason === 'dex-swap-deduct' || reason === 'dex-swap-add';
@@ -1741,6 +1752,20 @@ Provide a brief analysis (under 250 tokens) covering:
       if (cooldownActive && !isDexSwap) {
         console.log('🚫 Dashboard: Ignoring non-DEX wallet-balance-updated during cooldown:', symbol, incomingBalance, '(global:', globalCooldownActive, ')');
         return;
+      }
+
+      // v8.0.3: Stabilizer — reject balance that goes DOWN from a recent accepted value
+      // (mining rewards should only increase, never decrease)
+      if (!isDexSwap && symbol === 'QUG') {
+        const lastAccepted = lastAcceptedBalanceRef.current[symbol];
+        if (lastAccepted && Date.now() - lastAccepted.timestamp < 5000) {
+          // Within 5s window, only accept if balance is >= last accepted (monotonic increase)
+          if (incomingBalance < lastAccepted.balance * 0.999) {
+            console.log(`🚫 Dashboard: Rejecting balance decrease within 5s window: ${incomingBalance} < ${lastAccepted.balance}`);
+            return;
+          }
+        }
+        lastAcceptedBalanceRef.current[symbol] = { balance: incomingBalance, timestamp: Date.now() };
       }
 
       console.log(`💰 Dashboard: Received wallet-balance-updated event for ${symbol}:`, incomingBalance, 'Reason:', reason, 'isDexSwap:', isDexSwap);
@@ -1769,8 +1794,10 @@ Provide a brief analysis (under 250 tokens) covering:
                 history: (() => {
                   const prev = wallet.history || [];
                   const last = prev[prev.length - 1];
-                  // Deduplicate: skip if same balance or within 500ms
-                  if (last && (last.balance === incomingBalance || Date.now() - last.timestamp < 500)) {
+                  const pctDiff = last && last.balance > 0
+                    ? Math.abs(incomingBalance - last.balance) / last.balance : 1;
+                  // Skip if <0.5% change and within 3s (DEX swaps are always big changes)
+                  if (last && pctDiff < 0.005 && Date.now() - last.timestamp < 3000) {
                     return prev;
                   }
                   return [...prev, { timestamp: Date.now(), balance: incomingBalance }].slice(-20);
@@ -1785,8 +1812,9 @@ Provide a brief analysis (under 250 tokens) covering:
         setBalanceHistory(prev => {
           const history = prev[symbol] || [];
           const last = history[history.length - 1];
-          // Deduplicate: skip if same balance or within 500ms
-          if (last && (last.balance === incomingBalance || Date.now() - last.timestamp < 500)) {
+          const pctDiff = last && last.balance > 0
+            ? Math.abs(incomingBalance - last.balance) / last.balance : 1;
+          if (last && pctDiff < 0.005 && Date.now() - last.timestamp < 3000) {
             return prev;
           }
           const newPoint: BalanceHistoryPoint = { timestamp: Date.now(), balance: incomingBalance };
@@ -1828,15 +1856,23 @@ Provide a brief analysis (under 250 tokens) covering:
       setBalanceHistory(prev => {
         const history = prev[symbol] || [];
         const last = history[history.length - 1];
-        // Deduplicate: skip if same balance or within 500ms
-        if (last && (last.balance === validatedBalance || Date.now() - last.timestamp < 500)) {
-          return prev;
+        // Deduplicate: skip if <0.5% change and within 5s (mining rewards are tiny increments)
+        if (last) {
+          const pctDiff = last.balance > 0
+            ? Math.abs(validatedBalance - last.balance) / last.balance : (validatedBalance !== last.balance ? 1 : 0);
+          if (pctDiff < 0.005 && Date.now() - last.timestamp < 5000) {
+            // Still update the displayed balance, just don't add a history point
+            setWalletBalances(wallets => wallets.map(wallet =>
+              wallet.symbol === symbol ? { ...wallet, balance: validatedBalance } : wallet
+            ));
+            return prev;
+          }
         }
         const newPoint: BalanceHistoryPoint = {
           timestamp: Date.now(),
           balance: validatedBalance
         };
-        const updatedHistory = [...history, newPoint].slice(-20); // Keep last 20 points
+        const updatedHistory = [...history, newPoint].slice(-20);
         const newHistoryState = { ...prev, [symbol]: updatedHistory };
 
         // Save to localStorage
@@ -2022,10 +2058,20 @@ Provide a brief analysis (under 250 tokens) covering:
         console.log('🔄 Refresh using best balance:', qugBalance, '(highest:', previousHighest, ', cached:', cachedValue, ', node:', nodeBalance, ')');
 
         const now = Date.now();
-        const qugHistory: BalanceHistoryPoint[] = [
-          { timestamp: now - 60000, balance: qugBalance }, // 1 minute ago
-          { timestamp: now, balance: qugBalance }
-        ];
+        // Preserve existing history instead of wiping it
+        let savedHistory: Record<string, BalanceHistoryPoint[]> = {};
+        try {
+          const saved = localStorage.getItem('walletBalanceHistory');
+          savedHistory = saved ? JSON.parse(saved) : {};
+        } catch { savedHistory = {}; }
+
+        const qugSaved = savedHistory['QUG'] || [];
+        const qugLast = qugSaved[qugSaved.length - 1];
+        // Only add point if meaningfully different
+        const qugNeedNew = !qugLast || Math.abs(qugBalance - qugLast.balance) / Math.max(qugLast.balance, 0.001) > 0.005;
+        const qugHistory = qugNeedNew
+          ? [...qugSaved, { timestamp: now, balance: qugBalance }].slice(-20)
+          : (qugSaved.length >= 2 ? qugSaved : [{ timestamp: now - 60000, balance: qugBalance }, { timestamp: now, balance: qugBalance }]);
 
         const balances: WalletBalance[] = [
           {
@@ -2034,11 +2080,11 @@ Provide a brief analysis (under 250 tokens) covering:
             balance: qugBalance,
             icon: 'qug',
             color: 'from-amber-400 to-yellow-500',
-            history: qugHistory  // Add history directly
+            history: qugHistory
           }
         ];
 
-        console.log('📊 Initialized QUG with balance history:', qugHistory.length, 'points');
+        console.log('📊 Refresh QUG with history:', qugHistory.length, 'points (preserved:', qugSaved.length, ')');
 
         // Fetch USD balance
         try {
@@ -2054,10 +2100,12 @@ Provide a brief analysis (under 250 tokens) covering:
               const usdValue = parseFloat(data.data.balance_usd || '0');
               setUsdBalance(usdValue);
 
-              const usdHistory: BalanceHistoryPoint[] = [
-                { timestamp: now - 60000, balance: usdValue },
-                { timestamp: now, balance: usdValue }
-              ];
+              const usdSaved = savedHistory['USD'] || [];
+              const usdLast = usdSaved[usdSaved.length - 1];
+              const usdNeedNew = !usdLast || Math.abs(usdValue - usdLast.balance) > 0.01;
+              const usdHistory = usdNeedNew
+                ? [...usdSaved, { timestamp: now, balance: usdValue }].slice(-20)
+                : (usdSaved.length >= 2 ? usdSaved : [{ timestamp: now - 60000, balance: usdValue }, { timestamp: now, balance: usdValue }]);
 
               balances.push({
                 symbol: 'USD',
@@ -2065,10 +2113,10 @@ Provide a brief analysis (under 250 tokens) covering:
                 balance: usdValue,
                 icon: 'usd',
                 color: 'from-green-400 to-emerald-500',
-                history: usdHistory  // Add history directly
+                history: usdHistory
               });
 
-              console.log('📊 Initialized USD with balance history:', usdHistory.length, 'points');
+              console.log('📊 Refresh USD with history:', usdHistory.length, 'points (preserved:', usdSaved.length, ')');
             }
           }
         } catch (error) {
@@ -2109,10 +2157,12 @@ Provide a brief analysis (under 250 tokens) covering:
 
         // Always add QUGUSD if we have a balance (cached or fetched)
         if (qugusdBalance > 0) {
-          const qugusdHistory: BalanceHistoryPoint[] = [
-            { timestamp: now - 60000, balance: qugusdBalance },
-            { timestamp: now, balance: qugusdBalance }
-          ];
+          const qugusdSaved = savedHistory['QUGUSD'] || [];
+          const qugusdLast = qugusdSaved[qugusdSaved.length - 1];
+          const qugusdNeedNew = !qugusdLast || Math.abs(qugusdBalance - qugusdLast.balance) > 0.01;
+          const qugusdHistory = qugusdNeedNew
+            ? [...qugusdSaved, { timestamp: now, balance: qugusdBalance }].slice(-20)
+            : (qugusdSaved.length >= 2 ? qugusdSaved : [{ timestamp: now - 60000, balance: qugusdBalance }, { timestamp: now, balance: qugusdBalance }]);
 
           balances.push({
             symbol: 'QUGUSD',
@@ -2123,7 +2173,7 @@ Provide a brief analysis (under 250 tokens) covering:
             color: 'from-blue-400 to-cyan-500',
             history: qugusdHistory
           });
-          console.log('📊 Initialized QUGUSD with balance:', qugusdBalance, 'history:', qugusdHistory.length, 'points');
+          console.log('📊 Refresh QUGUSD with history:', qugusdBalance, '(preserved:', qugusdSaved.length, 'points)');
         }
 
         // Bridge wallets (with empty history to prevent "Loading..." display)
@@ -2174,14 +2224,8 @@ Provide a brief analysis (under 250 tokens) covering:
 
         setWalletBalances(balances);
 
-        // 🚨 v2.3.7-beta: SYNC FIX - Notify App.tsx of the QUG balance update
-        const qugWallet = balances.find(b => b.symbol === 'QUG');
-        if (qugWallet) {
-          console.log('🔄 [SYNC] Dispatching balance-update from refresh:', qugWallet.balance);
-          window.dispatchEvent(new CustomEvent('balance-update', {
-            detail: { balance: qugWallet.balance, source: 'Dashboard.refreshTrigger' }
-          }));
-        }
+        // v8.1.6: Removed balance-update dispatch to App.tsx (causes zigzag).
+        // App.tsx SSE handles balance updates directly.
       };
 
       refresh();

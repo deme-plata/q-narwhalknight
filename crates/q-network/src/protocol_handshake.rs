@@ -65,6 +65,12 @@ pub struct ProtocolHandshake {
 
     /// Current active crypto phase
     pub active_crypto_phase: CryptoPhase,
+
+    /// v8.4.0: Self-reported bandwidth tier (Mbps) for sync peer selection
+    /// 0 = unknown, 100 = 100Mbps, 1000 = 1Gbps, etc.
+    /// Used by gravity-assist to prefer high-bandwidth peers for sync
+    #[serde(default)]
+    pub bandwidth_tier_mbps: u32,
 }
 
 impl ProtocolHandshake {
@@ -97,7 +103,7 @@ impl ProtocolHandshake {
             build_timestamp,
             build_date,
             network_id: std::env::var("Q_NETWORK_ID")
-                .unwrap_or_else(|_| "mainnet2026.2".to_string()),
+                .unwrap_or_else(|_| "mainnet-genesis".to_string()),
             features: vec![
                 "turbo-sync".to_string(),
                 "balance-consensus".to_string(),
@@ -108,6 +114,11 @@ impl ProtocolHandshake {
             ],
             supported_crypto_phases,
             active_crypto_phase,
+            // v8.4.0: Self-reported bandwidth for sync peer selection
+            bandwidth_tier_mbps: std::env::var("Q_BANDWIDTH_MBPS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0), // 0 = unknown (backward-compatible with old nodes)
         }
     }
 
@@ -251,7 +262,7 @@ mod tests {
             supported_turbo_sync_versions: vec![0, 1],
             build_timestamp: 1234567890,
             build_date: "2024-01-01 00:00:00 UTC".to_string(),
-            network_id: "mainnet2026.2".to_string(),
+            network_id: "mainnet-genesis".to_string(),
             features: vec!["turbo-sync".to_string()],
             supported_crypto_phases: vec![CryptoPhase::Phase0],
             active_crypto_phase: CryptoPhase::Phase0,
@@ -263,7 +274,7 @@ mod tests {
             supported_turbo_sync_versions: vec![0], // Only supports OLD format
             build_timestamp: 1234567000,
             build_date: "2024-01-01 00:00:00 UTC".to_string(),
-            network_id: "mainnet2026.2".to_string(),
+            network_id: "mainnet-genesis".to_string(),
             features: vec!["turbo-sync".to_string()],
             supported_crypto_phases: vec![CryptoPhase::Phase0],
             active_crypto_phase: CryptoPhase::Phase0,
@@ -275,7 +286,7 @@ mod tests {
             supported_turbo_sync_versions: vec![0, 1], // Supports both
             build_timestamp: 1234567890,
             build_date: "2024-01-01 00:00:00 UTC".to_string(),
-            network_id: "mainnet2026.2".to_string(),
+            network_id: "mainnet-genesis".to_string(),
             features: vec!["turbo-sync".to_string()],
             supported_crypto_phases: vec![CryptoPhase::Phase0],
             active_crypto_phase: CryptoPhase::Phase0,
@@ -320,7 +331,7 @@ mod tests {
             supported_turbo_sync_versions: vec![1], // Only NEW format
             build_timestamp: 1234567890,
             build_date: "2024-01-01 00:00:00 UTC".to_string(),
-            network_id: "mainnet2026.2".to_string(),
+            network_id: "mainnet-genesis".to_string(),
             features: vec!["turbo-sync".to_string()],
             supported_crypto_phases: vec![CryptoPhase::Phase0],
             active_crypto_phase: CryptoPhase::Phase0,
@@ -332,7 +343,7 @@ mod tests {
             supported_turbo_sync_versions: vec![0], // Only OLD format
             build_timestamp: 1234567000,
             build_date: "2024-01-01 00:00:00 UTC".to_string(),
-            network_id: "mainnet2026.2".to_string(),
+            network_id: "mainnet-genesis".to_string(),
             features: vec!["turbo-sync".to_string()],
             supported_crypto_phases: vec![CryptoPhase::Phase0],
             active_crypto_phase: CryptoPhase::Phase0,

@@ -37,17 +37,34 @@ const MiniGraph = memo(function MiniGraph({
   width?: number;
   height?: number;
 }) {
-  const { path, gradient, trend, percentChange } = useMemo(() => {
+  const { path, gradient, trend, percentChange, plotData } = useMemo(() => {
     if (data.length < 2) {
-      return { path: '', gradient: '', trend: 0, percentChange: 0 };
+      return { path: '', gradient: '', trend: 0, percentChange: 0, plotData: [] as BalanceHistoryPoint[] };
     }
 
-    // Sort by timestamp and deduplicate consecutive same-balance points
+    // Sort by timestamp and deduplicate near-identical balance points
+    // This prevents zigzag from tiny mining increments
     const sorted = [...data].sort((a, b) => a.timestamp - b.timestamp);
-    const deduped = sorted.filter((point, i) => {
-      if (i === 0) return true;
-      return point.balance !== sorted[i - 1].balance;
-    });
+    const deduped: BalanceHistoryPoint[] = [];
+    for (const point of sorted) {
+      if (deduped.length === 0) {
+        deduped.push(point);
+        continue;
+      }
+      const last = deduped[deduped.length - 1];
+      const pctDiff = last.balance > 0
+        ? Math.abs(point.balance - last.balance) / last.balance
+        : (point.balance !== last.balance ? 1 : 0);
+      // Only keep point if balance changed by >0.5% or >5 seconds apart with any change
+      if (pctDiff > 0.005 || (pctDiff > 0 && point.timestamp - last.timestamp > 5000)) {
+        deduped.push(point);
+      }
+    }
+    // Always include the latest point so graph shows current balance
+    const lastSorted = sorted[sorted.length - 1];
+    if (deduped.length > 0 && deduped[deduped.length - 1].timestamp !== lastSorted.timestamp) {
+      deduped.push(lastSorted);
+    }
     // Need at least 2 unique points
     const plotData = deduped.length >= 2 ? deduped : sorted;
     if (plotData.length < 2) {
@@ -94,7 +111,8 @@ const MiniGraph = memo(function MiniGraph({
       path: pathData,
       gradient: gradientPath,
       trend: trendDirection,
-      percentChange: pctChange
+      percentChange: pctChange,
+      plotData
     };
   }, [data, width, height]);
 
@@ -170,13 +188,14 @@ const MiniGraph = memo(function MiniGraph({
           transition={{ duration: 1, ease: "easeOut" }}
         />
 
-        {/* Glowing dots at data points */}
-        {data.map((d, i) => {
-          const x = (i / (data.length - 1)) * width;
-          const values = data.map(p => p.balance);
+        {/* Glowing dots at deduped data points (matches the path curve) */}
+        {(plotData || []).map((d, i) => {
+          const pts = plotData || [];
+          const values = pts.map(p => p.balance);
           const min = Math.min(...values);
           const max = Math.max(...values);
           const range = max - min || 1;
+          const x = (i / (pts.length - 1)) * width;
           const y = height - ((d.balance - min) / range) * (height - 10) - 5;
 
           return (

@@ -764,46 +764,23 @@ export default function AIChatScreen() {
 
   const generateChatTitle = async (chatId: string, firstMessage: string) => {
     try {
-      // Use AI to generate a concise title from the first message
-      const titlePrompt = `Generate a short 3-5 word title for a chat that starts with: "${firstMessage.substring(0, 100)}". Only respond with the title, nothing else.`;
-      const response = await fetch(`/api/chat/${chatId}/stream?content=${encodeURIComponent(titlePrompt)}&max_tokens=20`);
+      // Generate a concise title from the first message (client-side extraction)
+      // DO NOT use the /stream endpoint — it saves messages to the chat DB,
+      // which causes the title prompt + response to appear as duplicate messages.
+      const words = firstMessage.trim().split(/\s+/);
+      let generatedTitle = words.slice(0, 5).join(' ');
+      if (words.length > 5) generatedTitle += '...';
+      // Clean up: remove quotes, newlines, and excessive punctuation
+      generatedTitle = generatedTitle.replace(/[\n\r]/g, ' ').replace(/['"]/g, '').trim();
+      if (!generatedTitle) generatedTitle = 'New Chat';
 
-      if (!response.ok) return;
-
-      const reader = response.body?.getReader();
-      if (!reader) return;
-
-      let generatedTitle = '';
-      const decoder = new TextDecoder();
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        const text = decoder.decode(value);
-        const lines = text.split('\n');
-
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            try {
-              const data = JSON.parse(line.slice(6));
-              if (data.cumulative) {
-                generatedTitle = data.cumulative.trim();
-              }
-            } catch {}
-          }
-        }
-      }
-
-      // Update the chat title
-      if (generatedTitle && generatedTitle.length > 0) {
-        await fetch(`/api/chat/${chatId}/rename`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title: generatedTitle.replace(/['"]/g, '') })
-        });
-        loadChats(false); // Refresh chat list without auto-selecting
-      }
+      // Update the chat title via the rename endpoint (no messages saved)
+      await fetch(`/api/chat/${chatId}/rename`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: generatedTitle })
+      });
+      loadChats(false); // Refresh chat list without auto-selecting
     } catch (error) {
       console.error('Failed to generate title:', error);
     }
@@ -1469,7 +1446,7 @@ export default function AIChatScreen() {
             qnkAPI.getOraclePrice('QUG/USD'),
           ]);
           const qugBalance = parseFloat(balResp2.data?.balance || balResp2.data?.confirmed || '0');
-          const qugPrice = parseFloat(priceResp2.data?.price || (priceResp2 as any)?.price || '42.50');
+          const qugPrice = parseFloat(priceResp2.data?.price || (priceResp2 as any)?.price || '3000.00');
           // v7.4.1: tokens is a HashMap/Object, NOT an array
           const tokensMap2 = tokResp2.data?.tokens || {};
           let totalValueUsd = qugBalance * qugPrice;
@@ -1951,9 +1928,11 @@ Response: "I'll send a mail to **Bob** through the node's P2P messaging.\n\n[ACT
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
 
+        let currentEventType = '';
         for (const line of lines) {
           if (line.startsWith('event:')) {
-            // Event type line (started, token, complete, error)
+            // Track event type for the next data line
+            currentEventType = line.substring(6).trim();
             continue;
           }
 
@@ -1977,11 +1956,11 @@ Response: "I'll send a mail to **Bob** through the node's P2P messaging.\n\n[ACT
                 // Token event
                 cumulativeText += parsed.token;
                 setStreamingMessage(cumulativeText);
-              } else if (parsed.finish_reason) {
-                // Complete event
-                console.log(`✅ Complete: ${parsed.tokens_generated} tokens in ${parsed.total_time_ms}ms`);
+              } else if (parsed.finish_reason || currentEventType === 'complete') {
+                // Complete event — detected by finish_reason field OR event: complete SSE type
+                console.log(`✅ Complete: ${parsed.total_tokens || parsed.tokens_generated} tokens in ${parsed.total_time_ms}ms`);
                 console.log(`   Throughput: ${parsed.tokens_per_second} tok/s`);
-                console.log(`   Worker: ${parsed.worker_node}, Mode: ${parsed.mode}`);
+                console.log(`   Engine: ${parsed.engine || 'unknown'}`);
 
                 // DON'T clear streaming message yet - keep it visible while loading from DB
                 setIsGenerating(false);

@@ -62,7 +62,7 @@ impl Default for BlockProducerConfig {
             is_validator: true,
             validator_index: 0,  // Default to primary validator
             total_validators: 1, // Default to single validator
-            network_id_str: "mainnet2026.2".to_string(),
+            network_id_str: "mainnet-genesis".to_string(),
         }
     }
 }

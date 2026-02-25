@@ -1008,6 +1008,31 @@ docker exec q-test-v${VERSION} curl -s localhost:8080/api/v1/status
      # IMPORTANT: Do NOT append "-beta" to download filenames
      ```
 
+10. **SLINT WALLET AUTO-UPDATE BUILD & PUBLISH PROCEDURE**
+   - The Slint wallet has a built-in auto-updater (`gui/slint-wallet/src/updater.rs`)
+   - The server's `/api/v1/version` endpoint scans `downloads/` for `slint-wallet-v{X.Y.Z}` and returns the highest version
+   - Connected wallets check for updates ~60s after login, then every 4 hours
+   - **After every Slint wallet build, publish to downloads:**
+     ```bash
+     # 1. Build the Slint wallet
+     cargo build --release --package slint-wallet
+
+     # 2. Copy to downloads with versioned AND generic names
+     cp target/release/slint-wallet /opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads/slint-wallet-v{VERSION}
+     cp target/release/slint-wallet /opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads/slint-wallet-linux-x86_64
+     cp target/release/slint-wallet /opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads/slint-wallet-linux-x64
+     cp target/release/slint-wallet /opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads/slint-wallet
+
+     # 3. Verify
+     ls -lh /opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads/slint-wallet-v{VERSION}
+     ```
+   - **Download link (tell user after deploy):**
+     ```
+     wget https://quillon.xyz/downloads/slint-wallet-v{VERSION} && chmod +x slint-wallet-v{VERSION}
+     ```
+   - **Auto-update flow**: Server detects new `slint-wallet-v{X.Y.Z}` → wallet polls `/api/v1/version` → sees higher version → shows UpdateBar → user clicks Update → downloads + self-replaces binary → user clicks Restart
+   - **Key files**: `gui/slint-wallet/src/updater.rs`, `gui/slint-wallet/ui/update_bar.slint`, `crates/q-api-server/src/handlers.rs` (`detect_latest_wallet_version`)
+
 #### **Testing Requirements:**
 
 **🚨 MANDATORY: Run ALL critical tests before ANY deployment!**

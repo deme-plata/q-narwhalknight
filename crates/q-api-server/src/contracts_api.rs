@@ -495,6 +495,12 @@ pub fn create_contracts_router() -> Router<Arc<AppState>> {
         .route("/listing/fulfill", post(crate::listing_api::listing_fulfill))
         .route("/listing/stats", get(crate::listing_api::listing_get_stats))
         .route("/listing/confirm-stripe", post(crate::listing_api::listing_confirm_stripe))
+        // v8.2.8: XLIST Crowdfunding Campaign endpoints
+        .route("/listing/campaigns", get(crate::listing_api::campaign_list))
+        .route("/listing/campaigns/create", post(crate::listing_api::campaign_create))
+        .route("/listing/campaigns/contribute", post(crate::listing_api::campaign_contribute))
+        .route("/listing/campaigns/:id", get(crate::listing_api::campaign_details))
+        .route("/listing/campaigns/:id/my-perks", get(crate::listing_api::campaign_my_perks))
 }
 
 /// Get all available contract templates
@@ -3149,7 +3155,7 @@ pub async fn update_social_profile(
 
     // Broadcast via gossipsub to sync across nodes
     if let Some(tx) = &state.libp2p_command_tx {
-        let network_id = std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "mainnet2026.2".to_string());
+        let network_id = std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "mainnet-genesis".to_string());
         let topic = format!("/qnk/{}/token-social", network_id);
 
         let message = serde_json::json!({
@@ -3202,6 +3208,19 @@ pub struct RwaMarketplaceListing {
     pub shares_available: String,
     pub kyc_required: bool,
     pub dividend_enabled: bool,
+    // Campaign-specific fields (None for regular RWA contracts)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub campaign_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raised_usd: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_usd_num: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contributor_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub campaign_status: Option<String>,
 }
 
 /// Map a ContractType to a human-readable RWA category name
@@ -3247,7 +3266,7 @@ pub async fn get_rwa_marketplace(
         ContractType::PhysicalGoodsToken,
     ];
 
-    let listings: Vec<RwaMarketplaceListing> = contracts
+    let mut listings: Vec<RwaMarketplaceListing> = contracts
         .iter()
         .filter(|(_, contract)| rwa_types.contains(&contract.contract_type))
         .filter(|(_, contract)| {
@@ -3261,6 +3280,7 @@ pub async fn get_rwa_marketplace(
                     "art_collectible" => contract.contract_type == ContractType::ArtCollectibleToken,
                     "ip_revenue" => contract.contract_type == ContractType::IPRevenueToken,
                     "physical_goods" => contract.contract_type == ContractType::PhysicalGoodsToken,
+                    "exchange_listing" => false, // campaigns injected separately below
                     _ => true,
                 }
             } else {
@@ -3311,9 +3331,58 @@ pub async fn get_rwa_marketplace(
                     .get("dividend_enabled")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
+                campaign_id: None,
+                raised_usd: None,
+                target_usd_num: None,
+                progress_percent: None,
+                contributor_count: None,
+                campaign_status: None,
             }
         })
         .collect();
+
+    // Inject exchange listing campaigns as marketplace entries
+    if category_filter.is_none() || category_filter == Some("exchange_listing") {
+        let campaigns = state.listing_campaigns.read().await;
+        for campaign in campaigns.iter() {
+            let progress = if campaign.target_usd > 0.0 {
+                (campaign.raised_usd / campaign.target_usd * 100.0).min(100.0)
+            } else {
+                0.0
+            };
+            let remaining = (campaign.target_usd - campaign.raised_usd).max(0.0);
+            let status_str = match campaign.status {
+                crate::listing_api::CampaignStatus::Funding => "funding",
+                crate::listing_api::CampaignStatus::Funded => "funded",
+                crate::listing_api::CampaignStatus::Listed => "listed",
+                crate::listing_api::CampaignStatus::Cancelled => "cancelled",
+            };
+            let mut features = HashMap::new();
+            features.insert("crowdfund".to_string(), true);
+            features.insert("early_bird".to_string(), campaign.early_bird_claimed < campaign.early_bird_slots);
+            listings.push(RwaMarketplaceListing {
+                address: campaign.campaign_id.clone(),
+                name: format!("{} Exchange Listing", campaign.exchange_name),
+                symbol: "XLIST".to_string(),
+                contract_type: "ExchangeListing".to_string(),
+                category: "Exchange Listing".to_string(),
+                description: campaign.description.clone(),
+                deployed_at: campaign.created_at,
+                verified: true,
+                features,
+                total_value_usd: format!("{:.0}", campaign.target_usd),
+                shares_available: format!("{:.0}", remaining),
+                kyc_required: false,
+                dividend_enabled: false,
+                campaign_id: Some(campaign.campaign_id.clone()),
+                raised_usd: Some(campaign.raised_usd),
+                target_usd_num: Some(campaign.target_usd),
+                progress_percent: Some(progress),
+                contributor_count: Some(campaign.contributor_count),
+                campaign_status: Some(status_str.to_string()),
+            });
+        }
+    }
 
     Ok(Json(ApiResponse::success(listings)))
 }

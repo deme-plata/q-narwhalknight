@@ -197,7 +197,7 @@ pub struct DexApiResponse<T> {
     pub error: Option<String>,
     pub timestamp: u64,
     pub api_version: String,
-    pub network: String, // "mainnet2026.2", "testnet"
+    pub network: String, // "mainnet-genesis", "testnet"
 }
 
 impl<T> DexApiResponse<T> {
@@ -208,7 +208,7 @@ impl<T> DexApiResponse<T> {
             error: None,
             timestamp: chrono::Utc::now().timestamp() as u64,
             api_version: "1.0.0".to_string(),
-            network: "mainnet2026.2".to_string(), // TODO: Make configurable
+            network: "mainnet-genesis".to_string(), // TODO: Make configurable
         }
     }
 
@@ -219,7 +219,7 @@ impl<T> DexApiResponse<T> {
             error: Some(message),
             timestamp: chrono::Utc::now().timestamp() as u64,
             api_version: "1.0.0".to_string(),
-            network: "mainnet2026.2".to_string(),
+            network: "mainnet-genesis".to_string(),
         }
     }
 }

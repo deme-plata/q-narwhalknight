@@ -321,6 +321,8 @@ pub enum AssetType {
     QNKUSD,        // Quillon Bank USD stablecoin
     BTC,           // Bitcoin
     ETH,           // Ethereum
+    ZEC,           // Zcash (v8.2.7: bridge oracle support)
+    IRON,          // Iron Fish (v8.2.7: bridge oracle support)
     USDC,          // USD Coin
     Gold,          // Tokenized gold
     RealEstate,    // Tokenized real estate

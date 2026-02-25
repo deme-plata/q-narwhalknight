@@ -645,6 +645,37 @@ impl BalanceConsensusEngine {
                 self.add_balance_tx(tx, &miner_address, reward_amount).await
                     .map_err(|e| BalanceConsensusError::BatchOperation(e.to_string()))?;
 
+                // v8.2.9: Persistent per-wallet mining stats (blockchain-derived)
+                // These are deterministic — same blocks = same stats on ANY node.
+                // Stored alongside balances so mining stats survive restarts and
+                // are consistent across all servers in the HA cluster.
+                {
+                    const CF: &str = "manifest";
+                    let blocks_key = format!("mining_blocks_{}", miner_address);
+                    let rewards_key = format!("mining_rewards_{}", miner_address);
+
+                    // Read current values and increment
+                    let current_blocks: u64 = tx.get(CF, blocks_key.as_bytes())
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|v| if v.len() == 8 { Some(u64::from_le_bytes(v[..8].try_into().unwrap())) } else { None })
+                        .unwrap_or(0);
+                    let current_rewards: u128 = tx.get(CF, rewards_key.as_bytes())
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|v| if v.len() == 16 { Some(u128::from_le_bytes(v[..16].try_into().unwrap())) } else { None })
+                        .unwrap_or(0);
+
+                    tx.put(CF, blocks_key.as_bytes(), &(current_blocks + 1).to_le_bytes())
+                        .await
+                        .map_err(|e| BalanceConsensusError::BatchOperation(e.to_string()))?;
+                    tx.put(CF, rewards_key.as_bytes(), &(current_rewards + reward_amount).to_le_bytes())
+                        .await
+                        .map_err(|e| BalanceConsensusError::BatchOperation(e.to_string()))?;
+                }
+
                 // v6.2.4: Record daily emission for audit trail
                 {
                     let mut controller = self.emission_controller.write().await;

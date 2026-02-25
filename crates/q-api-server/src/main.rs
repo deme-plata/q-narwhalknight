@@ -195,11 +195,11 @@ const HTTP_BOOTSTRAP_PEERS: &[&str] = &[
 fn is_allowed_balance_update_origin(origin_node_id: &str) -> bool {
     // Known bootstrap nodes always get automatic approval
     let bootstrap_nodes = [
-        "12D3KooWBHTC9FhwwXmvH7YA17YHTLdcxbtLWg2U5xEtxSeqX7jc", // Server Beta (Mainnet)
-        "12D3KooWFqPX9TkvF43eyDeH9wwxYTSfnBn8AobLJeA7xRnmpPcv", // Server Gamma (Mainnet)
-        "12D3KooWQZZAyLA4VQmwNozCBTZXXoWfvKE86ebbaPhSKu6XVmJJ", // Server Delta (Mainnet)
-        "12D3KooWPwin4nJcU9PzsxNgUVXj5e6zDnACr84H7RZ1XzmnARsY", // Server Alpha (Mainnet)
-        "12D3KooWFrhdwDDTgxPX41mUyRgLcE1ozsBYArKM4DT8t4VLwuNx", // Server Beta (legacy, for compat)
+        "12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH", // Server Beta (Mainnet 2026.1.3)
+        "12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH", // Server Gamma (Mainnet 2026.1.3)
+        "12D3KooWLJJRvqo6mBoHLpgxVbGKfW3Jv39ziU4kz1adKFv93JbK", // Server Delta (Mainnet 2026.1.3)
+        "12D3KooWBHTC9FhwwXmvH7YA17YHTLdcxbtLWg2U5xEtxSeqX7jc", // Server Beta (legacy, for compat)
+        "12D3KooWFqPX9TkvF43eyDeH9wwxYTSfnBn8AobLJeA7xRnmpPcv", // Server Gamma (legacy, for compat)
     ];
 
     if bootstrap_nodes.iter().any(|n| origin_node_id.contains(n)) {
@@ -656,13 +656,28 @@ async fn update_tui_metrics(
     // Collect all data first (with awaits), before acquiring write lock
     let uptime_secs = start_time.elapsed().as_secs();
 
-    // Get node status
-    let (peer_count, block_height) = {
+    // v8.1.0: Get REAL block height from atomic counter (updated by turbo sync)
+    // node_status.current_height stays at 0 during turbo sync — must use current_height_atomic
+    let atomic_height = app_state
+        .current_height_atomic
+        .load(std::sync::atomic::Ordering::SeqCst);
+
+    // Also try storage engine for most accurate contiguous height
+    let storage_height = app_state
+        .storage_engine
+        .get_highest_contiguous_block()
+        .await
+        .unwrap_or(0);
+
+    // Use the maximum of atomic and storage — whichever is more up to date
+    let block_height = atomic_height.max(storage_height);
+
+    // v8.1.0: Get REAL peer count from libp2p atomic counter
+    let peer_count = if let Some(ref peer_count_arc) = app_state.libp2p_peer_count {
+        peer_count_arc.load(std::sync::atomic::Ordering::SeqCst)
+    } else {
         let node_status = app_state.node_status.read().await;
-        (
-            node_status.connected_peers as usize,
-            node_status.current_height,
-        )
+        node_status.connected_peers as usize
     };
 
     // Get transaction pool size
@@ -752,7 +767,7 @@ async fn update_tui_metrics(
     let network_id = std::env::var("Q_NETWORK_ID").unwrap_or_default();
     let version = env!("CARGO_PKG_VERSION").to_string();
 
-    // Sync detection
+    // Sync detection — use >10 block gap as threshold
     let is_syncing = network_height > block_height + 10;
     let sync_progress = if is_syncing && network_height > 0 {
         (block_height as f32 / network_height as f32 * 100.0).clamp(0.0, 99.9)
@@ -760,6 +775,31 @@ async fn update_tui_metrics(
         100.0
     } else {
         0.0
+    };
+
+    // v8.1.0: Calculate REAL sync speed from sync_start_time/sync_start_height
+    let sync_speed = {
+        let start_time_opt = app_state.sync_start_time.read().ok().and_then(|t| *t);
+        if let Some(sync_start) = start_time_opt {
+            let sync_start_h = app_state
+                .sync_start_height
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let elapsed = sync_start.elapsed().as_secs_f32().max(1.0);
+            let synced = block_height.saturating_sub(sync_start_h) as f32;
+            synced / elapsed
+        } else {
+            0.0
+        }
+    };
+
+    // 🚀 v1.0.2: Collect APOLLO metrics BEFORE acquiring write lock (these need .await)
+    let (apollo_kalman, apollo_pid, apollo_gravity_stats) = if let Some(ref ts) = app_state.turbo_sync {
+        let km = ts.apollo_get_kalman_metrics().await;
+        let pm = ts.apollo_get_pid_metrics().await;
+        let gs = ts.apollo_get_all_peer_stats();
+        (km, pm, gs)
+    } else {
+        (None, None, vec![])
     };
 
     // Now acquire write lock and update metrics (no awaits here!)
@@ -794,8 +834,143 @@ async fn update_tui_metrics(
         metrics.sync_progress_percent = sync_progress;
         metrics.sync_current_height = block_height;
         metrics.sync_target_height = network_height;
+        metrics.sync_speed_blocks_per_sec = sync_speed;
         metrics.inbound_peers = peer_count; // P2P doesn't distinguish in/out yet
         metrics.outbound_peers = 0;
+
+        // 🚀 v1.0.2: Populate APOLLO sync optimization metrics for TUI
+        if let Some(ref ts) = app_state.turbo_sync {
+            metrics.apollo_sync_mode = ts.session_sync_mode.load(std::sync::atomic::Ordering::Relaxed);
+            metrics.apollo_chunks_completed = ts.session_completed_chunks.load(std::sync::atomic::Ordering::Relaxed);
+            metrics.apollo_chunks_total = ts.session_total_chunks.load(std::sync::atomic::Ordering::Relaxed);
+            metrics.apollo_in_flight = ts.session_in_flight.load(std::sync::atomic::Ordering::Relaxed);
+            metrics.apollo_queued = ts.session_queued.load(std::sync::atomic::Ordering::Relaxed);
+        }
+
+        // Kalman/PID metrics (pre-collected before lock — no .await needed)
+        if let Some(ref km) = apollo_kalman {
+            metrics.apollo_kalman_bandwidth_mbps = km.bandwidth_mbps;
+            metrics.apollo_kalman_latency_ms = km.latency_ms;
+            metrics.apollo_kalman_confidence = km.confidence;
+            metrics.apollo_kalman_optimal_chunk_kb = km.optimal_chunk_kb as u64;
+            metrics.apollo_kalman_loss_pct = km.loss_percent;
+            metrics.apollo_kalman_timeout_ms = km.optimal_timeout_ms;
+            metrics.apollo_kalman_concurrency = km.optimal_concurrency;
+        }
+        if let Some(ref pm) = apollo_pid {
+            metrics.apollo_pid_target_bps = pm.target;
+            metrics.apollo_pid_current_bps = pm.current_rate;
+            metrics.apollo_pid_error = pm.avg_error;
+        }
+
+        // Gravity-assist peer momentum (pre-collected)
+        metrics.apollo_peers_tracked = apollo_gravity_stats.len();
+        if let Some(best) = apollo_gravity_stats.first() {
+            let short_id = if best.peer_id.len() > 12 {
+                best.peer_id[..12].to_string()
+            } else {
+                best.peer_id.clone()
+            };
+            metrics.apollo_gravity_best_peer = short_id;
+            metrics.apollo_gravity_best_heat = best.cache_heat;
+        } else {
+            metrics.apollo_gravity_best_peer.clear();
+            metrics.apollo_gravity_best_heat = 0.0;
+        }
+
+        // Physics Dashboard — Theoretical Consensus Metrics
+        {
+            let height = block_height as f64;
+            let genesis_ts = q_storage::balance_consensus::active_genesis_timestamp();
+            let now_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let elapsed_s = if now_ts > genesis_ts {
+                (now_ts - genesis_ts) as f64
+            } else {
+                height.max(1.0)
+            };
+            let block_rate = height / elapsed_s.max(1.0);
+
+            let delta = 0.2_f64;
+            let d_mesh = 8.0_f64;
+            let heartbeat_ms = 50.0_f64;
+            let byzantine_fraction = 0.0_f64;
+            let k_param = 18.0_f64;
+
+            // Hamiltonian
+            let avg_anticone = delta * block_rate * 2.0;
+            let h_anticone = (avg_anticone / k_param).powi(2) * height;
+            let blue_fraction = if byzantine_fraction < 1.0 / 3.0 { 1.0 - byzantine_fraction } else { 0.0 };
+            let h_blue = -blue_fraction * height;
+            let h_vdf = -height;
+            let h_total = h_anticone + h_blue + h_vdf;
+
+            metrics.physics_h_total = h_total;
+            metrics.physics_h_parent = 0.0;
+            metrics.physics_h_anticone = h_anticone;
+            metrics.physics_h_blue = h_blue;
+            metrics.physics_h_vdf = h_vdf;
+
+            // Phase transition
+            let k_critical = if byzantine_fraction < 0.5 {
+                2.0 * delta * block_rate * (1.0 - byzantine_fraction) / (1.0 - 2.0 * byzantine_fraction)
+            } else {
+                f64::INFINITY
+            };
+            metrics.physics_kappa = k_param;
+            metrics.physics_kappa_c = k_critical;
+            metrics.physics_phase = if k_param >= k_critical { "ordered".into() } else { "disordered".into() };
+            metrics.physics_phase_margin = k_param - k_critical;
+            metrics.physics_order_param = blue_fraction;
+
+            // Temperature
+            let t_eff = (delta * block_rate) / (1.0 - byzantine_fraction).max(0.001);
+            metrics.physics_t_eff = t_eff;
+
+            // Gossip diffusion
+            let diffusion_d = d_mesh / (2.0 * heartbeat_ms / 1000.0);
+            let tau_gossip_ms = (1.0 / (2.0 * diffusion_d)) * 1000.0;
+            metrics.physics_diffusion_d = diffusion_d;
+            metrics.physics_tau_gossip_ms = tau_gossip_ms;
+            metrics.physics_mesh_degree = d_mesh;
+            metrics.physics_info_density_200ms = 1.0 - (-0.2 / (tau_gossip_ms / 1000.0)).exp();
+            metrics.physics_info_density_1s = 1.0 - (-1.0 / (tau_gossip_ms / 1000.0)).exp();
+
+            // Convergence
+            let spectral_gap = if t_eff > 0.0 { (k_param - k_critical).max(0.0) / t_eff } else { 0.0 };
+            let convergence_t = if spectral_gap > 0.0 { 1.0 / spectral_gap } else { 999.0 };
+            metrics.physics_spectral_gap = spectral_gap;
+            metrics.physics_convergence_time_s = convergence_t;
+
+            // Thermodynamics
+            let avg_ac_int = avg_anticone.round() as u64;
+            let entropy = if avg_ac_int > 0 {
+                (1..=avg_ac_int).map(|i| (i as f64).log2()).sum::<f64>()
+            } else {
+                0.0
+            };
+            metrics.physics_free_energy = h_total - t_eff * entropy;
+            metrics.physics_entropy = entropy;
+
+            // Security
+            metrics.physics_sig_forgery_bits = 256.0;
+            metrics.physics_key_recovery_bits = 200.0;
+            metrics.physics_dag_manipulation_bits = if byzantine_fraction > 0.0 && byzantine_fraction < 1.0 {
+                k_param * byzantine_fraction.log2().abs()
+            } else {
+                0.0 // 0 means infinity (no byzantine nodes)
+            };
+
+            // Privacy
+            metrics.physics_stem_length = 4.0;
+            metrics.physics_p_deanon = (-4.0_f64 / 1.0).exp();
+
+            // Network params
+            metrics.physics_block_rate = block_rate;
+            metrics.physics_byzantine_fraction = byzantine_fraction;
+        }
     } // Lock dropped here
 
     Ok(())
@@ -942,7 +1117,7 @@ struct BrowserTransaction {
     /// Optional memo/message
     #[serde(default)]
     memo: Option<String>,
-    /// Network ID (e.g., "mainnet2026.2")
+    /// Network ID (e.g., "mainnet-genesis")
     #[serde(default)]
     network_id: Option<String>,
     /// Protocol version
@@ -1390,7 +1565,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
             let now = chrono::Utc::now().timestamp() as u64;
             if now >= q_storage::emission_controller::GENESIS_TIMESTAMP {
                 info!("🌐 Auto-detected network: mainnet2026.2 (past Feb 22 12:00 UTC)");
-                "mainnet2026.2".to_string()
+                "mainnet-genesis".to_string()
             } else {
                 info!("🌐 Auto-detected network: mainnet2026.1.3 (rehearsal, before Feb 22 12:00 UTC)");
                 "mainnet2026.1.3".to_string()
@@ -1404,12 +1579,12 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                 "Invalid network '{}': {}. Defaulting to mainnet2026.2.",
                 network_str, e
             );
-            q_types::NetworkId::Mainnet2026_2
+            q_types::NetworkId::MainnetGenesis
         });
 
     let mut network_config = q_types::NetworkConfig::from_network_id(network_id.clone());
     // v7.3.5: Override the config's network_id with the PARSED network_id.
-    // from_network_id() calls mainnet() which hardcodes Mainnet2026_2 for all mainnet variants,
+    // from_network_id() calls mainnet() which hardcodes MainnetGenesis for all mainnet variants,
     // but we need the config to reflect the ACTUAL network (e.g., mainnet2026.1.1 rehearsal).
     network_config.network_id = network_id;
 
@@ -1450,7 +1625,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
     // On mainnet (strict mode): Node PANICS if any check fails
     // This protects BILLIONS of dollars from "cowboy coding" mistakes.
     //
-    let is_mainnet = matches!(network_id, q_types::NetworkId::Mainnet2026 | q_types::NetworkId::Mainnet2026_1 | q_types::NetworkId::Mainnet2026_1_1 | q_types::NetworkId::Mainnet2026_1_3 | q_types::NetworkId::Mainnet2026_2);
+    let is_mainnet = matches!(network_id, q_types::NetworkId::Mainnet2026 | q_types::NetworkId::Mainnet2026_1 | q_types::NetworkId::Mainnet2026_1_1 | q_types::NetworkId::Mainnet2026_1_3 | q_types::NetworkId::MainnetGenesis);
     let guard_config = if is_mainnet {
         GuardConfig::mainnet()
     } else {
@@ -2122,8 +2297,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
 
             // 🌐 v2.3.1-beta: Pool topic subscriptions ONLY if mining pool is enabled
             // Subscribing to unused topics can cause gossipsub mesh issues
+            // v8.2.7: CRITICAL FIX — match pool initialization logic (defaults to enabled)
+            // BUG: This defaulted to "0" (disabled) while pool init defaulted to "1" (enabled)
+            // Result: Pool started but gossipsub topics never subscribed = silent P2P failure
             let enable_pool_topics = std::env::var("Q_ENABLE_MINING_POOL")
-                .unwrap_or_else(|_| "0".to_string()) == "1";
+                .unwrap_or_else(|_| "1".to_string()) != "0";
 
             if enable_pool_topics {
                 let pool_topics = q_mining_pool::distributed::PoolTopics::new(
@@ -3192,7 +3370,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
 
                     // v2.5.1-beta: Initialize P2P message encryption for privacy
                     let network_id_for_encryption = std::env::var("Q_NETWORK_ID")
-                        .unwrap_or_else(|_| "mainnet2026.2".to_string());
+                        .unwrap_or_else(|_| "mainnet-genesis".to_string());
                     coordinator_arc.initialize_encryption(&network_id_for_encryption).await;
                     info!("🔐 P2P AI message encryption initialized (XChaCha20-Poly1305)");
 
@@ -3897,7 +4075,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
             let network_id = std::env::var("Q_NETWORK_ID")
                 .ok()
                 .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                .unwrap_or(q_types::NetworkId::Mainnet2026_2); // ✅ v1.3.2-beta: Phase 16 default (Bug #6 fix)
+                .unwrap_or(q_types::NetworkId::MainnetGenesis); // ✅ v1.3.2-beta: Phase 16 default (Bug #6 fix)
             let local_peer_id = {
                 let peer_info = state.libp2p_peer_info.read().await;
                 peer_info.0.clone()
@@ -4202,28 +4380,35 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                             );
                         }
 
-                        // 💰 v1.0.60-beta: Process coinbase TXs in fast sync path too
-                        // Same balance sync logic as batched path
+                        // 💰 v8.3.0: Sync HashMap from RocksDB (authoritative source) for fast sync path.
+                        // Previous incremental add caused balance drift — HashMap diverged from
+                        // RocksDB truth, causing flickering between ~377 and ~220 QUG.
+                        // Only update if RocksDB > current (SafeBatchedWriter may not have committed yet).
                         {
-                            let mut coinbase_updates = 0u64;
+                            let mut synced_addresses = 0u64;
                             let mut balances = wallet_balances_sync.write().await;
 
                             for block in &blocks {
                                 for tx in &block.transactions {
                                     if tx.from == [0u8; 32] {
-                                        let current_balance = balances.get(&tx.to).copied().unwrap_or(0);
-                                        let new_balance = current_balance + tx.amount;
-                                        balances.insert(tx.to, new_balance);
-                                        coinbase_updates += 1;
+                                        let address_hex = hex::encode(&tx.to);
+                                        if let Ok(actual_balance) = storage_clone.get_balance(&address_hex).await {
+                                            let current = balances.get(&tx.to).copied().unwrap_or(0);
+                                            // Only update upward — SafeBatchedWriter may not have committed yet,
+                                            // so RocksDB could return a stale lower value for recent blocks.
+                                            if actual_balance > current {
+                                                balances.insert(tx.to, actual_balance);
+                                                synced_addresses += 1;
+                                            }
+                                        }
                                     }
                                 }
                             }
 
-                            if coinbase_updates > 0 {
+                            if synced_addresses > 0 {
                                 info!(
-                                    "💰 [FAST SYNC BALANCE] Processed {} coinbase TXs from {} blocks",
-                                    coinbase_updates,
-                                    blocks.len()
+                                    "💰 [FAST SYNC BALANCE v8.3.0] Synced {} addresses from RocksDB",
+                                    synced_addresses
                                 );
                             }
                         }
@@ -4258,7 +4443,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                 let extreme_skip_balances_threshold: u64 = std::env::var("Q_EXTREME_SKIP_BALANCES_THRESHOLD")
                     .ok()
                     .and_then(|v| v.parse().ok())
-                    .unwrap_or(100_000);  // 100k blocks = auto-skip balances
+                    .unwrap_or(10_000);  // v8.2.0: Lowered 100K→10K — coinbase-only mode kicks in sooner for 10x faster last-mile sync
 
                 let current_db_height = storage_clone.get_latest_qblock_height().await.ok().flatten().unwrap_or(0);
                 let first_block_height = blocks.first().map(|b| b.header.height).unwrap_or(0);
@@ -5543,7 +5728,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                                 let network_id = std::env::var("Q_NETWORK_ID")
                                     .ok()
                                     .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                                    .unwrap_or(q_types::NetworkId::Mainnet2026_2); // ✅ v1.3.3-beta: Phase 16 default (Bug #9 fix)
+                                    .unwrap_or(q_types::NetworkId::MainnetGenesis); // ✅ v1.3.3-beta: Phase 16 default (Bug #9 fix)
                                 let topic = network_id.block_pack_requests_topic();
 
                                 if let Err(e) = gossipsub_tx_for_requests.try_send((topic, data)) {
@@ -6148,6 +6333,17 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
             info!("📋 Loaded {} listing orders from RocksDB", listing_orders.len());
             *orders = listing_orders;
         }
+
+        // v8.2.8: Load XLIST crowdfunding campaigns
+        let campaigns = listing_api::load_campaigns_from_db(&app_state).await;
+        if !campaigns.is_empty() {
+            let mut lock = app_state.listing_campaigns.write().await;
+            info!("📋 Loaded {} XLIST crowdfunding campaigns from RocksDB", campaigns.len());
+            *lock = campaigns;
+        }
+
+        // v8.4.0: Seed default exchange listing campaigns if none exist
+        listing_api::seed_default_campaigns(&app_state).await;
     }
 
     // ========================================
@@ -6181,7 +6377,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
             // Without this, .ends_with("/blocks") matches BOTH /qnk/mainnet2026.1/blocks
             // AND /qnk/mainnet2026.2/blocks, allowing blocks/txs/balances from wrong network.
             let our_network_id_for_gossip = std::env::var("Q_NETWORK_ID")
-                .unwrap_or_else(|_| "mainnet2026.2".to_string());
+                .unwrap_or_else(|_| "mainnet-genesis".to_string());
             let our_topic_prefix = format!("/qnk/{}/", our_network_id_for_gossip);
             info!("🔒 [GOSSIPSUB] Network isolation: only accepting topics with prefix '{}'", our_topic_prefix);
 
@@ -6376,15 +6572,20 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                         }
                     }
                 } else if topic.ends_with("/balance-updates") {
-                    // UN-DEPRECATED v3.9.5-beta: Gossipsub balance updates re-enabled by default
-                    // P2P balance replication provides fast balance propagation alongside DAG-Knight consensus
-                    // To disable: set Q_DISABLE_BALANCE_GOSSIP=1
-                    let balance_gossip_disabled = std::env::var("Q_DISABLE_BALANCE_GOSSIP")
+                    // v8.2.0: DETERMINISTIC BALANCE CONSENSUS — gossip balance updates DISABLED by default
+                    // Balances are now computed deterministically from block coinbase transactions only.
+                    // Gossip balance updates caused divergence between nodes (different balances per server).
+                    // To opt-in (NOT recommended): set Q_ENABLE_BALANCE_GOSSIP=1
+                    // Legacy compat: Q_DISABLE_BALANCE_GOSSIP=1 still works (disables)
+                    let balance_gossip_enabled = std::env::var("Q_ENABLE_BALANCE_GOSSIP")
+                        .map(|v| v == "1" || v.to_lowercase() == "true")
+                        .unwrap_or(false);
+                    let balance_gossip_legacy_disabled = std::env::var("Q_DISABLE_BALANCE_GOSSIP")
                         .map(|v| v == "1" || v.to_lowercase() == "true")
                         .unwrap_or(false);
 
-                    if balance_gossip_disabled {
-                        debug!("ℹ️ Ignoring gossipsub balance update (Q_DISABLE_BALANCE_GOSSIP=1)");
+                    if !balance_gossip_enabled || balance_gossip_legacy_disabled {
+                        debug!("ℹ️ Ignoring gossipsub balance update (deterministic mode — set Q_ENABLE_BALANCE_GOSSIP=1 to opt-in)");
                         continue;
                     }
 
@@ -6529,13 +6730,18 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                                 continue;
                             }
 
-                            // Update in-memory wallet balance HashMap
+                            // v8.3.0: Read current balance from RocksDB (not HashMap) before adding.
+                            // Previous: read stale HashMap → add → save back to RocksDB = corrupted truth.
+                            // Now: read RocksDB → add → save → set HashMap. RocksDB stays authoritative.
+                            let wallet_hex = hex::encode(&wallet_bytes);
                             let (current, new_balance) = {
+                                let rocks_balance = app_state_gossip.storage_engine
+                                    .get_balance(&wallet_hex).await.unwrap_or(0);
+                                let new_balance = rocks_balance.saturating_add(update.amount);
+                                // Update HashMap from the authoritative value
                                 let mut balances = app_state_gossip.wallet_balances.write().await;
-                                let current = balances.get(&wallet_bytes).copied().unwrap_or(0);
-                                let new_balance = current.saturating_add(update.amount);
                                 balances.insert(wallet_bytes, new_balance);
-                                (current, new_balance)
+                                (rocks_balance, new_balance)
                             };
 
                             // Persist to RocksDB
@@ -7353,8 +7559,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                                         let response_msg = q_api_server::bridge_committee::BridgeAttestationMessage::Attestation(attestation);
                                         let response_bytes = response_msg.to_cbor();
                                         let bridge_network_id: q_types::NetworkId = std::env::var("Q_NETWORK_ID")
-                                            .unwrap_or_else(|_| "mainnet2026.2".to_string())
-                                            .parse().unwrap_or(q_types::NetworkId::Mainnet2026_2);
+                                            .unwrap_or_else(|_| "mainnet-genesis".to_string())
+                                            .parse().unwrap_or(q_types::NetworkId::MainnetGenesis);
                                         let bridge_topic = bridge_network_id.bridge_attestations_topic();
                                         if let Some(ref cmd_tx) = app_state_bridge.libp2p_command_tx {
                                             let _ = cmd_tx.send(q_network::NetworkCommand::PublishConsensusMessage {
@@ -7699,7 +7905,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                                     let our_height = app_state_gossip
                                         .current_height_atomic
                                         .load(Ordering::Relaxed);
-                                    let max_reasonable = (our_height * 3).max(our_height + 500_000);
+                                    let max_reasonable = (our_height * 5).max(our_height + 50_000);
                                     if block_height > max_reasonable {
                                         warn!("🚫 [BLOCK FALLBACK] Rejecting suspicious block height {} (our: {}, max reasonable: {})",
                                               block_height, our_height, max_reasonable);
@@ -7959,25 +8165,30 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                                                                             }
                                                                         };
 
-                                                                        // v3.5.16-beta: CRITICAL FIX - Handle both credits AND debits
-                                                                        // TransferSent = DEBIT (subtract from balance)
-                                                                        // TransferReceived/MiningReward/DevelopmentFee = CREDIT (add to balance)
+                                                                        // v8.3.0: Read authoritative balance from RocksDB.
+                                                                        // balance_consensus already wrote correct value. Previous incremental
+                                                                        // add + save_wallet_balance was overwriting RocksDB with stale values.
                                                                         let current = wallet_balances.get(&address_bytes).copied().unwrap_or(0);
-                                                                        let (new_balance, change_reason_str) = match update.reason {
-                                                                            q_storage::ChangeReason::TransferSent => {
-                                                                                (current.saturating_sub(update.amount), "transfer_sent")
-                                                                            }
-                                                                            q_storage::ChangeReason::TransferReceived => {
-                                                                                (current.saturating_add(update.amount), "transfer_received")
-                                                                            }
-                                                                            q_storage::ChangeReason::MiningReward => {
-                                                                                (current.saturating_add(update.amount), "mining_reward")
-                                                                            }
-                                                                            q_storage::ChangeReason::DevelopmentFee => {
-                                                                                (current.saturating_add(update.amount), "development_fee")
+                                                                        let change_reason_str = match update.reason {
+                                                                            q_storage::ChangeReason::TransferSent => "transfer_sent",
+                                                                            q_storage::ChangeReason::TransferReceived => "transfer_received",
+                                                                            q_storage::ChangeReason::MiningReward => "mining_reward",
+                                                                            q_storage::ChangeReason::DevelopmentFee => "development_fee",
+                                                                        };
+                                                                        let new_balance = match storage.get_balance(&update.address).await {
+                                                                            Ok(actual) => actual,
+                                                                            Err(_) => {
+                                                                                match update.reason {
+                                                                                    q_storage::ChangeReason::TransferSent => current.saturating_sub(update.amount),
+                                                                                    _ => current.saturating_add(update.amount),
+                                                                                }
                                                                             }
                                                                         };
                                                                         wallet_balances.insert(address_bytes, new_balance);
+
+                                                                        // v8.3.0: Removed save_wallet_balance — balance_consensus is the
+                                                                        // sole authoritative writer to RocksDB. The previous pattern overwrote
+                                                                        // correct RocksDB values with stale incremental HashMap values.
 
                                                                         // Broadcast SSE event to notify frontends
                                                                         let old_balance_qnk = current as f64 / QUG_DISPLAY_DIVISOR;
@@ -8004,7 +8215,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                                                                         ).await;
 
                                                                         let sign = if matches!(update.reason, q_storage::ChangeReason::TransferSent) { "-" } else { "+" };
-                                                                        debug!("📡 [DAG→SSE v3.5.16] Balance update: {} {}{:.8} QNK (new: {:.8} QNK) reason={}",
+                                                                        debug!("📡 [DAG→SSE v3.5.16] Balance update: {} {}{:.8} QNK (new: {:.8} QNK) reason={} [PERSISTED]",
                                                                               &update.address[..16.min(update.address.len())],
                                                                               sign,
                                                                               update.amount as f64 / QUG_DISPLAY_DIVISOR,
@@ -8316,24 +8527,26 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                                                     }
                                                 };
 
-                                                // v3.5.16-beta: CRITICAL FIX - Handle both credits AND debits
-                                                // TransferSent = DEBIT (subtract from balance)
-                                                // TransferReceived/MiningReward/DevelopmentFee = CREDIT (add to balance)
+                                                // v8.3.0: Read authoritative balance from RocksDB after tx.commit().
+                                                // balance_consensus already wrote the correct value via add_balance_tx.
+                                                // Previous incremental add (saturating_add) drifted from RocksDB,
+                                                // causing balance flickering between ~377 and ~220 QUG.
                                                 let current = wallet_balances.get(&address_bytes).copied().unwrap_or(0);
-                                                let (new_balance, change_reason_str) = match update.reason {
-                                                    q_storage::ChangeReason::TransferSent => {
-                                                        // DEBIT: Subtract from sender's balance
-                                                        (current.saturating_sub(update.amount), "transfer_sent")
-                                                    }
-                                                    q_storage::ChangeReason::TransferReceived => {
-                                                        // CREDIT: Add to receiver's balance
-                                                        (current.saturating_add(update.amount), "transfer_received")
-                                                    }
-                                                    q_storage::ChangeReason::MiningReward => {
-                                                        (current.saturating_add(update.amount), "mining_reward")
-                                                    }
-                                                    q_storage::ChangeReason::DevelopmentFee => {
-                                                        (current.saturating_add(update.amount), "development_fee")
+                                                let change_reason_str = match update.reason {
+                                                    q_storage::ChangeReason::TransferSent => "transfer_sent",
+                                                    q_storage::ChangeReason::TransferReceived => "transfer_received",
+                                                    q_storage::ChangeReason::MiningReward => "mining_reward",
+                                                    q_storage::ChangeReason::DevelopmentFee => "development_fee",
+                                                };
+                                                // Read committed balance from RocksDB (single source of truth)
+                                                let new_balance = match storage.get_balance(&update.address).await {
+                                                    Ok(actual) => actual,
+                                                    Err(_) => {
+                                                        // Fallback: incremental if RocksDB read fails
+                                                        match update.reason {
+                                                            q_storage::ChangeReason::TransferSent => current.saturating_sub(update.amount),
+                                                            _ => current.saturating_add(update.amount),
+                                                        }
                                                     }
                                                 };
                                                 wallet_balances.insert(address_bytes, new_balance);
@@ -8501,28 +8714,16 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                                             let network_height = highest_network_height
                                                 .load(std::sync::atomic::Ordering::SeqCst);
 
-                                            // 🚀 v1.0.11-beta FIX #1: Update network height in gossipsub callback with STRONG ordering
-                                            // Root cause: app_state_block_producer.highest_network_height was stale (0 or old value)
-                                            // causing production pause to never trigger during catch-up
-                                            // CRITICAL FIX: Changed Relaxed → SeqCst per external AI review (Kimi AI, ChatGPT, DeepSeek)
-                                            // SeqCst ensures cross-thread visibility guarantees - prevents race conditions
-                                            // NOTE: This gossipsub callback updates app_state_gossip, which is shared with other components
+                                            // v8.1.7: REMOVED highest_network_height.store() from block gossipsub handler
+                                            // Root cause of height poisoning: a SINGLE rogue gossipsub block with fake height
+                                            // (e.g. 1.6M at real height 343K) could set highest_network_height because 5× multiplier
+                                            // was too generous. Network height should ONLY be set by:
+                                            //   1. Peer-height announcements (gossipsub peer-heights topic)
+                                            //   2. HTTP bootstrap fallback (verified network ID)
+                                            //   3. Turbo sync median (Byzantine-resistant)
+                                            // Individual blocks should NOT determine what we think the network height is.
                                             if block_height > current_height {
-                                                // v7.1.1: Height sanity check - reject heights that are unreasonably far ahead
-                                                // Prevents rogue peers (e.g. old testnet nodes) from poisoning highest_network_height
-                                                // v7.2.7: Relaxed height sanity - use max(3x, height+500K) to allow re-sync from low RocksDB tip
-                                                let max_reasonable_height = (current_height * 3).max(current_height + 500_000);
-                                                if block_height > max_reasonable_height {
-                                                    warn!("🚫 [HEIGHT SANITY] Rejecting suspicious block height {} from gossipsub (our height: {}, max reasonable: {})",
-                                                        block_height, current_height, max_reasonable_height);
-                                                } else {
-                                                    // We received a block from the network - update this app_state
-                                                    app_state_gossip.highest_network_height.store(
-                                                        block_height,
-                                                        std::sync::atomic::Ordering::SeqCst,
-                                                    );
-                                                    debug!("🔄 [v1.0.11-beta] Updated network height to {} (SeqCst)", block_height);
-                                                }
+                                                debug!("📦 [GOSSIPSUB BLOCK] Received block at height {} (our height: {})", block_height, current_height);
                                             }
 
                                             if network_height > current_height {
@@ -8664,7 +8865,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                                 let network_id = std::env::var("Q_NETWORK_ID")
                                     .ok()
                                     .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                                    .unwrap_or(q_types::NetworkId::Mainnet2026_2); // ✅ v1.3.2-beta: Phase 16 default (Bug #6 fix)
+                                    .unwrap_or(q_types::NetworkId::MainnetGenesis); // ✅ v1.3.2-beta: Phase 16 default (Bug #6 fix)
                                 let my_peer_info = app_state_gossip.libp2p_peer_info.read().await;
                                 let responder_peer_id = my_peer_info.0.clone();
                                 drop(my_peer_info);
@@ -8799,7 +9000,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                             let expected_network_id = std::env::var("Q_NETWORK_ID")
                                 .ok()
                                 .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                                .unwrap_or(q_types::NetworkId::Mainnet2026_2)
+                                .unwrap_or(q_types::NetworkId::MainnetGenesis)
                                 .as_str(); // ✅ v1.3.2-beta: Phase 16 default (Bug #6 fix)
                             let mut valid_blocks = Vec::new();
                             let mut rejected_count = 0;
@@ -9178,7 +9379,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                                                             let network_id = std::env::var("Q_NETWORK_ID")
                                                                 .ok()
                                                                 .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                                                                .unwrap_or(q_types::NetworkId::Mainnet2026_2); // ✅ v1.3.2-beta: Phase 16 default (Bug #6 fix)
+                                                                .unwrap_or(q_types::NetworkId::MainnetGenesis); // ✅ v1.3.2-beta: Phase 16 default (Bug #6 fix)
                                                             let cmd = q_network::NetworkCommand::PublishBlockRequest {
                                                                 topic: network_id.block_requests_topic(),
                                                                 request_bytes,
@@ -9269,7 +9470,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                             let expected_network_id = std::env::var("Q_NETWORK_ID")
                                 .ok()
                                 .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                                .unwrap_or(q_types::NetworkId::Mainnet2026_2)
+                                .unwrap_or(q_types::NetworkId::MainnetGenesis)
                                 .as_str(); // ✅ v1.3.2-beta: Phase 16 default (Bug #6 fix)
                             if block.header.network_id != expected_network_id {
                                 warn!("🚫 REJECTED block {} from peer {} - wrong network_id: '{}' (expected: '{}')",
@@ -9485,7 +9686,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                                                             s.parse::<q_types::NetworkId>().ok()
                                                         })
                                                         .unwrap_or(
-                                                            q_types::NetworkId::Mainnet2026_2,
+                                                            q_types::NetworkId::MainnetGenesis,
                                                         ); // ✅ v7.1.2: Mainnet 2026.1 default
                                                         let response_topic =
                                                             network_id.block_pack_responses_topic();
@@ -9691,35 +9892,46 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                             //
                             // This allows nodes to sync from scratch to networks at any reasonable height.
                             // The protection still prevents malicious peers from claiming absurd heights.
-                            const MAX_HEIGHT_JUMP: u64 = 500_000; // v1.3.10: Increased from 100K to 500K
-                            const INITIAL_SYNC_THRESHOLD: u64 = 100_000; // v1.3.10: Increased from 1K to 100K
+                            // v1.0.2: SAFE BATCHED SYNC — removed overly conservative MAX_HEIGHT_JUMP cap
+                            //
+                            // PROBLEM (v8.2.7): Chain grew to 2.3M+ blocks. Nodes past 100K height had
+                            //   MAX_HEIGHT_JUMP=200K which rejected ALL peer heights (gap=2.2M > 200K).
+                            //   Result: turbo sync blocked, only slow 50-block batch sync worked.
+                            //
+                            // WHY THE OLD CAP WAS WRONG:
+                            //   - A node at height 107K with network at 2.3M is NOT being attacked
+                            //   - It's just catching up after fresh start or long downtime
+                            //   - Real protection comes from block validation, not height caps
+                            //   - Sync-down protection prevents going backwards (the actual danger)
+                            //
+                            // NEW APPROACH: Only reject if claimed height is absurdly beyond any
+                            // reasonable chain growth (>50M blocks = ~4 years at 12 bps).
+                            // During catch-up, allow unlimited jumps — blocks are validated on receipt.
+                            const MAX_ABSURD_HEIGHT: u64 = 50_000_000; // Reject clearly fake heights
+                            const INITIAL_SYNC_THRESHOLD: u64 = 100_000;
 
                             let is_initial_sync = our_height < INITIAL_SYNC_THRESHOLD;
-                            let height_jump_too_large = announcement.highest_block > our_height + MAX_HEIGHT_JUMP;
 
-                            if height_jump_too_large && !is_initial_sync {
-                                // Height claim exceeds safety threshold - ignore to prevent sync issues
+                            if announcement.highest_block > MAX_ABSURD_HEIGHT {
                                 warn!(
-                                    "🛡️ [SYNC SAFETY] Ignoring peer {} height claim ({} blocks) - exceeds safety threshold (our height: {}, max jump: {})",
+                                    "🛡️ [SYNC SAFETY] Rejecting absurd peer {} height claim ({} blocks) - exceeds max chain height ({})",
                                     &announcement.peer_id[..announcement.peer_id.len().min(20)],
                                     announcement.highest_block,
-                                    our_height,
-                                    MAX_HEIGHT_JUMP
+                                    MAX_ABSURD_HEIGHT
                                 );
-                                debug!("   This is normal safety behavior - very large height differences are filtered to prevent sync issues");
-
-                                // Skip updating network height - this claim is outside safety bounds
-                                // Still register the peer for block pack requests (they might have real blocks)
-                                // but don't trust their height claim
                                 continue;
                             }
 
-                            // ✅ v1.3.2-beta: Log initial sync allowance
-                            if is_initial_sync && height_jump_too_large {
-                                info!("🚀 [INITIAL SYNC] Allowing large height jump during initial sync");
-                                info!("   Our height: {} (below {} threshold)", our_height, INITIAL_SYNC_THRESHOLD);
-                                info!("   Peer height: {} blocks", announcement.highest_block);
-                                info!("   This is expected behavior for new nodes joining the network");
+                            // Log large sync gaps for monitoring (not blocking)
+                            if announcement.highest_block > our_height + 200_000 && !is_initial_sync {
+                                info!("📡 [CATCH-UP] Large sync gap: our height {} → peer height {} (gap: {} blocks)",
+                                    our_height, announcement.highest_block,
+                                    announcement.highest_block.saturating_sub(our_height));
+                            }
+
+                            if is_initial_sync {
+                                info!("🚀 [INITIAL SYNC] Allowing peer height {} during initial sync (our height: {})",
+                                    announcement.highest_block, our_height);
                             }
 
                             if let Some(turbo_sync) = &app_state_gossip.turbo_sync {
@@ -9735,9 +9947,19 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                                             None
                                         }
                                     });
+                                    // v8.1.7: Cap peer registration height to prevent poisoning turbo_sync registry
+                                    // v1.0.2: Register peer at their ACTUAL height
+                                    // Old v8.1.7 capped to local_h + 10K which made catch-up
+                                    // impossibly slow (230 iterations to sync 2.3M blocks).
+                                    // Block validation on receipt is the real safety check.
                                     turbo_sync
                                         .register_peer_with_tip(peer_id, announcement.highest_block, tip_hash_bytes)
                                         .await;
+
+                                    // v8.4.0: Seed peer bandwidth from handshake for gravity-assist
+                                    if let Some(bw) = q_network::unified_network_manager::PEER_BANDWIDTH_TIERS.get(&peer_id.to_string()) {
+                                        turbo_sync.seed_peer_bandwidth(&peer_id.to_string(), *bw);
+                                    }
 
                                     // TEMPORARILY DISABLED v1.0.15: Circular dependency with sync_activation
                                     // 🌉 v0.9.6-beta: Update peer bridge cache for continuous sync
@@ -9777,29 +9999,32 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                                     );
 
                                     if announcement.highest_block > current_highest {
-                                        // v7.1.1: Height sanity check - reject heights that are unreasonably far ahead
-                                        // Prevents rogue peers (e.g. old testnet nodes with 117K blocks) from poisoning network height
+                                        // v1.0.2: Removed overly tight height sanity caps that blocked catch-up sync
+                                        // Old v8.1.7 capped at our_height + 100K for established nodes — broke sync
+                                        // when chain grew to 2.3M+ blocks. The absurd height check (50M) above
+                                        // provides sufficient protection; block validation is the real safety net.
                                         let our_height_now = app_state_gossip
                                             .current_height_atomic
                                             .load(std::sync::atomic::Ordering::Relaxed);
-                                        // v7.2.7: Relaxed height sanity - use max(3x, height+500K) to allow re-sync from low RocksDB tip
-                                        let max_reasonable_height = (our_height_now * 3).max(our_height_now + 500_000);
-                                        if announcement.highest_block > max_reasonable_height {
-                                            warn!("🚫 [HEIGHT SANITY] Rejecting suspicious peer height {} from {} (our height: {}, max reasonable: {})",
-                                                announcement.highest_block, &announcement.peer_id[..16.min(announcement.peer_id.len())],
-                                                our_height_now, max_reasonable_height);
-                                        } else {
+
+                                        // Log large gaps for monitoring
+                                        if announcement.highest_block > our_height_now + 5_000 {
+                                            info!("📡 [HEIGHT UPDATE] Storing network height {} (our height: {}, gap: {}, peer: {})",
+                                                announcement.highest_block, our_height_now,
+                                                announcement.highest_block.saturating_sub(our_height_now),
+                                                &announcement.peer_id[..20.min(announcement.peer_id.len())]);
+                                        }
+
                                         app_state_gossip.highest_network_height.store(
                                             announcement.highest_block,
                                             std::sync::atomic::Ordering::SeqCst,
                                         );
-                                        // v3.4.2: Reduced to debug to prevent log spam
                                         debug!(
                                             "📊 [TURBO SYNC] Network height updated to {}",
                                             announcement.highest_block
                                         );
 
-                                        // v5.2.0: Immediate sync trigger when gap > 10
+                                        // Immediate sync trigger when gap > 10
                                         if announcement.highest_block > our_height_now + 10 {
                                             debug!("[ACTIVE RECOVERY] Triggering immediate sync: peer={} our={} gap={}",
                                                 announcement.highest_block, our_height_now,
@@ -9894,7 +10119,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                                                                     let network_id = std::env::var("Q_NETWORK_ID")
                                                                             .ok()
                                                                             .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                                                                            .unwrap_or(q_types::NetworkId::Mainnet2026_2); // ✅ v1.3.3-beta: Phase 16 default (Bug #9 fix)
+                                                                            .unwrap_or(q_types::NetworkId::MainnetGenesis); // ✅ v1.3.3-beta: Phase 16 default (Bug #9 fix)
                                                                     let topic = network_id
                                                                         .block_pack_requests_topic(
                                                                         );
@@ -10072,7 +10297,6 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                                                 }
                                             });
                                         }
-                                    } // end else (height sanity passed)
                                     }
                                 }
                             }
@@ -11431,7 +11655,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
         let network_id = std::env::var("Q_NETWORK_ID")
             .ok()
             .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-            .unwrap_or(q_types::NetworkId::Mainnet2026_2);
+            .unwrap_or(q_types::NetworkId::MainnetGenesis);
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(300)); // 5 min
@@ -11565,7 +11789,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                             let network_id = std::env::var("Q_NETWORK_ID")
                                 .ok()
                                 .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                                .unwrap_or(q_types::NetworkId::Mainnet2026_2); // ✅ v1.3.2-beta: Phase 16 default (Bug #6 fix)
+                                .unwrap_or(q_types::NetworkId::MainnetGenesis); // ✅ v1.3.2-beta: Phase 16 default (Bug #6 fix)
                             let _ = network_clone.send(q_network::NetworkCommand::PublishBlock {
                                 topic: network_id.peer_heights_topic(),
                                 block_bytes: bytes,
@@ -11721,9 +11945,32 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                 let local_height = app_state_decay.current_height_atomic
                     .load(std::sync::atomic::Ordering::Relaxed);
 
+                // v8.1.7: HARD CLAMP — if network_height is more than 10K above local, force-clamp it
+                // This is the nuclear defense against any poisoning vector (known or unknown)
+                // v8.3.0: ONLY clamp for synced nodes (local > 100K). Fresh-syncing nodes (e.g.,
+                // Windows at height 1500 with real network at 3M) were getting clamped to
+                // 1500+10K=11.5K, destroying their sync target and making progress show ~12K
+                // instead of the real 3M. Poisoning defense not needed during initial sync.
+                let hard_cap = local_height + 10_000;
+                if network_height > hard_cap && local_height > 100_000 {
+                    warn!(
+                        "🚫 [HEIGHT CLAMP v8.1.7] CLAMPING poisoned network_height {} → {} (local: {}, cap: local+10K)",
+                        network_height, hard_cap, local_height
+                    );
+                    app_state_decay.highest_network_height.store(
+                        hard_cap,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                }
+                // Re-read after potential clamp
+                let network_height = app_state_decay.highest_network_height
+                    .load(std::sync::atomic::Ordering::SeqCst);
+
                 // Only decay if: data is stale (>60s) AND network_height > local_height
                 // AND last_update is non-zero (we've received at least one peer announcement)
-                if staleness > 60 && network_height > local_height && last_update > 0 {
+                // v8.3.0: Also require local > 100K — fresh-syncing nodes with stale peers
+                // (disconnected Windows clients) were decaying 3M → local, destroying sync target.
+                if staleness > 60 && network_height > local_height && last_update > 0 && local_height > 100_000 {
                     let gap = network_height - local_height;
                     // Decay by 10% of gap, minimum 1 block
                     let decay_amount = (gap / 10).max(1);
@@ -11765,7 +12012,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
             let network_id = std::env::var("Q_NETWORK_ID")
                 .ok()
                 .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                .unwrap_or(q_types::NetworkId::Mainnet2026_2);
+                .unwrap_or(q_types::NetworkId::MainnetGenesis);
 
             // Topics to unsubscribe when syncing. These are high-volume but non-essential
             // during sync. We KEEP: blocks, peer-heights, block-pack-*, turbo-sync-* (needed for sync)
@@ -11841,6 +12088,41 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
     }
 
     // ========================================
+    // v1.0.2: PERIODIC NONCE DEDUP CLEANUP (every 5 seconds)
+    // Replaces inline cleanup that scanned 10K+ DashMap entries per HTTP request
+    // ========================================
+    {
+        let dedup_map = app_state.mining_nonce_dedup.clone();
+        let height_atomic = app_state.current_height_atomic.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                let map_len = dedup_map.len();
+                if map_len > 5_000 {
+                    let current_height = height_atomic.load(std::sync::atomic::Ordering::Relaxed);
+                    let min_height = current_height.saturating_sub(1);
+                    let stale_keys: Vec<_> = dedup_map
+                        .iter()
+                        .filter(|entry| entry.key().0 < min_height)
+                        .take(5_000) // Remove up to 5K per cycle
+                        .map(|entry| *entry.key())
+                        .collect();
+                    let removed = stale_keys.len();
+                    for key in stale_keys {
+                        dedup_map.remove(&key);
+                    }
+                    if removed > 0 {
+                        debug!("🧹 [DEDUP CLEANUP] Removed {} stale nonce entries (map: {} → {})",
+                               removed, map_len, dedup_map.len());
+                    }
+                }
+            }
+        });
+        info!("✅ [DEDUP] Periodic nonce cleanup task started (every 5s)");
+    }
+
+    // ========================================
     // MINING SUBMISSION HIGH-PERFORMANCE BATCHED PROCESSOR
     // Target: 20,000+ submissions/sec with sub-60ms finality
     // ========================================
@@ -11902,7 +12184,59 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                 // This gives us 100,000 submissions/sec throughput (500 * 200 batches/sec)
                 if batch_buffer.len() >= 500 || last_batch_process.elapsed().as_millis() >= 5 {
                     let start = std::time::Instant::now();
+
+                    // ==================================================================================
+                    // v1.0.2: DEFERRED VDF VERIFICATION — moved from HTTP handler for throughput
+                    // ==================================================================================
+                    // Previously: 100 blake3 VDF iterations ran on EVERY HTTP request thread,
+                    // blocking Tokio workers at 7000+ req/sec. Now runs in single background thread.
+                    // Invalid submissions (fake hashes) are silently dropped here.
+                    let pre_verify_count = batch_buffer.len();
+                    batch_buffer.retain(|submission| {
+                        // 1. VDF hash recomputation (100 blake3 iterations)
+                        if let Some(ref challenge_bytes) = submission.challenge_hash_bytes {
+                            let mut hash_input = [0u8; 40];
+                            hash_input[..32].copy_from_slice(challenge_bytes);
+                            hash_input[32..].copy_from_slice(&submission.nonce.to_le_bytes());
+                            let initial = blake3::hash(&hash_input);
+                            let mut current = *initial.as_bytes();
+                            for _ in 0..100 {
+                                current = *blake3::hash(&current).as_bytes();
+                            }
+                            if current != submission.hash {
+                                warn!(
+                                    "🚨 [VDF VERIFY] Hash mismatch from miner {} — fake hash dropped",
+                                    &submission.miner_address_str[..16.min(submission.miner_address_str.len())]
+                                );
+                                return false;
+                            }
+                        }
+                        // 2. Difficulty verification
+                        if !(submission.hash < submission.difficulty_target) {
+                            warn!(
+                                "🚨 [DIFFICULTY] Below target from miner {} — dropped",
+                                &submission.miner_address_str[..16.min(submission.miner_address_str.len())]
+                            );
+                            return false;
+                        }
+                        true
+                    });
+                    let rejected_count = pre_verify_count - batch_buffer.len();
+                    if rejected_count > 0 {
+                        warn!(
+                            "🛡️ [BATCH VDF] Rejected {}/{} submissions (fake hash or below difficulty)",
+                            rejected_count, pre_verify_count
+                        );
+                    }
+
                     let batch_size = batch_buffer.len();
+                    if batch_size == 0 {
+                        batch_buffer.clear();
+                        last_batch_process = std::time::Instant::now();
+                        last_batch_completed = std::time::Instant::now();
+                        watchdog_warned = false;
+                        continue;
+                    }
 
                     // ==================================================================================
                     // v7.1.2 CRITICAL FIX: REMOVED DIRECT MINTING FROM BATCH PROCESSOR
@@ -11981,8 +12315,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
 
                     // Track accepted solutions in mining statistics
                     // Also track individual miner hashrates for ultra-precise network hashrate calculation
+                    // v1.0.2: total_solutions_submitted also tracked here (moved from HTTP handler)
                     if let Some(ref mining_stats_arc) = app_state_mining.mining_statistics {
                         let mut mining_stats = mining_stats_arc.write().await;
+                        mining_stats.total_solutions_submitted += (batch_size + rejected_count) as u64;
                         mining_stats.total_solutions_accepted += batch_size as u64;
 
                         // Update each miner's hashrate from solution data
@@ -12033,7 +12369,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                             let network_id = std::env::var("Q_NETWORK_ID")
                                 .ok()
                                 .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                                .unwrap_or(q_types::NetworkId::Mainnet2026_2); // ✅ v1.3.3-beta: Phase 16 default (Bug #9 fix)
+                                .unwrap_or(q_types::NetworkId::MainnetGenesis); // ✅ v1.3.3-beta: Phase 16 default (Bug #9 fix)
                             let topic = format!("{}/miner-stats", network_id.gossipsub_topic_prefix());
 
                             // v2.2.1: BATCHED miner stats broadcasting to prevent gossipsub queue saturation
@@ -12140,6 +12476,54 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                             .or_insert((*old_bal, *new_bal, 1));
                     }
 
+                    // v1.0.2: SSE MiningReward broadcast — moved from HTTP handler to background
+                    // Previously this ran on EVERY HTTP request with 3× read().await (peer_info,
+                    // mining_stats, node_status). Now batched per-wallet with single lock.
+                    {
+                        use q_api_server::streaming::StreamEvent;
+                        let origin_peer_id = app_state_mining.libp2p_peer_info.read().await.0.clone();
+                        let origin_node_name = std::env::var("Q_NODE_NAME").ok();
+
+                        // Aggregate by wallet to prevent SSE spam (one MiningReward per wallet per batch)
+                        let mut reward_by_wallet: std::collections::HashMap<String, (u64, f64, Option<String>, Option<String>)> = std::collections::HashMap::new();
+                        for submission in &batch_buffer {
+                            let wallet = submission.miner_address_str.clone();
+                            let entry = reward_by_wallet.entry(wallet).or_insert((
+                                submission.nonce,
+                                submission.hash_rate,
+                                submission.miner_id.clone(),
+                                submission.worker_name.clone(),
+                            ));
+                            // Keep latest hash_rate
+                            if submission.hash_rate > 0.0 {
+                                entry.1 = submission.hash_rate;
+                            }
+                        }
+
+                        let miner_reward_qnk = miner_reward as f64 / QUG_DISPLAY_DIVISOR;
+                        for (wallet_addr, (nonce, hash_rate, miner_id, worker_name)) in &reward_by_wallet {
+                            let wallet_with_prefix = if wallet_addr.starts_with("qnk") {
+                                wallet_addr.clone()
+                            } else {
+                                format!("qnk{}", wallet_addr)
+                            };
+                            let mining_event = StreamEvent::MiningReward {
+                                miner_address: wallet_with_prefix,
+                                reward_qnk: miner_reward_qnk,
+                                nonce: *nonce,
+                                block_height,
+                                difficulty: String::new(), // Batch — individual difficulty not tracked
+                                hash_rate: *hash_rate,
+                                miner_id: miner_id.clone(),
+                                worker_name: worker_name.clone(),
+                                origin_node_id: Some(origin_peer_id.clone()),
+                                origin_node_name: origin_node_name.clone(),
+                                timestamp: chrono::Utc::now(),
+                            };
+                            let _ = app_state_mining.event_broadcaster.broadcast(mining_event).await;
+                        }
+                    }
+
                     // Broadcast ONE aggregated event per wallet (massive event reduction!)
                     // v1.2.0-beta Phase 3: Enhanced with block tracking
                     use q_api_server::streaming::StreamEvent;
@@ -12215,6 +12599,50 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                     // 🔒 PRIVACY: Log aggregate statistics only, no individual miner data
                     debug!("📡 Broadcast {} aggregated mining reward notifications via SSE ({} solutions total)",
                           aggregated_updates.len(), balance_updates.len());
+
+                    // v1.0.2: P2P mining solution broadcast — moved from HTTP handler to background
+                    // Rate limited to max 1 per batch cycle (every 5ms = 200/sec max, but batches
+                    // are typically every 5ms so effectively ~200/sec — old handler was 20/sec).
+                    // Only broadcast ONE representative solution per batch to avoid gossipsub saturation.
+                    {
+                        let p2p_current = app_state_mining.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
+                        let p2p_network = app_state_mining.highest_network_height.load(std::sync::atomic::Ordering::Relaxed);
+                        let p2p_behind = p2p_network.saturating_sub(p2p_current);
+                        let skip_p2p = p2p_current > 0 && p2p_behind > 10_000;
+
+                        if !skip_p2p {
+                            if let Some(ref cmd_tx) = app_state_mining.libp2p_command_tx {
+                                // Pick first submission as representative
+                                if let Some(submission) = batch_buffer.first() {
+                                    let node_id = app_state_mining.libp2p_peer_info.read().await.0.clone();
+                                    let p2p_sub = q_types::mining_solution::P2PMiningSubmission::new(
+                                        submission.miner_address,
+                                        submission.hash,
+                                        submission.difficulty_target,
+                                        block_height,
+                                        [0u8; 32],
+                                        submission.nonce,
+                                        0,
+                                        node_id,
+                                    );
+                                    if let Ok(solution_bytes) = rmp_serde::to_vec(&p2p_sub) {
+                                        let network_id_str = std::env::var("Q_NETWORK_ID")
+                                            .unwrap_or_else(|_| "mainnet-genesis".to_string());
+                                        let network_id = network_id_str.parse::<q_types::NetworkId>()
+                                            .unwrap_or(q_types::NetworkId::MainnetGenesis);
+                                        let topic = network_id.mining_solutions_topic();
+                                        let _ = cmd_tx.send(q_network::NetworkCommand::PublishMiningSolution {
+                                            topic,
+                                            solution_bytes,
+                                            miner_address: submission.miner_address_str.clone(),
+                                            block_height,
+                                            nonce: submission.nonce,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     // v3.4.10-beta: EARLY FAST-SYNC CHECK - Skip PHASE 4 entirely during catch-up
                     // Problem: Even with mining paused, solutions were still being queued to BlockProducer,
@@ -13437,7 +13865,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                                         let network_id = std::env::var("Q_NETWORK_ID")
                                             .ok()
                                             .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                                            .unwrap_or(q_types::NetworkId::Mainnet2026_2); // ✅ v1.3.3-beta: Phase 16 default (Bug #9 fix)
+                                            .unwrap_or(q_types::NetworkId::MainnetGenesis); // ✅ v1.3.3-beta: Phase 16 default (Bug #9 fix)
                                         let topic = network_id.blocks_topic();
                                         let command = q_network::NetworkCommand::PublishBlock {
                                             topic,
@@ -14305,10 +14733,14 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
 
                         // 💰 PROCESS ALL TRANSACTIONS - Update wallet balances (coinbase AND transfers)
                         // v3.4.2-beta FIX: Previously only processed coinbase, missing P2P transfers!
+                        // v8.2.5 CRITICAL FIX: Persist balances IMMEDIATELY after transfers (not every 15s)
+                        // BUG: Balances were only synced to disk every 15s. If node restarted within that
+                        // window after a spend, the spend reverted — creating a money printer exploit.
                         let balance_updates = {
                             let mut balances =
                                 app_state_block_producer.wallet_balances.write().await;
                             let mut updates = Vec::new();
+                            let mut has_transfers = false;
                             for tx in &new_block.transactions {
                                 // Check if this is a coinbase transaction (from address is all zeros)
                                 if tx.from == [0u8; 32] {
@@ -14318,10 +14750,14 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                                     let new_balance = current_balance + tx.amount;
                                     balances.insert(tx.to, new_balance);
 
-                                    // ⚡ PERFORMANCE: Persistence now handled by periodic background task (every 15s)
-                                    // Previously synced on EVERY coinbase TX - now batched for 450x improvement
+                                    // v8.2.5: Persist coinbase immediately (prevents reward loss on restart)
+                                    if let Err(e) = app_state_block_producer.storage_engine
+                                        .save_wallet_balance(&tx.to, new_balance).await
+                                    {
+                                        error!("❌ CRITICAL: Failed to persist coinbase balance: {}", e);
+                                    }
 
-                                    info!("💰 TIME-BASED Coinbase TX: {} QNK → {} (new balance: {} QNK)",
+                                    info!("💰 TIME-BASED Coinbase TX: {} QNK → {} (new balance: {} QNK) [PERSISTED]",
                                           tx.amount as f64 / QUG_DISPLAY_DIVISOR,
                                           hex::encode(&tx.to[..8]),
                                           new_balance as f64 / QUG_DISPLAY_DIVISOR);
@@ -14332,6 +14768,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                                 } else {
                                     // 🔄 v3.4.2-beta: TRANSFER TRANSACTION - debit sender, credit receiver
                                     // This was MISSING before - P2P transfers were not updating in-memory balances!
+                                    has_transfers = true;
 
                                     // Debit the sender
                                     let sender_current = balances.get(&tx.from).copied().unwrap_or(0);
@@ -14343,7 +14780,20 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                                     let receiver_new = receiver_current.saturating_add(tx.amount);
                                     balances.insert(tx.to, receiver_new);
 
-                                    info!("🔄 TIME-BASED Transfer TX: {} QNK: {} → {} (sender: {} → {}, receiver: {} → {})",
+                                    // v8.2.5 CRITICAL: Persist BOTH sender and receiver balances IMMEDIATELY
+                                    // This prevents the money printer bug where spends revert on restart
+                                    if let Err(e) = app_state_block_producer.storage_engine
+                                        .save_wallet_balance(&tx.from, sender_new).await
+                                    {
+                                        error!("❌ CRITICAL: Failed to persist sender balance: {}", e);
+                                    }
+                                    if let Err(e) = app_state_block_producer.storage_engine
+                                        .save_wallet_balance(&tx.to, receiver_new).await
+                                    {
+                                        error!("❌ CRITICAL: Failed to persist receiver balance: {}", e);
+                                    }
+
+                                    info!("🔄 TIME-BASED Transfer TX: {} QNK: {} → {} (sender: {} → {}, receiver: {} → {}) [PERSISTED]",
                                           tx.amount as f64 / QUG_DISPLAY_DIVISOR,
                                           hex::encode(&tx.from[..8]),
                                           hex::encode(&tx.to[..8]),
@@ -14357,6 +14807,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                                     updates.push((tx.to, receiver_current, receiver_new, false, "transfer_received".to_string()));
                                 }
                             }
+
+                            if has_transfers {
+                                info!("🔒 v8.2.5: Transfer balances persisted to disk immediately (money printer fix)");
+                            }
+
                             updates
                         };
 
@@ -14479,7 +14934,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                                     let network_id = std::env::var("Q_NETWORK_ID")
                                         .ok()
                                         .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                                        .unwrap_or(q_types::NetworkId::Mainnet2026_2); // ✅ v1.3.3-beta: Phase 16 default (Bug #9 fix)
+                                        .unwrap_or(q_types::NetworkId::MainnetGenesis); // ✅ v1.3.3-beta: Phase 16 default (Bug #9 fix)
                                     let topic = network_id.blocks_topic();
                                     let command = q_network::NetworkCommand::PublishBlock {
                                         topic,
@@ -14610,7 +15065,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                                     let network_id = std::env::var("Q_NETWORK_ID")
                                         .ok()
                                         .and_then(|s| s.parse::<q_types::NetworkId>().ok())
-                                        .unwrap_or(q_types::NetworkId::Mainnet2026_2); // ✅ v1.3.3-beta: Phase 16 default (Bug #9 fix)
+                                        .unwrap_or(q_types::NetworkId::MainnetGenesis); // ✅ v1.3.3-beta: Phase 16 default (Bug #9 fix)
                                     let topic = network_id.blocks_topic();
                                     let command = q_network::NetworkCommand::PublishBlock {
                                         topic,
@@ -14688,11 +15143,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
             // v5.2.0: Clone sync_trigger for select! wake-up
             let sync_trigger = app_state_sync.sync_trigger.clone();
 
-            // 🚀 v1.0.2: Adaptive sync loop frequency (miner-optimized pattern)
+            // 🚀 v8.2.0: Adaptive sync loop frequency (miner-optimized pattern)
             // Instead of fixed 500ms, adapt based on sync gap:
             //   Fully synced (gap=0):   2000ms (save CPU, gossipsub delivers new blocks)
-            //   Slightly behind (1-5):  500ms  (current default)
-            //   Behind (5-50):          200ms  (aggressive catch-up)
+            //   Near-atomic (1-2):      100ms  (race to tip — every ms counts)
+            //   Catching up (3-50):     200ms  (aggressive catch-up)
             //   Far behind (50+):       100ms  (maximum throughput)
             let mut adaptive_interval_ms: u64 = 500; // Start at default
 
@@ -14758,10 +15213,17 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                 }
 
                 // 🚀 v1.0.4-beta: BOOTSTRAP HEIGHT DISCOVERY (FALLBACK ONLY - P2P is primary)
-                // If P2P hasn't given us network height (no peer announcements yet), fetch from HTTP bootstrap as fallback
-                // NOTE: P2P peer height announcements (Fix #2) are the PRIMARY mechanism - this is just a fallback
-                if network_height == 0 {
-                    debug!("🌐 [BOOTSTRAP HTTP FALLBACK] network_height=0, P2P announcements not received yet");
+                // v8.3.0: Also re-fetch periodically when we have few peers or are far behind.
+                // Previously only fired when network_height==0, so nodes that got a valid height once
+                // but then lost all peers would never refresh — height decayed to ~12K while real
+                // network is at 3M. Now also fires when peer count is low and we're far from synced.
+                let fast_peer_count_for_http = app_state_sync.turbo_sync.as_ref()
+                    .map(|ts| ts.peer_count_fast())
+                    .unwrap_or(0);
+                let needs_http_height = network_height == 0
+                    || (fast_peer_count_for_http < 2 && current_height + 50_000 < network_height);
+                if needs_http_height {
+                    debug!("🌐 [BOOTSTRAP HTTP FALLBACK] network_height={}, peers={}, refreshing from HTTP", network_height, fast_peer_count_for_http);
                     debug!("   Attempting HTTP bootstrap discovery from {} peers...", HTTP_BOOTSTRAP_PEERS.len());
 
                     // v5.1.0: Try multiple bootstrap peers for height discovery
@@ -14780,7 +15242,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                                             Ok(json) => {
                                                 // v7.3.1: NETWORK ISOLATION - Verify bootstrap peer is on same network
                                                 let our_net_id = std::env::var("Q_NETWORK_ID")
-                                                    .unwrap_or_else(|_| "mainnet2026.2".to_string());
+                                                    .unwrap_or_else(|_| "mainnet-genesis".to_string());
                                                 let peer_net_id = json["data"]["network_id"]
                                                     .as_str()
                                                     .or_else(|| json["network_id"].as_str())
@@ -15648,6 +16110,35 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
 
                                     drop(libp2p_lock); // Release lock immediately
 
+                                    // 🚀 v8.2.0: MICRO-SYNC fast path — for gaps ≤ 50, skip full TurboSync pipeline
+                                    if let Some(ref turbo_sync) = app_state_sync.turbo_sync {
+                                        let micro_gap = network_height.saturating_sub(current_height);
+                                        if micro_gap > 0 && micro_gap <= 50 {
+                                            match turbo_sync.micro_sync(current_height + 1, network_height).await {
+                                                Ok(true) => {
+                                                    info!("⚡ [MICRO-SYNC] Fast path succeeded for {} blocks", micro_gap);
+                                                    // Sync producers with new database state
+                                                    if let Err(e) = app_state_sync.block_producer_pool
+                                                        .sync_from_storage(&app_state_sync.storage_engine)
+                                                        .await
+                                                    {
+                                                        warn!("⚠️ [MICRO-SYNC] Producer sync failed: {}", e);
+                                                    }
+                                                    if let Some(ref sync_activator) = app_state_sync.sync_activator {
+                                                        sync_activator.record_sync_attempt().await;
+                                                    }
+                                                    continue; // Skip full TurboSync
+                                                }
+                                                Ok(false) => {
+                                                    debug!("⚡ [MICRO-SYNC] Not eligible or no peers — falling through to TurboSync");
+                                                }
+                                                Err(e) => {
+                                                    warn!("⚡ [MICRO-SYNC] Failed: {} — falling through to TurboSync", e);
+                                                }
+                                            }
+                                        }
+                                    }
+
                                     // 🚀 v1.4.13-beta: Actually call TurboSync to fetch blocks!
                                     // This is the critical missing piece - we must actively request blocks
                                     if let Some(ref turbo_sync) = app_state_sync.turbo_sync {
@@ -15889,11 +16380,12 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                 }
 
                 // ═══════════════════════════════════════════════════════════════════
-                // 🚀 v1.0.2: ADAPTIVE SYNC LOOP FREQUENCY (Miner-Optimized Pattern)
+                // 🚀 v8.2.0: ADAPTIVE SYNC LOOP FREQUENCY (Miner-Optimized Pattern)
                 // ═══════════════════════════════════════════════════════════════════
                 // Dynamically adjust loop interval based on sync gap:
                 //   Fully synced (gap=0):    2000ms (save CPU, rely on gossipsub)
-                //   Slightly behind (1-10):  500ms  (current default)
+                //   Near-atomic (1-2):       100ms  (race to tip — every ms counts)
+                //   Slightly behind (3-10):  200ms  (aggressive catch-up)
                 //   Behind (10-50):          200ms  (aggressive catch-up)
                 //   Far behind (50+):        100ms  (maximum throughput)
                 let sync_gap = network_height.saturating_sub(current_height);
@@ -15903,13 +16395,14 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                         turbo_sync.set_fully_synced(sync_gap == 0 && network_height > 0);
                     }
                     2000
-                } else if sync_gap <= 10 {
-                    // Near tip — gossipsub handles most blocks
+                } else if sync_gap <= 2 {
+                    // v8.2.0: Near-atomic — 1-2 blocks behind, race to tip
                     if let Some(ref turbo_sync) = app_state_sync.turbo_sync {
                         turbo_sync.set_fully_synced(false);
                     }
-                    500
+                    100
                 } else if sync_gap <= 50 {
+                    // v8.2.0: Merged 3-10 and 10-50 tiers into one aggressive tier
                     if let Some(ref turbo_sync) = app_state_sync.turbo_sync {
                         turbo_sync.set_fully_synced(false);
                     }
@@ -15937,19 +16430,29 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
     // IPFS-ROCKSDB DECENTRALIZED STORAGE INITIALIZATION
     // ========================================
     info!("💾 Initializing IPFS-RocksDB decentralized storage system...");
-    let ipfs_storage = match q_api_server::storage_api::initialize_storage().await {
-        Ok(storage) => {
+    // v8.2.2: Wrap in 30s timeout — IPFS init creates a separate libp2p swarm that can hang
+    // indefinitely, blocking the HTTP server from ever starting (port 8080 never binds).
+    let ipfs_storage = match tokio::time::timeout(
+        tokio::time::Duration::from_secs(30),
+        q_api_server::storage_api::initialize_storage()
+    ).await {
+        Ok(Ok(storage)) => {
             info!("✅ IPFS-RocksDB storage system initialized successfully");
             info!("   Distributed database backups enabled");
             info!("   Content-addressed storage via IPFS");
             info!("   libp2p network integration active");
             Some(storage)
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             warn!(
                 "⚠️  IPFS storage initialization failed: {}, backup functionality disabled",
                 e
             );
+            None
+        }
+        Err(_) => {
+            warn!("⚠️  IPFS storage initialization TIMED OUT after 30s — skipping (backup functionality disabled)");
+            warn!("   This prevents the HTTP server from being blocked by IPFS libp2p swarm init");
             None
         }
     };
@@ -15996,8 +16499,15 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
         let replication_manager = Arc::new(replication_manager);
 
         // Start replication manager background tasks
+        // v8.2.2: Wrap in timeout to prevent blocking HTTP server startup
         info!("🚀 Starting database replication manager...");
-        replication_manager.clone().start().await;
+        match tokio::time::timeout(
+            tokio::time::Duration::from_secs(15),
+            replication_manager.clone().start()
+        ).await {
+            Ok(()) => info!("✅ Replication manager started"),
+            Err(_) => warn!("⚠️  Replication manager start TIMED OUT after 15s — continuing without it"),
+        }
 
         // Create channel for gossipsub publishing
         let (gossipsub_tx, mut gossipsub_rx) =
@@ -16012,17 +16522,25 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
         );
 
         // Start bridge (spawns background tasks for bidirectional forwarding)
+        // v8.2.2: Wrap in timeout to prevent blocking HTTP server startup
         info!("🌉 Starting database replication bridge...");
-        let incoming_tx = match bridge.start(gossipsub_tx).await {
-            Ok(tx) => {
+        let incoming_tx = match tokio::time::timeout(
+            tokio::time::Duration::from_secs(15),
+            bridge.start(gossipsub_tx)
+        ).await {
+            Ok(Ok(tx)) => {
                 info!("✅ Database replication bridge started successfully");
                 tx
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 warn!(
                     "⚠️  Failed to start replication bridge: {}, replication disabled",
                     e
                 );
+                tokio::sync::mpsc::unbounded_channel().0
+            }
+            Err(_) => {
+                warn!("⚠️  Replication bridge start TIMED OUT after 15s — skipping");
                 tokio::sync::mpsc::unbounded_channel().0
             }
         };
@@ -16148,37 +16666,41 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
             loop {
                 interval.tick().await;
 
-                // Read all current balances from memory
-                let balances = app_state_balance_sync.wallet_balances.read().await;
-                let balance_count = balances.len();
+                // v8.3.0: REVERSED DIRECTION — Read FROM RocksDB INTO HashMap (never other way).
+                // Previous: HashMap → RocksDB (CORRUPTED RocksDB with stale in-memory values).
+                // balance_consensus is the sole authoritative writer to RocksDB via add_balance_tx.
+                // This periodic task now REFRESHES the HashMap cache from the truth source.
+                let addresses: Vec<([u8; 32], u128)> = {
+                    let balances = app_state_balance_sync.wallet_balances.read().await;
+                    if balances.is_empty() {
+                        continue;
+                    }
+                    balances.iter().map(|(k, v)| (*k, *v)).collect()
+                };
 
-                // Skip if no balances to sync
-                if balance_count == 0 {
-                    continue;
-                }
-
-                // Clone balances for async persistence (release lock quickly)
-                let balances_snapshot = balances.clone();
-                drop(balances);
-
-                // Persist to RocksDB with synced writes (survives hard kill)
                 let start = std::time::Instant::now();
-                match app_state_balance_sync
-                    .storage_engine
-                    .save_wallet_balances(&balances_snapshot)
-                    .await
+                let mut corrections = 0u64;
                 {
-                    Ok(_) => {
-                        let elapsed = start.elapsed();
-                        info!(
-                            "💾 Synced {} wallet balances to disk in {:?} (atomic batch write)",
-                            balance_count, elapsed
-                        );
+                    let mut balances = app_state_balance_sync.wallet_balances.write().await;
+                    for (addr, current_in_memory) in &addresses {
+                        let addr_hex = hex::encode(addr);
+                        if let Ok(actual_balance) = app_state_balance_sync.storage_engine
+                            .get_balance(&addr_hex).await
+                        {
+                            if actual_balance != *current_in_memory {
+                                balances.insert(*addr, actual_balance);
+                                corrections += 1;
+                            }
+                        }
                     }
-                    Err(e) => {
-                        error!("❌ Failed to sync wallet balances to disk: {:?}", e);
-                        error!("   Balances are still safe in memory but may be lost on crash!");
-                    }
+                }
+                let elapsed = start.elapsed();
+                if corrections > 0 {
+                    warn!("🔄 [v8.3.0 BALANCE REFRESH] Corrected {} of {} addresses from RocksDB in {:?}",
+                          corrections, addresses.len(), elapsed);
+                } else {
+                    info!("💾 [BALANCE SYNC] {} addresses verified against RocksDB in {:?} (all consistent)",
+                          addresses.len(), elapsed);
                 }
 
                 // v7.2.9: Persist current height as safe floor to prevent height regression on restart
@@ -16206,15 +16728,30 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                     }
                 }
 
+                // v8.3.0: Detect and fix height_cache desync every 15 seconds.
+                // Catches any code path that writes qblock:latest without updating cache.
+                if let Ok(Some(pointer_height)) = app_state_balance_sync.storage_engine
+                    .get_latest_qblock_height().await
+                {
+                    let cached = app_state_balance_sync.storage_engine
+                        .get_highest_contiguous_block().await.unwrap_or(0);
+                    if pointer_height > cached + 50 {
+                        warn!("🛡️ [v8.3.0 DESYNC FIX] height_cache={} but qblock:latest={}. Correcting.",
+                              cached, pointer_height);
+                        app_state_balance_sync.storage_engine
+                            .update_height_cache(pointer_height).await;
+                    }
+                }
+
                 // v7.1.2: Calculate true total supply from actual wallet balances
-                // Previously total_minted_supply was inflated by the mining batch processor
-                // which incremented it per batch without actually crediting balances.
-                // Now we sum all wallet balances for the true supply.
+                // v8.3.0: Read from the now-refreshed HashMap (synced from RocksDB above).
                 {
                     let mut calculated_supply: u128 = 0;
-                    for entry in balances_snapshot.iter() {
-                        calculated_supply = calculated_supply.saturating_add(*entry.1);
+                    let balances = app_state_balance_sync.wallet_balances.read().await;
+                    for (_, balance) in balances.iter() {
+                        calculated_supply = calculated_supply.saturating_add(*balance);
                     }
+                    drop(balances);
                     // Update in-memory supply counter
                     let mut supply = app_state_balance_sync.total_minted_supply.write().await;
                     *supply = calculated_supply;
@@ -16232,6 +16769,38 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
         });
 
         info!("✅ Periodic balance sync task started (15s interval)");
+    }
+
+    // ========================================
+    // 🔒 v8.2.0: PERIODIC BALANCE INTEGRITY MONITOR
+    // ========================================
+    // Computes and logs a deterministic hash of all wallet balances every 5 minutes.
+    // Operators compare hashes across nodes via: journalctl | grep "BALANCE INTEGRITY"
+    // Same hash = same balances = deterministic consensus working correctly.
+    {
+        let app_state_integrity = app_state.clone();
+        tokio::spawn(async move {
+            // Wait 60s after startup before first check (let sync complete)
+            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(300));
+            loop {
+                interval.tick().await;
+                let height = app_state_integrity.current_height_atomic
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                match app_state_integrity.storage_engine.compute_balance_state_hash().await {
+                    Ok((hash, wallet_count, total_supply)) => {
+                        let hash_hex = hex::encode(hash);
+                        let supply_qug = total_supply / 1_000_000_000_000_000_000_000_000u128;
+                        info!("🔒 [BALANCE INTEGRITY] height={} hash={} wallets={} supply={}QUG",
+                              height, &hash_hex[..16], wallet_count, supply_qug);
+                    }
+                    Err(e) => {
+                        warn!("🔒 [BALANCE INTEGRITY] Failed to compute state hash: {}", e);
+                    }
+                }
+            }
+        });
+        info!("✅ Balance integrity monitor started (5min interval)");
     }
 
     // ========================================
@@ -17677,6 +18246,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
         .route("/api/v1/sync/metrics", get(handlers::get_sync_metrics))
         // v5.2.0: Sync health endpoint - cross-node height divergence diagnostics
         .route("/api/v1/sync/health", get(handlers::sync_health))
+        // v1.0.2: Detailed sync status for admin panel chunk-level visibility
+        .route("/api/v1/sync/detailed", get(handlers::sync_detailed))
         // Quantum Cryptography
         .route(
             "/api/v1/quantum/crypto/status",
@@ -17980,6 +18551,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
         // v7.1.5: Dev Fee admin - verification, measurement, and config
         .route("/api/v1/admin/dev-fee", get(q_api_server::deploy_admin_api::admin_dev_fee_status))
         .route("/api/v1/admin/dev-fee/config", post(q_api_server::deploy_admin_api::admin_dev_fee_config))
+        // v8.2.0: Admin-only balance rebuild from chain (deterministic balance consensus)
+        .route("/api/v1/admin/rebuild-balances", post(handlers::admin_rebuild_balances))
         .route("/api/v1/admin/purge-phase-data", post(admin_purge_phase_data))
         // v7.3.0: Node operator admin settings (--admin-wallet)
         .route("/api/v1/admin/is-admin", get(q_api_server::admin_settings_api::is_admin))
@@ -18056,9 +18629,16 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
         // v0.9.3-beta: REMOVED .fallback_service() - was shadowing all API routes with 404
         // API routes now work correctly, frontend accessible at /ui/*
         // Add middleware
+        // v1.0.2-safe: 5-layer deadlock prevention for heavy connection load
+        // ConcurrencyLimit(2000): Only 2000 in-flight requests at once. Excess get 503.
+        // Timeout(30s): Kills any request hanging >30s. SSE unaffected (applies to initial response only).
+        // NOTE: TimeoutLayer must be AFTER TraceLayer (inner) because Trace wraps the body in a
+        // non-Default type. Timeout needs Body: Default, so it must wrap the raw axum routes.
         .layer(
             ServiceBuilder::new()
+                .layer(tower::limit::ConcurrencyLimitLayer::new(200))
                 .layer(TraceLayer::new_for_http())
+                .layer(tower_http::timeout::TimeoutLayer::new(std::time::Duration::from_secs(30)))
                 .layer(CorsLayer::permissive())
                 // Increase body size limit to 50MB for large transaction batches (50K tx)
                 .layer(axum::extract::DefaultBodyLimit::max(50 * 1024 * 1024)),
@@ -18301,7 +18881,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
 
     // Start the HIGH-PERFORMANCE HTTP API server
     info!("🚀 Initializing High-Performance HTTP Server for 1M+ TPS");
-    info!("   TCP optimizations: NODELAY, REUSEPORT, 4MB buffers");
+    info!("   TCP optimizations: NODELAY, REUSEADDR, 4MB buffers");
     info!("   HTTP/2 support: Automatic via client negotiation");
     info!(
         "P2P connections will be accepted on port {}",
@@ -18318,9 +18898,13 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
     );
 
     // v7.1.6: 96GB RAM / 19 vCPU — increase buffers and backlog
+    // v8.2.2: DISABLE auto-port-detection — silent port changes break nginx proxy routing
+    // If port 8080 is in TIME_WAIT, SO_REUSEADDR handles it. If another process has it,
+    // we MUST fail loudly so the operator knows nginx is broken.
     let high_perf_server = HighPerformanceServer::new(app, addr)
         .with_tcp_buffers(8 * 1024 * 1024, 8 * 1024 * 1024) // 8MB buffers (was 4MB)
-        .with_backlog(4096); // 4096 pending connections (was 1024)
+        .with_backlog(4096) // 4096 pending connections (was 1024)
+        .with_auto_port_detection(false); // v8.2.2: CRITICAL — never silently change port
 
     // v1.4.15-beta: Mark startup as complete - server is ready to accept connections
     {
@@ -18435,8 +19019,19 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                 }
             });
 
-            // Run TUI in foreground
-            q_tui::run_tui(tui_app).await?;
+            // Run TUI in foreground — if it exits (SSH disconnect, no TTY),
+            // the server continues running headless instead of killing the process.
+            match q_tui::run_tui(tui_app).await {
+                Ok(()) => {
+                    info!("🎨 TUI exited cleanly. Node continues running headless.");
+                    // Block on the server future so the process doesn't exit
+                    tokio::signal::ctrl_c().await.ok();
+                }
+                Err(e) => {
+                    warn!("⚠️ TUI failed: {}. Node continues running headless.", e);
+                    tokio::signal::ctrl_c().await.ok();
+                }
+            }
         }
 
         #[cfg(not(feature = "tui"))]

@@ -224,13 +224,13 @@ impl GenesisCheckpointValidator {
 
         // v7.3.0: Mainnet 2026.2 - Fresh directory relaunch with zero contamination
         genesis_checkpoints.insert(
-            NetworkId::Mainnet2026_2,
+            NetworkId::MainnetGenesis,
             GenesisCheckpoint {
-                network_id: NetworkId::Mainnet2026_2,
+                network_id: NetworkId::MainnetGenesis,
                 genesis_block_hash: [0u8; 32],
                 genesis_height: 1,
                 genesis_prev_hash: [0u8; 32],
-                network_name: "mainnet2026.2".to_string(),
+                network_name: "mainnet-genesis".to_string(),
                 description: "Q-NarwhalKnight Mainnet 2026.2 - Production network".to_string(),
             },
         );

@@ -53,7 +53,7 @@ const ActiveLoansCard: React.FC<ActiveLoansCardProps> = ({ onPayback }) => {
   };
 
   const calculateHealthRatio = (loan: ActiveLoan) => {
-    const QUG_PRICE = 42.50;
+    const QUG_PRICE = 3000.00;
     const loanValue = loan.loan_amount / 1e24;
     const collateralValue = loan.collateral_amount * QUG_PRICE;
     return (collateralValue / loanValue) * 100;

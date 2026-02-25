@@ -202,15 +202,26 @@ impl HighPerformanceServer {
         socket.set_reuse_address(true)?;
         info!("   ✓ SO_REUSEADDR enabled");
 
-        // SO_REUSEPORT - Kernel load balancing (Linux only)
-        #[cfg(target_os = "linux")]
+        // v8.2.2: SO_REUSEPORT DISABLED — it prevents binding over TIME_WAIT sockets,
+        // which causes the server to silently move to a different port after restarts.
+        // We only run one server instance, so kernel load balancing isn't needed.
+        // SO_REUSEADDR alone is sufficient for rapid restart.
+
+        // v8.2.3: TCP keepalive — detect dead connections (SSE CLOSE-WAIT leak fix)
+        // Without this, disconnected SSE clients leave CLOSE-WAIT sockets that accumulate
+        // until the accept queue is saturated and the server stops accepting new connections.
+        socket.set_keepalive(true)?;
         {
-            if let Err(e) = socket.set_reuse_port(true) {
-                warn!("   ⚠️  SO_REUSEPORT not supported: {}", e);
-            } else {
-                info!("   ✓ SO_REUSEPORT enabled (kernel load balancing)");
+            let mut keepalive = socket2::TcpKeepalive::new()
+                .with_time(std::time::Duration::from_secs(30))      // Start probing after 30s idle
+                .with_interval(std::time::Duration::from_secs(10)); // Probe every 10s
+            #[cfg(target_os = "linux")]
+            {
+                keepalive = keepalive.with_retries(3);               // Give up after 3 failed probes
             }
+            let _ = socket.set_tcp_keepalive(&keepalive);
         }
+        info!("   ✓ TCP keepalive enabled (30s idle, 10s interval)");
 
         // Set TCP buffer sizes
         socket.set_recv_buffer_size(self.tcp_recv_buffer_size)?;

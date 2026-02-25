@@ -66,8 +66,8 @@ struct Args {
     #[arg(short, long, default_value = "http://localhost:8080")]
     server: String,
 
-    /// Mining pool URL for pool mode (e.g., stratum+tcp://pool.quillon.xyz:3333)
-    #[arg(long, default_value = "stratum+tcp://pool.quillon.xyz:3333")]
+    /// Mining pool URL for pool mode (e.g., stratum+tcp://quillon.xyz:3333)
+    #[arg(long, default_value = "stratum+tcp://quillon.xyz:3333")]
     pool_url: String,
 
     /// Worker name for pool mining (default: randomly generated)
@@ -307,14 +307,21 @@ async fn main() -> Result<()> {
 
         if args.mode == "pool" {
             // Pool mining mode - connect via Stratum protocol
+            // v8.1.6: Accept --server if it looks like a stratum URL (user convenience)
+            let pool_url = if args.server.contains("stratum") || args.server.contains(":3333") {
+                info!("ℹ️  Using --server value as pool URL (detected stratum URL)");
+                args.server.clone()
+            } else {
+                args.pool_url.clone()
+            };
             let worker_name = args.worker_name.unwrap_or_else(|| {
                 format!("worker_{:08x}", rand::random::<u32>())
             });
             info!("⛏️  Starting Q-NarwhalKnight POOL mining...");
             info!("💰 Mining to wallet: {}", wallet);
-            info!("🏊 Pool URL: {}", args.pool_url);
+            info!("🏊 Pool URL: {}", pool_url);
             info!("👷 Worker name: {}", worker_name);
-            run_pool_mining(cpu_threads, args.intensity, &wallet, &worker_name, &args.pool_url).await?;
+            run_pool_mining(cpu_threads, args.intensity, &wallet, &worker_name, &pool_url).await?;
         } else if args.mode == "decentralized" {
             // Decentralized P2P pool mining mode - v2.3.0+
             // Uses CRDT-based PPLNS with gossipsub coordination
@@ -343,6 +350,13 @@ async fn main() -> Result<()> {
             ).await?;
         } else {
             // Solo mining mode - connect directly to API server
+            // v8.1.6: Detect stratum URL passed to solo mode and redirect to pool mode
+            if args.server.contains("stratum") || args.server.ends_with(":3333") {
+                error!("❌ Stratum URL detected in --server but mode is 'solo'.");
+                error!("   For pool mining, use: --mode pool --server {}", args.server);
+                error!("   For solo mining, use: --server https://quillon.xyz");
+                std::process::exit(1);
+            }
             info!("⛏️  Starting Q-NarwhalKnight SOLO mining...");
             info!("💰 Mining to wallet: {}", wallet);
             info!("🌐 Primary server: {}", args.server);
@@ -1167,11 +1181,18 @@ fn mining_thread(
     let batch_size = (intensity as u64) * 100_000; // Base batch size
     let api_url = &server_url;
 
-    let client = reqwest::Client::new();
+    // v8.3.0: Single shared client with connection pooling — prevents TCP exhaustion
+    // at scale (100+ miners each creating fresh connections per challenge fetch).
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(15))
+        .pool_max_idle_per_host(2)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
 
     // Check if server is syncing before starting to mine
     // Uses tokio Handle to run async challenge fetch from this sync thread
-    match tokio_handle.block_on(check_server_sync_status(api_url)) {
+    match tokio_handle.block_on(check_server_sync_status(&client, api_url)) {
         Ok((is_syncing, blocks_behind)) if is_syncing => {
             info!("⏸️  Thread {} waiting: Server is syncing ({} blocks behind network)", thread_id, blocks_behind);
             info!("   Mining will start automatically when sync is complete");
@@ -1180,7 +1201,7 @@ fn mining_thread(
                 if !is_running.load(Ordering::Relaxed) {
                     return;
                 }
-                match tokio_handle.block_on(check_server_sync_status(api_url)) {
+                match tokio_handle.block_on(check_server_sync_status(&client, api_url)) {
                     Ok((false, _)) => {
                         info!("✅ Thread {} detected sync complete - starting mining", thread_id);
                         break;
@@ -1202,7 +1223,7 @@ fn mining_thread(
     let mut last_server_notice = String::new();
 
     // Fetch initial mining challenge
-    let mut current_challenge = match tokio_handle.block_on(fetch_mining_challenge(api_url)) {
+    let mut current_challenge = match tokio_handle.block_on(fetch_mining_challenge(&client, api_url)) {
         Ok(challenge) => {
             info!("📋 Thread {} fetched challenge: block #{}, reward: {} QNK",
                  thread_id, challenge.block_height, challenge.block_reward);
@@ -1239,7 +1260,14 @@ fn mining_thread(
     };
 
     let mut last_challenge_refresh = std::time::Instant::now();
-    let challenge_refresh_interval = std::time::Duration::from_secs(50);
+    // v8.3.0: Only thread 0 does periodic challenge refresh (every 50s).
+    // Other threads only refresh when SSE signals a new block.
+    // At 100 miners × 8 threads this reduces API calls from ~2.6/s to ~0.3/s.
+    let challenge_refresh_interval = if thread_id == 0 {
+        std::time::Duration::from_secs(50)
+    } else {
+        std::time::Duration::from_secs(300) // 5 min — SSE signal handles the rest
+    };
     let mut last_known_block_signal = new_block_signal.load(Ordering::Relaxed);
 
     while is_running.load(Ordering::Relaxed) {
@@ -1249,7 +1277,7 @@ fn mining_thread(
 
         // Refresh challenge if expired, near expiration, OR new block arrived
         if should_refresh_immediately || last_challenge_refresh.elapsed() >= challenge_refresh_interval {
-            match tokio_handle.block_on(fetch_mining_challenge(api_url)) {
+            match tokio_handle.block_on(fetch_mining_challenge(&client, api_url)) {
                 Ok(new_challenge) => {
                     if new_challenge.block_height != current_challenge.block_height {
                         if should_refresh_immediately {
@@ -1627,8 +1655,8 @@ async fn start_sse_listener(
 
 /// Check if server is currently syncing (returns is_syncing, blocks_behind)
 /// Falls back to bootstrap1.quillon.xyz if primary server is unreachable.
-async fn check_server_sync_status(api_url: &str) -> Result<(bool, u64)> {
-    let client = reqwest::Client::new();
+/// v8.3.0: Accepts shared client to reuse TCP connections (was creating new client per call).
+async fn check_server_sync_status(client: &reqwest::Client, api_url: &str) -> Result<(bool, u64)> {
     let path = "/api/v1/status";
 
     let (body, _used_url) = fetch_with_fallback(&client, api_url, path).await?;
@@ -1654,8 +1682,8 @@ async fn check_server_sync_status(api_url: &str) -> Result<(bool, u64)> {
 }
 
 /// Fetch current mining challenge from API server (with fallback to bootstrap1.quillon.xyz)
-async fn fetch_mining_challenge(api_url: &str) -> Result<MiningChallenge> {
-    let client = reqwest::Client::new();
+/// v8.3.0: Accepts shared client to reuse TCP connections (was creating new client per call).
+async fn fetch_mining_challenge(client: &reqwest::Client, api_url: &str) -> Result<MiningChallenge> {
     let path = "/api/v1/mining/challenge";
 
     let (body, _used_url) = fetch_with_fallback(&client, api_url, path).await?;
@@ -2138,7 +2166,9 @@ async fn miner_link_task(
                 }
 
                 // Run send/receive loop
-                let mut stats_interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+                // v8.3.0: Stats every 5s instead of 1s — at 100 miners, reduces
+                // server WS processing from 100 msg/s to 20 msg/s.
+                let mut stats_interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
                 let mut ping_interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
 
                 loop {

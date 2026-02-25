@@ -101,8 +101,20 @@ impl<'a> tracing::field::Visit for MessageVisitor<'a> {
     }
 }
 
+/// Check if stdout is a real terminal (not a pipe, not headless)
+pub fn is_terminal_available() -> bool {
+    use std::io::IsTerminal;
+    io::stdout().is_terminal() && io::stdin().is_terminal()
+}
+
 /// Initialize the terminal for TUI mode
 pub fn init_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
+    if !is_terminal_available() {
+        return Err(anyhow::anyhow!(
+            "TUI requires a real terminal (TTY). Ubuntu Server headless or piped output detected. \
+             Run without --tui for headless/systemd operation."
+        ));
+    }
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -113,13 +125,14 @@ pub fn init_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
 
 /// Restore the terminal to normal mode
 pub fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
-    disable_raw_mode()?;
-    execute!(
+    // v8.3.0: Don't panic if terminal is already gone (SSH disconnect)
+    let _ = disable_raw_mode();
+    let _ = execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
         DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
+    );
+    let _ = terminal.show_cursor();
     Ok(())
 }
 
@@ -127,10 +140,19 @@ pub fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -
 pub async fn run_tui(mut app: App) -> Result<()> {
     let mut terminal = init_terminal()?;
     let mut event_handler = EventHandler::new(250); // 250ms tick rate
+    let mut draw_errors = 0u32;
 
     loop {
-        // Draw UI
-        terminal.draw(|f| ui::render(f, &mut app))?;
+        // Draw UI — handle errors gracefully (terminal may vanish)
+        if let Err(e) = terminal.draw(|f| ui::render(f, &mut app)) {
+            draw_errors += 1;
+            if draw_errors >= 3 {
+                eprintln!("⚠️ [TUI] Terminal draw failed {} times: {}. Exiting TUI gracefully.", draw_errors, e);
+                break;
+            }
+        } else {
+            draw_errors = 0;
+        }
 
         // Handle events
         match event_handler.next().await? {
@@ -144,6 +166,10 @@ pub async fn run_tui(mut app: App) -> Result<()> {
             }
             Event::Mouse(_) => {}
             Event::Resize(_, _) => {}
+            Event::TerminalLost => {
+                eprintln!("⚠️ [TUI] Terminal lost (SSH disconnect?). Node continues running without TUI.");
+                break;
+            }
         }
     }
 

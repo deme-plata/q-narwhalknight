@@ -295,7 +295,7 @@ pub use pruning::{AdaptivePruningEngine, PruningConfig, PruningMode, PruningStat
 pub use snapshot::SnapshotManager;
 pub use sync::{SyncProtocol, SyncRequest, SyncResponse};
 pub use transaction::{QTransaction, TransactionState};
-pub use turbo_sync::{TurboSyncManager, TurboSyncConfig, BlockPack, BlockPackRequest, NetworkRequest, TurboSyncMetrics, EnhancedPeerRegistry, PeerHeightRecord};
+pub use turbo_sync::{TurboSyncManager, TurboSyncConfig, BlockPack, BlockPackRequest, NetworkRequest, TurboSyncMetrics, EnhancedPeerRegistry, PeerHeightRecord, DetailedSyncStatus};
 pub use ml_batch_optimizer::{SyncFeatures, BatchOutcome, BatchSizePredictor, BatchOptimizerConfig};
 // TEMPORARILY DISABLED: Circular dependency with q-api-server
 // pub use turbo_sync_peer_bridge::{TurboSyncPeerBridge, PeerHeightEntry, run_periodic_sync, run_enhanced_periodic_sync};
@@ -1697,8 +1697,10 @@ impl QStorage {
                 }
 
                 // Update the height pointer in database
+                // v8.2.8: Use put_sync to ensure durability — sled on Windows loses
+                // unsynced writes on crash, causing height regression to 0.
                 let latest_height_bytes = scan_height.to_be_bytes().to_vec();
-                self.hot_db.put(CF_BLOCKS, b"qblock:latest", &latest_height_bytes).await
+                self.hot_db.put_sync(CF_BLOCKS, b"qblock:latest", &latest_height_bytes).await
                     .context("Failed to update height pointer after turbo scan")?;
 
                 // 🚨 v1.1.9: FIX 2 - FLUSH AFTER POINTER UPDATE
@@ -2117,8 +2119,9 @@ impl QStorage {
 
         if repaired_height > 0 {
             // Update pointer to repaired height
+            // v8.2.8: put_sync for durability on sled/Windows
             let height_bytes = repaired_height.to_be_bytes();
-            self.hot_db.put(CF_BLOCKS, b"qblock:latest", &height_bytes).await
+            self.hot_db.put_sync(CF_BLOCKS, b"qblock:latest", &height_bytes).await
                 .context("Failed to repair height pointer")?;
 
             // Update cache too
@@ -2375,9 +2378,34 @@ impl QStorage {
             }
 
             if latest == 0 {
-                // No blocks found even at low heights - truly empty database
+                // v8.2.8: Before returning 0, check safe_floor — on Windows/sled the height
+                // pointer may be lost but blocks still exist. safe_floor is the last persisted
+                // minimum height from periodic saves.
+                let safe_floor_key = "qblock:safe_floor";
+                if let Ok(Some(sf_bytes)) = self.hot_db.get("cf_metadata", safe_floor_key.as_bytes()).await {
+                    if let Ok(sf_str) = String::from_utf8(sf_bytes.to_vec()) {
+                        if let Ok(sf) = sf_str.parse::<u64>() {
+                            if sf > 0 {
+                                warn!("🔄 [HEIGHT RECOVERY] Block probes returned 0 but safe_floor={} — using safe_floor", sf);
+                                return Ok(sf);
+                            }
+                        }
+                    }
+                }
+                // Also check turbo_tip pointer
+                let turbo_tip_key = "qblock:turbo_tip";
+                if let Ok(Some(tt_bytes)) = self.hot_db.get("cf_metadata", turbo_tip_key.as_bytes()).await {
+                    if let Ok(tt_str) = String::from_utf8(tt_bytes.to_vec()) {
+                        if let Ok(tt) = tt_str.parse::<u64>() {
+                            if tt > 0 {
+                                warn!("🔄 [HEIGHT RECOVERY] Block probes returned 0 but turbo_tip={} — using turbo_tip", tt);
+                                return Ok(tt);
+                            }
+                        }
+                    }
+                }
                 warn!("🚨🚨🚨 [HEIGHT DEBUG] NO BLOCKS FOUND after comprehensive scan!");
-                warn!("🚨 [HEIGHT DEBUG] Database appears empty despite existing data!");
+                warn!("🚨 [HEIGHT DEBUG] Database appears empty — truly fresh start");
                 return Ok(0);
             }
         }
@@ -2423,9 +2451,10 @@ impl QStorage {
         // above gaps. Only runs on startup, so ~50 extra reads are negligible.
         {
             let mut probed_tip = highest_existing;
-            // Probe from 50K up to 2M at 25K intervals (max 80 reads)
+            // Probe from 50K up to 10M at 25K intervals (max ~400 reads)
+            // v8.3.0: Raised from 2M to 10M — chain exceeded 2.97M and probe missed all blocks above 2M
             let mut probe_h = ((highest_existing / 25_000) + 1) * 25_000; // next 25K boundary
-            while probe_h <= 2_000_000 {
+            while probe_h <= 10_000_000 {
                 if self.get_qblock_by_height(probe_h).await?.is_some() {
                     // Found blocks above the gap! Refine with binary search.
                     let mut lo = probe_h;
@@ -2497,12 +2526,26 @@ impl QStorage {
 
         if recovery_target > 1000 {
             // If binary search didn't find the actual tip (it can miss non-contiguous blocks),
-            // verify the persisted tip actually exists
+            // verify the persisted tip actually exists. If not, scan backwards to find the
+            // highest block near the recovery target.
+            // v8.3.0 FIX: Old code fell back to `highest_existing` (which could be 100K+ lower
+            // due to probe ceiling at 2M). Now scans backwards from recovery_target instead.
             let verified_target = if recovery_target > highest_existing {
                 if self.get_qblock_by_height(recovery_target).await?.is_some() {
                     recovery_target
                 } else {
-                    highest_existing
+                    // Block at exact recovery_target doesn't exist — scan backwards to find
+                    // the highest block near it (could be off by a few due to unflushed writes)
+                    let mut found = highest_existing;
+                    let scan_floor = recovery_target.saturating_sub(500);
+                    for h in (scan_floor..recovery_target).rev() {
+                        if self.get_qblock_by_height(h).await?.is_some() {
+                            found = h;
+                            info!("🔍 [RECOVERY v8.3.0] recovery_target {} missing, found block at {}", recovery_target, h);
+                            break;
+                        }
+                    }
+                    std::cmp::max(found, highest_existing)
                 }
             } else {
                 recovery_target
@@ -3391,6 +3434,26 @@ impl QStorage {
         }
     }
 
+    /// v8.2.9: Load persistent mining stats (blocks_found, rewards_earned) from RocksDB.
+    /// These are blockchain-derived and deterministic — same blocks = same stats on ANY node.
+    /// Used by the mining stats API to return consistent data across all HA servers.
+    pub async fn load_persistent_mining_stats(&self, wallet_hex: &str) -> Result<(u64, u128)> {
+        let blocks_key = format!("mining_blocks_{}", wallet_hex);
+        let rewards_key = format!("mining_rewards_{}", wallet_hex);
+
+        let blocks: u64 = match self.hot_db.get(CF_MANIFEST, blocks_key.as_bytes()).await? {
+            Some(bytes) if bytes.len() == 8 => u64::from_le_bytes(bytes[..8].try_into().unwrap()),
+            _ => 0,
+        };
+
+        let rewards: u128 = match self.hot_db.get(CF_MANIFEST, rewards_key.as_bytes()).await? {
+            Some(bytes) if bytes.len() == 16 => u128::from_le_bytes(bytes[..16].try_into().unwrap()),
+            _ => 0,
+        };
+
+        Ok((blocks, rewards))
+    }
+
     /// ✅ v0.9.27-beta: Get balance from balance consensus column family
     /// This reads directly from the "balances" CF written by BalanceConsensusEngine
     /// v2.5.0: Returns u128 with backward compatibility for u64 storage
@@ -3497,6 +3560,32 @@ impl QStorage {
             total_balance / 1_000_000_000_000_000_000_000_000
         );
         Ok(())
+    }
+
+    /// v8.2.0: Compute a deterministic hash of all wallet balances.
+    /// Sorts all (address, balance) pairs by address, feeds through blake3.
+    /// Same balances on any node → same hash. Used for cross-node verification.
+    pub async fn compute_balance_state_hash(&self) -> Result<([u8; 32], usize, u128)> {
+        let balances = self.load_wallet_balances().await?;
+
+        let mut sorted_entries: Vec<_> = balances.iter()
+            .filter(|(_, &amount)| amount > 0)
+            .collect();
+        sorted_entries.sort_by_key(|(addr, _)| *addr);
+
+        let mut hasher = blake3::Hasher::new();
+        let mut wallet_count = 0usize;
+        let mut total_supply = 0u128;
+
+        for (addr, &amount) in &sorted_entries {
+            hasher.update(addr.as_slice());
+            hasher.update(&amount.to_le_bytes());
+            wallet_count += 1;
+            total_supply = total_supply.saturating_add(amount);
+        }
+
+        let hash: [u8; 32] = *hasher.finalize().as_bytes();
+        Ok((hash, wallet_count, total_supply))
     }
 
     /// Save total minted supply to persistent storage (enforces 21M QUG hard cap)
@@ -4770,20 +4859,38 @@ impl QStorage {
 
             blocks_scanned += 1;
 
-            // Primary: Apply balance_updates embedded in blocks (deterministic).
-            // Each BalanceUpdate records the final balance (new_balance) for an address
-            // after this block's changes. Taking the latest value per address is correct.
-            if !block.balance_updates.is_empty() {
-                for bu in &block.balance_updates {
-                    if bu.address != [0u8; 32] {
-                        balances.insert(bu.address, bu.new_balance);
+            // v8.2.0: Process block.transactions — mirrors the runtime path in
+            // BalanceConsensusEngine::process_block_mining_rewards() exactly.
+            // This ensures rebuild produces identical balances to live processing.
+            for block_tx in &block.transactions {
+                let is_coinbase = block_tx.is_coinbase() || block_tx.tx_type.is_coinbase();
+
+                if is_coinbase {
+                    // Coinbase (mining reward): credit miner
+                    if block_tx.to != [0u8; 32] && block_tx.amount > 0 {
+                        let entry = balances.entry(block_tx.to).or_insert(0);
+                        *entry = entry.saturating_add(block_tx.amount);
                         balance_updates_applied += 1;
                     }
+                } else {
+                    // Transfer: debit sender, credit receiver
+                    if block_tx.amount == 0 {
+                        continue;
+                    }
+                    // Debit sender (saturating to prevent underflow)
+                    if let Some(sender_bal) = balances.get_mut(&block_tx.from) {
+                        *sender_bal = sender_bal.saturating_sub(block_tx.amount);
+                    }
+                    // Credit receiver
+                    let entry = balances.entry(block_tx.to).or_insert(0);
+                    *entry = entry.saturating_add(block_tx.amount);
+                    balance_updates_applied += 1;
                 }
-            } else {
-                // Fallback for early blocks without balance_updates:
-                // Mining solutions represent coinbase rewards. Use the emission
-                // controller's static halving schedule for approximate reward.
+            }
+
+            // Fallback for blocks with no transactions but with mining_solutions
+            // (legacy blocks from early chain history)
+            if block.transactions.is_empty() {
                 for solution in &block.mining_solutions {
                     if solution.miner_address != [0u8; 32] {
                         let reward = crate::emission_controller::static_block_reward_for_timestamp(
@@ -5344,6 +5451,76 @@ impl QStorage {
         }
 
         Ok(hashes)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 🔐 v8.1.7: OAuth2 Key Vault — Server-side encrypted signing keys
+    // Stores AES-256-GCM encrypted Ed25519 private keys for OAuth2 custodial signing.
+    // When an OAuth2 user sends a transaction, the server uses the vault key
+    // instead of requiring the user to enter their mnemonic every time.
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Save an encrypted signing key for OAuth2 custodial signing.
+    /// Key format: oauth2_vault_{address_hex} → AES-256-GCM encrypted private key bytes
+    pub async fn save_vault_key(&self, address: &[u8; 32], encrypted_key: &[u8]) -> Result<()> {
+        let key = format!("oauth2_vault_{}", hex::encode(address));
+        self.hot_db.put(CF_MANIFEST, key.as_bytes(), encrypted_key).await?;
+        info!(
+            "🔐 [VAULT] Saved encrypted signing key for address: {}...{}",
+            &hex::encode(address)[..8],
+            &hex::encode(address)[56..]
+        );
+        Ok(())
+    }
+
+    /// Load an encrypted signing key from the vault.
+    pub async fn load_vault_key(&self, address: &[u8; 32]) -> Result<Option<Vec<u8>>> {
+        let key = format!("oauth2_vault_{}", hex::encode(address));
+        match self.hot_db.get(CF_MANIFEST, key.as_bytes()).await? {
+            Some(bytes) => {
+                debug!(
+                    "🔐 [VAULT] Loaded encrypted key for address: {}...{}",
+                    &hex::encode(address)[..8],
+                    &hex::encode(address)[56..]
+                );
+                Ok(Some(bytes))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Load all vault keys from persistent storage.
+    /// Returns map of address → encrypted private key bytes.
+    pub async fn load_vault_keys(&self) -> Result<HashMap<[u8; 32], Vec<u8>>> {
+        let mut vault = HashMap::new();
+        let prefix = "oauth2_vault_".as_bytes();
+
+        match self.hot_db.scan_prefix(CF_MANIFEST, prefix).await {
+            Ok(entries) => {
+                for (key, value) in entries {
+                    if let Ok(key_str) = String::from_utf8(key) {
+                        if let Some(hex_addr) = key_str.strip_prefix("oauth2_vault_") {
+                            if let Ok(addr_bytes) = hex::decode(hex_addr) {
+                                if addr_bytes.len() == 32 {
+                                    let mut address = [0u8; 32];
+                                    address.copy_from_slice(&addr_bytes);
+                                    vault.insert(address, value);
+                                }
+                            }
+                        }
+                    }
+                }
+                info!(
+                    "🔐 [VAULT] Loaded {} encrypted signing keys from persistent storage",
+                    vault.len()
+                );
+            }
+            Err(e) => {
+                warn!("Failed to scan vault keys: {}", e);
+            }
+        }
+
+        Ok(vault)
     }
 
     /// Save CollateralVault to persistent storage (generic byte storage)
@@ -6953,6 +7130,30 @@ impl QStorage {
 
         debug!("📧 Saved email {} in folder '{}' for wallet {}", email.id, email.folder, &wallet_hex[..8]);
         Ok(())
+    }
+
+    /// Get all unique wallet addresses that have email activity on this node
+    pub async fn get_all_email_wallets(&self) -> Result<Vec<[u8; 32]>> {
+        let entries = self.hot_db.scan_prefix(CF_EMAILS_BY_WALLET, b"").await?;
+        let mut seen = std::collections::HashSet::new();
+        let mut wallets = Vec::new();
+        for (key, _) in entries {
+            if let Ok(key_str) = String::from_utf8(key) {
+                if let Some(wallet_hex) = key_str.split(':').next() {
+                    if wallet_hex.len() == 64 && seen.insert(wallet_hex.to_string()) {
+                        if let Ok(bytes) = hex::decode(wallet_hex) {
+                            if bytes.len() == 32 {
+                                let mut w = [0u8; 32];
+                                w.copy_from_slice(&bytes);
+                                wallets.push(w);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        info!("📧 Found {} unique email wallets", wallets.len());
+        Ok(wallets)
     }
 
     /// Get an email by ID

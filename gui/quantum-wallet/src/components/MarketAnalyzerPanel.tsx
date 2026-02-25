@@ -154,7 +154,7 @@ export default function MarketAnalyzerPanel({
       }
 
       // Get QUG/USD price from QUG/QUGUSD pool
-      let qugPriceUsd = 42.50; // Default
+      let qugPriceUsd = 3000.00; // Default
       const qugQugusdPool = rawPools.find((p: any) =>
         (p.token0 === 'QUG' && p.token1 === 'QUGUSD') ||
         (p.token0 === 'QUGUSD' && p.token1 === 'QUG')

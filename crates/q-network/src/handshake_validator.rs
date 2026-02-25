@@ -97,6 +97,11 @@ pub struct HandshakeMessage {
 
     /// Genesis block hash for network verification
     pub genesis_hash: Vec<u8>,
+
+    /// v8.4.0: Self-reported bandwidth tier (Mbps) for sync peer selection
+    /// 0 = unknown. Used by gravity-assist to prefer high-bandwidth peers.
+    #[serde(default)]
+    pub bandwidth_tier_mbps: u32,
 }
 
 impl HandshakeMessage {
@@ -113,6 +118,11 @@ impl HandshakeMessage {
                 "memory-limiting".to_string(),
             ],
             genesis_hash,
+            // v8.4.0: Self-reported bandwidth for sync peer selection
+            bandwidth_tier_mbps: std::env::var("Q_BANDWIDTH_MBPS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
         }
     }
 }
@@ -407,7 +417,7 @@ mod tests {
     #[test]
     fn test_handshake_validation_wrong_network() {
         let genesis = vec![1, 2, 3, 4];
-        let validator = HandshakeValidator::new("mainnet2026.2".to_string(), genesis.clone());
+        let validator = HandshakeValidator::new("mainnet-genesis".to_string(), genesis.clone());
 
         let peer_handshake = HandshakeMessage::new(
             "testnet".to_string(),

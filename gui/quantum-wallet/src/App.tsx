@@ -10,6 +10,7 @@ import DownloadNodeScreen from './components/DownloadNodeScreen';
 import AIChatScreen from './components/AIChatScreen';
 import SettingsScreen from './components/SettingsScreen';
 import RwaMarketplaceScreen from './components/RwaMarketplaceScreen';
+import EmailScreen from './components/EmailScreen';
 import Navigation from './components/Navigation';
 import TopBar from './components/TopBar';
 import TokenBar from './components/TokenBar';
@@ -50,7 +51,7 @@ function safeCacheBalance(balance: number): void {
   }
 }
 
-type Screen = 'dashboard' | 'transactions' | 'explorer' | 'dex' | 'mining' | 'vm' | 'rwamarket' | 'download' | 'aichat' | 'settings';
+type Screen = 'dashboard' | 'transactions' | 'explorer' | 'dex' | 'mining' | 'vm' | 'rwamarket' | 'download' | 'aichat' | 'email' | 'settings';
 
 function App() {
   console.log('🚀 App function executing - TOP OF FUNCTION');
@@ -58,7 +59,7 @@ function App() {
   // v7.0.0: NETWORK CHANGE DETECTION - Clear all cached data when switching networks
   // This prevents stale testnet balances/tokens from showing up on mainnet
   (() => {
-    const CURRENT_NETWORK = 'mainnet2026.2'; // Must match Q_NETWORK_ID
+    const CURRENT_NETWORK = 'mainnet-genesis'; // Must match Q_NETWORK_ID
     const lastNetwork = localStorage.getItem('lastNetworkId');
     if (lastNetwork && lastNetwork !== CURRENT_NETWORK) {
       console.warn(`🔄 [App] Network changed: ${lastNetwork} → ${CURRENT_NETWORK}. Clearing ALL cached data.`);
@@ -161,6 +162,10 @@ function App() {
   // v2.3.11-beta: Track when DEX swap just happened to ignore stale SSE updates
   // SSE balance updates from server can be stale and overwrite correct DEX swap balance
   const dexSwapInProgressRef = useRef(false);
+
+  // v8.1.6: Monotonic block-height tracking to prevent balance zigzag
+  // Only accept balance updates from same or higher block height
+  const lastBalanceHeightRef = useRef(0);
 
   // Debug: Log whenever currentScreen changes
   useEffect(() => {
@@ -391,11 +396,28 @@ function App() {
           return;
         }
 
+        // v8.1.6: Custom events don't carry block height, so check if SSE already
+        // provided a more recent update. If SSE is active with height tracking,
+        // skip custom events to avoid stale overwrites.
+        const eventHeight = customEvent.detail?.blockHeight || 0;
+        if (eventHeight > 0 && eventHeight < lastBalanceHeightRef.current) {
+          console.log('🚫 [BALANCE] Rejecting stale custom balance-update (height regression):', {
+            eventHeight,
+            lastHeight: lastBalanceHeightRef.current,
+            staleBalance: newBalance,
+            source
+          });
+          return;
+        }
+        if (eventHeight > 0) {
+          lastBalanceHeightRef.current = eventHeight;
+        }
+
         console.log('🟡 [BALANCE DEBUG] Custom balance-update event:', {
           newBalance: newBalance,
           currentBalance: nodeData.balance,
           source: source,
-          isDexSwap: isDexSwap
+          blockHeight: eventHeight
         });
 
         // Use debounced update for non-DEX updates to prevent flickering
@@ -525,6 +547,19 @@ function App() {
         // v5.5.2: Dispatch event so DeployControlPanel knows SSE is connected
         window.dispatchEvent(new Event('sse-connected'));
 
+        // v8.1.5: Force balance refresh on SSE reconnect — during HA failover the
+        // user may land on a different backend with slightly different balance state.
+        // Without this, the UI shows stale balance until the user manually refreshes.
+        try {
+          const { walletSession } = await import('./services/walletAuth');
+          const session = walletSession.getSession();
+          if (session) {
+            console.log('🔄 App.tsx: SSE reconnected — balance will refresh via Dashboard');
+          }
+        } catch (balErr) {
+          console.warn('⚠️ App.tsx: Balance refresh on SSE reconnect failed:', balErr);
+        }
+
         // Process SSE stream using ReadableStream
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
@@ -599,9 +634,25 @@ function App() {
                   return; // Skip this SSE update entirely
                 }
 
+                // v8.1.6: Monotonic height tracking — reject stale balance from older blocks
+                const eventBlockHeight = balanceData.block_height || 0;
+                if (eventBlockHeight > 0 && eventBlockHeight < lastBalanceHeightRef.current) {
+                  console.log('🚫 [BALANCE] Rejecting stale SSE balance (height regression):', {
+                    eventHeight: eventBlockHeight,
+                    lastHeight: lastBalanceHeightRef.current,
+                    staleBalance: balanceData.new_balance,
+                    reason: changeReason
+                  });
+                  return;
+                }
+                if (eventBlockHeight > 0) {
+                  lastBalanceHeightRef.current = eventBlockHeight;
+                }
+
                 console.log('🟢 [BALANCE DEBUG] SSE balance-updated event:', {
                   oldBalance: balanceData.old_balance,
                   newBalance: balanceData.new_balance,
+                  blockHeight: eventBlockHeight,
                   currentNodeDataBalance: nodeData.balance,
                   reason: balanceData.change_reason,
                   isP2PMiningReward,
@@ -796,34 +847,32 @@ function App() {
 
               // Only update if this reward is for the current wallet
               if (currentHex && eventHex === currentHex) {
-                // ADD the pending reward to the current balance (don't replace!)
-                const currentBalance = nodeData.balance;
+                // v8.0.3: DON'T update balance here — the `balance-updated` SSE event
+                // already sends the correct absolute balance from the backend.
+                // Using nodeData.balance here is a STALE closure value, which causes
+                // zigzag: pending-mining-reward computes wrong total, then balance-updated
+                // sends the correct value, alternating every block.
                 const rewardQnk = rewardData.pending_reward_qnk || 0;
-                const newBalance = currentBalance + rewardQnk;
-
-                console.log('🟢 [PENDING REWARD] Adding to balance:', {
-                  currentBalance,
+                console.log('💎 [PENDING REWARD] Received (info only, balance-updated SSE handles balance):', {
                   pendingReward: rewardQnk,
-                  newBalance,
                   source: 'P2P_SSE'
                 });
 
-                // Update balance with the new total (current + pending reward)
-                setPendingBalanceUpdate(newBalance);
-
-                // Also dispatch event for Dashboard to update wallet balances
+                // Dispatch mining reward notification for Dashboard transaction list only
+                // Do NOT dispatch wallet-balance-updated — balance-updated SSE handles that
                 window.dispatchEvent(new CustomEvent('wallet-balance-updated', {
                   detail: {
                     symbol: 'QUG',
-                    balance: newBalance,
-                    oldBalance: currentBalance,
+                    balance: nodeDataBalanceRef.current + rewardQnk,
+                    oldBalance: nodeDataBalanceRef.current,
                     reason: 'pending_mining_reward',
                     rewardAmount: rewardQnk,
                     walletAddress: eventHex,
                     timestamp: new Date().toISOString(),
+                    infoOnly: true,  // Signal: don't update balance display, just log the reward
                   }
                 }));
-                console.log('📢 App.tsx: Dispatched wallet-balance-updated for pending mining reward');
+                console.log('📢 App.tsx: Dispatched pending-mining-reward info event');
               }
             } else if (type === 'mining_stats') {
               // v2.7.5-beta: Handle P2P mining stats (hash rate, solutions count)
@@ -1134,6 +1183,7 @@ function App() {
               <div style={{ display: currentScreen === 'aichat' ? 'block' : 'none' }}>
                 <AIChatScreen />
               </div>
+              {currentScreen === 'email' && <EmailScreen />}
               {currentScreen === 'download' && <DownloadNodeScreen />}
               {currentScreen === 'settings' && <SettingsScreen onLogout={handleLogout} />}
             </main>

@@ -232,7 +232,7 @@ impl BlockRequestAuthenticator {
 
         // Verify network ID matches (prevent cross-network attacks)
         // v7.3.0: Accept mainnet2026, mainnet2026.1 and mainnet2026.2
-        let expected_network_ids = ["mainnet2026.2", "mainnet2026.1", "mainnet2026"];
+        let expected_network_ids = ["mainnet-genesis", "mainnet2026.2", "mainnet2026.1", "mainnet2026"];
 
         if !expected_network_ids.contains(&proof.network_id.as_str()) {
             error!("🚨 [ZK BLOCK AUTH] Network ID mismatch! Cross-network attack detected.");

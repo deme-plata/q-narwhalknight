@@ -26,7 +26,7 @@ use rayon::prelude::*;  // ✅ v0.9.41-beta: Parallel decompression
 use serde::{Deserialize, Serialize};
 use std::cmp::min;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, RwLock, Semaphore, Mutex};
@@ -340,6 +340,11 @@ pub struct TurboSyncConfig {
     /// When true, subscribes to gossipsub for live blocks while filling small gaps
     /// Default: true - provides near-atomic sync to network tip
     pub endgame_live_stream: bool,
+
+    /// v8.4.0: Preferred peers for sync (1Gbit servers)
+    /// Read from Q_PREFERRED_SYNC_PEERS="peer_id1,peer_id2"
+    /// These peers get a 3x score boost in gravity-assist peer selection
+    pub preferred_sync_peers: Vec<String>,
 }
 
 impl Default for TurboSyncConfig {
@@ -585,6 +590,13 @@ impl Default for TurboSyncConfig {
             endgame_live_stream: std::env::var("Q_ENDGAME_LIVE_STREAM")
                 .map(|v| v == "1" || v.to_lowercase() == "true")
                 .unwrap_or(true),  // ON by default for atomic sync experience
+
+            // v8.4.0: Preferred sync peers (comma-separated peer IDs)
+            // These peers get a 3x score boost in gravity-assist peer selection
+            preferred_sync_peers: std::env::var("Q_PREFERRED_SYNC_PEERS")
+                .ok()
+                .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+                .unwrap_or_default(),
         }
     }
 }
@@ -1172,6 +1184,98 @@ impl TurboSyncMetrics {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// 📊 v1.0.2: Detailed Sync Status (Admin Panel Visibility)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Detailed sync status for the admin panel — combines session chunk progress,
+/// TurboSyncMetrics, and peer registry data into a single snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DetailedSyncStatus {
+    pub sync_mode: String,
+    pub local_height: u64,
+    pub network_height: u64,
+    pub gap: u64,
+    pub total_chunks: u64,
+    pub completed_chunks: u64,
+    pub in_flight: u64,
+    pub queued: u64,
+    pub chunk_progress_pct: f64,
+    pub blocks_per_second: f64,
+    pub bytes_downloaded_mb: f64,
+    pub compression_ratio: f64,
+    pub active_streams: u64,
+    pub failed_chunks: u64,
+    pub retried_chunks: u64,
+    pub peer_count: u64,
+    pub best_peer_height: u64,
+    pub is_fully_synced: bool,
+    pub eta_seconds: Option<u64>,
+    // v8.2.8: Apollo subsystem metrics
+    pub apollo_kalman_bandwidth_mbps: f64,
+    pub apollo_kalman_latency_ms: f64,
+    pub apollo_kalman_confidence: f64,
+    pub apollo_kalman_optimal_chunk_kb: u64,
+    pub apollo_kalman_loss_pct: f64,
+    pub apollo_kalman_timeout_ms: u64,
+    pub apollo_kalman_concurrency: u64,
+    pub apollo_kalman_jitter_ms: f64,
+    pub apollo_kalman_samples: u64,
+    pub apollo_pid_target_bps: f64,
+    pub apollo_pid_current_bps: f64,
+    pub apollo_pid_error: f64,
+    pub apollo_pid_kp: f64,
+    pub apollo_pid_ki: f64,
+    pub apollo_pid_kd: f64,
+    pub apollo_peers_tracked: u64,
+    pub apollo_gravity_best_peer: String,
+    pub apollo_gravity_best_heat: f64,
+}
+
+impl Default for DetailedSyncStatus {
+    fn default() -> Self {
+        Self {
+            sync_mode: "idle".to_string(),
+            local_height: 0,
+            network_height: 0,
+            gap: 0,
+            total_chunks: 0,
+            completed_chunks: 0,
+            in_flight: 0,
+            queued: 0,
+            chunk_progress_pct: 0.0,
+            blocks_per_second: 0.0,
+            bytes_downloaded_mb: 0.0,
+            compression_ratio: 1.0,
+            active_streams: 0,
+            failed_chunks: 0,
+            retried_chunks: 0,
+            peer_count: 0,
+            best_peer_height: 0,
+            is_fully_synced: false,
+            eta_seconds: None,
+            apollo_kalman_bandwidth_mbps: 0.0,
+            apollo_kalman_latency_ms: 0.0,
+            apollo_kalman_confidence: 0.0,
+            apollo_kalman_optimal_chunk_kb: 0,
+            apollo_kalman_loss_pct: 0.0,
+            apollo_kalman_timeout_ms: 0,
+            apollo_kalman_concurrency: 0,
+            apollo_kalman_jitter_ms: 0.0,
+            apollo_kalman_samples: 0,
+            apollo_pid_target_bps: 0.0,
+            apollo_pid_current_bps: 0.0,
+            apollo_pid_error: 0.0,
+            apollo_pid_kp: 0.0,
+            apollo_pid_ki: 0.0,
+            apollo_pid_kd: 0.0,
+            apollo_peers_tracked: 0,
+            apollo_gravity_best_peer: String::new(),
+            apollo_gravity_best_heat: 0.0,
+        }
+    }
+}
+
 /// Turbo Sync Manager - Main orchestrator
 pub struct TurboSyncManager {
     config: TurboSyncConfig,
@@ -1274,6 +1378,21 @@ pub struct TurboSyncManager {
 
     /// Whether the node is fully synced (gap == 0). Used for adaptive loop frequency.
     pub is_fully_synced: Arc<AtomicBool>,
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // 📊 v1.0.2: Session Chunk Progress Atomics (Admin Panel Sync Visibility)
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// Total chunks in the current sync session (0 when idle)
+    pub session_total_chunks: Arc<AtomicU64>,
+    /// Completed chunks in the current sync session
+    pub session_completed_chunks: Arc<AtomicU64>,
+    /// Currently in-flight chunk downloads
+    pub session_in_flight: Arc<AtomicU64>,
+    /// Chunks still queued waiting to be spawned
+    pub session_queued: Arc<AtomicU64>,
+    /// Current sync mode: 0=idle, 1=turbo, 2=endgame, 3=micro
+    pub session_sync_mode: Arc<AtomicU8>,
 
     /// 🚀 v1.5.0-beta: CHIRON Parallel State Applicator (~30% sync speedup)
     /// Uses pre-computed execution hints to parallelize transaction state application
@@ -1627,6 +1746,13 @@ impl TurboSyncManager {
             info!("   • Peer momentum tracking: heat, bandwidth, latency");
             info!("   • 30-second cache heat half-life");
             info!("   Disable with Q_APOLLO_GRAVITY_ASSIST=0 if encountering issues");
+            if !config.preferred_sync_peers.is_empty() {
+                info!("   📡 v8.4.0: {} preferred sync peers configured (3x boost)",
+                      config.preferred_sync_peers.len());
+                for p in &config.preferred_sync_peers {
+                    info!("     → {}", &p[..p.len().min(16)]);
+                }
+            }
             info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         }
 
@@ -1685,6 +1811,12 @@ impl TurboSyncManager {
             cached_peer_count: Arc::new(AtomicU32::new(0)),
             cached_has_gaps: Arc::new(AtomicBool::new(true)), // Assume gaps until proven otherwise
             is_fully_synced: Arc::new(AtomicBool::new(false)),
+            // 📊 v1.0.2: Session Chunk Progress Atomics
+            session_total_chunks: Arc::new(AtomicU64::new(0)),
+            session_completed_chunks: Arc::new(AtomicU64::new(0)),
+            session_in_flight: Arc::new(AtomicU64::new(0)),
+            session_queued: Arc::new(AtomicU64::new(0)),
+            session_sync_mode: Arc::new(AtomicU8::new(0)),
         }
     }
 
@@ -1733,6 +1865,122 @@ impl TurboSyncManager {
     /// Update fully-synced state
     pub fn set_fully_synced(&self, synced: bool) {
         self.is_fully_synced.store(synced, Ordering::Release);
+    }
+
+    /// 📊 v1.0.2: Get detailed sync status snapshot for admin panel
+    pub async fn get_detailed_sync_status(&self) -> DetailedSyncStatus {
+        let local_height = self.get_local_height().await.unwrap_or(0);
+        let network_height = self.cached_max_peer_height.load(Ordering::Relaxed);
+        let gap = network_height.saturating_sub(local_height);
+        let is_synced = self.is_fully_synced.load(Ordering::Relaxed);
+
+        // Session chunk progress
+        let total_chunks = self.session_total_chunks.load(Ordering::Relaxed);
+        let completed_chunks = self.session_completed_chunks.load(Ordering::Relaxed);
+        let in_flight = self.session_in_flight.load(Ordering::Relaxed);
+        let queued = self.session_queued.load(Ordering::Relaxed);
+        let mode_u8 = self.session_sync_mode.load(Ordering::Relaxed);
+
+        let sync_mode = if is_synced && gap <= 5 {
+            "fully_synced".to_string()
+        } else {
+            match mode_u8 {
+                1 => "turbo".to_string(),
+                2 => "endgame".to_string(),
+                3 => "micro".to_string(),
+                _ => if gap > 0 { "idle".to_string() } else { "fully_synced".to_string() },
+            }
+        };
+
+        let chunk_progress_pct = if total_chunks > 0 {
+            (completed_chunks as f64 / total_chunks as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        // Metrics from TurboSyncMetrics
+        let blocks_per_second = self.metrics.blocks_per_second().await;
+        let bytes_downloaded = self.metrics.total_bytes_downloaded.load(Ordering::Relaxed) as f64;
+        let bytes_downloaded_mb = bytes_downloaded / (1024.0 * 1024.0);
+        let compression_ratio = self.metrics.compression_ratio() as f64;
+        let active_streams = self.metrics.active_parallel_streams.load(Ordering::Relaxed) as u64;
+        let failed_chunks = self.metrics.failed_chunks.load(Ordering::Relaxed);
+        let retried_chunks = self.metrics.retried_chunks.load(Ordering::Relaxed);
+
+        // Peer info
+        let peer_count = self.cached_peer_count.load(Ordering::Relaxed) as u64;
+        let best_peer_height = network_height;
+
+        // ETA calculation
+        let eta_seconds = if gap > 0 && blocks_per_second > 0.0 {
+            Some((gap as f64 / blocks_per_second) as u64)
+        } else {
+            None
+        };
+
+        // v8.2.8: Apollo subsystem metrics
+        let (kalman_bw, kalman_lat, kalman_conf, kalman_chunk, kalman_loss, kalman_timeout, kalman_conc, kalman_jitter, kalman_samples) =
+            if let Some(km) = self.apollo_get_kalman_metrics().await {
+                (km.bandwidth_mbps, km.latency_ms, km.confidence, km.optimal_chunk_kb as u64,
+                 km.loss_percent, km.optimal_timeout_ms, km.optimal_concurrency as u64,
+                 km.jitter_ms, km.samples_collected as u64)
+            } else {
+                (0.0, 0.0, 0.0, 0, 0.0, 0, 0, 0.0, 0)
+            };
+
+        let (pid_target, pid_current, pid_error, pid_kp, pid_ki, pid_kd) =
+            if let Some(pm) = self.apollo_get_pid_metrics().await {
+                (pm.target, pm.current_rate, pm.avg_error, pm.kp, pm.ki, pm.kd)
+            } else {
+                (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            };
+
+        let all_peer_stats = self.apollo_get_all_peer_stats();
+        let peers_tracked = all_peer_stats.len() as u64;
+        let (best_peer_name, best_heat) = all_peer_stats.iter()
+            .max_by(|a, b| a.cache_heat.partial_cmp(&b.cache_heat).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|p| (p.peer_id[..12.min(p.peer_id.len())].to_string(), p.cache_heat))
+            .unwrap_or_default();
+
+        DetailedSyncStatus {
+            sync_mode,
+            local_height,
+            network_height,
+            gap,
+            total_chunks,
+            completed_chunks,
+            in_flight,
+            queued,
+            chunk_progress_pct,
+            blocks_per_second,
+            bytes_downloaded_mb,
+            compression_ratio,
+            active_streams,
+            failed_chunks,
+            retried_chunks,
+            peer_count,
+            best_peer_height,
+            is_fully_synced: is_synced,
+            eta_seconds,
+            apollo_kalman_bandwidth_mbps: kalman_bw,
+            apollo_kalman_latency_ms: kalman_lat,
+            apollo_kalman_confidence: kalman_conf,
+            apollo_kalman_optimal_chunk_kb: kalman_chunk,
+            apollo_kalman_loss_pct: kalman_loss,
+            apollo_kalman_timeout_ms: kalman_timeout,
+            apollo_kalman_concurrency: kalman_conc,
+            apollo_kalman_jitter_ms: kalman_jitter,
+            apollo_kalman_samples: kalman_samples,
+            apollo_pid_target_bps: pid_target,
+            apollo_pid_current_bps: pid_current,
+            apollo_pid_error: pid_error,
+            apollo_pid_kp: pid_kp,
+            apollo_pid_ki: pid_ki,
+            apollo_pid_kd: pid_kd,
+            apollo_peers_tracked: peers_tracked,
+            apollo_gravity_best_peer: best_peer_name,
+            apollo_gravity_best_heat: best_heat,
+        }
     }
 
     /// 🚀 v1.5.0-beta: Check if CHIRON hints are enabled
@@ -2008,10 +2256,37 @@ impl TurboSyncManager {
 
     /// 🌍 v1.9.0-SLINGSHOT: Select best peer for target range using gravity assist
     /// Returns the peer most likely to have hot cache for the target range
+    /// v8.4.0: Applies 3x boost to preferred sync peers (1Gbit servers)
     pub fn apollo_select_peer(&self, target_range: &std::ops::Range<u64>, available_peers: &[&str]) -> Option<String> {
         if !self.config.enable_apollo_gravity_assist || available_peers.is_empty() {
             return available_peers.first().map(|s| s.to_string());
         }
+
+        // v8.4.0: If preferred sync peers are configured, apply preference boost
+        if !self.config.preferred_sync_peers.is_empty() {
+            let mut best_peer: Option<(String, f64)> = None;
+            for &peer_id in available_peers {
+                let base_score = self.apollo_peer_momentum
+                    .get_peer_momentum(peer_id)
+                    .map(|m| m.selection_score(target_range))
+                    .unwrap_or(0.1);
+
+                // 3x boost for preferred peers (1Gbit servers)
+                let is_preferred = self.config.preferred_sync_peers.iter()
+                    .any(|p| peer_id.contains(p.as_str()) || p.contains(peer_id));
+                let final_score = if is_preferred { base_score * 3.0 } else { base_score };
+
+                match &best_peer {
+                    None => best_peer = Some((peer_id.to_string(), final_score)),
+                    Some((_, best_score)) if final_score > *best_score => {
+                        best_peer = Some((peer_id.to_string(), final_score));
+                    }
+                    _ => {}
+                }
+            }
+            return best_peer.map(|(peer, _)| peer);
+        }
+
         self.apollo_peer_momentum.select_best_peer(target_range, available_peers)
     }
 
@@ -2021,6 +2296,11 @@ impl TurboSyncManager {
             return None;
         }
         self.apollo_peer_momentum.get_peer_momentum(peer_id)
+    }
+
+    /// 🌍 v1.9.0: Get all peer gravity-assist stats for TUI/monitoring
+    pub fn apollo_get_all_peer_stats(&self) -> Vec<crate::peer_momentum::PeerStats> {
+        self.apollo_peer_momentum.get_all_stats()
     }
 
     /// 🚀 v2.1.0-DELTA-V: Log full APOLLO optimization summary
@@ -2154,16 +2434,47 @@ impl TurboSyncManager {
         self.register_peer_with_tip(peer_id, highest_block, None).await;
     }
 
+    /// v8.4.0: Seed peer bandwidth from handshake-reported tier
+    /// Called by network layer after successful handshake to give gravity-assist
+    /// an initial bandwidth signal before actual block transfers occur.
+    pub fn seed_peer_bandwidth(&self, peer_id: &str, bandwidth_mbps: u32) {
+        if self.config.enable_apollo_gravity_assist && bandwidth_mbps > 0 {
+            self.apollo_peer_momentum.seed_bandwidth_from_handshake(peer_id, bandwidth_mbps);
+        }
+    }
+
     /// Register a peer with height and optional tip hash (v5.2.0)
     /// v8.0.8: Added height sanity check to prevent rogue peers from poisoning registry
     pub async fn register_peer_with_tip(&self, peer_id: PeerId, highest_block: u64, tip_hash: Option<[u8; 32]>) {
-        // v8.0.8: Height sanity — reject heights unreasonably far ahead of our stored tip
+        // v8.2.8: Dynamic peer height sanity check using peer consensus.
+        // Old approach: reject if peer_height > our_height + 500K — broke on Windows/sled
+        // when height pointer was lost (our_height=0 → cap=500K → all real peers rejected).
+        //
+        // New approach: Use MEDIAN of already-registered peers as the reference, not just
+        // our local height. If 3+ peers agree on ~2.3M, a rogue peer claiming 100M is rejected,
+        // but legitimate peers are never blocked even when local height is 0.
         let our_height = self.storage.get_highest_contiguous_block().await.unwrap_or(0);
-        let max_reasonable = (our_height * 3).max(our_height + 500_000);
-        if highest_block > max_reasonable {
-            warn!("🚫 [PEER REGISTRY] Rejecting suspicious height {} from peer {} (our: {}, max: {})",
-                highest_block, peer_id, our_height, max_reasonable);
-            return;
+        {
+            let registry = self.peer_registry.read().await;
+            let peer_count = registry.active_peer_count();
+            let reference_height = if peer_count >= 3 {
+                // Use median of existing peers as reference (consensus-based)
+                registry.median_height().unwrap_or(our_height)
+            } else {
+                our_height
+            };
+            // Allow 3x reference or reference + 500K (whichever is larger)
+            // For fresh nodes (reference=0): allow anything up to 10M blocks (generous first-sync)
+            let max_reasonable = if reference_height < 1_000 {
+                10_000_000 // Fresh start: accept peers up to 10M
+            } else {
+                (reference_height * 3).max(reference_height + 500_000)
+            };
+            if highest_block > max_reasonable {
+                warn!("🚫 [PEER REGISTRY] Rejecting suspicious height {} from peer {} (ref: {}, our: {}, peers: {}, max: {})",
+                    highest_block, peer_id, reference_height, our_height, peer_count, max_reasonable);
+                return;
+            }
         }
 
         let mut registry = self.peer_registry.write().await;
@@ -2345,7 +2656,7 @@ impl TurboSyncManager {
 
         // 🚀 v2.1.4-DELTA-V: Accept ALL peers with sufficient height
         // Sort so bootstrap is first (most reliable), then by height descending
-        const BOOTSTRAP_PEER: &str = "12D3KooWBHTC9FhwwXmvH7YA17YHTLdcxbtLWg2U5xEtxSeqX7jc";
+        const BOOTSTRAP_PEER: &str = "12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH";
 
         // 🛡️ v1.4.5-beta: Collect peers with height and trust scores
         // 🚀 v2.2.1-beta: CRITICAL FIX - Use local_height not target_height!
@@ -3509,6 +3820,11 @@ impl TurboSyncManager {
                     "📈 [TURBO SYNC] Height pointer updated: {} → {} (+{} blocks)",
                     actual_current, highest_contiguous, highest_contiguous - actual_current
                 );
+
+                // v8.3.0: CRITICAL — sync height cache with DB pointer.
+                // Without this, save_safe_floor() persists stale cached height,
+                // causing 140K block regression on restart (2.97M → 2.83M).
+                self.storage.update_height_cache(highest_contiguous).await;
             } else {
                 debug!(
                     "📊 [v2.2.0] Height update skipped under lock: {} already >= {}",
@@ -3754,6 +4070,9 @@ impl TurboSyncManager {
                 tx.commit().await?;
                 info!("📈 [DIRECT APPLY] Height: {} → {} (+{})",
                     actual_current, highest_contiguous, highest_contiguous - actual_current);
+
+                // v8.3.0: Sync height cache with pointer (same fix as apply_block_pack path).
+                self.storage.update_height_cache(highest_contiguous).await;
             }
         }
 
@@ -3899,11 +4218,32 @@ impl TurboSyncManager {
                   start_height, end_height, peer);
 
             // 🚀 v3.4.7-beta: Use adaptive timeout (10s-45s range for faster retry)
+            // 🔭 v1.0.2-KALMAN: Blend Kalman-predicted timeout (30% weight) with RTT-based (70%)
             let dynamic_timeout = {
                 let timeout_calc = self.adaptive_timeout.read().await;
-                timeout_calc.get_timeout()
+                let rtt_timeout = timeout_calc.get_timeout();
+
+                if self.config.enable_apollo_kalman {
+                    let kalman = self.apollo_kalman_predictor.read().await;
+                    let state = kalman.get_state();
+                    if state.confidence > 0.3 {
+                        let kalman_timeout = state.optimal_timeout();
+                        // Blend: 70% RTT-based + 30% Kalman-predicted
+                        let blended_ms = (rtt_timeout.as_millis() as f64 * 0.7
+                            + kalman_timeout.as_millis() as f64 * 0.3) as u64;
+                        let blended = Duration::from_millis(blended_ms)
+                            .clamp(Duration::from_secs(5), Duration::from_secs(30));
+                        debug!("🔭 [KALMAN TIMEOUT] RTT={:?}, Kalman={:?}, Blended={:?} (conf={:.2})",
+                               rtt_timeout, kalman_timeout, blended, state.confidence);
+                        blended
+                    } else {
+                        rtt_timeout // Low confidence — use pure RTT
+                    }
+                } else {
+                    rtt_timeout
+                }
             };
-            info!("⏱️  [ADAPTIVE TIMEOUT] Using {:?} for chunk {}..={} (v3.4.7: 10s-45s range)",
+            info!("⏱️  [ADAPTIVE TIMEOUT] Using {:?} for chunk {}..={} (v3.4.7+KALMAN blend)",
                    dynamic_timeout, start_height, end_height);
 
             // Wait for response with adaptive timeout
@@ -3959,6 +4299,25 @@ impl TurboSyncManager {
                             }
 
                             let chunk_time = chunk_start.elapsed();
+
+                            // 🌍 v1.0.2-SLINGSHOT: Record peer serving for gravity-assist momentum
+                            if self.config.enable_apollo_gravity_assist {
+                                self.apollo_record_peer_serving(
+                                    &peer.to_string(),
+                                    start_height..end_height,
+                                    (block_count as u64) * 1024, // estimated bytes
+                                    chunk_time.as_millis() as u32,
+                                );
+                            }
+
+                            // 🔭 v1.0.2-KALMAN: Feed Kalman predictor with actual measurements
+                            if self.config.enable_apollo_kalman {
+                                let chunk_secs = chunk_time.as_secs_f64().max(0.001);
+                                let bandwidth_mbps = ((block_count as f64) * 1024.0) / chunk_secs / 1_000_000.0;
+                                let latency_ms = chunk_time.as_millis() as f64 / 2.0; // approximate one-way
+                                self.apollo_update_kalman(bandwidth_mbps, latency_ms, 0.0).await;
+                            }
+
                             info!("🚀 Downloaded+applied chunk {}-{} from {} in {}ms (direct, retry: {})",
                                   start_height, end_height, peer, chunk_time.as_millis(), retry_count);
 
@@ -3969,6 +4328,14 @@ impl TurboSyncManager {
                             {
                                 let mut tracker = self.progress_tracker.write().await;
                                 tracker.record_failure(&peer.to_string()).await;
+                            }
+                            // 🌍 v1.0.2-SLINGSHOT: Penalty for gravity-assist momentum
+                            if self.config.enable_apollo_gravity_assist {
+                                self.apollo_peer_momentum.record_failure(&peer.to_string());
+                            }
+                            // 🔭 v1.0.2-KALMAN: Feed loss=1.0 on request error
+                            if self.config.enable_apollo_kalman {
+                                self.apollo_update_kalman(0.0, 0.0, 1.0).await;
                             }
 
                             // 💥 v1.3.9-beta: Direct request error
@@ -3993,6 +4360,14 @@ impl TurboSyncManager {
                         let mut tracker = self.progress_tracker.write().await;
                         tracker.record_failure(&peer.to_string()).await;
                     }
+                    // 🌍 v1.0.2-SLINGSHOT: Penalty for gravity-assist momentum
+                    if self.config.enable_apollo_gravity_assist {
+                        self.apollo_peer_momentum.record_failure(&peer.to_string());
+                    }
+                    // 🔭 v1.0.2-KALMAN: Feed loss=1.0 on channel close
+                    if self.config.enable_apollo_kalman {
+                        self.apollo_update_kalman(0.0, 0.0, 1.0).await;
+                    }
 
                     error!("💥 [P2P DIRECT ERROR] Response channel closed for {}..={}",
                           start_height, end_height);
@@ -4016,6 +4391,14 @@ impl TurboSyncManager {
                     {
                         let mut tracker = self.progress_tracker.write().await;
                         tracker.record_failure(&peer.to_string()).await;
+                    }
+                    // 🌍 v1.0.2-SLINGSHOT: Penalty for gravity-assist momentum
+                    if self.config.enable_apollo_gravity_assist {
+                        self.apollo_peer_momentum.record_failure(&peer.to_string());
+                    }
+                    // 🔭 v1.0.2-KALMAN: Feed loss=1.0 on timeout
+                    if self.config.enable_apollo_kalman {
+                        self.apollo_update_kalman(0.0, 0.0, 1.0).await;
                     }
 
                     // ⏱️ v3.4.7-beta: Timeout logging with reduced max timeout
@@ -4062,6 +4445,26 @@ impl TurboSyncManager {
 
         let chunk_time = chunk_start.elapsed();
 
+        // 🌍 v1.0.2-SLINGSHOT: Record peer serving for gravity-assist momentum (BlockPack path)
+        if self.config.enable_apollo_gravity_assist {
+            let estimated_bytes = (end_height - start_height + 1) * 1024;
+            self.apollo_record_peer_serving(
+                &peer.to_string(),
+                start_height..end_height,
+                estimated_bytes,
+                chunk_time.as_millis() as u32,
+            );
+        }
+
+        // 🔭 v1.0.2-KALMAN: Feed Kalman predictor (BlockPack path)
+        if self.config.enable_apollo_kalman {
+            let chunk_secs = chunk_time.as_secs_f64().max(0.001);
+            let blocks = (end_height - start_height + 1) as f64;
+            let bandwidth_mbps = (blocks * 1024.0) / chunk_secs / 1_000_000.0;
+            let latency_ms = chunk_time.as_millis() as f64 / 2.0;
+            self.apollo_update_kalman(bandwidth_mbps, latency_ms, 0.0).await;
+        }
+
         info!(
             "🚀 Downloaded chunk {}-{} from {} in {}ms (retry: {})",
             start_height, end_height, peer, chunk_time.as_millis(), retry_count
@@ -4099,6 +4502,11 @@ impl TurboSyncManager {
             peers.clone() // Fallback to original peers
         };
 
+        // 📊 v1.0.2: Update session atomics for admin panel visibility
+        self.session_total_chunks.store(total_chunks as u64, Ordering::Release);
+        self.session_completed_chunks.store(0, Ordering::Release);
+        self.session_sync_mode.store(1, Ordering::Release); // 1 = turbo
+
         info!("🚀 Starting parallel download: {} chunks from {} peers (Warp Sync: {})",
               total_chunks, peers.len(), if use_warp_peers { "intelligent routing" } else { "fallback" });
 
@@ -4122,7 +4530,22 @@ impl TurboSyncManager {
         // Instead of spawning ALL chunks at once (causing far-ahead timeouts),
         // only spawn chunks within a window from current applied height.
         // This prevents 200K+ block-ahead chunks from timing out.
-        let max_in_flight_chunks = self.config.parallel_streams; // Default: 8
+        // 🔭 v1.0.2-KALMAN: Use Kalman optimal_concurrency when confident
+        let max_in_flight_chunks = if self.config.enable_apollo_kalman {
+            let kalman = self.apollo_kalman_predictor.read().await;
+            let state = kalman.get_state();
+            if state.confidence > 0.4 {
+                let kalman_concurrency = state.optimal_concurrency();
+                let bounded = kalman_concurrency.clamp(4, self.config.parallel_streams * 2);
+                info!("🔭 [KALMAN CONCURRENCY] Using {} in-flight (Kalman={}, config={}, conf={:.2})",
+                      bounded, kalman_concurrency, self.config.parallel_streams, state.confidence);
+                bounded
+            } else {
+                self.config.parallel_streams
+            }
+        } else {
+            self.config.parallel_streams // Default: 8
+        };
         let mut chunks_queue: std::collections::VecDeque<(usize, u64, u64)> = chunks
             .into_iter()
             .enumerate()
@@ -4139,6 +4562,30 @@ impl TurboSyncManager {
             let peer_count = peers_list.len();
             let self_clone = self_ref.clone_for_task();
 
+            // 🌍 v1.0.2-SLINGSHOT: Use gravity-assist to pick optimal first peer
+            // Reorder peers_list so the best-cached peer for this range is first
+            let ordered_peers = if self_ref.config.enable_apollo_gravity_assist && peer_count > 1 {
+                let peer_strs: Vec<String> = peers_list.iter().map(|p| p.to_string()).collect();
+                let peer_str_refs: Vec<&str> = peer_strs.iter().map(|s| s.as_str()).collect();
+                if let Some(best) = self_ref.apollo_select_peer(&(start..end), &peer_str_refs) {
+                    // Move the best peer to front, keep others in original order for retries
+                    let mut reordered = peers_list.clone();
+                    if let Some(pos) = reordered.iter().position(|p| p.to_string() == best) {
+                        if pos > 0 {
+                            let best_peer = reordered.remove(pos);
+                            reordered.insert(0, best_peer);
+                            debug!("🌍 [GRAVITY ASSIST] Chunk {}-{}: Promoted peer {} to front (cache-hot)",
+                                   start, end, &best[..best.len().min(12)]);
+                        }
+                    }
+                    reordered
+                } else {
+                    peers_list.clone()
+                }
+            } else {
+                peers_list.clone()
+            };
+
             futures.push(tokio::spawn(async move {
                 // v1.3.10-beta: Retry logic with DIFFERENT PEER on each attempt
                 let mut retry_count = 0;
@@ -4146,8 +4593,13 @@ impl TurboSyncManager {
 
                 loop {
                     // v1.3.10-beta: Select DIFFERENT peer for each retry attempt
+                    // v1.0.2: First attempt uses gravity-assist ordered peer (index 0)
                     let peer_idx = (chunk_idx + retry_count as usize) % peer_count;
-                    let peer = peers_list[peer_idx];
+                    let peer = if retry_count == 0 {
+                        ordered_peers[0] // Gravity-assist selected (or original first)
+                    } else {
+                        ordered_peers[peer_idx] // Round-robin for retries
+                    };
 
                     if retry_count > 0 {
                         info!("🔄 [RETRY] Chunk {}-{}: Using DIFFERENT peer {} (attempt {}/{})",
@@ -4191,6 +4643,10 @@ impl TurboSyncManager {
             }
         }
 
+        // 📊 v1.0.2: Update session atomics after initial spawn
+        self.session_in_flight.store(spawned_count as u64, Ordering::Release);
+        self.session_queued.store(chunks_queue.len() as u64, Ordering::Release);
+
         info!("🚀 [v3.4.8] Spawned initial {} chunks, {} remaining in queue",
               spawned_count, chunks_queue.len());
 
@@ -4212,6 +4668,11 @@ impl TurboSyncManager {
                         debug!("🚀 [v3.4.8] Spawned chunk {}-{} ({} remaining)",
                                next_start, next_end, chunks_queue.len());
                     }
+
+                    // 📊 v1.0.2: Update session atomics for admin panel
+                    self.session_completed_chunks.store(completed_chunks as u64, Ordering::Release);
+                    self.session_in_flight.store(futures.len() as u64, Ordering::Release);
+                    self.session_queued.store(chunks_queue.len() as u64, Ordering::Release);
 
                     // 🚀 v2.1.0-DELTA-V: Update APOLLO PID controller with current throughput
                     if self.config.enable_apollo_pid && completed_chunks > 0 {
@@ -4256,6 +4717,9 @@ impl TurboSyncManager {
                         let peers_for_retry = if use_warp_peers { priority_peers.clone() } else { peers.clone() };
                         spawn_chunk_task(&mut futures, next_idx, next_start, next_end, peers_for_retry, self);
                     }
+                    // 📊 v1.0.2: Update session atomics on failure too
+                    self.session_in_flight.store(futures.len() as u64, Ordering::Release);
+                    self.session_queued.store(chunks_queue.len() as u64, Ordering::Release);
                     // Continue with other chunks even if one fails
                 }
             }
@@ -4291,9 +4755,64 @@ impl TurboSyncManager {
             self.log_apollo_summary().await;
         }
 
+        // 🚀 v1.0.2-POST-SYNC: Post-sync optimization phase
+        {
+            info!("🔧 [POST-SYNC] Starting post-sync optimization phase...");
+
+            // Phase A: Trigger RocksDB compaction (background, non-blocking)
+            // After bulk sync, RocksDB has many L0 SST files from rapid writes.
+            // Background compaction consolidates them for 20-40% faster reads.
+            let storage_for_compact = Arc::clone(&self.storage);
+            tokio::spawn(async move {
+                info!("🔧 [POST-SYNC] Phase A: Triggering background RocksDB compaction...");
+                match storage_for_compact.compact().await {
+                    Ok(()) => info!("✅ [POST-SYNC] RocksDB compaction completed"),
+                    Err(e) => warn!("⚠️ [POST-SYNC] RocksDB compaction failed (non-critical): {}", e),
+                }
+            });
+
+            // Phase B: Reset PID controller for steady-state operation
+            // During sync, PID targets ~1000 BPS throughput. After sync, target ~100 BPS
+            // (real-time block production rate) to prevent over-aggressive network usage.
+            if self.config.enable_apollo_pid {
+                let mut pid = self.apollo_pid_controller.write().await;
+                pid.reset();
+                pid.set_target(100.0); // Steady-state: ~100 BPS (real-time block rate)
+                info!("🎛️ [POST-SYNC] Phase B: PID reset for steady-state (target=100 BPS)");
+            }
+
+            // Phase C: Log Kalman converged state for monitoring
+            if self.config.enable_apollo_kalman {
+                let kalman = self.apollo_kalman_predictor.read().await;
+                let state = kalman.get_state();
+                let metrics = kalman.get_metrics();
+                info!("🔭 [POST-SYNC] Phase C: Kalman converged state:");
+                info!("   BW={:.1} Mbps, Lat={:.1} ms, Loss={:.2}%, Conf={:.2}",
+                      state.bandwidth_bps / 1_000_000.0, state.latency_ms,
+                      state.loss_rate * 100.0, state.confidence);
+                info!("   Optimal: chunk={}KB, timeout={}ms, concurrency={}",
+                      metrics.optimal_chunk_kb, metrics.optimal_timeout_ms, metrics.optimal_concurrency);
+            }
+
+            // Phase D: Return sync memory to OS (prevent OOM on Gamma)
+            #[cfg(target_os = "linux")]
+            {
+                extern "C" { fn malloc_trim(pad: usize) -> i32; }
+                unsafe { malloc_trim(0); }
+                info!("🧹 [POST-SYNC] Phase D: malloc_trim — returned freed memory to OS");
+            }
+
+            info!("✅ [POST-SYNC] Optimization phase complete");
+        }
+
         // 🚀 v2.3.10-beta: Clear prefetch pipeline after sync completes
         self.warp_prefetch.clear().await;
         debug!("🚀 [WARP SYNC] Prefetch pipeline cleared after sync completion");
+
+        // 📊 v1.0.2: Reset session atomics — sync complete, back to idle
+        self.session_sync_mode.store(0, Ordering::Release);
+        self.session_in_flight.store(0, Ordering::Release);
+        self.session_queued.store(0, Ordering::Release);
 
         Ok(())
     }
@@ -4353,6 +4872,12 @@ impl TurboSyncManager {
             cached_peer_count: Arc::clone(&self.cached_peer_count),
             cached_has_gaps: Arc::clone(&self.cached_has_gaps),
             is_fully_synced: Arc::clone(&self.is_fully_synced),
+            // 📊 v1.0.2: Session Chunk Progress
+            session_total_chunks: Arc::clone(&self.session_total_chunks),
+            session_completed_chunks: Arc::clone(&self.session_completed_chunks),
+            session_in_flight: Arc::clone(&self.session_in_flight),
+            session_queued: Arc::clone(&self.session_queued),
+            session_sync_mode: Arc::clone(&self.session_sync_mode),
         }
     }
 
@@ -4509,6 +5034,14 @@ impl TurboSyncManager {
         let blocks_to_sync = target_height.saturating_sub(local_height);
         let is_endgame = blocks_to_sync <= self.config.endgame_threshold && blocks_to_sync > 0;
 
+        // 📊 v1.0.2: Set session_sync_mode for admin panel badges
+        if is_endgame {
+            self.session_sync_mode.store(2, Ordering::Release); // 2 = endgame
+        } else if blocks_to_sync <= 50 {
+            self.session_sync_mode.store(3, Ordering::Release); // 3 = micro
+        }
+        // Note: mode 1 (turbo) is set in download_chunks_parallel() when chunk download starts
+
         // 🤖 v1.4.0-beta: ML-driven adaptive batch size prediction
         // Now that we have qualified peers, extract features and predict optimal batch size
         let features = self.extract_sync_features(&qualified_peers).await;
@@ -4520,30 +5053,57 @@ impl TurboSyncManager {
         // Safety: Cap ML prediction by memory limiter (never exceed memory-safe size)
         let memory_cap = self.memory_limiter.get_recommended_batch_size().await as u64;
 
-        // 🎯 v3.2.11-beta: Use endgame settings when near tip
+        // 🎯 v8.2.0: SINGLE-SHOT ENDGAME — request ALL remaining blocks in one chunk
+        // v3.2.11 used 50-block chunks × 10 round-trips = ~30s worst case
+        // v8.2.0: 1 request for up to 500 blocks (~5-10 MB compressed) = ~3s
         let chunk_size = if is_endgame {
-            // ATOMIC SYNC ENDGAME: Use small, fast chunks for near-tip sync
+            // Single-shot: request all remaining blocks at once
+            let single_shot = blocks_to_sync.min(self.config.endgame_threshold);
             info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            info!("🎯 [ATOMIC SYNC ENDGAME] ACTIVATED! Only {} blocks to network tip", blocks_to_sync);
+            info!("🎯 [SINGLE-SHOT ENDGAME v8.2.0] Requesting ALL {} blocks in ONE request", single_shot);
             info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            info!("   Mode: FAST NEAR-TIP SYNC (streamlined last {} blocks)", self.config.endgame_threshold);
-            info!("   Chunk size: {} blocks (vs {} normal)", self.config.endgame_chunk_size, self.config.chunk_size);
-            info!("   Timeout: {:?} (vs {:?} normal)", self.config.endgame_timeout, self.config.chunk_timeout);
-            info!("   Live streaming: {} (subscribe to gossipsub for new blocks)",
-                  if self.config.endgame_live_stream { "ON" } else { "OFF" });
+            info!("   Mode: SINGLE-SHOT (1 round-trip instead of ~{} round-trips)",
+                  (blocks_to_sync + self.config.endgame_chunk_size - 1) / self.config.endgame_chunk_size);
+            info!("   Payload: ~{}-{} MB compressed", blocks_to_sync / 100, blocks_to_sync / 50);
+            info!("   Timeout: {:?} (endgame) vs {:?} (normal)", self.config.endgame_timeout, self.config.chunk_timeout);
             info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-            // 🎯 v3.2.11-beta: Activate endgame timeout mode (faster timeouts)
+            // v8.2.0: Use shorter timeout for small batches
             {
+                let endgame_timeout = if blocks_to_sync <= 100 {
+                    Duration::from_secs(2) // 100 blocks is tiny — 2s is plenty
+                } else {
+                    self.config.endgame_timeout // 3s for larger endgame batches
+                };
                 let mut timeout_calc = self.adaptive_timeout.write().await;
-                timeout_calc.set_endgame_mode(self.config.endgame_timeout);
+                timeout_calc.set_endgame_mode(endgame_timeout);
             }
 
-            // Use endgame-optimized chunk size (small, fast)
-            self.config.endgame_chunk_size.min(blocks_to_sync)
+            single_shot
         } else {
             // Normal sync: Use ML-predicted chunk size
-            ml_chunk_size.min(memory_cap).min(self.config.chunk_size)
+            // 🔭 v1.0.2-KALMAN: Blend Kalman BDP-optimal chunk size (40% weight) when confident
+            let base_chunk = ml_chunk_size.min(memory_cap).min(self.config.chunk_size);
+            if self.config.enable_apollo_kalman {
+                let kalman = self.apollo_kalman_predictor.read().await;
+                let state = kalman.get_state();
+                if state.confidence > 0.4 {
+                    let kalman_chunk = state.optimal_chunk_size() as u64;
+                    // Blend: 60% ML/config + 40% Kalman BDP-optimal
+                    let blended = ((base_chunk as f64 * 0.6) + (kalman_chunk as f64 * 0.4)) as u64;
+                    let clamped = blended.clamp(
+                        self.config.chunk_size / 4, // min: quarter of config
+                        self.config.chunk_size * 2,  // max: double config
+                    ).min(memory_cap);
+                    info!("🔭 [KALMAN CHUNK] ML={}, Kalman={}, Blended={} (conf={:.2})",
+                          base_chunk, kalman_chunk, clamped, state.confidence);
+                    clamped
+                } else {
+                    base_chunk
+                }
+            } else {
+                base_chunk
+            }
         };
 
         // Log ML prediction details
@@ -4749,6 +5309,104 @@ impl TurboSyncManager {
         }
 
         Ok(())
+    }
+
+    /// v8.2.0: MICRO-SYNC — fast path for gaps ≤ 50 blocks
+    ///
+    /// Skips the full TurboSync pipeline (peer discovery, ML prediction, memory check,
+    /// chunk splitting, parallel download) and directly requests missing blocks from
+    /// the best cached peer via P2P request-response.
+    ///
+    /// Returns Ok(true) if blocks were fetched and applied, Ok(false) if micro-sync
+    /// couldn't run (no network channel, no peers), Err on failure.
+    pub async fn micro_sync(&self, from_height: u64, to_height: u64) -> Result<bool> {
+        let range = to_height.saturating_sub(from_height) + 1;
+        if range > 50 || range == 0 {
+            return Ok(false); // Not eligible for micro-sync
+        }
+
+        let network_tx = match &self.network_tx {
+            Some(tx) => tx,
+            None => return Ok(false), // No network channel — can't micro-sync
+        };
+
+        // Use cached best peer (no expensive peer discovery)
+        let best_peer = {
+            let registry = self.peer_registry.read().await;
+            let peers = registry.active_peers_by_height();
+            match peers.first() {
+                Some(record) if record.height >= to_height => record.peer_id,
+                _ => return Ok(false), // No peer at required height
+            }
+        };
+
+        // 📊 v1.0.2: Set session_sync_mode for admin panel — micro mode
+        self.session_sync_mode.store(3, Ordering::Release); // 3 = micro
+
+        info!("⚡ [MICRO-SYNC v8.2.0] Fast path: requesting {} blocks ({}-{}) from {}",
+              range, from_height, to_height, best_peer);
+
+        let micro_start = Instant::now();
+
+        // Direct request-response — single call, 2s timeout
+        let (response_tx, response_rx) = oneshot::channel();
+        if let Err(e) = network_tx.send(NetworkRequest::RequestBlockRangeDirect {
+            peer_id: Some(best_peer.to_string()),
+            start_height: from_height,
+            end_height: to_height,
+            response_tx,
+        }) {
+            warn!("⚠️ [MICRO-SYNC] Failed to send request: {}", e);
+            return Ok(false);
+        }
+
+        // 2s timeout — 50 blocks is tiny
+        match tokio::time::timeout(Duration::from_secs(2), response_rx).await {
+            Ok(Ok(Ok(blocks))) => {
+                let block_count = blocks.len();
+                if block_count == 0 {
+                    info!("⚡ [MICRO-SYNC] Peer returned 0 blocks — falling through to normal sync");
+                    return Ok(false);
+                }
+
+                let actual_start = blocks.first().map(|b| b.header.height).unwrap_or(from_height);
+                let actual_end = blocks.last().map(|b| b.header.height).unwrap_or(to_height);
+
+                // Apply blocks directly (reuse existing apply path)
+                self.apply_blocks_vec(blocks, None, actual_start, actual_end).await?;
+
+                // Update metrics
+                self.metrics.total_blocks_synced.fetch_add(block_count as u64, Ordering::Relaxed);
+
+                // Update height cache
+                let contiguous = self.storage.get_highest_contiguous_block().await.unwrap_or(0);
+                if contiguous > self.storage.height_cache.cached() {
+                    self.storage.update_height_cache(contiguous).await;
+                }
+
+                let elapsed = micro_start.elapsed();
+                info!("⚡ [MICRO-SYNC v8.2.0] SUCCESS: {} blocks ({}-{}) in {:?} from {}",
+                      block_count, actual_start, actual_end, elapsed, best_peer);
+
+                self.session_sync_mode.store(0, Ordering::Release); // back to idle
+                Ok(true)
+            }
+            Ok(Ok(Err(e))) => {
+                warn!("⚡ [MICRO-SYNC] Peer returned error: {} — falling through", e);
+                self.session_sync_mode.store(0, Ordering::Release);
+                Ok(false)
+            }
+            Ok(Err(_)) => {
+                warn!("⚡ [MICRO-SYNC] Response channel closed — falling through");
+                self.session_sync_mode.store(0, Ordering::Release);
+                Ok(false)
+            }
+            Err(_) => {
+                warn!("⚡ [MICRO-SYNC] Timed out after 2s — falling through to normal sync");
+                self.session_sync_mode.store(0, Ordering::Release);
+                Ok(false)
+            }
+        }
     }
 
     /// Get chunks that need to be synced - for use by external network layer

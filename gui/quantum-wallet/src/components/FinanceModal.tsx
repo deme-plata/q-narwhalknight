@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, TrendingUp, Users, Wallet, Target, Activity, BarChart3, Waves, Anchor, AlertCircle, Info, RefreshCw, HelpCircle, LineChart, Coins, Flame, Clock, Shield } from 'lucide-react';
+import { X, TrendingUp, Users, Wallet, Target, Activity, BarChart3, Waves, Anchor, AlertCircle, Info, RefreshCw, HelpCircle, LineChart, Coins, Flame, Clock, Shield, Zap } from 'lucide-react';
 
 // Big, user-friendly tooltip component - FIXED: stays open when hovering tooltip
 const BigTooltip: React.FC<{
@@ -946,6 +946,97 @@ const FinanceModal: React.FC<FinanceModalProps> = ({ isOpen, onClose }) => {
                         </div>
                         <div className="mt-3 bg-black/20 rounded-lg p-2 text-xs text-gray-500 font-mono text-center">
                           No trusted oracle. No coordinator. Pure math from genesis timestamp (1771761600).
+                        </div>
+                      </div>
+
+                      {/* Attosecond Opto-Physics: Emission Timescale Foundations */}
+                      <div className="p-5 rounded-xl bg-gradient-to-br from-violet-500/10 to-fuchsia-500/10 border border-violet-500/20">
+                        <h3 className="text-lg font-semibold text-white mb-3 flex items-center gap-2">
+                          <Zap className="w-5 h-5 text-violet-400" />
+                          Attosecond Opto-Physics: Emission Timescale Foundations
+                        </h3>
+                        <p className="text-sm text-gray-400 mb-3">
+                          QUG emission draws from the mathematics of ultrafast laser physics. Just as attosecond pulses
+                          (10<sup>-18</sup>s) resolve electron dynamics in real-time, the emission controller resolves
+                          economic dynamics at sub-block granularity using analogous time-energy uncertainty principles.
+                        </p>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
+                          <div className="bg-black/20 rounded-lg p-3">
+                            <div className="text-xs text-violet-400 font-semibold mb-2">Pulse-Train Emission Model</div>
+                            <p className="text-[11px] text-gray-400 mb-2">
+                              Each block reward is an "emission pulse" — a discrete energy packet analogous to an
+                              attosecond XUV pulse in a high-harmonic generation (HHG) laser system:
+                            </p>
+                            <div className="text-xs font-mono text-violet-300 bg-black/30 rounded p-2 text-center">
+                              E<sub>pulse</sub>(n) = A<sub>k</sub> / (lambda * T) * rect(t - n*tau)
+                            </div>
+                            <p className="text-[10px] text-gray-500 mt-1">
+                              Where each block at interval tau carries exactly the energy (reward) needed to maintain
+                              the target annual flux, independent of repetition rate lambda.
+                            </p>
+                          </div>
+
+                          <div className="bg-black/20 rounded-lg p-3">
+                            <div className="text-xs text-fuchsia-400 font-semibold mb-2">Time-Energy Uncertainty Bound</div>
+                            <p className="text-[11px] text-gray-400 mb-2">
+                              The emission controller's PI correction factor is bounded by a Heisenberg-inspired
+                              time-energy relation — faster measurement means larger reward uncertainty:
+                            </p>
+                            <div className="text-xs font-mono text-fuchsia-300 bg-black/30 rounded p-2 text-center">
+                              Delta_R * Delta_t &ge; hbar_econ = A<sub>k</sub> / (2*pi * N<sub>blocks/year</sub>)
+                            </div>
+                            <p className="text-[10px] text-gray-500 mt-1">
+                              This prevents the correction factor from oscillating — the economic "uncertainty principle"
+                              that stabilizes emission even under adversarial block rate manipulation.
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+                          <div className="bg-black/20 rounded-lg p-3">
+                            <div className="text-xs text-cyan-400 font-semibold mb-2">Chirped Halving Envelope</div>
+                            <p className="text-[11px] text-gray-400 mb-2">
+                              The 64-era halving schedule forms a chirped envelope function, analogous to chirped-pulse
+                              amplification (CPA) in femtosecond lasers. Early eras carry high energy (2.625M QUG/yr),
+                              with exponential decay:
+                            </p>
+                            <div className="text-xs font-mono text-cyan-300 bg-black/30 rounded p-2 text-center">
+                              A(t) = A<sub>0</sub> * exp(-t * ln2 / T<sub>half</sub>) | T<sub>half</sub> = 4 years
+                            </div>
+                            <p className="text-[10px] text-gray-500 mt-1">
+                              Like CPA stretching a pulse before amplification, the halving schedule "stretches" the
+                              total supply release over 256 years while front-loading early incentives.
+                            </p>
+                          </div>
+
+                          <div className="bg-black/20 rounded-lg p-3">
+                            <div className="text-xs text-amber-400 font-semibold mb-2">Phase-Locked Consensus Timing</div>
+                            <p className="text-[11px] text-gray-400 mb-2">
+                              The K-Parameter framework models validator agreement as phase-locked oscillators — the
+                              same mathematics governing mode-locked lasers that produce attosecond pulses:
+                            </p>
+                            <div className="text-xs font-mono text-amber-300 bg-black/30 rounded p-2 text-center">
+                              Psi(t) = Sum_n E_n * exp(i*n*omega_rep*t + i*phi_n)
+                            </div>
+                            <p className="text-[10px] text-gray-500 mt-1">
+                              When validators "mode-lock" (achieve consensus), the superposition of their timing
+                              signals produces ultrasharp finality — sub-3-second deterministic agreement from the
+                              constructive interference of N independent oscillators.
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="bg-black/20 rounded-lg p-3">
+                          <div className="text-xs text-gray-500 mb-2 text-center font-mono">
+                            Timescale Hierarchy: Attosecond (10<sup>-18</sup>s) electron dynamics &rarr; Femtosecond (10<sup>-15</sup>s) molecular bonds &rarr;
+                            Nanosecond (10<sup>-9</sup>s) CPU clock &rarr; Second (10<sup>0</sup>s) block time &rarr; Gigasecond (10<sup>9</sup>s) halving era
+                          </div>
+                          <p className="text-[10px] text-gray-500 text-center">
+                            The emission controller operates across 27 orders of magnitude in timescale —
+                            from nanosecond hash computations to gigasecond halving eras — unified by the same
+                            time-energy reciprocity that governs ultrafast laser physics.
+                          </p>
                         </div>
                       </div>
 

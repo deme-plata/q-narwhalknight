@@ -275,7 +275,7 @@ pub async fn ensure_ai_engine_loaded(_state: &Arc<AppState>) -> anyhow::Result<A
             }
             #[cfg(not(feature = "llama-cpp"))]
             {
-                return Err(anyhow::anyhow!("No AI engine available: llama-cpp feature disabled and legacy-mistralrs not available"));
+                return Err(anyhow::anyhow!("AI inference disabled: llama-cpp removed to prevent API starvation. BitNet engine coming soon."));
             }
         } else {
             // Try llama-cpp-2 first (preferred for performance)
@@ -294,7 +294,7 @@ pub async fn ensure_ai_engine_loaded(_state: &Arc<AppState>) -> anyhow::Result<A
             }
             #[cfg(not(feature = "llama-cpp"))]
             {
-                return Err(anyhow::anyhow!("No AI engine available: llama-cpp feature disabled"));
+                return Err(anyhow::anyhow!("AI inference disabled: llama-cpp removed to prevent API starvation (v8.2.8). Use BitNet or enable with --features llama-cpp."));
             }
         }
     };

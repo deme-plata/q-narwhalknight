@@ -84,7 +84,7 @@ const PhaseTransitionModal: React.FC<PhaseTransitionModalProps> = ({ onClose }) 
               <div className="detail-section highlight">
                 <h3>✨ How to Upgrade</h3>
                 <ul className="bullet-list">
-                  <li>📥 <strong>Download v7.3.0</strong> — New binary with mainnet2026.2 support</li>
+                  <li>📥 <strong>Download v8.0.1</strong> — New binary with mainnet2026.1.3 support</li>
                   <li>📂 <strong>Fresh data directory</strong> — Automatically uses data-mainnet2026.2</li>
                   <li>🔑 <strong>New identity keys</strong> — Generated on first boot</li>
                   <li>🌐 <strong>P2P isolation</strong> — Old mainnet2026.1 nodes cannot connect</li>
@@ -94,11 +94,11 @@ const PhaseTransitionModal: React.FC<PhaseTransitionModalProps> = ({ onClose }) 
 
               {/* Download Section */}
               <div className="action-section">
-                <h3>📥 Download v7.3.0</h3>
-                <p>Download the mainnet2026.2 binary:</p>
+                <h3>📥 Download v8.0.1</h3>
+                <p>Download the mainnet2026.1.3 binary:</p>
                 <div className="download-links">
-                  <a href="/downloads/q-api-server-v7.3.0" className="download-btn" download style={{marginRight: '10px'}}>
-                    📦 Node v7.3.0
+                  <a href="/downloads/q-api-server-v8.0.1" className="download-btn" download style={{marginRight: '10px'}}>
+                    📦 Node v8.0.1
                   </a>
                   <a href="/downloads/q-miner-linux-x64" className="download-btn" download>
                     ⛏️ Miner (Latest)
@@ -108,12 +108,12 @@ const PhaseTransitionModal: React.FC<PhaseTransitionModalProps> = ({ onClose }) 
                   <code>
                     # Stop your old node<br/>
                     pkill -f q-api-server<br/><br/>
-                    # Download v7.3.0<br/>
-                    wget https://quillon.xyz/downloads/q-api-server-v7.3.0<br/>
+                    # Download v8.0.1<br/>
+                    wget https://quillon.xyz/downloads/q-api-server-v8.0.1<br/>
                     wget https://quillon.xyz/downloads/q-miner-linux-x64<br/>
-                    chmod +x q-api-server-v7.3.0 q-miner-linux-x64<br/><br/>
-                    # Start node (auto-creates data-mainnet2026.2)<br/>
-                    ./q-api-server-v7.3.0 --port 8080<br/><br/>
+                    chmod +x q-api-server-v8.0.1 q-miner-linux-x64<br/><br/>
+                    # Start node (auto-creates data-mainnet2026.1.3)<br/>
+                    ./q-api-server-v8.0.1 --port 8080<br/><br/>
                     # Start mining<br/>
                     ./q-miner-linux-x64 --mode solo --wallet YOUR_WALLET --threads 4
                   </code>

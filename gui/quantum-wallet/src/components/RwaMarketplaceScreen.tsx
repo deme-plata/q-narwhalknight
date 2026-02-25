@@ -4,8 +4,9 @@ import {
   Building, TrendingUp, Landmark, Gem, Leaf, Palette, FileText, Package,
   Search, Grid3X3, List, Shield, ChevronRight, ExternalLink, X,
   ArrowUpRight, Clock, DollarSign, BarChart3, Loader2, ShoppingCart,
-  CheckCircle2, AlertCircle, Filter, SortDesc, Briefcase, Star
+  CheckCircle2, AlertCircle, Filter, SortDesc, Briefcase, Star, Users
 } from 'lucide-react';
+import XListCrowdfundModal from './XListCrowdfundModal';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -23,6 +24,13 @@ interface RwaListing {
   shares_available: string;
   kyc_required: boolean;
   dividend_enabled: boolean;
+  // Campaign-specific (only set for ExchangeListing type)
+  campaign_id?: string;
+  raised_usd?: number;
+  target_usd_num?: number;
+  progress_percent?: number;
+  contributor_count?: number;
+  campaign_status?: string;
 }
 
 interface PortfolioHolding {
@@ -54,7 +62,8 @@ const CATEGORY_MAP: Record<string, { label: string; icon: typeof Building; apiKe
   carbon_credit:   { label: 'Carbon Credits',     icon: Leaf,       apiKey: 'carbon_credit' },
   art_collectible: { label: 'Art & Collectibles', icon: Palette,    apiKey: 'art_collectible' },
   ip_revenue:      { label: 'IP & Royalties',     icon: FileText,   apiKey: 'ip_revenue' },
-  physical_goods:  { label: 'Physical Goods',     icon: Package,    apiKey: 'physical_goods' },
+  physical_goods:      { label: 'Physical Goods',     icon: Package,    apiKey: 'physical_goods' },
+  exchange_listing:    { label: 'Exchange Listings',  icon: Star,       apiKey: 'exchange_listing' },
 };
 
 const SORT_OPTIONS: { value: string; label: string }[] = [
@@ -181,6 +190,7 @@ function AssetCard({
 }) {
   const Icon = getCategoryIcon(asset.category);
   const pps = pricePerShare(asset.total_value_usd, asset.shares_available);
+  const isCampaign = !!asset.campaign_id;
 
   if (viewMode === 'list') {
     return (
@@ -209,22 +219,44 @@ function AssetCard({
           </div>
           <p className="text-xs text-gray-500 font-light truncate">{asset.symbol} &middot; {asset.category}</p>
         </div>
-        <div className="text-right flex-shrink-0">
-          <p className="text-sm text-[#D4AF37] font-light">{formatCurrency(pps)}<span className="text-[10px] text-gray-500">/share</span></p>
-          <p className="text-[11px] text-gray-500 font-light">{formatCurrency(asset.total_value_usd)} total</p>
-        </div>
-        <div className="flex items-center gap-2 flex-shrink-0">
-          {asset.dividend_enabled && (
-            <span className="text-[10px] px-2 py-0.5 rounded-full border border-emerald-500/20 text-emerald-400/80 bg-emerald-500/[0.06]">
-              Yield
+        {isCampaign ? (
+          <div className="flex items-center gap-4 flex-shrink-0">
+            <div className="w-32">
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[10px] text-gray-500 font-light">{(asset.progress_percent ?? 0).toFixed(0)}%</span>
+                <span className="text-[10px] text-[#D4AF37] font-light">{formatCurrency(asset.raised_usd ?? 0)}</span>
+              </div>
+              <div className="w-full h-1.5 bg-white/[0.06] rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-gradient-to-r from-[#D4AF37] to-[#B8960C] rounded-full transition-all duration-500"
+                  style={{ width: `${Math.min(asset.progress_percent ?? 0, 100)}%` }}
+                />
+              </div>
+            </div>
+            <span className="text-[10px] px-2 py-0.5 rounded-full border border-[#D4AF37]/20 text-[#D4AF37]/80 bg-[#D4AF37]/[0.06]">
+              {asset.contributor_count ?? 0} backers
             </span>
-          )}
-          {asset.kyc_required && (
-            <span className="text-[10px] px-2 py-0.5 rounded-full border border-amber-500/20 text-amber-400/80 bg-amber-500/[0.06]">
-              KYC
-            </span>
-          )}
-        </div>
+          </div>
+        ) : (
+          <>
+            <div className="text-right flex-shrink-0">
+              <p className="text-sm text-[#D4AF37] font-light">{formatCurrency(pps)}<span className="text-[10px] text-gray-500">/share</span></p>
+              <p className="text-[11px] text-gray-500 font-light">{formatCurrency(asset.total_value_usd)} total</p>
+            </div>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              {asset.dividend_enabled && (
+                <span className="text-[10px] px-2 py-0.5 rounded-full border border-emerald-500/20 text-emerald-400/80 bg-emerald-500/[0.06]">
+                  Yield
+                </span>
+              )}
+              {asset.kyc_required && (
+                <span className="text-[10px] px-2 py-0.5 rounded-full border border-amber-500/20 text-amber-400/80 bg-amber-500/[0.06]">
+                  KYC
+                </span>
+              )}
+            </div>
+          </>
+        )}
         <ChevronRight size={16} className="text-gray-600 group-hover:text-gray-400 transition-colors duration-300 flex-shrink-0" />
       </motion.div>
     );
@@ -295,27 +327,63 @@ function AssetCard({
       <div className="mx-5 border-t border-white/[0.06]" />
 
       {/* Card footer */}
-      <div className="px-5 py-4 flex items-end justify-between">
-        <div>
-          <p className="text-[10px] text-gray-600 font-light tracking-wider uppercase mb-0.5">Price / Share</p>
-          <p className="text-lg text-[#D4AF37] font-light">{formatCurrency(pps)}</p>
-        </div>
-        <div className="text-right">
-          <p className="text-[10px] text-gray-600 font-light tracking-wider uppercase mb-0.5">Total Value</p>
-          <p className="text-sm text-white/80 font-light">{formatCurrency(asset.total_value_usd)}</p>
-        </div>
-      </div>
-
-      {/* Shares info */}
-      <div className="px-5 pb-4 flex items-center justify-between">
-        <p className="text-[10px] text-gray-600 font-light">
-          {formatNumber(asset.shares_available)} shares available
-        </p>
-        <p className="text-[10px] text-gray-600 font-light flex items-center gap-1">
-          <Clock size={10} />
-          {timeAgo(asset.deployed_at)}
-        </p>
-      </div>
+      {isCampaign ? (
+        <>
+          <div className="px-5 py-4">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[10px] text-gray-500 font-light tracking-wider uppercase">
+                {formatCurrency(asset.raised_usd ?? 0)} raised
+              </span>
+              <span className="text-[10px] text-gray-500 font-light">
+                of {formatCurrency(asset.total_value_usd)}
+              </span>
+            </div>
+            <div className="w-full h-2 bg-white/[0.06] rounded-full overflow-hidden mb-2">
+              <div
+                className="h-full bg-gradient-to-r from-[#D4AF37] to-[#B8960C] rounded-full transition-all duration-500"
+                style={{ width: `${Math.min(asset.progress_percent ?? 0, 100)}%` }}
+              />
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-[#D4AF37] font-light">{(asset.progress_percent ?? 0).toFixed(0)}% funded</span>
+              <span className="text-[10px] text-gray-500 font-light flex items-center gap-1">
+                <Users size={10} />
+                {asset.contributor_count ?? 0} contributors
+              </span>
+            </div>
+          </div>
+          <div className="px-5 pb-4">
+            <div className="w-full py-2.5 rounded-xl text-xs font-semibold tracking-wide text-center
+              bg-gradient-to-r from-[#D4AF37]/20 to-[#B8960C]/20 text-[#D4AF37] border border-[#D4AF37]/20
+              group-hover:from-[#D4AF37] group-hover:to-[#B8960C] group-hover:text-black
+              transition-all duration-500">
+              Contribute
+            </div>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="px-5 py-4 flex items-end justify-between">
+            <div>
+              <p className="text-[10px] text-gray-600 font-light tracking-wider uppercase mb-0.5">Price / Share</p>
+              <p className="text-lg text-[#D4AF37] font-light">{formatCurrency(pps)}</p>
+            </div>
+            <div className="text-right">
+              <p className="text-[10px] text-gray-600 font-light tracking-wider uppercase mb-0.5">Total Value</p>
+              <p className="text-sm text-white/80 font-light">{formatCurrency(asset.total_value_usd)}</p>
+            </div>
+          </div>
+          <div className="px-5 pb-4 flex items-center justify-between">
+            <p className="text-[10px] text-gray-600 font-light">
+              {formatNumber(asset.shares_available)} shares available
+            </p>
+            <p className="text-[10px] text-gray-600 font-light flex items-center gap-1">
+              <Clock size={10} />
+              {timeAgo(asset.deployed_at)}
+            </p>
+          </div>
+        </>
+      )}
     </motion.div>
   );
 }
@@ -385,6 +453,7 @@ export default function RwaMarketplaceScreen() {
   const [investError, setInvestError] = useState('');
   const [portfolioLoading, setPortfolioLoading] = useState(false);
   const [showSortDropdown, setShowSortDropdown] = useState(false);
+  const [crowdfundCampaign, setCrowdfundCampaign] = useState<any>(null);
 
   // ─── Data Fetching ───────────────────────────────────────────────────────
 
@@ -514,6 +583,43 @@ export default function RwaMarketplaceScreen() {
       setInvestLoading(false);
     }
   }, [selectedAsset, investAmount]);
+
+  // ─── Campaign Click Handler ──────────────────────────────────────────────
+
+  const handleAssetClick = useCallback(async (asset: RwaListing) => {
+    if (asset.campaign_id) {
+      // Fetch full campaign object for the crowdfund modal
+      try {
+        const resp = await fetch(`/api/v1/contracts/listing/campaigns/${asset.campaign_id}`);
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data.success && data.data?.campaign) {
+            setCrowdfundCampaign(data.data.campaign);
+            return;
+          }
+        }
+      } catch (err) {
+        console.error('[RWA] Failed to fetch campaign details:', err);
+      }
+      // Fallback: construct a minimal campaign object from listing data
+      setCrowdfundCampaign({
+        campaign_id: asset.campaign_id,
+        exchange_name: asset.name.replace(' Exchange Listing', ''),
+        exchange_logo: '',
+        target_usd: asset.target_usd_num || parseFloat(asset.total_value_usd) || 0,
+        raised_usd: asset.raised_usd || 0,
+        contributor_count: asset.contributor_count || 0,
+        early_bird_slots: 0,
+        early_bird_claimed: 0,
+        status: asset.campaign_status || 'funding',
+        tier: 'silver',
+        description: asset.description,
+        perks: {},
+      });
+    } else {
+      setSelectedAsset(asset);
+    }
+  }, []);
 
   // ─── Filtering & Sorting ─────────────────────────────────────────────────
 
@@ -804,7 +910,7 @@ export default function RwaMarketplaceScreen() {
                           key={asset.address}
                           asset={asset}
                           viewMode="grid"
-                          onClick={() => setSelectedAsset(asset)}
+                          onClick={() => handleAssetClick(asset)}
                         />
                       ))}
                     </motion.div>
@@ -815,7 +921,7 @@ export default function RwaMarketplaceScreen() {
                           key={asset.address}
                           asset={asset}
                           viewMode="list"
-                          onClick={() => setSelectedAsset(asset)}
+                          onClick={() => handleAssetClick(asset)}
                         />
                       ))}
                     </motion.div>
@@ -1190,6 +1296,15 @@ export default function RwaMarketplaceScreen() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* ─── Crowdfund Modal (for campaign listings) ──────────────────────── */}
+      {crowdfundCampaign && (
+        <XListCrowdfundModal
+          campaign={crowdfundCampaign}
+          onClose={() => setCrowdfundCampaign(null)}
+          walletAddress={localStorage.getItem('walletAddress') || ''}
+        />
+      )}
 
       {/* ─── Custom Scrollbar Styles ────────────────────────────────────── */}
       <style>{`

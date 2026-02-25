@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, memo, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Search, Copy, Check, ExternalLink, Hash, User, Blocks, Shield, X, Clock, ArrowRight, CheckCircle, XCircle, Key, FileCode, Wifi, Zap, Globe, MessageCircle, Bell, Send, UserCircle, CreditCard, LogOut, BookOpen, Palette, Pickaxe, Settings } from 'lucide-react';
+import { Search, Copy, Check, ExternalLink, Hash, User, Blocks, Shield, X, Clock, ArrowRight, CheckCircle, XCircle, Key, FileCode, Wifi, Zap, Globe, MessageCircle, Bell, Send, UserCircle, CreditCard, LogOut, BookOpen, Palette, Pickaxe, Settings, FileText, Code, Twitter, Facebook, Download, ChevronDown } from 'lucide-react';
 import { TICKER_SYMBOL } from '../constants/ticker';
 import { qnkAPI } from '../services/api';
 import type { MiningStatsEvent } from '../services/api';
@@ -119,6 +119,7 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
   const [recentInboxItems, setRecentInboxItems] = useState<any[]>([]);
   const walletAddr = useMemo(() => localStorage.getItem('walletAddress') || '', []);
   const [showMinerLinkModal, setShowMinerLinkModal] = useState(false);
+  const [showTaxModal, setShowTaxModal] = useState(false);
   const minerLink = useMinerLink(walletAddr || null);
 
   // MetaMask linked account data
@@ -1557,6 +1558,95 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
                 <Shield className="w-4 h-4 text-amber-400/70" />
                 <span>Settings</span>
               </button>
+              <button
+                onClick={() => { setShowTaxModal(true); setShowProfileModal(false); }}
+                className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-slate-700/50 text-slate-300 hover:text-emerald-100 transition-colors text-sm"
+              >
+                <FileText className="w-4 h-4 text-emerald-400/70" />
+                <span>Tax Report</span>
+              </button>
+
+              {/* Subdomain Links */}
+              <div className="border-t border-slate-700/50 mt-1 pt-1">
+                <a
+                  href="https://api.quillon.xyz"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="w-full flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-slate-700/50 text-slate-400 hover:text-cyan-300 transition-colors text-sm"
+                >
+                  <Globe className="w-4 h-4 text-cyan-400/60" />
+                  <span>API Docs</span>
+                  <ExternalLink className="w-3 h-3 ml-auto opacity-40" />
+                </a>
+                <a
+                  href="https://code.quillon.xyz"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="w-full flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-slate-700/50 text-slate-400 hover:text-purple-300 transition-colors text-sm"
+                >
+                  <Code className="w-4 h-4 text-purple-400/60" />
+                  <span>Source Code</span>
+                  <ExternalLink className="w-3 h-3 ml-auto opacity-40" />
+                </a>
+                <a
+                  href="https://drive.proton.me/urls/4VJ9CYH98W#Ibg1AdOuYewX"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="w-full flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-slate-700/50 text-slate-400 hover:text-amber-300 transition-colors text-sm"
+                >
+                  <FileText className="w-4 h-4 text-amber-400/60" />
+                  <span>Whitepaper</span>
+                  <ExternalLink className="w-3 h-3 ml-auto opacity-40" />
+                </a>
+                <a
+                  href="https://technical-deepdive.quillon.xyz/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="w-full flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-slate-700/50 text-slate-400 hover:text-emerald-300 transition-colors text-sm"
+                >
+                  <BookOpen className="w-4 h-4 text-emerald-400/60" />
+                  <span>Technical Deep Dive</span>
+                  <ExternalLink className="w-3 h-3 ml-auto opacity-40" />
+                </a>
+              </div>
+
+              {/* Social Links */}
+              <div className="border-t border-slate-700/50 mt-1 pt-1 flex items-center gap-1 px-3 py-2">
+                <a
+                  href="https://x.com/QuilloNetwork"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="p-2 rounded-lg hover:bg-slate-700/50 text-slate-500 hover:text-white transition-colors"
+                  title="X (Twitter)"
+                >
+                  <svg viewBox="0 0 24 24" className="w-4 h-4" fill="currentColor">
+                    <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
+                  </svg>
+                </a>
+                <a
+                  href="https://facebook.com/QuilloNetwork"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="p-2 rounded-lg hover:bg-slate-700/50 text-slate-500 hover:text-[#1877F2] transition-colors"
+                  title="Facebook"
+                >
+                  <svg viewBox="0 0 24 24" className="w-4 h-4" fill="currentColor">
+                    <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/>
+                  </svg>
+                </a>
+                <a
+                  href="https://discord.gg/quillon"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="p-2 rounded-lg hover:bg-slate-700/50 text-slate-500 hover:text-[#5865F2] transition-colors"
+                  title="Discord"
+                >
+                  <svg viewBox="0 0 24 24" className="w-4 h-4" fill="currentColor">
+                    <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.095 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.095 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/>
+                  </svg>
+                </a>
+              </div>
+
               <div className="border-t border-slate-700/50 mt-1 pt-1">
                 {metamaskAddress ? (
                   <button
@@ -1946,8 +2036,351 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
         onClose={() => setShowMinerLinkModal(false)}
         minerLink={minerLink}
       />
+
+      {/* Tax Report Modal */}
+      {showTaxModal && createPortal(
+        <TaxReportModal
+          isOpen={showTaxModal}
+          onClose={() => setShowTaxModal(false)}
+          walletAddress={walletAddr}
+          currentBalance={currentBalance}
+        />,
+        document.body
+      )}
     </>
   );
 });
+
+// =====================================================
+// TAX REPORT MODAL — Multi-jurisdiction PDF generator
+// =====================================================
+
+interface TaxJurisdiction {
+  id: string;
+  name: string;
+  flag: string;
+  shortGainRate: number;  // % for < 1 year
+  longGainRate: number;   // % for >= 1 year
+  freeAllowance: number;  // tax-free threshold in USD
+  currency: string;
+  currencySymbol: string;
+}
+
+const JURISDICTIONS: TaxJurisdiction[] = [
+  { id: 'us',  name: 'United States',  flag: '\u{1F1FA}\u{1F1F8}', shortGainRate: 37, longGainRate: 20, freeAllowance: 0,     currency: 'USD', currencySymbol: '$' },
+  { id: 'uk',  name: 'United Kingdom', flag: '\u{1F1EC}\u{1F1E7}', shortGainRate: 20, longGainRate: 20, freeAllowance: 6000,  currency: 'GBP', currencySymbol: '\u00A3' },
+  { id: 'de',  name: 'Germany',        flag: '\u{1F1E9}\u{1F1EA}', shortGainRate: 26.375, longGainRate: 0, freeAllowance: 600, currency: 'EUR', currencySymbol: '\u20AC' },
+  { id: 'nl',  name: 'Netherlands',    flag: '\u{1F1F3}\u{1F1F1}', shortGainRate: 36, longGainRate: 36, freeAllowance: 57000, currency: 'EUR', currencySymbol: '\u20AC' },
+  { id: 'au',  name: 'Australia',      flag: '\u{1F1E6}\u{1F1FA}', shortGainRate: 45, longGainRate: 22.5, freeAllowance: 0,   currency: 'AUD', currencySymbol: 'A$' },
+  { id: 'ca',  name: 'Canada',         flag: '\u{1F1E8}\u{1F1E6}', shortGainRate: 26.76, longGainRate: 26.76, freeAllowance: 0, currency: 'CAD', currencySymbol: 'C$' },
+  { id: 'jp',  name: 'Japan',          flag: '\u{1F1EF}\u{1F1F5}', shortGainRate: 55, longGainRate: 55, freeAllowance: 200000, currency: 'JPY', currencySymbol: '\u00A5' },
+  { id: 'sg',  name: 'Singapore',      flag: '\u{1F1F8}\u{1F1EC}', shortGainRate: 0, longGainRate: 0, freeAllowance: 0,       currency: 'SGD', currencySymbol: 'S$' },
+  { id: 'ae',  name: 'UAE',            flag: '\u{1F1E6}\u{1F1EA}', shortGainRate: 0, longGainRate: 0, freeAllowance: 0,       currency: 'AED', currencySymbol: 'AED' },
+  { id: 'pt',  name: 'Portugal',       flag: '\u{1F1F5}\u{1F1F9}', shortGainRate: 28, longGainRate: 28, freeAllowance: 0,     currency: 'EUR', currencySymbol: '\u20AC' },
+];
+
+const TRANSLATIONS: Record<string, Record<string, string>> = {
+  en: { title: 'Crypto Tax Report', jurisdiction: 'Jurisdiction', taxYear: 'Tax Year', holdings: 'Current Holdings', costBasis: 'Cost Basis (USD)', currentValue: 'Current Value', unrealizedGain: 'Unrealized Gain/Loss', shortTermRate: 'Short-Term Rate', longTermRate: 'Long-Term Rate', freeAllowance: 'Tax-Free Allowance', estimatedTax: 'Estimated Tax', generate: 'Generate PDF Report', disclaimer: 'This is an estimate only. Consult a tax professional for official filing.', noTax: 'No Capital Gains Tax', totalTransactions: 'Total Transactions', miningIncome: 'Mining Income', wallet: 'Wallet', summary: 'Summary', period: 'Period' },
+  de: { title: 'Krypto-Steuerbericht', jurisdiction: 'Steuergebiet', taxYear: 'Steuerjahr', holdings: 'Aktueller Bestand', costBasis: 'Anschaffungskosten (EUR)', currentValue: 'Aktueller Wert', unrealizedGain: 'Unrealisierter Gewinn/Verlust', shortTermRate: 'Kurzfristiger Steuersatz', longTermRate: 'Langfristiger Steuersatz', freeAllowance: 'Steuerfreier Freibetrag', estimatedTax: 'Geschätzte Steuer', generate: 'PDF-Bericht erstellen', disclaimer: 'Dies ist nur eine Schätzung. Konsultieren Sie einen Steuerberater.', noTax: 'Keine Kapitalertragssteuer', totalTransactions: 'Gesamttransaktionen', miningIncome: 'Mining-Einkommen', wallet: 'Wallet', summary: 'Zusammenfassung', period: 'Zeitraum' },
+  nl: { title: 'Crypto Belastingrapport', jurisdiction: 'Jurisdictie', taxYear: 'Belastingjaar', holdings: 'Huidige Bezittingen', costBasis: 'Kostprijs (EUR)', currentValue: 'Huidige Waarde', unrealizedGain: 'Ongerealiseerde Winst/Verlies', shortTermRate: 'Korte Termijn Tarief', longTermRate: 'Lange Termijn Tarief', freeAllowance: 'Belastingvrije Drempel', estimatedTax: 'Geschatte Belasting', generate: 'PDF Rapport Genereren', disclaimer: 'Dit is slechts een schatting. Raadpleeg een belastingadviseur.', noTax: 'Geen Vermogenswinstbelasting', totalTransactions: 'Totaal Transacties', miningIncome: 'Mining Inkomsten', wallet: 'Portemonnee', summary: 'Samenvatting', period: 'Periode' },
+  ja: { title: '\u6697\u53F7\u8CC7\u7523\u7A0E\u52D9\u30EC\u30DD\u30FC\u30C8', jurisdiction: '\u7BA1\u8F44\u5730\u57DF', taxYear: '\u8AB2\u7A0E\u5E74\u5EA6', holdings: '\u4FDD\u6709\u8CC7\u7523', costBasis: '\u53D6\u5F97\u4FA1\u683C', currentValue: '\u73FE\u5728\u4FA1\u5024', unrealizedGain: '\u542B\u307F\u640D\u76CA', shortTermRate: '\u77ED\u671F\u7A0E\u7387', longTermRate: '\u9577\u671F\u7A0E\u7387', freeAllowance: '\u975E\u8AB2\u7A0E\u67A0', estimatedTax: '\u63A8\u5B9A\u7A0E\u984D', generate: 'PDF\u30EC\u30DD\u30FC\u30C8\u751F\u6210', disclaimer: '\u3053\u308C\u306F\u63A8\u5B9A\u5024\u3067\u3059\u3002\u7A0E\u7406\u58EB\u306B\u3054\u76F8\u8AC7\u304F\u3060\u3055\u3044\u3002', noTax: '\u30AD\u30E3\u30D4\u30BF\u30EB\u30B2\u30A4\u30F3\u7A0E\u306A\u3057', totalTransactions: '\u7DCF\u53D6\u5F15\u6570', miningIncome: '\u30DE\u30A4\u30CB\u30F3\u30B0\u53CE\u5165', wallet: '\u30A6\u30A9\u30EC\u30C3\u30C8', summary: '\u6982\u8981', period: '\u671F\u9593' },
+  fr: { title: 'Rapport Fiscal Crypto', jurisdiction: 'Juridiction', taxYear: 'Ann\u00E9e Fiscale', holdings: 'Avoirs Actuels', costBasis: 'Co\u00FBt de Base (EUR)', currentValue: 'Valeur Actuelle', unrealizedGain: 'Gain/Perte Non R\u00E9alis\u00E9', shortTermRate: 'Taux Court Terme', longTermRate: 'Taux Long Terme', freeAllowance: 'Abattement Fiscal', estimatedTax: 'Imp\u00F4t Estim\u00E9', generate: 'G\u00E9n\u00E9rer le Rapport PDF', disclaimer: 'Ceci est une estimation. Consultez un fiscaliste.', noTax: 'Pas d\'imp\u00F4t sur les plus-values', totalTransactions: 'Total des Transactions', miningIncome: 'Revenus du Minage', wallet: 'Portefeuille', summary: 'R\u00E9sum\u00E9', period: 'P\u00E9riode' },
+};
+
+function TaxReportModal({ isOpen, onClose, walletAddress, currentBalance }: { isOpen: boolean; onClose: () => void; walletAddress: string; currentBalance: number }) {
+  const [jurisdiction, setJurisdiction] = useState<TaxJurisdiction>(JURISDICTIONS[0]);
+  const [taxYear, setTaxYear] = useState(new Date().getFullYear());
+  const [costBasis, setCostBasis] = useState(0);
+  const [qugPrice, setQugPrice] = useState(0.0001);
+  const [language, setLanguage] = useState('en');
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [showJurisdictions, setShowJurisdictions] = useState(false);
+
+  const t = TRANSLATIONS[language] || TRANSLATIONS.en;
+  const currentValue = currentBalance * qugPrice;
+  const unrealizedGain = currentValue - costBasis;
+  const taxableGain = Math.max(0, unrealizedGain - jurisdiction.freeAllowance);
+  const estimatedTax = taxableGain * (jurisdiction.shortGainRate / 100);
+
+  const generatePDF = async () => {
+    setIsGenerating(true);
+    await new Promise(r => setTimeout(r, 800));
+
+    const doc = document.createElement('div');
+    const cs = jurisdiction.currencySymbol;
+    const fmtNum = (n: number) => n.toLocaleString(language === 'de' || language === 'nl' ? 'de-DE' : language === 'ja' ? 'ja-JP' : language === 'fr' ? 'fr-FR' : 'en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+    doc.innerHTML = `
+      <div style="font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; max-width: 800px; margin: 0 auto; padding: 48px; color: #0f172a; background: white;">
+        <div style="text-align: center; margin-bottom: 40px; border-bottom: 3px solid #10b981; padding-bottom: 24px;">
+          <h1 style="font-size: 28px; font-weight: 800; color: #064e3b; margin: 0 0 8px 0; letter-spacing: -0.5px;">${jurisdiction.flag} ${t.title}</h1>
+          <p style="color: #6b7280; font-size: 14px; margin: 0;">Quillon Network (${TICKER_SYMBOL}) | ${t.period}: ${taxYear}</p>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 32px;">
+          <div style="background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%); padding: 20px; border-radius: 12px; border: 1px solid #a7f3d0;">
+            <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #059669; font-weight: 600;">${t.jurisdiction}</div>
+            <div style="font-size: 20px; font-weight: 700; color: #064e3b; margin-top: 4px;">${jurisdiction.flag} ${jurisdiction.name}</div>
+          </div>
+          <div style="background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%); padding: 20px; border-radius: 12px; border: 1px solid #93c5fd;">
+            <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #2563eb; font-weight: 600;">${t.wallet}</div>
+            <div style="font-size: 13px; font-weight: 600; color: #1e3a5f; margin-top: 4px; word-break: break-all; font-family: monospace;">${walletAddress.slice(0, 12)}...${walletAddress.slice(-8)}</div>
+          </div>
+        </div>
+
+        <h2 style="font-size: 18px; font-weight: 700; color: #064e3b; margin: 0 0 16px 0; padding-bottom: 8px; border-bottom: 2px solid #d1fae5;">${t.summary}</h2>
+
+        <table style="width: 100%; border-collapse: collapse; margin-bottom: 32px;">
+          <tbody>
+            <tr style="border-bottom: 1px solid #e5e7eb;">
+              <td style="padding: 14px 16px; font-weight: 500; color: #374151;">${t.holdings}</td>
+              <td style="padding: 14px 16px; text-align: right; font-weight: 700; font-family: monospace; color: #0f172a;">${fmtNum(currentBalance)} ${TICKER_SYMBOL}</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #e5e7eb; background: #f9fafb;">
+              <td style="padding: 14px 16px; font-weight: 500; color: #374151;">${t.costBasis}</td>
+              <td style="padding: 14px 16px; text-align: right; font-weight: 700; font-family: monospace; color: #0f172a;">${cs}${fmtNum(costBasis)}</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #e5e7eb;">
+              <td style="padding: 14px 16px; font-weight: 500; color: #374151;">${t.currentValue}</td>
+              <td style="padding: 14px 16px; text-align: right; font-weight: 700; font-family: monospace; color: #0f172a;">${cs}${fmtNum(currentValue)}</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #e5e7eb; background: #f9fafb;">
+              <td style="padding: 14px 16px; font-weight: 500; color: #374151;">${t.unrealizedGain}</td>
+              <td style="padding: 14px 16px; text-align: right; font-weight: 700; font-family: monospace; color: ${unrealizedGain >= 0 ? '#059669' : '#dc2626'};">${unrealizedGain >= 0 ? '+' : ''}${cs}${fmtNum(unrealizedGain)}</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #e5e7eb;">
+              <td style="padding: 14px 16px; font-weight: 500; color: #374151;">${t.shortTermRate}</td>
+              <td style="padding: 14px 16px; text-align: right; font-weight: 700; font-family: monospace; color: #0f172a;">${jurisdiction.shortGainRate}%</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #e5e7eb; background: #f9fafb;">
+              <td style="padding: 14px 16px; font-weight: 500; color: #374151;">${t.longTermRate}</td>
+              <td style="padding: 14px 16px; text-align: right; font-weight: 700; font-family: monospace; color: #0f172a;">${jurisdiction.longGainRate === 0 ? t.noTax : jurisdiction.longGainRate + '%'}</td>
+            </tr>
+            ${jurisdiction.freeAllowance > 0 ? `
+            <tr style="border-bottom: 1px solid #e5e7eb;">
+              <td style="padding: 14px 16px; font-weight: 500; color: #374151;">${t.freeAllowance}</td>
+              <td style="padding: 14px 16px; text-align: right; font-weight: 700; font-family: monospace; color: #059669;">${cs}${fmtNum(jurisdiction.freeAllowance)}</td>
+            </tr>` : ''}
+          </tbody>
+        </table>
+
+        <div style="background: linear-gradient(135deg, ${estimatedTax === 0 ? '#ecfdf5, #d1fae5' : '#fef2f2, #fecaca'}); padding: 24px; border-radius: 16px; text-align: center; margin-bottom: 32px; border: 2px solid ${estimatedTax === 0 ? '#10b981' : '#f87171'};">
+          <div style="font-size: 12px; text-transform: uppercase; letter-spacing: 2px; color: ${estimatedTax === 0 ? '#059669' : '#dc2626'}; font-weight: 600; margin-bottom: 8px;">${t.estimatedTax}</div>
+          <div style="font-size: 36px; font-weight: 800; color: ${estimatedTax === 0 ? '#064e3b' : '#991b1b'};">${estimatedTax === 0 ? t.noTax : cs + fmtNum(estimatedTax)}</div>
+        </div>
+
+        <div style="background: #fffbeb; padding: 16px; border-radius: 8px; border-left: 4px solid #f59e0b; margin-bottom: 24px;">
+          <p style="margin: 0; font-size: 12px; color: #92400e; line-height: 1.5;">${t.disclaimer}</p>
+        </div>
+
+        <div style="text-align: center; color: #9ca3af; font-size: 11px; margin-top: 32px; padding-top: 16px; border-top: 1px solid #e5e7eb;">
+          Generated by Quillon Network Tax Calculator | ${new Date().toLocaleDateString()} | quillon.xyz
+        </div>
+      </div>
+    `;
+
+    const printWindow = window.open('', '_blank');
+    if (printWindow) {
+      printWindow.document.write(`<!DOCTYPE html><html><head><title>${t.title} - ${taxYear}</title><style>@media print { body { margin: 0; } @page { size: A4; margin: 20mm; } }</style></head><body>${doc.innerHTML}</body></html>`);
+      printWindow.document.close();
+      setTimeout(() => { printWindow.print(); }, 500);
+    }
+
+    setIsGenerating(false);
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <AnimatePresence>
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-[10000] overflow-y-auto py-4"
+        onClick={onClose}
+      >
+        <motion.div
+          initial={{ scale: 0.9, opacity: 0, y: 20 }}
+          animate={{ scale: 1, opacity: 1, y: 0 }}
+          exit={{ scale: 0.9, opacity: 0 }}
+          transition={{ type: "spring", stiffness: 300, damping: 25 }}
+          className="relative bg-gradient-to-br from-slate-900 via-emerald-950/30 to-slate-900 border-2 border-emerald-500/40 rounded-2xl p-6 max-w-xl w-full mx-4 shadow-2xl overflow-hidden"
+          onClick={(e) => e.stopPropagation()}
+          style={{ boxShadow: '0 0 60px rgba(16, 185, 129, 0.2)' }}
+        >
+          {/* Background orb */}
+          <div className="absolute top-0 right-0 w-48 h-48 bg-emerald-500/[0.06] rounded-full blur-3xl -translate-y-1/3 translate-x-1/3 pointer-events-none" />
+
+          {/* Header */}
+          <div className="relative flex items-center justify-between mb-5">
+            <div className="flex items-center gap-3">
+              <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-emerald-500/30 to-teal-500/30 border border-emerald-400/40 flex items-center justify-center">
+                <FileText className="w-6 h-6 text-emerald-300" />
+              </div>
+              <div>
+                <h2 className="text-xl font-bold bg-gradient-to-r from-emerald-400 to-teal-300 bg-clip-text text-transparent">{t.title}</h2>
+                <p className="text-emerald-300/50 text-xs">{TICKER_SYMBOL} | {t.period} {taxYear}</p>
+              </div>
+            </div>
+            <button onClick={onClose} className="p-2 hover:bg-emerald-500/20 rounded-lg transition-colors">
+              <X className="w-5 h-5 text-emerald-400" />
+            </button>
+          </div>
+
+          {/* Language Selector */}
+          <div className="relative flex gap-1 mb-4 p-1 bg-slate-800/60 rounded-lg border border-slate-700/40">
+            {[
+              { code: 'en', label: 'EN' },
+              { code: 'de', label: 'DE' },
+              { code: 'nl', label: 'NL' },
+              { code: 'fr', label: 'FR' },
+              { code: 'ja', label: 'JA' },
+            ].map(lang => (
+              <button
+                key={lang.code}
+                onClick={() => setLanguage(lang.code)}
+                className={`flex-1 py-1.5 rounded text-xs font-bold transition-all ${language === lang.code ? 'bg-emerald-500/30 text-emerald-300 border border-emerald-400/30' : 'text-slate-500 hover:text-slate-300'}`}
+              >
+                {lang.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Jurisdiction Selector */}
+          <div className="relative mb-4">
+            <button
+              onClick={() => setShowJurisdictions(!showJurisdictions)}
+              className="w-full flex items-center justify-between p-3 bg-slate-800/60 border border-emerald-500/20 rounded-xl hover:border-emerald-500/40 transition-colors"
+            >
+              <div className="flex items-center gap-3">
+                <span className="text-xl">{jurisdiction.flag}</span>
+                <div className="text-left">
+                  <div className="text-sm font-bold text-emerald-100">{jurisdiction.name}</div>
+                  <div className="text-[10px] text-emerald-400/50">
+                    {jurisdiction.shortGainRate === 0 && jurisdiction.longGainRate === 0 ? t.noTax : `${jurisdiction.shortGainRate}% / ${jurisdiction.longGainRate}%`}
+                  </div>
+                </div>
+              </div>
+              <ChevronDown className={`w-4 h-4 text-emerald-400 transition-transform ${showJurisdictions ? 'rotate-180' : ''}`} />
+            </button>
+            <AnimatePresence>
+              {showJurisdictions && (
+                <motion.div
+                  initial={{ opacity: 0, y: -10, scaleY: 0.9 }}
+                  animate={{ opacity: 1, y: 0, scaleY: 1 }}
+                  exit={{ opacity: 0, y: -10, scaleY: 0.9 }}
+                  className="absolute top-full left-0 right-0 mt-1 bg-slate-800 border border-emerald-500/20 rounded-xl overflow-hidden z-10 max-h-52 overflow-y-auto shadow-xl"
+                  style={{ transformOrigin: 'top' }}
+                >
+                  {JURISDICTIONS.map(j => (
+                    <button
+                      key={j.id}
+                      onClick={() => { setJurisdiction(j); setShowJurisdictions(false); }}
+                      className={`w-full flex items-center gap-3 px-4 py-2.5 text-left hover:bg-emerald-500/10 transition-colors ${j.id === jurisdiction.id ? 'bg-emerald-500/20 text-emerald-200' : 'text-slate-300'}`}
+                    >
+                      <span className="text-lg">{j.flag}</span>
+                      <span className="text-sm flex-1">{j.name}</span>
+                      <span className="text-xs text-emerald-400/50">
+                        {j.shortGainRate === 0 && j.longGainRate === 0 ? t.noTax : `${j.shortGainRate}%`}
+                      </span>
+                    </button>
+                  ))}
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+
+          {/* Tax Year & Cost Basis Inputs */}
+          <div className="relative grid grid-cols-2 gap-3 mb-4">
+            <div>
+              <label className="text-[10px] text-emerald-400/60 uppercase tracking-wider font-semibold mb-1 block">{t.taxYear}</label>
+              <select
+                value={taxYear}
+                onChange={(e) => setTaxYear(Number(e.target.value))}
+                className="w-full p-2.5 bg-slate-800/60 border border-emerald-500/20 rounded-lg text-emerald-100 text-sm focus:border-emerald-400/50 focus:outline-none"
+              >
+                {[2026, 2025, 2024, 2023].map(y => <option key={y} value={y}>{y}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="text-[10px] text-emerald-400/60 uppercase tracking-wider font-semibold mb-1 block">{t.costBasis}</label>
+              <input
+                type="number"
+                value={costBasis || ''}
+                onChange={(e) => setCostBasis(Number(e.target.value))}
+                placeholder="0.00"
+                className="w-full p-2.5 bg-slate-800/60 border border-emerald-500/20 rounded-lg text-emerald-100 text-sm focus:border-emerald-400/50 focus:outline-none font-mono placeholder:text-slate-600"
+              />
+            </div>
+          </div>
+
+          {/* Price Input */}
+          <div className="relative mb-4">
+            <label className="text-[10px] text-emerald-400/60 uppercase tracking-wider font-semibold mb-1 block">{TICKER_SYMBOL} Price (USD)</label>
+            <input
+              type="number"
+              value={qugPrice}
+              onChange={(e) => setQugPrice(Number(e.target.value))}
+              step="0.0001"
+              className="w-full p-2.5 bg-slate-800/60 border border-emerald-500/20 rounded-lg text-emerald-100 text-sm focus:border-emerald-400/50 focus:outline-none font-mono"
+            />
+          </div>
+
+          {/* Results Summary */}
+          <div className="relative grid grid-cols-2 gap-3 mb-4">
+            <div className="p-3 bg-slate-800/40 border border-slate-700/30 rounded-xl">
+              <div className="text-[10px] text-slate-500 uppercase tracking-wider">{t.holdings}</div>
+              <div className="text-lg font-bold text-white font-mono">{currentBalance.toLocaleString()} <span className="text-xs text-amber-400">{TICKER_SYMBOL}</span></div>
+            </div>
+            <div className="p-3 bg-slate-800/40 border border-slate-700/30 rounded-xl">
+              <div className="text-[10px] text-slate-500 uppercase tracking-wider">{t.currentValue}</div>
+              <div className="text-lg font-bold text-white font-mono">{jurisdiction.currencySymbol}{currentValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+            </div>
+          </div>
+
+          {/* Gain/Loss & Tax */}
+          <div className="relative p-4 rounded-xl mb-4 border-2" style={{ background: unrealizedGain >= 0 ? 'rgba(16,185,129,0.08)' : 'rgba(239,68,68,0.08)', borderColor: unrealizedGain >= 0 ? 'rgba(16,185,129,0.3)' : 'rgba(239,68,68,0.3)' }}>
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm text-slate-400">{t.unrealizedGain}</span>
+              <span className={`text-xl font-bold font-mono ${unrealizedGain >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                {unrealizedGain >= 0 ? '+' : ''}{jurisdiction.currencySymbol}{unrealizedGain.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-slate-400">{t.estimatedTax}</span>
+              <span className={`text-xl font-bold font-mono ${estimatedTax === 0 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                {estimatedTax === 0 ? t.noTax : `${jurisdiction.currencySymbol}${estimatedTax.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+              </span>
+            </div>
+          </div>
+
+          {/* Disclaimer */}
+          <p className="relative text-[10px] text-amber-400/50 mb-4 leading-relaxed">{t.disclaimer}</p>
+
+          {/* Generate PDF Button */}
+          <motion.button
+            onClick={generatePDF}
+            disabled={isGenerating}
+            className="relative w-full py-3 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 rounded-xl text-white font-bold text-sm flex items-center justify-center gap-2 disabled:opacity-50 transition-all"
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.98 }}
+          >
+            {isGenerating ? (
+              <motion.div
+                className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full"
+                animate={{ rotate: 360 }}
+                transition={{ duration: 0.8, repeat: Infinity, ease: "linear" }}
+              />
+            ) : (
+              <Download className="w-4 h-4" />
+            )}
+            {isGenerating ? 'Generating...' : t.generate}
+          </motion.button>
+        </motion.div>
+      </motion.div>
+    </AnimatePresence>
+  );
+}
 
 export default TopBar;

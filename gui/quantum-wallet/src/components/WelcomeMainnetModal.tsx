@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Sparkles, Shield, Rocket, X, ChevronRight, ChevronLeft, Globe, Zap, Lock, Cpu, Coins, BarChart3, Users, Pickaxe } from 'lucide-react';
 import { qnkAPI } from '../services/api';
 
-const STORAGE_KEY = 'mainnet2026.2_welcomed_v2';
+const STORAGE_KEY = 'mainnet-genesis_welcomed_v2';
 
 interface WelcomeMainnetModalProps {
   onClose: () => void;
