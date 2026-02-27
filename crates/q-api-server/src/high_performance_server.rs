@@ -94,7 +94,7 @@ impl HighPerformanceServer {
         info!("   Listening on: http://{}", actual_addr);
         info!("   HTTP/2 will be negotiated automatically per connection");
 
-        // Create shutdown signal handler for both SIGTERM (systemd) and CTRL+C
+        // Create shutdown signal handler for SIGTERM, CTRL+C, SIGUSR1 (graceful restart), SIGUSR2 (rollback)
         let shutdown_signal = async {
             let ctrl_c = async {
                 tokio::signal::ctrl_c()
@@ -113,12 +113,42 @@ impl HighPerformanceServer {
             #[cfg(not(unix))]
             let terminate = std::future::pending::<()>();
 
+            // v8.5.0: SIGUSR1 — graceful restart (used by auto-updater after binary swap)
+            #[cfg(unix)]
+            let usr1 = async {
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
+                    .expect("failed to install SIGUSR1 signal handler")
+                    .recv()
+                    .await;
+            };
+
+            #[cfg(not(unix))]
+            let usr1 = std::future::pending::<()>();
+
+            // v8.5.0: SIGUSR2 — rollback signal (restores previous binary and restarts)
+            #[cfg(unix)]
+            let usr2 = async {
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined2())
+                    .expect("failed to install SIGUSR2 signal handler")
+                    .recv()
+                    .await;
+            };
+
+            #[cfg(not(unix))]
+            let usr2 = std::future::pending::<()>();
+
             tokio::select! {
                 _ = ctrl_c => {
                     info!("🛑 Received CTRL+C signal - initiating graceful shutdown");
                 },
                 _ = terminate => {
                     info!("🛑 Received SIGTERM signal - initiating graceful shutdown");
+                },
+                _ = usr1 => {
+                    info!("🔄 Received SIGUSR1 signal - initiating graceful restart (auto-update)");
+                },
+                _ = usr2 => {
+                    warn!("⏪ Received SIGUSR2 signal - initiating rollback restart");
                 },
             }
         };

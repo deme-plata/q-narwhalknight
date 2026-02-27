@@ -38,6 +38,7 @@ pub fn email_router() -> Router<Arc<AppState>> {
         .route("/message/{id}", delete(delete_email))
         .route("/message/{id}/read", put(mark_read))
         .route("/unread-count", get(get_unread_count))
+        .route("/mark-all-read", post(mark_all_read))
         .route("/search", get(search_emails))
         .route("/contacts", get(get_contacts))
         .route("/folder/{folder}", get(get_folder))
@@ -445,6 +446,28 @@ async fn get_unread_count(
         Ok(count) => Ok(Json(ApiResponse::success(UnreadCountResponse { count }))),
         Err(e) => {
             error!("Failed to get unread count: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// POST /api/v1/email/mark-all-read — Mark all inbox emails as read
+async fn mark_all_read(
+    auth_wallet: Option<AuthenticatedWallet>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<UnreadCountResponse>>, StatusCode> {
+    let auth = match auth_wallet {
+        Some(w) => w,
+        None => return Ok(Json(ApiResponse::error("Authentication required".to_string()))),
+    };
+
+    match state.storage_engine.mark_all_inbox_read(&auth.address).await {
+        Ok(marked) => {
+            info!("📖 Marked {} emails as read for {}", marked, &hex::encode(auth.address)[..8]);
+            Ok(Json(ApiResponse::success(UnreadCountResponse { count: 0 })))
+        }
+        Err(e) => {
+            error!("Failed to mark all as read: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
@@ -1028,6 +1051,13 @@ pub async fn handle_p2p_email(state: &Arc<AppState>, data: &[u8]) {
 
             if !is_local {
                 debug!("📧 P2P email {} is not for us, ignoring", email.id);
+                return;
+            }
+
+            // v8.2.11: Skip if email already exists — prevents overwriting
+            // read=true back to read=false on gossipsub retransmissions
+            if let Ok(Some(_)) = state.storage_engine.get_email(&email.id).await {
+                debug!("📧 P2P email {} already exists, skipping duplicate", email.id);
                 return;
             }
 

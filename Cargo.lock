@@ -12666,7 +12666,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "anyhow",
  "candle-core 0.9.2-alpha.2",
@@ -12689,7 +12689,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-audio"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "anyhow",
  "apodize",
@@ -12699,7 +12699,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-core"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "accelerate-src",
  "ahash 0.8.12",
@@ -12801,7 +12801,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-mcp"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12822,7 +12822,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-paged-attn"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "anyhow",
  "bindgen_cuda 0.1.7",
@@ -12837,7 +12837,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-quant"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "bindgen_cuda 0.1.7",
  "byteorder",
@@ -12865,7 +12865,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-vision"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "candle-core 0.9.2-alpha.2",
  "image 0.25.8",
@@ -15998,7 +15998,7 @@ dependencies = [
 
 [[package]]
 name = "q-aegis-ql"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -16017,7 +16017,7 @@ dependencies = [
 
 [[package]]
 name = "q-ai-inference"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "aes-gcm",
  "ahash 0.8.12",
@@ -16066,7 +16066,7 @@ dependencies = [
 
 [[package]]
 name = "q-api-server"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "anyhow",
  "argon2",
@@ -16167,6 +16167,7 @@ dependencies = [
  "rmp-serde",
  "rust_decimal",
  "secp256k1 0.29.1",
+ "self-replace",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -16288,7 +16289,7 @@ dependencies = [
 
 [[package]]
 name = "q-bounty-protocol"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -16319,7 +16320,7 @@ dependencies = [
 
 [[package]]
 name = "q-bounty-server"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "anyhow",
  "axum 0.7.9",
@@ -16348,7 +16349,7 @@ dependencies = [
 
 [[package]]
 name = "q-cache"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -16419,7 +16420,7 @@ dependencies = [
 
 [[package]]
 name = "q-crypto-advanced"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "aegis",
  "anyhow",
@@ -16486,7 +16487,7 @@ dependencies = [
 
 [[package]]
 name = "q-dag-knight"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -16514,7 +16515,7 @@ dependencies = [
 
 [[package]]
 name = "q-dandelion"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -16542,7 +16543,7 @@ dependencies = [
 
 [[package]]
 name = "q-dex"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -16577,7 +16578,7 @@ dependencies = [
 
 [[package]]
 name = "q-eternal-cypher"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -16592,7 +16593,7 @@ dependencies = [
 
 [[package]]
 name = "q-fairqueue"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -16725,7 +16726,7 @@ dependencies = [
 
 [[package]]
 name = "q-ipfs-storage"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -16812,7 +16813,7 @@ dependencies = [
 
 [[package]]
 name = "q-lattice-vrf"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -16846,10 +16847,11 @@ dependencies = [
 
 [[package]]
 name = "q-miner"
-version = "1.0.0"
+version = "2.7.1"
 dependencies = [
  "anyhow",
  "async-trait",
+ "atty",
  "axum 0.7.9",
  "bindgen 0.69.5",
  "blake3",
@@ -16992,7 +16994,7 @@ dependencies = [
 
 [[package]]
 name = "q-narwhal-core"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -17039,7 +17041,7 @@ dependencies = [
 
 [[package]]
 name = "q-network"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -17125,7 +17127,7 @@ dependencies = [
 
 [[package]]
 name = "q-oracle"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -17157,7 +17159,7 @@ dependencies = [
 
 [[package]]
 name = "q-paas-sdk"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "anyhow",
  "backoff",
@@ -17330,7 +17332,7 @@ dependencies = [
 
 [[package]]
 name = "q-quantum-rng"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -17359,7 +17361,7 @@ dependencies = [
 
 [[package]]
 name = "q-quillon-bank"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -17394,7 +17396,7 @@ dependencies = [
 
 [[package]]
 name = "q-quillon-bank-cli"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -17460,7 +17462,7 @@ dependencies = [
 
 [[package]]
 name = "q-resonance"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -17598,7 +17600,7 @@ dependencies = [
 
 [[package]]
 name = "q-sharding"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -17628,7 +17630,7 @@ dependencies = [
 
 [[package]]
 name = "q-stablecoin"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -17656,7 +17658,7 @@ dependencies = [
 
 [[package]]
 name = "q-storage"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -17682,6 +17684,7 @@ dependencies = [
  "lz4",
  "memmap2 0.9.9",
  "num_cpus",
+ "once_cell",
  "parking_lot 0.12.5",
  "postcard",
  "prometheus",
@@ -17754,7 +17757,7 @@ dependencies = [
 
 [[package]]
 name = "q-tor-circuit"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -17774,7 +17777,7 @@ dependencies = [
 
 [[package]]
 name = "q-tor-client"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "anyhow",
  "arti-client",
@@ -17810,7 +17813,7 @@ dependencies = [
 
 [[package]]
 name = "q-tps-benchmark"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "anyhow",
  "bytes",
@@ -17852,7 +17855,7 @@ dependencies = [
 
 [[package]]
 name = "q-types"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -17887,7 +17890,7 @@ dependencies = [
 
 [[package]]
 name = "q-vdf"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -17919,7 +17922,7 @@ dependencies = [
 
 [[package]]
 name = "q-visualizer"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "anyhow",
  "crossterm 0.27.0",
@@ -18021,7 +18024,7 @@ dependencies = [
 
 [[package]]
 name = "q-wallet"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -21089,7 +21092,7 @@ dependencies = [
 
 [[package]]
 name = "slint-wallet"
-version = "8.4.2"
+version = "8.5.9"
 dependencies = [
  "anyhow",
  "arboard",
@@ -21099,6 +21102,8 @@ dependencies = [
  "chrono",
  "core_affinity",
  "ed25519-dalek",
+ "eventsource-client",
+ "futures",
  "futures-util",
  "hex",
  "num_cpus",

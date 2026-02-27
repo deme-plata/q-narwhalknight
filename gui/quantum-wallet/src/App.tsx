@@ -18,7 +18,9 @@ import QuantumBackground from './components/QuantumBackground';
 import AnimatedBorder from './components/AnimatedBorder';
 import DeployControlPanel from './components/DeployControlPanel';
 import NodeSettingsModal from './components/NodeSettingsModal';
+import SupplyCorrectionModal from './components/SupplyCorrectionModal';
 import OAuthConsentPage from './components/OAuthConsentPage';
+import { sseManager } from './services/sseManager';
 import './App.css';
 
 // v3.6.1-beta: SANITY CHECK - Max possible balance is 21 million QUG (total supply)
@@ -489,524 +491,143 @@ function App() {
 
     window.addEventListener('dex-cooldown-expired', handleDexCooldownExpired);
 
-    // Set up authenticated SSE for real-time updates with privacy filtering
-    // Using custom fetch-based SSE to support X-Wallet-Auth authentication header
+    // v8.4.4: Use shared SSE manager — single connection, multiple subscribers
+    // Replaces fetch-based SSE that had broken reconnection and no auto-retry
     const currentWalletAddress = localStorage.getItem('walletAddress') || '';
-    const sseUrl = `/api/v1/events?wallet_address=${encodeURIComponent(currentWalletAddress)}`;
-    console.log('📡 App.tsx: Attempting authenticated SSE connection to:', sseUrl);
-    console.log('🔐 App.tsx: SSE connection with wallet filter:', currentWalletAddress);
+    console.log('📡 App.tsx: Starting shared SSE manager for:', currentWalletAddress);
 
-    // Generate authentication header for SSE connection
-    const setupAuthenticatedSSE = async () => {
-      try {
-        // Import wallet auth dynamically to generate X-Wallet-Auth header
-        const { generateAuthHeader, walletSession } = await import('./services/walletAuth');
+    // v8.4.4: Use sseManager — native EventSource with auto-reconnect,
+    // visibility-aware, health-checked, single connection shared by all components.
+    // Replaces broken fetch()-based SSE that had no auto-retry and stale backoff.
+    const unsubs: (() => void)[] = [];
+    sseManager.start(currentWalletAddress);
 
-        // Get private key from session
-        const session = walletSession.getSession();
-        if (!session || !session.privateKey) {
-          console.error('❌ App.tsx: No wallet session found for SSE authentication');
-          // v5.5.2: Retry after delay instead of silently giving up
-          if (mounted) {
-            const reconnectDelay = getReconnectDelay();
-            console.log(`🔄 App.tsx: No session yet, retrying SSE in ${reconnectDelay/1000}s...`);
-            setTimeout(() => { if (mounted) setupAuthenticatedSSE(); }, reconnectDelay);
+    // Helper to normalize wallet addresses for comparison
+    const normalizeAddr = (addr: string) =>
+      (addr?.startsWith('qnk') ? addr.substring(3) : addr)?.toLowerCase();
+    const myHex = normalizeAddr(currentWalletAddress);
+
+    // --- balance-updated ---
+    unsubs.push(sseManager.on('balance-updated', (parsedData: any) => {
+      if (!mounted) return;
+      const balanceData = parsedData.data || parsedData;
+      const eventHex = normalizeAddr(balanceData.wallet_address || '');
+
+      if (myHex && eventHex === myHex) {
+        const changeReason = balanceData.change_reason || '';
+        const isP2PMiningReward = changeReason === 'p2p_mining_reward' || changeReason === 'pending_mining_reward';
+
+        const sseGlobalCooldownUntil = parseInt(localStorage.getItem('dexCooldownUntil') || '0');
+        if (dexSwapInProgressRef.current || Date.now() < sseGlobalCooldownUntil) return;
+
+        const eventBlockHeight = balanceData.block_height || 0;
+        if (eventBlockHeight > 0 && eventBlockHeight < lastBalanceHeightRef.current) return;
+        if (eventBlockHeight > 0) lastBalanceHeightRef.current = eventBlockHeight;
+
+        setPendingBalanceUpdate(balanceData.new_balance);
+        const rewardAmount = isP2PMiningReward ? (balanceData.new_balance || 0) - (balanceData.old_balance || 0) : undefined;
+        window.dispatchEvent(new CustomEvent('wallet-balance-updated', {
+          detail: {
+            symbol: 'QUG', balance: balanceData.new_balance, oldBalance: balanceData.old_balance,
+            reason: changeReason, rewardAmount, blockHeight: balanceData.block_height,
+            blockHash: balanceData.block_hash, walletAddress: balanceData.wallet_address,
+            timestamp: balanceData.timestamp,
           }
-          return;
-        }
-
-        // Generate authentication header
-        const authHeaderJson = await generateAuthHeader(
-          session.privateKey,
-          currentWalletAddress,
-          '/api/v1/events'
-        );
-
-        console.log('🔐 App.tsx: Generated X-Wallet-Auth header for SSE');
-
-        // Set up custom SSE using fetch with authentication
-        const response = await fetch(sseUrl, {
-          method: 'GET',
-          headers: {
-            'Accept': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-            'X-Wallet-Auth': authHeaderJson,
-          },
-        });
-
-        if (!response.ok) {
-          throw new Error(`SSE connection failed: ${response.status} ${response.statusText}`);
-        }
-
-        if (!response.body) {
-          throw new Error('SSE response has no body');
-        }
-
-        console.log('✅ App.tsx: Authenticated SSE connection established');
-        resetReconnectBackoff(); // v5.1.1: Reset backoff on successful connection
-        // v5.5.2: Dispatch event so DeployControlPanel knows SSE is connected
-        window.dispatchEvent(new Event('sse-connected'));
-
-        // v8.1.5: Force balance refresh on SSE reconnect — during HA failover the
-        // user may land on a different backend with slightly different balance state.
-        // Without this, the UI shows stale balance until the user manually refreshes.
-        try {
-          const { walletSession } = await import('./services/walletAuth');
-          const session = walletSession.getSession();
-          if (session) {
-            console.log('🔄 App.tsx: SSE reconnected — balance will refresh via Dashboard');
-          }
-        } catch (balErr) {
-          console.warn('⚠️ App.tsx: Balance refresh on SSE reconnect failed:', balErr);
-        }
-
-        // Process SSE stream using ReadableStream
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-
-        // SSE event parser state
-        let eventType = '';
-        let eventData = '';
-
-        const processLine = (line: string) => {
-          if (line.startsWith('event:')) {
-            eventType = line.substring(6).trim();
-          } else if (line.startsWith('data:')) {
-            eventData = line.substring(5).trim();
-          } else if (line === '') {
-            // Empty line signals end of event
-            if (eventType && eventData) {
-              handleSSEEvent(eventType, eventData);
-              eventType = '';
-              eventData = '';
-            }
-          }
-        };
-
-        const handleSSEEvent = (type: string, data: string) => {
-          if (!mounted) return;
-
-          console.log(`📨 App.tsx: SSE event received - type: ${type}`, data);
-
-          try {
-            const parsedData = JSON.parse(data);
-
-            if (type === 'balance-updated') {
-              // CRITICAL FIX: Backend wraps data in {type: "BalanceUpdated", data: {...}}
-              const balanceData = parsedData.data || parsedData;
-
-              const currentWalletAddress = localStorage.getItem('walletAddress');
-              // Strip "qnk" prefix for comparison since backend sends hex without prefix
-              const currentHex = currentWalletAddress?.startsWith('qnk')
-                ? currentWalletAddress.substring(3)
-                : currentWalletAddress;
-
-              // Handle both formats: with or without "qnk" prefix in the event
-              let eventHex = balanceData.wallet_address;
-              if (eventHex?.startsWith('qnk')) {
-                eventHex = eventHex.substring(3);
-              }
-
-              console.log('💰 App.tsx: Balance update SSE event received!', {
-                eventWallet: eventHex,
-                currentWallet: currentHex,
-                match: eventHex === currentHex,
-                oldBalance: balanceData.old_balance,
-                newBalance: balanceData.new_balance,
-                reason: balanceData.change_reason,
-                timestamp: balanceData.timestamp
-              });
-
-              // Only update if this balance event is for the current wallet
-              if (currentHex && eventHex === currentHex) {
-                const changeReason = balanceData.change_reason || '';
-                const isP2PMiningReward = changeReason === 'p2p_mining_reward' || changeReason === 'pending_mining_reward';
-
-                // v2.3.31-beta: Check BOTH local ref AND global cooldown for SSE updates
-                const sseGlobalCooldownUntil = parseInt(localStorage.getItem('dexCooldownUntil') || '0');
-                const sseGlobalCooldownActive = Date.now() < sseGlobalCooldownUntil;
-                if (dexSwapInProgressRef.current || sseGlobalCooldownActive) {
-                  console.log('🚫 App.tsx: IGNORING SSE balance update - DEX cooldown (global:', sseGlobalCooldownActive, ')', {
-                    staleBalance: balanceData.new_balance,
-                    reason: changeReason
-                  });
-                  return; // Skip this SSE update entirely
-                }
-
-                // v8.1.6: Monotonic height tracking — reject stale balance from older blocks
-                const eventBlockHeight = balanceData.block_height || 0;
-                if (eventBlockHeight > 0 && eventBlockHeight < lastBalanceHeightRef.current) {
-                  console.log('🚫 [BALANCE] Rejecting stale SSE balance (height regression):', {
-                    eventHeight: eventBlockHeight,
-                    lastHeight: lastBalanceHeightRef.current,
-                    staleBalance: balanceData.new_balance,
-                    reason: changeReason
-                  });
-                  return;
-                }
-                if (eventBlockHeight > 0) {
-                  lastBalanceHeightRef.current = eventBlockHeight;
-                }
-
-                console.log('🟢 [BALANCE DEBUG] SSE balance-updated event:', {
-                  oldBalance: balanceData.old_balance,
-                  newBalance: balanceData.new_balance,
-                  blockHeight: eventBlockHeight,
-                  currentNodeDataBalance: nodeData.balance,
-                  reason: balanceData.change_reason,
-                  isP2PMiningReward,
-                  source: 'SSE'
-                });
-
-                if (isP2PMiningReward) {
-                  // v3.2.9-beta: Backend now correctly tracks accumulated balance!
-                  // The in-memory HashMap sync fix means new_balance is ACCURATE.
-                  // Just use new_balance directly - no more manual accumulation needed.
-                  const rewardAmount = (balanceData.new_balance || 0) - (balanceData.old_balance || 0);
-                  console.log('💰 App.tsx: P2P mining reward - using backend balance:', {
-                    rewardAmount,
-                    backendNewBalance: balanceData.new_balance,
-                    backendOldBalance: balanceData.old_balance
-                  });
-                  setPendingBalanceUpdate(balanceData.new_balance);
-                  console.log('⏱️ [BALANCE DEBUG] P2P balance from backend:', balanceData.new_balance);
-
-                  // Dispatch with backend's accumulated balance
-                  window.dispatchEvent(new CustomEvent('wallet-balance-updated', {
-                    detail: {
-                      symbol: 'QUG',
-                      balance: balanceData.new_balance,
-                      oldBalance: balanceData.old_balance,
-                      reason: balanceData.change_reason,
-                      rewardAmount,
-                      blockHeight: balanceData.block_height,
-                      blockHash: balanceData.block_hash,
-                      walletAddress: balanceData.wallet_address,
-                      timestamp: balanceData.timestamp,
-                    }
-                  }));
-                } else {
-                  // Local mining rewards: use new_balance directly
-                  setPendingBalanceUpdate(balanceData.new_balance);
-                  console.log('⏱️ [BALANCE DEBUG] Balance update queued (debounced):', balanceData.new_balance);
-
-                  // Dispatch custom event for Dashboard to update wallet balances
-                  window.dispatchEvent(new CustomEvent('wallet-balance-updated', {
-                    detail: {
-                      symbol: 'QUG',
-                      balance: balanceData.new_balance,
-                      oldBalance: balanceData.old_balance,
-                      reason: balanceData.change_reason,
-                      blockHeight: balanceData.block_height,
-                      blockHash: balanceData.block_hash,
-                      walletAddress: balanceData.wallet_address,
-                      timestamp: balanceData.timestamp,
-                    }
-                  }));
-                }
-                console.log('📢 App.tsx: Dispatched wallet-balance-updated event for Dashboard');
-              } else {
-                console.log('❌ App.tsx: Balance update IGNORED (not for current wallet)', {
-                  eventWallet: eventHex,
-                  currentWallet: currentHex
-                });
-              }
-            } else if (type === 'token-balance-updated') {
-              // v1.4.10-beta: Handle custom token balance updates for instant DEX updates
-              // v2.9.16-beta: Check cooldown BEFORE dispatching - this is the root cause fix!
-              const tokenData = parsedData.data || parsedData;
-              const tokenSymbol = tokenData.token_symbol || '';
-              const tokenUpper = tokenSymbol.toUpperCase();
-
-              // v2.9.16-beta: Check if we're in cooldown - if so, DON'T dispatch stale SSE events
-              const now = Date.now();
-              const globalCooldownUntil = parseInt(localStorage.getItem('customTokensCooldownUntil') || '0');
-              if (now < globalCooldownUntil) {
-                console.log(`🛡️ [App.tsx v2.9.16] BLOCKED SSE token-balance-updated for ${tokenUpper} - cooldown active for ${Math.round((globalCooldownUntil - now) / 1000)}s more`);
-                return; // Don't dispatch during cooldown - this prevents stale data from reaching ANY component
-              }
-
-              const currentWalletAddress = localStorage.getItem('walletAddress');
-              const currentHex = currentWalletAddress?.startsWith('qnk')
-                ? currentWalletAddress.substring(3)
-                : currentWalletAddress;
-
-              let eventHex = tokenData.wallet_address;
-              if (eventHex?.startsWith('qnk')) {
-                eventHex = eventHex.substring(3);
-              }
-
-              console.log('🪙 App.tsx: Token balance update SSE event received!', {
-                token: tokenData.token_symbol,
-                tokenAddress: tokenData.token_address,
-                eventWallet: eventHex,
-                currentWallet: currentHex,
-                match: eventHex === currentHex,
-                oldBalance: tokenData.old_balance,
-                newBalance: tokenData.new_balance,
-                reason: tokenData.change_reason
-              });
-
-              // Only dispatch if this event is for the current wallet
-              if (currentHex && eventHex === currentHex) {
-                // Dispatch custom event for DEX and Dashboard to update custom token balances
-                window.dispatchEvent(new CustomEvent('token-balance-updated', {
-                  detail: {
-                    tokenAddress: tokenData.token_address,
-                    tokenSymbol: tokenData.token_symbol,
-                    oldBalance: tokenData.old_balance,
-                    newBalance: tokenData.new_balance,
-                    reason: tokenData.change_reason,
-                    blockHeight: tokenData.block_height,
-                    confirmationStatus: tokenData.confirmation_status,
-                    source: 'backend-sse' // v2.9.16: Mark source for debugging
-                  }
-                }));
-                console.log('📢 App.tsx: Dispatched token-balance-updated event for DEX');
-              }
-            } else if (type === 'token_price_update') {
-              // v2.9.25-beta: Forward token_price_update to DexScreen via CustomEvent
-              // This ensures price updates are received even when DexScreen's own EventSource disconnects
-              const priceData = parsedData.data || parsedData;
-              console.log('📈 App.tsx: Token price update SSE received!', {
-                symbol: priceData.token_symbol,
-                address: priceData.token_address,
-                price: priceData.price,
-                change1h: priceData.change_1h,
-                change24h: priceData.change_24h,
-                change7d: priceData.change_7d,
-                volume24h: priceData.volume_24h
-              });
-
-              // Dispatch to window for DexScreen to catch
-              window.dispatchEvent(new CustomEvent('token-price-updated', {
-                detail: {
-                  token_symbol: priceData.token_symbol,
-                  token_address: priceData.token_address,
-                  price: priceData.price,
-                  change_1h: priceData.change_1h,
-                  change_24h: priceData.change_24h,
-                  change_7d: priceData.change_7d,
-                  volume_24h: priceData.volume_24h,
-                  source: 'app-sse-forward'
-                }
-              }));
-              console.log('📢 App.tsx: Dispatched token-price-updated event for DexScreen');
-            } else if (type === 'loan-approved') {
-              // Handle loan approval from Quillon Bank CLI
-              const loanData = parsedData.data || parsedData;
-
-              console.log('🏦 App.tsx: Loan approved via CLI:', loanData);
-
-              // Dispatch custom event for Dashboard to show approval modal
-              window.dispatchEvent(new CustomEvent('loan-approved', {
-                detail: {
-                  loanId: loanData.loan_id,
-                  amount: loanData.amount,
-                  interestRate: loanData.interest_rate,
-                  termMonths: loanData.term_months,
-                  monthlyPayment: loanData.monthly_payment,
-                  collateralAmount: loanData.collateral_amount,
-                  collateralType: loanData.collateral_type || 'QUG',
-                }
-              }));
-              console.log('📢 App.tsx: Dispatched loan-approved event for Dashboard');
-            } else if (type === 'pending_mining_reward') {
-              // v2.3.31-beta: Check BOTH local ref AND global cooldown
-              const miningGlobalCooldownUntil = parseInt(localStorage.getItem('dexCooldownUntil') || '0');
-              const miningGlobalCooldownActive = Date.now() < miningGlobalCooldownUntil;
-              if (dexSwapInProgressRef.current || miningGlobalCooldownActive) {
-                console.log('🚫 App.tsx: IGNORING pending_mining_reward SSE - DEX cooldown (global:', miningGlobalCooldownActive, ')');
-                return;
-              }
-
-              // v2.7.5-beta: Handle P2P pending mining rewards for instant balance updates
-              // When mining to a peer node, bootstrap receives mining stats via P2P gossipsub
-              // This provides instant feedback even before the block is confirmed
-              const rewardData = parsedData.data || parsedData;
-
-              const currentWalletAddress = localStorage.getItem('walletAddress');
-              const currentHex = currentWalletAddress?.startsWith('qnk')
-                ? currentWalletAddress.substring(3)
-                : currentWalletAddress;
-
-              // Handle address matching (with or without "qnk" prefix)
-              let eventHex = rewardData.miner_address;
-              if (eventHex?.startsWith('qnk')) {
-                eventHex = eventHex.substring(3);
-              }
-
-              console.log('💎 App.tsx: Pending mining reward SSE event!', {
-                minerAddress: eventHex,
-                currentWallet: currentHex,
-                match: eventHex === currentHex,
-                pendingReward: rewardData.pending_reward_qnk,
-                fromNode: rewardData.from_node_id
-              });
-
-              // Only update if this reward is for the current wallet
-              if (currentHex && eventHex === currentHex) {
-                // v8.0.3: DON'T update balance here — the `balance-updated` SSE event
-                // already sends the correct absolute balance from the backend.
-                // Using nodeData.balance here is a STALE closure value, which causes
-                // zigzag: pending-mining-reward computes wrong total, then balance-updated
-                // sends the correct value, alternating every block.
-                const rewardQnk = rewardData.pending_reward_qnk || 0;
-                console.log('💎 [PENDING REWARD] Received (info only, balance-updated SSE handles balance):', {
-                  pendingReward: rewardQnk,
-                  source: 'P2P_SSE'
-                });
-
-                // Dispatch mining reward notification for Dashboard transaction list only
-                // Do NOT dispatch wallet-balance-updated — balance-updated SSE handles that
-                window.dispatchEvent(new CustomEvent('wallet-balance-updated', {
-                  detail: {
-                    symbol: 'QUG',
-                    balance: nodeDataBalanceRef.current + rewardQnk,
-                    oldBalance: nodeDataBalanceRef.current,
-                    reason: 'pending_mining_reward',
-                    rewardAmount: rewardQnk,
-                    walletAddress: eventHex,
-                    timestamp: new Date().toISOString(),
-                    infoOnly: true,  // Signal: don't update balance display, just log the reward
-                  }
-                }));
-                console.log('📢 App.tsx: Dispatched pending-mining-reward info event');
-              }
-            } else if (type === 'mining_stats') {
-              // v2.7.5-beta: Handle P2P mining stats (hash rate, solutions count)
-              // These are informational - no balance update needed
-              const statsData = parsedData.data || parsedData;
-              console.log('📊 App.tsx: Mining stats SSE event:', {
-                minerAddress: statsData.miner_address,
-                hashRate: statsData.hash_rate_khs,
-                solutionsCount: statsData.solutions_count
-              });
-              // Dispatch for MiningScreen to update stats display
-              window.dispatchEvent(new CustomEvent('mining-stats-updated', {
-                detail: statsData
-              }));
-            } else if (type === 'server-version') {
-              // v5.6.0: Server version broadcast — show refresh banner if version changed
-              const versionData = parsedData.data || parsedData;
-              const serverVersion = versionData.version;
-              const cachedVersion = localStorage.getItem('serverVersion');
-              console.log(`📡 App.tsx: Server version event: v${serverVersion} (cached: ${cachedVersion})`);
-              if (cachedVersion && cachedVersion !== serverVersion) {
-                setNewVersionBanner(serverVersion);
-              }
-              localStorage.setItem('serverVersion', serverVersion);
-            } else if (type === 'email-received') {
-              // v7.3.4: Quillon Mail — new email received
-              const emailData = parsedData.data || parsedData;
-              console.log('📧 App.tsx: Email received:', emailData.subject);
-              window.dispatchEvent(new CustomEvent('email-received', { detail: emailData }));
-            } else if (type === 'email-sent') {
-              const emailData = parsedData.data || parsedData;
-              console.log('📧 App.tsx: Email sent:', emailData.subject);
-              window.dispatchEvent(new CustomEvent('email-sent', { detail: emailData }));
-            } else if (type === 'email-unread-count') {
-              const emailData = parsedData.data || parsedData;
-              console.log('📧 App.tsx: Unread count:', emailData.count);
-              window.dispatchEvent(new CustomEvent('email-unread-count', { detail: emailData }));
-            } else if (type === 'calendar-event-created') {
-              // v7.3.3: Calendar event created/updated
-              const calData = parsedData.data || parsedData;
-              console.log('📅 App.tsx: Calendar event created:', calData);
-              window.dispatchEvent(new CustomEvent('calendar-event-created', { detail: calData }));
-            } else if (type === 'calendar-reminder') {
-              // v7.3.3: Calendar reminder notification
-              const reminderData = parsedData.data || parsedData;
-              console.log('📅 App.tsx: Calendar reminder:', reminderData);
-              window.dispatchEvent(new CustomEvent('calendar-reminder', { detail: reminderData }));
-            } else if (type === 'scheduled-tx-executed') {
-              // v7.3.3: Scheduled transaction executed
-              const txData = parsedData.data || parsedData;
-              console.log('📅 App.tsx: Scheduled TX executed:', txData);
-              window.dispatchEvent(new CustomEvent('scheduled-tx-executed', { detail: txData }));
-            } else {
-              console.log(`📨 App.tsx: SSE event type '${type}' received:`, parsedData);
-            }
-          } catch (error) {
-            console.error('❌ App.tsx: Error processing SSE event:', error);
-          }
-        };
-
-        // Read stream continuously
-        const readStream = async () => {
-          try {
-            while (mounted) {
-              const { done, value } = await reader.read();
-
-              if (done) {
-                console.log('🔄 App.tsx: SSE stream ended, will reconnect...');
-                break;
-              }
-
-              // Decode chunk and add to buffer
-              buffer += decoder.decode(value, { stream: true });
-
-              // Process complete lines
-              const lines = buffer.split('\n');
-              buffer = lines.pop() || ''; // Keep incomplete line in buffer
-
-              for (const line of lines) {
-                processLine(line);
-              }
-            }
-          } catch (error) {
-            console.error('❌ App.tsx: SSE stream read error:', error);
-          } finally {
-            reader.releaseLock();
-            // v5.5.2: Dispatch event so DeployControlPanel knows SSE disconnected
-            window.dispatchEvent(new Event('sse-disconnected'));
-
-            // v5.1.1: Auto-reconnect SSE with exponential backoff (3s → 6s → 12s → 24s → 30s cap)
-            if (mounted) {
-              const reconnectDelay = getReconnectDelay();
-              console.log(`🔄 App.tsx: SSE disconnected, reconnecting in ${reconnectDelay/1000}s (attempt ${sseReconnectAttempts})...`);
-              setTimeout(() => {
-                if (mounted) {
-                  console.log('🔄 App.tsx: Attempting SSE reconnection...');
-                  setupAuthenticatedSSE();
-                }
-              }, reconnectDelay);
-            }
-          }
-        };
-
-        // Start reading the stream
-        readStream();
-
-      } catch (error) {
-        console.error('❌ App.tsx: Failed to establish authenticated SSE connection:', error);
-        // v5.5.2: Dispatch event so DeployControlPanel knows SSE failed
-        window.dispatchEvent(new Event('sse-disconnected'));
-
-        // v5.1.1: Reconnect on connection failure with exponential backoff
-        if (mounted) {
-          const reconnectDelay = getReconnectDelay();
-          console.log(`🔄 App.tsx: SSE connection failed, retrying in ${reconnectDelay/1000}s (attempt ${sseReconnectAttempts})...`);
-          setTimeout(() => {
-            if (mounted) {
-              console.log('🔄 App.tsx: Retrying SSE connection...');
-              setupAuthenticatedSSE();
-            }
-          }, reconnectDelay);
-        }
+        }));
       }
-    };
+    }));
 
-    // Initialize authenticated SSE connection
-    setupAuthenticatedSSE();
+    // --- token-balance-updated ---
+    unsubs.push(sseManager.on('token-balance-updated', (parsedData: any) => {
+      if (!mounted) return;
+      const tokenData = parsedData.data || parsedData;
+      const globalCooldownUntil = parseInt(localStorage.getItem('customTokensCooldownUntil') || '0');
+      if (Date.now() < globalCooldownUntil) return;
+
+      const eventHex = normalizeAddr(tokenData.wallet_address || '');
+      if (myHex && eventHex === myHex) {
+        window.dispatchEvent(new CustomEvent('token-balance-updated', {
+          detail: { tokenAddress: tokenData.token_address, tokenSymbol: tokenData.token_symbol,
+            oldBalance: tokenData.old_balance, newBalance: tokenData.new_balance,
+            reason: tokenData.change_reason, blockHeight: tokenData.block_height,
+            confirmationStatus: tokenData.confirmation_status, source: 'backend-sse' }
+        }));
+      }
+    }));
+
+    // --- token_price_update ---
+    unsubs.push(sseManager.on('token_price_update', (parsedData: any) => {
+      if (!mounted) return;
+      const priceData = parsedData.data || parsedData;
+      window.dispatchEvent(new CustomEvent('token-price-updated', {
+        detail: { token_symbol: priceData.token_symbol, token_address: priceData.token_address,
+          price: priceData.price, change_1h: priceData.change_1h, change_24h: priceData.change_24h,
+          change_7d: priceData.change_7d, volume_24h: priceData.volume_24h, source: 'app-sse-forward' }
+      }));
+    }));
+
+    // --- loan-approved ---
+    unsubs.push(sseManager.on('loan-approved', (parsedData: any) => {
+      if (!mounted) return;
+      const d = parsedData.data || parsedData;
+      window.dispatchEvent(new CustomEvent('loan-approved', {
+        detail: { loanId: d.loan_id, amount: d.amount, interestRate: d.interest_rate,
+          termMonths: d.term_months, monthlyPayment: d.monthly_payment,
+          collateralAmount: d.collateral_amount, collateralType: d.collateral_type || 'QUG' }
+      }));
+    }));
+
+    // --- pending_mining_reward ---
+    unsubs.push(sseManager.on('pending_mining_reward', (parsedData: any) => {
+      if (!mounted) return;
+      const sseGlobalCooldownUntil = parseInt(localStorage.getItem('dexCooldownUntil') || '0');
+      if (dexSwapInProgressRef.current || Date.now() < sseGlobalCooldownUntil) return;
+
+      const rewardData = parsedData.data || parsedData;
+      const eventHex = normalizeAddr(rewardData.miner_address || '');
+      if (myHex && eventHex === myHex) {
+        const rewardQnk = rewardData.pending_reward_qnk || 0;
+        window.dispatchEvent(new CustomEvent('wallet-balance-updated', {
+          detail: { symbol: 'QUG', balance: nodeDataBalanceRef.current + rewardQnk,
+            oldBalance: nodeDataBalanceRef.current, reason: 'pending_mining_reward',
+            rewardAmount: rewardQnk, walletAddress: eventHex,
+            timestamp: new Date().toISOString(), infoOnly: true }
+        }));
+      }
+    }));
+
+    // --- mining_stats ---
+    unsubs.push(sseManager.on('mining_stats', (parsedData: any) => {
+      if (!mounted) return;
+      window.dispatchEvent(new CustomEvent('mining-stats-updated', { detail: parsedData.data || parsedData }));
+    }));
+
+    // --- server-version ---
+    unsubs.push(sseManager.on('server-version', (parsedData: any) => {
+      if (!mounted) return;
+      const versionData = parsedData.data || parsedData;
+      const cachedVersion = localStorage.getItem('serverVersion');
+      if (cachedVersion && cachedVersion !== versionData.version) setNewVersionBanner(versionData.version);
+      localStorage.setItem('serverVersion', versionData.version);
+    }));
+
+    // --- email events ---
+    unsubs.push(sseManager.on('email-received', (p: any) => { if (mounted) window.dispatchEvent(new CustomEvent('email-received', { detail: p.data || p })); }));
+    unsubs.push(sseManager.on('email-sent', (p: any) => { if (mounted) window.dispatchEvent(new CustomEvent('email-sent', { detail: p.data || p })); }));
+    unsubs.push(sseManager.on('email-unread-count', (p: any) => { if (mounted) window.dispatchEvent(new CustomEvent('email-unread-count', { detail: p.data || p })); }));
+
+    // --- calendar events ---
+    unsubs.push(sseManager.on('calendar-event-created', (p: any) => { if (mounted) window.dispatchEvent(new CustomEvent('calendar-event-created', { detail: p.data || p })); }));
+    unsubs.push(sseManager.on('calendar-reminder', (p: any) => { if (mounted) window.dispatchEvent(new CustomEvent('calendar-reminder', { detail: p.data || p })); }));
+    unsubs.push(sseManager.on('scheduled-tx-executed', (p: any) => { if (mounted) window.dispatchEvent(new CustomEvent('scheduled-tx-executed', { detail: p.data || p })); }));
 
     return () => {
-      console.log('🎬 App.tsx: useEffect cleanup - closing SSE');
+      console.log('App.tsx: useEffect cleanup - stopping SSE');
       mounted = false;
+      unsubs.forEach(u => u());
+      sseManager.stop();
       window.removeEventListener('balance-update', handleBalanceUpdate);
       window.removeEventListener('dex-cooldown-expired', handleDexCooldownExpired);
-      // SSE stream will automatically stop when mounted = false
     };
   }, [authenticated]);
 
@@ -1152,6 +773,8 @@ function App() {
           <DeployControlPanel />
           {/* v7.3.0: Node Settings Modal - admin wallet OAuth2 + node info */}
           <NodeSettingsModal />
+          {/* v8.5.7: Supply Correction Notice — one-time transparency modal */}
+          <SupplyCorrectionModal />
 
           {/* Token Bar - Below TopBar */}
           <TokenBar onTokenClick={handleTokenClick} />

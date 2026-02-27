@@ -1364,3 +1364,372 @@ pub async fn admin_dev_fee_config(
     // Return updated status
     admin_dev_fee_status(headers, State(state)).await
 }
+
+// ========================================
+// 🔄 v8.5.0: UPDATE ANNOUNCEMENT API
+// ========================================
+
+/// Request body for POST /api/v1/admin/update/announce
+#[derive(Debug, Deserialize)]
+pub struct AnnounceUpdateRequest {
+    pub version: String,
+    pub sha256_checksum: String,
+    pub blake3_checksum: String,
+    pub binary_size: u64,
+    pub download_url: String,
+    #[serde(default)]
+    pub mandatory: bool,
+    #[serde(default)]
+    pub release_notes: String,
+}
+
+/// Response for POST /api/v1/admin/update/announce
+#[derive(Debug, Serialize)]
+pub struct AnnounceUpdateResponse {
+    pub success: bool,
+    pub message: String,
+    pub version: String,
+    pub signer_pubkey: String,
+    pub topic: String,
+}
+
+/// POST /api/v1/admin/update/announce
+/// Signs and broadcasts an update announcement to the P2P gossipsub network.
+/// Localhost-only (defense-in-depth alongside iptables).
+/// Called by ha-deploy.sh after successful rolling deployment.
+pub async fn admin_announce_update(
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AnnounceUpdateRequest>,
+) -> Result<Json<AnnounceUpdateResponse>, StatusCode> {
+    // Localhost-only restriction
+    let ip = addr.ip();
+    let is_localhost = ip.is_loopback()
+        || ip == std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))
+        || ip == std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST);
+
+    if !is_localhost {
+        warn!(
+            "🔄 [AUTO-UPDATE] Rejecting announce request from non-localhost: {}",
+            addr
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Get peer ID
+    let peer_id = {
+        let info = state.libp2p_peer_info.read().await;
+        info.0.clone()
+    };
+
+    // Determine network ID
+    let network_id_str = std::env::var("Q_NETWORK_ID")
+        .unwrap_or_else(|_| "mainnet-genesis".to_string());
+
+    // Create announcement
+    let release_notes = req.release_notes.clone();
+    let mut announcement = q_types::update_announcement::UpdateAnnouncement::new(
+        req.version.clone(),
+        req.sha256_checksum.clone(),
+        req.blake3_checksum.clone(),
+        req.binary_size,
+        req.download_url.clone(),
+        network_id_str.clone(),
+        peer_id,
+        req.mandatory,
+        req.release_notes,
+    );
+
+    // Sign with node signing key
+    announcement.sign(&state.node_signing_key);
+
+    let signer_pubkey = announcement.signer_pubkey.clone();
+    let topic = network_id_str.parse::<q_types::NetworkId>()
+        .map(|nid| nid.update_announcements_topic())
+        .unwrap_or_else(|_| format!("/qnk/{}/update-announcements", network_id_str));
+
+    // Publish via gossipsub
+    if let Some(ref cmd_tx) = state.libp2p_command_tx {
+        match serde_json::to_vec(&announcement) {
+            Ok(data) => {
+                let data_len = data.len();
+                let _ = cmd_tx.send(q_network::NetworkCommand::PublishMessage {
+                    topic: topic.clone(),
+                    data,
+                });
+                info!(
+                    "🔄 [AUTO-UPDATE] Update announcement published: v{} ({} bytes) to {}",
+                    req.version, data_len, topic
+                );
+            }
+            Err(e) => {
+                error!("🔄 [AUTO-UPDATE] Failed to serialize announcement: {}", e);
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        }
+    } else {
+        warn!("🔄 [AUTO-UPDATE] No gossipsub command channel — announcement not broadcast");
+    }
+
+    // Send email notification to admin if configured
+    send_update_notification_email(
+        &state,
+        &req.version,
+        &req.download_url,
+        &release_notes,
+        req.mandatory,
+    ).await;
+
+    Ok(Json(AnnounceUpdateResponse {
+        success: true,
+        message: format!("Update v{} announced to P2P network", req.version),
+        version: req.version,
+        signer_pubkey,
+        topic,
+    }))
+}
+
+/// GET /api/v1/admin/update/status
+/// Returns the current auto-update state
+pub async fn admin_update_status(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let update_state = state
+        .auto_update_state
+        .as_ref()
+        .map(|rx| rx.borrow().clone());
+
+    let notification_email = state.admin_notification_email.read().await.clone();
+
+    Json(serde_json::json!({
+        "auto_update_enabled": state.auto_update_enabled.load(std::sync::atomic::Ordering::Relaxed),
+        "current_version": env!("CARGO_PKG_VERSION"),
+        "state": update_state,
+        "notification_email": notification_email,
+    }))
+}
+
+/// POST /api/v1/admin/update/toggle
+/// Toggles auto-update on/off at runtime. Admin-only (requires admin wallet auth).
+pub async fn admin_update_toggle(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    body: Option<Json<serde_json::Value>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Admin auth check
+    let wallet = headers
+        .get("x-wallet-auth")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let clean_wallet = wallet.replace("qnk", "").replace("qug", "");
+    if clean_wallet != state.admin_wallet && clean_wallet != crate::aegis_auth_middleware::FOUNDER_WALLET {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // If body has explicit "enabled" field, use it; otherwise toggle
+    let new_value = if let Some(Json(body)) = body {
+        if let Some(enabled) = body.get("enabled").and_then(|v| v.as_bool()) {
+            enabled
+        } else {
+            !state.auto_update_enabled.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    } else {
+        !state.auto_update_enabled.load(std::sync::atomic::Ordering::Relaxed)
+    };
+
+    state.auto_update_enabled.store(new_value, std::sync::atomic::Ordering::Relaxed);
+
+    info!(
+        "🔄 [AUTO-UPDATE] Auto-update {} by admin {}",
+        if new_value { "ENABLED" } else { "DISABLED" },
+        &clean_wallet[..16.min(clean_wallet.len())]
+    );
+
+    Ok(Json(serde_json::json!({
+        "auto_update_enabled": new_value,
+        "message": format!("Auto-update {}", if new_value { "enabled" } else { "disabled" }),
+    })))
+}
+
+// ============================================================
+// v8.5.1: Admin notification email for node updates
+// ============================================================
+
+/// GET /api/v1/admin/update/notification-email
+/// Returns the current notification email setting
+pub async fn admin_get_notification_email(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Admin auth check
+    let wallet = headers
+        .get("x-wallet-auth")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let clean_wallet = wallet.replace("qnk", "").replace("qug", "");
+    if clean_wallet != state.admin_wallet && clean_wallet != FOUNDER_WALLET {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let email = state.admin_notification_email.read().await.clone();
+
+    Ok(Json(serde_json::json!({
+        "notification_email": email,
+        "enabled": email.is_some(),
+    })))
+}
+
+/// POST /api/v1/admin/update/notification-email
+/// Set or clear the admin notification email address.
+/// Body: { "email": "admin@example.com" } to set, or { "email": null } to clear.
+pub async fn admin_set_notification_email(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Admin auth check
+    let wallet = headers
+        .get("x-wallet-auth")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let clean_wallet = wallet.replace("qnk", "").replace("qug", "");
+    if clean_wallet != state.admin_wallet && clean_wallet != FOUNDER_WALLET {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let email = body.get("email").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+    // Basic email validation if provided
+    if let Some(ref e) = email {
+        if !e.contains('@') || !e.contains('.') || e.len() < 5 {
+            return Ok(Json(serde_json::json!({
+                "success": false,
+                "message": "Invalid email address format",
+            })));
+        }
+    }
+
+    let was_set = email.is_some();
+    *state.admin_notification_email.write().await = email.clone();
+
+    info!(
+        "🔄 [AUTO-UPDATE] Notification email {}: {}",
+        if was_set { "set" } else { "cleared" },
+        email.as_deref().unwrap_or("(none)")
+    );
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "notification_email": email,
+        "enabled": was_set,
+        "message": if was_set {
+            format!("Update notifications will be sent to {}", email.unwrap_or_default())
+        } else {
+            "Update email notifications disabled".to_string()
+        },
+    })))
+}
+
+/// Send an update notification email to the admin (called from auto-updater or announce handler).
+/// Uses the existing MTA outbound queue — delivery happens automatically every 30 seconds.
+pub async fn send_update_notification_email(
+    state: &AppState,
+    version: &str,
+    download_url: &str,
+    release_notes: &str,
+    mandatory: bool,
+) {
+    let email_addr = {
+        let guard = state.admin_notification_email.read().await;
+        match guard.clone() {
+            Some(e) => e,
+            None => return, // No notification email configured
+        }
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let urgency = if mandatory { "MANDATORY SECURITY UPDATE" } else { "Software Update Available" };
+
+    let subject = format!("[Q-NarwhalKnight] {} — v{}", urgency, version);
+
+    let body = format!(
+        "{}\n\nA new node version v{} is available for your Q-NarwhalKnight node.\n\n\
+         Download: {}\n\n\
+         {}\
+         Release Notes:\n{}\n\n\
+         ---\n\
+         This is an automated notification from your node at {}.\n\
+         To stop receiving these emails, disable notifications in Node Settings > Updates.\n\
+         \n\
+         — system@quillon.xyz",
+        urgency,
+        version,
+        download_url,
+        if mandatory { "This is a mandatory security update. Please update as soon as possible.\n\n" } else { "" },
+        if release_notes.is_empty() { "(no release notes provided)" } else { release_notes },
+        env!("CARGO_PKG_VERSION"),
+    );
+
+    let body_html = Some(format!(
+        "<div style=\"font-family: -apple-system, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;\">\
+         <div style=\"background: linear-gradient(135deg, #0f172a, #1e293b); border-radius: 12px; padding: 24px; color: #e2e8f0;\">\
+         <h2 style=\"color: {}; margin-top: 0;\">{}</h2>\
+         <p>A new node version <strong>v{}</strong> is available for your Q-NarwhalKnight node.</p>\
+         <a href=\"{}\" style=\"display: inline-block; margin: 16px 0; padding: 12px 24px; \
+         background: linear-gradient(135deg, #3b82f6, #06b6d4); color: white; text-decoration: none; \
+         border-radius: 8px; font-weight: 600;\">Download v{}</a>\
+         {}\
+         <div style=\"margin-top: 16px; padding-top: 16px; border-top: 1px solid #334155;\">\
+         <p style=\"color: #94a3b8; font-size: 14px;\"><strong>Release Notes:</strong></p>\
+         <pre style=\"background: #0f172a; padding: 12px; border-radius: 8px; color: #94a3b8; \
+         font-size: 13px; white-space: pre-wrap;\">{}</pre>\
+         </div>\
+         <p style=\"color: #64748b; font-size: 12px; margin-top: 16px;\">\
+         Sent from your node running v{}. \
+         Disable in Node Settings &gt; Updates.</p>\
+         </div></div>",
+        if mandatory { "#ef4444" } else { "#3b82f6" },
+        urgency,
+        version,
+        download_url,
+        version,
+        if mandatory { "<p style=\"color: #fbbf24; font-weight: 600;\">This is a mandatory security update. Please update as soon as possible.</p>" } else { "" },
+        if release_notes.is_empty() { "(no release notes provided)" } else { release_notes },
+        env!("CARGO_PKG_VERSION"),
+    ));
+
+    let outbound = q_types::OutboundEmail {
+        id: format!("update-notify-{}-{}", version, now),
+        from_wallet: [0u8; 32], // System wallet
+        from_email: "system@quillon.xyz".to_string(),
+        to_email: email_addr.clone(),
+        subject,
+        body,
+        body_html,
+        timestamp: now,
+        status: q_types::OutboundStatus::Pending,
+        retry_count: 0,
+        last_error: None,
+        next_retry_at: None,
+        email_id: None,
+    };
+
+    match state.storage_engine.save_outbound_email(&outbound).await {
+        Ok(_) => {
+            info!(
+                "🔄 [AUTO-UPDATE] Update notification email queued for {} (v{})",
+                email_addr, version
+            );
+        }
+        Err(e) => {
+            error!(
+                "🔄 [AUTO-UPDATE] Failed to queue notification email: {}",
+                e
+            );
+        }
+    }
+}

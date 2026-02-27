@@ -18,7 +18,7 @@ export default function DownloadNodeScreen() {
         </p>
         <div className="inline-flex items-center gap-2 px-4 py-2 bg-quantum-cyan/20 border border-quantum-cyan/50 rounded-full">
           <span className="w-2 h-2 bg-quantum-cyan rounded-full animate-pulse"></span>
-          <span className="text-sm font-bold text-quantum-cyan">v8.1.2 • Post-Quantum + DAG-Knight + DeFi Stack</span>
+          <span className="text-sm font-bold text-quantum-cyan">v8.5.9 • Post-Quantum + DAG-Knight + DeFi Stack</span>
         </div>
       </motion.div>
 
@@ -135,12 +135,12 @@ export default function DownloadNodeScreen() {
 
           <div className="space-y-3">
             <a
-              href="/downloads/q-api-server-v8.1.6"
+              href="https://dl.quillon.xyz/downloads/q-api-server-v8.5.9"
               download="q-api-server"
               className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-quantum-cyan to-quantum-purple rounded-xl font-bold text-white hover:shadow-lg hover:shadow-quantum-cyan/50 transition-all"
             >
               <Download className="w-5 h-5" />
-              Download Linux Binary (v8.1.6)
+              Download Linux Binary (v8.5.9)
             </a>
             <p className="text-center text-sm text-gray-200">
               Size: ~83 MB | Bitcoin-Style 21M Emission + P2P Gossipsub + DeFi Stack
@@ -151,9 +151,9 @@ export default function DownloadNodeScreen() {
           <div className="mt-6 p-4 bg-quantum-dark/50 rounded-xl border border-quantum-purple/20">
             <p className="text-sm font-mono text-gray-100 mb-2">Quick Start:</p>
             <pre className="text-xs text-quantum-cyan overflow-x-auto">
-{`wget https://quillon.xyz/downloads/q-api-server-v8.1.6
-chmod +x q-api-server-v8.1.6
-./q-api-server-v8.1.6 --port 8080 --tui --admin-wallet YOUR_WALLET_ADDRESS`}
+{`wget https://dl.quillon.xyz/downloads/q-api-server-v8.5.9
+chmod +x q-api-server-v8.5.9
+./q-api-server-v8.5.9 --port 8080 --tui --admin-wallet YOUR_WALLET_ADDRESS`}
             </pre>
             <p className="text-xs text-quantum-green mt-2">
               WarpSync auto-discovers peers & syncs 900K+ blocks in minutes
@@ -212,7 +212,7 @@ chmod +x q-api-server-v8.1.6
 
           <div className="space-y-3">
             <a
-              href="/downloads/q-narwhalknight-windows-x64.zip"
+              href="https://dl.quillon.xyz/downloads/q-narwhalknight-windows-x64.zip"
               download="q-narwhalknight-windows-x64.zip"
               className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-quantum-purple to-quantum-pink rounded-xl font-bold text-white hover:shadow-lg hover:shadow-quantum-purple/50 transition-all"
             >
@@ -242,25 +242,23 @@ chmod +x q-api-server-v8.1.6
 
       {/* Miner Download Section */}
       <motion.div
-        className="p-8 bg-gradient-to-br from-amber-500/30 via-orange-500/20 to-quantum-pink/20 backdrop-blur-xl border border-amber-500/40 rounded-2xl relative overflow-hidden"
+        className="p-8 rounded-2xl border border-amber-500/60 relative overflow-hidden"
+        style={{ backgroundColor: '#1a1225' }}
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.35 }}
       >
-        <div className="absolute top-0 right-0 w-48 h-48 bg-amber-500/10 rounded-full blur-3xl -translate-y-1/2 translate-x-1/2"></div>
-        <div className="absolute bottom-0 left-0 w-32 h-32 bg-orange-500/10 rounded-full blur-2xl translate-y-1/2 -translate-x-1/2"></div>
-
         <div className="relative">
           <div className="flex items-center gap-4 mb-6">
-            <div className="w-16 h-16 bg-gradient-to-br from-orange-400/40 to-rose-500/40 rounded-xl flex items-center justify-center">
-              <Pickaxe className="w-8 h-8 text-orange-300" />
+            <div className="w-16 h-16 rounded-xl flex items-center justify-center" style={{ backgroundColor: '#3d2200' }}>
+              <Pickaxe className="w-8 h-8 text-orange-400" />
             </div>
             <div>
               <div className="flex items-center gap-3">
-                <h2 className="text-2xl font-bold text-white">Q-Miner</h2>
-                <span className="px-3 py-1 bg-orange-500/40 text-white text-xs font-bold rounded-full uppercase animate-pulse">Solo Mining</span>
+                <h2 className="text-2xl font-bold text-orange-300">Q-Miner</h2>
+                <span className="px-3 py-1 text-xs font-bold rounded-full uppercase animate-pulse text-yellow-200" style={{ backgroundColor: '#7c3a00' }}>Solo Mining</span>
               </div>
-              <p className="text-white">Standalone mining client for Q-NarwhalKnight network</p>
+              <p className="text-orange-100">Standalone mining client for Q-NarwhalKnight network</p>
             </div>
           </div>
 
@@ -269,70 +267,78 @@ chmod +x q-api-server-v8.1.6
               <div className="flex items-start gap-3">
                 <Cpu className="w-5 h-5 text-cyan-400 flex-shrink-0 mt-0.5" />
                 <div>
-                  <p className="text-cyan-200 font-semibold">Multi-threaded CPU Mining</p>
-                  <p className="text-sm text-white">Scales across all available cores with adaptive difficulty</p>
+                  <p className="text-cyan-300 font-semibold">Multi-threaded CPU Mining</p>
+                  <p className="text-sm text-orange-100">Scales across all available cores with adaptive difficulty</p>
                 </div>
               </div>
               <div className="flex items-start gap-3">
                 <Shield className="w-5 h-5 text-emerald-400 flex-shrink-0 mt-0.5" />
                 <div>
-                  <p className="text-emerald-200 font-semibold">Post-Quantum VRF Election</p>
-                  <p className="text-sm text-white">Ring-LWE based mining leader election for quantum resistance</p>
+                  <p className="text-emerald-300 font-semibold">Post-Quantum VRF Election</p>
+                  <p className="text-sm text-orange-100">Ring-LWE based mining leader election for quantum resistance</p>
                 </div>
               </div>
               <div className="flex items-start gap-3">
                 <Zap className="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" />
                 <div>
-                  <p className="text-yellow-200 font-semibold">100+ KH/s Per Thread</p>
-                  <p className="text-sm text-white">Optimized SIMD hashing with adaptive nonce ranges</p>
+                  <p className="text-yellow-300 font-semibold">100+ KH/s Per Thread</p>
+                  <p className="text-sm text-orange-100">Optimized SIMD hashing with adaptive nonce ranges</p>
                 </div>
               </div>
             </div>
 
             <div className="space-y-3">
               {/* Native CPU-Optimized (Modern CPUs) */}
-              <div className="p-3 bg-gradient-to-r from-yellow-500/10 to-orange-500/10 border border-yellow-500/30 rounded-xl">
+              <div className="p-3 rounded-xl border border-yellow-600" style={{ backgroundColor: '#2a1a00' }}>
                 <p className="text-xs text-yellow-300 font-bold mb-2 uppercase tracking-wider">Native CPU Optimized — Modern CPUs</p>
                 <a
-                  href="/downloads/q-miner-linux-x64-native"
+                  href="https://dl.quillon.xyz/downloads/q-miner-linux-x64-native"
                   download="q-miner-linux-x64-native"
-                  className="w-full flex items-center justify-center gap-3 px-6 py-3 bg-gradient-to-r from-yellow-500 to-orange-500 rounded-xl font-bold text-white hover:shadow-lg hover:shadow-yellow-500/50 transition-all"
+                  className="w-full flex items-center justify-center gap-3 px-6 py-3 bg-gradient-to-r from-yellow-600 to-orange-600 rounded-xl font-bold text-yellow-100 hover:shadow-lg hover:shadow-yellow-500/50 transition-all"
                 >
                   <Download className="w-5 h-5" />
                   Linux x64 — Native (AVX2/AVX-512, LTO)
                 </a>
-                <p className="text-xs text-white/60 mt-1 text-center">Compiled with target-cpu=native, fat LTO, codegen-units=1 — up to 30% faster hashing</p>
+                <p className="text-xs text-yellow-200 mt-1 text-center">Compiled with target-cpu=native, fat LTO, codegen-units=1 — up to 30% faster hashing</p>
               </div>
 
               {/* Legacy (Portable) */}
-              <div className="p-3 bg-black/20 border border-white/10 rounded-xl">
-                <p className="text-xs text-white/50 font-bold mb-2 uppercase tracking-wider">Legacy — Portable (Older CPUs)</p>
+              <div className="p-3 rounded-xl border border-gray-600" style={{ backgroundColor: '#15101e' }}>
+                <p className="text-xs text-orange-200 font-bold mb-2 uppercase tracking-wider">Legacy — Portable (Older CPUs)</p>
                 <a
-                  href="/downloads/q-miner-linux-x64-legacy"
+                  href="https://dl.quillon.xyz/downloads/q-miner-linux-x64-legacy"
                   download="q-miner-linux-x64-legacy"
-                  className="w-full flex items-center justify-center gap-3 px-5 py-3 bg-gradient-to-r from-orange-500/70 to-rose-500/70 rounded-xl font-bold text-white hover:shadow-lg hover:shadow-orange-500/30 transition-all text-sm"
+                  className="w-full flex items-center justify-center gap-3 px-5 py-3 bg-gradient-to-r from-orange-700 to-rose-700 rounded-xl font-bold text-orange-100 hover:shadow-lg hover:shadow-orange-500/30 transition-all text-sm"
                 >
                   <Download className="w-5 h-5" />
                   Linux x64 — Legacy (x86-64-v2)
                 </a>
-                <p className="text-xs text-white/50 mt-1 text-center">Compatible with all x86-64 CPUs (2009+). Use this if the native version crashes.</p>
+                <p className="text-xs text-orange-200 mt-1 text-center">Compatible with all x86-64 CPUs (2009+). Use this if the native version crashes.</p>
               </div>
 
               {/* Windows */}
               <a
-                href="/downloads/q-miner-windows-x64.exe"
+                href="https://dl.quillon.xyz/downloads/q-miner-windows-x64.exe"
                 download="q-miner-windows-x64.exe"
-                className="w-full flex items-center justify-center gap-3 px-6 py-3 bg-gradient-to-r from-purple-500 to-blue-500 rounded-xl font-bold text-white hover:shadow-lg hover:shadow-purple-500/50 transition-all"
+                className="w-full flex items-center justify-center gap-3 px-6 py-3 bg-gradient-to-r from-purple-600 to-blue-600 rounded-xl font-bold text-purple-100 hover:shadow-lg hover:shadow-purple-500/50 transition-all"
               >
                 <Download className="w-5 h-5" />
                 Download Miner — Windows x64
               </a>
-              <p className="text-center text-xs text-white/70">v2.5.0 — std::thread mining, jemalloc/mimalloc, batched atomics</p>
+              <p className="text-center text-xs text-orange-200">v2.7.1 — improved networking, std::thread mining, jemalloc/mimalloc, batched atomics</p>
 
-              <div className="p-4 bg-black/30 rounded-xl border border-orange-400/30">
-                <p className="text-sm font-mono text-white mb-2">Linux Quick Start (Native):</p>
-                <pre className="text-xs text-white overflow-x-auto whitespace-pre-wrap">
-{`wget https://quillon.xyz/downloads/q-miner-linux-x64-native
+              {/* Universal wget download */}
+              <div className="p-4 rounded-xl border border-amber-600" style={{ backgroundColor: '#0d0a00' }}>
+                <p className="text-sm font-mono text-amber-200 font-bold mb-2">Quick Download (wget):</p>
+                <pre className="text-xs text-amber-300 overflow-x-auto whitespace-pre-wrap select-all cursor-pointer p-2 rounded" style={{ backgroundColor: '#000000' }}>
+{`wget https://quillon.xyz/downloads/q-miner-v2.7.1 && chmod +x q-miner-v2.7.1`}
+                </pre>
+              </div>
+
+              <div className="p-4 rounded-xl border border-orange-600" style={{ backgroundColor: '#0d0a00' }}>
+                <p className="text-sm font-mono text-orange-200 font-bold mb-2">Linux Quick Start (Native):</p>
+                <pre className="text-xs text-amber-300 overflow-x-auto whitespace-pre-wrap" style={{ backgroundColor: '#000000', padding: '8px', borderRadius: '6px' }}>
+{`wget https://dl.quillon.xyz/downloads/q-miner-linux-x64-native
 chmod +x q-miner-linux-x64-native
 ./q-miner-linux-x64-native \\
   --mode solo \\
@@ -341,11 +347,11 @@ chmod +x q-miner-linux-x64-native
   --server https://quillon.xyz`}
                 </pre>
               </div>
-              <div className="p-4 bg-black/30 rounded-xl border border-purple-400/30">
-                <p className="text-sm font-mono text-white mb-2">Windows Quick Start (PowerShell):</p>
-                <pre className="text-xs text-white overflow-x-auto whitespace-pre-wrap">
+              <div className="p-4 rounded-xl border border-purple-600" style={{ backgroundColor: '#0a0515' }}>
+                <p className="text-sm font-mono text-purple-200 font-bold mb-2">Windows Quick Start (PowerShell):</p>
+                <pre className="text-xs text-purple-300 overflow-x-auto whitespace-pre-wrap" style={{ backgroundColor: '#000000', padding: '8px', borderRadius: '6px' }}>
 {`# Download from browser or:
-Invoke-WebRequest -Uri https://quillon.xyz/downloads/q-miner-windows-x64.exe -OutFile q-miner.exe
+Invoke-WebRequest -Uri https://dl.quillon.xyz/downloads/q-miner-windows-x64.exe -OutFile q-miner.exe
 .\\q-miner.exe --mode solo --wallet YOUR_WALLET_ADDRESS --threads 4 --server https://quillon.xyz`}
                 </pre>
               </div>
@@ -405,7 +411,7 @@ Invoke-WebRequest -Uri https://quillon.xyz/downloads/q-miner-windows-x64.exe -Ou
 
             <div className="space-y-3">
               <a
-                href="/downloads/slint-wallet-linux-x86_64"
+                href="https://dl.quillon.xyz/downloads/slint-wallet-linux-x86_64"
                 download="slint-wallet-linux-x86_64"
                 className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-emerald-500 to-teal-500 rounded-xl font-bold text-white hover:shadow-lg hover:shadow-emerald-500/50 transition-all"
               >
@@ -413,19 +419,19 @@ Invoke-WebRequest -Uri https://quillon.xyz/downloads/q-miner-windows-x64.exe -Ou
                 Download Wallet — Linux x64
               </a>
               <a
-                href="/downloads/slint-wallet-windows-x64.exe"
+                href="https://dl.quillon.xyz/downloads/slint-wallet-windows-x64.exe"
                 download="slint-wallet-windows-x64.exe"
                 className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-teal-500 to-cyan-500 rounded-xl font-bold text-white hover:shadow-lg hover:shadow-teal-500/50 transition-all"
               >
                 <Download className="w-5 h-5" />
                 Download Wallet — Windows x64
               </a>
-              <p className="text-center text-xs text-white/70">v8.1.6 — Linux: ~16 MB | Windows: ~11 MB — OpenGL auto-fallback included</p>
+              <p className="text-center text-xs text-gray-300">v8.2.8 — Linux: ~16 MB | Windows: ~11 MB — OpenGL auto-fallback included</p>
 
               <div className="p-4 bg-black/30 rounded-xl border border-emerald-400/30">
                 <p className="text-sm font-mono text-white mb-2">Linux Quick Start:</p>
                 <pre className="text-xs text-white overflow-x-auto whitespace-pre-wrap">
-{`wget https://quillon.xyz/downloads/slint-wallet-linux-x86_64
+{`wget https://dl.quillon.xyz/downloads/slint-wallet-linux-x86_64
 chmod +x slint-wallet-linux-x86_64
 ./slint-wallet-linux-x86_64`}
                 </pre>
@@ -493,7 +499,7 @@ cargo build --release --package q-api-server
         <div className="p-4 bg-white/10 rounded-xl border border-yellow-500/20 mb-4">
           <p className="text-sm font-bold text-yellow-300 mb-2">Option 1: One-Line Install (SSH)</p>
           <p className="text-xs text-gray-100 mb-2">SSH into your rig and run:</p>
-          <pre className="text-xs text-yellow-300 overflow-x-auto whitespace-pre-wrap select-all cursor-pointer bg-black/30 p-2 rounded">{`curl -sL https://quillon.xyz/downloads/install-hiveos.sh | bash`}</pre>
+          <pre className="text-xs text-yellow-300 overflow-x-auto whitespace-pre-wrap select-all cursor-pointer bg-black/30 p-2 rounded">{`curl -sL https://dl.quillon.xyz/downloads/install-hiveos.sh | bash`}</pre>
         </div>
 
         <div className="p-4 bg-white/10 rounded-xl border border-yellow-500/20">
@@ -505,7 +511,7 @@ cargo build --release --package q-api-server
 
           <div className="mb-3 p-3 bg-black/40 border border-yellow-400/50 rounded-lg">
             <p className="text-xs text-white mb-1 font-semibold">Installation URL (copy this exactly):</p>
-            <pre className="text-sm text-yellow-300 font-mono select-all cursor-pointer break-all">https://quillon.xyz/downloads/q-miner-hiveos.tar.gz</pre>
+            <pre className="text-sm text-yellow-300 font-mono select-all cursor-pointer break-all">https://dl.quillon.xyz/downloads/q-miner-hiveos.tar.gz</pre>
           </div>
 
           <ol className="space-y-2 text-sm text-gray-200">
@@ -515,7 +521,7 @@ cargo build --release --package q-api-server
             <li><span className="text-yellow-400 font-mono mr-2">4.</span>Pool URL: <span className="font-mono text-yellow-300">https://quillon.xyz</span></li>
             <li><span className="text-yellow-400 font-mono mr-2">5.</span>Miner: <span className="text-white font-medium">Custom</span>
               <ul className="ml-6 mt-1 space-y-1 text-gray-100 text-xs">
-                <li>Installation URL: <span className="font-mono text-yellow-300 font-bold select-all">https://quillon.xyz/downloads/q-miner-hiveos.tar.gz</span></li>
+                <li>Installation URL: <span className="font-mono text-yellow-300 font-bold select-all">https://dl.quillon.xyz/downloads/q-miner-hiveos.tar.gz</span></li>
                 <li>Hash algorithm: <span className="font-mono text-yellow-300">qnk-dagknight</span></li>
                 <li>Wallet template: <span className="font-mono text-yellow-300">%WAL%</span></li>
                 <li>Pool URL: <span className="font-mono text-yellow-300">https://quillon.xyz</span></li>

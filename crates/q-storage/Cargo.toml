@@ -65,6 +65,9 @@ parking_lot = "0.12"
 # Rayon for parallel processing (v0.9.41-beta: parallel decompression)
 rayon = "1.8"
 
+# v8.4.4: once_cell for lazy static sync rayon pool
+once_cell = { workspace = true }
+
 # System information for memory management (v1.0.15.1-beta)
 sysinfo = "0.30"
 

@@ -206,6 +206,13 @@ export default function EmailScreen() {
       }
       if (response?.data) {
         setEmails(response.data);
+        // v8.5.5: When viewing inbox, compute unread from actual loaded emails
+        // and sync to Dashboard — prevents stale badge when API count disagrees
+        if (activeFolder === 'inbox') {
+          const localUnread = response.data.filter((e: any) => !e.read).length;
+          setUnreadCount(localUnread);
+          window.dispatchEvent(new CustomEvent('email-unread-count', { detail: { count: localUnread } }));
+        }
       }
     } catch (e) {
       console.error('Failed to fetch emails:', e);
@@ -219,6 +226,8 @@ export default function EmailScreen() {
       const response = await qnkAPI.getEmailUnreadCount();
       if (response?.data?.count !== undefined) {
         setUnreadCount(response.data.count);
+        // v8.5.5: Always sync authoritative count to Dashboard badge
+        window.dispatchEvent(new CustomEvent('email-unread-count', { detail: { count: response.data.count } }));
       }
     } catch (e) {
       // Silently fail
@@ -343,17 +352,20 @@ export default function EmailScreen() {
 
   const handleMarkRead = async (emailId: string) => {
     try {
+      // v8.5.5: Optimistically update local state + badge FIRST, then persist to server.
+      // This ensures the badge clears immediately without waiting for API round-trip.
+      setEmails(prev => {
+        const updated = prev.map(e =>
+          e.id === emailId ? { ...e, read: true } : e
+        );
+        // Compute new unread count from local state (most reliable source of truth)
+        const localUnread = updated.filter(e => !e.read && e.folder === 'inbox').length;
+        setUnreadCount(localUnread);
+        window.dispatchEvent(new CustomEvent('email-unread-count', { detail: { count: localUnread } }));
+        return updated;
+      });
+      // Persist to server (fire-and-forget — badge already updated)
       await qnkAPI.markEmailRead(emailId);
-      setEmails(prev => prev.map(e =>
-        e.id === emailId ? { ...e, read: true } : e
-      ));
-      // v8.2.10: Fetch authoritative count from API, then notify Dashboard
-      // with the real number instead of a generic "decrement by 1" event.
-      // This prevents stale-read races and count drift.
-      const response = await qnkAPI.getEmailUnreadCount();
-      const count = response?.data?.count ?? 0;
-      setUnreadCount(count);
-      window.dispatchEvent(new CustomEvent('email-unread-count', { detail: { count } }));
     } catch (e) {
       console.error('Failed to mark read:', e);
     }
@@ -605,15 +617,37 @@ export default function EmailScreen() {
           <span className="text-xs uppercase tracking-widest" style={{ color: 'rgba(107,114,128,0.8)', fontSize: '10px' }}>
             {emails.length} message{emails.length !== 1 ? 's' : ''}
           </span>
-          <motion.button
-            whileHover={{ rotate: 180 }}
-            transition={{ duration: 0.4 }}
-            onClick={fetchEmails}
-            className="p-1.5 rounded-lg transition-colors"
-            style={{ color: 'rgba(0,229,255,0.4)' }}
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-          </motion.button>
+          <div className="flex items-center gap-1">
+            {unreadCount > 0 && (
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={async () => {
+                  // v8.5.5: Optimistically clear badge FIRST, then persist
+                  setUnreadCount(0);
+                  setEmails(prev => prev.map(e => ({ ...e, read: true })));
+                  window.dispatchEvent(new CustomEvent('email-unread-count', { detail: { count: 0 } }));
+                  try {
+                    await qnkAPI.markAllEmailsRead();
+                  } catch {}
+                }}
+                className="px-2 py-1 rounded-lg text-[10px] transition-colors"
+                style={{ color: 'rgba(0,229,255,0.5)', background: 'rgba(0,229,255,0.06)', border: '1px solid rgba(0,229,255,0.1)' }}
+                title="Mark all as read"
+              >
+                <Check className="w-3 h-3 inline mr-0.5" />Read all
+              </motion.button>
+            )}
+            <motion.button
+              whileHover={{ rotate: 180 }}
+              transition={{ duration: 0.4 }}
+              onClick={fetchEmails}
+              className="p-1.5 rounded-lg transition-colors"
+              style={{ color: 'rgba(0,229,255,0.4)' }}
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+            </motion.button>
+          </div>
         </div>
 
         {/* Email List */}

@@ -349,6 +349,7 @@ pub fn get_upgrade_capabilities() -> Vec<String> {
         "pq-signatures-ready".to_string(),  // Post-quantum signature support
         "sync-down-protection".to_string(), // Sync-down safety checks
         "version-filter-v1".to_string(),    // Version-based peer filtering
+        "auto-update-v1".to_string(),       // v8.5.0: P2P auto-update support
     ]
 }
 

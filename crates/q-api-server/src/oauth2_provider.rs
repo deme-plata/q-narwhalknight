@@ -213,23 +213,76 @@ impl OAuth2Storage {
             refresh_tokens.insert(refresh_token.clone(), token_key.clone());
         }
 
+        // v8.5.1: Persist token to RocksDB so it survives server restarts
+        if let Some(ref storage) = self.storage {
+            let db_key = format!("oauth2:access_token:{}", token_key);
+            if let Ok(json) = serde_json::to_vec(&token) {
+                let _ = storage.db_put(q_storage::CF_MANIFEST, db_key.as_bytes(), &json).await;
+            }
+            // Persist refresh→access mapping too
+            if let Some(ref refresh_token) = token.refresh_token {
+                let rt_key = format!("oauth2:refresh_token:{}", refresh_token);
+                let _ = storage.db_put(q_storage::CF_MANIFEST, rt_key.as_bytes(), token_key.as_bytes()).await;
+            }
+        }
+
         let mut tokens = self.access_tokens.write().await;
         tokens.insert(token_key, token);
     }
 
     pub async fn get_access_token(&self, token: &str) -> Option<AccessToken> {
-        let tokens = self.access_tokens.read().await;
-        tokens.get(token).cloned()
+        // Check in-memory cache first
+        {
+            let tokens = self.access_tokens.read().await;
+            if let Some(t) = tokens.get(token) {
+                return Some(t.clone());
+            }
+        }
+
+        // v8.5.1: Fall back to RocksDB (token may have been stored before a restart)
+        if let Some(ref storage) = self.storage {
+            let db_key = format!("oauth2:access_token:{}", token);
+            if let Ok(Some(data)) = storage.db_get(q_storage::CF_MANIFEST, db_key.as_bytes()).await {
+                if let Ok(access_token) = serde_json::from_slice::<AccessToken>(&data) {
+                    // Check expiration before returning
+                    if access_token.expires_at < chrono::Utc::now() {
+                        // Clean up expired token from disk
+                        let _ = storage.db_delete(q_storage::CF_MANIFEST, db_key.as_bytes()).await;
+                        return None;
+                    }
+                    // Re-hydrate in-memory cache
+                    let mut tokens = self.access_tokens.write().await;
+                    tokens.insert(token.to_string(), access_token.clone());
+                    if let Some(ref rt) = access_token.refresh_token {
+                        let mut refresh_tokens = self.refresh_tokens.write().await;
+                        refresh_tokens.insert(rt.clone(), token.to_string());
+                    }
+                    return Some(access_token);
+                }
+            }
+        }
+
+        None
     }
 
     pub async fn revoke_token(&self, token: &str) {
         let mut tokens = self.access_tokens.write().await;
         if let Some(access_token) = tokens.remove(token) {
             // Also remove refresh token if exists
-            if let Some(refresh_token) = access_token.refresh_token {
+            if let Some(ref refresh_token) = &access_token.refresh_token {
                 let mut refresh_tokens = self.refresh_tokens.write().await;
-                refresh_tokens.remove(&refresh_token);
+                refresh_tokens.remove(refresh_token);
+                // v8.5.1: Remove from RocksDB too
+                if let Some(ref storage) = self.storage {
+                    let rt_key = format!("oauth2:refresh_token:{}", refresh_token);
+                    let _ = storage.db_delete(q_storage::CF_MANIFEST, rt_key.as_bytes()).await;
+                }
             }
+        }
+        // v8.5.1: Remove from RocksDB
+        if let Some(ref storage) = self.storage {
+            let db_key = format!("oauth2:access_token:{}", token);
+            let _ = storage.db_delete(q_storage::CF_MANIFEST, db_key.as_bytes()).await;
         }
     }
 

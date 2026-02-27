@@ -24,11 +24,13 @@ use core_affinity::CoreId;
 use raw_cpuid::CpuId;
 use serde_json::Value;
 
+use q_miner::shared_state::{SharedMinerState, ThreadState, ThreadStatus, DiagnosticEvent, MinerThrottleMode};
+
 // Simplified command-line arguments
 #[derive(Parser)]
 #[command(name = "q-miner")]
 #[command(about = "Q-NarwhalKnight High-Performance Miner")]
-#[command(version = "2.3.0")]
+#[command(version = "2.6.0")]
 struct Args {
     /// Mining mode: solo, pool, decentralized, benchmark
     /// - solo: Mine directly to your local node
@@ -86,6 +88,20 @@ struct Args {
     /// Region for pool node discovery (e.g., us-east, eu-west, asia-pacific)
     #[arg(long, default_value = "global")]
     region: String,
+
+    /// Disable TUI dashboard (use plain log output)
+    #[arg(long)]
+    no_tui: bool,
+
+    /// Force-enable TUI dashboard (overrides terminal detection)
+    #[arg(long)]
+    tui: bool,
+
+    /// Network bandwidth limit in KB/s (upload+download combined).
+    /// 0 = unlimited (default). Minimum effective: 1 KB/s.
+    /// At 10 KB/s: challenge refresh every 120s, solution submits throttled.
+    #[arg(long, default_value = "0")]
+    bandwidth_limit: u32,
 }
 
 // Hardware info structure with CPU optimization details
@@ -112,9 +128,12 @@ pub struct MiningChallenge {
     /// Server notice broadcast to miners (None = no notice)
     #[serde(default)]
     pub server_notice: Option<String>,
-    /// v1.0.3: Server version for update detection
+    /// v1.0.3: Server version (informational only — different version track from miner)
     #[serde(default)]
     pub server_version: Option<String>,
+    /// v2.7.0: Minimum miner version required by the server
+    #[serde(default)]
+    pub min_miner_version: Option<String>,
 }
 
 // API response wrapper
@@ -199,12 +218,48 @@ async fn fetch_with_fallback(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter("q_miner=info,q_dag_knight=info")
-        .init();
+    let mut args = Args::parse();
 
-    let args = Args::parse();
+    // Normalize server URL once upfront — strips trailing slashes, adds scheme if missing
+    args.server = normalize_server_url(&args.server);
+
+    // Determine if TUI should be enabled
+    // --tui forces it on, --no-tui forces it off, otherwise auto-detect terminal
+    let use_tui = if args.no_tui {
+        false
+    } else if args.tui {
+        cfg!(feature = "tui")
+    } else {
+        cfg!(feature = "tui")
+            && atty::is(atty::Stream::Stdout)
+            && args.mode != "benchmark"
+    };
+
+    // Initialize logging — TUI mode captures logs via layer, headless uses fmt
+    #[cfg(feature = "tui")]
+    let tui_log_rx = if use_tui {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+
+        let (layer, rx) = q_miner::ui::tui_app::MinerTuiLogLayer::new();
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::EnvFilter::new("q_miner=info,q_dag_knight=info"))
+            .with(layer)
+            .init();
+        Some(rx)
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter("q_miner=info,q_dag_knight=info")
+            .init();
+        None
+    };
+
+    #[cfg(not(feature = "tui"))]
+    {
+        tracing_subscriber::fmt()
+            .with_env_filter("q_miner=info,q_dag_knight=info")
+            .init();
+    }
 
     // Print banner
     print_banner();
@@ -275,8 +330,15 @@ async fn main() -> Result<()> {
     }
 
     // Determine mining configuration
+    // When user doesn't specify --threads, auto-detect: reserve 1 core on small
+    // desktops (≤8 threads) so the system stays responsive — especially on Windows
+    // where 100% CPU pins the entire UI.  Servers (>8 threads) use all cores.
     let cpu_threads = if args.threads == 0 {
-        hardware_info.cpu_threads
+        if hardware_info.cpu_threads <= 8 {
+            (hardware_info.cpu_threads).max(2) - 1 // e.g. 4t→3, 8t→7, 2t→1
+        } else {
+            hardware_info.cpu_threads
+        }
     } else {
         args.threads
     };
@@ -286,10 +348,14 @@ async fn main() -> Result<()> {
         run_benchmark(cpu_threads, args.intensity, args.duration).await?;
     } else {
         // Validate wallet address for non-benchmark modes
+        // NOTE: Use eprintln! (not error!) for pre-TUI validation failures.
+        // In TUI mode, tracing logs go to the TUI layer which never renders
+        // if we exit before the TUI starts — causing silent exits on Windows.
         let wallet = match args.wallet {
             Some(w) => w,
             None => {
-                error!("❌ Wallet address required for {} mode. Use --wallet <address>", args.mode);
+                eprintln!("❌ Wallet address required for {} mode. Use --wallet <address>", args.mode);
+                eprintln!("   Example: q-miner --mode solo --wallet qnk<your_address> --server https://quillon.xyz");
                 std::process::exit(1);
             }
         };
@@ -299,9 +365,9 @@ async fn main() -> Result<()> {
         let is_aqua_wallet = wallet.starts_with("qnka") && wallet.len() == 66;
 
         if !is_qug_wallet && !is_aqua_wallet {
-            error!("❌ Invalid wallet address format.");
-            error!("   QUG wallet: 'qnk' + 64 hex chars (67 total)");
-            error!("   AQUA wallet: 'qnka' + 62 hex chars (66 total)");
+            eprintln!("❌ Invalid wallet address format.");
+            eprintln!("   QUG wallet: 'qnk' + 64 hex chars (67 total)");
+            eprintln!("   AQUA wallet: 'qnka' + 62 hex chars (66 total)");
             std::process::exit(1);
         }
 
@@ -352,9 +418,9 @@ async fn main() -> Result<()> {
             // Solo mining mode - connect directly to API server
             // v8.1.6: Detect stratum URL passed to solo mode and redirect to pool mode
             if args.server.contains("stratum") || args.server.ends_with(":3333") {
-                error!("❌ Stratum URL detected in --server but mode is 'solo'.");
-                error!("   For pool mining, use: --mode pool --server {}", args.server);
-                error!("   For solo mining, use: --server https://quillon.xyz");
+                eprintln!("❌ Stratum URL detected in --server but mode is 'solo'.");
+                eprintln!("   For pool mining, use: --mode pool --server {}", args.server);
+                eprintln!("   For solo mining, use: --server https://quillon.xyz");
                 std::process::exit(1);
             }
             info!("⛏️  Starting Q-NarwhalKnight SOLO mining...");
@@ -364,7 +430,14 @@ async fn main() -> Result<()> {
             if let Some(ref name) = args.miner_name {
                 info!("🏷️  Miner name: {}", name);
             }
-            run_mining(cpu_threads, args.intensity, args.gpu, &wallet, &args.server, args.miner_name.as_deref()).await?;
+            #[cfg(feature = "tui")]
+            {
+                run_mining(cpu_threads, args.intensity, args.gpu, &wallet, &args.server, args.miner_name.as_deref(), use_tui, args.bandwidth_limit, tui_log_rx).await?;
+            }
+            #[cfg(not(feature = "tui"))]
+            {
+                run_mining(cpu_threads, args.intensity, args.gpu, &wallet, &args.server, args.miner_name.as_deref(), false, args.bandwidth_limit, ()).await?;
+            }
         }
     }
 
@@ -459,7 +532,20 @@ async fn run_benchmark(threads: usize, intensity: u8, duration: u64) -> Result<(
     Ok(())
 }
 
-async fn run_mining(threads: usize, intensity: u8, gpu_enabled: bool, wallet: &str, server_url: &str, miner_name: Option<&str>) -> Result<()> {
+async fn run_mining(
+    threads: usize,
+    intensity: u8,
+    gpu_enabled: bool,
+    wallet: &str,
+    server_url: &str,
+    miner_name: Option<&str>,
+    use_tui: bool,
+    bandwidth_limit: u32,
+    #[cfg(feature = "tui")]
+    tui_log_rx: Option<tokio::sync::mpsc::UnboundedReceiver<q_miner::ui::tui_app::LogEntry>>,
+    #[cfg(not(feature = "tui"))]
+    _tui_log_rx: (),
+) -> Result<()> {
     let hash_counter = Arc::new(AtomicU64::new(0));
     let is_running = Arc::new(AtomicBool::new(true));
     let wallet = wallet.to_string();
@@ -475,7 +561,6 @@ async fn run_mining(threads: usize, intensity: u8, gpu_enabled: bool, wallet: &s
     let new_block_signal = Arc::new(AtomicU64::new(0)); // Increments when new block arrives
 
     // PERF: Use AtomicU64 to store hashrate as f64 bits (lock-free, zero contention)
-    // Previous tokio::sync::RwLock caused unnecessary async overhead in mining threads
     let current_hashrate_khs = Arc::new(AtomicU64::new(0u64)); // f64 bits stored as u64
 
     // Miner link control atomics — wallet can remotely pause/resume, adjust threads/intensity
@@ -485,7 +570,29 @@ async fn run_mining(threads: usize, intensity: u8, gpu_enabled: bool, wallet: &s
     let solutions_found = Arc::new(AtomicU64::new(0));
     let blocks_mined = Arc::new(AtomicU64::new(0));
 
+    // Create SharedMinerState for TUI
+    let (shared_state, event_rx) = SharedMinerState::new(
+        hash_counter.clone(),
+        is_running.clone(),
+        new_block_signal.clone(),
+        current_hashrate_khs.clone(),
+        is_paused.clone(),
+        target_threads.clone(),
+        target_intensity.clone(),
+        solutions_found.clone(),
+        blocks_mined.clone(),
+        threads,
+        server_url.clone(),
+        wallet.clone(),
+        miner_id.clone(),
+        miner_name.clone(),
+        "solo".to_string(),
+    );
+
     info!("🔥 Starting {} CPU mining threads (dedicated OS threads)", threads);
+    if bandwidth_limit > 0 {
+        info!("📡 Network bandwidth limit: {} KB/s (challenge refresh slowed, submit throttled)", bandwidth_limit);
+    }
 
     // PERF: Capture tokio Handle so mining threads can dispatch async I/O
     // without running on the tokio scheduler themselves
@@ -505,11 +612,35 @@ async fn run_mining(threads: usize, intensity: u8, gpu_enabled: bool, wallet: &s
             let miner_id = miner_id.clone();
             let miner_name = miner_name.clone();
             let handle = tokio_handle.clone();
+            let thread_state = shared_state.thread_states[thread_id].clone();
+            let event_tx = shared_state.event_tx.clone();
+            let throttle_mode = shared_state.throttle_mode.clone();
+            let challenge_latency = shared_state.last_challenge_latency_us.clone();
+            let using_fallback = shared_state.using_fallback.clone();
+            let shared_state_solutions = solutions_found.clone();
+            let shared_state_blocks = blocks_mined.clone();
 
+            let bw_limit = bandwidth_limit;
             std::thread::Builder::new()
                 .name(format!("miner-{}", thread_id))
                 .spawn(move || {
-                    mining_thread(thread_id, hash_counter, is_running, intensity, wallet, server_url, new_block_signal, hashrate_khs, miner_id, miner_name, handle)
+                    // Windows: Lower mining thread priority so the OS/TUI stay responsive.
+                    // This costs ~0-2% hashrate but prevents the system from freezing.
+                    #[cfg(target_os = "windows")]
+                    unsafe {
+                        extern "system" {
+                            fn GetCurrentThread() -> *mut std::ffi::c_void;
+                            fn SetThreadPriority(hThread: *mut std::ffi::c_void, nPriority: i32) -> i32;
+                        }
+                        const THREAD_PRIORITY_BELOW_NORMAL: i32 = -1;
+                        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+                    }
+                    mining_thread(
+                        thread_id, hash_counter, is_running, intensity, wallet, server_url,
+                        new_block_signal, hashrate_khs, miner_id, miner_name, handle,
+                        thread_state, event_tx, throttle_mode, challenge_latency, using_fallback,
+                        bw_limit, shared_state_solutions, shared_state_blocks,
+                    )
                 })
                 .expect("Failed to spawn mining thread")
         })
@@ -528,8 +659,10 @@ async fn run_mining(threads: usize, intensity: u8, gpu_enabled: bool, wallet: &s
     let sse_server_url = server_url.clone();
     let sse_running = is_running.clone();
     let sse_new_block_signal = new_block_signal.clone();
+    let sse_connected_flag = shared_state.sse_connected.clone();
+    let sse_event_tx = shared_state.event_tx.clone();
     let sse_handle = tokio::spawn(async move {
-        start_sse_listener(sse_wallet, sse_server_url, sse_running, sse_new_block_signal).await;
+        start_sse_listener(sse_wallet, sse_server_url, sse_running, sse_new_block_signal, sse_connected_flag, sse_event_tx).await;
     });
 
     // Start miner-link WebSocket relay for real-time wallet ↔ miner communication
@@ -562,10 +695,34 @@ async fn run_mining(threads: usize, intensity: u8, gpu_enabled: bool, wallet: &s
     info!("✅ Q-NarwhalKnight miner started successfully!");
     info!("🎧 Connected to SSE stream for real-time block updates");
     info!("🔗 Miner-link relay active — connect your wallet for real-time monitoring");
-    info!("Press Ctrl+C to stop mining...");
 
-    // Wait for shutdown signal
-    signal::ctrl_c().await?;
+    // TUI mode: launch dashboard instead of waiting for Ctrl+C
+    #[cfg(feature = "tui")]
+    if use_tui {
+        if let Some(log_rx) = tui_log_rx {
+            info!("🖥️  Launching TUI dashboard...");
+            // Flush stdout so all pre-TUI banner text is rendered before
+            // we switch to the alternate screen buffer (fixes Windows cmd.exe
+            // where the TUI would never appear).
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            // Brief yield so Windows console can finish rendering
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            q_miner::ui::tui_app::run_miner_tui(shared_state, event_rx, log_rx).await?;
+        } else {
+            info!("Press Ctrl+C to stop mining...");
+            signal::ctrl_c().await?;
+        }
+    } else {
+        info!("Press Ctrl+C to stop mining...");
+        signal::ctrl_c().await?;
+    }
+
+    #[cfg(not(feature = "tui"))]
+    {
+        info!("Press Ctrl+C to stop mining...");
+        signal::ctrl_c().await?;
+    }
 
     info!("🛑 Shutdown signal received, stopping mining...");
     is_running.store(false, Ordering::SeqCst);
@@ -1163,7 +1320,16 @@ fn mining_thread(
     miner_id: String,
     miner_name: Option<String>,
     tokio_handle: tokio::runtime::Handle,
+    thread_state: Arc<ThreadState>,
+    event_tx: mpsc::UnboundedSender<DiagnosticEvent>,
+    throttle_mode: Arc<parking_lot::RwLock<MinerThrottleMode>>,
+    challenge_latency: Arc<AtomicU64>,
+    _using_fallback: Arc<AtomicBool>,
+    bandwidth_limit_kbps: u32,
+    shared_state_solutions: Arc<AtomicU64>,
+    shared_state_blocks: Arc<AtomicU64>,
 ) {
+    let _ = event_tx.send(DiagnosticEvent::ThreadStarted { thread_id });
     // OPTIMIZATION: Pin thread to specific CPU core for cache locality on multi-socket systems
     // This dramatically improves performance on AMD EPYC / Intel Xeon servers with NUMA
     let core_ids = core_affinity::get_core_ids().unwrap_or_default();
@@ -1181,32 +1347,39 @@ fn mining_thread(
     let batch_size = (intensity as u64) * 100_000; // Base batch size
     let api_url = &server_url;
 
-    // v8.3.0: Single shared client with connection pooling — prevents TCP exhaustion
-    // at scale (100+ miners each creating fresh connections per challenge fetch).
+    // v1.0.2: Single shared client with connection pooling + TCP keepalive.
+    // Prevents TCP exhaustion: keepalive detects dead connections, idle timeout
+    // closes unused sockets, and pool_max_idle caps open connections.
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(15))
         .pool_max_idle_per_host(2)
+        .pool_idle_timeout(std::time::Duration::from_secs(30))
+        .tcp_keepalive(std::time::Duration::from_secs(15))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
     // Check if server is syncing before starting to mine
-    // Uses tokio Handle to run async challenge fetch from this sync thread
     match tokio_handle.block_on(check_server_sync_status(&client, api_url)) {
         Ok((is_syncing, blocks_behind)) if is_syncing => {
+            thread_state.set_status(ThreadStatus::WaitingForSync { blocks_behind });
+            let _ = event_tx.send(DiagnosticEvent::ServerSyncing { blocks_behind });
             info!("⏸️  Thread {} waiting: Server is syncing ({} blocks behind network)", thread_id, blocks_behind);
             info!("   Mining will start automatically when sync is complete");
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(5));
                 if !is_running.load(Ordering::Relaxed) {
+                    thread_state.set_status(ThreadStatus::Stopped);
                     return;
                 }
                 match tokio_handle.block_on(check_server_sync_status(&client, api_url)) {
                     Ok((false, _)) => {
+                        let _ = event_tx.send(DiagnosticEvent::ServerSyncComplete);
                         info!("✅ Thread {} detected sync complete - starting mining", thread_id);
                         break;
                     }
                     Ok((true, behind)) => {
+                        thread_state.set_status(ThreadStatus::WaitingForSync { blocks_behind: behind });
                         info!("⏸️  Thread {} still waiting: {} blocks behind", thread_id, behind);
                     }
                     Err(_) => {}
@@ -1222,24 +1395,57 @@ fn mining_thread(
     // Track last server notice to avoid spamming logs
     let mut last_server_notice = String::new();
 
-    // Fetch initial mining challenge
-    let mut current_challenge = match tokio_handle.block_on(fetch_mining_challenge(&client, api_url)) {
-        Ok(challenge) => {
-            info!("📋 Thread {} fetched challenge: block #{}, reward: {} QNK",
-                 thread_id, challenge.block_height, challenge.block_reward);
-            // Display server notice if present
-            if let Some(ref notice) = challenge.server_notice {
-                if !notice.is_empty() {
-                    warn!("📢 SERVER NOTICE: {}", notice);
-                    last_server_notice = notice.clone();
+    // Fetch initial mining challenge — retry with staggered backoff instead of dying
+    // v2.7.1: With bandwidth limiting, all threads racing at startup causes most to fail.
+    // Stagger: thread N waits N*200ms before first attempt, then retries with backoff.
+    if thread_id > 0 {
+        let stagger = std::time::Duration::from_millis(thread_id as u64 * 200);
+        std::thread::sleep(stagger);
+    }
+
+    let mut current_challenge = loop {
+        if !is_running.load(Ordering::Relaxed) { return; }
+        thread_state.set_status(ThreadStatus::FetchingChallenge);
+        let fetch_start = std::time::Instant::now();
+        match tokio_handle.block_on(fetch_mining_challenge(&client, api_url)) {
+            Ok(challenge) => {
+                let latency_us = fetch_start.elapsed().as_micros() as u64;
+                challenge_latency.store(latency_us, Ordering::Relaxed);
+                thread_state.challenge_fetch_latency_us.store(latency_us, Ordering::Relaxed);
+                let _ = event_tx.send(DiagnosticEvent::ChallengeFetched {
+                    thread_id,
+                    block_height: challenge.block_height,
+                    latency_ms: latency_us / 1000,
+                });
+                info!("📋 Thread {} fetched challenge: block #{}, reward: {} QNK",
+                     thread_id, challenge.block_height, challenge.block_reward);
+                if let Some(ref notice) = challenge.server_notice {
+                    if !notice.is_empty() {
+                        warn!("📢 SERVER NOTICE: {}", notice);
+                        last_server_notice = notice.clone();
+                        let _ = event_tx.send(DiagnosticEvent::ServerNotice { message: notice.clone() });
+                    }
                 }
+                // v2.7.1: Use min_miner_version for update detection (not server_version)
+                if let Some(ref min_ver) = challenge.min_miner_version {
+                    if version_less_than(env!("CARGO_PKG_VERSION"), min_ver) {
+                        let _ = event_tx.send(DiagnosticEvent::UpdateAvailable { min_miner_version: min_ver.clone() });
+                    }
+                }
+                break challenge;
             }
-            challenge
-        }
-        Err(e) => {
-            error!("❌ Thread {} failed to fetch initial challenge: {}", thread_id, e);
-            error!("   Make sure q-api-server is running on {}", api_url);
-            return;
+            Err(e) => {
+                let msg = format!("{}", e);
+                thread_state.set_status(ThreadStatus::Error { message: msg.clone(), since: std::time::Instant::now() });
+                let _ = event_tx.send(DiagnosticEvent::ChallengeFetchFailed { thread_id, error: msg });
+                // Retry with backoff: 2s base + thread_id stagger (so threads don't all retry together)
+                let retry_delay = std::time::Duration::from_secs(2) +
+                    std::time::Duration::from_millis(thread_id as u64 * 300);
+                warn!("⏳ Thread {} challenge fetch failed, retrying in {:.1}s: {}",
+                    thread_id, retry_delay.as_secs_f32(), e);
+                std::thread::sleep(retry_delay);
+                continue;
+            }
         }
     };
 
@@ -1263,23 +1469,61 @@ fn mining_thread(
     // v8.3.0: Only thread 0 does periodic challenge refresh (every 50s).
     // Other threads only refresh when SSE signals a new block.
     // At 100 miners × 8 threads this reduces API calls from ~2.6/s to ~0.3/s.
-    let challenge_refresh_interval = if thread_id == 0 {
+    //
+    // --bandwidth-limit: When set, increase intervals to reduce network I/O.
+    // At 10 KB/s: thread 0 refreshes every 120s, others every 600s.
+    let challenge_refresh_interval = if bandwidth_limit_kbps > 0 {
+        if thread_id == 0 {
+            // Scale: lower bandwidth = longer interval. Min 120s at ≤10 KB/s.
+            let secs = (120u64).max(500 / (bandwidth_limit_kbps as u64).max(1));
+            std::time::Duration::from_secs(secs)
+        } else {
+            std::time::Duration::from_secs(600) // 10 min with bandwidth limit
+        }
+    } else if thread_id == 0 {
         std::time::Duration::from_secs(50)
     } else {
         std::time::Duration::from_secs(300) // 5 min — SSE signal handles the rest
     };
+
+    // Track last solution submission time for bandwidth throttling
+    let mut last_submit_time = std::time::Instant::now();
+    // At 10 KB/s limit with ~0.5 KB per submit, allow ~20 submits/sec max (generous).
+    // The real bottleneck is solution finding, not submission rate.
+    let min_submit_interval = if bandwidth_limit_kbps > 0 {
+        // Each submit is ~0.5 KB. At N KB/s, allow N/0.5 = 2N submits/sec.
+        // Convert to ms: 1000 / (2*N). At 10 KB/s → 50ms min between submits.
+        let ms = (1000u64) / ((2 * bandwidth_limit_kbps as u64).max(1));
+        std::time::Duration::from_millis(ms.max(10))
+    } else {
+        std::time::Duration::from_millis(0) // no limit
+    };
     let mut last_known_block_signal = new_block_signal.load(Ordering::Relaxed);
 
+    thread_state.set_status(ThreadStatus::Mining { block_height: current_challenge.block_height });
+
     while is_running.load(Ordering::Relaxed) {
+        // Throttle check — add delay before API calls if throttle is active
+        let delay_ms = throttle_mode.read().delay_ms();
+        if delay_ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        }
+
         // Check if new block arrived via SSE
         let current_block_signal = new_block_signal.load(Ordering::Relaxed);
         let should_refresh_immediately = current_block_signal != last_known_block_signal;
 
         // Refresh challenge if expired, near expiration, OR new block arrived
         if should_refresh_immediately || last_challenge_refresh.elapsed() >= challenge_refresh_interval {
+            let fetch_start = std::time::Instant::now();
             match tokio_handle.block_on(fetch_mining_challenge(&client, api_url)) {
                 Ok(new_challenge) => {
+                    let latency_us = fetch_start.elapsed().as_micros() as u64;
+                    challenge_latency.store(latency_us, Ordering::Relaxed);
+                    thread_state.challenge_fetch_latency_us.store(latency_us, Ordering::Relaxed);
+
                     if new_challenge.block_height != current_challenge.block_height {
+                        thread_state.set_status(ThreadStatus::Mining { block_height: new_challenge.block_height });
                         if should_refresh_immediately {
                             info!("🔄 Thread {} IMMEDIATELY updated challenge (new block signal): block #{} -> #{}",
                                  thread_id, current_challenge.block_height, new_challenge.block_height);
@@ -1346,6 +1590,21 @@ fn mining_thread(
 
             // Check if solution meets difficulty target
             if hash < target {
+                // Bandwidth throttle: wait if submitting too fast
+                if !min_submit_interval.is_zero() {
+                    let elapsed = last_submit_time.elapsed();
+                    if elapsed < min_submit_interval {
+                        std::thread::sleep(min_submit_interval - elapsed);
+                    }
+                }
+                last_submit_time = std::time::Instant::now();
+
+                thread_state.solutions_found.fetch_add(1, Ordering::Relaxed);
+                let _ = event_tx.send(DiagnosticEvent::SolutionFound {
+                    thread_id,
+                    block_height: current_challenge.block_height,
+                    nonce,
+                });
                 info!("💎 Solution found! Block #{}, Thread {}",
                      current_challenge.block_height, thread_id);
 
@@ -1369,6 +1628,10 @@ fn mining_thread(
                 let submit_url = format!("{}/api/v1/mining/submit", normalized_url);
                 let fallback_submit_url = format!("{}/api/v1/mining/submit", FALLBACK_BOOTSTRAP_URL);
                 let client_clone = client.clone();
+                let submit_event_tx = event_tx.clone();
+                let submit_solutions = shared_state_solutions.clone();
+                let submit_blocks = shared_state_blocks.clone();
+                let submit_block_height = current_challenge.block_height;
                 tokio_handle.spawn(async move {
                     let try_submit = |url: String, sol: serde_json::Value, cl: reqwest::Client| async move {
                         cl.post(&url)
@@ -1378,30 +1641,45 @@ fn mining_thread(
                             .await
                     };
 
+                    // Helper: process a successful response, increment counters, send TUI events
+                    let process_success = |result: &serde_json::Value, event_tx: &tokio::sync::mpsc::UnboundedSender<DiagnosticEvent>, solutions: &Arc<AtomicU64>, blocks: &Arc<AtomicU64>, block_height: u64| {
+                        if let Some(data) = result.get("data") {
+                            let reward_qnk = data.get("reward_qnk")
+                                .and_then(|v| v.as_f64())
+                                .unwrap_or(0.0);
+                            if reward_qnk > 0.0 {
+                                info!("✅ Solution accepted! Earned {} QNK", reward_qnk);
+                            } else {
+                                info!("✅ Solution accepted at block #{}", block_height);
+                            }
+                            // Increment global counters so TUI/MinerLink see real values
+                            solutions.fetch_add(1, Ordering::Relaxed);
+                            blocks.fetch_add(1, Ordering::Relaxed);
+                            let _ = event_tx.send(DiagnosticEvent::SolutionAccepted {
+                                block_height,
+                                reward_qnk,
+                            });
+                            // v2.7.0: Show update notification if server requires newer miner
+                            if data.get("update_available").and_then(|v| v.as_bool()).unwrap_or(false) {
+                                warn!("╔══════════════════════════════════════════════════╗");
+                                warn!("║  📦 MINER UPDATE AVAILABLE                       ║");
+                                warn!("║  Your miner v{} may be outdated.              ", env!("CARGO_PKG_VERSION"));
+                                warn!("║  Download: https://quillon.xyz/downloads/         ║");
+                                warn!("╚══════════════════════════════════════════════════╝");
+                            }
+                            // Show server notices (e.g. "use https://quillon.xyz")
+                            if let Some(notice) = data.get("server_notice").and_then(|v| v.as_str()) {
+                                if !notice.is_empty() {
+                                    warn!("[SERVER] {}", notice);
+                                }
+                            }
+                        }
+                    };
+
                     match try_submit(submit_url, solution.clone(), client_clone.clone()).await {
                         Ok(resp) if resp.status().is_success() => {
                             if let Ok(result) = resp.json::<serde_json::Value>().await {
-                                if let Some(data) = result.get("data") {
-                                    if let Some(reward) = data.get("reward_qnk") {
-                                        info!("✅ Solution accepted! Earned {} QNK", reward);
-                                    }
-                                    // v1.0.3: Show update notification if server has newer version
-                                    if data.get("update_available").and_then(|v| v.as_bool()).unwrap_or(false) {
-                                        if let Some(sv) = data.get("server_version").and_then(|v| v.as_str()) {
-                                            warn!("╔══════════════════════════════════════════════════╗");
-                                            warn!("║  📦 UPDATE AVAILABLE: Server is running v{}  ", sv);
-                                            warn!("║  You are running v{}. Please update your miner.", env!("CARGO_PKG_VERSION"));
-                                            warn!("║  Download: https://quillon.xyz/downloads/         ");
-                                            warn!("╚══════════════════════════════════════════════════╝");
-                                        }
-                                    }
-                                    // Show server notices (e.g. "use https://quillon.xyz")
-                                    if let Some(notice) = data.get("server_notice").and_then(|v| v.as_str()) {
-                                        if !notice.is_empty() {
-                                            warn!("[SERVER] {}", notice);
-                                        }
-                                    }
-                                }
+                                process_success(&result, &submit_event_tx, &submit_solutions, &submit_blocks, submit_block_height);
                             }
                         }
                         Ok(resp) => {
@@ -1409,11 +1687,7 @@ fn mining_thread(
                             match try_submit(fallback_submit_url, solution, client_clone).await {
                                 Ok(resp2) if resp2.status().is_success() => {
                                     if let Ok(result) = resp2.json::<serde_json::Value>().await {
-                                        if let Some(data) = result.get("data") {
-                                            if let Some(reward) = data.get("reward_qnk") {
-                                                info!("✅ Solution accepted via fallback! Earned {} QNK", reward);
-                                            }
-                                        }
+                                        process_success(&result, &submit_event_tx, &submit_solutions, &submit_blocks, submit_block_height);
                                     }
                                 }
                                 _ => { warn!("❌ Solution rejected by fallback too"); }
@@ -1424,11 +1698,7 @@ fn mining_thread(
                             match try_submit(fallback_submit_url, solution, client_clone).await {
                                 Ok(resp2) if resp2.status().is_success() => {
                                     if let Ok(result) = resp2.json::<serde_json::Value>().await {
-                                        if let Some(data) = result.get("data") {
-                                            if let Some(reward) = data.get("reward_qnk") {
-                                                info!("✅ Solution accepted via fallback! Earned {} QNK", reward);
-                                            }
-                                        }
+                                        process_success(&result, &submit_event_tx, &submit_solutions, &submit_blocks, submit_block_height);
                                     }
                                 }
                                 _ => { warn!("❌ Failed to submit solution to both servers"); }
@@ -1447,6 +1717,8 @@ fn mining_thread(
         }
     }
 
+    thread_state.set_status(ThreadStatus::Stopped);
+    let _ = event_tx.send(DiagnosticEvent::ThreadStopped { thread_id });
     info!("🛑 CPU mining thread {} stopped", thread_id);
 }
 
@@ -1494,6 +1766,8 @@ async fn start_sse_listener(
     server_url: String,
     is_running: Arc<AtomicBool>,
     new_block_signal: Arc<AtomicU64>,
+    sse_connected: Arc<AtomicBool>,
+    sse_event_tx: mpsc::UnboundedSender<DiagnosticEvent>,
 ) {
     use eventsource_client::{self as eventsource, Client as _};
     use futures::StreamExt;
@@ -1534,6 +1808,8 @@ async fn start_sse_listener(
         let mut stream = client.stream();
 
         info!("🎧 Connected to SSE stream at {}", url);
+        sse_connected.store(true, Ordering::Relaxed);
+        let _ = sse_event_tx.send(DiagnosticEvent::SseConnected { url: url.to_string() });
 
         while is_running.load(Ordering::SeqCst) {
             match stream.next().await {
@@ -1543,8 +1819,8 @@ async fn start_sse_listener(
                         match serde_json::from_str::<serde_json::Value>(&ev.data) {
                             Ok(data) => {
                                 if let Some(block_height) = data.get("height").and_then(|v| v.as_u64()) {
-                                    // Increment signal to notify all mining threads
                                     let new_signal = new_block_signal.fetch_add(1, Ordering::SeqCst) + 1;
+                                    let _ = sse_event_tx.send(DiagnosticEvent::NewBlockSignal { block_height });
                                     info!("🔔 NEW BLOCK #{} detected via SSE - signaling mining threads (signal: {})",
                                          block_height, new_signal);
                                 }
@@ -1581,6 +1857,12 @@ async fn start_sse_listener(
                                         info!("║   Nonce:  {:<40} ║", nonce);
                                         info!("╚═══════════════════════════════════════════════════╝");
                                         info!("");
+
+                                        // Send reward event to TUI dashboard
+                                        let _ = sse_event_tx.send(DiagnosticEvent::MiningReward {
+                                            reward_qnk,
+                                            block_height,
+                                        });
                                     }
                                 }
                             }
@@ -1602,6 +1884,10 @@ async fn start_sse_listener(
                                                     .and_then(|v| v.as_f64())
                                                     .unwrap_or(0.0);
                                                 info!("💰 Balance Updated: {:.8} QNK", new_balance);
+                                                // Send balance update to TUI dashboard
+                                                let _ = sse_event_tx.send(DiagnosticEvent::BalanceUpdated {
+                                                    new_balance,
+                                                });
                                             }
                                         }
                                     }
@@ -1617,15 +1903,22 @@ async fn start_sse_listener(
                     // Ignore comments
                 }
                 Some(Err(e)) => {
+                    sse_connected.store(false, Ordering::Relaxed);
+                    let _ = sse_event_tx.send(DiagnosticEvent::SseDisconnected { error: format!("{}", e) });
                     warn!("SSE stream error: {}", e);
                     break;
                 }
                 None => {
+                    sse_connected.store(false, Ordering::Relaxed);
+                    let _ = sse_event_tx.send(DiagnosticEvent::SseDisconnected { error: "Stream ended".into() });
                     warn!("SSE stream ended");
                     break;
                 }
             }
         }
+
+        // v1.0.2: Drop stream explicitly to trigger clean TCP close before reconnecting.
+        drop(stream);
 
         // Reconnect after delay if still running
         if is_running.load(Ordering::SeqCst) {
@@ -1651,6 +1944,114 @@ async fn start_sse_listener(
     }
 
     info!("🛑 SSE listener stopped");
+}
+
+/// v1.0.2: SSE listener for decentralized mining mode — listens for new-block events
+/// and increments the shared signal so all mining threads refresh their challenge.
+/// Uses the same reconnect logic as solo mode SSE listener.
+async fn decentralized_sse_listener(
+    wallet: String,
+    server_url: String,
+    is_running: Arc<AtomicBool>,
+    new_block_signal: Arc<AtomicU64>,
+) {
+    use eventsource_client::{self as eventsource, Client as _};
+    use futures::StreamExt;
+
+    let normalized_url = normalize_server_url(&server_url);
+    let primary_url = format!("{}/api/v1/events?wallet_address={}", normalized_url, wallet);
+    let fallback_url = format!("{}/api/v1/events?wallet_address={}", FALLBACK_BOOTSTRAP_URL, wallet);
+    let mut use_fallback = false;
+    let mut primary_fail_count = 0u32;
+
+    loop {
+        if !is_running.load(Ordering::SeqCst) {
+            break;
+        }
+
+        let url = if use_fallback { &fallback_url } else { &primary_url };
+
+        let client = match eventsource::ClientBuilder::for_url(url) {
+            Ok(builder) => builder.build(),
+            Err(e) => {
+                warn!("[decentralized-SSE] Failed to create SSE client: {}", e);
+                if !use_fallback {
+                    primary_fail_count += 1;
+                    if primary_fail_count >= 3 {
+                        info!("[decentralized-SSE] Switching to fallback {}", FALLBACK_BOOTSTRAP_URL);
+                        use_fallback = true;
+                        primary_fail_count = 0;
+                    }
+                }
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                continue;
+            }
+        };
+
+        let mut stream = client.stream();
+        info!("[decentralized-SSE] Connected to {} for new-block signals", url);
+
+        while is_running.load(Ordering::SeqCst) {
+            match stream.next().await {
+                Some(Ok(eventsource::SSE::Event(ev))) => {
+                    if ev.event_type == "new-block" {
+                        if let Ok(data) = serde_json::from_str::<serde_json::Value>(&ev.data) {
+                            if let Some(block_height) = data.get("height").and_then(|v| v.as_u64()) {
+                                let new_signal = new_block_signal.fetch_add(1, Ordering::SeqCst) + 1;
+                                info!("[decentralized-SSE] NEW BLOCK #{} - signaling threads (signal: {})",
+                                     block_height, new_signal);
+                            }
+                        }
+                    }
+                    // Also handle mining_reward for display
+                    if ev.event_type == "mining_reward" {
+                        if let Ok(data) = serde_json::from_str::<serde_json::Value>(&ev.data) {
+                            if let Some(miner_address) = data.get("miner_address").and_then(|v| v.as_str()) {
+                                if miner_address == wallet {
+                                    let reward = data.get("reward_qnk").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    let height = data.get("block_height").and_then(|v| v.as_u64()).unwrap_or(0);
+                                    info!("💎 REWARD: {:.8} QNK at block #{}", reward, height);
+                                }
+                            }
+                        }
+                    }
+                }
+                Some(Ok(eventsource::SSE::Comment(_))) => {}
+                Some(Err(e)) => {
+                    warn!("[decentralized-SSE] Stream error: {} — reconnecting", e);
+                    break;
+                }
+                None => {
+                    warn!("[decentralized-SSE] Stream ended — reconnecting");
+                    break;
+                }
+            }
+        }
+
+        // Drop the stream explicitly before reconnecting to clean up the TCP connection
+        drop(stream);
+
+        if is_running.load(Ordering::SeqCst) {
+            if !use_fallback {
+                primary_fail_count += 1;
+                if primary_fail_count >= 3 {
+                    info!("[decentralized-SSE] Switching to fallback after {} failures", primary_fail_count);
+                    use_fallback = true;
+                    primary_fail_count = 0;
+                }
+            } else {
+                primary_fail_count += 1;
+                if primary_fail_count >= 3 {
+                    info!("[decentralized-SSE] Retrying primary server...");
+                    use_fallback = false;
+                    primary_fail_count = 0;
+                }
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        }
+    }
+
+    info!("[decentralized-SSE] Listener stopped");
 }
 
 /// Check if server is currently syncing (returns is_syncing, blocks_behind)
@@ -1698,18 +2099,17 @@ async fn fetch_mining_challenge(client: &reqwest::Client, api_url: &str) -> Resu
 
     let challenge = api_response.data.ok_or_else(|| anyhow::anyhow!("Missing challenge data in API response"))?;
 
-    // v1.0.3: Check server version and notify if update available
-    if let Some(ref sv) = challenge.server_version {
+    // v2.7.0: Check min_miner_version from server (miner and server have independent version tracks)
+    if let Some(ref min_ver) = challenge.min_miner_version {
         let my_ver = env!("CARGO_PKG_VERSION");
-        if sv != my_ver {
-            // Use a static flag to only show once per session
+        if version_less_than(my_ver, min_ver) {
             use std::sync::atomic::{AtomicBool, Ordering};
             static SHOWN: AtomicBool = AtomicBool::new(false);
             if !SHOWN.swap(true, Ordering::Relaxed) {
                 warn!("╔══════════════════════════════════════════════════╗");
-                warn!("║  📦 UPDATE AVAILABLE                             ║");
-                warn!("║  Server version: v{:<36}║", sv);
-                warn!("║  Your version:   v{:<36}║", my_ver);
+                warn!("║  📦 MINER UPDATE REQUIRED                        ║");
+                warn!("║  Minimum version: v{:<35}║", min_ver);
+                warn!("║  Your version:    v{:<35}║", my_ver);
                 warn!("║  Download: https://quillon.xyz/downloads/         ║");
                 warn!("╚══════════════════════════════════════════════════╝");
             }
@@ -1728,6 +2128,25 @@ async fn fetch_mining_challenge(client: &reqwest::Client, api_url: &str) -> Resu
     }
 
     Ok(challenge)
+}
+
+/// Semantic version comparison: returns true if `a` < `b` (e.g. "2.6.0" < "2.7.0")
+fn version_less_than(a: &str, b: &str) -> bool {
+    let parse = |s: &str| -> Option<(u32, u32, u32)> {
+        let s = s.strip_prefix('v').unwrap_or(s);
+        let parts: Vec<&str> = s.split('.').collect();
+        if parts.len() >= 3 {
+            Some((parts[0].parse().ok()?, parts[1].parse().ok()?, parts[2].parse().ok()?))
+        } else if parts.len() == 2 {
+            Some((parts[0].parse().ok()?, parts[1].parse().ok()?, 0))
+        } else {
+            None
+        }
+    };
+    match (parse(a), parse(b)) {
+        (Some(va), Some(vb)) => va < vb,
+        _ => a < b,
+    }
 }
 
 /// Decode hex string to byte array
@@ -1841,9 +2260,14 @@ async fn run_decentralized_pool_mining(
     info!("🔌 Connecting to P2P network via {}", primary_node);
     info!("🌍 Pool region: {}", region);
 
-    // Check pool node status
+    // v1.0.2: Shared client with connection pooling + TCP keepalive for decentralized mode.
+    // All threads share this single client to prevent TCP socket exhaustion.
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .pool_max_idle_per_host(4)
+        .pool_idle_timeout(std::time::Duration::from_secs(30))
+        .tcp_keepalive(std::time::Duration::from_secs(15))
         .build()?;
 
     let pool_status = client
@@ -1954,132 +2378,190 @@ async fn run_decentralized_pool_mining(
         }
     });
 
-    // Main mining loop - uses standard mining challenge API
+    // v1.0.2: Restructured decentralized mining to match solo mode's efficient pattern:
+    // - One SSE listener signals all threads on new blocks (instead of each thread polling)
+    // - Only thread 0 does periodic challenge refresh (50s), others wait for SSE signal (5min max)
+    // - All threads share one reqwest client (connection pooling)
+    // This reduces API calls from (N_threads × N_miners / 30s) to ~0.3/s per miner.
     let server_url = normalize_server_url(primary_node);
     let wallet_clone = wallet.to_string();
-    let worker_clone = worker_name.to_string();
+
+    // Shared new-block signal: SSE listener increments this when a new block arrives,
+    // all mining threads check it to know when to refresh their challenge.
+    let new_block_signal = Arc::new(AtomicU64::new(0));
+
+    // Spawn SSE listener for new block notifications (same as solo mode)
+    let sse_wallet = wallet_clone.clone();
+    let sse_server = server_url.clone();
+    let sse_running = is_running.clone();
+    let sse_signal = new_block_signal.clone();
+    tokio::spawn(async move {
+        decentralized_sse_listener(sse_wallet, sse_server, sse_running, sse_signal).await;
+    });
 
     info!("⚡ Starting {} mining threads...", threads);
 
-    // Spawn mining threads
+    // Spawn mining threads — each uses shared client + SSE-driven challenge refresh
     for thread_id in 0..threads {
         let hash_counter = hash_counter.clone();
         let is_running = is_running.clone();
         let share_tx = share_tx.clone();
         let server = server_url.clone();
         let wallet = wallet_clone.clone();
-        let worker = worker_clone.clone();
         let client = client.clone();
+        let new_block_signal = new_block_signal.clone();
 
         tokio::spawn(async move {
             let mut local_nonce = (thread_id as u64) << 56; // Thread-unique nonce range
+
+            // v1.0.2: Only thread 0 does periodic refresh (50s). Other threads rely on
+            // SSE new-block signal, with a 5-min fallback. This slashes API calls by ~95%.
+            let challenge_refresh_interval = if thread_id == 0 {
+                std::time::Duration::from_secs(50)
+            } else {
+                std::time::Duration::from_secs(300)
+            };
+            let mut last_challenge_refresh = std::time::Instant::now();
+            let mut last_known_block_signal = new_block_signal.load(Ordering::Relaxed);
+
+            // Fetch initial challenge
+            let challenge_url = format!("{}/api/v1/mining/challenge?wallet={}", server, wallet);
+            let mut current_challenge: Option<(MiningChallenge, [u8; 32], [u8; 32])> = None;
+
+            // Initial fetch with retries
+            for attempt in 0..5 {
+                match client.get(&challenge_url).send().await {
+                    Ok(resp) => {
+                        if let Ok(api_resp) = resp.json::<ApiResponse<MiningChallenge>>().await {
+                            if api_resp.success {
+                                if let Some(c) = api_resp.data {
+                                    if let (Ok(cb), Ok(tb)) = (
+                                        hex::decode(&c.challenge_hash),
+                                        hex::decode(&c.difficulty_target),
+                                    ) {
+                                        if cb.len() >= 32 && tb.len() >= 32 {
+                                            let mut challenge_bytes = [0u8; 32];
+                                            let mut target_bytes = [0u8; 32];
+                                            challenge_bytes.copy_from_slice(&cb[..32]);
+                                            target_bytes.copy_from_slice(&tb[..32]);
+                                            info!("📋 Thread {} fetched initial challenge: block #{}",
+                                                 thread_id, c.block_height);
+                                            current_challenge = Some((c, challenge_bytes, target_bytes));
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if attempt < 4 {
+                            warn!("⚠️  Thread {} challenge fetch attempt {}: {}", thread_id, attempt + 1, e);
+                        }
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            }
+
+            let (mut challenge, mut challenge_bytes, mut target_bytes) = match current_challenge {
+                Some(c) => c,
+                None => {
+                    error!("❌ Thread {} failed to fetch initial challenge after 5 attempts", thread_id);
+                    return;
+                }
+            };
 
             loop {
                 if !is_running.load(Ordering::Relaxed) {
                     break;
                 }
 
-                // Get mining challenge from API
-                let challenge_url = format!("{}/api/v1/mining/challenge?wallet={}", server, wallet);
-                let challenge: MiningChallenge = match client.get(&challenge_url).send().await {
-                    Ok(resp) => {
-                        match resp.json::<ApiResponse<MiningChallenge>>().await {
-                            Ok(api_resp) if api_resp.success => {
-                                match api_resp.data {
-                                    Some(c) => c,
-                                    None => {
-                                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                                        continue;
+                // Check if new block arrived via SSE or periodic timer expired
+                let current_block_signal = new_block_signal.load(Ordering::Relaxed);
+                let should_refresh = current_block_signal != last_known_block_signal
+                    || last_challenge_refresh.elapsed() >= challenge_refresh_interval;
+
+                if should_refresh {
+                    match client.get(&challenge_url).send().await {
+                        Ok(resp) => {
+                            if let Ok(api_resp) = resp.json::<ApiResponse<MiningChallenge>>().await {
+                                if api_resp.success {
+                                    if let Some(new_c) = api_resp.data {
+                                        if new_c.block_height != challenge.block_height {
+                                            info!("🔄 Thread {} challenge updated: block #{} -> #{}",
+                                                 thread_id, challenge.block_height, new_c.block_height);
+                                        }
+                                        if let (Ok(cb), Ok(tb)) = (
+                                            hex::decode(&new_c.challenge_hash),
+                                            hex::decode(&new_c.difficulty_target),
+                                        ) {
+                                            if cb.len() >= 32 && tb.len() >= 32 {
+                                                challenge_bytes.copy_from_slice(&cb[..32]);
+                                                target_bytes.copy_from_slice(&tb[..32]);
+                                                challenge = new_c;
+                                            }
+                                        }
                                     }
                                 }
                             }
-                            _ => {
-                                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                                continue;
-                            }
+                        }
+                        Err(e) => {
+                            warn!("⚠️  Thread {} challenge refresh failed: {}", thread_id, e);
                         }
                     }
-                    Err(_) => {
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                        continue;
-                    }
-                };
+                    last_challenge_refresh = std::time::Instant::now();
+                    last_known_block_signal = current_block_signal;
+                }
 
-                // Parse challenge
-                let challenge_bytes = match hex::decode(&challenge.challenge_hash) {
-                    Ok(b) if b.len() >= 32 => {
-                        let mut arr = [0u8; 32];
-                        arr.copy_from_slice(&b[..32]);
-                        arr
-                    }
-                    _ => continue,
-                };
+                // Mine a batch of nonces
+                let batch_size = 50_000u64;
+                let mut local_count: u64 = 0;
 
-                let target_bytes = match hex::decode(&challenge.difficulty_target) {
-                    Ok(b) if b.len() >= 32 => {
-                        let mut arr = [0u8; 32];
-                        arr.copy_from_slice(&b[..32]);
-                        arr
-                    }
-                    _ => continue,
-                };
-
-                // Mining loop for this challenge
-                let mining_start = std::time::Instant::now();
-                let batch_size = 50_000u64; // v7.4.3: increased from 10k for better throughput
-
-                // v7.4.3: Pre-compute the wallet-specific prefix (challenge + wallet)
-                // This avoids re-hashing the same prefix bytes millions of times
-                let mut prefix_hasher = blake3::Hasher::new();
-                prefix_hasher.update(&challenge_bytes);
-                // Note: We'll add nonce inline
-
-                while mining_start.elapsed() < std::time::Duration::from_secs(30) {
+                for i in 0..batch_size {
                     if !is_running.load(Ordering::Relaxed) {
                         break;
                     }
 
-                    // v7.4.3: Thread-local counter to reduce atomic contention
-                    let mut local_count: u64 = 0;
+                    local_nonce = local_nonce.wrapping_add(1);
 
-                    for _ in 0..batch_size {
-                        local_nonce = local_nonce.wrapping_add(1);
+                    let mut hash_input = [0u8; 40];
+                    hash_input[..32].copy_from_slice(&challenge_bytes);
+                    hash_input[32..].copy_from_slice(&local_nonce.to_le_bytes());
+                    let hash_result = compute_dag_knight_hash_optimized(&hash_input);
+                    local_count += 1;
 
-                        // v7.4.3 PERF: Use fixed input array + compute_dag_knight_hash_optimized
-                        // Before: new Hasher per nonce + no VDF = different algo than solo
-                        // After: matches solo mining hash exactly + 100 VDF iterations
-                        let mut hash_input = [0u8; 40];
-                        hash_input[..32].copy_from_slice(&challenge_bytes);
-                        hash_input[32..].copy_from_slice(&local_nonce.to_le_bytes());
-                        let hash_result = compute_dag_knight_hash_optimized(&hash_input);
-                        local_count += 1;
+                    // Flush every 1024 hashes
+                    if local_count & 1023 == 0 {
+                        hash_counter.fetch_add(1024, Ordering::Relaxed);
+                    }
 
-                        // Flush every 1024 hashes
-                        if local_count & 1023 == 0 {
-                            hash_counter.fetch_add(1024, Ordering::Relaxed);
-                        }
-
-                        // Check if solution meets target
-                        if hash_result[..] < target_bytes[..] {
-                            let hash_bytes = &hash_result;
-                            // Found a share!
-                            let share = DecentralizedShare {
-                                share_id: *hash_bytes,
-                                difficulty: challenge.block_reward,
-                                block_height: challenge.block_height,
-                                nonce: local_nonce,
-                                timestamp: chrono::Utc::now().timestamp_millis() as u64,
-                            };
-
-                            let _ = share_tx.send(share).await;
-                            info!("💎 Share found! nonce={}, height={}", local_nonce, challenge.block_height);
+                    // Check for new block every 4096 hashes (abandon stale work fast)
+                    if i & 4095 == 0 && i > 0 {
+                        let sig = new_block_signal.load(Ordering::Relaxed);
+                        if sig != last_known_block_signal {
+                            break; // New block — refresh challenge
                         }
                     }
-                    // Flush remaining local hashes
-                    let remainder = local_count & 1023;
-                    if remainder > 0 {
-                        hash_counter.fetch_add(remainder, Ordering::Relaxed);
+
+                    // Check if solution meets target
+                    if hash_result[..] < target_bytes[..] {
+                        let share = DecentralizedShare {
+                            share_id: hash_result,
+                            difficulty: challenge.block_reward,
+                            block_height: challenge.block_height,
+                            nonce: local_nonce,
+                            timestamp: chrono::Utc::now().timestamp_millis() as u64,
+                        };
+
+                        let _ = share_tx.send(share).await;
+                        info!("💎 Share found! nonce={}, height={}", local_nonce, challenge.block_height);
                     }
+                }
+
+                // Flush remaining local hashes
+                let remainder = local_count & 1023;
+                if remainder > 0 {
+                    hash_counter.fetch_add(remainder, Ordering::Relaxed);
                 }
             }
         });

@@ -295,6 +295,19 @@ impl RocksDBKV {
         opts.set_bytes_per_sync(1024 * 1024); // 1 MiB - sync data in steady chunks
         opts.set_wal_bytes_per_sync(1024 * 1024); // 1 MiB - sync WAL in steady chunks
 
+        // v8.4.4: RocksDB write rate limiter — prevents sync writes from monopolizing disk I/O.
+        // During bulk sync, compaction/flush writes can saturate the disk, stalling API reads.
+        // This limits background write throughput so read latency stays low.
+        // Only affects compaction and flush writes — reads go through block cache unaffected.
+        // Default: 200 MB/s (plenty for sync, but prevents 100% disk saturation).
+        let write_rate_mb: i64 = std::env::var("Q_ROCKSDB_WRITE_RATE_MB")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(200);
+        if write_rate_mb > 0 {
+            let rate_bytes_per_sec = write_rate_mb * 1024 * 1024;
+            opts.set_ratelimiter(rate_bytes_per_sec, 100_000, 10); // 100ms refill, fairness=10
+            info!("🚀 [v8.4.4] RocksDB write rate limiter: {}MB/s (prevents disk saturation during sync)", write_rate_mb);
+        }
+
         // v6.0.8: Direct I/O on small nodes to eliminate kernel page cache bloat
         // ROOT CAUSE of Gamma OOM: 9.7GB database → kernel caches SST file pages → 2-3GB page cache
         // Page cache is counted against cgroup MemoryMax, pushing total past 7GB limit.

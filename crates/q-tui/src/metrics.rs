@@ -1,5 +1,58 @@
 use serde::{Deserialize, Serialize};
 
+/// Network throttle mode — controls P2P aggressiveness
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NetworkThrottleMode {
+    Conservative, // Low bandwidth: reduce sync concurrency, smaller mesh
+    Normal,       // Default settings
+    Turbo,        // Max bandwidth: aggressive sync, full mesh
+}
+
+impl NetworkThrottleMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NetworkThrottleMode::Conservative => "Conservative",
+            NetworkThrottleMode::Normal => "Normal",
+            NetworkThrottleMode::Turbo => "Turbo",
+        }
+    }
+
+    /// Cycle to next mode
+    pub fn next(self) -> Self {
+        match self {
+            NetworkThrottleMode::Conservative => NetworkThrottleMode::Normal,
+            NetworkThrottleMode::Normal => NetworkThrottleMode::Turbo,
+            NetworkThrottleMode::Turbo => NetworkThrottleMode::Conservative,
+        }
+    }
+}
+
+impl Default for NetworkThrottleMode {
+    fn default() -> Self {
+        NetworkThrottleMode::Turbo // v8.5.4: Default to Turbo for max sync speed
+    }
+}
+
+impl NetworkThrottleMode {
+    /// Convert to AtomicU8 value: 0=Conservative, 1=Normal, 2=Turbo
+    pub fn to_u8(self) -> u8 {
+        match self {
+            NetworkThrottleMode::Conservative => 0,
+            NetworkThrottleMode::Normal => 1,
+            NetworkThrottleMode::Turbo => 2,
+        }
+    }
+
+    /// Convert from AtomicU8 value
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0 => NetworkThrottleMode::Conservative,
+            1 => NetworkThrottleMode::Normal,
+            _ => NetworkThrottleMode::Turbo,
+        }
+    }
+}
+
 /// Node metrics for display
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Metrics {
@@ -10,6 +63,13 @@ pub struct Metrics {
     pub tor_circuits: usize,
     pub bytes_received: u64,
     pub bytes_sent: u64,
+
+    // Bandwidth analysis
+    pub bytes_in_per_sec: u64,
+    pub bytes_out_per_sec: u64,
+    pub total_bytes_in: u64,
+    pub total_bytes_out: u64,
+    pub network_throttle_mode: NetworkThrottleMode,
 
     // Blockchain metrics
     pub block_height: u64,
@@ -132,6 +192,11 @@ impl Default for Metrics {
             tor_circuits: 0,
             bytes_received: 0,
             bytes_sent: 0,
+            bytes_in_per_sec: 0,
+            bytes_out_per_sec: 0,
+            total_bytes_in: 0,
+            total_bytes_out: 0,
+            network_throttle_mode: NetworkThrottleMode::Normal,
             block_height: 0,
             dag_size_mb: 0.0,
             last_block_secs: 0,
@@ -234,6 +299,23 @@ impl Metrics {
             format!("{:.2} KB", bytes as f64 / KB as f64)
         } else {
             format!("{} B", bytes)
+        }
+    }
+
+    /// Format bytes per second as human-readable rate
+    pub fn format_bytes_rate(bytes_per_sec: u64) -> String {
+        const KB: u64 = 1024;
+        const MB: u64 = KB * 1024;
+        const GB: u64 = MB * 1024;
+
+        if bytes_per_sec >= GB {
+            format!("{:.1} GB/s", bytes_per_sec as f64 / GB as f64)
+        } else if bytes_per_sec >= MB {
+            format!("{:.1} MB/s", bytes_per_sec as f64 / MB as f64)
+        } else if bytes_per_sec >= KB {
+            format!("{:.1} KB/s", bytes_per_sec as f64 / KB as f64)
+        } else {
+            format!("{} B/s", bytes_per_sec)
         }
     }
 

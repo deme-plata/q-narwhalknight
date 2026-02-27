@@ -675,6 +675,12 @@ pub enum NetworkCommand {
         topic: String,
         pubkey_bytes: Vec<u8>,
     },
+
+    /// v8.5.0: Generic publish — used by auto-update announcements and other new topics
+    PublishMessage {
+        topic: String,
+        data: Vec<u8>,
+    },
 }
 
 /// Response from /api/v1/peer-id endpoint
@@ -1045,6 +1051,9 @@ pub struct UnifiedNetworkManager {
     /// v1.0.2-safe: Track strike count for chronically slow peers
     /// After 5 strikes in 60s, disconnect the peer to free internal libp2p send buffers
     slow_peer_strikes: DashMap<PeerId, (u32, std::time::Instant)>,
+    /// v1.0.2: Outbound P2P bandwidth counter (cumulative bytes published via gossipsub)
+    /// Set by caller via set_p2p_bytes_out() after construction
+    p2p_bytes_out: Option<Arc<std::sync::atomic::AtomicU64>>,
 }
 
 // SAFETY: UnifiedNetworkManager is Sync because:
@@ -2118,7 +2127,20 @@ impl UnifiedNetworkManager {
             sync_retry_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
             // v1.0.2-safe: SlowPeer strike tracking for disconnect-on-chronic-failure
             slow_peer_strikes: DashMap::new(),
+            p2p_bytes_out: None,
         })
+    }
+
+    /// Set P2P outbound bytes counter for bandwidth tracking
+    pub fn set_p2p_bytes_out(&mut self, counter: Arc<std::sync::atomic::AtomicU64>) {
+        self.p2p_bytes_out = Some(counter);
+    }
+
+    /// Track outbound bytes (called on every gossipsub publish)
+    fn track_bytes_out(&self, bytes: usize) {
+        if let Some(ref counter) = self.p2p_bytes_out {
+            counter.fetch_add(bytes as u64, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     /// Get network configuration
@@ -4569,6 +4591,7 @@ impl UnifiedNetworkManager {
                 info!("🌉 P2P mining reward/transaction propagation ENABLED");
             }
             NetworkCommand::PublishBlock { topic, block_bytes, block_height } => {
+                self.track_bytes_out(block_bytes.len());
                 // 🔍 v1.0.71-beta: Enhanced diagnostics for P2P broadcast issues
                 let peer_count = self.connected_peer_count.load(std::sync::atomic::Ordering::Relaxed);
                 let connected_peers: Vec<_> = self.swarm.connected_peers().collect();
@@ -4593,6 +4616,7 @@ impl UnifiedNetworkManager {
                 }
             }
             NetworkCommand::PublishBlockRequest { topic, request_bytes } => {
+                self.track_bytes_out(request_bytes.len());
                 info!("📤 Publishing block request ({} bytes) to gossipsub topic: {}", request_bytes.len(), topic);
                 match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), request_bytes) {
                     Ok(()) => {
@@ -4604,6 +4628,7 @@ impl UnifiedNetworkManager {
                 }
             }
             NetworkCommand::PublishBlockResponse { topic, response_bytes, block_height } => {
+                self.track_bytes_out(response_bytes.len());
                 info!("📤 Publishing block response for block {} ({} bytes) to gossipsub topic: {}", block_height, response_bytes.len(), topic);
                 match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), response_bytes) {
                     Ok(()) => {
@@ -4615,6 +4640,7 @@ impl UnifiedNetworkManager {
                 }
             }
             NetworkCommand::PublishBlockPack { topic, pack_bytes } => {
+                self.track_bytes_out(pack_bytes.len());
                 info!("🚀 [TURBO SYNC] Publishing block pack ({:.1} KB compressed) to gossipsub topic: {}",
                       pack_bytes.len() as f64 / 1024.0, topic);
                 match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), pack_bytes) {
@@ -4627,6 +4653,7 @@ impl UnifiedNetworkManager {
                 }
             }
             NetworkCommand::RequestBlockPack { topic, request_bytes, start_height, end_height } => {
+                self.track_bytes_out(request_bytes.len());
                 info!("🚀 [TURBO SYNC] Requesting block pack {}-{} ({} bytes) from P2P network",
                       start_height, end_height, request_bytes.len());
                 match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), request_bytes) {
@@ -4639,6 +4666,7 @@ impl UnifiedNetworkManager {
                 }
             }
             NetworkCommand::PublishPeerHeight { topic, announcement_bytes, height } => {
+                self.track_bytes_out(announcement_bytes.len());
                 debug!("📡 [TURBO SYNC] Publishing peer height announcement {} ({} bytes) to topic: {}",
                       height, announcement_bytes.len(), topic);
                 match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), announcement_bytes) {
@@ -4994,6 +5022,13 @@ impl UnifiedNetworkManager {
                 match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), pubkey_bytes) {
                     Ok(()) => debug!("📤 [QUEUE] Enqueued OAuth2 JWT pubkey (topic={})", topic),
                     Err(reason) => warn!("⚠️ [QUEUE] OAuth2 JWT pubkey dropped: {} (topic={})", reason, topic),
+                }
+            }
+            NetworkCommand::PublishMessage { topic, data } => {
+                debug!("📤 [P2P] Publishing generic message ({} bytes) to topic: {}", data.len(), topic);
+                match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), data) {
+                    Ok(()) => debug!("📤 [QUEUE] Enqueued generic message (topic={})", topic),
+                    Err(reason) => warn!("⚠️ [QUEUE] Generic message dropped: {} (topic={})", reason, topic),
                 }
             }
             NetworkCommand::RequestBlockRangeDirect { peer_id, start_height, end_height, response_tx } => {

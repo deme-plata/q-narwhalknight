@@ -4,7 +4,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Settings, Shield, Globe, Key, Trash2, RefreshCw, Clock, Server, Wifi, DollarSign, Download, ArrowUpCircle, CheckCircle } from 'lucide-react';
+import { X, Settings, Shield, Globe, Key, Trash2, RefreshCw, Clock, Server, Wifi, DollarSign, Download, ArrowUpCircle, CheckCircle, AlertTriangle, Loader2 } from 'lucide-react';
 
 const MASTER_WALLET = 'efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723';
 
@@ -64,7 +64,27 @@ interface NodeUpdateInfo {
   download_url: string | null;
 }
 
-type TabId = 'overview' | 'oauth2' | 'node' | 'fees';
+interface AutoUpdateStatus {
+  auto_update_enabled: boolean;
+  current_version: string;
+  state: NodeUpdateStateData;
+  notification_email: string | null;
+}
+
+type NodeUpdateStateData =
+  | { state: 'Disabled' }
+  | { state: 'Idle' }
+  | { state: 'WaitingForQuorum'; version: string; signers_so_far: number; signers_needed: number }
+  | { state: 'Available'; version: string; download_url: string }
+  | { state: 'Downloading'; version: string; progress_percent: number }
+  | { state: 'Verifying'; version: string }
+  | { state: 'PreflightCheck'; version: string }
+  | { state: 'ReadyToRestart'; version: string }
+  | { state: 'RestartScheduled'; version: string; restart_in_secs: number }
+  | { state: 'Error'; version: string; message: string; retry_count: number }
+  | { state: 'RollingBack'; version: string; reason: string };
+
+type TabId = 'overview' | 'oauth2' | 'node' | 'updates' | 'fees';
 
 function formatUptime(secs: number): string {
   const days = Math.floor(secs / 86400);
@@ -98,6 +118,7 @@ export default function NodeSettingsModal() {
   const [nodeInfo, setNodeInfo] = useState<NodeInfo | null>(null);
   const [operatorFees, setOperatorFees] = useState<OperatorFees | null>(null);
   const [updateInfo, setUpdateInfo] = useState<NodeUpdateInfo | null>(null);
+  const [autoUpdateStatus, setAutoUpdateStatus] = useState<AutoUpdateStatus | null>(null);
   const [feeEarnings, setFeeEarnings] = useState<FeeEarnings | null>(null);
   const [loading, setLoading] = useState(false);
   const [revoking, setRevoking] = useState<string | null>(null);
@@ -153,6 +174,13 @@ export default function NodeSettingsModal() {
     } catch { /* ignore - non-critical */ }
   }, []);
 
+  const fetchAutoUpdateStatus = useCallback(async () => {
+    try {
+      const res = await fetch('/api/v1/admin/update/status');
+      if (res.ok) setAutoUpdateStatus(await res.json());
+    } catch { /* ignore - non-critical */ }
+  }, []);
+
   const fetchFeeEarnings = useCallback(async () => {
     try {
       const res = await fetch('/api/v1/admin/fee-earnings', { headers: getAuthHeaders() });
@@ -165,9 +193,16 @@ export default function NodeSettingsModal() {
     if (!isOpen) return;
     setLoading(true);
     setError(null);
-    Promise.all([fetchSettings(), fetchConsents(), fetchNodeInfo(), fetchOperatorFees(), fetchUpdateInfo(), fetchFeeEarnings()])
+    Promise.all([fetchSettings(), fetchConsents(), fetchNodeInfo(), fetchOperatorFees(), fetchUpdateInfo(), fetchAutoUpdateStatus(), fetchFeeEarnings()])
       .finally(() => setLoading(false));
-  }, [isOpen, fetchSettings, fetchConsents, fetchNodeInfo, fetchOperatorFees, fetchUpdateInfo, fetchFeeEarnings]);
+  }, [isOpen, fetchSettings, fetchConsents, fetchNodeInfo, fetchOperatorFees, fetchUpdateInfo, fetchAutoUpdateStatus, fetchFeeEarnings]);
+
+  // Auto-refresh update status when Updates tab is active
+  useEffect(() => {
+    if (!isOpen || activeTab !== 'updates') return;
+    const interval = setInterval(fetchAutoUpdateStatus, 5000);
+    return () => clearInterval(interval);
+  }, [isOpen, activeTab, fetchAutoUpdateStatus]);
 
   const handleRevoke = async (clientId: string) => {
     setRevoking(clientId);
@@ -186,7 +221,7 @@ export default function NodeSettingsModal() {
 
   const handleRefresh = () => {
     setLoading(true);
-    Promise.all([fetchSettings(), fetchConsents(), fetchNodeInfo(), fetchOperatorFees(), fetchUpdateInfo(), fetchFeeEarnings()])
+    Promise.all([fetchSettings(), fetchConsents(), fetchNodeInfo(), fetchOperatorFees(), fetchUpdateInfo(), fetchAutoUpdateStatus(), fetchFeeEarnings()])
       .finally(() => setLoading(false));
   };
 
@@ -196,6 +231,7 @@ export default function NodeSettingsModal() {
     { id: 'overview', label: 'Overview', icon: <Settings className="w-4 h-4" /> },
     { id: 'oauth2', label: 'OAuth2', icon: <Key className="w-4 h-4" /> },
     { id: 'node', label: 'Node', icon: <Server className="w-4 h-4" /> },
+    { id: 'updates', label: 'Updates', icon: <ArrowUpCircle className="w-4 h-4" /> },
     { id: 'fees', label: 'Fees', icon: <DollarSign className="w-4 h-4" />, masterOnly: true },
   ];
 
@@ -305,6 +341,31 @@ export default function NodeSettingsModal() {
                   revoking={revoking}
                   onRevoke={handleRevoke}
                 />
+              ) : activeTab === 'updates' ? (
+                <UpdatesTab autoUpdateStatus={autoUpdateStatus} updateInfo={updateInfo} onToggle={async () => {
+                  try {
+                    const res = await fetch('/api/v1/admin/update/toggle', {
+                      method: 'POST',
+                      headers: getAuthHeaders(),
+                    });
+                    if (res.ok) {
+                      const data = await res.json();
+                      setAutoUpdateStatus(prev => prev ? { ...prev, auto_update_enabled: data.auto_update_enabled } : prev);
+                    }
+                  } catch { /* ignore */ }
+                }} onSetEmail={async (email: string | null) => {
+                  try {
+                    const res = await fetch('/api/v1/admin/update/notification-email', {
+                      method: 'POST',
+                      headers: getAuthHeaders(),
+                      body: JSON.stringify({ email }),
+                    });
+                    if (res.ok) {
+                      const data = await res.json();
+                      setAutoUpdateStatus(prev => prev ? { ...prev, notification_email: data.notification_email } : prev);
+                    }
+                  } catch { /* ignore */ }
+                }} />
               ) : activeTab === 'fees' ? (
                 <FeesTab
                   fees={operatorFees}
@@ -647,6 +708,370 @@ function NodeTab({ nodeInfo, updateInfo, onCheckUpdate }: {
         ) : (
           <p className="text-xs text-slate-500">Click &quot;Check&quot; to see if an update is available</p>
         )}
+      </div>
+    </div>
+  );
+}
+
+// -- Updates Tab --
+
+function getStateLabel(state: string): string {
+  const labels: Record<string, string> = {
+    Disabled: 'Disabled',
+    Idle: 'Idle',
+    WaitingForQuorum: 'Waiting for Quorum',
+    Available: 'Update Available',
+    Downloading: 'Downloading',
+    Verifying: 'Verifying',
+    PreflightCheck: 'Preflight Check',
+    ReadyToRestart: 'Ready to Restart',
+    RestartScheduled: 'Restart Scheduled',
+    Error: 'Error',
+    RollingBack: 'Rolling Back',
+  };
+  return labels[state] || state;
+}
+
+function getStateColor(state: string): { bg: string; text: string; border: string } {
+  switch (state) {
+    case 'Idle':
+      return { bg: 'bg-slate-500/20', text: 'text-slate-400', border: 'border-slate-500/30' };
+    case 'WaitingForQuorum':
+      return { bg: 'bg-amber-500/20', text: 'text-amber-400', border: 'border-amber-500/30' };
+    case 'Available':
+      return { bg: 'bg-cyan-500/20', text: 'text-cyan-400', border: 'border-cyan-500/30' };
+    case 'Downloading':
+    case 'Verifying':
+    case 'PreflightCheck':
+      return { bg: 'bg-blue-500/20', text: 'text-blue-400', border: 'border-blue-500/30' };
+    case 'ReadyToRestart':
+    case 'RestartScheduled':
+      return { bg: 'bg-purple-500/20', text: 'text-purple-400', border: 'border-purple-500/30' };
+    case 'Error':
+      return { bg: 'bg-red-500/20', text: 'text-red-400', border: 'border-red-500/30' };
+    case 'RollingBack':
+      return { bg: 'bg-orange-500/20', text: 'text-orange-400', border: 'border-orange-500/30' };
+    default:
+      return { bg: 'bg-slate-500/20', text: 'text-slate-400', border: 'border-slate-500/30' };
+  }
+}
+
+function getStateIcon(state: string) {
+  switch (state) {
+    case 'Idle':
+    case 'Disabled':
+      return <CheckCircle className="w-4 h-4" />;
+    case 'WaitingForQuorum':
+      return <Clock className="w-4 h-4" />;
+    case 'Available':
+      return <Download className="w-4 h-4" />;
+    case 'Downloading':
+    case 'Verifying':
+    case 'PreflightCheck':
+      return <Loader2 className="w-4 h-4 animate-spin" />;
+    case 'ReadyToRestart':
+    case 'RestartScheduled':
+      return <ArrowUpCircle className="w-4 h-4" />;
+    case 'Error':
+      return <AlertTriangle className="w-4 h-4" />;
+    case 'RollingBack':
+      return <RefreshCw className="w-4 h-4 animate-spin" />;
+    default:
+      return <Settings className="w-4 h-4" />;
+  }
+}
+
+function UpdatesTab({ autoUpdateStatus, updateInfo, onToggle, onSetEmail }: {
+  autoUpdateStatus: AutoUpdateStatus | null;
+  updateInfo: NodeUpdateInfo | null;
+  onToggle: () => Promise<void>;
+  onSetEmail: (email: string | null) => Promise<void>;
+}) {
+  const [toggling, setToggling] = useState(false);
+  const [emailInput, setEmailInput] = useState('');
+  const [emailSaving, setEmailSaving] = useState(false);
+  const [emailDirty, setEmailDirty] = useState(false);
+
+  const handleToggle = async () => {
+    setToggling(true);
+    await onToggle();
+    setToggling(false);
+  };
+
+  const handleSaveEmail = async () => {
+    setEmailSaving(true);
+    await onSetEmail(emailInput.trim() || null);
+    setEmailSaving(false);
+    setEmailDirty(false);
+  };
+
+  const handleClearEmail = async () => {
+    setEmailSaving(true);
+    await onSetEmail(null);
+    setEmailInput('');
+    setEmailSaving(false);
+    setEmailDirty(false);
+  };
+  if (!autoUpdateStatus) {
+    return (
+      <div className="text-center py-8">
+        <ArrowUpCircle className="w-8 h-8 text-slate-600 mx-auto mb-3" />
+        <p className="text-slate-400">Update status not available</p>
+        <p className="text-xs text-slate-500 mt-1">The node may not support the auto-update API yet</p>
+      </div>
+    );
+  }
+
+  const stateData = autoUpdateStatus.state;
+  const stateName = stateData.state;
+  const color = getStateColor(stateName);
+
+  return (
+    <div className="space-y-4">
+      {/* Version + auto-update status with toggle */}
+      <div className="grid grid-cols-2 gap-3">
+        <StatCard
+          icon={<Server className="w-4 h-4 text-blue-400" />}
+          label="Current Version"
+          value={`v${autoUpdateStatus.current_version}`}
+        />
+        <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-4">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2">
+              {autoUpdateStatus.auto_update_enabled
+                ? <CheckCircle className="w-4 h-4 text-green-400" />
+                : <AlertTriangle className="w-4 h-4 text-amber-400" />}
+              <span className="text-xs text-slate-400 uppercase tracking-wide">Auto-Update</span>
+            </div>
+            <button
+              onClick={handleToggle}
+              disabled={toggling}
+              className={`relative w-11 h-6 rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500/50 ${
+                autoUpdateStatus.auto_update_enabled
+                  ? 'bg-green-500/80'
+                  : 'bg-slate-600'
+              } ${toggling ? 'opacity-50' : ''}`}
+              title={autoUpdateStatus.auto_update_enabled ? 'Disable auto-update' : 'Enable auto-update'}
+            >
+              <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${
+                autoUpdateStatus.auto_update_enabled ? 'translate-x-5' : 'translate-x-0'
+              }`} />
+            </button>
+          </div>
+          <div className="text-xl font-bold text-white">
+            {autoUpdateStatus.auto_update_enabled ? 'Enabled' : 'Disabled'}
+          </div>
+          <div className="text-xs text-slate-500 mt-1">
+            {autoUpdateStatus.auto_update_enabled ? 'Will apply updates automatically' : 'Notification only'}
+          </div>
+        </div>
+      </div>
+
+      {/* State badge */}
+      <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-4">
+        <div className="flex items-center justify-between mb-3">
+          <span className="text-sm text-slate-400">Update State</span>
+          <span className={`inline-flex items-center gap-1.5 px-3 py-1 text-xs font-semibold rounded-full ${color.bg} ${color.text} border ${color.border}`}>
+            {getStateIcon(stateName)}
+            {getStateLabel(stateName)}
+          </span>
+        </div>
+
+        {/* State-specific detail panels */}
+        {stateName === 'WaitingForQuorum' && 'signers_so_far' in stateData && (
+          <div className="mt-3 space-y-2">
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-amber-400">Collecting signatures...</span>
+              <span className="text-slate-400 font-mono">
+                {(stateData as { signers_so_far: number; signers_needed: number }).signers_so_far} / {(stateData as { signers_so_far: number; signers_needed: number }).signers_needed} signers
+              </span>
+            </div>
+            <div className="w-full h-2 bg-slate-700 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-gradient-to-r from-amber-500 to-yellow-400 rounded-full transition-all"
+                style={{ width: `${Math.min(100, ((stateData as { signers_so_far: number; signers_needed: number }).signers_so_far / (stateData as { signers_so_far: number; signers_needed: number }).signers_needed) * 100)}%` }}
+              />
+            </div>
+            {'version' in stateData && (
+              <div className="text-xs text-slate-500">Target version: v{(stateData as { version: string }).version}</div>
+            )}
+          </div>
+        )}
+
+        {stateName === 'Downloading' && 'progress_percent' in stateData && (
+          <div className="mt-3 space-y-2">
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-blue-400">Downloading binary...</span>
+              <span className="text-slate-400 font-mono">{(stateData as { progress_percent: number }).progress_percent}%</span>
+            </div>
+            <div className="w-full h-2 bg-slate-700 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-gradient-to-r from-blue-500 to-cyan-400 rounded-full transition-all"
+                style={{ width: `${(stateData as { progress_percent: number }).progress_percent}%` }}
+              />
+            </div>
+            {'version' in stateData && (
+              <div className="text-xs text-slate-500">Downloading v{(stateData as { version: string }).version}</div>
+            )}
+          </div>
+        )}
+
+        {stateName === 'Available' && 'download_url' in stateData && (
+          <div className="mt-3">
+            <a
+              href={(stateData as { download_url: string }).download_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center justify-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-white bg-gradient-to-r from-cyan-600 to-blue-600 rounded-lg hover:from-cyan-500 hover:to-blue-500 transition-all"
+            >
+              <Download className="w-4 h-4" />
+              Download v{(stateData as { version: string }).version}
+            </a>
+            <div className="text-xs text-slate-500 mt-2 text-center">
+              Auto-update is disabled. Download and apply manually.
+            </div>
+          </div>
+        )}
+
+        {stateName === 'RestartScheduled' && 'restart_in_secs' in stateData && (
+          <div className="mt-3 bg-purple-500/10 border border-purple-500/30 rounded-lg p-3">
+            <div className="flex items-center gap-2 text-purple-400">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              <span className="text-sm font-medium">Restart in {(stateData as { restart_in_secs: number }).restart_in_secs}s</span>
+            </div>
+            {'version' in stateData && (
+              <div className="text-xs text-purple-300/60 mt-1">Upgrading to v{(stateData as { version: string }).version}</div>
+            )}
+          </div>
+        )}
+
+        {stateName === 'Error' && 'message' in stateData && (
+          <div className="mt-3 bg-red-500/10 border border-red-500/30 rounded-lg p-3">
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 text-red-400 mt-0.5 shrink-0" />
+              <div>
+                <div className="text-sm text-red-400 break-all">{(stateData as { message: string }).message}</div>
+                {'retry_count' in stateData && (stateData as { retry_count: number }).retry_count > 0 && (
+                  <div className="text-xs text-red-300/60 mt-1">Retries: {(stateData as { retry_count: number }).retry_count}</div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {stateName === 'RollingBack' && 'reason' in stateData && (
+          <div className="mt-3 bg-orange-500/10 border border-orange-500/30 rounded-lg p-3">
+            <div className="flex items-start gap-2">
+              <RefreshCw className="w-4 h-4 text-orange-400 mt-0.5 shrink-0 animate-spin" />
+              <div>
+                <div className="text-sm text-orange-400">Rolling back...</div>
+                <div className="text-xs text-orange-300/60 mt-1">{(stateData as { reason: string }).reason}</div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {(stateName === 'Verifying' || stateName === 'PreflightCheck') && (
+          <div className="mt-3 flex items-center gap-2 text-blue-400 text-sm">
+            <Loader2 className="w-4 h-4 animate-spin" />
+            {stateName === 'Verifying' ? 'Verifying checksums (SHA-256 + BLAKE3)...' : 'Running preflight check on new binary...'}
+          </div>
+        )}
+
+        {stateName === 'ReadyToRestart' && (
+          <div className="mt-3 flex items-center gap-2 text-purple-400 text-sm">
+            <ArrowUpCircle className="w-4 h-4" />
+            Binary verified and ready. Restart pending.
+          </div>
+        )}
+      </div>
+
+      {/* Version comparison from updateInfo */}
+      {updateInfo && updateInfo.latest_version && (
+        <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-4">
+          <h3 className="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
+            <Globe className="w-4 h-4 text-cyan-400" /> Version Comparison
+          </h3>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-slate-400">Running</span>
+              <span className="text-xs font-mono text-white">v{updateInfo.current_version}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-slate-400">Latest</span>
+              <span className={`text-xs font-mono ${updateInfo.update_available ? 'text-amber-400' : 'text-green-400'}`}>
+                v{updateInfo.latest_version}
+              </span>
+            </div>
+            {!updateInfo.update_available && (
+              <div className="flex items-center gap-2 text-xs text-green-400 mt-1">
+                <CheckCircle className="w-3.5 h-3.5" />
+                Node is up to date
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Email notifications */}
+      <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-4">
+        <h3 className="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
+          <Globe className="w-4 h-4 text-blue-400" /> Email Notifications
+        </h3>
+        <p className="text-xs text-slate-500 mb-3">
+          Receive an email from system@quillon.xyz when a new node version is available.
+        </p>
+        <div className="flex items-center gap-2">
+          <input
+            type="email"
+            placeholder={autoUpdateStatus.notification_email || 'admin@example.com'}
+            value={emailDirty ? emailInput : (autoUpdateStatus.notification_email || '')}
+            onChange={e => { setEmailInput(e.target.value); setEmailDirty(true); }}
+            className="flex-1 px-3 py-2 bg-slate-700/50 border border-slate-600/50 rounded-lg text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+          />
+          {(emailDirty || (!emailDirty && !autoUpdateStatus.notification_email)) && (
+            <button
+              onClick={handleSaveEmail}
+              disabled={emailSaving}
+              className="px-3 py-2 text-xs font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-500 disabled:opacity-50 transition-colors"
+            >
+              {emailSaving ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Save'}
+            </button>
+          )}
+          {autoUpdateStatus.notification_email && !emailDirty && (
+            <button
+              onClick={handleClearEmail}
+              disabled={emailSaving}
+              className="px-3 py-2 text-xs font-medium text-red-400 bg-red-500/10 border border-red-500/30 rounded-lg hover:bg-red-500/20 disabled:opacity-50 transition-colors"
+            >
+              {emailSaving ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Remove'}
+            </button>
+          )}
+        </div>
+        {autoUpdateStatus.notification_email && !emailDirty && (
+          <div className="flex items-center gap-2 mt-2 text-xs text-green-400">
+            <CheckCircle className="w-3.5 h-3.5" />
+            Notifications will be sent to {autoUpdateStatus.notification_email}
+          </div>
+        )}
+      </div>
+
+      {/* Info footer */}
+      <div className="bg-slate-800/30 border border-slate-700/30 rounded-lg p-3">
+        <div className="text-xs text-slate-500 space-y-1">
+          <div className="flex justify-between">
+            <span>Quorum requirement:</span>
+            <span className="text-slate-400">2-of-3 trusted bootstrap signers</span>
+          </div>
+          <div className="flex justify-between">
+            <span>Verification:</span>
+            <span className="text-slate-400">Ed25519 + SHA-256 + BLAKE3</span>
+          </div>
+          <div className="flex justify-between">
+            <span>Safety gates:</span>
+            <span className="text-slate-400">Min peers, sync check, preflight, rollback watchdog</span>
+          </div>
+        </div>
       </div>
     </div>
   );

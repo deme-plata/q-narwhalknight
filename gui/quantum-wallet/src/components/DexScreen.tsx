@@ -142,7 +142,7 @@ const U128_MAX = BigInt('340282366920938463463374607431768211455');
 // Native tokens (QUG, QUGUSD) use 24 decimals, custom tokens typically use 7-8
 const getTokenDecimals = (symbol: string, tokenList?: Array<{symbol: string, decimals?: number}>): number => {
   const upperSymbol = symbol.toUpperCase();
-  if (upperSymbol === 'QUG' || upperSymbol === 'QUGUSD') {
+  if (upperSymbol === 'QUG' || upperSymbol === 'QUGUSD' || upperSymbol === 'QCREDIT') {
     return 24;
   }
   // Try to find decimals from token list
@@ -1519,18 +1519,18 @@ export default function DexScreen() {
             holders: qugHolders,
             icon: 'qug-logo',
             features: {
-              reflection: true,
-              autoLiquidity: true,
-              buybackAndBurn: true,
-              antiWhale: true,
+              reflection: false,
+              autoLiquidity: false,
+              buybackAndBurn: false,
+              antiWhale: false,
               quantumSecured: true,
             },
             fees: {
-              buy: 2,
-              sell: 4,
-              transfer: 1,
+              buy: 0,
+              sell: 0,
+              transfer: 0,
             },
-            description: 'QUG (Quillon) is the native quantum-enhanced token powering the Quillon blockchain. Built on DAG-BFT consensus with post-quantum cryptographic security. Enables staking, governance, and ultra-fast transactions.',
+            description: 'QUG (Quillon) is the native quantum-enhanced token powering the Quillon blockchain. Built on DAG-BFT consensus with post-quantum cryptographic security (Dilithium5 + Kyber1024). 21M max supply, 4-year halving, ~1 second blocks. No fees. No pre-mine.',
             website: 'https://quillon.xyz',
             whitepaper: 'https://quillon.xyz/whitepaper',
           },

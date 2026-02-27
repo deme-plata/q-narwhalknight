@@ -333,7 +333,19 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend }: DashboardProps) 
     return () => clearTimeout(timer);
   }, [showMainnetWelcome]);
 
-  // v7.3.4: Fetch unread email count on mount + listen for SSE events
+  // v8.5.7: Show supply correction notice once (after welcome modal is dismissed)
+  useEffect(() => {
+    const scKey = 'supply_correction_v857_seen';
+    if (localStorage.getItem(scKey)) return;
+    const timer = setTimeout(() => {
+      if (!showMainnetWelcome && !showBountyModal) {
+        window.dispatchEvent(new CustomEvent('open-supply-correction'));
+      }
+    }, 1500);
+    return () => clearTimeout(timer);
+  }, [showMainnetWelcome, showBountyModal]);
+
+  // v8.5.5: Fetch unread email count on mount + listen for events
   useEffect(() => {
     const fetchUnread = async () => {
       try {
@@ -342,22 +354,14 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend }: DashboardProps) 
       } catch {}
     };
     fetchUnread();
-    const interval = setInterval(fetchUnread, 60000); // refresh every 60s as fallback
+    const interval = setInterval(fetchUnread, 30000); // refresh every 30s
 
-    // v8.2.10: Always re-fetch authoritative count from API instead of
-    // blind +1/-1. SSE email-received events are broadcast to ALL connected
-    // clients (not filtered per-wallet), so incrementing caused phantom
-    // badges for emails meant for other users or already-read emails.
-    const handleEmailReceived = () => {
-      fetchUnread();
-    };
+    const handleEmailReceived = () => { fetchUnread(); };
     const handleUnreadCount = (e: Event) => {
       const detail = (e as CustomEvent).detail;
       if (detail?.count !== undefined) setUnreadEmailCount(detail.count);
     };
-    const handleEmailRead = () => {
-      fetchUnread();
-    };
+    const handleEmailRead = () => { fetchUnread(); };
 
     window.addEventListener('email-received', handleEmailReceived);
     window.addEventListener('email-unread-count', handleUnreadCount);
@@ -369,6 +373,19 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend }: DashboardProps) 
       window.removeEventListener('email-read', handleEmailRead);
     };
   }, []);
+
+  // v8.5.5: Re-fetch unread count whenever user switches to/from mail tab
+  useEffect(() => {
+    const fetchUnread = async () => {
+      try {
+        const res = await qnkAPI.getEmailUnreadCount();
+        if (res?.data?.count !== undefined) setUnreadEmailCount(res.data.count);
+      } catch {}
+    };
+    // Small delay to let EmailScreen's mark-read calls settle
+    const timer = setTimeout(fetchUnread, 500);
+    return () => clearTimeout(timer);
+  }, [activeDashboardTab]);
 
   // v7.3.4: Persist tab order changes
   const handleTabOrderChange = useCallback((newOrder: Array<'wallet' | 'mail' | 'calendar' | 'chat'>) => {

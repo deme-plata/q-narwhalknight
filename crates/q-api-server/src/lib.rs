@@ -8,6 +8,11 @@
 /// v2.3.5-beta: Sync activation fix + hashrate flickering fix
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Minimum miner version required to mine on this server.
+/// Bump this when a miner update is mandatory (e.g. protocol change).
+/// Miner versions are independent from server versions (q-miner v2.x vs q-api-server v8.x).
+pub const MIN_MINER_VERSION: &str = "2.6.0";
+
 // DEACTIVATED: use q_bep44_discovery::DiscoveryEngine;
 // DEACTIVATED: use q_bitcoin_bridge::bridge::IntegratedBitcoinBridge;
 // DEACTIVATED: use q_dns_phantom::DNSPhantomNetwork;
@@ -303,6 +308,7 @@ pub mod bootstrap_config; // ✅ v2.9.0-beta: Multi-bootstrap with automatic fai
 pub mod upgrade_verifier; // ✅ v5.1.1: Safe rolling deployment verification
 pub mod admin_settings_api; // ✅ v7.3.0: Node operator admin settings API (--admin-wallet)
 pub mod deploy_admin_api; // ✅ v5.1.1: Deploy admin panel API (master-wallet-only)
+pub mod node_auto_updater; // ✅ v8.5.0: P2P auto-update with Ed25519 quorum verification
 pub mod state_sync_api; // ✅ v5.2.0: HTTP full state sync (contracts, pools, balances) from bootstrap peers
 pub mod miner_link_api; // ✅ v7.2.0: WebSocket relay for wallet ↔ personal miner communication
 
@@ -984,6 +990,16 @@ pub struct AppState {
     // Stripe payment client - initialized once at startup from STRIPE_SECRET_KEY env var
     pub stripe_client: Option<stripe::Client>,
 
+    // v1.0.2: P2P bandwidth tracking — cumulative byte counters for TUI dashboard
+    pub p2p_bytes_in: Arc<std::sync::atomic::AtomicU64>,
+    pub p2p_bytes_out: Arc<std::sync::atomic::AtomicU64>,
+
+    // v8.5.4: Network throttle mode (0=Conservative, 1=Normal, 2=Turbo) — set by TUI, read by sync loop
+    // Conservative: 2 in-flight chunks, 200ms delay (SSD-friendly for cheap hardware)
+    // Normal: half parallelism, 10ms delay (balanced)
+    // Turbo: full parallelism, no delay (max sync speed, default)
+    pub network_throttle_mode: Arc<std::sync::atomic::AtomicU8>,
+
     // SYNC MODE: Track highest block height seen from network to prevent mining during sync
     pub highest_network_height: Arc<std::sync::atomic::AtomicU64>,
 
@@ -1028,6 +1044,21 @@ pub struct AppState {
     // 🛑 v1.0.2-beta: Graceful shutdown broadcast channel
     // Signal handler broadcasts shutdown to all subsystems for clean termination
     pub shutdown_tx: tokio::sync::broadcast::Sender<()>,
+
+    // 🔄 v8.5.0: Auto-update announcement forwarding channel
+    // Gossipsub handler forwards raw announcement bytes to NodeAutoUpdater
+    pub auto_update_tx: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
+
+    // 🔄 v8.5.0: Auto-update state receiver (for SSE/API)
+    pub auto_update_state: Option<tokio::sync::watch::Receiver<node_auto_updater::NodeUpdateState>>,
+
+    // 🔄 v8.5.1: Runtime auto-update enabled toggle (admin-controllable via API)
+    // Initialized from Q_AUTO_UPDATE env var, can be toggled via POST /api/v1/admin/update/toggle
+    pub auto_update_enabled: Arc<std::sync::atomic::AtomicBool>,
+
+    // 🔄 v8.5.1: Admin notification email for update alerts
+    // Set via POST /api/v1/admin/update/notification-email or Q_ADMIN_NOTIFICATION_EMAIL env
+    pub admin_notification_email: Arc<tokio::sync::RwLock<Option<String>>>,
 
     // 🔧 v1.0.4-beta: Challenge caching to prevent mining stalls
     // Ensures consistent challenge_hash across API requests for same height
@@ -1190,6 +1221,9 @@ pub struct AppState {
 
     // QUG/QUGUSD Stablecoin System - CollateralVault for over-collateralized minting
     pub collateral_vault: Arc<RwLock<q_vm::contracts::CollateralVault>>,
+
+    // v8.5.5: QCREDIT Yield Vault — lock QUG, mint QCREDIT 1:1, earn tiered yield
+    pub qcredit_vault: Arc<RwLock<q_vm::contracts::QCreditVault>>,
 
     // Quillon Bank Loan Applications - Pending loan applications with RocksDB persistence
     pub pending_loan_applications:
@@ -1817,21 +1851,32 @@ impl AppState {
             }
         }
 
-        // v8.1.2: REMOVED unconditional QUGUSD wipe (was v7.2.12)
-        // BUG FIX: The old code deleted ALL users' QUGUSD balances on every restart!
-        // It was meant for testnet→mainnet transition but ran unconditionally.
-        // QUGUSD token_balances are now preserved across restarts like all other tokens.
+        // v8.5.6: ONE-TIME QUGUSD ghost cleanup (replaces v8.5.3 every-restart purge).
+        // Root causes FIXED: (1) restore migration flag persists, (2) state_sync_api rejects QUGUSD from P2P.
+        // After one-time purge, legitimate QUGUSD from swaps/mints/loans persists across restarts.
         {
-            use q_types::QUGUSD_TOKEN_ADDRESS;
-            let qugusd_count = token_balances
-                .iter()
-                .filter(|((_wallet, token_addr), _)| *token_addr == QUGUSD_TOKEN_ADDRESS)
-                .count();
-            if qugusd_count > 0 {
-                tracing::info!(
-                    "✅ [v8.1.2] Preserved {} QUGUSD token_balance entries across restart",
-                    qugusd_count
-                );
+            const QUGUSD_PURGE_FLAG: &[u8] = b"migration_qugusd_ghost_purge_v856_done";
+            if !storage_engine.has_migration_flag(QUGUSD_PURGE_FLAG).await {
+                use q_types::QUGUSD_TOKEN_ADDRESS;
+                let qugusd_entries: Vec<([u8; 32], [u8; 32])> = token_balances
+                    .iter()
+                    .filter(|((_wallet, token_addr), _)| *token_addr == QUGUSD_TOKEN_ADDRESS)
+                    .map(|((wallet, token), _)| (*wallet, *token))
+                    .collect();
+                let qugusd_count = qugusd_entries.len();
+                if qugusd_count > 0 {
+                    for (wallet, token) in &qugusd_entries {
+                        token_balances.remove(&(*wallet, *token));
+                    }
+                    for (wallet, token) in &qugusd_entries {
+                        let _ = storage_engine.delete_token_balance(wallet, token).await;
+                    }
+                    tracing::warn!(
+                        "🧹 [v8.5.6] ONE-TIME purge: removed {} ghost QUGUSD entries (won't run again)",
+                        qugusd_count
+                    );
+                }
+                let _ = storage_engine.set_migration_flag(QUGUSD_PURGE_FLAG).await;
             }
         }
 
@@ -2160,15 +2205,35 @@ impl AppState {
                     break;
                 }
             }
-            // v8.0.1: If pool has old $42.50 price, delete it so it gets recreated at $3000
-            if pool_price > 0.0 && pool_price < 100.0 {
-                tracing::warn!(
-                    "💱 [STARTUP v8.0.1] Pool QUG price ${:.4} is outdated (< $100), removing stale pool for recreation at $3000",
-                    pool_price
-                );
-                liquidity_pools_map.remove("pool-qug-qugusd-bootstrap");
-                let _ = storage_engine.delete_liquidity_pool("pool-qug-qugusd-bootstrap").await;
-                pool_price = 0.0; // Force pool recreation below
+            // v8.5.9: Force pool reserves to match $3000 target price on every startup.
+            // Ghost trades from the supply inflation bug contaminated reserves — rather than
+            // deleting the pool (which re-bootstraps with stale data), we directly correct
+            // the reserve ratio to the authoritative oracle price.
+            {
+                let target_price = 3000.0_f64;
+                if pool_price > 0.0 && (pool_price < target_price * 0.9 || pool_price > target_price * 1.1) {
+                    // Pool ratio drifted >10% from target — reset reserves
+                    let pool_id = "pool-qug-qugusd-bootstrap".to_string();
+                    if let Some(mut pool_ref) = liquidity_pools_map.get_mut(&pool_id) {
+                        // DashMap RefMut derefs directly to LiquidityPool
+                        let qug_reserve_f64 = pool_ref.reserve0 as f64 / 1e24;
+                        let new_qugusd_reserve = (qug_reserve_f64 * target_price * 1e24) as u128;
+                        tracing::warn!(
+                            "💱 [v8.5.9] Pool price ${:.2} drifted from target ${:.0} — resetting reserves (QUG={:.2}, QUGUSD: {:.0} → {:.0})",
+                            pool_price, target_price, qug_reserve_f64,
+                            pool_ref.reserve1 as f64 / 1e24, new_qugusd_reserve as f64 / 1e24
+                        );
+                        pool_ref.reserve1 = new_qugusd_reserve;
+                        pool_ref.lp_token_supply = ((pool_ref.reserve0 as f64 * new_qugusd_reserve as f64).sqrt()) as u128;
+                        // Serialize and persist
+                        if let Ok(data) = serde_json::to_vec(&*pool_ref) {
+                            let _ = storage_engine.save_liquidity_pool(&pool_id, &data).await;
+                        }
+                        pool_price = target_price;
+                    }
+                    vault_w.qug_price_usd = target_price;
+                    vault_w.last_price_update = chrono::Utc::now().timestamp();
+                }
             }
             if pool_price > 0.0 && pool_price < 1_000_000.0 {
                 vault_w.qug_price_usd = pool_price;
@@ -2224,6 +2289,61 @@ impl AppState {
             let oracle_ref = bank_r.oracle_integration.as_ref();
             bootstrap_bridge_pools(&mut liquidity_pools_map, &storage_engine, qug_price, Some(oracle_ref)).await;
             drop(bank_r);
+        }
+
+        // v8.5.5: Initialize QCREDIT Yield Vault from storage or create new
+        let qcredit_vault = match storage_engine.load_qcredit_vault().await {
+            Ok(Some(vault_bytes)) => {
+                match serde_json::from_slice::<q_vm::contracts::QCreditVault>(&vault_bytes) {
+                    Ok(persisted) => {
+                        tracing::info!(
+                            "💳 Loaded QCREDIT vault: total_locked={:.2}, positions={}, reserve={:.2}",
+                            persisted.total_locked as f64 / 1e24,
+                            persisted.positions.values().map(|v| v.len()).sum::<usize>(),
+                            persisted.protocol_reserve as f64 / 1e24,
+                        );
+                        Arc::new(RwLock::new(persisted))
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to deserialize QCREDIT vault: {}, creating new", e);
+                        Arc::new(RwLock::new(q_vm::contracts::QCreditVault::new()))
+                    }
+                }
+            }
+            Ok(None) => {
+                tracing::info!("💳 No persisted QCREDIT vault found, creating new");
+                Arc::new(RwLock::new(q_vm::contracts::QCreditVault::new()))
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load QCREDIT vault: {}, creating new", e);
+                Arc::new(RwLock::new(q_vm::contracts::QCreditVault::new()))
+            }
+        };
+        tracing::info!("💳 QCREDIT Yield Vault initialized");
+
+        // v8.5.5: Bootstrap QUG/QCREDIT pool at 1:1 ratio
+        {
+            let qcredit_pool_id = "pool-qug-qcredit-bootstrap".to_string();
+            if !liquidity_pools_map.contains_key(&qcredit_pool_id) {
+                let bootstrap_amount: u128 = 10_000 * 1_000_000_000_000_000_000_000_000u128;
+                let pool = LiquidityPool {
+                    pool_id: qcredit_pool_id.clone(),
+                    token0: format!("qnk{}", hex::encode(q_types::QUG_TOKEN_ADDRESS)),
+                    token1: format!("qnk{}", hex::encode(q_types::QCREDIT_TOKEN_ADDRESS)),
+                    reserve0: bootstrap_amount,
+                    reserve1: bootstrap_amount,
+                    provider: [0u8; 32],
+                    created_at: chrono::Utc::now(),
+                    lp_token_supply: bootstrap_amount,
+                    token0_decimals: 24,
+                    token1_decimals: 24,
+                };
+                liquidity_pools_map.insert(qcredit_pool_id.clone(), pool.clone());
+                if let Ok(pool_bytes) = serde_json::to_vec(&pool) {
+                    let _ = storage_engine.save_liquidity_pool(&qcredit_pool_id, &pool_bytes).await;
+                }
+                tracing::info!("🏊 [v8.5.5] Created bootstrap QUG/QCREDIT pool: 10K/10K @ 1:1");
+            }
         }
 
         // Load existing loan applications from persistent storage
@@ -2382,6 +2502,9 @@ impl AppState {
             node_cypher: Arc::new(q_eternal_cypher::NodeCypher::from_ed25519_key(ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng))), // v7.2.12: test dummy
             admin_wallet: crate::aegis_auth_middleware::FOUNDER_WALLET.to_string(),
             stripe_client: crate::payment_api::init_stripe_client().ok(),
+            p2p_bytes_in: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            p2p_bytes_out: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            network_throttle_mode: Arc::new(std::sync::atomic::AtomicU8::new(2)), // 2 = Turbo (default)
             highest_network_height: Arc::new(std::sync::atomic::AtomicU64::new(0)), // Sync mode tracking
             last_peer_height_update: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v5.2.0: Peer height staleness
             sync_trigger: Arc::new(tokio::sync::Notify::new()), // v5.2.0: Immediate sync wake-up
@@ -2398,6 +2521,14 @@ impl AppState {
                 let (tx, _rx) = tokio::sync::broadcast::channel(1);
                 tx
             }, // 🛑 v1.0.2-beta: Graceful shutdown broadcast
+            auto_update_tx: None, // 🔄 v8.5.0: Auto-update (set in main.rs after init)
+            auto_update_state: None, // 🔄 v8.5.0: Auto-update state (set in main.rs after init)
+            auto_update_enabled: Arc::new(std::sync::atomic::AtomicBool::new(
+                std::env::var("Q_AUTO_UPDATE").unwrap_or_else(|_| "0".to_string()) == "1"
+            )), // 🔄 v8.5.1: Runtime auto-update toggle
+            admin_notification_email: Arc::new(tokio::sync::RwLock::new(
+                std::env::var("Q_ADMIN_NOTIFICATION_EMAIL").ok()
+            )), // 🔄 v8.5.1: Admin notification email
             current_challenge: Arc::new(tokio::sync::RwLock::new(None)), // 🔧 v1.0.4-beta: Challenge caching
             fork_detector: Arc::new(q_storage::fork_detector::ForkDetector::new()), // 🔍 v0.9.67-beta: Comprehensive fork detection
             sync_start_time: Arc::new(std::sync::RwLock::new(None)), // 🎨 v0.6.6-beta: Progress bar sync tracking
@@ -2612,6 +2743,8 @@ impl AppState {
 
             // QUG/QUGUSD Stablecoin System - CollateralVault
             collateral_vault,
+            // v8.5.5: QCREDIT Yield Vault
+            qcredit_vault,
 
             // Quillon Bank Loan Applications - Persistent storage
             pending_loan_applications: Arc::new(RwLock::new(pending_loan_applications_map)),
@@ -3102,21 +3235,32 @@ impl AppState {
             }
         }
 
-        // v8.1.2: REMOVED unconditional QUGUSD wipe (was v7.2.12)
-        // BUG FIX: The old code deleted ALL users' QUGUSD balances on every restart!
-        // It was meant for testnet→mainnet transition but ran unconditionally.
-        // QUGUSD token_balances are now preserved across restarts like all other tokens.
+        // v8.5.6: ONE-TIME QUGUSD ghost cleanup (replaces v8.5.3 every-restart purge).
+        // Root causes FIXED: (1) restore migration flag persists, (2) state_sync_api rejects QUGUSD from P2P.
+        // After one-time purge, legitimate QUGUSD from swaps/mints/loans persists across restarts.
         {
-            use q_types::QUGUSD_TOKEN_ADDRESS;
-            let qugusd_count = token_balances
-                .iter()
-                .filter(|((_wallet, token_addr), _)| *token_addr == QUGUSD_TOKEN_ADDRESS)
-                .count();
-            if qugusd_count > 0 {
-                tracing::info!(
-                    "✅ [v8.1.2] Preserved {} QUGUSD token_balance entries across restart",
-                    qugusd_count
-                );
+            const QUGUSD_PURGE_FLAG: &[u8] = b"migration_qugusd_ghost_purge_v856_done";
+            if !storage_engine.has_migration_flag(QUGUSD_PURGE_FLAG).await {
+                use q_types::QUGUSD_TOKEN_ADDRESS;
+                let qugusd_entries: Vec<([u8; 32], [u8; 32])> = token_balances
+                    .iter()
+                    .filter(|((_wallet, token_addr), _)| *token_addr == QUGUSD_TOKEN_ADDRESS)
+                    .map(|((wallet, token), _)| (*wallet, *token))
+                    .collect();
+                let qugusd_count = qugusd_entries.len();
+                if qugusd_count > 0 {
+                    for (wallet, token) in &qugusd_entries {
+                        token_balances.remove(&(*wallet, *token));
+                    }
+                    for (wallet, token) in &qugusd_entries {
+                        let _ = storage_engine.delete_token_balance(wallet, token).await;
+                    }
+                    tracing::warn!(
+                        "🧹 [v8.5.6] ONE-TIME purge: removed {} ghost QUGUSD entries (won't run again)",
+                        qugusd_count
+                    );
+                }
+                let _ = storage_engine.set_migration_flag(QUGUSD_PURGE_FLAG).await;
             }
         }
 
@@ -3429,15 +3573,35 @@ impl AppState {
                     break;
                 }
             }
-            // v8.0.1: If pool has old $42.50 price, delete it so it gets recreated at $3000
-            if pool_price > 0.0 && pool_price < 100.0 {
-                tracing::warn!(
-                    "💱 [STARTUP v8.0.1] Pool QUG price ${:.4} is outdated (< $100), removing stale pool for recreation at $3000",
-                    pool_price
-                );
-                liquidity_pools_map.remove("pool-qug-qugusd-bootstrap");
-                let _ = storage_engine.delete_liquidity_pool("pool-qug-qugusd-bootstrap").await;
-                pool_price = 0.0; // Force pool recreation below
+            // v8.5.9: Force pool reserves to match $3000 target price on every startup.
+            // Ghost trades from the supply inflation bug contaminated reserves — rather than
+            // deleting the pool (which re-bootstraps with stale data), we directly correct
+            // the reserve ratio to the authoritative oracle price.
+            {
+                let target_price = 3000.0_f64;
+                if pool_price > 0.0 && (pool_price < target_price * 0.9 || pool_price > target_price * 1.1) {
+                    // Pool ratio drifted >10% from target — reset reserves
+                    let pool_id = "pool-qug-qugusd-bootstrap".to_string();
+                    if let Some(mut pool_ref) = liquidity_pools_map.get_mut(&pool_id) {
+                        // DashMap RefMut derefs directly to LiquidityPool
+                        let qug_reserve_f64 = pool_ref.reserve0 as f64 / 1e24;
+                        let new_qugusd_reserve = (qug_reserve_f64 * target_price * 1e24) as u128;
+                        tracing::warn!(
+                            "💱 [v8.5.9] Pool price ${:.2} drifted from target ${:.0} — resetting reserves (QUG={:.2}, QUGUSD: {:.0} → {:.0})",
+                            pool_price, target_price, qug_reserve_f64,
+                            pool_ref.reserve1 as f64 / 1e24, new_qugusd_reserve as f64 / 1e24
+                        );
+                        pool_ref.reserve1 = new_qugusd_reserve;
+                        pool_ref.lp_token_supply = ((pool_ref.reserve0 as f64 * new_qugusd_reserve as f64).sqrt()) as u128;
+                        // Serialize and persist
+                        if let Ok(data) = serde_json::to_vec(&*pool_ref) {
+                            let _ = storage_engine.save_liquidity_pool(&pool_id, &data).await;
+                        }
+                        pool_price = target_price;
+                    }
+                    vault_w.qug_price_usd = target_price;
+                    vault_w.last_price_update = chrono::Utc::now().timestamp();
+                }
             }
             if pool_price > 0.0 && pool_price < 1_000_000.0 {
                 vault_w.qug_price_usd = pool_price;
@@ -3493,6 +3657,61 @@ impl AppState {
             let oracle_ref = bank_r.oracle_integration.as_ref();
             bootstrap_bridge_pools(&mut liquidity_pools_map, &storage_engine, qug_price, Some(oracle_ref)).await;
             drop(bank_r);
+        }
+
+        // v8.5.5: Initialize QCREDIT Yield Vault from storage or create new
+        let qcredit_vault = match storage_engine.load_qcredit_vault().await {
+            Ok(Some(vault_bytes)) => {
+                match serde_json::from_slice::<q_vm::contracts::QCreditVault>(&vault_bytes) {
+                    Ok(persisted) => {
+                        tracing::info!(
+                            "💳 Loaded QCREDIT vault: total_locked={:.2}, positions={}, reserve={:.2}",
+                            persisted.total_locked as f64 / 1e24,
+                            persisted.positions.values().map(|v| v.len()).sum::<usize>(),
+                            persisted.protocol_reserve as f64 / 1e24,
+                        );
+                        Arc::new(RwLock::new(persisted))
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to deserialize QCREDIT vault: {}, creating new", e);
+                        Arc::new(RwLock::new(q_vm::contracts::QCreditVault::new()))
+                    }
+                }
+            }
+            Ok(None) => {
+                tracing::info!("💳 No persisted QCREDIT vault found, creating new");
+                Arc::new(RwLock::new(q_vm::contracts::QCreditVault::new()))
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load QCREDIT vault: {}, creating new", e);
+                Arc::new(RwLock::new(q_vm::contracts::QCreditVault::new()))
+            }
+        };
+        tracing::info!("💳 QCREDIT Yield Vault initialized");
+
+        // v8.5.5: Bootstrap QUG/QCREDIT pool at 1:1 ratio
+        {
+            let qcredit_pool_id = "pool-qug-qcredit-bootstrap".to_string();
+            if !liquidity_pools_map.contains_key(&qcredit_pool_id) {
+                let bootstrap_amount: u128 = 10_000 * 1_000_000_000_000_000_000_000_000u128;
+                let pool = LiquidityPool {
+                    pool_id: qcredit_pool_id.clone(),
+                    token0: format!("qnk{}", hex::encode(q_types::QUG_TOKEN_ADDRESS)),
+                    token1: format!("qnk{}", hex::encode(q_types::QCREDIT_TOKEN_ADDRESS)),
+                    reserve0: bootstrap_amount,
+                    reserve1: bootstrap_amount,
+                    provider: [0u8; 32],
+                    created_at: chrono::Utc::now(),
+                    lp_token_supply: bootstrap_amount,
+                    token0_decimals: 24,
+                    token1_decimals: 24,
+                };
+                liquidity_pools_map.insert(qcredit_pool_id.clone(), pool.clone());
+                if let Ok(pool_bytes) = serde_json::to_vec(&pool) {
+                    let _ = storage_engine.save_liquidity_pool(&qcredit_pool_id, &pool_bytes).await;
+                }
+                tracing::info!("🏊 [v8.5.5] Created bootstrap QUG/QCREDIT pool: 10K/10K @ 1:1");
+            }
         }
 
         // Load existing loan applications from persistent storage
@@ -3605,6 +3824,9 @@ impl AppState {
             node_cypher: Arc::new(q_eternal_cypher::NodeCypher::from_ed25519_key(ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng))), // v7.2.12: placeholder, replaced in main.rs
             admin_wallet: crate::aegis_auth_middleware::FOUNDER_WALLET.to_string(),
             stripe_client: crate::payment_api::init_stripe_client().ok(),
+            p2p_bytes_in: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            p2p_bytes_out: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            network_throttle_mode: Arc::new(std::sync::atomic::AtomicU8::new(2)), // 2 = Turbo (default)
             highest_network_height: Arc::new(std::sync::atomic::AtomicU64::new(0)), // Sync mode tracking
             last_peer_height_update: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v5.2.0: Peer height staleness
             sync_trigger: Arc::new(tokio::sync::Notify::new()), // v5.2.0: Immediate sync wake-up
@@ -3621,6 +3843,14 @@ impl AppState {
                 let (tx, _rx) = tokio::sync::broadcast::channel(1);
                 tx
             }, // 🛑 v1.0.2-beta: Graceful shutdown broadcast
+            auto_update_tx: None, // 🔄 v8.5.0: Auto-update (set in main.rs after init)
+            auto_update_state: None, // 🔄 v8.5.0: Auto-update state (set in main.rs after init)
+            auto_update_enabled: Arc::new(std::sync::atomic::AtomicBool::new(
+                std::env::var("Q_AUTO_UPDATE").unwrap_or_else(|_| "0".to_string()) == "1"
+            )), // 🔄 v8.5.1: Runtime auto-update toggle
+            admin_notification_email: Arc::new(tokio::sync::RwLock::new(
+                std::env::var("Q_ADMIN_NOTIFICATION_EMAIL").ok()
+            )), // 🔄 v8.5.1: Admin notification email
             current_challenge: Arc::new(tokio::sync::RwLock::new(None)), // 🔧 v1.0.4-beta: Challenge caching
             fork_detector: Arc::new(q_storage::fork_detector::ForkDetector::new()), // 🔍 v0.9.67-beta: Comprehensive fork detection
             sync_start_time: Arc::new(std::sync::RwLock::new(None)), // 🎨 v0.6.6-beta: Progress bar sync tracking
@@ -3933,6 +4163,8 @@ impl AppState {
 
             // QUG/QUGUSD Stablecoin System - CollateralVault
             collateral_vault,
+            // v8.5.5: QCREDIT Yield Vault
+            qcredit_vault,
 
             // Quillon Bank Loan Applications - Persistent storage
             pending_loan_applications: Arc::new(RwLock::new(pending_loan_applications_map)),

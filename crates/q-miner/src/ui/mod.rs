@@ -2,6 +2,9 @@ pub mod dashboard;
 pub mod cli;
 pub mod tui_app;
 
+#[cfg(feature = "tui")]
+pub mod tui_views;
+
 #[cfg(feature = "gui")]
 pub mod gui;
 

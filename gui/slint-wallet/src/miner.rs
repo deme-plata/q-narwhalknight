@@ -8,6 +8,11 @@ use crate::models::MiningSubmission;
 /// This MUST match the server's recomputation in handlers.rs submit_mining_solution.
 const VDF_ITERATIONS: u32 = 100;
 
+/// v8.5.2: Fallback bootstrap server (same as standalone miner).
+/// If the primary server goes down, challenge fetch + solution submit automatically
+/// fail over to this URL, preventing missed blocks.
+const FALLBACK_BOOTSTRAP_URL: &str = "https://quillon.xyz";
+
 /// Background miner state shared between the mining threads and the UI.
 pub struct MinerState {
     pub running: AtomicBool,
@@ -49,6 +54,7 @@ struct SharedChallenge {
 
 /// BLAKE3 VDF mining: hash(challenge || nonce), then iterate 100 times.
 /// Must match server-side verification exactly (100 VDF iterations).
+/// v8.5.2: Zero-allocation — pre-allocated 40-byte buffer (from standalone miner).
 #[inline(always)]
 fn mine_hash(challenge_bytes: &[u8; 32], nonce: u64) -> [u8; 32] {
     let mut input = [0u8; 40];
@@ -144,7 +150,220 @@ fn pin_thread_to_core(thread_id: usize) {
     }
 }
 
+/// v8.5.2: SSE listener for new-block events — instant challenge refresh.
+/// Ported from standalone miner's start_sse_listener with fallback support.
+async fn start_sse_listener(
+    wallet: String,
+    server_url: String,
+    is_running: Arc<AtomicBool>,
+    new_block_signal: Arc<AtomicU64>,
+    state: Arc<MinerState>,
+) {
+    use eventsource_client::{self as eventsource, Client as _};
+    use futures::StreamExt;
+
+    let primary_url = format!("{}/api/v1/events?wallet_address={}", server_url, wallet);
+    let fallback_url = format!("{}/api/v1/events?wallet_address={}", FALLBACK_BOOTSTRAP_URL, wallet);
+    let mut use_fallback = false;
+    let mut primary_fail_count = 0u32;
+
+    loop {
+        if !is_running.load(Ordering::SeqCst) {
+            break;
+        }
+
+        let url = if use_fallback { &fallback_url } else { &primary_url };
+
+        let client = match eventsource::ClientBuilder::for_url(url) {
+            Ok(builder) => builder.build(),
+            Err(e) => {
+                eprintln!("[MINER-SSE] Failed to create SSE client for {}: {}", url, e);
+                if !use_fallback {
+                    primary_fail_count += 1;
+                    if primary_fail_count >= 3 {
+                        eprintln!("[MINER-SSE] Switching to fallback {}", FALLBACK_BOOTSTRAP_URL);
+                        use_fallback = true;
+                        primary_fail_count = 0;
+                    }
+                }
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                continue;
+            }
+        };
+
+        let mut stream = client.stream();
+        eprintln!("[MINER-SSE] Connected to {}", url);
+
+        while is_running.load(Ordering::SeqCst) {
+            match stream.next().await {
+                Some(Ok(eventsource::SSE::Event(ev))) => {
+                    // New block → signal mining threads to refresh challenge immediately
+                    if ev.event_type == "new-block" {
+                        if let Ok(data) = serde_json::from_str::<serde_json::Value>(&ev.data) {
+                            if let Some(height) = data.get("height").and_then(|v| v.as_u64()) {
+                                let sig = new_block_signal.fetch_add(1, Ordering::SeqCst) + 1;
+                                eprintln!("[MINER-SSE] New block #{} — signaling threads (sig={})", height, sig);
+                            }
+                        }
+                        // Reset fail counter on successful events
+                        primary_fail_count = 0;
+                    }
+
+                    // Mining reward notification
+                    if ev.event_type == "mining_reward" {
+                        if let Ok(data) = serde_json::from_str::<serde_json::Value>(&ev.data) {
+                            if let Some(miner_addr) = data.get("miner_address").and_then(|v| v.as_str()) {
+                                if miner_addr == wallet {
+                                    let reward = data.get("reward_qnk").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    let height = data.get("block_height").and_then(|v| v.as_u64()).unwrap_or(0);
+                                    eprintln!("[MINER-SSE] Mining reward! +{:.8} QUG at block #{}", reward, height);
+                                    state.set_status(&format!("Reward! +{:.4} QUG", reward));
+                                }
+                            }
+                        }
+                    }
+
+                    // Balance update for mining rewards
+                    if ev.event_type == "balance_updated" {
+                        if let Ok(data) = serde_json::from_str::<serde_json::Value>(&ev.data) {
+                            if let Some(addr) = data.get("wallet_address").and_then(|v| v.as_str()) {
+                                if addr == wallet {
+                                    if let Some(reason) = data.get("change_reason").and_then(|v| v.as_str()) {
+                                        if reason == "mining_reward" {
+                                            let bal = data.get("new_balance").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                            eprintln!("[MINER-SSE] Balance: {:.8} QUG", bal);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Some(Ok(eventsource::SSE::Comment(_))) => {}
+                Some(Err(e)) => {
+                    eprintln!("[MINER-SSE] Stream error: {}", e);
+                    break;
+                }
+                None => {
+                    eprintln!("[MINER-SSE] Stream ended");
+                    break;
+                }
+            }
+        }
+
+        // v1.0.2: Drop stream explicitly to trigger clean TCP close (prevent FIN-WAIT-1 zombies)
+        drop(stream);
+
+        if is_running.load(Ordering::SeqCst) {
+            if !use_fallback {
+                primary_fail_count += 1;
+                if primary_fail_count >= 3 {
+                    eprintln!("[MINER-SSE] Primary failed {} times, switching to fallback", primary_fail_count);
+                    use_fallback = true;
+                    primary_fail_count = 0;
+                }
+            } else {
+                primary_fail_count += 1;
+                if primary_fail_count >= 3 {
+                    eprintln!("[MINER-SSE] Fallback failed, retrying primary...");
+                    use_fallback = false;
+                    primary_fail_count = 0;
+                }
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        }
+    }
+
+    eprintln!("[MINER-SSE] Listener stopped");
+}
+
+/// v8.5.2: Fetch challenge with automatic fallback to quillon.xyz.
+/// Ported from standalone miner's fetch_with_fallback pattern.
+async fn fetch_challenge_with_fallback(
+    api_client: &ApiClient,
+    server_url: &str,
+) -> Result<crate::models::MiningChallenge, String> {
+    // Try primary server first
+    match api_client.get_mining_challenge().await {
+        Ok(c) => return Ok(c),
+        Err(e) => {
+            let msg = e.to_string();
+            // Don't fallback for auth/sync errors — those are local issues
+            if msg.contains("503") || msg.contains("SERVICE_UNAVAILABLE")
+                || msg.contains("No peers") || msg.contains("discovering") {
+                return Err(msg);
+            }
+            eprintln!("[MINER] Primary challenge failed ({}), trying fallback...", msg);
+        }
+    }
+
+    // Fallback: direct GET to quillon.xyz (no auth needed for challenge)
+    let fallback_url = format!("{}/api/v1/mining/challenge", FALLBACK_BOOTSTRAP_URL);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    match client.get(&fallback_url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            #[derive(serde::Deserialize)]
+            struct Wrapper { data: Option<crate::models::MiningChallenge> }
+            match resp.json::<Wrapper>().await {
+                Ok(w) if w.data.is_some() => {
+                    eprintln!("[MINER] Using fallback challenge from {}", FALLBACK_BOOTSTRAP_URL);
+                    Ok(w.data.unwrap())
+                }
+                _ => Err("Fallback: no data in response".to_string()),
+            }
+        }
+        Ok(resp) => Err(format!("Fallback HTTP {}", resp.status())),
+        Err(e) => Err(format!("Fallback unreachable: {}", e)),
+    }
+}
+
+/// v8.5.2: Submit solution with automatic fallback.
+/// If primary fails, tries fallback server to avoid missing block rewards.
+async fn submit_with_fallback(
+    api_client: &ApiClient,
+    submission: &MiningSubmission,
+    server_url: &str,
+) -> Result<serde_json::Value, String> {
+    // Try primary
+    match api_client.submit_mining_solution(submission).await {
+        Ok(resp) => return Ok(resp),
+        Err(e) => {
+            eprintln!("[MINER] Primary submit failed: {} — trying fallback", e);
+        }
+    }
+
+    // Fallback: POST directly to quillon.xyz
+    let fallback_url = format!("{}/api/v1/mining/submit", FALLBACK_BOOTSTRAP_URL);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    match client.post(&fallback_url).json(submission).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            eprintln!("[MINER] Fallback submit succeeded!");
+            resp.json().await.map_err(|e| format!("Fallback parse: {}", e))
+        }
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            Err(format!("Fallback HTTP {}: {}", status, body))
+        }
+        Err(e) => Err(format!("Fallback unreachable: {}", e)),
+    }
+}
+
 /// Start the mining loop with multiple threads (one per CPU core).
+/// v8.5.2: Major networking improvements ported from standalone miner:
+///   - SSE new-block listener for instant challenge refresh (no more 10s stale work)
+///   - Fallback server (quillon.xyz) for challenge fetch + solution submit
+///   - Stale work detection every 4096 hashes (from standalone miner v7.4.3)
+///   - Thread-local hash counting (batch 1024 before atomic add)
+///   - TCP keepalive on HTTP client (15s, prevents socket exhaustion)
 pub fn start_mining(
     state: Arc<MinerState>,
     api_client: Arc<ApiClient>,
@@ -177,13 +396,46 @@ pub fn start_mining(
         (0..num_threads).map(|_| AtomicU64::new(0)).collect(),
     );
 
-    // Coordinator thread: fetches challenges every 10s, aggregates hashrate every second
+    // v8.5.2: New-block signal from SSE — mining threads check this to abandon stale work
+    let new_block_signal = Arc::new(AtomicU64::new(0));
+
+    // v8.5.2: Spawn SSE listener for instant new-block notifications
+    {
+        let wallet = miner_address.clone();
+        let server_url = api_client.base_url().to_string();
+        let is_running = Arc::new(AtomicBool::new(true));
+        let signal = new_block_signal.clone();
+        let state_clone = state.clone();
+        // Store is_running so we can stop SSE when mining stops
+        let is_running_for_stop = is_running.clone();
+
+        rt.spawn(async move {
+            start_sse_listener(wallet, server_url, is_running, signal, state_clone).await;
+        });
+
+        // Monitor mining state and stop SSE when mining stops
+        let state_monitor = state.clone();
+        rt.spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                if !state_monitor.running.load(Ordering::SeqCst) {
+                    is_running_for_stop.store(false, Ordering::SeqCst);
+                    break;
+                }
+            }
+        });
+    }
+
+    // Coordinator thread: fetches challenges, aggregates hashrate
+    // v8.5.2: Thread 0 refreshes every 50s (like standalone miner), others rely on SSE signal.
+    // Also refreshes immediately on new_block_signal change.
     {
         let state = state.clone();
         let api_client = api_client.clone();
         let rt = rt.clone();
         let challenge = challenge.clone();
         let thread_hashes = thread_hashes.clone();
+        let new_block_signal = new_block_signal.clone();
 
         std::thread::Builder::new()
             .name("miner-coordinator".into())
@@ -191,11 +443,13 @@ pub fn start_mining(
                 let mut last_hashrate_calc = std::time::Instant::now();
                 let mut consecutive_errors = 0u32;
                 let mut last_height = 0u64;
+                let mut last_block_signal = 0u64;
+                let server_url = api_client.base_url().to_string();
 
                 while state.running.load(Ordering::SeqCst) {
-                    // Fetch new challenge
+                    // Fetch new challenge (with fallback)
                     let client = api_client.clone();
-                    match rt.block_on(client.get_mining_challenge()) {
+                    match rt.block_on(fetch_challenge_with_fallback(&client, &server_url)) {
                         Ok(c) => {
                             consecutive_errors = 0;
                             if let (Ok(ch), Ok(tg)) = (
@@ -234,9 +488,8 @@ pub fn start_mining(
                                 state.set_status("Error: decode failed");
                             }
                         }
-                        Err(e) => {
+                        Err(msg) => {
                             consecutive_errors += 1;
-                            let msg = e.to_string();
                             if msg.contains("503") || msg.contains("SERVICE_UNAVAILABLE") {
                                 state.set_status("Waiting for sync...");
                                 eprintln!("[MINER] Node syncing — mining paused (attempt {})", consecutive_errors);
@@ -250,15 +503,24 @@ pub fn start_mining(
                         }
                     }
 
-                    // Wait 10 seconds between challenge fetches, updating hashrate every second
-                    let wait_secs = if consecutive_errors > 5 { 15 } else { 10 };
-                    for _ in 0..wait_secs {
+                    // v8.5.2: Wait up to 50s between challenge fetches (like standalone miner thread 0),
+                    // but wake up immediately if SSE signals a new block.
+                    // Update hashrate every second within the wait loop.
+                    let wait_secs = if consecutive_errors > 5 { 15 } else { 50 };
+                    for _tick in 0..wait_secs {
                         if !state.running.load(Ordering::Relaxed) {
                             return;
                         }
                         std::thread::sleep(std::time::Duration::from_secs(1));
 
-                        // Sum all thread hash counters for hashrate
+                        // Check if SSE signaled a new block — refresh challenge immediately
+                        let current_signal = new_block_signal.load(Ordering::Relaxed);
+                        if current_signal != last_block_signal {
+                            last_block_signal = current_signal;
+                            break; // Exit wait loop to fetch new challenge now
+                        }
+
+                        // Sum all thread hash counters for hashrate (every second)
                         let elapsed = last_hashrate_calc.elapsed();
                         if elapsed.as_millis() >= 900 {
                             let total: u64 = thread_hashes
@@ -284,6 +546,7 @@ pub fn start_mining(
         let rt = rt.clone();
         let challenge = challenge.clone();
         let my_counter = thread_hashes.clone();
+        let new_block_signal = new_block_signal.clone();
 
         std::thread::Builder::new()
             .name(format!("miner-{}", thread_id))
@@ -292,6 +555,10 @@ pub fn start_mining(
 
                 let mut nonce: u64 = rand::random::<u64>().wrapping_add(thread_id as u64 * 1_000_000_000);
                 const BATCH_SIZE: u64 = 10_000;
+                let server_url = api_client.base_url().to_string();
+
+                // v8.5.2: Track last known block signal for stale work detection
+                let mut last_known_block_signal = new_block_signal.load(Ordering::Relaxed);
 
                 while state.running.load(Ordering::SeqCst) {
                     // Read current challenge (one RwLock read per batch)
@@ -315,9 +582,33 @@ pub fn start_mining(
 
                     let (challenge_bytes, target_bytes, challenge_hash, difficulty_target, block_height) = ch;
 
+                    // Update signal baseline when reading fresh challenge
+                    last_known_block_signal = new_block_signal.load(Ordering::Relaxed);
+
+                    // v8.5.2: Thread-local hash counting — batch 1024 before atomic add
+                    // Reduces cache-line contention in multi-thread scenarios
+                    let mut local_hash_count: u64 = 0;
+
                     // Mine a batch — tight inner loop
-                    for _ in 0..BATCH_SIZE {
+                    for i in 0..BATCH_SIZE {
                         let hash = mine_hash(&challenge_bytes, nonce);
+                        local_hash_count += 1;
+
+                        // v8.5.2: Batch atomic update every 1024 hashes (from standalone miner)
+                        if local_hash_count >= 1024 {
+                            my_counter[thread_id].fetch_add(local_hash_count, Ordering::Relaxed);
+                            local_hash_count = 0;
+                        }
+
+                        // v8.5.2 (from standalone v7.4.3): Check for new block every 4096 hashes
+                        // Before: only checked between batches (up to 7s of wasted work)
+                        // After: max ~2ms wasted on stale challenge
+                        if i & 4095 == 0 && i > 0 {
+                            let sig = new_block_signal.load(Ordering::Relaxed);
+                            if sig != last_known_block_signal {
+                                break; // New block arrived — refresh challenge immediately
+                            }
+                        }
 
                         if meets_difficulty(&hash, &target_bytes) {
                             let hr = state.hashrate.load(Ordering::Relaxed);
@@ -334,15 +625,18 @@ pub fn start_mining(
                             };
 
                             eprintln!("[MINER] Found valid hash! Nonce: {} — submitting...", nonce);
+
+                            // v8.5.2: Submit with fallback (from standalone miner)
                             let client = api_client.clone();
-                            match rt.block_on(client.submit_mining_solution(&submission)) {
+                            let sub = submission.clone();
+                            let srv = server_url.clone();
+                            match rt.block_on(submit_with_fallback(&client, &sub, &srv)) {
                                 Ok(resp) => {
                                     eprintln!("[MINER] Block accepted! Response: {:?}", resp);
                                     state.blocks_found.fetch_add(1, Ordering::SeqCst);
                                     state.set_status("Block found!");
                                 }
-                                Err(e) => {
-                                    let msg = e.to_string();
+                                Err(msg) => {
                                     if msg.contains("Hash verification failed") {
                                         eprintln!("[MINER] HASH MISMATCH — server rejected (VDF issue?)");
                                     } else if msg.contains("Duplicate nonce") {
@@ -378,7 +672,10 @@ pub fn start_mining(
                         nonce = nonce.wrapping_add(1);
                     }
 
-                    my_counter[thread_id].fetch_add(BATCH_SIZE, Ordering::Relaxed);
+                    // Flush remaining local hash count
+                    if local_hash_count > 0 {
+                        my_counter[thread_id].fetch_add(local_hash_count, Ordering::Relaxed);
+                    }
                 }
             })
             .expect("failed to spawn mining thread");

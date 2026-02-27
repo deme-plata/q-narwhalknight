@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use futures_util::StreamExt;
 use semver::Version;
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use tokio::sync::watch;
 
@@ -39,6 +40,8 @@ pub struct Updater {
     state_rx: watch::Receiver<UpdateState>,
     /// Path to the downloaded temp file (set after successful download).
     temp_path: std::sync::Mutex<Option<PathBuf>>,
+    /// Expected SHA-256 checksum from server (set during version check).
+    expected_sha256: std::sync::Mutex<Option<String>>,
 }
 
 impl Updater {
@@ -49,6 +52,7 @@ impl Updater {
             state_tx,
             state_rx,
             temp_path: std::sync::Mutex::new(None),
+            expected_sha256: std::sync::Mutex::new(None),
         }
     }
 
@@ -87,6 +91,13 @@ impl Updater {
 
         if remote > current {
             let ver = latest.to_string();
+            // Capture SHA-256 checksum from server for post-download verification
+            let sha256 = body
+                .get("data")
+                .and_then(|d| d.get("latest_wallet_sha256"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            *self.expected_sha256.lock().unwrap() = sha256;
             let _ = self
                 .state_tx
                 .send(UpdateState::Available { version: ver.clone() });
@@ -137,6 +148,12 @@ impl Updater {
         // Write to a temp file next to the current executable
         let current_exe = std::env::current_exe()?;
         let temp_path = current_exe.with_extension("update-tmp");
+
+        // Clean up stale temp file from any previous failed download
+        if temp_path.exists() {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+        }
+
         let mut file = tokio::fs::File::create(&temp_path).await?;
 
         let mut stream = resp.bytes_stream();
@@ -153,6 +170,31 @@ impl Updater {
         }
         tokio::io::AsyncWriteExt::flush(&mut file).await?;
         drop(file);
+
+        // Verify SHA-256 checksum (prevents MITM / corrupt downloads)
+        if let Some(expected) = self.expected_sha256.lock().unwrap().as_ref() {
+            let file_data = tokio::fs::read(&temp_path).await?;
+            let mut hasher = Sha256::new();
+            hasher.update(&file_data);
+            let actual = format!("{:x}", hasher.finalize());
+            if actual != *expected {
+                // Delete the corrupt/tampered binary immediately
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                let msg = format!(
+                    "SHA-256 mismatch! Expected {}..., got {}... — possible tampering",
+                    &expected[..16.min(expected.len())],
+                    &actual[..16]
+                );
+                let _ = self.state_tx.send(UpdateState::Error {
+                    version: version_owned,
+                    message: msg.clone(),
+                });
+                return Err(anyhow!(msg));
+            }
+            tracing::info!("✅ [UPDATE] SHA-256 verified: {}...", &actual[..16]);
+        } else {
+            tracing::warn!("⚠️ [UPDATE] No SHA-256 from server — skipping checksum verification");
+        }
 
         // Make executable on Unix
         #[cfg(unix)]

@@ -78,6 +78,7 @@ const truncateWallet = (addr: string): string => {
 };
 
 const formatUsd = (value: number): string => {
+  if (value == null || isNaN(value)) return '$0';
   return value.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
 };
 
@@ -570,7 +571,7 @@ const XListCrowdfundModal: React.FC<XListCrowdfundModalProps> = ({ campaign, onC
                 {formatUsd(entry.amount_usd)}
               </span>
               <span style={{ textAlign: 'right', color: 'rgba(255,255,255,0.5)', fontFamily: 'monospace' }}>
-                {entry.share_percent.toFixed(1)}%
+                {(entry.share_percent ?? 0).toFixed(1)}%
               </span>
               <span style={{ textAlign: 'center' }}>
                 <span style={{
@@ -583,7 +584,7 @@ const XListCrowdfundModal: React.FC<XListCrowdfundModalProps> = ({ campaign, onC
                 </span>
               </span>
               <span style={{ textAlign: 'right', color: '#00d4ff', fontWeight: 600, fontFamily: 'monospace' }}>
-                {entry.multiplier.toFixed(1)}x
+                {(entry.multiplier ?? 0).toFixed(1)}x
               </span>
             </motion.div>
           );
@@ -652,7 +653,7 @@ const XListCrowdfundModal: React.FC<XListCrowdfundModalProps> = ({ campaign, onC
             background: 'rgba(0, 212, 255, 0.1)', border: '1px solid rgba(0, 212, 255, 0.2)',
             fontSize: 14, fontWeight: 700, color: '#00d4ff',
           }}>
-            {myPerks.multiplier.toFixed(1)}x airdrop multiplier
+            {(myPerks.multiplier ?? 0).toFixed(1)}x airdrop multiplier
             {myPerks.is_early_bird && (
               <span style={{ marginLeft: 6, fontSize: 12, color: '#ffc107' }}>
                 (incl. +0.5x early bird)
@@ -682,7 +683,7 @@ const XListCrowdfundModal: React.FC<XListCrowdfundModalProps> = ({ campaign, onC
               Pool Share
             </div>
             <div style={{ fontSize: 18, fontWeight: 700, color: '#00d4ff', marginTop: 4, fontFamily: 'monospace' }}>
-              {myPerks.share_percent.toFixed(2)}%
+              {(myPerks.share_percent ?? 0).toFixed(2)}%
             </div>
           </div>
         </div>

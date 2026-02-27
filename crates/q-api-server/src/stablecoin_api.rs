@@ -12,7 +12,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use q_types::{ApiResponse, TokenInfo, TokenType, QUGUSD_TOKEN_ADDRESS, QUG_TOKEN_ADDRESS};
+use q_types::{ApiResponse, TokenInfo, TokenType, QUGUSD_TOKEN_ADDRESS, QUG_TOKEN_ADDRESS, QCREDIT_TOKEN_ADDRESS};
 use q_vm::contracts::{CollateralVault, MintResult, PositionHealth, RedeemResult, VaultStats};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -241,6 +241,39 @@ pub async fn get_multi_token_balance(
         },
     );
     total_usd_value += qugusd_usd_value;
+
+    // v8.5.5: Add QCREDIT balance (from token_balances + vault locked positions)
+    let qcredit_balance = {
+        let token_balances = state.token_balances.read().await;
+        let balance_key = (addr_bytes, QCREDIT_TOKEN_ADDRESS);
+        token_balances.get(&balance_key).copied().unwrap_or(0)
+    };
+    // Also count locked QUG as QCREDIT (positions minted 1:1)
+    let qcredit_vault_locked = {
+        let vault = state.qcredit_vault.read().await;
+        let wallet_hex = hex::encode(addr_bytes);
+        vault.get_positions(&wallet_hex)
+            .iter()
+            .map(|p| p.qcredit_minted)
+            .sum::<u128>()
+    };
+    let total_qcredit = qcredit_balance.max(qcredit_vault_locked);
+    if total_qcredit > 0 {
+        // QCREDIT trades at ~1:1 with QUG
+        let qcredit_usd = (total_qcredit as f64 / QUG_DIVISOR) * qug_price_usd;
+        tokens.insert(
+            "QCREDIT".to_string(),
+            TokenBalance {
+                balance: format!("{:.8}", total_qcredit as f64 / QUG_DIVISOR),
+                balance_base_units: total_qcredit,
+                usd_value: qcredit_usd,
+                name: Some("Quillon Credit".to_string()),
+                contract_address: Some(format!("qnk{}", hex::encode(QCREDIT_TOKEN_ADDRESS))),
+                decimals: Some(24),
+            },
+        );
+        total_usd_value += qcredit_usd;
+    }
 
     // ============================================
     // 🔧 v2.9.21-beta: CRITICAL FIX - Read token balances from RocksDB, not in-memory HashMap

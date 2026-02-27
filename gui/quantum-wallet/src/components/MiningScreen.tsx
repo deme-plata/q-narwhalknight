@@ -250,15 +250,15 @@ export default function MiningScreen() {
   const handleDownloadMiner = (platform: 'linux' | 'linux-arm64' | 'windows' | 'macos-intel' | 'macos-arm') => {
     // Link to download the miner binary
     if (platform === 'windows') {
-      window.open('/downloads/q-miner-windows-x64.exe', '_blank');
+      window.open('https://dl.quillon.xyz/downloads/q-miner-windows-x64.exe', '_blank');
     } else if (platform === 'linux-arm64') {
-      window.open('/downloads/q-miner-linux-arm64', '_blank');
+      window.open('https://dl.quillon.xyz/downloads/q-miner-linux-arm64', '_blank');
     } else if (platform === 'macos-intel') {
-      window.open('/downloads/q-miner-macos-x64', '_blank');
+      window.open('https://dl.quillon.xyz/downloads/q-miner-macos-x64', '_blank');
     } else if (platform === 'macos-arm') {
-      window.open('/downloads/q-miner-macos-arm64', '_blank');
+      window.open('https://dl.quillon.xyz/downloads/q-miner-macos-arm64', '_blank');
     } else {
-      window.open('/downloads/q-miner-linux-x64', '_blank');
+      window.open('https://dl.quillon.xyz/downloads/q-miner-linux-x64', '_blank');
     }
   };
 
@@ -273,7 +273,7 @@ export default function MiningScreen() {
     ? `${window.location.protocol}//${window.location.host}`
     : 'http://localhost:8080';
 
-  const miningCommand = `./q-miner-v2.5.0 --mode solo --wallet ${walletAddress} --threads 4 --intensity 7 --server ${currentServerUrl}`;
+  const miningCommand = `./q-miner-v8.3.0 --mode solo --wallet ${walletAddress} --threads 4 --intensity 7 --server ${currentServerUrl}`;
 
   const tabs = [
     { id: 'pool' as MiningTab, label: 'Pool Mining', icon: Users, color: 'quantum-purple' },
@@ -905,14 +905,14 @@ export default function MiningScreen() {
                     <div className="bg-quantum-dark/50 rounded-lg p-4 border border-quantum-cyan/20 relative">
                       <p className="text-quantum-cyan text-sm font-bold mb-3">Linux x86_64</p>
                       <div className="space-y-1 font-mono text-xs text-gray-300 overflow-x-auto">
-                        <code className="block">wget https://quillon.xyz/downloads/q-miner-v2.5.0</code>
-                        <code className="block">chmod +x q-miner-v2.5.0</code>
-                        <code className="block text-quantum-green mt-2">./q-miner-v2.5.0 --mode solo \</code>
+                        <code className="block">wget https://dl.quillon.xyz/downloads/q-miner-v8.3.0</code>
+                        <code className="block">chmod +x q-miner-v8.3.0</code>
+                        <code className="block text-quantum-green mt-2">./q-miner-v8.3.0 --mode solo \</code>
                         <code className="block text-quantum-green pl-2">--wallet {walletAddress || 'YOUR_WALLET'} \</code>
                         <code className="block text-quantum-green pl-2">--server {currentServerUrl}</code>
                       </div>
                       <button
-                        onClick={() => copyCommand(`wget https://quillon.xyz/downloads/q-miner-v2.5.0 && chmod +x q-miner-v2.5.0 && ./q-miner-v2.5.0 --mode solo --wallet ${walletAddress || 'YOUR_WALLET'} --server ${currentServerUrl}`)}
+                        onClick={() => copyCommand(`wget https://dl.quillon.xyz/downloads/q-miner-v8.3.0 && chmod +x q-miner-v8.3.0 && ./q-miner-v8.3.0 --mode solo --wallet ${walletAddress || 'YOUR_WALLET'} --server ${currentServerUrl}`)}
                         className="absolute top-3 right-3 bg-quantum-cyan/20 hover:bg-quantum-cyan/30 text-quantum-cyan px-2 py-1 rounded text-xs transition-colors"
                       >
                         Copy
@@ -923,14 +923,14 @@ export default function MiningScreen() {
                     <div className="bg-quantum-dark/50 rounded-lg p-4 border border-quantum-green/20 relative">
                       <p className="text-quantum-green text-sm font-bold mb-3">Linux ARM64</p>
                       <div className="space-y-1 font-mono text-xs text-gray-300 overflow-x-auto">
-                        <code className="block">wget https://quillon.xyz/downloads/q-miner-linux-arm64</code>
+                        <code className="block">wget https://dl.quillon.xyz/downloads/q-miner-linux-arm64</code>
                         <code className="block">chmod +x q-miner-linux-arm64</code>
                         <code className="block text-quantum-green mt-2">./q-miner-linux-arm64 --mode solo \</code>
                         <code className="block text-quantum-green pl-2">--wallet {walletAddress || 'YOUR_WALLET'} \</code>
                         <code className="block text-quantum-green pl-2">--server {currentServerUrl}</code>
                       </div>
                       <button
-                        onClick={() => copyCommand(`wget https://quillon.xyz/downloads/q-miner-linux-arm64 && chmod +x q-miner-linux-arm64 && ./q-miner-linux-arm64 --mode solo --wallet ${walletAddress || 'YOUR_WALLET'} --server ${currentServerUrl}`)}
+                        onClick={() => copyCommand(`wget https://dl.quillon.xyz/downloads/q-miner-linux-arm64 && chmod +x q-miner-linux-arm64 && ./q-miner-linux-arm64 --mode solo --wallet ${walletAddress || 'YOUR_WALLET'} --server ${currentServerUrl}`)}
                         className="absolute top-3 right-3 bg-quantum-green/20 hover:bg-quantum-green/30 text-quantum-green px-2 py-1 rounded text-xs transition-colors"
                       >
                         Copy
@@ -942,7 +942,7 @@ export default function MiningScreen() {
                       <p className="text-quantum-purple text-sm font-bold mb-3">Windows x64</p>
                       <div className="space-y-1 font-mono text-xs text-gray-300 overflow-x-auto">
                         <code className="block text-gray-400"># Download from Downloads tab or:</code>
-                        <code className="block">Invoke-WebRequest -Uri https://quillon.xyz/downloads/q-miner-windows-x64.exe -OutFile q-miner.exe</code>
+                        <code className="block">Invoke-WebRequest -Uri https://dl.quillon.xyz/downloads/q-miner-windows-x64.exe -OutFile q-miner.exe</code>
                         <code className="block text-quantum-green mt-2">.\\q-miner.exe --mode solo `</code>
                         <code className="block text-quantum-green pl-2">--wallet {walletAddress || 'YOUR_WALLET'} `</code>
                         <code className="block text-quantum-green pl-2">--server {currentServerUrl}</code>
@@ -1107,7 +1107,7 @@ export default function MiningScreen() {
               <h3 className="text-lg font-bold text-white mb-2 flex items-center gap-2">
                 <Download className="w-5 h-5 text-quantum-cyan" />
                 Miner Downloads
-                <span className="text-xs font-medium px-2 py-0.5 bg-quantum-green/20 text-quantum-green rounded-full">v2.3.0</span>
+                <span className="text-xs font-medium px-2 py-0.5 bg-quantum-green/20 text-quantum-green rounded-full">v8.3.0</span>
               </h3>
               <p className="text-sm text-gray-400 mb-4">Native threads, jemalloc/mimalloc allocator, batched atomic counters</p>
 
@@ -1157,16 +1157,16 @@ export default function MiningScreen() {
                 <h4 className="text-sm font-bold text-quantum-cyan mb-3">Quick Start (wget)</h4>
                 <div className="space-y-2">
                   <div className="bg-quantum-dark/80 rounded-lg p-2 font-mono text-xs text-gray-300 flex items-center justify-between">
-                    <code>wget https://quillon.xyz/downloads/q-miner-v2.5.0 && chmod +x q-miner-v2.5.0</code>
-                    <button onClick={() => copyCommand('wget https://quillon.xyz/downloads/q-miner-v2.5.0 && chmod +x q-miner-v2.5.0')} className="text-quantum-cyan hover:text-white ml-2 flex-shrink-0 text-xs px-2">Copy</button>
+                    <code>wget https://dl.quillon.xyz/downloads/q-miner-v8.3.0 && chmod +x q-miner-v8.3.0</code>
+                    <button onClick={() => copyCommand('wget https://dl.quillon.xyz/downloads/q-miner-v8.3.0 && chmod +x q-miner-v8.3.0')} className="text-quantum-cyan hover:text-white ml-2 flex-shrink-0 text-xs px-2">Copy</button>
                   </div>
                   <div className="bg-quantum-dark/80 rounded-lg p-2 font-mono text-xs text-gray-300 flex items-center justify-between">
-                    <code>wget https://quillon.xyz/downloads/q-miner-linux-arm64 && chmod +x q-miner-linux-arm64</code>
-                    <button onClick={() => copyCommand('wget https://quillon.xyz/downloads/q-miner-linux-arm64 && chmod +x q-miner-linux-arm64')} className="text-quantum-green hover:text-white ml-2 flex-shrink-0 text-xs px-2">Copy</button>
+                    <code>wget https://dl.quillon.xyz/downloads/q-miner-linux-arm64 && chmod +x q-miner-linux-arm64</code>
+                    <button onClick={() => copyCommand('wget https://dl.quillon.xyz/downloads/q-miner-linux-arm64 && chmod +x q-miner-linux-arm64')} className="text-quantum-green hover:text-white ml-2 flex-shrink-0 text-xs px-2">Copy</button>
                   </div>
                   <div className="bg-quantum-dark/80 rounded-lg p-2 font-mono text-xs text-gray-300 flex items-center justify-between">
-                    <code>wget https://quillon.xyz/downloads/q-miner-windows-x64.exe</code>
-                    <button onClick={() => copyCommand('wget https://quillon.xyz/downloads/q-miner-windows-x64.exe')} className="text-quantum-purple hover:text-white ml-2 flex-shrink-0 text-xs px-2">Copy</button>
+                    <code>wget https://dl.quillon.xyz/downloads/q-miner-windows-x64.exe</code>
+                    <button onClick={() => copyCommand('wget https://dl.quillon.xyz/downloads/q-miner-windows-x64.exe')} className="text-quantum-purple hover:text-white ml-2 flex-shrink-0 text-xs px-2">Copy</button>
                   </div>
                 </div>
               </div>
@@ -1184,7 +1184,7 @@ export default function MiningScreen() {
                     <p className="text-gray-400 text-sm">Full node with mining, wallet, DEX, and P2P sync</p>
                   </div>
                   <motion.a
-                    href="/downloads/q-api-server-linux-x86_64"
+                    href="https://dl.quillon.xyz/downloads/q-api-server-linux-x86_64"
                     download
                     className="bg-gradient-to-r from-quantum-purple to-quantum-pink hover:from-quantum-purple/80 hover:to-quantum-pink/80 text-white font-bold py-2 px-4 rounded-lg transition-all flex items-center gap-2"
                     whileHover={{ scale: 1.02 }}
@@ -1195,7 +1195,7 @@ export default function MiningScreen() {
                   </motion.a>
                 </div>
                 <div className="bg-quantum-dark/80 rounded-lg p-3 font-mono text-sm text-quantum-cyan">
-                  <code>wget https://quillon.xyz/downloads/q-api-server-linux-x86_64 && chmod +x q-api-server-linux-x86_64</code>
+                  <code>wget https://dl.quillon.xyz/downloads/q-api-server-linux-x86_64 && chmod +x q-api-server-linux-x86_64</code>
                 </div>
               </div>
             </div>

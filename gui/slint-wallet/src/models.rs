@@ -48,7 +48,7 @@ fn default_vdf_iterations() -> u32 {
 
 /// Mining submission to server
 /// Fields must match MiningSolutionRequest in handlers.rs for stats to work
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct MiningSubmission {
     pub miner_address: String,
     pub nonce: u64,

@@ -3647,6 +3647,13 @@ impl QStorage {
     }
 
     /// Save token balance to persistent storage
+    /// v8.5.2: Check if a token balance key exists in RocksDB (regardless of value).
+    /// Used by state sync to avoid re-inserting spent token balances from stale peers.
+    pub async fn has_token_balance_key(&self, wallet_address: &[u8; 32], token_address: &[u8; 32]) -> bool {
+        let key = format!("token_balance_{}_{}", hex::encode(wallet_address), hex::encode(token_address));
+        matches!(self.hot_db.get(CF_MANIFEST, key.as_bytes()).await, Ok(Some(_)))
+    }
+
     /// Key format: token_balance_{wallet_hex}_{token_hex}
     /// v2.7.9-beta: Changed from u64 to u128 for larger token supplies (up to 10^38)
     pub async fn save_token_balance(&self, wallet_address: &[u8; 32], token_address: &[u8; 32], amount: u128) -> Result<()> {
@@ -3676,8 +3683,10 @@ impl QStorage {
     pub async fn get_token_balance(&self, wallet_address: &[u8; 32], token_address: &[u8; 32]) -> Result<u128> {
         // First check CF_MANIFEST storage (supports both old 8-byte and new 16-byte format)
         let key = format!("token_balance_{}_{}", hex::encode(wallet_address), hex::encode(token_address));
+        let mut manifest_has_entry = false;
         let manifest_balance = match self.hot_db.get(CF_MANIFEST, key.as_bytes()).await? {
             Some(bytes) => {
+                manifest_has_entry = true;
                 if bytes.len() == 16 {
                     // v2.7.9-beta: New 16-byte u128 format
                     let amount = u128::from_le_bytes([
@@ -3716,13 +3725,15 @@ impl QStorage {
             None => 0,
         };
 
-        // If manifest storage has balance, return it
-        if manifest_balance > 0 {
+        // v8.5.3: CF_MANIFEST is authoritative. If it has ANY entry (even 0), trust it.
+        // The old check `manifest_balance > 0` would fall through to CF_TOKEN_BALANCES
+        // when a user legitimately spent their balance to 0, resurrecting the old pre-spend value.
+        if manifest_has_entry {
             return Ok(manifest_balance);
         }
 
+        // Only check CF_TOKEN_BALANCES if CF_MANIFEST has NO entry at all (new node, never synced)
         // v1.4.8-beta: Check CF_TOKEN_BALANCES (state sync storage) for synced transfers
-        // State sync writes to this CF when processing TokenTransfer transactions from other nodes
         #[cfg(not(target_os = "windows"))]
         if let Some(db) = self.get_rocks_db_handle() {
             if let Some(cf) = db.cf_handle(CF_TOKEN_BALANCES) {
@@ -3828,6 +3839,9 @@ impl QStorage {
 
         // v1.4.8-beta: Also load from CF_TOKEN_BALANCES (state sync storage)
         // This captures balances from synced TokenTransfer transactions
+        // v8.5.3: CRITICAL FIX — CF_MANIFEST is authoritative. State sync only fills MISSING entries.
+        // The old "highest wins" rule caused ghost balances: stale pre-spend values in CF_TOKEN_BALANCES
+        // would override correct post-spend values in CF_MANIFEST on every restart.
         #[cfg(not(target_os = "windows"))]
         if let Some(db) = self.get_rocks_db_handle() {
             if let Some(cf) = db.cf_handle(CF_TOKEN_BALANCES) {
@@ -3848,14 +3862,16 @@ impl QStorage {
                                 u64::from_be_bytes(value[..8].try_into().unwrap_or([0u8; 8])) as u128
                             };
 
-                            // Only insert if not already in manifest storage OR if state sync has higher balance
+                            // v8.5.3: Only insert if NOT already in CF_MANIFEST (manifest is authoritative)
+                            // Previously this used "highest wins" which resurrected spent balances
+                            // v8.5.5: ALSO skip QUGUSD entries from state sync — they are the source
+                            // of the 172K QUGUSD ghost. State sync has stale testnet QUGUSD in binary
+                            // keys that survive the CF_MANIFEST text-key purge.
+                            if token_address == q_types::QUGUSD_TOKEN_ADDRESS {
+                                continue; // NEVER load QUGUSD from state sync CF
+                            }
                             let balance_key = (wallet_address, token_address);
-                            if let Some(&existing) = balances.get(&balance_key) {
-                                if amount > existing {
-                                    balances.insert(balance_key, amount);
-                                    state_sync_count += 1;
-                                }
-                            } else if amount > 0 {
+                            if !balances.contains_key(&balance_key) && amount > 0 {
                                 balances.insert(balance_key, amount);
                                 state_sync_count += 1;
                             }
@@ -4527,6 +4543,31 @@ impl QStorage {
         Ok(())
     }
 
+    // ============================================================================
+    // QCREDIT Yield Vault Persistence (v8.5.5)
+    // ============================================================================
+
+    /// Save the entire QCREDIT vault state as a single JSON blob
+    pub async fn save_qcredit_vault(&self, vault_data: &[u8]) -> Result<()> {
+        self.hot_db.put(CF_MANIFEST, b"qcredit_vault_state", vault_data).await?;
+        debug!("💳 Saved QCREDIT vault state ({} bytes)", vault_data.len());
+        Ok(())
+    }
+
+    /// Load the QCREDIT vault state
+    pub async fn load_qcredit_vault(&self) -> Result<Option<Vec<u8>>> {
+        match self.hot_db.get(CF_MANIFEST, b"qcredit_vault_state").await? {
+            Some(data) => {
+                info!("💳 Loaded QCREDIT vault state ({} bytes)", data.len());
+                Ok(Some(data))
+            }
+            None => {
+                info!("💳 No QCREDIT vault state found in storage");
+                Ok(None)
+            }
+        }
+    }
+
     /// Delete all entries with a given prefix from CF_MANIFEST
     pub async fn delete_by_prefix(&self, prefix: &[u8]) -> Result<usize> {
         let entries = self.hot_db.scan_prefix(CF_MANIFEST, prefix).await?;
@@ -4804,6 +4845,52 @@ impl QStorage {
         Ok(true)
     }
 
+    /// v8.4.3: Detect significant block gaps in the chain.
+    ///
+    /// Samples blocks at regular intervals to detect gaps from checkpoint jumps.
+    /// Returns (has_gaps, contiguous_blocks, tip_height, gap_percentage).
+    /// A node with >5% gaps should accept state-sync balance imports as a safety net.
+    pub async fn detect_block_gaps(&self) -> (bool, u64, u64, f64) {
+        let tip = self.height_cache.cached();
+        if tip < 1000 {
+            return (false, tip, tip, 0.0);
+        }
+
+        // Sample every 1000th block to detect gaps quickly (O(tip/1000) not O(tip))
+        let sample_interval = std::cmp::max(1, tip / 1000);
+        let mut present = 0u64;
+        let mut sampled = 0u64;
+
+        let mut h = 1u64;
+        while h <= tip {
+            sampled += 1;
+            let height_key = format!("qblock:height:{}", h);
+            match self.hot_db.get(CF_BLOCKS, height_key.as_bytes()).await {
+                Ok(Some(_)) => present += 1,
+                _ => {}
+            }
+            h += sample_interval;
+        }
+
+        if sampled == 0 {
+            return (false, tip, tip, 0.0);
+        }
+
+        let gap_pct = 100.0 * (1.0 - (present as f64 / sampled as f64));
+        let estimated_present = (present as f64 / sampled as f64 * tip as f64) as u64;
+        let has_gaps = gap_pct > 5.0; // >5% missing = significant gaps
+
+        if has_gaps {
+            warn!("⚠️ [GAP DETECT v8.4.3] Block gaps detected: {:.1}% missing ({}/{} samples present, tip={})",
+                  gap_pct, present, sampled, tip);
+        } else {
+            debug!("✅ [GAP DETECT] Chain is contiguous: {:.1}% present ({}/{} samples, tip={})",
+                   100.0 - gap_pct, present, sampled, tip);
+        }
+
+        (has_gaps, estimated_present, tip, gap_pct)
+    }
+
     /// v7.2.12: Rebuild wallet balances by scanning the blockchain.
     /// Iterates blocks 1..tip, skips blocks with timestamp < GENESIS_TIMESTAMP,
     /// and reconstructs balances from balance_updates embedded in blocks.
@@ -4925,6 +5012,408 @@ impl QStorage {
               total_supply / 1_000_000_000_000_000_000_000_000u128, total_supply);
 
         Ok((balances, total_supply))
+    }
+
+    /// v8.5.0: One-time migration — purge ALL wallet balances, rebuild from chain,
+    /// then scale to match emission controller (the source of truth).
+    ///
+    /// **Why scaling is needed:**
+    /// The block producer embedded inflated coinbase amounts into blocks (calculated
+    /// from the inflated state). So the chain itself has ~59x more QUG than the
+    /// emission controller says was actually mined. We rebuild from chain to get
+    /// correct RELATIVE proportions, then scale everyone down to match the emission
+    /// controller's authoritative total.
+    ///
+    /// **Why this is safe:**
+    /// - Everyone keeps their relative share (mined 5% of blocks → keep 5% of supply)
+    /// - Total supply matches emission controller (the only correct number)
+    /// - Deterministic — every node produces the same result
+    ///
+    /// `emission_total_supply`: The emission controller's total_supply (u128, 24 decimals).
+    /// Pass 0 to skip scaling (rebuild only).
+    ///
+    /// Idempotent: runs once, sets a migration flag, never runs again.
+    pub async fn purge_and_rebuild_balances(&self, emission_total_supply: u128) -> Result<bool> {
+        const MIGRATION_FLAG: &[u8] = b"migration_balance_rebuild_v851_done";
+
+        if let Ok(Some(_)) = self.hot_db.get(CF_MANIFEST, MIGRATION_FLAG).await {
+            return Ok(false); // Already done
+        }
+
+        info!("🧹 [v8.5.1] Purging ALL wallet balances and rebuilding from chain...");
+
+        // 1. Delete ALL wallet_balance_ keys
+        let deleted = self.delete_by_prefix(b"wallet_balance_").await.unwrap_or(0);
+        let _ = self.hot_db.delete(CF_MANIFEST, b"total_minted_supply").await;
+        info!("   Deleted {} stale wallet balance entries", deleted);
+
+        // 2. Rebuild from chain (only post-genesis blocks, includes transfers)
+        let (mut balances, chain_total) = self.rebuild_balances_from_chain().await?;
+        let chain_qug = chain_total / 1_000_000_000_000_000_000_000_000u128;
+        let emission_qug = emission_total_supply / 1_000_000_000_000_000_000_000_000u128;
+        info!("   Rebuilt {} wallets from chain: {} QUG", balances.len(), chain_qug);
+        info!("   Emission controller says: {} QUG", emission_qug);
+
+        // 3. Scale balances to match emission controller if there's significant inflation
+        let final_total = if emission_total_supply > 0 && chain_total > emission_total_supply * 2 {
+            // Chain has >2x what emission says — scale down proportionally
+            // Use integer division to avoid u128 overflow:
+            //   scale_divisor = chain_total / emission_total ≈ 59
+            //   new_balance = old_balance / scale_divisor
+            let scale_divisor = chain_total / emission_total_supply;
+            info!("   ⚖️ Scaling {} wallets by 1/{}: chain ({} QUG) → emission ({} QUG)",
+                  balances.len(), scale_divisor, chain_qug, emission_qug);
+
+            for (_addr, balance) in balances.iter_mut() {
+                *balance = *balance / scale_divisor;
+            }
+
+            // Re-persist the scaled balances
+            self.save_wallet_balances(&balances).await?;
+            let scaled_total: u128 = balances.values().sum();
+            self.save_total_supply(scaled_total).await?;
+
+            let scaled_qug = scaled_total / 1_000_000_000_000_000_000_000_000u128;
+            info!("   ✅ Scaled to {} QUG across {} wallets (divisor={})",
+                  scaled_qug, balances.len(), scale_divisor);
+            scaled_total
+        } else {
+            // Chain total is reasonable — no scaling needed
+            info!("   ✅ Chain total is within range — no scaling needed");
+            chain_total
+        };
+
+        let final_qug = final_total / 1_000_000_000_000_000_000_000_000u128;
+        info!("🧹 [v8.5.0] Migration complete: {} wallets, {} QUG total", balances.len(), final_qug);
+
+        // 4. Set migration flag
+        self.hot_db.put(CF_MANIFEST, MIGRATION_FLAG, b"done").await?;
+
+        Ok(true)
+    }
+
+    /// v8.5.1: Purge ghost QUGUSD token balances.
+    ///
+    /// QUGUSD balances suffer from a ghost balance bug where spent balances reappear
+    /// on restart. This happens because the 15s token balance sync can overwrite
+    /// correct RocksDB values with stale in-memory data during race conditions.
+    ///
+    /// Fix: Delete all QUGUSD token_balance_ entries. Re-populate only from
+    /// CollateralVault minted_qugusd positions (the CDP source of truth).
+    ///
+    /// Idempotent: runs once, sets migration flag.
+    pub async fn purge_ghost_qugusd_balances(&self) -> Result<bool> {
+        const MIGRATION_FLAG: &[u8] = b"migration_qugusd_purge_v851_done";
+
+        if let Ok(Some(_)) = self.hot_db.get(CF_MANIFEST, MIGRATION_FLAG).await {
+            return Ok(false); // Already done
+        }
+
+        info!("🧹 [v8.5.1] Purging ghost QUGUSD token balances...");
+
+        let qugusd_hex = hex::encode(q_types::QUGUSD_TOKEN_ADDRESS);
+        let prefix = "token_balance_".as_bytes();
+        let mut deleted_count = 0u64;
+
+        // Iterate all token_balance_ entries and delete QUGUSD ones
+        if let Ok(entries) = self.hot_db.scan_prefix(CF_MANIFEST, prefix).await {
+            for (key, _value) in entries {
+                if let Ok(key_str) = std::str::from_utf8(&key) {
+                    if key_str.ends_with(&qugusd_hex) {
+                        let _ = self.hot_db.delete(CF_MANIFEST, &key).await;
+                        deleted_count += 1;
+                    }
+                }
+            }
+        }
+
+        info!("   Deleted {} ghost QUGUSD token_balance entries", deleted_count);
+
+        // Set migration flag
+        self.hot_db.put(CF_MANIFEST, MIGRATION_FLAG, b"done").await?;
+
+        Ok(true)
+    }
+
+    /// v8.5.5: Purge QUGUSD ghost entries from CF_TOKEN_BALANCES (binary key format).
+    /// The v8.5.3 startup purge only deleted from CF_MANIFEST (text keys).
+    /// State sync stores balances in CF_TOKEN_BALANCES with binary keys (wallet 32B + token 32B).
+    /// These stale QUGUSD entries survive the text-key purge and get re-loaded by load_token_balances().
+    #[cfg(not(target_os = "windows"))]
+    pub async fn purge_qugusd_from_state_sync_cf(&self) -> Result<u64> {
+        let qugusd_addr = q_types::QUGUSD_TOKEN_ADDRESS;
+        let mut deleted = 0u64;
+
+        if let Some(db) = self.get_rocks_db_handle() {
+            if let Some(cf) = db.cf_handle(CF_TOKEN_BALANCES) {
+                let mut keys_to_delete: Vec<Vec<u8>> = Vec::new();
+                let iter = db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
+                for item in iter {
+                    if let Ok((key, _value)) = item {
+                        if key.len() == 64 {
+                            let token_address = &key[32..64];
+                            if token_address == qugusd_addr {
+                                keys_to_delete.push(key.to_vec());
+                            }
+                        }
+                    }
+                }
+                for key in &keys_to_delete {
+                    let _ = db.delete_cf(&cf, key);
+                    deleted += 1;
+                }
+            }
+        }
+
+        Ok(deleted)
+    }
+
+    /// v8.5.2: Restore QUGUSD token balances that were accidentally purged by v8.5.1.
+    /// The purge was too aggressive — it deleted ALL QUGUSD token_balance entries
+    /// when it should have only fixed one ghost balance. This restores from known values.
+    pub async fn restore_qugusd_balances(&self) -> Result<bool> {
+        // v8.5.3: DISABLED permanently — This migration ran on EVERY restart due to
+        // non-persisting flag, resurrecting spent QUGUSD balances ("money glitch").
+        Ok(false)
+    }
+
+    /// v8.5.4: Reconcile wallet balances by applying DEX swap debits/credits.
+    ///
+    /// **THE MONEY GLITCH FIX**: State sync was importing stale balances from peers,
+    /// overwriting local DEX swap debits. This migration:
+    /// 1. Rebuilds chain-only balances (coinbase + transfers) — same as rebuild_balances_from_chain()
+    /// 2. Scans ALL swap history from CF_SWAP_HISTORY for QUG debits/credits
+    /// 3. Applies swap adjustments to get the correct final balance
+    /// 4. Persists corrected balances to RocksDB
+    ///
+    /// Runs once, sets migration flag. Safe to re-run (idempotent via flag).
+    pub async fn reconcile_balances_with_dex_swaps(&self) -> Result<bool> {
+        // v8.5.7: Use emission controller's tracked total as the CEILING for total supply.
+        // The emission controller tracks actual adaptive rewards (accounts for block rate).
+        // static_block_reward_for_timestamp() overcounts because it assumes 1 bps rate.
+        // Fix: count each miner's SHARE of blocks, then distribute the emission total proportionally.
+        const MIGRATION_FLAG: &[u8] = b"migration_balance_reconcile_v857b_done";
+
+        if let Ok(Some(_)) = self.hot_db.get(CF_MANIFEST, MIGRATION_FLAG).await {
+            return Ok(false); // Already done
+        }
+
+        info!("🔧 [v8.5.7 RECONCILIATION] Starting balance reconciliation (emission controller + miner shares)...");
+
+        // ====================================================================
+        // STEP 1: Rebuild balances from chain (coinbase + transfers only)
+        // This gives us the baseline without any DEX swap effects.
+        // ====================================================================
+        let genesis_timestamp: u64 = crate::balance_consensus::active_genesis_timestamp();
+        let tip = self.height_cache.cached();
+
+        // Dev wallet (receives 1% fee — computed at runtime, not in blocks)
+        let dev_wallet_hex = crate::balance_consensus::FOUNDER_WALLET.trim_start_matches("qnk");
+        let dev_wallet_bytes: [u8; 32] = {
+            let bytes = hex::decode(dev_wallet_hex).unwrap_or_default();
+            let mut arr = [0u8; 32];
+            if bytes.len() == 32 { arr.copy_from_slice(&bytes); }
+            arr
+        };
+
+        // Load the emission controller's tracked total — this is the CORRECT total supply.
+        let emission_total: u128 = match self.load_emission_state().await {
+            Ok(Some(data)) => {
+                match serde_json::from_slice::<crate::emission_controller::EmissionController>(&data) {
+                    Ok(ec) => {
+                        let total = ec.total_cumulative_emission();
+                        info!("   Emission controller total: {:.4} QUG ({} base units)",
+                            total as f64 / 1_000_000_000_000_000_000_000_000.0, total);
+                        total
+                    }
+                    Err(e) => {
+                        warn!("   Failed to deserialize emission controller: {}, using time-based fallback", e);
+                        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+                        let elapsed = now.saturating_sub(genesis_timestamp);
+                        crate::emission_controller::target_cumulative_at_time(elapsed)
+                    }
+                }
+            }
+            _ => {
+                // Fallback: compute from elapsed time
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+                let elapsed = now.saturating_sub(genesis_timestamp);
+                let total = crate::emission_controller::target_cumulative_at_time(elapsed);
+                info!("   Emission controller not available, using time-based target: {:.4} QUG",
+                    total as f64 / 1_000_000_000_000_000_000_000_000.0);
+                total
+            }
+        };
+
+        // Step 1: Scan blocks to count each miner's SHARE (number of block-slots mined)
+        let mut miner_shares: HashMap<[u8; 32], u64> = HashMap::new();
+        let mut total_miner_slots = 0u64;
+        let mut blocks_scanned = 0u64;
+
+        if tip > 0 {
+            info!("   Step 1/2: Scanning {} heights to count miner shares...", tip);
+            for height in 1..=tip {
+                let height_key = format!("qblock:height:{}", height);
+                let block_data = match self.hot_db.get(CF_BLOCKS, height_key.as_bytes()).await {
+                    Ok(Some(data)) => data,
+                    _ => continue,
+                };
+
+                let block: q_types::block::QBlock = if precompressed_storage::is_precompressed(&block_data) {
+                    match precompressed_storage::PrecompressedBlock::from_bytes(&block_data)
+                        .and_then(|c| c.decompress().map_err(|e| e.into()))
+                        .and_then(|raw| q_types::legacy::deserialize_qblock_with_fallback(&raw)
+                            .map_err(|e| anyhow::anyhow!("{}", e)))
+                    {
+                        Ok(b) => b,
+                        Err(_) => continue,
+                    }
+                } else {
+                    match q_types::legacy::deserialize_qblock_with_fallback(&block_data) {
+                        Ok(b) => b,
+                        Err(_) => continue,
+                    }
+                };
+
+                if block.header.timestamp > 0 && block.header.timestamp < genesis_timestamp {
+                    continue;
+                }
+
+                blocks_scanned += 1;
+
+                // Collect unique miner addresses from coinbase txs (excluding dev wallet)
+                let mut miners_this_block: Vec<[u8; 32]> = Vec::new();
+                for block_tx in &block.transactions {
+                    let is_coinbase = block_tx.is_coinbase() || block_tx.tx_type.is_coinbase();
+                    if is_coinbase && block_tx.to != [0u8; 32] && block_tx.amount > 0 {
+                        if block_tx.to != dev_wallet_bytes {
+                            if !miners_this_block.contains(&block_tx.to) {
+                                miners_this_block.push(block_tx.to);
+                            }
+                        }
+                    }
+                }
+
+                // Legacy blocks: mining_solutions without transactions
+                if block.transactions.is_empty() {
+                    for solution in &block.mining_solutions {
+                        if solution.miner_address != [0u8; 32] {
+                            if !miners_this_block.contains(&solution.miner_address) {
+                                miners_this_block.push(solution.miner_address);
+                            }
+                        }
+                    }
+                }
+
+                // Each miner in this block gets 1 share (split if multiple miners)
+                if !miners_this_block.is_empty() {
+                    for miner_addr in &miners_this_block {
+                        *miner_shares.entry(*miner_addr).or_insert(0) += 1;
+                    }
+                    total_miner_slots += miners_this_block.len() as u64;
+                }
+
+                if height % 50_000 == 0 {
+                    info!("   [RECONCILE] Progress: {}/{} heights", height, tip);
+                }
+            }
+        }
+
+        info!("   Step 1 done: {} blocks scanned, {} miners, {} total miner-slots",
+              blocks_scanned, miner_shares.len(), total_miner_slots);
+
+        // Step 2: Distribute emission_total proportionally by miner share
+        // 1% dev fee, 99% to miners proportional to their block count
+        let dev_fee_total = emission_total.saturating_mul(crate::balance_consensus::DEV_FEE_BPS)
+            / crate::balance_consensus::BPS_DIVISOR;
+        let miner_pool = emission_total.saturating_sub(dev_fee_total);
+
+        let mut balances: HashMap<[u8; 32], u128> = HashMap::new();
+        if total_miner_slots > 0 {
+            for (miner_addr, shares) in &miner_shares {
+                let miner_reward = miner_pool * (*shares as u128) / (total_miner_slots as u128);
+                if miner_reward > 0 {
+                    *balances.entry(*miner_addr).or_insert(0) += miner_reward;
+                }
+            }
+        }
+        if dev_fee_total > 0 {
+            *balances.entry(dev_wallet_bytes).or_insert(0) += dev_fee_total;
+        }
+
+        let chain_total: u128 = balances.values().sum();
+        let chain_qug = chain_total / 1_000_000_000_000_000_000_000_000u128;
+        info!("   Step 2 done: {} wallets, {} QUG distributed (emission controller total)",
+              balances.len(), chain_qug);
+
+        let final_total: u128 = balances.values().sum();
+        let final_qug = final_total / 1_000_000_000_000_000_000_000_000u128;
+
+        // Compare with what's currently in RocksDB
+        let current_stored_total: u128 = {
+            let mut total = 0u128;
+            let prefix = b"wallet_balance_";
+            if let Ok(entries) = self.hot_db.scan_prefix(CF_MANIFEST, prefix).await {
+                for (_key, value) in entries {
+                    if value.len() == 16 {
+                        total += u128::from_le_bytes(value[..16].try_into().unwrap());
+                    }
+                }
+            }
+            total
+        };
+        let stored_qug = current_stored_total / 1_000_000_000_000_000_000_000_000u128;
+
+        info!("   ─────────────────────────────────────────────");
+        info!("   RECONCILIATION SUMMARY (v8.5.7 — emission controller):");
+        info!("   Emission controller total: {:.4} QUG", emission_total as f64 / 1e24);
+        info!("   Distributed to wallets:    {} QUG ({} wallets)", final_qug, balances.len());
+        info!("   Previous RocksDB total:    {} QUG (inflated)", stored_qug);
+        info!("   Inflation removed:         {} QUG", stored_qug.saturating_sub(final_qug));
+        info!("   Blocks scanned:            {} (with {} miner-slots)", blocks_scanned, total_miner_slots);
+        info!("   ─────────────────────────────────────────────");
+
+        // PURGE all existing wallet balances first (removes testnet remnants + glitched wallets)
+        {
+            let prefix = b"wallet_balance_";
+            if let Ok(entries) = self.hot_db.scan_prefix(CF_MANIFEST, prefix).await {
+                let keys_to_delete: Vec<Vec<u8>> = entries.into_iter().map(|(k, _)| k).collect();
+                let purge_count = keys_to_delete.len();
+                for key in &keys_to_delete {
+                    let _ = self.hot_db.delete(CF_MANIFEST, key).await;
+                }
+                info!("   🗑️ Purged {} old wallet_balance entries (testnet remnants + glitched)", purge_count);
+            }
+        }
+
+        // Persist ONLY emission-derived mining reward balances
+        self.save_wallet_balances(&balances).await?;
+        self.save_total_supply(final_total).await?;
+
+        // Set migration flag
+        self.hot_db.put(CF_MANIFEST, MIGRATION_FLAG, b"done").await?;
+
+        info!("✅ [v8.5.7 RECONCILIATION] Balance reconciliation complete. {} wallets, {} QUG total supply.", balances.len(), final_qug);
+
+        Ok(true)
+    }
+
+    /// v8.5.0: Save balance processed watermark to RocksDB.
+    /// The watermark tracks the highest block height whose balance effects have been
+    /// persisted. On restart, blocks at or below this height are skipped to prevent
+    /// re-inflation from replaying coinbase transactions.
+    pub async fn save_balance_watermark(&self, height: u64) -> Result<()> {
+        self.hot_db.put(CF_MANIFEST, b"balance_processed_watermark", &height.to_le_bytes()).await
+    }
+
+    /// v8.5.0: Load balance processed watermark from RocksDB.
+    pub async fn load_balance_watermark(&self) -> Result<u64> {
+        match self.hot_db.get(CF_MANIFEST, b"balance_processed_watermark").await? {
+            Some(bytes) if bytes.len() == 8 => {
+                Ok(u64::from_le_bytes(bytes[..8].try_into().unwrap()))
+            }
+            _ => Ok(0),
+        }
     }
 
     // ============================================================================
@@ -6069,6 +6558,16 @@ impl QStorage {
     /// This returns the concrete RocksDBKV type which supports pruning operations
     pub fn get_hot_db(&self) -> Arc<RocksDBKV> {
         self.hot_db_concrete.clone()
+    }
+
+    /// v8.5.6: Check if a migration flag is set in CF_MANIFEST
+    pub async fn has_migration_flag(&self, flag: &[u8]) -> bool {
+        self.hot_db.get(CF_MANIFEST, flag).await.ok().flatten().is_some()
+    }
+
+    /// v8.5.6: Set a migration flag in CF_MANIFEST
+    pub async fn set_migration_flag(&self, flag: &[u8]) -> Result<()> {
+        self.hot_db.put(CF_MANIFEST, flag, b"done").await
     }
 
     /// Execute adaptive pruning on the hot database
@@ -7219,9 +7718,34 @@ impl QStorage {
             email.read = true;
             let email_bytes = serde_json::to_vec(&email)?;
             self.hot_db.put(CF_EMAILS, email_id.as_bytes(), &email_bytes).await?;
-            debug!("📖 Marked email {} as read", email_id);
+            tracing::info!("📖 Marked email {} as read (subject='{}')", email_id, email.subject);
+        } else {
+            tracing::warn!("📖 mark_email_read: email {} not found in DB", email_id);
         }
         Ok(())
+    }
+
+    /// Mark all inbox emails as read for a wallet
+    pub async fn mark_all_inbox_read(&self, wallet: &[u8; 32]) -> Result<u64> {
+        let wallet_hex = hex::encode(wallet);
+        let prefix = format!("{}:inbox:", wallet_hex);
+        let entries = self.hot_db.scan_prefix(CF_EMAILS_BY_FOLDER, prefix.as_bytes()).await?;
+
+        let mut marked = 0u64;
+        for (_, email_id_bytes) in entries {
+            if let Ok(email_id) = String::from_utf8(email_id_bytes) {
+                if let Some(mut email) = self.get_email(&email_id).await? {
+                    if !email.read {
+                        email.read = true;
+                        let email_bytes = serde_json::to_vec(&email)?;
+                        self.hot_db.put(CF_EMAILS, email_id.as_bytes(), &email_bytes).await?;
+                        marked += 1;
+                    }
+                }
+            }
+        }
+        debug!("📖 Marked {} emails as read for wallet {}", marked, &wallet_hex[..8]);
+        Ok(marked)
     }
 
     /// Get unread count for a wallet
@@ -7231,14 +7755,29 @@ impl QStorage {
         let entries = self.hot_db.scan_prefix(CF_EMAILS_BY_FOLDER, prefix.as_bytes()).await?;
 
         let mut count = 0u64;
+        let total = entries.len();
         for (_, email_id_bytes) in entries {
             if let Ok(email_id) = String::from_utf8(email_id_bytes) {
                 if let Some(email) = self.get_email(&email_id).await? {
                     if !email.read {
                         count += 1;
+                        // v8.5.5: Log unread emails at info level for debugging
+                        tracing::info!(
+                            "📬 [UNREAD] email_id={} subject='{}' folder='{}' for wallet {}",
+                            email_id, email.subject, email.folder, &wallet_hex[..8]
+                        );
                     }
+                } else {
+                    // Orphaned index entry — email exists in folder index but not in CF_EMAILS
+                    tracing::warn!(
+                        "⚠️ [EMAIL] Orphaned folder index: email_id={} not found in CF_EMAILS for wallet {}",
+                        email_id, &wallet_hex[..8]
+                    );
                 }
             }
+        }
+        if count > 0 {
+            tracing::info!("📬 [UNREAD] Wallet {} has {}/{} unread inbox emails", &wallet_hex[..8], count, total);
         }
         Ok(count)
     }

@@ -182,7 +182,7 @@ use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
 pub use crate::wallet_auth::AuthenticatedWallet;
-use crate::{AppState, PendingMixingRequest, StreamEvent, VERSION};
+use crate::{AppState, PendingMixingRequest, StreamEvent, VERSION, MIN_MINER_VERSION};
 use crate::transaction_utils; // v2.4.0-beta: Consensus-verified transactions
 use q_storage::BalanceStorage; // Import trait for get_balance method
 
@@ -430,11 +430,23 @@ pub struct VersionInfo {
     pub features: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_wallet_version: Option<String>,
+    /// v8.5.5: SHA-256 of latest wallet binary (for auto-update verification)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_wallet_sha256: Option<String>,
+    /// v8.5.0: Latest node binary version available in downloads/
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_node_version: Option<String>,
+    /// v8.5.0: SHA-256 of latest node binary (for auto-update verification)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_node_sha256: Option<String>,
+    /// v8.5.0: Download URL for latest node binary
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_node_download_url: Option<String>,
 }
 
-/// Scan the downloads directory for slint-wallet-v{X.Y.Z} binaries and return the highest version.
-fn detect_latest_wallet_version() -> Option<String> {
-    fn scan_dir(dir: &std::path::Path, best: &mut Option<(u64, u64, u64, String)>) {
+/// Scan the downloads directory for slint-wallet-v{X.Y.Z} binaries and return the highest version + SHA-256.
+fn detect_latest_wallet_version() -> Option<(String, Option<String>)> {
+    fn scan_dir(dir: &std::path::Path, best: &mut Option<(u64, u64, u64, String, std::path::PathBuf)>) {
         let Ok(read_dir) = std::fs::read_dir(dir) else { return };
         for entry in read_dir.flatten() {
             let name = entry.file_name();
@@ -449,21 +461,83 @@ fn detect_latest_wallet_version() -> Option<String> {
                 parts[2].parse::<u64>(),
             ) else { continue };
             match best {
-                Some((bm, bn, bp, _)) if (major, minor, patch) <= (*bm, *bn, *bp) => {}
-                _ => { *best = Some((major, minor, patch, version_part.to_string())); }
+                Some((bm, bn, bp, _, _)) if (major, minor, patch) <= (*bm, *bn, *bp) => {}
+                _ => { *best = Some((major, minor, patch, version_part.to_string(), entry.path())); }
             }
         }
     }
 
-    let mut best: Option<(u64, u64, u64, String)> = None;
+    let mut best: Option<(u64, u64, u64, String, std::path::PathBuf)> = None;
     scan_dir(std::path::Path::new("gui/quantum-wallet/dist-final/downloads"), &mut best);
     if best.is_none() {
         scan_dir(std::path::Path::new("/opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads"), &mut best);
     }
-    best.map(|(_, _, _, v)| v)
+    best.map(|(_, _, _, version, path)| {
+        let sha256 = std::fs::read(&path).ok().map(|data| {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&data);
+            format!("{:x}", hasher.finalize())
+        });
+        (version, sha256)
+    })
+}
+
+/// v8.5.0: Scan downloads/ for q-api-server-v{X.Y.Z} binaries and return the highest version.
+fn detect_latest_node_version() -> Option<(String, Option<String>)> {
+    fn scan_dir(dir: &std::path::Path, best: &mut Option<(u64, u64, u64, String, std::path::PathBuf)>) {
+        let Ok(read_dir) = std::fs::read_dir(dir) else { return };
+        for entry in read_dir.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            let Some(stripped) = name_str.strip_prefix("q-api-server-v") else { continue };
+            let parts: Vec<&str> = stripped.split('.').collect();
+            if parts.len() != 3 { continue; }
+            let (Ok(major), Ok(minor), Ok(patch)) = (
+                parts[0].parse::<u64>(),
+                parts[1].parse::<u64>(),
+                parts[2].parse::<u64>(),
+            ) else { continue };
+            match best {
+                Some((bm, bn, bp, _, _)) if (major, minor, patch) <= (*bm, *bn, *bp) => {}
+                _ => { *best = Some((major, minor, patch, stripped.to_string(), entry.path())); }
+            }
+        }
+    }
+
+    let mut best: Option<(u64, u64, u64, String, std::path::PathBuf)> = None;
+    scan_dir(std::path::Path::new("gui/quantum-wallet/dist-final/downloads"), &mut best);
+    if best.is_none() {
+        scan_dir(std::path::Path::new("/opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads"), &mut best);
+    }
+
+    best.map(|(_, _, _, version, path)| {
+        // Compute SHA-256 of the binary for auto-update verification
+        let sha256 = std::fs::read(&path).ok().map(|data| {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&data);
+            format!("{:x}", hasher.finalize())
+        });
+        (version, sha256)
+    })
 }
 
 pub async fn version_info() -> Result<Json<ApiResponse<VersionInfo>>, StatusCode> {
+    let (latest_node_version, latest_node_sha256, latest_node_download_url) =
+        match detect_latest_node_version() {
+            Some((version, sha256)) => {
+                let url = format!("https://quillon.xyz/downloads/q-api-server-v{}", version);
+                (Some(version), sha256, Some(url))
+            }
+            None => (None, None, None),
+        };
+
+    let (latest_wallet_version, latest_wallet_sha256) = match detect_latest_wallet_version() {
+        Some((version, sha256)) => (Some(version), sha256),
+        None => (None, None),
+    };
+
     let info = VersionInfo {
         binary_version: env!("CARGO_PKG_VERSION").to_string(),
         build_timestamp: env!("BUILD_TIMESTAMP").parse().unwrap_or(0),
@@ -475,8 +549,13 @@ pub async fn version_info() -> Result<Json<ApiResponse<VersionInfo>>, StatusCode
             "balance-consensus".to_string(),
             "distributed-ai".to_string(),
             "aegis-ql".to_string(),
+            "auto-update-v1".to_string(),
         ],
-        latest_wallet_version: detect_latest_wallet_version(),
+        latest_wallet_version,
+        latest_wallet_sha256,
+        latest_node_version,
+        latest_node_sha256,
+        latest_node_download_url,
     };
 
     Ok(Json(ApiResponse::success(info)))
@@ -1048,10 +1127,13 @@ pub async fn network_supply(
     };
     let total_mined_qnk = total_mined_base_units as f64 / QNK_TO_BASE_UNITS as f64;
 
-    // Get holder count from wallet balances (this is still useful for display)
+    // v8.5.3: Get holder count — filter out testnet-contaminated dust wallets.
+    // P2P gossipsub rebroadcasts old testnet balances, inflating wallet count.
+    // Only count wallets with meaningful balance (>= 0.001 QUG in base units).
+    const MIN_HOLDER_BALANCE: u128 = 1_000_000_000_000_000_000_000; // 0.001 QUG (1e21 base units)
     let holders_count: usize = {
         let wallet_balances = state.wallet_balances.read().await;
-        wallet_balances.iter().filter(|(_, &balance)| balance > 0).count()
+        wallet_balances.iter().filter(|(_, &balance)| balance >= MIN_HOLDER_BALANCE).count()
     };
 
     // Calculate network hashrate from actual mining statistics (if available)
@@ -3433,9 +3515,11 @@ fn default_token_type_str() -> String {
 }
 
 /// Send a transaction (combines signing and submitting)
-/// SECURITY: Requires cryptographic authentication via X-Wallet-Auth header
+/// SECURITY: Requires cryptographic authentication via X-Wallet-Auth or Authorization: Bearer header
+/// v8.5.1: Use non-optional AuthenticatedWallet so Axum returns proper auth errors
+///         (Option<T> silently swallows Bearer token errors, converting them to None)
 pub async fn send_transaction(
-    auth_wallet: Option<AuthenticatedWallet>,
+    auth_wallet: AuthenticatedWallet,
     State(state): State<Arc<AppState>>,
     Json(request): Json<SendTransactionRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
@@ -3466,23 +3550,11 @@ pub async fn send_transaction(
 
 /// Inner implementation of send_transaction (wrapped for timeout safety)
 async fn send_transaction_inner(
-    auth_wallet: Option<AuthenticatedWallet>,
+    auth_wallet: AuthenticatedWallet,
     state: Arc<AppState>,
     request: SendTransactionRequest,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     debug!("Processing send transaction request (inner)");
-
-    // SECURITY: Enforce authentication for transaction submission
-    let auth_wallet = match auth_wallet {
-        Some(wallet) => wallet,
-        None => {
-            warn!("🚫 Unauthorized transaction attempt");
-            return Ok(Json(ApiResponse::error(
-                "🔒 Authentication Required: Transaction submission requires cryptographic signature proof. \
-                Please provide X-Wallet-Auth header with Ed25519/Dilithium5 signature.".to_string()
-            )));
-        }
-    };
 
     // Parse sender address from request (handle 'qnk' prefix)
     let from_hex = if request.from.starts_with("qnk") {
@@ -7234,11 +7306,18 @@ pub async fn get_mesh_peers(
         }
     }
 
+    // v8.5.1: Include local peer ID so frontend can highlight "this node"
+    let local_peer_id = {
+        let peer_info = state.libp2p_peer_info.read().await;
+        if !peer_info.0.is_empty() { Some(peer_info.0.clone()) } else { None }
+    };
+
     Ok(Json(ApiResponse::success(serde_json::json!({
         "peers": peers,
         "network_height": network_height,
         "local_height": local_height,
-        "peer_count": peers.len()
+        "peer_count": peers.len(),
+        "local_peer_id": local_peer_id
     }))))
 }
 
@@ -8301,7 +8380,8 @@ pub async fn submit_mining_solution(
         }
     }
 
-    // v1.0.2-safe: Per-IP rate limiter — cap each IP to 30 mining submissions/second
+    // v8.5.8: Per-IP rate limiter — cap each IP to 60 mining submissions/second
+    // (was 30 in v1.0.2, doubled since Nginx now distributes across 3 backends)
     // Breaks the retry storm that caused the Feb 24 deadlock
     {
         use dashmap::DashMap;
@@ -8319,9 +8399,9 @@ pub async fn submit_mining_solution(
         let mut entry = rate_map.entry(client_ip.clone()).or_insert((now_secs, 0));
         if entry.0 == now_secs {
             entry.1 += 1;
-            if entry.1 > 30 {
+            if entry.1 > 60 {
                 drop(entry);
-                warn!("⚠️ Mining rate limit: {} exceeded 30 req/s — 429", client_ip);
+                warn!("⚠️ Mining rate limit: {} exceeded 60 req/s — 429", client_ip);
                 return Err(StatusCode::TOO_MANY_REQUESTS);
             }
         } else {
@@ -8557,11 +8637,11 @@ pub async fn submit_mining_solution(
     // Lock-free height read (atomic, no .await)
     let block_height = state.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
 
-    // Version check (string compare only, no locks)
-    let server_ver = VERSION;
+    // Version check: compare miner version against MIN_MINER_VERSION (not server version)
+    // Miner and server have independent version tracks (q-miner v2.x vs q-api-server v8.x)
     let update_available = match &request.miner_version {
-        Some(v) => v != server_ver,
-        None => true,
+        Some(v) => version_less_than(v, MIN_MINER_VERSION),
+        None => true, // No version sent = old miner, suggest update
     };
 
     Ok(Json(ApiResponse::success(MiningSolutionResponse {
@@ -8575,7 +8655,7 @@ pub async fn submit_mining_solution(
             "⛏️ Solution accepted - reward will be credited when block is produced"
                 .to_string(),
         server_notice: MINING_SERVER_NOTICE.to_string(),
-        server_version: server_ver.to_string(),
+        server_version: VERSION.to_string(),
         update_available,
     })))
 }
@@ -8739,6 +8819,7 @@ pub async fn get_mining_challenge(
                         expires_at: challenge.expires_at,
                         server_notice: MINING_SERVER_NOTICE.to_string(),
                         server_version: VERSION.to_string(),
+                        min_miner_version: Some(MIN_MINER_VERSION.to_string()),
                     })));
                 } else if age_seconds < 150 {
                     // Grace period (120-150s): Warn but still return cached challenge
@@ -8756,6 +8837,7 @@ pub async fn get_mining_challenge(
                         expires_at: challenge.expires_at,
                         server_notice: MINING_SERVER_NOTICE.to_string(),
                         server_version: VERSION.to_string(),
+                        min_miner_version: Some(MIN_MINER_VERSION.to_string()),
                     })));
                 } else {
                     // Challenge is too old (>150s) - force regeneration
@@ -8836,6 +8918,7 @@ pub async fn get_mining_challenge(
         expires_at: cached_challenge.expires_at,
         server_notice: MINING_SERVER_NOTICE.to_string(),
         server_version: VERSION.to_string(),
+        min_miner_version: Some(MIN_MINER_VERSION.to_string()),
     })))
 }
 
@@ -8919,6 +9002,26 @@ pub fn verify_mining_difficulty(hash: &[u8; 32], target: &[u8; 32]) -> bool {
     hash < target
 }
 
+/// Semantic version comparison: returns true if `a` < `b` (e.g. "2.6.0" < "2.7.0")
+/// Strips leading 'v' prefix. Falls back to string compare if parsing fails.
+fn version_less_than(a: &str, b: &str) -> bool {
+    let parse = |s: &str| -> Option<(u32, u32, u32)> {
+        let s = s.strip_prefix('v').unwrap_or(s);
+        let parts: Vec<&str> = s.split('.').collect();
+        if parts.len() >= 3 {
+            Some((parts[0].parse().ok()?, parts[1].parse().ok()?, parts[2].parse().ok()?))
+        } else if parts.len() == 2 {
+            Some((parts[0].parse().ok()?, parts[1].parse().ok()?, 0))
+        } else {
+            None
+        }
+    };
+    match (parse(a), parse(b)) {
+        (Some(va), Some(vb)) => va < vb,
+        _ => a < b, // fallback to lexicographic
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct MiningChallengeResponse {
     pub challenge_hash: String,
@@ -8930,8 +9033,11 @@ pub struct MiningChallengeResponse {
     /// Server notice broadcast to all miners (empty string = no notice)
     #[serde(skip_serializing_if = "String::is_empty")]
     pub server_notice: String,
-    /// v1.0.3: Server version — miner can compare to detect updates
+    /// v1.0.3: Server version (q-api-server version, for informational display only)
     pub server_version: String,
+    /// v8.5.9: Minimum miner version required — miner compares its own version against this
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_miner_version: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

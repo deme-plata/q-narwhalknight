@@ -1142,9 +1142,22 @@ pub async fn campaign_details(
         entry.rank = (i + 1) as u32;
     }
 
+    // Build per-contribution list with payment method for transparency
+    let contribution_details: Vec<serde_json::Value> = contributions.iter().map(|c| {
+        serde_json::json!({
+            "wallet": &c.wallet[..16],
+            "amount_usd": c.amount_usd,
+            "payment_method": c.payment_method,
+            "raw_amount": c.raw_amount,
+            "is_early_bird": c.is_early_bird,
+            "created_at": c.created_at,
+        })
+    }).collect();
+
     Ok(Json(ApiResponse::success(serde_json::json!({
         "campaign": campaign,
         "leaderboard": leaderboard,
+        "contributions": contribution_details,
         "contribution_count": contributions.len(),
         "progress_percent": (campaign.raised_usd / campaign.target_usd * 100.0).min(100.0),
         "remaining_usd": (campaign.target_usd - campaign.raised_usd).max(0.0),

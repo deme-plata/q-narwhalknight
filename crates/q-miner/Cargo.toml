@@ -1,6 +1,6 @@
 [package]
 name = "q-miner"
-version = "1.0.0"
+version = "2.7.1"
 edition = "2021"
 description = "Q-NarwhalKnight High-Performance CPU/GPU Miner with CUDA Support"
 authors = ["Server Beta <server-beta@q-narwhalknight.dev>"]
@@ -102,6 +102,9 @@ crossterm = { workspace = true, optional = true }
 tui-textarea = { version = "0.4", optional = true }
 unicode-width = "0.1"
 
+# Terminal detection
+atty = "0.2"
+
 # Math and cryptography
 sha3 = { workspace = true }
 blake3 = { workspace = true }
@@ -126,7 +129,7 @@ tempfile = { workspace = true }
 tokio-test = "0.4"
 
 [features]
-default = ["cpu-mining", "network", "cli", "jemalloc"]
+default = ["cpu-mining", "network", "cli", "jemalloc", "tui"]
 vendored-openssl = ["openssl"]
 
 # Mining backends

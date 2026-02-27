@@ -47,6 +47,9 @@ export default function MiningDashboard() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const animFrameRef = useRef<number>(0);
   const displayHashRateRef = useRef<number>(0);
+  // v8.5.5: Refs for animation-consumed values — prevents useCallback/useEffect churn
+  const connectedMinersRef = useRef<number>(0);
+  const networkHashRateRef = useRef<number>(0);
 
   // Use the same wallet as Dashboard - from localStorage
   const [walletAddress, setWalletAddress] = useState('');
@@ -62,6 +65,10 @@ export default function MiningDashboard() {
   // v8.2.8: Fetch actual daily emission from API instead of hardcoded constant
   const [dailyEmissionQug, setDailyEmissionQug] = useState(7186.07); // 2,625,000 / 365.25 default
 
+  // v8.5.5: Keep refs in sync — animation reads refs (no re-render dependency)
+  connectedMinersRef.current = connectedMiners;
+  networkHashRateRef.current = stats.networkHashRate;
+
   // ═══════════════════════════════════════════════════════════════
   // v7.4.4: "The VDF Forge" — Mining Engine Visualization
   // Inspired by BLAKE3 × 101 VDF from the Q-NarwhalKnight miner
@@ -70,10 +77,11 @@ export default function MiningDashboard() {
   // it approaches the difficulty target at the center. Most fail
   // (red ember). Solutions = golden supernova with shockwave.
   // ═══════════════════════════════════════════════════════════════
+  // v8.5.5: Stable callback — reads dynamic values from refs, zero dependencies
   const startMiningEngineCanvas = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { willReadFrequently: false }) as CanvasRenderingContext2D | null;
     if (!ctx) return;
     if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
 
@@ -88,7 +96,8 @@ export default function MiningDashboard() {
     const cy = H / 2;
     const maxR = Math.min(W, H) * 0.42;
 
-    const minerCount = Math.max(connectedMiners, 1);
+    // v8.5.5: Read from ref (live) instead of closure-captured state
+    const minerCount = Math.max(connectedMinersRef.current, 1);
     const VDF_RINGS = 10; // 10 visual rings ≈ 10 VDF iterations each = 100 + 1 initial
 
     // VDF ring radii (outer to inner)
@@ -379,7 +388,7 @@ export default function MiningDashboard() {
       ctx.fillStyle = '#ffffff';
       ctx.shadowColor = 'rgba(255, 184, 0, 0.6)';
       ctx.shadowBlur = 12;
-      ctx.fillText(`${minerCount}`, cx, cy - 4);
+      ctx.fillText(`${connectedMinersRef.current || minerCount}`, cx, cy - 4);
       ctx.shadowBlur = 0;
       ctx.font = '8px system-ui, -apple-system, sans-serif';
       ctx.fillStyle = 'rgba(255, 184, 0, 0.85)';
@@ -394,9 +403,10 @@ export default function MiningDashboard() {
       ctx.fillStyle = 'rgba(120, 160, 255, 0.6)';
       ctx.fillText('Sequential Proof-of-Work Engine', 14, 34);
 
-      // Top-right: Network hashrate
+      // Top-right: Network hashrate (v8.5.5: read from ref)
       ctx.textAlign = 'right';
-      const totalKhs = stats.networkHashRate / 1000;
+      const netHR = networkHashRateRef.current;
+      const totalKhs = netHR / 1000;
       const hrText = totalKhs >= 1000 ? `${(totalKhs / 1000).toFixed(1)} MH/s` : `${totalKhs.toFixed(0)} KH/s`;
       ctx.font = 'bold 13px "SF Mono", "Fira Code", monospace';
       ctx.fillStyle = 'rgba(0, 230, 200, 0.9)';
@@ -405,10 +415,10 @@ export default function MiningDashboard() {
       ctx.fillStyle = 'rgba(0, 230, 200, 0.6)';
       ctx.fillText('Network Hashrate', W - 14, 34);
 
-      // Bottom-left: Your share
+      // Bottom-left: Your share (v8.5.5: read from ref)
       ctx.textAlign = 'left';
-      const yourPct = stats.networkHashRate > 0
-        ? ((displayHashRateRef.current / stats.networkHashRate) * 100).toFixed(2) : '0.00';
+      const yourPct = netHR > 0
+        ? ((displayHashRateRef.current / netHR) * 100).toFixed(2) : '0.00';
       ctx.font = 'bold 11px system-ui, sans-serif';
       ctx.fillStyle = 'rgba(180, 140, 255, 0.8)';
       ctx.fillText(`Your share: ${yourPct}%`, 14, H - 20);
@@ -423,7 +433,7 @@ export default function MiningDashboard() {
     };
 
     animate();
-  }, [connectedMiners, stats.networkHashRate]);
+  }, []); // v8.5.5: Empty deps — reads connectedMiners/networkHashRate from refs
 
   // v3.4.21-beta: Fetch authoritative balance from API
   const fetchBalance = async () => {
@@ -1140,7 +1150,7 @@ export default function MiningDashboard() {
                 </div>
 
                 <p className="text-gray-500 text-[10px] mt-2 text-center italic">
-                  Read the full technical whitepaper at quillon.xyz/downloads/Q-NarwhalKnight-Miner-Whitepaper.pdf
+                  Read the full technical whitepaper at dl.quillon.xyz/downloads/Q-NarwhalKnight-Miner-Whitepaper.pdf
                 </p>
               </div>
             </motion.div>
@@ -1375,14 +1385,14 @@ export default function MiningDashboard() {
       >
         <h4 className="text-lg font-bold text-quantum-green mb-3 flex items-center gap-2">
           <Zap className="w-5 h-5" />
-          Download Optimized Miner v2.3.0
+          Download Optimized Miner v8.3.0
         </h4>
         <p className="text-gray-300 text-sm mb-4">
-          v2.3.0: Miner identification + Lock-free multi-threading + P2P propagation
+          v8.3.0: Better networking + Miner identification + Lock-free multi-threading + P2P propagation
         </p>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <a
-            href="/downloads/q-miner-linux-x64"
+            href="https://dl.quillon.xyz/downloads/q-miner-linux-x64"
             download
             className="flex items-center justify-center gap-2 bg-quantum-green/20 hover:bg-quantum-green/30 border border-quantum-green/50 text-quantum-green font-bold py-3 px-4 rounded-lg transition-all"
           >
@@ -1390,7 +1400,7 @@ export default function MiningDashboard() {
             Linux x64 (Latest)
           </a>
           <a
-            href="/downloads/q-miner-windows-x64.exe"
+            href="https://dl.quillon.xyz/downloads/q-miner-windows-x64.exe"
             download
             className="flex items-center justify-center gap-2 bg-quantum-cyan/20 hover:bg-quantum-cyan/30 border border-quantum-cyan/50 text-quantum-cyan font-bold py-3 px-4 rounded-lg transition-all"
           >
@@ -1398,7 +1408,7 @@ export default function MiningDashboard() {
             Windows x64
           </a>
           <a
-            href="/downloads/q-miner-macos-arm64"
+            href="https://dl.quillon.xyz/downloads/q-miner-macos-arm64"
             download
             className="flex items-center justify-center gap-2 bg-quantum-purple/20 hover:bg-quantum-purple/30 border border-quantum-purple/50 text-quantum-purple font-bold py-3 px-4 rounded-lg transition-all"
           >
@@ -1406,7 +1416,7 @@ export default function MiningDashboard() {
             macOS ARM64
           </a>
           <a
-            href="/downloads/q-miner-macos-x64"
+            href="https://dl.quillon.xyz/downloads/q-miner-macos-x64"
             download
             className="flex items-center justify-center gap-2 bg-quantum-yellow/20 hover:bg-quantum-yellow/30 border border-quantum-yellow/50 text-quantum-yellow font-bold py-3 px-4 rounded-lg transition-all"
           >

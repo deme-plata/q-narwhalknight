@@ -704,18 +704,38 @@ async fn merge_p2p_response(
         }
     }
 
-    // ---- Wallet balances: SKIPPED (v8.2.0 deterministic balance consensus) ----
-    // Wallet balances are now computed deterministically from block coinbase transactions only.
-    // Importing wallet balances from P2P state sync caused divergence between nodes when
-    // peers had different balance states (from gossip timing, missed messages, etc.).
-    // The block-based path (process_block_mining_rewards) is the single source of truth.
+    // ---- Wallet balances: DISABLED (v8.5.4 money glitch fix) ----
+    // v8.5.4: CRITICAL FIX — Wallet balance import from peers PERMANENTLY DISABLED.
+    //
+    // ROOT CAUSE OF MONEY GLITCH: DEX swaps are off-chain (not in blocks). When a user
+    // swaps QUG for tokens, the swap debit only exists on the local node's RocksDB.
+    // Other nodes still have the pre-swap (higher) balance. The "take higher balance"
+    // merge logic would overwrite the local debited balance with the peer's stale higher
+    // balance — effectively refunding the spent QUG while the user keeps the swapped tokens.
+    //
+    // This ran every 5 minutes AND 10s after every restart, causing the "money glitch"
+    // where QUG reappeared after being spent on DEX swaps.
+    //
+    // Balance consensus from block coinbase transactions is the sole authoritative source.
+    // DEX swap debits are applied locally and must never be overwritten by peer state.
     if !response.wallet_balances.is_empty() {
-        debug!("🔒 [STATE SYNC] Skipping {} wallet balances from P2P state sync (deterministic mode)",
+        debug!("🔒 [STATE SYNC v8.5.4] Skipping {} wallet balances from P2P peer (disabled — prevents DEX swap debit erasure)",
                response.wallet_balances.len());
     }
 
-    // ---- Merge token balances (add-only) ----
+    // ---- Merge token balances (add-only for NEW tokens, never overwrite existing) ----
+    // v8.5.2 FIX: Only insert token balances for keys that don't exist locally at all.
+    // Previously, if a user swapped QUGUSD→QUG (balance set to 0 in HashMap),
+    // P2P sync from a stale peer would re-insert the old balance → infinite money glitch.
+    // Now: if we have ANY record (even 0), we trust our local state over peers.
+    //
+    // v8.5.6 FIX: REJECT ALL QUGUSD token balances from P2P state sync.
+    // Nodes running older versions have a ghost QUGUSD balance (172K+ QUGUSD) that
+    // resurrects on every restart and propagates to the entire network via state sync.
+    // QUGUSD is only legitimately created at runtime via vault minting or DEX swaps.
     {
+        let qugusd_addr = q_types::QUGUSD_TOKEN_ADDRESS;
+        let mut qugusd_rejected = 0u64;
         let mut balances = app_state.token_balances.write().await;
         for (composite_key, amount_str) in &response.token_balances {
             let parts: Vec<&str> = composite_key.splitn(2, '_').collect();
@@ -735,8 +755,24 @@ async fn merge_p2p_response(
                 Err(_) => continue,
             };
 
+            // v8.5.6: Block QUGUSD from P2P — ghost balance propagation prevention
+            if token_bytes == qugusd_addr {
+                qugusd_rejected += 1;
+                continue;
+            }
+
             let key = (wallet_bytes, token_bytes);
-            if !balances.contains_key(&key) && amount > 0 {
+            // v8.5.2: Check BOTH in-memory HashMap AND RocksDB.
+            // If we have any local record (even 0 from a swap), don't overwrite.
+            let has_local = balances.contains_key(&key);
+            let has_persisted = if !has_local {
+                // Check RocksDB — if key exists at all (even 0), trust local state
+                app_state.storage_engine.has_token_balance_key(&wallet_bytes, &token_bytes).await
+            } else {
+                true
+            };
+
+            if !has_local && !has_persisted && amount > 0 {
                 if let Err(e) = app_state
                     .storage_engine
                     .save_token_balance(&wallet_bytes, &token_bytes, amount)
@@ -747,6 +783,9 @@ async fn merge_p2p_response(
                 balances.insert(key, amount);
                 result.tokens_added += 1;
             }
+        }
+        if qugusd_rejected > 0 {
+            info!("🛡️ [STATE SYNC P2P v8.5.6] Rejected {} QUGUSD token balances from peer (ghost prevention)", qugusd_rejected);
         }
     }
 
@@ -984,17 +1023,20 @@ async fn merge_http_snapshot(app_state: &Arc<AppState>, snapshot: &FullStateSnap
         }
     }
 
-    // ---- Wallet balances: SKIPPED (v8.2.0 deterministic balance consensus) ----
-    // Wallet balances are now computed deterministically from block coinbase transactions only.
-    // Importing wallet balances from HTTP state sync caused divergence between nodes.
-    // The block-based path (process_block_mining_rewards) is the single source of truth.
+    // ---- Wallet balances: DISABLED (v8.5.4 money glitch fix) ----
+    // v8.5.4: See P2P path above. Wallet balance import permanently disabled to prevent
+    // DEX swap debits from being overwritten by stale peer balances.
     if !snapshot.wallet_balances.is_empty() {
-        debug!("🔒 [STATE SYNC HTTP] Skipping {} wallet balances from HTTP state sync (deterministic mode)",
+        debug!("🔒 [STATE SYNC HTTP v8.5.4] Skipping {} wallet balances (disabled — prevents DEX swap debit erasure)",
                snapshot.wallet_balances.len());
     }
 
-    // ---- Merge token balances ----
+    // ---- Merge token balances (add-only for NEW tokens, never overwrite existing) ----
+    // v8.5.2 FIX: Same protection as P2P path — don't restore spent token balances
+    // v8.5.6 FIX: REJECT ALL QUGUSD token balances (ghost propagation from older nodes)
     {
+        let qugusd_addr = q_types::QUGUSD_TOKEN_ADDRESS;
+        let mut qugusd_rejected = 0u64;
         let mut balances = app_state.token_balances.write().await;
         for (composite_key, amount_str) in &snapshot.token_balances {
             let parts: Vec<&str> = composite_key.splitn(2, '_').collect();
@@ -1003,14 +1045,30 @@ async fn merge_http_snapshot(app_state: &Arc<AppState>, snapshot: &FullStateSnap
             let token_bytes = match hex_to_32bytes(parts[1]) { Some(b) => b, None => continue };
             let amount: u128 = match amount_str.parse() { Ok(a) => a, Err(_) => continue };
 
+            // v8.5.6: Block QUGUSD from HTTP state sync — ghost balance propagation prevention
+            if token_bytes == qugusd_addr {
+                qugusd_rejected += 1;
+                continue;
+            }
+
             let key = (wallet_bytes, token_bytes);
-            if !balances.contains_key(&key) && amount > 0 {
+            let has_local = balances.contains_key(&key);
+            let has_persisted = if !has_local {
+                app_state.storage_engine.get_token_balance(&wallet_bytes, &token_bytes).await.unwrap_or(0) > 0
+            } else {
+                true
+            };
+
+            if !has_local && !has_persisted && amount > 0 {
                 if let Err(e) = app_state.storage_engine.save_token_balance(&wallet_bytes, &token_bytes, amount).await {
                     warn!("🔄 [STATE SYNC HTTP] Failed to persist token balance: {}", e);
                 }
                 balances.insert(key, amount);
                 result.tokens_added += 1;
             }
+        }
+        if qugusd_rejected > 0 {
+            info!("🛡️ [STATE SYNC HTTP v8.5.6] Rejected {} QUGUSD token balances from peer (ghost prevention)", qugusd_rejected);
         }
     }
 

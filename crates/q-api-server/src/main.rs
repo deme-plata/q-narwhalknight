@@ -47,6 +47,8 @@ mod liquidity_api;
 use q_api_server::quillon_bank_api;
 // ✅ ENABLED - QUG/QUGUSD Dual-Token Stablecoin System
 mod stablecoin_api;
+// ✅ v8.5.5 - QCREDIT Yield Vault API (lock QUG → mint QCREDIT, tiered yield)
+mod qcredit_api;
 // ✅ v3.0 - Quantum Neural Oracle Prediction Staking API
 #[cfg(not(target_os = "windows"))]
 mod qno_api;
@@ -137,23 +139,22 @@ static HIGHEST_EVER_HEIGHT: AtomicU64 = AtomicU64::new(0);
 // 4. Mandatory signature verification (prevents forgery)
 //
 use once_cell::sync::Lazy;
-use std::sync::Mutex;
-use std::collections::HashMap;
 use std::time::Instant;
+use dashmap::DashMap;
 
-/// LRU cache for deduplicating balance updates
+/// v8.4.4: LRU cache for deduplicating balance updates — DashMap for lock-free concurrent access
 /// Key: dedup_key() from P2PBalanceUpdate
 /// Value: timestamp when first seen
-/// Max size: 100,000 entries (sufficient for ~24h at 1 update/second)
-static BALANCE_UPDATE_DEDUP_CACHE: Lazy<Mutex<HashMap<String, Instant>>> =
-    Lazy::new(|| Mutex::new(HashMap::with_capacity(100_000)));
+/// DashMap uses per-shard RwLocks internally — no global Mutex blocking tokio workers
+static BALANCE_UPDATE_DEDUP_CACHE: Lazy<DashMap<String, Instant>> =
+    Lazy::new(|| DashMap::with_capacity(100_000));
 
-/// Rate limiting counters per origin node
+/// v8.4.4: Rate limiting counters per origin node — DashMap for lock-free access
 /// Key: origin_node_id
 /// Value: (count, window_start_timestamp)
-/// Limit: 100 updates per minute per node
-static BALANCE_UPDATE_RATE_LIMITS: Lazy<Mutex<HashMap<String, (u32, Instant)>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+/// Limit: 2000 updates per minute per node
+static BALANCE_UPDATE_RATE_LIMITS: Lazy<DashMap<String, (u32, Instant)>> =
+    Lazy::new(DashMap::new);
 
 /// Maximum balance updates per node per minute
 /// v5.1.0: Reduced from 50000 to 2000 - tighter rate limit for money integrity
@@ -168,10 +169,10 @@ const DEDUP_CACHE_MAX_AGE_SECS: u64 = 24 * 60 * 60;
 static CONNECTED_PEERS: Lazy<std::sync::RwLock<std::collections::HashSet<String>>> =
     Lazy::new(|| std::sync::RwLock::new(std::collections::HashSet::new()));
 
-/// v5.1.0: Aggregate P2P balance credit per node per minute (prevents supply inflation)
+/// v8.4.4: Aggregate P2P balance credit per node per minute — DashMap for lock-free access
 /// Key: origin_node_id, Value: (total_amount_credited, window_start)
-static BALANCE_AMOUNT_LIMITS: Lazy<Mutex<HashMap<String, (u128, Instant)>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+static BALANCE_AMOUNT_LIMITS: Lazy<DashMap<String, (u128, Instant)>> =
+    Lazy::new(DashMap::new);
 
 /// v5.1.0: Maximum QUG that can be credited per node per minute via P2P updates
 /// 100 QUG = 100 * 10^24 base units
@@ -220,78 +221,69 @@ fn is_allowed_balance_update_origin(origin_node_id: &str) -> bool {
 }
 
 /// v5.1.0: Check aggregate balance amount limit per node per minute
+/// v8.4.4: Migrated to DashMap — lock-free concurrent access
 /// Returns true if allowed, false if aggregate limit exceeded
 fn check_balance_amount_limit(origin_node_id: &str, amount: u128) -> bool {
-    let mut limits = match BALANCE_AMOUNT_LIMITS.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-
     let now = Instant::now();
-    let entry = limits.entry(origin_node_id.to_string()).or_insert((0, now));
 
-    // Reset window every minute
-    if now.duration_since(entry.1).as_secs() >= 60 {
-        entry.0 = 0;
-        entry.1 = now;
+    match BALANCE_AMOUNT_LIMITS.get_mut(origin_node_id) {
+        Some(mut entry) => {
+            // Reset window every minute
+            if now.duration_since(entry.1).as_secs() >= 60 {
+                entry.0 = 0;
+                entry.1 = now;
+            }
+            if entry.0.saturating_add(amount) > MAX_QUG_PER_NODE_PER_MINUTE {
+                return false;
+            }
+            entry.0 = entry.0.saturating_add(amount);
+            true
+        }
+        None => {
+            BALANCE_AMOUNT_LIMITS.insert(origin_node_id.to_string(), (amount, now));
+            amount <= MAX_QUG_PER_NODE_PER_MINUTE
+        }
     }
-
-    if entry.0.saturating_add(amount) > MAX_QUG_PER_NODE_PER_MINUTE {
-        return false;
-    }
-
-    entry.0 = entry.0.saturating_add(amount);
-    true
 }
 
 /// Maximum unique nodes to track for rate limiting (DoS protection)
 const MAX_RATE_LIMIT_ENTRIES: usize = 10_000;
 
 /// Check rate limit for a node. Returns true if allowed, false if rate limited.
+/// v8.4.4: Migrated to DashMap — lock-free concurrent access, no global Mutex
 fn check_balance_update_rate_limit(origin_node_id: &str) -> bool {
-    let mut limits = match BALANCE_UPDATE_RATE_LIMITS.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => {
-            // Lock poisoning indicates a panic in a previous holder - this is SERIOUS
-            error!("🚨 CRITICAL: BALANCE_UPDATE_RATE_LIMITS lock poisoned! A thread panicked while holding this lock.");
-            error!("   This indicates a bug that caused a panic. System stability may be compromised.");
-            // Recover the poisoned lock to allow continued operation
-            poisoned.into_inner()
-        }
-    };
-
     let now = Instant::now();
     let window_duration = std::time::Duration::from_secs(60);
 
     // Cleanup expired entries periodically (when at 80% capacity)
-    if limits.len() > MAX_RATE_LIMIT_ENTRIES * 8 / 10 {
-        limits.retain(|_, (_, window_start)| {
+    if BALANCE_UPDATE_RATE_LIMITS.len() > MAX_RATE_LIMIT_ENTRIES * 8 / 10 {
+        BALANCE_UPDATE_RATE_LIMITS.retain(|_, (_, window_start)| {
             now.duration_since(*window_start) < window_duration
         });
     }
 
-    match limits.get_mut(origin_node_id) {
-        Some((count, window_start)) => {
-            if now.duration_since(*window_start) >= window_duration {
+    match BALANCE_UPDATE_RATE_LIMITS.get_mut(origin_node_id) {
+        Some(mut entry) => {
+            if now.duration_since(entry.1) >= window_duration {
                 // Window expired, reset counter
-                *count = 1;
-                *window_start = now;
+                entry.0 = 1;
+                entry.1 = now;
                 true
-            } else if *count >= MAX_BALANCE_UPDATES_PER_NODE_PER_MINUTE {
+            } else if entry.0 >= MAX_BALANCE_UPDATES_PER_NODE_PER_MINUTE {
                 // Rate limit exceeded
                 false
             } else {
-                *count += 1;
+                entry.0 += 1;
                 true
             }
         }
         None => {
             // Hard limit: deny new nodes if at capacity (DoS protection)
-            if limits.len() >= MAX_RATE_LIMIT_ENTRIES {
+            if BALANCE_UPDATE_RATE_LIMITS.len() >= MAX_RATE_LIMIT_ENTRIES {
                 warn!("⚠️ RATE LIMIT CACHE: At capacity ({}), denying new node", MAX_RATE_LIMIT_ENTRIES);
                 return false;
             }
-            limits.insert(origin_node_id.to_string(), (1, now));
+            BALANCE_UPDATE_RATE_LIMITS.insert(origin_node_id.to_string(), (1, now));
             true
         }
     }
@@ -301,49 +293,42 @@ fn check_balance_update_rate_limit(origin_node_id: &str) -> bool {
 const MAX_DEDUP_CACHE_ENTRIES: usize = 100_000;
 
 /// Check if a balance update is a duplicate. Returns true if already seen.
+/// v8.4.4: Migrated to DashMap — lock-free concurrent access, no global Mutex
 fn is_duplicate_balance_update(dedup_key: &str) -> bool {
-    let mut cache = match BALANCE_UPDATE_DEDUP_CACHE.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => {
-            // Lock poisoning indicates a panic in a previous holder - this is SERIOUS
-            error!("🚨 CRITICAL: BALANCE_UPDATE_DEDUP_CACHE lock poisoned! A thread panicked while holding this lock.");
-            error!("   This indicates a bug that caused a panic. System stability may be compromised.");
-            // Recover the poisoned lock to allow continued operation
-            poisoned.into_inner()
-        }
-    };
-
     let now = Instant::now();
 
     // Cleanup old entries when approaching limit
-    if cache.len() > 90_000 {
-        cache.retain(|_, timestamp| {
+    if BALANCE_UPDATE_DEDUP_CACHE.len() > 90_000 {
+        BALANCE_UPDATE_DEDUP_CACHE.retain(|_, timestamp| {
             now.duration_since(*timestamp).as_secs() < DEDUP_CACHE_MAX_AGE_SECS
         });
 
-        // If still at hard limit after cleanup, evict oldest 10%
-        if cache.len() >= MAX_DEDUP_CACHE_ENTRIES {
-            let evict_count = cache.len() / 10;
-            let mut entries: Vec<_> = cache.iter()
-                .map(|(k, v)| (k.clone(), *v))
-                .collect();
-            entries.sort_by_key(|(_, ts)| *ts);
-            for (k, _) in entries.into_iter().take(evict_count) {
-                cache.remove(&k);
-            }
-            warn!("⚠️ DEDUP CACHE: Evicted {} oldest entries (DoS protection)", evict_count);
+        // If still at hard limit after cleanup, evict a batch
+        if BALANCE_UPDATE_DEDUP_CACHE.len() >= MAX_DEDUP_CACHE_ENTRIES {
+            // DashMap doesn't support sorted eviction efficiently, just remove expired
+            let evict_target = BALANCE_UPDATE_DEDUP_CACHE.len() / 10;
+            let mut evicted = 0;
+            BALANCE_UPDATE_DEDUP_CACHE.retain(|_, _| {
+                if evicted >= evict_target {
+                    true
+                } else {
+                    evicted += 1;
+                    false
+                }
+            });
+            warn!("⚠️ DEDUP CACHE: Evicted {} entries (DoS protection)", evicted);
         }
     }
 
-    if cache.contains_key(dedup_key) {
+    if BALANCE_UPDATE_DEDUP_CACHE.contains_key(dedup_key) {
         true // Duplicate
     } else {
         // Hard limit: reject new entries if cache is completely full
-        if cache.len() >= MAX_DEDUP_CACHE_ENTRIES {
+        if BALANCE_UPDATE_DEDUP_CACHE.len() >= MAX_DEDUP_CACHE_ENTRIES {
             warn!("⚠️ DEDUP CACHE: At hard limit ({}), treating as duplicate", MAX_DEDUP_CACHE_ENTRIES);
             return true; // Treat as duplicate to prevent OOM
         }
-        cache.insert(dedup_key.to_string(), now);
+        BALANCE_UPDATE_DEDUP_CACHE.insert(dedup_key.to_string(), now);
         false // Not seen before
     }
 }
@@ -756,9 +741,12 @@ async fn update_tui_metrics(
         0
     };
 
-    // Total supply
+    // Total supply — prefer emission controller (authoritative) over wallet sum (may include stale data)
     let total_supply_raw = *app_state.total_minted_supply.read().await;
-    let total_supply_display = total_supply_raw as f64 / 1e24;
+    let total_supply_display = match app_state.balance_consensus_engine.get_emission_summary().await {
+        Ok(summary) if summary.total_supply > 0 => summary.total_supply as f64 / 1e24,
+        _ => total_supply_raw as f64 / 1e24, // fallback to wallet sum
+    };
 
     // Emission rate: ~2,625,000 QUG/year, ~0.0833 QUG/block at 1 bps
     let emission_rate = if block_height > 0 { 0.0833 } else { 0.0 };
@@ -1407,6 +1395,23 @@ S3 STORAGE (archival / overflow):
   Note: S3 is used for cold/archival blocks and backups only.
   Hot data (recent blocks, balances, state) stays on local NVMe/SSD.
 
+STORAGE / SSD:
+  --cheap-ssd                            SSD-friendly mode (or Q_CHEAP_SSD=1)
+                                          Caps RocksDB writes to 50 MB/s
+                                          Starts in Conservative throttle mode
+                                          Adds inter-block disk I/O delays
+                                          Recommended for budget SATA SSDs
+  Q_ROCKSDB_WRITE_RATE_MB=200           Limit RocksDB write rate (MB/s, default: 200)
+  Q_ROCKSDB_BLOCK_CACHE_MB=512          RocksDB block cache size (auto-tuned by RAM)
+  ROCKSDB_BLOCK_CACHE_MB=512            Same as above (legacy alias)
+
+NETWORK THROTTLE (TUI [T] key):
+  Conservative (0)  SSD-safe: slower sync, 100ms disk pause between writes
+  Normal (1)        Balanced: moderate sync speed, 10ms disk pause
+  Turbo (2)         Max speed: no throttling, full disk throughput
+  Toggle with [T] in the server TUI during operation.
+  --cheap-ssd automatically starts in Conservative mode.
+
 TUNING (advanced):
   Q_TURBO_PARALLEL_STREAMS=16          Parallel sync streams
   Q_TURBO_CHUNK_SIZE=2500              Blocks per sync chunk
@@ -1421,7 +1426,7 @@ P2P NETWORK:
   Gossipsub topics: blocks, peer-heights, turbo-sync-*
 
 HOMEPAGE: https://quillon.xyz
-DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
+DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         )
         .arg(
             Arg::new("node-id")
@@ -1482,7 +1487,25 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                 .help("Wallet address that controls this node's admin settings panel (hex, with or without qnk/qug prefix)")
                 .required(false),
         )
+        .arg(
+            Arg::new("cheap-ssd")
+                .long("cheap-ssd")
+                .help("SSD-friendly mode: limits RocksDB write rate to 50 MB/s, starts in Conservative throttle. Use this if your SSD is a budget SATA drive or you see high disk latency during sync.")
+                .action(ArgAction::SetTrue),
+        )
         .get_matches();
+
+    // v8.5.9: --cheap-ssd mode — limits RocksDB write rate and starts in Conservative throttle
+    let cheap_ssd_mode = matches.get_flag("cheap-ssd") ||
+        std::env::var("Q_CHEAP_SSD").map(|v| v == "1" || v.to_lowercase() == "true").unwrap_or(false);
+    if cheap_ssd_mode {
+        // Set RocksDB write rate to 50 MB/s (unless user already set it lower)
+        let current_rate: i64 = std::env::var("Q_ROCKSDB_WRITE_RATE_MB")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(200);
+        if current_rate >= 200 {
+            std::env::set_var("Q_ROCKSDB_WRITE_RATE_MB", "50");
+        }
+    }
 
     // Check if TUI mode is enabled
     let tui_mode = matches.get_flag("tui");
@@ -2356,6 +2379,16 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                 }
             }
 
+            // v8.5.0: Subscribe to update-announcements topic for P2P auto-update
+            {
+                let update_topic = network_id.update_announcements_topic();
+                if let Err(e) = manager.subscribe_topic(&update_topic) {
+                    warn!("⚠️  Failed to subscribe to update-announcements topic: {}", e);
+                } else {
+                    info!("🔄 Subscribed to update-announcements topic: {}", update_topic);
+                }
+            }
+
             // ✅ v0.9.75-beta: Wrap manager but DON'T spawn event loop yet
             // CRITICAL FIX: Prevents deadlock where event loop locks manager forever,
             // causing Phase 3 storage injection to timeout and breaking BlockPackCodec responses.
@@ -2523,6 +2556,13 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
     .await?;
     let mut state = state;
 
+    // v8.5.9: --cheap-ssd → start in Conservative throttle mode (0)
+    if cheap_ssd_mode {
+        state.network_throttle_mode.store(0, std::sync::atomic::Ordering::Relaxed);
+        info!("💾 [CHEAP SSD] Mode enabled: RocksDB write rate capped, Conservative throttle active");
+        info!("💾 [CHEAP SSD] Sync will be slower but won't saturate your disk. Toggle with [T] in TUI.");
+    }
+
     // v7.1.0: Load persisted emission controller state from RocksDB
     // This ensures emission stats survive restarts instead of resetting to 0
     match state.storage_engine.load_emission_state().await {
@@ -2541,6 +2581,133 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
         }
         Err(e) => {
             warn!("⚠️ Error loading emission state: {}", e);
+        }
+    }
+
+    // v8.5.0: One-time testnet wallet purge + rebuild from mainnet blocks.
+    // Pass emission controller total so balances are scaled to match reality.
+    // Also load the balance watermark to prevent re-inflation on restart.
+    {
+        let emission_total = match balance_engine.get_emission_summary().await {
+            Ok(summary) => summary.total_supply,
+            Err(_) => 0, // No emission state → skip scaling
+        };
+        let rebuild_ran = match state.storage_engine.purge_and_rebuild_balances(emission_total).await {
+            Ok(true) => {
+                // Rebuild happened — refresh in-memory wallet_balances from RocksDB
+                let rebuilt = state.storage_engine.load_wallet_balances().await.unwrap_or_default();
+                let mut balances = state.wallet_balances.write().await;
+                balances.clear();
+                for (addr, amount) in &rebuilt {
+                    balances.insert(*addr, *amount);
+                }
+                let total: u128 = rebuilt.values().sum();
+                let mut supply = state.total_minted_supply.write().await;
+                *supply = total;
+                info!("✅ Balance rebuild complete: {} wallets, {} QUG",
+                      rebuilt.len(), total / 1_000_000_000_000_000_000_000_000u128);
+                true
+            }
+            Ok(false) => {
+                // Already done on a previous boot — just log
+                debug!("Balance rebuild migration already completed (skipped)");
+                false
+            }
+            Err(e) => { warn!("⚠️ Balance purge/rebuild failed: {}", e); false },
+        };
+
+        // Set watermark on balance engine.
+        // After a rebuild, ALWAYS reset watermark to current tip (not stale old value).
+        // This prevents catch-up blocks with inflated coinbase from re-inflating supply.
+        if rebuild_ran {
+            let tip = state.storage_engine.get_highest_contiguous_block().await.unwrap_or(0);
+            if tip > 0 {
+                balance_engine.set_balance_watermark(tip);
+                let _ = state.storage_engine.save_balance_watermark(tip).await;
+                info!("🛡️ [WATERMARK] Reset watermark to current tip after rebuild: height {}", tip);
+            }
+        } else {
+            let watermark = state.storage_engine.load_balance_watermark().await.unwrap_or(0);
+            if watermark > 0 {
+                balance_engine.set_balance_watermark(watermark);
+                info!("🛡️ [WATERMARK] Loaded persisted balance watermark: height {}", watermark);
+            } else {
+                let tip = state.storage_engine.get_highest_contiguous_block().await.unwrap_or(0);
+                if tip > 0 {
+                    balance_engine.set_balance_watermark(tip);
+                    let _ = state.storage_engine.save_balance_watermark(tip).await;
+                    info!("🛡️ [WATERMARK] Initialized balance watermark to current tip: height {}", tip);
+                }
+            }
+        }
+    }
+
+    // v8.5.4: MONEY GLITCH FIX — Reconcile wallet balances with DEX swap history.
+    // State sync was importing stale balances from peers, overwriting DEX swap debits.
+    // This one-time migration rebuilds balances from chain + applies swap debits/credits.
+    {
+        match state.storage_engine.reconcile_balances_with_dex_swaps().await {
+            Ok(true) => {
+                // Reconciliation happened — refresh in-memory wallet_balances from RocksDB
+                let reconciled = state.storage_engine.load_wallet_balances().await.unwrap_or_default();
+                let mut balances = state.wallet_balances.write().await;
+                balances.clear();
+                for (addr, amount) in &reconciled {
+                    balances.insert(*addr, *amount);
+                }
+                let total: u128 = reconciled.values().sum();
+                let mut supply = state.total_minted_supply.write().await;
+                *supply = total;
+                info!("✅ [v8.5.4] Balance reconciliation loaded: {} wallets, {} QUG",
+                      reconciled.len(), total / 1_000_000_000_000_000_000_000_000u128);
+
+                // Reset watermark to current tip after reconciliation
+                let tip = state.storage_engine.get_highest_contiguous_block().await.unwrap_or(0);
+                if tip > 0 {
+                    balance_engine.set_balance_watermark(tip);
+                    let _ = state.storage_engine.save_balance_watermark(tip).await;
+                    info!("🛡️ [WATERMARK] Reset watermark after reconciliation: height {}", tip);
+                }
+            }
+            Ok(false) => {
+                debug!("[v8.5.4] Balance reconciliation already completed (skipped)");
+            }
+            Err(e) => {
+                warn!("⚠️ [v8.5.4] Balance reconciliation failed: {} — continuing with existing balances", e);
+            }
+        }
+    }
+
+    // v8.5.6: ONE-TIME purge of QUGUSD ghost entries from CF_TOKEN_BALANCES (binary key storage).
+    // After this + the P2P rejection fix in state_sync_api.rs, QUGUSD persists legitimately.
+    {
+        #[cfg(not(target_os = "windows"))]
+        {
+            let purge_flag = b"migration_qugusd_cf_token_purge_v856_done";
+            if !state.storage_engine.has_migration_flag(purge_flag).await {
+                match state.storage_engine.purge_qugusd_from_state_sync_cf().await {
+                    Ok(count) if count > 0 => {
+                        info!("🧹 [v8.5.6] ONE-TIME: Purged {} stale QUGUSD entries from CF_TOKEN_BALANCES", count);
+                        let qugusd_addr = q_types::QUGUSD_TOKEN_ADDRESS;
+                        let mut token_balances = state.token_balances.write().await;
+                        let qugusd_keys: Vec<([u8; 32], [u8; 32])> = token_balances.iter()
+                            .filter(|((_w, t), _)| *t == qugusd_addr)
+                            .map(|((w, t), _)| (*w, *t))
+                            .collect();
+                        let purged = qugusd_keys.len();
+                        for key in qugusd_keys {
+                            token_balances.remove(&key);
+                        }
+                        drop(token_balances);
+                        if purged > 0 {
+                            info!("🧹 [v8.5.6] Also removed {} QUGUSD entries from in-memory token_balances", purged);
+                        }
+                    }
+                    Ok(_) => debug!("[v8.5.6] No stale QUGUSD entries in CF_TOKEN_BALANCES"),
+                    Err(e) => warn!("⚠️ [v8.5.6] CF_TOKEN_BALANCES QUGUSD purge failed: {}", e),
+                }
+                let _ = state.storage_engine.set_migration_flag(purge_flag).await;
+            }
         }
     }
 
@@ -3482,6 +3649,13 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
         state.libp2p_peer_count = Some(peer_count.clone());
         info!("📊 Atomic peer count integrated into AppState");
     }
+    // v1.0.2: Wire P2P outbound bandwidth counter to network manager
+    if let Some(ref libp2p) = state.libp2p_discovery {
+        if let Ok(mut mgr) = libp2p.try_lock() {
+            mgr.set_p2p_bytes_out(state.p2p_bytes_out.clone());
+            info!("📊 P2P outbound bandwidth counter integrated into network manager");
+        }
+    }
     // Note: node_status.connected_peers will be updated by reading the atomic counter
     // 2. P2P listener (direct TCP connections)
     // Stats loop reads from node_status.connected_peers
@@ -4384,32 +4558,42 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                         // Previous incremental add caused balance drift — HashMap diverged from
                         // RocksDB truth, causing flickering between ~377 and ~220 QUG.
                         // Only update if RocksDB > current (SafeBatchedWriter may not have committed yet).
+                        //
+                        // v8.4.4: Split into two phases — RocksDB reads FIRST (no lock held),
+                        // then write lock only for the in-memory HashMap update (microseconds).
+                        // Previously held write lock during ALL RocksDB reads, blocking balance API calls.
                         {
-                            let mut synced_addresses = 0u64;
-                            let mut balances = wallet_balances_sync.write().await;
-
+                            // Phase 1: Read from RocksDB WITHOUT holding the write lock
+                            let mut updates: Vec<([u8; 32], u128)> = Vec::new();
                             for block in &blocks {
                                 for tx in &block.transactions {
                                     if tx.from == [0u8; 32] {
                                         let address_hex = hex::encode(&tx.to);
                                         if let Ok(actual_balance) = storage_clone.get_balance(&address_hex).await {
-                                            let current = balances.get(&tx.to).copied().unwrap_or(0);
-                                            // Only update upward — SafeBatchedWriter may not have committed yet,
-                                            // so RocksDB could return a stale lower value for recent blocks.
-                                            if actual_balance > current {
-                                                balances.insert(tx.to, actual_balance);
-                                                synced_addresses += 1;
-                                            }
+                                            updates.push((tx.to, actual_balance));
                                         }
                                     }
                                 }
                             }
 
-                            if synced_addresses > 0 {
-                                info!(
-                                    "💰 [FAST SYNC BALANCE v8.3.0] Synced {} addresses from RocksDB",
-                                    synced_addresses
-                                );
+                            // Phase 2: Acquire write lock only for the HashMap update (microseconds)
+                            if !updates.is_empty() {
+                                let mut balances = wallet_balances_sync.write().await;
+                                let mut synced_addresses = 0u64;
+                                for (addr, actual_balance) in &updates {
+                                    let current = balances.get(addr).copied().unwrap_or(0);
+                                    if *actual_balance > current {
+                                        balances.insert(*addr, *actual_balance);
+                                        synced_addresses += 1;
+                                    }
+                                }
+                                drop(balances);
+                                if synced_addresses > 0 {
+                                    info!(
+                                        "💰 [FAST SYNC BALANCE v8.3.0] Synced {} addresses from RocksDB",
+                                        synced_addresses
+                                    );
+                                }
                             }
                         }
 
@@ -4641,27 +4825,39 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                 {
                     // Sync HashMap from RocksDB (source of truth) for fast lookups
                     // v7.1.2: Also emit SSE events so frontend sees balance updates during sync
-                    let mut balances = wallet_balances_sync.write().await;
+                    //
+                    // v8.4.4: Split into two phases — RocksDB reads FIRST (no lock held),
+                    // then write lock only for the HashMap update (microseconds).
+                    // Previously held write lock during ALL RocksDB reads, blocking balance API calls.
                     let mut synced_addresses = 0u64;
                     let mut sse_updates: Vec<(String, u128, u128)> = Vec::new(); // (addr, old, new)
 
+                    // Phase 1: Read from RocksDB WITHOUT holding the write lock
+                    let mut db_reads: Vec<([u8; 32], String, u128)> = Vec::new();
                     for block in &blocks {
                         for tx in &block.transactions {
                             if tx.from == [0u8; 32] {
-                                // Read actual balance from RocksDB (authoritative source)
                                 let address_hex = hex::encode(&tx.to);
                                 if let Ok(actual_balance) = storage_clone.get_balance(&address_hex).await {
-                                    let old_balance = balances.get(&tx.to).copied().unwrap_or(0);
-                                    if actual_balance != old_balance {
-                                        sse_updates.push((address_hex.clone(), old_balance, actual_balance));
-                                    }
-                                    balances.insert(tx.to, actual_balance);
-                                    synced_addresses += 1;
+                                    db_reads.push((tx.to, address_hex, actual_balance));
                                 }
                             }
                         }
                     }
-                    drop(balances);
+
+                    // Phase 2: Acquire write lock only for HashMap update (microseconds)
+                    if !db_reads.is_empty() {
+                        let mut balances = wallet_balances_sync.write().await;
+                        for (addr_bytes, address_hex, actual_balance) in &db_reads {
+                            let old_balance = balances.get(addr_bytes).copied().unwrap_or(0);
+                            if *actual_balance != old_balance {
+                                sse_updates.push((address_hex.clone(), old_balance, *actual_balance));
+                            }
+                            balances.insert(*addr_bytes, *actual_balance);
+                            synced_addresses += 1;
+                        }
+                        drop(balances);
+                    }
 
                     // v7.1.2: Emit SSE BalanceUpdated events for miners whose balances changed
                     if !sse_updates.is_empty() {
@@ -5548,6 +5744,14 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
     turbo_sync_manager.set_network_channel(network_request_tx.clone());
     info!("✅ TRUE P2P Turbo Sync network channel configured!");
 
+    // 🎚️ v8.5.4: Share throttle mode atomic between AppState and TurboSyncManager
+    // TUI sets it via AppState, sync loop reads it via TurboSyncManager — same Arc
+    turbo_sync_manager.set_network_throttle_mode(state.network_throttle_mode.clone());
+    let throttle_name = match state.network_throttle_mode.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => "Conservative", 1 => "Normal", _ => "Turbo",
+    };
+    info!("🎚️ [THROTTLE] Network throttle mode: {} (toggle with T in TUI)", throttle_name);
+
     let turbo_sync = Arc::new(turbo_sync_manager);
     state.turbo_sync = Some(turbo_sync.clone());
 
@@ -5766,6 +5970,37 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
         warn!(
             "⚠️ [TURBO SYNC P2P] Gossipsub not available - network request processor NOT started"
         );
+    }
+
+    // ========================================
+    // 🔄 v8.5.0: NODE AUTO-UPDATER INITIALIZATION
+    // ========================================
+    {
+        let auto_update_config = q_api_server::node_auto_updater::AutoUpdateConfig::from_env(
+            &db_path,
+            env!("CARGO_PKG_VERSION"),
+            network_config.network_id.as_str(),
+        );
+
+        let is_bootstrap_node = std::env::var("Q_BOOTSTRAP_NODE").unwrap_or_else(|_| "0".to_string()) == "1";
+
+        let (auto_updater, auto_update_tx) = q_api_server::node_auto_updater::NodeAutoUpdater::new(
+            auto_update_config,
+            state.libp2p_peer_count.clone(),
+            state.current_height_atomic.clone(),
+            state.highest_network_height.clone(),
+            is_bootstrap_node,
+            state.node_signing_key.clone(),
+            state.libp2p_command_tx.clone(),
+        );
+
+        let auto_update_state_rx = auto_updater.state_receiver();
+        state.auto_update_tx = Some(auto_update_tx);
+        state.auto_update_state = Some(auto_update_state_rx);
+
+        // Spawn the background auto-updater task
+        auto_updater.spawn();
+        info!("🔄 [AUTO-UPDATE] Background task spawned");
     }
 
     let app_state = Arc::new(state);
@@ -6138,6 +6373,82 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
     }
 
     // ========================================
+    // v8.5.5: Register $QCREDIT as a built-in token contract
+    // Quillon Credit — lock QUG 1:1, mint QCREDIT, earn tiered yield
+    // ========================================
+    {
+        use q_types::{QCREDIT_TOKEN_ADDRESS, QCREDIT_DECIMALS, BANK_MASTER_ACCOUNT};
+        use q_vm::contracts::{ContractAddress, ContractType, DeployedSmartContract, ContractState, ContractMetadata};
+
+        let qcredit_contract_addr = ContractAddress(QCREDIT_TOKEN_ADDRESS);
+
+        let already_registered = {
+            let contracts = app_state.orobit_ecosystem.deployed_contracts.read().await;
+            contracts.contains_key(&qcredit_contract_addr)
+        };
+
+        if !already_registered {
+            info!("💳 [QCREDIT] Registering $QCREDIT yield vault token as built-in contract...");
+
+            let mut deployment_params = std::collections::HashMap::new();
+            deployment_params.insert("name".to_string(), serde_json::json!("Quillon Credit"));
+            deployment_params.insert("symbol".to_string(), serde_json::json!("QCREDIT"));
+            deployment_params.insert("decimals".to_string(), serde_json::json!(QCREDIT_DECIMALS));
+            deployment_params.insert("initialSupply".to_string(), serde_json::json!("0"));
+            deployment_params.insert("tokenType".to_string(), serde_json::json!("YieldVault"));
+            deployment_params.insert("description".to_string(), serde_json::json!(
+                "Digital credit layer — lock QUG 1:1 to mint QCREDIT, earn tiered yield (5-25% APY). L1 capital → L2 credit."
+            ));
+
+            let qcredit_contract = DeployedSmartContract {
+                address: qcredit_contract_addr.clone(),
+                contract_type: ContractType::SecureToken,
+                deployer: BANK_MASTER_ACCOUNT,
+                deployment_params,
+                deployed_at: chrono::Utc::now().timestamp() as u64,
+                deployment_tx: "genesis-qcredit-vault".to_string(),
+                verified: true,
+                contract_state: ContractState {
+                    active: true,
+                    paused: false,
+                    total_calls: 0,
+                    last_interaction: chrono::Utc::now().timestamp() as u64,
+                    storage_root: [0u8; 32],
+                },
+                metadata: ContractMetadata {
+                    name: "Quillon Credit".to_string(),
+                    symbol: Some("QCREDIT".to_string()),
+                    description: "Yield vault token — lock QUG, mint QCREDIT 1:1, earn 5-25% APY across 4 tiers".to_string(),
+                    features: {
+                        let mut f = std::collections::HashMap::new();
+                        f.insert("yield_vault".to_string(), true);
+                        f.insert("tiered_apy".to_string(), true);
+                        f.insert("lockable".to_string(), true);
+                        f.insert("burnable".to_string(), true);
+                        f
+                    },
+                    governance_enabled: false,
+                    upgrade_history: vec![],
+                },
+            };
+
+            let mut contracts = app_state.orobit_ecosystem.deployed_contracts.write().await;
+            contracts.insert(qcredit_contract_addr.clone(), qcredit_contract);
+            drop(contracts);
+
+            app_state.symbol_to_address.insert(
+                "QCREDIT".to_string(),
+                format!("qnk{}", hex::encode(QCREDIT_TOKEN_ADDRESS)),
+            );
+
+            // QCREDIT starts with 0 supply — minted on-demand when users lock QUG
+            info!("✅ [QCREDIT] $QCREDIT yield vault token registered (supply: 0, decimals: 24, minted on lock)");
+        } else {
+            info!("✅ [QCREDIT] $QCREDIT already registered");
+        }
+    }
+
+    // ========================================
     // v7.0.1: INTEGRITY CHECK DISABLED - was opening a SECOND RocksDB handle
     // on the same hot DB path, causing "lock hold by current process" error.
     // This double-open corrupted the DB's LOG file and may have caused
@@ -6382,6 +6693,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
             info!("🔒 [GOSSIPSUB] Network isolation: only accepting topics with prefix '{}'", our_topic_prefix);
 
             while let Some((topic, data)) = gossipsub_rx.recv().await {
+                // v1.0.2: Track inbound P2P bandwidth
+                app_state_gossip.p2p_bytes_in.fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
+
                 // v1.1.31-beta: Changed to trace! to reduce log spam
                 trace!("📥 GOSSIPSUB: topic={}, size={} bytes", topic, data.len());
 
@@ -9577,11 +9891,14 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
 
                             // Only update height if transaction succeeded
                             if transaction_success {
-                                // Update node height if this advances us
-                                let mut status = app_state_gossip.node_status.write().await;
-                                if block_height > status.current_height {
-                                    // Check for consecutive blocks
-                                    let mut next_expected = status.current_height + 1;
+                                // v8.4.4: Read storage heights WITHOUT holding write lock.
+                                // Previously held node_status.write() during get_qblock_by_height() loop,
+                                // blocking ALL status API reads for seconds during sync.
+                                let current_status_height = app_state_gossip.node_status.read().await.current_height;
+                                if block_height > current_status_height {
+                                    // Scan consecutive blocks without any lock held
+                                    let mut new_height = current_status_height;
+                                    let mut next_expected = current_status_height + 1;
                                     loop {
                                         match app_state_gossip
                                             .storage_engine
@@ -9589,7 +9906,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                                             .await
                                         {
                                             Ok(Some(_)) => {
-                                                status.current_height = next_expected;
+                                                new_height = next_expected;
                                                 info!(
                                                     "📈 P2P sync advanced height to {}",
                                                     next_expected
@@ -9597,6 +9914,14 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                                                 next_expected += 1;
                                             }
                                             _ => break,
+                                        }
+                                    }
+                                    // Acquire write lock only for the single-field update (microseconds)
+                                    if new_height > current_status_height {
+                                        let mut status = app_state_gossip.node_status.write().await;
+                                        // Re-check to avoid racing with another updater
+                                        if new_height > status.current_height {
+                                            status.current_height = new_height;
                                         }
                                     }
                                 }
@@ -9732,15 +10057,36 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                     info!("🎯 [TURBO SYNC DEBUG] Received message on /block-pack-responses topic!");
                     info!("🎯 [TURBO SYNC DEBUG] Response size: {} bytes", data.len());
 
+                    // v8.5.2: Guard against OOM from corrupted/malicious P2P data.
+                    // bincode reads a u64 length prefix for Vec<u8> fields (compressed_data)
+                    // and tries Vec::with_capacity(length). Corrupted data with length=2^32
+                    // crashes Windows nodes with "memory allocation of 4294967296 bytes failed".
+                    // Cap at 500MB — no legitimate BlockPack should ever be this large.
+                    // v8.5.2: Guard against OOM from corrupted/malicious P2P data.
+                    // bincode reads a u64 length prefix for Vec<u8> fields (compressed_data)
+                    // and tries Vec::with_capacity(length). Corrupted data with length=2^32
+                    // crashes Windows nodes with "memory allocation of 4294967296 bytes failed".
+                    // Cap at 500MB — no legitimate BlockPack should ever be this large.
+                    const MAX_BLOCKPACK_WIRE_SIZE: usize = 500_000_000;
+                    if data.len() > MAX_BLOCKPACK_WIRE_SIZE {
+                        warn!("🚫 [TURBO SYNC] BlockPack too large: {} bytes (limit {}), dropping",
+                              data.len(), MAX_BLOCKPACK_WIRE_SIZE);
+                        continue;
+                    }
+
                     // ✅ v0.9.66-beta: Cascading decode for BlockPack responses
-                    // Try postcard first (most common), then bincode, then MessagePack
+                    // Try postcard first (most common), then bincode (with size limit), then MessagePack
                     let pack_result = postcard::from_bytes::<q_storage::BlockPack>(&data)
                         .or_else(|e1| {
                             info!(
                                 "🔍 [TURBO SYNC] Postcard decode failed: {:?}, trying bincode",
                                 e1
                             );
-                            bincode::deserialize::<q_storage::BlockPack>(&data)
+                            // v8.5.2: Use bincode Options with size limit to prevent OOM
+                            use bincode::Options;
+                            bincode::DefaultOptions::new()
+                                .with_limit(MAX_BLOCKPACK_WIRE_SIZE as u64)
+                                .deserialize::<q_storage::BlockPack>(&data)
                         })
                         .or_else(|e2| {
                             info!(
@@ -9871,14 +10217,13 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
 
                             // 🛡️ v1.3.0-beta: FALSE HEIGHT CLAIM PROTECTION
                             // Prevents malicious peers from advertising impossible heights
-                            // Root cause fix for node stuck at 16,818 due to peer claiming 78,377
+                            // v8.4.4: Use atomic counter instead of RocksDB read — this path is hit
+                            // 1000+/min from gossipsub peer-height announcements. The old
+                            // get_latest_qblock_height().await call was a RocksDB read on every
+                            // message, starving sync and API of tokio worker time.
                             let our_height = app_state_gossip
-                                .storage_engine
-                                .get_latest_qblock_height()
-                                .await
-                                .ok()
-                                .flatten()
-                                .unwrap_or(0);
+                                .current_height_atomic
+                                .load(std::sync::atomic::Ordering::Relaxed);
 
                             // 🛡️ v1.3.10-beta: FIXED SMART HEIGHT VALIDATION
                             //
@@ -11342,7 +11687,14 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                 // ========================================
                 } else if topic.contains("/pool/") {
                     // Handle all pool-related messages
-                    match bincode::deserialize::<q_mining_pool::distributed::PoolMessage>(&data) {
+                    // v8.5.2: Use bincode Options with 10MB limit to prevent OOM from corrupted P2P data
+                    const MAX_POOL_MSG_SIZE: u64 = 10_000_000;
+                    match {
+                        use bincode::Options;
+                        bincode::DefaultOptions::new()
+                            .with_limit(MAX_POOL_MSG_SIZE)
+                            .deserialize::<q_mining_pool::distributed::PoolMessage>(&data)
+                    } {
                         Ok(pool_message) => {
                             // Route to distributed pool coordinator if available
                             if let Some(ref coordinator) = app_state_gossip.distributed_pool_coordinator {
@@ -11411,6 +11763,18 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                 // ========================================
                 } else if topic.ends_with("/calendar") {
                     q_api_server::calendar_api::handle_p2p_calendar_event(&app_state_gossip, &data).await;
+                // ========================================
+                // 🔄 v8.5.0: P2P UPDATE ANNOUNCEMENT HANDLER
+                // ========================================
+                } else if topic.contains("/update-announcements") {
+                    // Forward to auto-updater channel (non-blocking)
+                    if let Some(ref tx) = app_state_gossip.auto_update_tx {
+                        if let Err(e) = tx.send(data.clone()) {
+                            debug!("🔄 [AUTO-UPDATE] Failed to forward announcement: {}", e);
+                        } else {
+                            debug!("🔄 [AUTO-UPDATE] Forwarded announcement ({} bytes)", data.len());
+                        }
+                    }
                 } else {
                     warn!("Unknown gossipsub topic: {}, dropping", topic);
                 }
@@ -16728,6 +17092,21 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
                     }
                 }
 
+                // v8.5.0: Persist balance watermark — update the watermark to current tip
+                // so that on next restart, blocks below this height are skipped.
+                {
+                    let current_height = app_state_balance_sync.storage_engine
+                        .get_highest_contiguous_block().await.unwrap_or(0);
+                    if current_height > 0 {
+                        // Update the in-memory watermark on the balance engine
+                        app_state_balance_sync.balance_consensus_engine
+                            .set_balance_watermark(current_height);
+                        // Persist to RocksDB
+                        let _ = app_state_balance_sync.storage_engine
+                            .save_balance_watermark(current_height).await;
+                    }
+                }
+
                 // v8.3.0: Detect and fix height_cache desync every 15 seconds.
                 // Catches any code path that writes qblock:latest without updating cache.
                 if let Ok(Some(pointer_height)) = app_state_balance_sync.storage_engine
@@ -18401,7 +18780,14 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
         // 📈 v2.5.0-beta: Perpetual Futures API - Leveraged long/short trading
         .nest("/api/v1/perp", q_api_server::perpetual_api::create_perp_router())
         // ⛏️ v2.2.1-beta: Stratum Mining Pool API - PPLNS rewards
-        .nest("/api/v1/pool", q_api_server::pool_api::create_pool_router());
+        .nest("/api/v1/pool", q_api_server::pool_api::create_pool_router())
+        // 💳 v8.5.5: QCREDIT Yield Vault API - Lock QUG, earn tiered yield
+        .route("/api/v1/qcredit/status", get(qcredit_api::get_status))
+        .route("/api/v1/qcredit/tiers", get(qcredit_api::get_tiers))
+        .route("/api/v1/qcredit/position", get(qcredit_api::get_position))
+        .route("/api/v1/qcredit/lock", post(qcredit_api::lock_qug))
+        .route("/api/v1/qcredit/unlock", post(qcredit_api::unlock_position))
+        .route("/api/v1/qcredit/claim", post(qcredit_api::claim_yield));
 
     // ✨ v1.4.0-beta: Recursive Proofs API - Eliminates Weak Subjectivity
     // Post-quantum recursive SNARKs for ~10ms trustless light client bootstrap
@@ -18551,6 +18937,12 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
         // v7.1.5: Dev Fee admin - verification, measurement, and config
         .route("/api/v1/admin/dev-fee", get(q_api_server::deploy_admin_api::admin_dev_fee_status))
         .route("/api/v1/admin/dev-fee/config", post(q_api_server::deploy_admin_api::admin_dev_fee_config))
+        // 🔄 v8.5.0: Auto-update announcement + status + toggle + notifications
+        .route("/api/v1/admin/update/announce", post(q_api_server::deploy_admin_api::admin_announce_update))
+        .route("/api/v1/admin/update/status", get(q_api_server::deploy_admin_api::admin_update_status))
+        .route("/api/v1/admin/update/toggle", post(q_api_server::deploy_admin_api::admin_update_toggle))
+        .route("/api/v1/admin/update/notification-email", get(q_api_server::deploy_admin_api::admin_get_notification_email))
+        .route("/api/v1/admin/update/notification-email", post(q_api_server::deploy_admin_api::admin_set_notification_email))
         // v8.2.0: Admin-only balance rebuild from chain (deterministic balance consensus)
         .route("/api/v1/admin/rebuild-balances", post(handlers::admin_rebuild_balances))
         .route("/api/v1/admin/purge-phase-data", post(admin_purge_phase_data))
@@ -18999,12 +19391,46 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v7.1.3-beta"
 
             tokio::spawn(async move {
                 info!("📊 Starting TUI metrics updater task...");
+                let mut prev_bytes_in: u64 = 0;
+                let mut prev_bytes_out: u64 = 0;
                 loop {
+                    // Snapshot cumulative P2P byte counters and compute per-second rates
+                    let cur_bytes_in = app_state_clone.p2p_bytes_in.load(std::sync::atomic::Ordering::Relaxed);
+                    let cur_bytes_out = app_state_clone.p2p_bytes_out.load(std::sync::atomic::Ordering::Relaxed);
+                    let delta_in = cur_bytes_in.saturating_sub(prev_bytes_in);
+                    let delta_out = cur_bytes_out.saturating_sub(prev_bytes_out);
+                    prev_bytes_in = cur_bytes_in;
+                    prev_bytes_out = cur_bytes_out;
+
                     // Update metrics from app state
                     if let Err(e) =
                         update_tui_metrics(&metrics_clone, &app_state_clone, start_time).await
                     {
                         warn!("Failed to update TUI metrics: {}", e);
+                    }
+
+                    // Write bandwidth rates (computed here because update_tui_metrics has no local state)
+                    if let Ok(mut m) = metrics_clone.write() {
+                        m.bytes_in_per_sec = delta_in;
+                        m.bytes_out_per_sec = delta_out;
+                        m.total_bytes_in = cur_bytes_in;
+                        m.total_bytes_out = cur_bytes_out;
+                        m.bytes_received = delta_in; // backwards-compat: rate per tick
+                        m.bytes_sent = delta_out;
+
+                        // 🎚️ v8.5.4: Bridge TUI throttle mode → AppState → TurboSyncManager
+                        // TUI writes to Metrics.network_throttle_mode, we propagate to the AtomicU8
+                        let tui_throttle = m.network_throttle_mode.to_u8();
+                        let current = app_state_clone.network_throttle_mode.load(std::sync::atomic::Ordering::Relaxed);
+                        if tui_throttle != current {
+                            app_state_clone.network_throttle_mode.store(tui_throttle, std::sync::atomic::Ordering::Relaxed);
+                            let name = match tui_throttle {
+                                0 => "Conservative",
+                                1 => "Normal",
+                                _ => "Turbo",
+                            };
+                            info!("🎚️ [THROTTLE] Mode changed to {} (sync concurrency adjusted)", name);
+                        }
                     }
 
                     // Update every second

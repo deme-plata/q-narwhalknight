@@ -246,14 +246,32 @@ const FinanceModal: React.FC<FinanceModalProps> = ({ isOpen, onClose }) => {
   const [stablecoinError, setStablecoinError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'overview' | 'adoption' | 'holders' | 'checkpoints' | 'stablecoin' | 'graphs' | 'emission'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'adoption' | 'holders' | 'checkpoints' | 'stablecoin' | 'graphs' | 'emission' | 'qcredit'>('overview');
+  const [qcreditStatus, setQcreditStatus] = useState<any>(null);
+  const [qcreditLoading, setQcreditLoading] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
       fetchFinancialData();
       fetchStablecoinData();
+      fetchQCreditData();
     }
   }, [isOpen]);
+
+  const fetchQCreditData = async () => {
+    setQcreditLoading(true);
+    try {
+      const response = await fetch('/api/v1/qcredit/status');
+      const result = await response.json();
+      if (result.success && result.data) {
+        setQcreditStatus(result.data);
+      }
+    } catch (err) {
+      console.error('Failed to fetch QCREDIT status:', err);
+    } finally {
+      setQcreditLoading(false);
+    }
+  };
 
   const fetchFinancialData = async () => {
     setLoading(true);
@@ -316,6 +334,7 @@ const FinanceModal: React.FC<FinanceModalProps> = ({ isOpen, onClose }) => {
   const tabs = [
     { id: 'overview', label: 'Overview', icon: Activity },
     { id: 'emission', label: 'Emission', icon: Flame },
+    { id: 'qcredit', label: 'QCREDIT', icon: Zap },
     { id: 'graphs', label: 'Graphs', icon: LineChart },
     { id: 'adoption', label: 'Adoption', icon: TrendingUp },
     { id: 'holders', label: 'Holders', icon: Users },
@@ -1043,7 +1062,7 @@ const FinanceModal: React.FC<FinanceModalProps> = ({ isOpen, onClose }) => {
                       {/* Whitepaper Link */}
                       <div className="p-4 rounded-xl bg-amber-500/5 border border-amber-500/20 text-center">
                         <a
-                          href="/downloads/qug-emission-economics-whitepaper.pdf"
+                          href="https://dl.quillon.xyz/downloads/qug-emission-economics-whitepaper.pdf"
                           target="_blank"
                           className="text-amber-400 hover:text-amber-300 underline font-semibold"
                         >
@@ -1216,6 +1235,91 @@ const FinanceModal: React.FC<FinanceModalProps> = ({ isOpen, onClose }) => {
                         </div>
                       </div>
                     </div>
+                  )}
+
+                  {/* QCREDIT Yield Vault Tab */}
+                  {activeTab === 'qcredit' && (
+                    <>
+                      {qcreditLoading ? (
+                        <div className="flex items-center justify-center py-12">
+                          <RefreshCw className="w-8 h-8 text-amber-400 animate-spin" />
+                        </div>
+                      ) : qcreditStatus ? (
+                        <div className="space-y-4">
+                          {/* Header */}
+                          <div className="text-center p-4 bg-gradient-to-r from-amber-500/10 to-orange-500/10 border border-amber-500/20 rounded-xl">
+                            <h3 className="text-lg font-bold bg-gradient-to-r from-amber-400 to-orange-300 bg-clip-text text-transparent">Quillon Credit (QCREDIT)</h3>
+                            <p className="text-xs text-amber-300/60 mt-1">Lock QUG 1:1 to mint QCREDIT &mdash; earn tiered yield</p>
+                          </div>
+
+                          {/* TVL & Stats */}
+                          <div className="grid grid-cols-2 gap-3">
+                            <div className="p-3 bg-slate-800/50 border border-slate-700/30 rounded-xl">
+                              <div className="text-[10px] text-slate-500 uppercase tracking-wider">Total Value Locked</div>
+                              <div className="text-lg font-bold text-white font-mono mt-1">{parseFloat(qcreditStatus.total_locked).toLocaleString(undefined, { maximumFractionDigits: 2 })} QUG</div>
+                            </div>
+                            <div className="p-3 bg-slate-800/50 border border-slate-700/30 rounded-xl">
+                              <div className="text-[10px] text-slate-500 uppercase tracking-wider">QCREDIT Supply</div>
+                              <div className="text-lg font-bold text-amber-400 font-mono mt-1">{parseFloat(qcreditStatus.total_qcredit_supply).toLocaleString(undefined, { maximumFractionDigits: 2 })}</div>
+                            </div>
+                            <div className="p-3 bg-slate-800/50 border border-slate-700/30 rounded-xl">
+                              <div className="text-[10px] text-slate-500 uppercase tracking-wider">Protocol Reserve</div>
+                              <div className="text-lg font-bold text-emerald-400 font-mono mt-1">{parseFloat(qcreditStatus.protocol_reserve).toLocaleString(undefined, { maximumFractionDigits: 2 })} QUG</div>
+                            </div>
+                            <div className="p-3 bg-slate-800/50 border border-slate-700/30 rounded-xl">
+                              <div className="text-[10px] text-slate-500 uppercase tracking-wider">Positions</div>
+                              <div className="text-lg font-bold text-cyan-400 font-mono mt-1">{qcreditStatus.position_count}</div>
+                            </div>
+                          </div>
+
+                          {/* Yield Tiers */}
+                          <div>
+                            <h4 className="text-sm font-bold text-slate-300 mb-2">Yield Tiers</h4>
+                            <div className="grid grid-cols-2 gap-2">
+                              {(qcreditStatus.tiers || []).map((tier: any, i: number) => {
+                                const colors = [
+                                  { bg: 'from-amber-700/20 to-amber-600/10', border: 'border-amber-600/30', text: 'text-amber-400' },
+                                  { bg: 'from-slate-400/20 to-slate-300/10', border: 'border-slate-400/30', text: 'text-slate-300' },
+                                  { bg: 'from-yellow-500/20 to-yellow-400/10', border: 'border-yellow-500/30', text: 'text-yellow-400' },
+                                  { bg: 'from-cyan-400/20 to-blue-400/10', border: 'border-cyan-400/30', text: 'text-cyan-300' },
+                                ][i] || { bg: 'from-slate-700/20 to-slate-600/10', border: 'border-slate-600/30', text: 'text-slate-400' };
+                                return (
+                                  <div key={tier.name} className={`p-3 bg-gradient-to-r ${colors.bg} border ${colors.border} rounded-xl`}>
+                                    <div className="flex justify-between items-center">
+                                      <span className={`font-bold ${colors.text}`}>{tier.name}</span>
+                                      <span className="text-white font-bold text-lg">{tier.apy_percent}%</span>
+                                    </div>
+                                    <div className="text-[10px] text-slate-500 mt-1">{tier.lock_days} day lock</div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+
+                          {/* How It Works */}
+                          <div className="p-3 bg-slate-800/30 border border-slate-700/20 rounded-xl">
+                            <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">How It Works</h4>
+                            <div className="space-y-1.5 text-xs text-slate-500">
+                              <div className="flex items-center gap-2"><span className="w-5 h-5 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center text-[10px] font-bold">1</span> Lock QUG in a tier (7-180 days)</div>
+                              <div className="flex items-center gap-2"><span className="w-5 h-5 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center text-[10px] font-bold">2</span> Receive QCREDIT 1:1 (tradeable on DEX)</div>
+                              <div className="flex items-center gap-2"><span className="w-5 h-5 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center text-[10px] font-bold">3</span> Earn yield (claim anytime, paid in QUG)</div>
+                              <div className="flex items-center gap-2"><span className="w-5 h-5 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center text-[10px] font-bold">4</span> Unlock after lock period (burn QCREDIT, get QUG back)</div>
+                            </div>
+                          </div>
+
+                          <div className="p-2 bg-amber-500/5 border border-amber-500/10 rounded-lg text-center">
+                            <span className="text-[10px] text-amber-300/60">Lock/unlock via the Wallet screen</span>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex items-center justify-center py-12">
+                          <div className="text-center">
+                            <Zap className="w-12 h-12 text-amber-400/40 mx-auto mb-3" />
+                            <p className="text-slate-500">QCREDIT vault loading...</p>
+                          </div>
+                        </div>
+                      )}
+                    </>
                   )}
 
                   {/* QUGUSD Tab */}

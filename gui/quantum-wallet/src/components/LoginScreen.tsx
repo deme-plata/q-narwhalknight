@@ -627,15 +627,15 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
 
   const handleDownloadMiner = (platform: 'linux' | 'linux-arm64' | 'windows' | 'macos-intel' | 'macos-arm') => {
     if (platform === 'windows') {
-      window.open('/downloads/q-miner-windows-x64.exe', '_blank');
+      window.open('https://dl.quillon.xyz/downloads/q-miner-windows-x64.exe', '_blank');
     } else if (platform === 'linux-arm64') {
-      window.open('/downloads/q-miner-linux-arm64', '_blank');
+      window.open('https://dl.quillon.xyz/downloads/q-miner-linux-arm64', '_blank');
     } else if (platform === 'macos-intel') {
-      window.open('/downloads/q-miner-macos-x64', '_blank');
+      window.open('https://dl.quillon.xyz/downloads/q-miner-macos-x64', '_blank');
     } else if (platform === 'macos-arm') {
-      window.open('/downloads/q-miner-macos-arm64', '_blank');
+      window.open('https://dl.quillon.xyz/downloads/q-miner-macos-arm64', '_blank');
     } else {
-      window.open('/downloads/q-miner-linux-x64', '_blank');
+      window.open('https://dl.quillon.xyz/downloads/q-miner-linux-x64', '_blank');
     }
   };
 
@@ -1789,7 +1789,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
               <div className="space-y-3">
                 {/* Linux x64 */}
                 <a
-                  href="/downloads/q-api-server-v8.0.1"
+                  href="https://dl.quillon.xyz/downloads/q-api-server-v8.4.3"
                   download="q-api-server"
                   className="w-full p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-cyan-500/20 hover:border-cyan-500/40 rounded-xl transition-all flex items-center gap-4 group block"
                 >
@@ -1805,7 +1805,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
 
                 {/* Windows x64 */}
                 <a
-                  href="/downloads/q-narwhalknight-windows-x64.zip"
+                  href="https://dl.quillon.xyz/downloads/q-narwhalknight-windows-x64.zip"
                   download="q-narwhalknight-windows-x64.zip"
                   className="w-full p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-cyan-500/20 hover:border-cyan-500/40 rounded-xl transition-all flex items-center gap-4 group block"
                 >
@@ -1852,9 +1852,9 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
               <div className="mt-3 p-3 bg-slate-800/40 rounded-xl border border-cyan-500/10">
                 <h3 className="text-sm font-bold text-cyan-300 mb-2">Quick Start (Linux)</h3>
                 <code className="text-[11px] text-cyan-100/70 block whitespace-pre-wrap break-all font-mono leading-relaxed">
-{`wget https://quillon.xyz/downloads/q-api-server-v8.0.1
-chmod +x q-api-server-v8.0.1
-./q-api-server-v8.0.1 --port 8080`}
+{`wget https://dl.quillon.xyz/downloads/q-api-server-v8.4.3
+chmod +x q-api-server-v8.4.3
+./q-api-server-v8.4.3 --port 8080`}
                 </code>
                 <div className="text-[10px] text-emerald-400/70 mt-2">WarpSync auto-discovers peers & syncs 900K+ blocks in minutes</div>
               </div>
@@ -2017,9 +2017,9 @@ cargo build --release --package q-api-server
               <div className="mt-5 p-4 bg-slate-800/40 rounded-xl border border-amber-500/10">
                 <h3 className="text-sm font-bold text-amber-300 mb-2">Quick Start (Linux)</h3>
                 <code className="text-xs text-amber-100/70 block whitespace-pre-wrap break-all font-mono">
-{`wget https://quillon.xyz/downloads/q-miner-v2.5.0
-chmod +x q-miner-v2.5.0
-./q-miner-v2.5.0 --mode solo --wallet YOUR_WALLET --threads 4 --server https://quillon.xyz`}
+{`wget https://dl.quillon.xyz/downloads/q-miner-v8.3.0
+chmod +x q-miner-v8.3.0
+./q-miner-v8.3.0 --mode solo --wallet YOUR_WALLET --threads 4 --server https://quillon.xyz`}
                 </code>
               </div>
 
@@ -2175,7 +2175,7 @@ chmod +x q-miner-v2.5.0
               {/* Download Buttons */}
               <div className="relative space-y-3">
                 <motion.a
-                  href="/downloads/slint-wallet-linux-x86_64"
+                  href="https://dl.quillon.xyz/downloads/slint-wallet-linux-x86_64"
                   download="slint-wallet-linux-x86_64"
                   className="w-full p-4 bg-gradient-to-r from-emerald-600/80 to-teal-600/80 hover:from-emerald-500 hover:to-teal-500 border border-emerald-400/30 rounded-xl transition-all flex items-center gap-4 group block"
                   whileHover={{ scale: 1.02, x: 4 }}
@@ -2192,7 +2192,7 @@ chmod +x q-miner-v2.5.0
                 </motion.a>
 
                 <motion.a
-                  href="/downloads/slint-wallet-windows-x64.exe"
+                  href="https://dl.quillon.xyz/downloads/slint-wallet-windows-x64.exe"
                   download="slint-wallet-windows-x64.exe"
                   className="w-full p-4 bg-gradient-to-r from-teal-600/80 to-cyan-600/80 hover:from-teal-500 hover:to-cyan-500 border border-teal-400/30 rounded-xl transition-all flex items-center gap-4 group block"
                   whileHover={{ scale: 1.02, x: 4 }}
@@ -2213,7 +2213,7 @@ chmod +x q-miner-v2.5.0
               <div className="relative mt-4 p-3 bg-slate-800/50 rounded-xl border border-emerald-500/15">
                 <h3 className="text-sm font-bold text-emerald-300 mb-2">Quick Start (Linux)</h3>
                 <code className="text-[11px] text-emerald-100/70 block whitespace-pre-wrap break-all font-mono leading-relaxed">
-{`wget https://quillon.xyz/downloads/slint-wallet-linux-x86_64
+{`wget https://dl.quillon.xyz/downloads/slint-wallet-linux-x86_64
 chmod +x slint-wallet-linux-x86_64
 ./slint-wallet-linux-x86_64`}
                 </code>

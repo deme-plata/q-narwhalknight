@@ -1,4 +1,4 @@
-use crate::metrics::Metrics;
+use crate::metrics::{Metrics, NetworkThrottleMode};
 use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ringbuf::{HeapRb, Rb};
@@ -76,6 +76,21 @@ pub struct App {
     /// TPS history (last 60 data points)
     pub tps_history: Arc<RwLock<HeapRb<f64>>>,
 
+    /// Bandwidth in history (last 60 samples of bytes/s)
+    pub bw_in_history: Arc<RwLock<HeapRb<u64>>>,
+
+    /// Bandwidth out history (last 60 samples of bytes/s)
+    pub bw_out_history: Arc<RwLock<HeapRb<u64>>>,
+
+    /// Peak bandwidth in (bytes/s) this session
+    pub peak_bw_in: u64,
+
+    /// Peak bandwidth out (bytes/s) this session
+    pub peak_bw_out: u64,
+
+    /// Current network throttle mode
+    pub network_throttle_mode: NetworkThrottleMode,
+
     /// Should quit?
     pub should_quit: bool,
 
@@ -108,6 +123,11 @@ impl App {
             log_filter: LogLevel::Info, // Default: filter out Debug and Trace
             menu_selection: 0,
             tps_history: Arc::new(RwLock::new(HeapRb::new(60))),
+            bw_in_history: Arc::new(RwLock::new(HeapRb::new(60))),
+            bw_out_history: Arc::new(RwLock::new(HeapRb::new(60))),
+            peak_bw_in: 0,
+            peak_bw_out: 0,
+            network_throttle_mode: NetworkThrottleMode::default(), // v8.5.4: Turbo by default
             should_quit: false,
             bounty_testnet_address: String::new(),
             bounty_mainnet_address: String::new(),
@@ -132,6 +152,11 @@ impl App {
             log_filter: LogLevel::Info,
             menu_selection: 0,
             tps_history: Arc::new(RwLock::new(HeapRb::new(60))),
+            bw_in_history: Arc::new(RwLock::new(HeapRb::new(60))),
+            bw_out_history: Arc::new(RwLock::new(HeapRb::new(60))),
+            peak_bw_in: 0,
+            peak_bw_out: 0,
+            network_throttle_mode: NetworkThrottleMode::default(), // v8.5.4: Turbo by default
             should_quit: false,
             bounty_testnet_address: String::new(),
             bounty_mainnet_address: String::new(),
@@ -191,6 +216,14 @@ impl App {
             }
             KeyCode::Char('f') | KeyCode::Char('F') => {
                 self.view_mode = ViewMode::Physics;
+            }
+            KeyCode::Char('t') | KeyCode::Char('T') => {
+                // 🎚️ v8.5.4: Throttle toggle works on ALL views (not just Network)
+                self.network_throttle_mode = self.network_throttle_mode.next();
+                // Write throttle mode into metrics so the server can read it
+                if let Ok(mut metrics) = self.metrics.write() {
+                    metrics.network_throttle_mode = self.network_throttle_mode;
+                }
             }
             KeyCode::Char('p') | KeyCode::Char('P') => {
                 self.logs_paused = !self.logs_paused;
@@ -306,10 +339,26 @@ impl App {
 
     /// Called on every tick (250ms)
     pub fn on_tick(&mut self) {
-        // Update TPS history
         if let Ok(metrics) = self.metrics.read() {
+            // Update TPS history
             if let Ok(mut history) = self.tps_history.write() {
                 history.push_overwrite(metrics.current_tps as f64);
+            }
+            // Update bandwidth history
+            let bw_in = metrics.bytes_in_per_sec;
+            let bw_out = metrics.bytes_out_per_sec;
+            if let Ok(mut history) = self.bw_in_history.write() {
+                history.push_overwrite(bw_in);
+            }
+            if let Ok(mut history) = self.bw_out_history.write() {
+                history.push_overwrite(bw_out);
+            }
+            // Track peaks
+            if bw_in > self.peak_bw_in {
+                self.peak_bw_in = bw_in;
+            }
+            if bw_out > self.peak_bw_out {
+                self.peak_bw_out = bw_out;
             }
         }
     }
@@ -330,6 +379,24 @@ impl App {
     /// Get TPS history for chart
     pub fn get_tps_history(&self) -> Vec<f64> {
         if let Ok(history) = self.tps_history.read() {
+            history.iter().copied().collect()
+        } else {
+            vec![]
+        }
+    }
+
+    /// Get bandwidth in history for chart
+    pub fn get_bw_in_history(&self) -> Vec<u64> {
+        if let Ok(history) = self.bw_in_history.read() {
+            history.iter().copied().collect()
+        } else {
+            vec![]
+        }
+    }
+
+    /// Get bandwidth out history for chart
+    pub fn get_bw_out_history(&self) -> Vec<u64> {
+        if let Ok(history) = self.bw_out_history.read() {
             history.iter().copied().collect()
         } else {
             vec![]

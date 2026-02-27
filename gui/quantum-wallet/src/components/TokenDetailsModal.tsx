@@ -1,8 +1,9 @@
 import { motion } from 'framer-motion';
-import { X, TrendingUp, TrendingDown, ExternalLink, Info, Droplet, Zap, Shield, Coins, Users, Activity, ArrowUpDown, ArrowUp, ArrowDown, Filter, Twitter, MessageCircle, Globe, Github, FileText } from 'lucide-react';
-import { useState, useEffect, useRef } from 'react';
+import { X, TrendingUp, TrendingDown, ExternalLink, Info, Droplet, Zap, Shield, Coins, Users, Activity, ArrowUpDown, ArrowUp, ArrowDown, Filter, Twitter, MessageCircle, Globe, Github, FileText, Lock, Unlock, Clock, Gift, ChevronDown, AlertCircle, CheckCircle } from 'lucide-react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import { qnkAPI } from '../services/api';
+import { qnkAPI, getQCreditStatus, getQCreditPosition, getQCreditTiers, lockQCredit, unlockQCredit, claimQCreditYield } from '../services/api';
+import type { QCreditStatus, QCreditPosition, QCreditPositionResponse, QCreditTier } from '../services/api';
 
 // v3.1.1: Helper to safely parse u128 values that may come as strings from the API
 // v3.6.14: Also handles base unit conversion - if value is absurdly large, divide by 1e8
@@ -111,6 +112,145 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
   const [sortOrder, setSortOrder] = useState<SortOrder>('desc');
   const [filterType, setFilterType] = useState<TransactionFilter>('all');
 
+  // v8.5.5: QCredit Yield Vault state
+  const isQCredit = token?.symbol?.toUpperCase() === 'QCREDIT';
+  const [qcreditStatus, setQcreditStatus] = useState<QCreditStatus | null>(null);
+  const [qcreditPositions, setQcreditPositions] = useState<QCreditPosition[]>([]);
+  const [qcreditTotalLocked, setQcreditTotalLocked] = useState('0');
+  const [qcreditTotalPending, setQcreditTotalPending] = useState('0');
+  const [qcreditLoading, setQcreditLoading] = useState(false);
+  const [lockAmount, setLockAmount] = useState('');
+  const [selectedTier, setSelectedTier] = useState('bronze');
+  const [tierDropdownOpen, setTierDropdownOpen] = useState(false);
+  const [lockLoading, setLockLoading] = useState(false);
+  const [actionLoading, setActionLoading] = useState<number | null>(null);
+  const [qcreditError, setQcreditError] = useState<string | null>(null);
+  const [qcreditSuccess, setQcreditSuccess] = useState<string | null>(null);
+
+  const getAuthHeaders = useCallback(() => {
+    const wallet = localStorage.getItem('walletAddress') || '';
+    return { 'Authorization': `Bearer ${wallet}`, 'X-Wallet-Auth': wallet };
+  }, []);
+
+  const walletAddress = typeof window !== 'undefined' ? localStorage.getItem('walletAddress') || '' : '';
+
+  // Fetch QCredit vault data
+  useEffect(() => {
+    if (!isQCredit || !token) return;
+    let mounted = true;
+
+    const fetchQCreditData = async () => {
+      setQcreditLoading(true);
+      try {
+        const [status, positionData] = await Promise.allSettled([
+          getQCreditStatus(),
+          walletAddress ? getQCreditPosition(getAuthHeaders()) : Promise.resolve(null),
+        ]);
+
+        if (!mounted) return;
+
+        if (status.status === 'fulfilled' && status.value) {
+          setQcreditStatus(status.value);
+        }
+
+        if (positionData.status === 'fulfilled' && positionData.value) {
+          const pd = positionData.value as QCreditPositionResponse;
+          setQcreditPositions(pd.positions);
+          setQcreditTotalLocked(pd.total_locked);
+          setQcreditTotalPending(pd.total_pending_yield);
+        }
+      } catch (err) {
+        console.error('Failed to fetch QCredit data:', err);
+      } finally {
+        if (mounted) setQcreditLoading(false);
+      }
+    };
+
+    fetchQCreditData();
+    const interval = setInterval(fetchQCreditData, 30000);
+    return () => { mounted = false; clearInterval(interval); };
+  }, [isQCredit, token, walletAddress]);
+
+  // QCredit actions
+  const handleLockQug = async () => {
+    if (!lockAmount || parseFloat(lockAmount) <= 0) {
+      setQcreditError('Enter a valid amount');
+      return;
+    }
+    setLockLoading(true);
+    setQcreditError(null);
+    setQcreditSuccess(null);
+    try {
+      await lockQCredit(walletAddress, lockAmount, selectedTier, getAuthHeaders());
+      setQcreditSuccess(`Locked ${lockAmount} QUG in ${selectedTier} tier`);
+      setLockAmount('');
+      // Refresh data
+      const [status, posData] = await Promise.all([
+        getQCreditStatus(),
+        getQCreditPosition(getAuthHeaders()),
+      ]);
+      setQcreditStatus(status);
+      setQcreditPositions(posData.positions);
+      setQcreditTotalLocked(posData.total_locked);
+      setQcreditTotalPending(posData.total_pending_yield);
+    } catch (err: any) {
+      setQcreditError(err.message || 'Lock failed');
+    } finally {
+      setLockLoading(false);
+    }
+  };
+
+  const handleUnlock = async (posIndex: number) => {
+    setActionLoading(posIndex);
+    setQcreditError(null);
+    setQcreditSuccess(null);
+    try {
+      const result = await unlockQCredit(walletAddress, posIndex, getAuthHeaders());
+      setQcreditSuccess(`Unlocked! Returned ${result.qug_returned} QUG + ${result.yield_claimed} yield`);
+      const [status, posData] = await Promise.all([
+        getQCreditStatus(),
+        getQCreditPosition(getAuthHeaders()),
+      ]);
+      setQcreditStatus(status);
+      setQcreditPositions(posData.positions);
+      setQcreditTotalLocked(posData.total_locked);
+      setQcreditTotalPending(posData.total_pending_yield);
+    } catch (err: any) {
+      setQcreditError(err.message || 'Unlock failed');
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleClaimYield = async (posIndex: number) => {
+    setActionLoading(posIndex + 10000); // offset to differentiate from unlock
+    setQcreditError(null);
+    setQcreditSuccess(null);
+    try {
+      const result = await claimQCreditYield(walletAddress, posIndex, getAuthHeaders());
+      setQcreditSuccess(`Claimed ${result.yield_claimed} QUG yield`);
+      const [status, posData] = await Promise.all([
+        getQCreditStatus(),
+        getQCreditPosition(getAuthHeaders()),
+      ]);
+      setQcreditStatus(status);
+      setQcreditPositions(posData.positions);
+      setQcreditTotalLocked(posData.total_locked);
+      setQcreditTotalPending(posData.total_pending_yield);
+    } catch (err: any) {
+      setQcreditError(err.message || 'Claim failed');
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const tierInfo: Record<string, { label: string; days: number; apy: number; color: string; gradient: string }> = {
+    bronze:   { label: 'Bronze',   days: 7,   apy: 5,  color: 'text-amber-600',    gradient: 'from-amber-700 to-amber-500' },
+    silver:   { label: 'Silver',   days: 30,  apy: 10, color: 'text-slate-300',     gradient: 'from-slate-400 to-slate-200' },
+    gold:     { label: 'Gold',     days: 90,  apy: 15, color: 'text-yellow-400',    gradient: 'from-yellow-500 to-yellow-300' },
+    platinum: { label: 'Platinum', days: 180, apy: 25, color: 'text-cyan-300',      gradient: 'from-cyan-400 to-purple-400' },
+  };
+
   // v2.3.6-beta: Real market stats from AMM oracle
   const [realMarketStats, setRealMarketStats] = useState<{
     marketCap: number;
@@ -154,14 +294,23 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
           // Calculate real liquidity from pool reserves
           let realLiquidity = 0;
           if (poolReserves) {
-            // Liquidity = reserve0 (in USD value) + reserve1 (in USD value)
-            // reserve0 is token amount, reserve1 is typically QUG
-            // v3.1.1: Parse u128 values that may come as strings
+            // v8.4.5: Fix liquidity calculation — use correct price per token
+            // Old code assumed reserve1 is always QUG and multiplied by qugPriceUsd,
+            // but for QUG/QUGUSD pool, reserve1 is QUGUSD ($1 stablecoin).
+            // Multiplying 27.8M QUGUSD × $2730 QUG price = $75.9B (wrong!)
             const reserve0Parsed = parseU128(poolReserves.reserve0);
             const reserve1Parsed = parseU128(poolReserves.reserve1);
-            const reserve0Value = reserve0Parsed * priceData.price_usd;
-            // v2.3.8-beta: Use real QUG price instead of hardcoded value
-            const reserve1Value = reserve1Parsed * qugPriceUsd;
+            const token0Upper = (poolReserves.token0 || '').toUpperCase();
+            const token1Upper = (poolReserves.token1 || '').toUpperCase();
+            // Price each reserve correctly based on what token it is
+            const reserve0Price = token0Upper === 'QUGUSD' ? 1.0
+              : token0Upper === 'QUG' ? qugPriceUsd
+              : priceData.price_usd;
+            const reserve1Price = token1Upper === 'QUGUSD' ? 1.0
+              : token1Upper === 'QUG' ? qugPriceUsd
+              : priceData.price_usd;
+            const reserve0Value = reserve0Parsed * reserve0Price;
+            const reserve1Value = reserve1Parsed * reserve1Price;
             realLiquidity = reserve0Value + reserve1Value;
 
             console.log('📊 Pool reserves:', {
@@ -174,10 +323,14 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
             });
           }
 
-          // Calculate market cap from total supply and price
-          // v2.3.8-beta: Use token's actual supply, default to 0 if not available
+          // Calculate market cap from CIRCULATING supply (not total/max supply)
+          // v8.4.5: Fix — was using totalSupply (21M) instead of circulatingSupply (~21K)
+          // Market cap = circulating supply × price (same as every other blockchain)
+          // FDV = total supply × price (shown separately)
+          const circulatingSupply = token.circulatingSupply > 0 ? token.circulatingSupply
+            : (token.totalSupply > 0 ? token.totalSupply : 0);
           const actualSupply = token.totalSupply > 0 ? token.totalSupply : 0;
-          const realMarketCap = actualSupply * priceData.price_usd;
+          const realMarketCap = circulatingSupply * priceData.price_usd;
 
           setRealMarketStats({
             price: priceData.price_usd,
@@ -521,11 +674,21 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
 
     // v4.0.5: Use sorted data (oldest-first) to match chart rendering order
     const sortedData = [...priceData].sort((a, b) => a.timestamp - b.timestamp);
-    // Calculate which data point we're hovering over
-    const dataIndex = Math.floor(((x - padding) / (width - 2 * padding)) * sortedData.length);
+    // v8.5.3: Snap to nearest data point with precise Y position
+    const dataIndex = Math.round(((x - padding) / (width - 2 * padding)) * (sortedData.length - 1));
     if (dataIndex >= 0 && dataIndex < sortedData.length) {
-      setHoveredPoint(sortedData[dataIndex]);
-      setMousePosition({ x, y });
+      const point = sortedData[dataIndex];
+      // Calculate the precise Y position from the data point's price
+      const height = canvas.height;
+      const prices = sortedData.map(p => p.price);
+      const minPrice = Math.min(...prices);
+      const maxPrice = Math.max(...prices);
+      const priceRange = maxPrice - minPrice || 1;
+      const snappedY = height - padding - ((point.price - minPrice) / priceRange) * (height - 2 * padding);
+      // Calculate snapped X position too
+      const snappedX = padding + (dataIndex / Math.max(sortedData.length - 1, 1)) * (width - 2 * padding);
+      setHoveredPoint(point);
+      setMousePosition({ x: snappedX, y: snappedY });
     }
   };
 
@@ -670,7 +833,7 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
             {/* Price and Change */}
             <div className="mt-6 flex items-end gap-4">
               <div className="text-5xl font-black text-white">
-                ${hoveredPoint ? hoveredPoint.price.toFixed(4) : token.price.toLocaleString()}
+                ${hoveredPoint ? (hoveredPoint.price < 1 ? hoveredPoint.price.toPrecision(6) : hoveredPoint.price < 100 ? hoveredPoint.price.toFixed(4) : hoveredPoint.price.toFixed(2)) : token.price.toLocaleString()}
               </div>
               <div className={`flex items-center gap-2 text-2xl font-bold mb-2 ${
                 token.change24h > 0 ? 'text-quantum-green' : 'text-red-500'
@@ -725,6 +888,255 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
 
             {/* RIGHT COLUMN: All Info */}
             <div className="flex flex-col gap-6 overflow-y-auto max-h-[700px]">
+
+              {/* v8.5.5: QCREDIT Yield Vault Panel */}
+              {isQCredit ? (
+                <>
+                  {/* Vault Status Overview */}
+                  <div>
+                    <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
+                      <Zap className="w-5 h-5 text-amber-400" />
+                      Yield Vault
+                      <span className="text-xs bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded">LIVE</span>
+                    </h3>
+                    {qcreditLoading && !qcreditStatus ? (
+                      <div className="flex items-center justify-center py-8">
+                        <div className="w-6 h-6 border-2 border-amber-400/30 border-t-amber-400 rounded-full animate-spin" />
+                      </div>
+                    ) : qcreditStatus ? (
+                      <div className="grid grid-cols-2 gap-3">
+                        <StatCard icon={<Lock className="w-5 h-5" />} label="Total Value Locked" value={`${parseFloat(qcreditStatus.total_locked).toLocaleString(undefined, { maximumFractionDigits: 2 })} QUG`} color="from-amber-500 to-orange-500" />
+                        <StatCard icon={<Coins className="w-5 h-5" />} label="QCREDIT Supply" value={parseFloat(qcreditStatus.total_qcredit_supply).toLocaleString(undefined, { maximumFractionDigits: 2 })} color="from-cyan-500 to-blue-500" />
+                        <StatCard icon={<Shield className="w-5 h-5" />} label="Protocol Reserve" value={`${parseFloat(qcreditStatus.protocol_reserve).toLocaleString(undefined, { maximumFractionDigits: 2 })} QUG`} color="from-emerald-500 to-green-500" />
+                        <StatCard icon={<Users className="w-5 h-5" />} label="Active Positions" value={qcreditStatus.position_count.toString()} color="from-purple-500 to-pink-500" />
+                      </div>
+                    ) : (
+                      <div className="text-center py-6 text-gray-500">Unable to load vault status</div>
+                    )}
+                  </div>
+
+                  {/* Yield Tiers */}
+                  <div>
+                    <h3 className="text-lg font-bold text-white mb-3 flex items-center gap-2">
+                      <Gift className="w-5 h-5 text-yellow-400" />
+                      Yield Tiers
+                    </h3>
+                    <div className="grid grid-cols-2 gap-2">
+                      {Object.entries(tierInfo).map(([key, info]) => (
+                        <div key={key} className={`relative p-3 rounded-xl border transition-all cursor-pointer ${
+                          selectedTier === key
+                            ? 'border-amber-500/50 bg-gradient-to-br from-amber-500/10 to-orange-500/10 ring-1 ring-amber-500/30'
+                            : 'border-white/10 bg-black/40 hover:border-white/20'
+                        }`} onClick={() => setSelectedTier(key)}>
+                          <div className="flex items-center justify-between mb-1">
+                            <span className={`text-sm font-bold ${info.color}`}>{info.label}</span>
+                            <span className="text-lg font-black bg-gradient-to-r from-emerald-400 to-green-300 bg-clip-text text-transparent">{info.apy}%</span>
+                          </div>
+                          <div className="text-xs text-gray-500">Lock: {info.days} days</div>
+                          <div className="text-[10px] text-gray-600 mt-0.5">APY paid in QUG</div>
+                          {selectedTier === key && (
+                            <div className="absolute top-1.5 right-1.5 w-2 h-2 bg-amber-400 rounded-full shadow-lg shadow-amber-400/50" />
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Lock QUG Form */}
+                  <div>
+                    <h3 className="text-lg font-bold text-white mb-3 flex items-center gap-2">
+                      <Lock className="w-5 h-5 text-amber-400" />
+                      Lock QUG
+                    </h3>
+                    <div className="bg-black/40 rounded-xl border border-white/10 p-4 space-y-3">
+                      <div className="flex items-center gap-2">
+                        <div className="flex-1 relative">
+                          <input
+                            type="number"
+                            value={lockAmount}
+                            onChange={(e) => setLockAmount(e.target.value)}
+                            placeholder="Amount of QUG to lock"
+                            className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-2.5 text-white placeholder-gray-500 focus:outline-none focus:border-amber-500/50 focus:ring-1 focus:ring-amber-500/30 text-sm"
+                            min="0"
+                            step="0.01"
+                          />
+                          <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-500">QUG</span>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 text-xs text-gray-500">
+                        <span>Selected tier:</span>
+                        <span className={`font-bold ${tierInfo[selectedTier]?.color || 'text-white'}`}>
+                          {tierInfo[selectedTier]?.label || selectedTier} ({tierInfo[selectedTier]?.apy || 0}% APY, {tierInfo[selectedTier]?.days || 0}d lock)
+                        </span>
+                      </div>
+                      <button
+                        onClick={handleLockQug}
+                        disabled={lockLoading || !lockAmount || parseFloat(lockAmount) <= 0}
+                        className="w-full py-2.5 rounded-lg font-bold text-sm transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-gradient-to-r from-amber-500 to-orange-500 text-white hover:shadow-lg hover:shadow-amber-500/30"
+                      >
+                        {lockLoading ? (
+                          <span className="flex items-center justify-center gap-2">
+                            <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                            Locking...
+                          </span>
+                        ) : (
+                          `Lock ${lockAmount || '0'} QUG in ${tierInfo[selectedTier]?.label || selectedTier}`
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Status Messages */}
+                  {qcreditError && (
+                    <div className="flex items-center gap-2 p-3 bg-red-500/10 border border-red-500/20 rounded-xl text-red-400 text-sm">
+                      <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                      {qcreditError}
+                    </div>
+                  )}
+                  {qcreditSuccess && (
+                    <div className="flex items-center gap-2 p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-xl text-emerald-400 text-sm">
+                      <CheckCircle className="w-4 h-4 flex-shrink-0" />
+                      {qcreditSuccess}
+                    </div>
+                  )}
+
+                  {/* User Positions */}
+                  {walletAddress && (
+                    <div>
+                      <h3 className="text-lg font-bold text-white mb-3 flex items-center gap-2">
+                        <Activity className="w-5 h-5 text-cyan-400" />
+                        Your Positions
+                        {qcreditPositions.length > 0 && (
+                          <span className="text-xs bg-cyan-500/20 text-cyan-400 px-2 py-0.5 rounded">{qcreditPositions.length}</span>
+                        )}
+                      </h3>
+
+                      {/* Summary */}
+                      {qcreditPositions.length > 0 && (
+                        <div className="grid grid-cols-2 gap-2 mb-3">
+                          <div className="p-2.5 bg-black/40 border border-white/10 rounded-lg">
+                            <div className="text-[10px] text-gray-500 uppercase tracking-wider">Your Locked</div>
+                            <div className="text-sm font-bold text-white font-mono">{parseFloat(qcreditTotalLocked).toLocaleString(undefined, { maximumFractionDigits: 4 })} QUG</div>
+                          </div>
+                          <div className="p-2.5 bg-black/40 border border-white/10 rounded-lg">
+                            <div className="text-[10px] text-gray-500 uppercase tracking-wider">Pending Yield</div>
+                            <div className="text-sm font-bold text-emerald-400 font-mono">{parseFloat(qcreditTotalPending).toLocaleString(undefined, { maximumFractionDigits: 4 })} QUG</div>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Position Cards */}
+                      {qcreditPositions.length === 0 ? (
+                        <div className="text-center py-6 bg-black/30 rounded-xl border border-white/5">
+                          <Lock className="w-8 h-8 text-gray-600 mx-auto mb-2" />
+                          <p className="text-sm text-gray-500">No active positions</p>
+                          <p className="text-xs text-gray-600 mt-1">Lock QUG above to start earning yield</p>
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          {qcreditPositions.map((pos) => {
+                            const ti = tierInfo[pos.tier.toLowerCase()] || tierInfo.bronze;
+                            const lockProgress = pos.lock_days_remaining > 0
+                              ? Math.max(0, Math.min(100, (1 - pos.lock_days_remaining / (ti.days || 1)) * 100))
+                              : 100;
+                            return (
+                              <div key={pos.index} className="bg-black/40 border border-white/10 rounded-xl p-3 space-y-2">
+                                <div className="flex items-center justify-between">
+                                  <div className="flex items-center gap-2">
+                                    <span className={`text-xs font-bold px-2 py-0.5 rounded bg-gradient-to-r ${ti.gradient} text-white`}>
+                                      {pos.tier}
+                                    </span>
+                                    <span className="text-sm font-bold text-white font-mono">{parseFloat(pos.amount_locked).toLocaleString(undefined, { maximumFractionDigits: 4 })} QUG</span>
+                                  </div>
+                                  <span className="text-xs font-bold text-emerald-400">{pos.apy_percent}% APY</span>
+                                </div>
+
+                                {/* Lock progress bar */}
+                                <div>
+                                  <div className="flex justify-between text-[10px] text-gray-500 mb-1">
+                                    <span>Lock progress</span>
+                                    <span>{pos.is_unlockable ? 'Unlockable' : `${pos.lock_days_remaining}d remaining`}</span>
+                                  </div>
+                                  <div className="h-1.5 bg-white/5 rounded-full overflow-hidden">
+                                    <div
+                                      className={`h-full rounded-full transition-all ${pos.is_unlockable ? 'bg-emerald-500' : 'bg-gradient-to-r from-amber-500 to-orange-500'}`}
+                                      style={{ width: `${lockProgress}%` }}
+                                    />
+                                  </div>
+                                </div>
+
+                                {/* Yield info */}
+                                <div className="flex items-center justify-between text-xs">
+                                  <div className="text-gray-500">
+                                    Pending: <span className="text-emerald-400 font-mono">{parseFloat(pos.pending_yield).toLocaleString(undefined, { maximumFractionDigits: 6 })} QUG</span>
+                                  </div>
+                                  <div className="text-gray-600">
+                                    Claimed: <span className="font-mono">{parseFloat(pos.claimed_yield).toLocaleString(undefined, { maximumFractionDigits: 4 })}</span>
+                                  </div>
+                                </div>
+
+                                {/* Action Buttons */}
+                                <div className="flex gap-2">
+                                  <button
+                                    onClick={() => handleClaimYield(pos.index)}
+                                    disabled={actionLoading !== null || parseFloat(pos.pending_yield) <= 0}
+                                    className="flex-1 py-1.5 rounded-lg text-xs font-bold transition-all disabled:opacity-30 disabled:cursor-not-allowed bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/30"
+                                  >
+                                    {actionLoading === pos.index + 10000 ? (
+                                      <span className="flex items-center justify-center gap-1">
+                                        <div className="w-3 h-3 border border-emerald-400/30 border-t-emerald-400 rounded-full animate-spin" />
+                                      </span>
+                                    ) : (
+                                      <span className="flex items-center justify-center gap-1"><Gift className="w-3 h-3" /> Claim Yield</span>
+                                    )}
+                                  </button>
+                                  <button
+                                    onClick={() => handleUnlock(pos.index)}
+                                    disabled={actionLoading !== null || !pos.is_unlockable}
+                                    className="flex-1 py-1.5 rounded-lg text-xs font-bold transition-all disabled:opacity-30 disabled:cursor-not-allowed bg-amber-500/20 text-amber-400 border border-amber-500/20 hover:bg-amber-500/30"
+                                  >
+                                    {actionLoading === pos.index ? (
+                                      <span className="flex items-center justify-center gap-1">
+                                        <div className="w-3 h-3 border border-amber-400/30 border-t-amber-400 rounded-full animate-spin" />
+                                      </span>
+                                    ) : (
+                                      <span className="flex items-center justify-center gap-1"><Unlock className="w-3 h-3" /> Unlock</span>
+                                    )}
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* How It Works */}
+                  <div className="bg-black/30 border border-white/5 rounded-xl p-4">
+                    <h4 className="text-sm font-bold text-gray-300 mb-2">How QCREDIT Works</h4>
+                    <div className="space-y-1.5 text-xs text-gray-500">
+                      <div className="flex items-center gap-2">
+                        <span className="w-5 h-5 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center text-[10px] font-bold">1</span>
+                        Lock QUG in a tier (7-180 days)
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="w-5 h-5 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center text-[10px] font-bold">2</span>
+                        Receive QCREDIT 1:1 (tradeable on DEX)
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="w-5 h-5 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center text-[10px] font-bold">3</span>
+                        Earn yield (claim anytime, paid in QUG)
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="w-5 h-5 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center text-[10px] font-bold">4</span>
+                        Unlock after lock period (burn QCREDIT, get QUG back)
+                      </div>
+                    </div>
+                  </div>
+                </>
+              ) : (
+              <>
               {/* Stats Grid - v2.3.6-beta: Uses real market stats from AMM when available */}
               <div>
                 <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
@@ -743,7 +1155,7 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
                   <StatCard
                     icon={<TrendingUp className="w-5 h-5" />}
                     label="FDV (Fully Diluted)"
-                    value={formatLargeNumber(token.fullyDilutedMarketCap ?? (token.totalSupply * token.price))}
+                    value={formatLargeNumber(token.totalSupply * (realMarketStats?.price ?? token.price))}
                     color="from-indigo-500 to-purple-500"
                   />
                   <StatCard
@@ -773,7 +1185,8 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
                 </div>
               </div>
 
-              {/* Transaction Fees */}
+              {/* Transaction Fees — only show if any fee > 0 */}
+              {(token.fees.buy > 0 || token.fees.sell > 0 || token.fees.transfer > 0) && (
               <div>
                 <h3 className="text-xl font-bold text-white mb-4">Transaction Fees</h3>
                 <div className="grid grid-cols-3 gap-3">
@@ -782,43 +1195,56 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
                   <FeeCard label="Transfer" percentage={token.fees.transfer} />
                 </div>
               </div>
+              )}
 
-              {/* Token Features */}
+              {/* Token Features — only show features that are active */}
+              {(token.features.reflection || token.features.autoLiquidity || token.features.buybackAndBurn || token.features.antiWhale || token.features.quantumSecured) && (
               <div>
                 <h3 className="text-xl font-bold text-white mb-4">Token Features</h3>
                 <div className="grid grid-cols-1 gap-3">
+                  {token.features.quantumSecured && (
+                  <FeatureCard
+                    icon={<Shield className="w-5 h-5" />}
+                    title="Quantum Security"
+                    description="Post-quantum cryptographic protection (Dilithium5 + Kyber1024)"
+                    active={true}
+                  />
+                  )}
+                  {token.features.reflection && (
                   <FeatureCard
                     icon={<Droplet className="w-5 h-5" />}
                     title="Reflection"
                     description="Earn passive rewards from every transaction"
-                    active={token.features.reflection}
+                    active={true}
                   />
+                  )}
+                  {token.features.autoLiquidity && (
                   <FeatureCard
                     icon={<Zap className="w-5 h-5" />}
                     title="Auto-Liquidity"
                     description="Automatic liquidity pool growth"
-                    active={token.features.autoLiquidity}
+                    active={true}
                   />
+                  )}
+                  {token.features.buybackAndBurn && (
                   <FeatureCard
                     icon={<Activity className="w-5 h-5" />}
                     title="Buyback & Burn"
                     description="Deflationary token mechanics"
-                    active={token.features.buybackAndBurn}
+                    active={true}
                   />
+                  )}
+                  {token.features.antiWhale && (
                   <FeatureCard
                     icon={<Shield className="w-5 h-5" />}
                     title="Anti-Whale"
                     description="Protection against large holders"
-                    active={token.features.antiWhale}
+                    active={true}
                   />
-                  <FeatureCard
-                    icon={<Shield className="w-5 h-5" />}
-                    title="Quantum Security"
-                    description="Post-quantum cryptographic protection"
-                    active={token.features.quantumSecured}
-                  />
+                  )}
                 </div>
               </div>
+              )}
 
               {/* Description */}
               <div>
@@ -905,6 +1331,8 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
                     )}
                   </div>
                 </div>
+              )}
+              </>
               )}
             </div>
           </div>

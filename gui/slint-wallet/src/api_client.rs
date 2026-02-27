@@ -30,15 +30,23 @@ pub struct ApiClient {
 }
 
 impl ApiClient {
+    /// Build a reqwest client with proper connection management.
+    /// v8.5.2: Matches standalone miner — TCP keepalive, connection pooling, idle timeouts.
+    fn build_client() -> Client {
+        Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(15))
+            .pool_max_idle_per_host(2)
+            .pool_idle_timeout(std::time::Duration::from_secs(30))
+            .tcp_keepalive(std::time::Duration::from_secs(15))
+            .build()
+            .unwrap_or_else(|_| Client::new())
+    }
+
     /// Create an API client using wallet-based Ed25519 signature authentication.
     pub fn new(base_url: &str, wallet: Arc<Wallet>) -> Self {
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .expect("Failed to build HTTP client");
-
         Self {
-            client,
+            client: Self::build_client(),
             base_url: base_url.trim_end_matches('/').to_string(),
             auth: AuthMode::Wallet(wallet),
         }
@@ -48,13 +56,8 @@ impl ApiClient {
     /// This mode supports balance queries, history, and send transactions
     /// without requiring a local private key.
     pub fn from_bearer(base_url: &str, token: String, address: String) -> Self {
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .expect("Failed to build HTTP client");
-
         Self {
-            client,
+            client: Self::build_client(),
             base_url: base_url.trim_end_matches('/').to_string(),
             auth: AuthMode::Bearer { token, address },
         }
@@ -68,14 +71,14 @@ impl ApiClient {
         }
     }
 
+    /// Get the base URL for SSE/fallback connections.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     /// Returns true if this client has a local wallet (can sign locally).
     pub fn has_wallet(&self) -> bool {
         matches!(&self.auth, AuthMode::Wallet(_))
-    }
-
-    /// Get the base URL for this client.
-    pub fn base_url(&self) -> &str {
-        &self.base_url
     }
 
     /// Get wallet address as hex (without qnk prefix), for SSE query parameter.

@@ -2911,6 +2911,11 @@ class QNarwhalKnightAPI {
     return this.authenticatedRequest<any>('/v1/email/unread-count');
   }
 
+  /** Mark all inbox emails as read */
+  async markAllEmailsRead(): Promise<ApiResponse<{ count: number }>> {
+    return this.authenticatedRequest<any>('/v1/email/mark-all-read', { method: 'POST' });
+  }
+
   /** Search emails */
   async searchEmails(query: string): Promise<ApiResponse<any[]>> {
     return this.authenticatedRequest<any[]>(`/v1/email/search?q=${encodeURIComponent(query)}`);
@@ -3171,6 +3176,106 @@ export interface MiningStatsEvent {
   // v7.4.2: Human-readable miner name from --miner-name CLI arg
   worker_name?: string;
   timestamp: string;
+}
+
+// ============================================================================
+// v8.5.5: QCREDIT Yield Vault API Functions
+// ============================================================================
+
+export interface QCreditTier {
+  name: string;
+  lock_days: number;
+  apy_percent: number;
+}
+
+export interface QCreditStatus {
+  total_locked: string;
+  total_locked_raw: string;
+  total_qcredit_supply: string;
+  protocol_reserve: string;
+  total_yield_paid: string;
+  position_count: number;
+  tiers: QCreditTier[];
+}
+
+export interface QCreditPosition {
+  index: number;
+  amount_locked: string;
+  qcredit_minted: string;
+  tier: string;
+  apy_percent: number;
+  lock_timestamp: number;
+  unlock_timestamp: number;
+  is_unlockable: boolean;
+  claimed_yield: string;
+  pending_yield: string;
+  lock_days_remaining: number;
+}
+
+export interface QCreditPositionResponse {
+  positions: QCreditPosition[];
+  total_locked: string;
+  total_pending_yield: string;
+}
+
+export async function getQCreditStatus(baseUrl?: string): Promise<QCreditStatus> {
+  const url = baseUrl || getConnectionInfo().apiBaseUrl;
+  const resp = await fetch(`${url}/api/v1/qcredit/status`);
+  const data = await resp.json();
+  if (!data.success) throw new Error(data.error || 'Failed to get QCREDIT status');
+  return data.data;
+}
+
+export async function getQCreditTiers(baseUrl?: string): Promise<QCreditTier[]> {
+  const url = baseUrl || getConnectionInfo().apiBaseUrl;
+  const resp = await fetch(`${url}/api/v1/qcredit/tiers`);
+  const data = await resp.json();
+  if (!data.success) throw new Error(data.error || 'Failed to get QCREDIT tiers');
+  return data.data;
+}
+
+export async function getQCreditPosition(authHeaders: Record<string, string>, baseUrl?: string): Promise<QCreditPositionResponse> {
+  const url = baseUrl || getConnectionInfo().apiBaseUrl;
+  const resp = await fetch(`${url}/api/v1/qcredit/position`, { headers: authHeaders });
+  const data = await resp.json();
+  if (!data.success) throw new Error(data.error || 'Failed to get QCREDIT position');
+  return data.data;
+}
+
+export async function lockQCredit(wallet: string, amount: string, tier: string, authHeaders: Record<string, string>, baseUrl?: string): Promise<any> {
+  const url = baseUrl || getConnectionInfo().apiBaseUrl;
+  const resp = await fetch(`${url}/api/v1/qcredit/lock`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders },
+    body: JSON.stringify({ wallet, amount, tier }),
+  });
+  const data = await resp.json();
+  if (!data.success) throw new Error(data.error || 'Failed to lock QUG');
+  return data.data;
+}
+
+export async function unlockQCredit(wallet: string, position_index: number, authHeaders: Record<string, string>, baseUrl?: string): Promise<any> {
+  const url = baseUrl || getConnectionInfo().apiBaseUrl;
+  const resp = await fetch(`${url}/api/v1/qcredit/unlock`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders },
+    body: JSON.stringify({ wallet, position_index }),
+  });
+  const data = await resp.json();
+  if (!data.success) throw new Error(data.error || 'Failed to unlock position');
+  return data.data;
+}
+
+export async function claimQCreditYield(wallet: string, position_index: number, authHeaders: Record<string, string>, baseUrl?: string): Promise<any> {
+  const url = baseUrl || getConnectionInfo().apiBaseUrl;
+  const resp = await fetch(`${url}/api/v1/qcredit/claim`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders },
+    body: JSON.stringify({ wallet, position_index }),
+  });
+  const data = await resp.json();
+  if (!data.success) throw new Error(data.error || 'Failed to claim yield');
+  return data.data;
 }
 
 // Export singleton instance

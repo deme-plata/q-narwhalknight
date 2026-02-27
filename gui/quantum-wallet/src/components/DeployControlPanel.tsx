@@ -602,7 +602,7 @@ export default function DeployControlPanel() {
   const eventSourceRef = useRef<EventSource | null>(null);
 
   // Tab state
-  const [activeTab, setActiveTab] = useState<'overview' | 'bank' | 'bridge' | 'settings' | 'bounty'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'bank' | 'bridge' | 'settings' | 'bounty' | 'dex'>('overview');
 
   // Bounty admin state
   const [bountyStats, setBountyStats] = useState<any>(null);
@@ -637,6 +637,12 @@ export default function DeployControlPanel() {
   const [respondMsgId, setRespondMsgId] = useState('');
   const [respondContent, setRespondContent] = useState('');
   const bankLogRef = useRef<HTMLDivElement>(null);
+
+  // v8.5.3: DEX Analytics state
+  const [dexPools, setDexPools] = useState<any[]>([]);
+  const [dexFeeStats, setDexFeeStats] = useState<any>(null);
+  const [dexLoading, setDexLoading] = useState(false);
+  const [dexSection, setDexSection] = useState<'analytics' | 'pools' | 'fees'>('analytics');
 
   // Check if current wallet is master
   const walletAddress = localStorage.getItem('walletAddress') || '';
@@ -846,6 +852,31 @@ export default function DeployControlPanel() {
       }
     } catch {}
     setBankLoading(false);
+  }, [isMaster, walletAddress]);
+
+  // v8.5.3: Fetch DEX analytics data
+  const fetchDexData = useCallback(async () => {
+    if (!isMaster) return;
+    setDexLoading(true);
+    try {
+      const [poolsR, feesR, supplyR] = await Promise.all([
+        fetch('/api/v1/dex/pools').catch(() => null),
+        fetch('/api/v1/admin/operator-fees', { headers: { 'x-wallet-address': walletAddress } }).catch(() => null),
+        fetch('/api/v1/network/supply').catch(() => null),
+      ]);
+
+      if (poolsR?.ok) {
+        try {
+          const j = await poolsR.json();
+          const pools = j.data || j.pools || [];
+          setDexPools(Array.isArray(pools) ? pools : []);
+        } catch {}
+      }
+      if (feesR?.ok) {
+        try { const j = await feesR.json(); setDexFeeStats(j.data || j); } catch {}
+      }
+    } catch {}
+    setDexLoading(false);
   }, [isMaster, walletAddress]);
 
   // Bank admin actions
@@ -1216,7 +1247,7 @@ export default function DeployControlPanel() {
                 <div>
                   <h2 className="text-lg font-bold text-emerald-50">Node Admin</h2>
                   <p className="text-xs text-emerald-300/60">
-                    {activeTab === 'overview' ? 'Deploy Control Panel' : activeTab === 'settings' ? 'Node Settings' : activeTab === 'bridge' ? 'Bridge Pairs' : activeTab === 'bounty' ? 'Bounty Campaign Admin' : 'Quillon Bank CLI'}
+                    {activeTab === 'overview' ? 'Deploy Control Panel' : activeTab === 'settings' ? 'Node Settings' : activeTab === 'bridge' ? 'Bridge Pairs' : activeTab === 'bounty' ? 'Bounty Campaign Admin' : activeTab === 'dex' ? 'DEX Analytics' : 'Quillon Bank CLI'}
                   </p>
                 </div>
               </div>
@@ -1236,6 +1267,7 @@ export default function DeployControlPanel() {
                   { id: 'bank' as const, icon: Landmark, label: 'Bank CLI' },
                   { id: 'bridge' as const, icon: Globe, label: 'Bridge Pairs' },
                   { id: 'bounty' as const, icon: Award, label: 'Bounty' },
+                  { id: 'dex' as const, icon: TrendingUp, label: 'DEX' },
                 ] : []),
                 ...(isNodeAdmin ? [
                   { id: 'settings' as const, icon: Settings, label: 'Node Settings' },
@@ -1248,6 +1280,7 @@ export default function DeployControlPanel() {
                     if (tab.id === 'bank') fetchBankData();
                     if (tab.id === 'settings') fetchSettingsData();
                     if (tab.id === 'bounty') fetchBountyData();
+                    if (tab.id === 'dex') fetchDexData();
                   }}
                   className={`flex items-center gap-1.5 px-3 py-1.5 rounded-t-lg text-xs font-medium transition-all ${
                     activeTab === tab.id
@@ -2879,6 +2912,252 @@ export default function DeployControlPanel() {
                     )}
                   </>
                 )}
+              </>)}
+
+              {/* ═══════════════════════════════════════════════════════════ */}
+              {/* DEX ANALYTICS TAB (v8.5.3)                                */}
+              {/* ═══════════════════════════════════════════════════════════ */}
+              {activeTab === 'dex' && (<>
+                {/* Sub-tabs */}
+                <div className="flex items-center gap-2 mb-4">
+                  {(['analytics', 'pools', 'fees'] as const).map(sec => (
+                    <button key={sec} onClick={() => setDexSection(sec)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                        dexSection === sec ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40' : 'text-gray-400 hover:text-white hover:bg-white/5'
+                      }`}>
+                      {sec === 'analytics' ? 'Overview' : sec === 'pools' ? 'Pools' : 'Fee Revenue'}
+                    </button>
+                  ))}
+                  <button onClick={fetchDexData} disabled={dexLoading}
+                    className="ml-auto p-1.5 rounded-lg hover:bg-white/10 text-gray-400 hover:text-white transition-all">
+                    <RefreshCw className={`w-3.5 h-3.5 ${dexLoading ? 'animate-spin' : ''}`} />
+                  </button>
+                </div>
+
+                {dexLoading && dexPools.length === 0 ? (
+                  <div className="flex items-center justify-center py-16">
+                    <RefreshCw className="w-6 h-6 text-cyan-400 animate-spin" />
+                  </div>
+                ) : (<>
+
+                {/* Analytics Overview */}
+                {dexSection === 'analytics' && (
+                  <div className="space-y-4">
+                    {/* Top metrics */}
+                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                      <div className="rounded-xl border border-cyan-500/20 bg-cyan-500/5 p-3">
+                        <div className="flex items-center gap-2 mb-1">
+                          <Layers className="w-3.5 h-3.5 text-cyan-400" />
+                          <span className="text-[10px] text-gray-400 uppercase tracking-wider">Active Pools</span>
+                        </div>
+                        <div className="text-xl font-bold text-white">{dexPools.length}</div>
+                      </div>
+                      <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-3">
+                        <div className="flex items-center gap-2 mb-1">
+                          <DollarSign className="w-3.5 h-3.5 text-emerald-400" />
+                          <span className="text-[10px] text-gray-400 uppercase tracking-wider">Total Liquidity</span>
+                        </div>
+                        <div className="text-xl font-bold text-white">
+                          ${dexPools.reduce((sum, p) => {
+                            const r0 = parseFloat(p.reserve0 || p.total_liquidity || '0');
+                            const r1 = parseFloat(p.reserve1 || '0');
+                            return sum + r0 + r1;
+                          }, 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                        </div>
+                      </div>
+                      <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-3">
+                        <div className="flex items-center gap-2 mb-1">
+                          <Activity className="w-3.5 h-3.5 text-amber-400" />
+                          <span className="text-[10px] text-gray-400 uppercase tracking-wider">Protocol Fee</span>
+                        </div>
+                        <div className="text-xl font-bold text-white">
+                          {dexFeeStats?.dex_protocol_fee_percent || '0.15%'}
+                        </div>
+                        <div className="text-[10px] text-gray-500">of 0.30% total</div>
+                      </div>
+                      <div className="rounded-xl border border-purple-500/20 bg-purple-500/5 p-3">
+                        <div className="flex items-center gap-2 mb-1">
+                          <Wallet className="w-3.5 h-3.5 text-purple-400" />
+                          <span className="text-[10px] text-gray-400 uppercase tracking-wider">Founder Balance</span>
+                        </div>
+                        <div className="text-xl font-bold text-white">
+                          {(dexFeeStats?.founder_wallet_balance_qug || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })} QUG
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Fee structure explanation */}
+                    <div className="rounded-xl border border-white/10 bg-white/5 p-4">
+                      <h4 className="text-sm font-bold text-white mb-3 flex items-center gap-2">
+                        <DollarSign className="w-4 h-4 text-emerald-400" />
+                        Fee Structure (per swap)
+                      </h4>
+                      <div className="grid grid-cols-3 gap-3">
+                        <div className="text-center p-3 rounded-lg bg-black/30 border border-cyan-500/10">
+                          <div className="text-lg font-bold text-cyan-300">0.30%</div>
+                          <div className="text-[10px] text-gray-400">Total Fee</div>
+                        </div>
+                        <div className="text-center p-3 rounded-lg bg-black/30 border border-emerald-500/10">
+                          <div className="text-lg font-bold text-emerald-300">0.15%</div>
+                          <div className="text-[10px] text-gray-400">→ LP Providers</div>
+                        </div>
+                        <div className="text-center p-3 rounded-lg bg-black/30 border border-amber-500/10">
+                          <div className="text-lg font-bold text-amber-300">0.15%</div>
+                          <div className="text-[10px] text-gray-400">→ Protocol Treasury</div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Operator fee settings */}
+                    {dexFeeStats && (
+                      <div className="rounded-xl border border-white/10 bg-white/5 p-4">
+                        <h4 className="text-sm font-bold text-white mb-3 flex items-center gap-2">
+                          <Settings className="w-4 h-4 text-gray-400" />
+                          Node Operator Fee Settings
+                        </h4>
+                        <div className="grid grid-cols-2 gap-3 text-sm">
+                          <div>
+                            <span className="text-gray-400">Operator Fee:</span>
+                            <span className="text-white ml-2 font-mono">{dexFeeStats.node_operator_fee_percent || '0%'}</span>
+                          </div>
+                          <div>
+                            <span className="text-gray-400">Protocol Fee:</span>
+                            <span className="text-white ml-2 font-mono">{dexFeeStats.dex_protocol_fee_percent || '0.15%'}</span>
+                          </div>
+                          <div>
+                            <span className="text-gray-400">Admin Wallet:</span>
+                            <span className="text-cyan-300 ml-2 font-mono text-[10px]">{(dexFeeStats.admin_wallet || '').slice(0, 12)}...</span>
+                          </div>
+                          <div>
+                            <span className="text-gray-400">Admin Balance:</span>
+                            <span className="text-white ml-2 font-mono">{(dexFeeStats.admin_wallet_balance_qug || 0).toFixed(4)} QUG</span>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Pools Tab */}
+                {dexSection === 'pools' && (
+                  <div className="space-y-3">
+                    {dexPools.length === 0 ? (
+                      <div className="text-center py-8 text-gray-500">No pools found</div>
+                    ) : dexPools.map((pool: any, i: number) => (
+                      <div key={i} className="rounded-xl border border-white/10 bg-white/5 p-4">
+                        <div className="flex items-center justify-between mb-3">
+                          <div className="flex items-center gap-2">
+                            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-cyan-500 to-purple-500 flex items-center justify-center text-white text-xs font-bold">
+                              {(pool.token0 || 'T0').slice(0, 2)}
+                            </div>
+                            <div>
+                              <div className="text-sm font-bold text-white">
+                                {pool.token0 || 'Token0'} / {pool.token1 || 'Token1'}
+                              </div>
+                              <div className="text-[10px] text-gray-500 font-mono">{pool.address || pool.pool_id || `pool-${i}`}</div>
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <div className="text-xs text-gray-400">Fee</div>
+                            <div className="text-sm font-bold text-amber-300">{((pool.fee || 30) / 100).toFixed(2)}%</div>
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-2 gap-3">
+                          <div className="p-2 rounded-lg bg-black/30">
+                            <div className="text-[10px] text-gray-500">{pool.token0 || 'Reserve 0'}</div>
+                            <div className="text-sm font-mono text-white">
+                              {parseFloat(pool.reserve0 || '0').toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                            </div>
+                          </div>
+                          <div className="p-2 rounded-lg bg-black/30">
+                            <div className="text-[10px] text-gray-500">{pool.token1 || 'Reserve 1'}</div>
+                            <div className="text-sm font-mono text-white">
+                              {parseFloat(pool.reserve1 || '0').toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                            </div>
+                          </div>
+                        </div>
+                        {pool.reserve0 && pool.reserve1 && parseFloat(pool.reserve0) > 0 && (
+                          <div className="mt-2 text-xs text-gray-400">
+                            Price: 1 {pool.token0} = {(parseFloat(pool.reserve1) / parseFloat(pool.reserve0)).toFixed(4)} {pool.token1}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Fee Revenue Tab */}
+                {dexSection === 'fees' && (
+                  <div className="space-y-4">
+                    <div className="rounded-xl border border-emerald-500/20 bg-gradient-to-br from-emerald-500/5 to-cyan-500/5 p-4">
+                      <h4 className="text-sm font-bold text-white mb-3 flex items-center gap-2">
+                        <Banknote className="w-4 h-4 text-emerald-400" />
+                        Protocol Fee Revenue
+                      </h4>
+                      <div className="text-[10px] text-gray-400 mb-4">
+                        0.15% of every swap goes to the protocol treasury (master wallet). 0.15% goes to LP providers.
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="p-3 rounded-lg bg-black/30 border border-emerald-500/10">
+                          <div className="text-[10px] text-gray-500 mb-1">Founder Wallet Balance</div>
+                          <div className="text-lg font-bold text-emerald-300">
+                            {(dexFeeStats?.founder_wallet_balance_qug || 0).toLocaleString(undefined, { maximumFractionDigits: 4 })} QUG
+                          </div>
+                        </div>
+                        <div className="p-3 rounded-lg bg-black/30 border border-cyan-500/10">
+                          <div className="text-[10px] text-gray-500 mb-1">Admin Wallet Balance</div>
+                          <div className="text-lg font-bold text-cyan-300">
+                            {(dexFeeStats?.admin_wallet_balance_qug || 0).toLocaleString(undefined, { maximumFractionDigits: 4 })} QUG
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Fee collection per pool */}
+                    <div className="rounded-xl border border-white/10 bg-white/5 p-4">
+                      <h4 className="text-sm font-bold text-white mb-3">Fee Collection by Pool</h4>
+                      {dexPools.length === 0 ? (
+                        <div className="text-center py-4 text-gray-500 text-sm">No pool data</div>
+                      ) : (
+                        <div className="space-y-2">
+                          {dexPools.map((pool: any, i: number) => {
+                            const vol = parseFloat(pool.volume_24h || '0');
+                            const feeRate = (pool.fee || 30) / 10000;
+                            const protocolFee = vol * feeRate * 0.5; // 50% of fees to protocol
+                            return (
+                              <div key={i} className="flex items-center justify-between p-2 rounded-lg bg-black/20">
+                                <span className="text-sm text-white font-medium">
+                                  {pool.token0}/{pool.token1}
+                                </span>
+                                <div className="text-right">
+                                  <div className="text-xs text-gray-400">24h Vol: ${vol.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
+                                  <div className="text-xs text-emerald-400">Protocol: ${protocolFee.toLocaleString(undefined, { maximumFractionDigits: 2 })}</div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Sound money info */}
+                    <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4">
+                      <h4 className="text-sm font-bold text-amber-300 mb-2 flex items-center gap-2">
+                        <Shield className="w-4 h-4" />
+                        Sound Money Guarantee
+                      </h4>
+                      <ul className="text-xs text-gray-300 space-y-1">
+                        <li>21,000,000 QUG maximum supply — enforced by emission controller</li>
+                        <li>4-year halving schedule (64 eras, 256 years to full emission)</li>
+                        <li>Every block signed with Dilithium5 post-quantum signatures</li>
+                        <li>No pre-mine, no ICO, no allocation — everyone started at genesis</li>
+                        <li>Pool reserves verified by constant-product AMM (x * y = k)</li>
+                      </ul>
+                    </div>
+                  </div>
+                )}
+
+                </>)}
               </>)}
 
               {/* ═══════════════════════════════════════════════════════════ */}

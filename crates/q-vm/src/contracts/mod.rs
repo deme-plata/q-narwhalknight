@@ -13,6 +13,8 @@ pub mod bio_contracts;
 pub mod pq_deployment;
 /// v3.9.1: Decentralized identity with inheritance support
 pub mod decentralized_identity;
+/// v8.5.5: Quillon Credit yield vault (lock QUG → mint QCREDIT, tiered APY)
+pub mod qcredit_vault;
 
 // Re-export main types for convenience
 pub use orobit_smart_contracts::{
@@ -59,6 +61,11 @@ pub use decentralized_identity::{
     InheritanceTransfer, KycLevel, TokenType as IdentityTokenType,
     IdentityEvent, IdentityError, IdentityContractStats,
     IdentityContractMethod, IdentityContractResult,
+};
+
+// Re-export QCredit vault types (v8.5.5)
+pub use qcredit_vault::{
+    QCreditVault, CreditPosition, CreditTier, TierInfo, VaultStatus as QCreditVaultStatus,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

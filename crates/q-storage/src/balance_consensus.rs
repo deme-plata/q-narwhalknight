@@ -147,6 +147,14 @@ pub struct BalanceConsensusEngine {
     /// Reduces I/O from 10,000 queries/sec to 1 query/sec
     /// Format: (supply, last_updated) - v2.10.0: u128 for 24 decimal precision
     cached_total_supply: std::sync::Arc<RwLock<(u128, std::time::Instant)>>,
+
+    /// v8.5.0: Persistent balance watermark — highest block height whose balance
+    /// effects are already persisted in RocksDB. On restart, blocks at or below
+    /// this height are skipped by all process_block_* functions. This prevents
+    /// the LRU dedup cache (in-memory only, lost on restart) from allowing
+    /// turbo_sync to re-credit coinbase transactions, which was the root cause
+    /// of the 111x inflation bug.
+    balance_processed_watermark: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// Consensus statistics for monitoring
@@ -197,6 +205,7 @@ impl BalanceConsensusEngine {
             stats: std::sync::Arc::new(RwLock::new(ConsensusStats::default())),
             emission_controller: std::sync::Arc::new(RwLock::new(emission_controller)),
             cached_total_supply: std::sync::Arc::new(RwLock::new((0, std::time::Instant::now()))),
+            balance_processed_watermark: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -221,6 +230,14 @@ impl BalanceConsensusEngine {
             let active_genesis = active_genesis_timestamp();
             if block.header.timestamp > 0 && block.header.timestamp < active_genesis {
                 tracing::debug!("🧹 [GENESIS FILTER] Skipping pre-genesis block reward h={}", block.header.height);
+                return Ok(Vec::new());
+            }
+        }
+
+        // v8.5.0: Skip blocks already persisted before this session (prevents re-inflation)
+        {
+            let watermark = self.balance_processed_watermark.load(std::sync::atomic::Ordering::Relaxed);
+            if watermark > 0 && block.header.height <= watermark {
                 return Ok(Vec::new());
             }
         }
@@ -580,6 +597,14 @@ impl BalanceConsensusEngine {
             }
         }
 
+        // v8.5.0: Skip blocks already persisted before this session (prevents re-inflation)
+        {
+            let watermark = self.balance_processed_watermark.load(std::sync::atomic::Ordering::Relaxed);
+            if watermark > 0 && block.header.height <= watermark {
+                return Ok(Vec::new());
+            }
+        }
+
         // ✅ v1.0.75-beta: FIXED - Process EXISTING coinbase transactions from synced blocks
         //
         // Previous Issue (v0.9.77-beta Phase 7):
@@ -903,6 +928,14 @@ impl BalanceConsensusEngine {
             let active_genesis = active_genesis_timestamp();
             if block.header.timestamp > 0 && block.header.timestamp < active_genesis {
                 tracing::debug!("🧹 [GENESIS FILTER] Skipping pre-genesis coinbase h={}", block.header.height);
+                return Ok(Vec::new());
+            }
+        }
+
+        // v8.5.0: Skip blocks already persisted before this session (prevents re-inflation)
+        {
+            let watermark = self.balance_processed_watermark.load(std::sync::atomic::Ordering::Relaxed);
+            if watermark > 0 && block.header.height <= watermark {
                 return Ok(Vec::new());
             }
         }
@@ -1314,6 +1347,21 @@ impl BalanceConsensusEngine {
         controller.set_genesis_timestamp(self.genesis_timestamp);
         info!("💰 Emission controller state restored from disk");
         Ok(())
+    }
+
+    /// v8.5.0: Set the balance processed watermark.
+    /// All blocks at or below this height will be skipped by process_block_* functions.
+    pub fn set_balance_watermark(&self, height: u64) {
+        let old = self.balance_processed_watermark.load(std::sync::atomic::Ordering::Relaxed);
+        if height > old {
+            self.balance_processed_watermark.store(height, std::sync::atomic::Ordering::Relaxed);
+            info!("🛡️ [WATERMARK] Balance watermark set: {} → {}", old, height);
+        }
+    }
+
+    /// v8.5.0: Get the current balance processed watermark.
+    pub fn get_balance_watermark(&self) -> u64 {
+        self.balance_processed_watermark.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Get total supply with 1-second caching for 10,000 bps performance

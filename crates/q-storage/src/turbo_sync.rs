@@ -32,6 +32,20 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, RwLock, Semaphore, Mutex};
 use tracing::{debug, error, info, warn};
 
+/// v8.4.4: Dedicated rayon thread pool for sync verification work.
+/// Limits CPU-bound par_sort and SHA3 verification to 4 threads instead of
+/// the global rayon pool (19 threads on Beta), preventing sync from saturating all CPU cores.
+/// API handlers and tokio workers get the remaining cores for responsive request handling.
+static SYNC_RAYON_POOL: once_cell::sync::Lazy<rayon::ThreadPool> = once_cell::sync::Lazy::new(|| {
+    let num_threads = std::env::var("Q_SYNC_RAYON_THREADS")
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(4usize);
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(num_threads)
+        .thread_name(|idx| format!("sync-rayon-{}", idx))
+        .build()
+        .expect("Failed to create sync rayon thread pool")
+});
+
 use q_types::block::QBlock;
 
 // Import QStorage from parent module
@@ -116,19 +130,34 @@ impl EnhancedPeerRegistry {
     }
 
     /// Update peer height with monotonicity check.
-    /// Warns on height decrease, rejects after 5 violations.
+    /// v8.4.4: Relaxed from 5 → 50 violations and added time-based reset.
+    /// Gossipsub doesn't guarantee message ordering, so small height decreases
+    /// are normal (out-of-order delivery). The old threshold of 5 was banning
+    /// our best sync peers (Gamma/Delta) within minutes of startup.
     pub fn update_peer(&mut self, peer_id: PeerId, height: u64, tip_hash: Option<[u8; 32]>) -> bool {
         if let Some(record) = self.peers.get_mut(&peer_id) {
+            // v8.4.4: Reset violations if peer has been well-behaved for 60s
+            if record.violations > 0 && record.last_updated.elapsed() > Duration::from_secs(60) {
+                record.violations = 0;
+            }
             if height < record.height {
-                record.violations += 1;
-                warn!(
-                    "⚠️ [MONOTONICITY] Peer {} height decreased {} → {} (violation #{}/5)",
-                    peer_id, record.height, height, record.violations
-                );
-                if record.violations >= 5 {
-                    warn!("🚫 [MONOTONICITY] Peer {} rejected: too many height decreases", peer_id);
-                    return false;
+                // v8.4.4: Only count as violation if decrease is significant (>100 blocks)
+                // Small decreases are normal gossipsub out-of-order delivery
+                if record.height - height > 100 {
+                    record.violations += 1;
+                    warn!(
+                        "⚠️ [MONOTONICITY] Peer {} height decreased {} → {} (violation #{}/50)",
+                        peer_id, record.height, height, record.violations
+                    );
+                    if record.violations >= 50 {
+                        warn!("🚫 [MONOTONICITY] Peer {} rejected: too many height decreases", peer_id);
+                        return false;
+                    }
                 }
+                // Don't update height to a lower value — keep the highest seen
+                record.tip_hash = tip_hash;
+                record.last_updated = Instant::now();
+                return true;
             }
             record.height = height;
             record.tip_hash = tip_hash;
@@ -1442,6 +1471,17 @@ pub struct TurboSyncManager {
     /// Predicts next chunks and starts downloading before they're needed
     /// Keeps 8 chunks in prefetch queue for continuous download pipelining
     warp_prefetch: Arc<PrefetchPipeline>,
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // 🎚️ v8.5.4: Runtime Network Throttle Mode (TUI-controlled resource management)
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// Network throttle mode: 0=Conservative, 1=Normal, 2=Turbo
+    /// Shared with AppState — TUI sets it, sync loop reads it.
+    /// Conservative: 2 in-flight, 200ms inter-chunk delay (SSD-friendly)
+    /// Normal: config-default in-flight, 10ms inter-chunk delay
+    /// Turbo: 2x config in-flight, 0ms delay (max speed)
+    pub network_throttle_mode: Arc<AtomicU8>,
 }
 
 impl TurboSyncManager {
@@ -1817,6 +1857,8 @@ impl TurboSyncManager {
             session_in_flight: Arc::new(AtomicU64::new(0)),
             session_queued: Arc::new(AtomicU64::new(0)),
             session_sync_mode: Arc::new(AtomicU8::new(0)),
+            // 🎚️ v8.5.4: Runtime throttle mode (default: Turbo=2 for max sync speed)
+            network_throttle_mode: Arc::new(AtomicU8::new(2)),
         }
     }
 
@@ -1825,6 +1867,29 @@ impl TurboSyncManager {
     pub fn set_network_channel(&mut self, tx: mpsc::UnboundedSender<NetworkRequest>) {
         info!("🌐 [TURBO SYNC] Network channel configured - TRUE P2P enabled!");
         self.network_tx = Some(tx);
+    }
+
+    /// 🎚️ v8.5.4: Share throttle mode atomic with AppState so TUI can control sync speed.
+    /// Call this after creating TurboSyncManager and before starting sync loops.
+    pub fn set_network_throttle_mode(&mut self, mode: Arc<AtomicU8>) {
+        self.network_throttle_mode = mode;
+    }
+
+    /// 🎚️ v8.5.4: Get sync parameters based on current throttle mode.
+    /// Returns (max_concurrency_override, inter_chunk_delay_ms)
+    ///
+    /// Turbo:        max speed — full parallelism, no delay
+    /// Normal:       fast but polite — half parallelism, 10ms delay
+    /// Conservative: SSD-friendly — 2 streams, 200ms delay
+    fn get_throttle_params(&self) -> (Option<usize>, u64) {
+        match self.network_throttle_mode.load(Ordering::Relaxed) {
+            0 => (Some(2), 200),    // Conservative: 2 in-flight, 200ms delay
+            1 => {                  // Normal: half of config, 10ms delay
+                let normal_concurrency = (self.config.parallel_streams / 2).max(4);
+                (Some(normal_concurrency), 10)
+            }
+            _ => (None, 0),         // Turbo (default): full speed, no throttle
+        }
     }
 
     /// 🚀 v1.5.0-beta: Get CHIRON parallel state applicator for external use
@@ -3131,9 +3196,10 @@ impl TurboSyncManager {
         // Partial batches (with gaps) may have blocks in arbitrary order from database fetch
         // Sorting ensures we can accurately track contiguous height progression
         // 🚀 v1.0.7-beta: Use parallel sort for large batches (faster for 1000+ blocks)
+        // v8.4.4: Use dedicated sync rayon pool (4 threads) instead of global pool (19 threads)
         let sort_start = Instant::now();
         if blocks.len() > 100 {
-            blocks.par_sort_unstable_by_key(|b| b.header.height);
+            SYNC_RAYON_POOL.install(|| blocks.par_sort_unstable_by_key(|b| b.header.height));
         } else {
             blocks.sort_by_key(|b| b.header.height);
         }
@@ -3209,8 +3275,13 @@ impl TurboSyncManager {
         // OPTIMIZATION: Uses rayon for 10-20x faster verification on multi-core CPUs
         // - Before: Sequential loop, 15-25ms for 8k blocks
         // - After:  Parallel rayon, 1-3ms for 8k blocks
+        // v8.4.4: Run on dedicated sync rayon pool (4 threads) instead of global (19 threads)
         let sha3_start = Instant::now();
-        let (sha3_valid_count, failed_heights) = self.sha3_verifier.verify_blocks_batch_parallel(&blocks);
+        let sha3_verifier_ref = &self.sha3_verifier;
+        let blocks_ref = &blocks;
+        let (sha3_valid_count, failed_heights) = SYNC_RAYON_POOL.install(|| {
+            sha3_verifier_ref.verify_blocks_batch_parallel(blocks_ref)
+        });
         let sha3_time = sha3_start.elapsed();
 
         if !failed_heights.is_empty() {
@@ -3482,6 +3553,16 @@ impl TurboSyncManager {
             self.storage.save_qblocks_batch_turbo(&blocks).await
                 .context(format!("Failed to batch save {} blocks (heights {}-{})",
                     blocks.len(), pack.start_height, pack.end_height))?;
+
+            // v8.5.9: Post-write disk I/O throttle (same as apply_blocks_vec path)
+            let disk_throttle_ms = match self.network_throttle_mode.load(Ordering::Relaxed) {
+                0 => 100u64,  // Conservative: SSD-friendly
+                1 => 10,      // Normal
+                _ => 0,       // Turbo
+            };
+            if disk_throttle_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(disk_throttle_ms)).await;
+            }
 
             // 🚨 v1.1.27-beta CRITICAL FIX: Update height cache to CONTIGUOUS height only!
             // ROOT CAUSE (v1.1.6): update_height_cache(pack.end_height) advanced pointer even with gaps.
@@ -3917,14 +3998,20 @@ impl TurboSyncManager {
         let apply_start = Instant::now();
 
         // Sort blocks by height (same as apply_block_pack line 2703)
+        // v8.4.4: Use dedicated sync rayon pool (4 threads) instead of global pool
         if blocks.len() > 100 {
-            blocks.par_sort_unstable_by_key(|b| b.header.height);
+            SYNC_RAYON_POOL.install(|| blocks.par_sort_unstable_by_key(|b| b.header.height));
         } else {
             blocks.sort_by_key(|b| b.header.height);
         }
 
         // SHA3 verification (same as apply_block_pack line 2781)
-        let (sha3_valid_count, failed_heights) = self.sha3_verifier.verify_blocks_batch_parallel(&blocks);
+        // v8.4.4: Run on dedicated sync rayon pool
+        let sha3_verifier_ref = &self.sha3_verifier;
+        let blocks_ref = &blocks;
+        let (sha3_valid_count, failed_heights) = SYNC_RAYON_POOL.install(|| {
+            sha3_verifier_ref.verify_blocks_batch_parallel(blocks_ref)
+        });
         if !failed_heights.is_empty() {
             warn!(
                 "⚠️  [SHA3-256 DIRECT] {}/{} blocks failed verification in range {}-{}: {:?}",
@@ -4021,6 +4108,18 @@ impl TurboSyncManager {
             // Batch save blocks
             self.storage.save_qblocks_batch_turbo(&blocks).await
                 .context(format!("Failed to batch save {} blocks (direct apply)", blocks.len()))?;
+
+            // v8.5.9: Post-write disk I/O throttle — lets cheap SSDs flush before next batch.
+            // Conservative=100ms, Normal=10ms, Turbo=0ms. Without this, RocksDB memtable flushes
+            // + compaction can saturate a budget SATA SSD (~200 MB/s), causing I/O stalls.
+            let disk_throttle_ms = match self.network_throttle_mode.load(Ordering::Relaxed) {
+                0 => 100u64,  // Conservative: 100ms post-write rest (SSD-friendly)
+                1 => 10,      // Normal: 10ms breather
+                _ => 0,       // Turbo: no delay
+            };
+            if disk_throttle_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(disk_throttle_ms)).await;
+            }
 
             // Update height cache
             let contiguous_height = self.storage.get_highest_contiguous_block().await.unwrap_or(0);
@@ -4531,21 +4630,50 @@ impl TurboSyncManager {
         // only spawn chunks within a window from current applied height.
         // This prevents 200K+ block-ahead chunks from timing out.
         // 🔭 v1.0.2-KALMAN: Use Kalman optimal_concurrency when confident
+        //
+        // v8.4.4: Q_SYNC_MAX_CONCURRENCY env var caps max in-flight chunks.
+        // On Beta (48 parallel_streams), uncapped concurrency saturates all 19 tokio workers,
+        // starving API handlers. Default cap: 8 — enough for good throughput, leaves workers for API.
+        let env_max_concurrency: usize = std::env::var("Q_SYNC_MAX_CONCURRENCY")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+
+        // 🎚️ v8.5.4: Apply runtime throttle mode (TUI-controlled)
+        let (throttle_concurrency_cap, inter_chunk_delay_ms) = self.get_throttle_params();
+        let effective_max_concurrency = match throttle_concurrency_cap {
+            Some(cap) => env_max_concurrency.min(cap),
+            None => env_max_concurrency, // Turbo: no additional cap
+        };
+
         let max_in_flight_chunks = if self.config.enable_apollo_kalman {
             let kalman = self.apollo_kalman_predictor.read().await;
             let state = kalman.get_state();
             if state.confidence > 0.4 {
                 let kalman_concurrency = state.optimal_concurrency();
                 let bounded = kalman_concurrency.clamp(4, self.config.parallel_streams * 2);
-                info!("🔭 [KALMAN CONCURRENCY] Using {} in-flight (Kalman={}, config={}, conf={:.2})",
-                      bounded, kalman_concurrency, self.config.parallel_streams, state.confidence);
-                bounded
+                // v8.4.4: Apply env cap on top of Kalman
+                // v8.5.4: Also apply throttle mode cap
+                let capped = bounded.min(effective_max_concurrency);
+                info!("🔭 [KALMAN CONCURRENCY] Using {} in-flight (Kalman={}, config={}, cap={}, throttle={}, conf={:.2})",
+                      capped, kalman_concurrency, self.config.parallel_streams, env_max_concurrency,
+                      throttle_concurrency_cap.map(|c| c.to_string()).unwrap_or("off".into()),
+                      state.confidence);
+                capped
             } else {
-                self.config.parallel_streams
+                self.config.parallel_streams.min(effective_max_concurrency)
             }
         } else {
-            self.config.parallel_streams // Default: 8
+            self.config.parallel_streams.min(effective_max_concurrency)
         };
+
+        let throttle_mode_name = match self.network_throttle_mode.load(Ordering::Relaxed) {
+            0 => "Conservative",
+            1 => "Normal",
+            _ => "Turbo",
+        };
+        if inter_chunk_delay_ms > 0 {
+            info!("🎚️ [THROTTLE] Mode: {} — max {} in-flight, {}ms inter-chunk delay",
+                  throttle_mode_name, max_in_flight_chunks, inter_chunk_delay_ms);
+        }
         let mut chunks_queue: std::collections::VecDeque<(usize, u64, u64)> = chunks
             .into_iter()
             .enumerate()
@@ -4667,6 +4795,19 @@ impl TurboSyncManager {
                         spawn_chunk_task(&mut futures, next_idx, next_start, next_end, peers_for_retry, self);
                         debug!("🚀 [v3.4.8] Spawned chunk {}-{} ({} remaining)",
                                next_start, next_end, chunks_queue.len());
+                    }
+
+                    // v8.4.4: Yield to tokio scheduler after each chunk completes.
+                    // Without this, the sync loop runs back-to-back without giving
+                    // API handler tasks a chance to execute on the worker threads.
+                    tokio::task::yield_now().await;
+
+                    // 🎚️ v8.5.4: Inter-chunk throttle delay (TUI-controlled)
+                    // Conservative=200ms, Normal=10ms, Turbo=0ms
+                    // Re-read throttle mode each iteration so TUI changes take effect immediately
+                    let (_, delay_ms) = self.get_throttle_params();
+                    if delay_ms > 0 {
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     }
 
                     // 📊 v1.0.2: Update session atomics for admin panel
@@ -4878,6 +5019,8 @@ impl TurboSyncManager {
             session_in_flight: Arc::clone(&self.session_in_flight),
             session_queued: Arc::clone(&self.session_queued),
             session_sync_mode: Arc::clone(&self.session_sync_mode),
+            // 🎚️ v8.5.4: Share throttle mode (same Arc)
+            network_throttle_mode: Arc::clone(&self.network_throttle_mode),
         }
     }
 

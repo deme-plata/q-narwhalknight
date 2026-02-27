@@ -337,6 +337,11 @@ pub mod unified_zk_validator;
 /// v3.7.4: Validator Registry with Dilithium5 post-quantum signatures
 pub mod validator_registry;
 
+/// v8.5.0: P2P Update Announcement Protocol
+/// Cryptographically signed software update announcements via gossipsub
+/// with quorum verification (2-of-3 trusted bootstrap signers)
+pub mod update_announcement;
+
 // Re-export block types for convenience
 pub use block::{
     QBlock, BlockHeader, BlockHash, DagRound, MiningSolution,
@@ -590,6 +595,21 @@ pub const VAULT_TOKEN_ADDRESS: [u8; 32] = [
 pub const FORGE_DECIMALS: u8 = 0;
 pub const FORGE_TOKEN_ADDRESS: [u8; 32] = [
     0x46, 0x4F, 0x52, 0x47, 0x45, 0x00, 0x00, 0x00, // "FORGE" in ASCII + zeros
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+// ============================================================================
+// Quillon Credit (QCREDIT) Yield Vault Token (v8.5.5)
+// Lock QUG → mint QCREDIT 1:1, earn tiered yield
+// Digital credit layer: L1 capital (QUG) → L2 credit (QCREDIT) → L3 products
+// ============================================================================
+
+/// QCREDIT uses 24 decimals (same as QUG) for 1:1 lock/mint parity
+pub const QCREDIT_DECIMALS: u8 = 24;
+pub const QCREDIT_TOKEN_ADDRESS: [u8; 32] = [
+    0x51, 0x43, 0x52, 0x45, 0x44, 0x49, 0x54, 0x00, // "QCREDIT" in ASCII + zeros
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -4096,6 +4116,14 @@ impl NetworkId {
     /// Topic: /qnk/{network}/oauth2-pubkeys
     pub fn oauth2_pubkeys_topic(&self) -> String {
         format!("{}/oauth2-pubkeys", self.gossipsub_topic_prefix())
+    }
+
+    /// v8.5.0: Software update announcement topic
+    /// Bootstrap nodes publish signed UpdateAnnouncement messages here.
+    /// Remote nodes subscribe to discover and verify new binary releases.
+    /// Topic: /qnk/{network}/update-announcements
+    pub fn update_announcements_topic(&self) -> String {
+        format!("{}/update-announcements", self.gossipsub_topic_prefix())
     }
 }
 

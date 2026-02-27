@@ -2095,12 +2095,23 @@ function TaxReportModal({ isOpen, onClose, walletAddress, currentBalance }: { is
   const [language, setLanguage] = useState('en');
   const [isGenerating, setIsGenerating] = useState(false);
   const [showJurisdictions, setShowJurisdictions] = useState(false);
+  // v8.5.5: Enhanced tax report state
+  const [costBasisMethod, setCostBasisMethod] = useState<'fifo' | 'lifo'>('fifo');
+  const [miningIncome, setMiningIncome] = useState(0);
+  const [yieldIncome, setYieldIncome] = useState(0);
+  const [holdingPeriod, setHoldingPeriod] = useState<'short' | 'long'>('short');
+  const [activeTab, setActiveTab] = useState<'capital' | 'income'>('capital');
 
   const t = TRANSLATIONS[language] || TRANSLATIONS.en;
   const currentValue = currentBalance * qugPrice;
   const unrealizedGain = currentValue - costBasis;
+  const gainRate = holdingPeriod === 'long' ? jurisdiction.longGainRate : jurisdiction.shortGainRate;
   const taxableGain = Math.max(0, unrealizedGain - jurisdiction.freeAllowance);
-  const estimatedTax = taxableGain * (jurisdiction.shortGainRate / 100);
+  const capitalGainsTax = taxableGain * (gainRate / 100);
+  // Income tax on mining + yield (treated as ordinary income at short-term rate)
+  const totalIncome = (miningIncome + yieldIncome) * qugPrice;
+  const incomeTax = totalIncome * (jurisdiction.shortGainRate / 100);
+  const estimatedTax = capitalGainsTax + incomeTax;
 
   const generatePDF = async () => {
     setIsGenerating(true);
@@ -2164,9 +2175,29 @@ function TaxReportModal({ isOpen, onClose, walletAddress, currentBalance }: { is
           </tbody>
         </table>
 
+        ${(miningIncome > 0 || yieldIncome > 0) ? `
+        <h2 style="font-size: 18px; font-weight: 700; color: #064e3b; margin: 0 0 16px 0; padding-bottom: 8px; border-bottom: 2px solid #d1fae5;">Income Summary</h2>
+        <table style="width: 100%; border-collapse: collapse; margin-bottom: 32px;">
+          <tbody>
+            ${miningIncome > 0 ? `<tr style="border-bottom: 1px solid #e5e7eb;">
+              <td style="padding: 14px 16px; font-weight: 500; color: #374151;">Mining Rewards</td>
+              <td style="padding: 14px 16px; text-align: right; font-weight: 700; font-family: monospace; color: #0f172a;">${fmtNum(miningIncome)} ${TICKER_SYMBOL} (${cs}${fmtNum(miningIncome * qugPrice)})</td>
+            </tr>` : ''}
+            ${yieldIncome > 0 ? `<tr style="border-bottom: 1px solid #e5e7eb; background: #f9fafb;">
+              <td style="padding: 14px 16px; font-weight: 500; color: #374151;">QCREDIT Yield</td>
+              <td style="padding: 14px 16px; text-align: right; font-weight: 700; font-family: monospace; color: #0f172a;">${fmtNum(yieldIncome)} ${TICKER_SYMBOL} (${cs}${fmtNum(yieldIncome * qugPrice)})</td>
+            </tr>` : ''}
+            <tr style="border-bottom: 1px solid #e5e7eb;">
+              <td style="padding: 14px 16px; font-weight: 500; color: #374151;">Income Tax (${jurisdiction.shortGainRate}%)</td>
+              <td style="padding: 14px 16px; text-align: right; font-weight: 700; font-family: monospace; color: #dc2626;">${cs}${fmtNum(incomeTax)}</td>
+            </tr>
+          </tbody>
+        </table>` : ''}
+
         <div style="background: linear-gradient(135deg, ${estimatedTax === 0 ? '#ecfdf5, #d1fae5' : '#fef2f2, #fecaca'}); padding: 24px; border-radius: 16px; text-align: center; margin-bottom: 32px; border: 2px solid ${estimatedTax === 0 ? '#10b981' : '#f87171'};">
-          <div style="font-size: 12px; text-transform: uppercase; letter-spacing: 2px; color: ${estimatedTax === 0 ? '#059669' : '#dc2626'}; font-weight: 600; margin-bottom: 8px;">${t.estimatedTax}</div>
+          <div style="font-size: 12px; text-transform: uppercase; letter-spacing: 2px; color: ${estimatedTax === 0 ? '#059669' : '#dc2626'}; font-weight: 600; margin-bottom: 8px;">${t.estimatedTax} (Capital Gains + Income)</div>
           <div style="font-size: 36px; font-weight: 800; color: ${estimatedTax === 0 ? '#064e3b' : '#991b1b'};">${estimatedTax === 0 ? t.noTax : cs + fmtNum(estimatedTax)}</div>
+          <div style="font-size: 11px; color: #6b7280; margin-top: 4px;">Cost Basis: ${costBasisMethod.toUpperCase()} | Holding: ${holdingPeriod === 'long' ? '>1 year' : '<1 year'} (${gainRate}%)</div>
         </div>
 
         <div style="background: #fffbeb; padding: 16px; border-radius: 8px; border-left: 4px solid #f59e0b; margin-bottom: 24px;">
@@ -2326,6 +2357,98 @@ function TaxReportModal({ isOpen, onClose, walletAddress, currentBalance }: { is
               className="w-full p-2.5 bg-slate-800/60 border border-emerald-500/20 rounded-lg text-emerald-100 text-sm focus:border-emerald-400/50 focus:outline-none font-mono"
             />
           </div>
+
+          {/* v8.5.5: Tab selector — Capital Gains vs Income */}
+          <div className="relative flex gap-1 mb-4 p-1 bg-slate-800/60 rounded-lg border border-slate-700/40">
+            {[
+              { id: 'capital' as const, label: 'Capital Gains' },
+              { id: 'income' as const, label: 'Income (Mining/Yield)' },
+            ].map(tab => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`flex-1 py-1.5 rounded text-xs font-bold transition-all ${activeTab === tab.id ? 'bg-emerald-500/30 text-emerald-300 border border-emerald-400/30' : 'text-slate-500 hover:text-slate-300'}`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          {activeTab === 'capital' && (
+            <>
+              {/* Cost Basis Method + Holding Period */}
+              <div className="relative grid grid-cols-2 gap-3 mb-4">
+                <div>
+                  <label className="text-[10px] text-emerald-400/60 uppercase tracking-wider font-semibold mb-1 block">Cost Basis Method</label>
+                  <div className="flex gap-1">
+                    {(['fifo', 'lifo'] as const).map(method => (
+                      <button
+                        key={method}
+                        onClick={() => setCostBasisMethod(method)}
+                        className={`flex-1 py-2 rounded text-xs font-bold transition-all ${costBasisMethod === method ? 'bg-emerald-500/30 text-emerald-300 border border-emerald-400/30' : 'bg-slate-800/60 text-slate-500 border border-slate-700/30'}`}
+                      >
+                        {method.toUpperCase()}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <label className="text-[10px] text-emerald-400/60 uppercase tracking-wider font-semibold mb-1 block">Holding Period</label>
+                  <div className="flex gap-1">
+                    {([{ id: 'short' as const, label: '<1yr' }, { id: 'long' as const, label: '>1yr' }]).map(hp => (
+                      <button
+                        key={hp.id}
+                        onClick={() => setHoldingPeriod(hp.id)}
+                        className={`flex-1 py-2 rounded text-xs font-bold transition-all ${holdingPeriod === hp.id ? 'bg-emerald-500/30 text-emerald-300 border border-emerald-400/30' : 'bg-slate-800/60 text-slate-500 border border-slate-700/30'}`}
+                      >
+                        {hp.label} ({hp.id === 'short' ? jurisdiction.shortGainRate : jurisdiction.longGainRate}%)
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
+
+          {activeTab === 'income' && (
+            <>
+              {/* Mining + Yield Income */}
+              <div className="relative grid grid-cols-2 gap-3 mb-4">
+                <div>
+                  <label className="text-[10px] text-emerald-400/60 uppercase tracking-wider font-semibold mb-1 block">Mining Rewards ({TICKER_SYMBOL})</label>
+                  <input
+                    type="number"
+                    value={miningIncome || ''}
+                    onChange={(e) => setMiningIncome(Number(e.target.value))}
+                    placeholder="0.00"
+                    className="w-full p-2.5 bg-slate-800/60 border border-emerald-500/20 rounded-lg text-emerald-100 text-sm focus:border-emerald-400/50 focus:outline-none font-mono placeholder:text-slate-600"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] text-emerald-400/60 uppercase tracking-wider font-semibold mb-1 block">QCREDIT Yield ({TICKER_SYMBOL})</label>
+                  <input
+                    type="number"
+                    value={yieldIncome || ''}
+                    onChange={(e) => setYieldIncome(Number(e.target.value))}
+                    placeholder="0.00"
+                    className="w-full p-2.5 bg-slate-800/60 border border-emerald-500/20 rounded-lg text-emerald-100 text-sm focus:border-emerald-400/50 focus:outline-none font-mono placeholder:text-slate-600"
+                  />
+                </div>
+              </div>
+              {totalIncome > 0 && (
+                <div className="relative p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl mb-4">
+                  <div className="flex justify-between text-sm">
+                    <span className="text-amber-300/70">Total Income (USD)</span>
+                    <span className="text-amber-200 font-bold font-mono">{jurisdiction.currencySymbol}{totalIncome.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  </div>
+                  <div className="flex justify-between text-sm mt-1">
+                    <span className="text-amber-300/70">Income Tax ({jurisdiction.shortGainRate}%)</span>
+                    <span className="text-amber-200 font-bold font-mono">{jurisdiction.currencySymbol}{incomeTax.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
 
           {/* Results Summary */}
           <div className="relative grid grid-cols-2 gap-3 mb-4">
