@@ -73,10 +73,10 @@ impl Default for QuantumAutomatedMarketMaker {
             golden_ratio: "1.618033988749895".parse().unwrap(),
             euler_constant: "2.718281828459045".parse().unwrap(),
             pi_constant: "3.141592653589793".parse().unwrap(),
-            quantum_slippage_reduction_bps: 618,   // 6.18% (golden ratio reduction)
-            impermanent_loss_protection_bps: 8500, // 85% protection
-            max_price_impact_bps: 500,             // 5% maximum impact
-            quantum_yield_multiplier_bps: 16180,   // 161.80% = 1.618x golden ratio yield boost
+            quantum_slippage_reduction_bps: 350,   // v8.6.0: 3.50% slippage reduction (was 6.18%)
+            impermanent_loss_protection_bps: 6000, // v8.6.0: 60% protection (was 85%)
+            max_price_impact_bps: 800,             // v8.6.0: 8% maximum impact (was 5%)
+            quantum_yield_multiplier_bps: 11000,   // v8.6.0: 110% = 1.1x yield boost (was 1.618x)
         }
     }
 }
@@ -137,7 +137,7 @@ impl QuantumLiquidityManager {
             token_a_reserve: BigDecimal::from(618034), // Golden ratio * 1000 * 618
             token_b_reserve: BigDecimal::from(1000000), // 1M ORBUSD
             total_shares: BigDecimal::from(785398),    // √(618034 * 1000000)
-            fee_rate: "0.003".parse().unwrap(),         // 0.3%
+            fee_rate: "0.010".parse().unwrap(),         // v8.6.0: 1.0% protocol fee (was 0.3%)
             quantum_k_invariant: BigDecimal::from(618034000000i64), // x * y constant
             wave_function_state: QuantumState::Entangled,
             entanglement_strength: 0.707, // Maximum quantum correlation

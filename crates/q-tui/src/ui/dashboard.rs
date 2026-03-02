@@ -77,24 +77,22 @@ pub fn render(f: &mut Frame, app: &App) {
 fn render_header(f: &mut Frame, area: Rect, app: &App) {
     let metrics = app.metrics.read().unwrap();
 
-    let status_text = if metrics.is_syncing {
-        let mode_label = match metrics.apollo_sync_mode {
-            1 => "TURBO",
-            2 => "ENDGAME",
-            3 => "MICRO",
-            _ => "SYNCING",
-        };
-        let mode_color = match metrics.apollo_sync_mode {
-            1 => Color::Yellow,
-            2 => Color::Magenta,
-            3 => Color::Cyan,
-            _ => Color::Yellow,
-        };
-        Span::styled(mode_label, Style::default().fg(mode_color).add_modifier(Modifier::BOLD))
-    } else if metrics.peer_count > 0 {
-        Span::styled("SYNCED", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
-    } else {
-        Span::styled("CONNECTING", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+    // Starship Flight Computer phase-based header
+    let status_text = match metrics.starship_phase.as_str() {
+        "SUPER_HEAVY"       => Span::styled("TURBO SYNC", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        "HOT_STAGING"       => Span::styled("ENDGAME", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+        "STARSHIP_CRUISE"   => Span::styled("CRUISE", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        "IGNITION"          => Span::styled("IGNITION", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        "ORBITAL_INSERTION" => Span::styled("INSERTING", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
+        "STATION_KEEPING" if metrics.starship_orbit_stable =>
+            Span::styled("IN ORBIT", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        "STATION_KEEPING" =>
+            Span::styled("STABILIZING", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
+        "PRELAUNCH" if metrics.peer_count > 0 =>
+            Span::styled("PRELAUNCH", Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
+        _ if metrics.peer_count == 0 =>
+            Span::styled("CONNECTING", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        _ => Span::styled("SYNCED", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
     };
 
     let version_str = if metrics.version.is_empty() {
@@ -111,7 +109,21 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
 
     let peer_color = if metrics.peer_count > 0 { Color::Green } else { Color::Red };
 
-    let header = Paragraph::new(Line::from(vec![
+    // v8.6.1: Operator earnings display
+    let operator_spans = if metrics.operator_fee_promille > 0 && !metrics.admin_wallet_address.is_empty() {
+        vec![
+            Span::raw(" │ "),
+            Span::styled("Earned: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{:.4} QUG", metrics.operator_fee_total_qug + metrics.admin_wallet_balance),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            ),
+        ]
+    } else {
+        vec![]
+    };
+
+    let mut header_spans = vec![
         Span::styled("Peers: ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             format!("{}", metrics.peer_count),
@@ -135,7 +147,10 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
             format!("Net Height: {}", metrics.network_height),
             Style::default().fg(Color::Blue)
         ),
-    ]))
+    ];
+    header_spans.extend(operator_spans);
+
+    let header = Paragraph::new(Line::from(header_spans))
     .block(Block::default().borders(Borders::ALL).style(Style::default().fg(Color::Cyan)))
     .alignment(Alignment::Left);
 
@@ -305,6 +320,16 @@ fn render_metrics_grid(f: &mut Frame, area: Rect, app: &App) {
     if metrics.emission_rate > 0.0 {
         blockchain_items.push(ListItem::new(format!("Emission:     {:.6} QUG/blk", metrics.emission_rate)));
     }
+    // v8.6.1: Operator wallet balance
+    if metrics.operator_fee_promille > 0 && metrics.admin_wallet_balance > 0.0 {
+        blockchain_items.push(ListItem::new(Line::from(vec![
+            Span::raw("Wallet:      "),
+            Span::styled(
+                format!("{:.4} QUG", metrics.admin_wallet_balance),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            ),
+        ])));
+    }
 
     let blockchain = List::new(blockchain_items)
         .block(
@@ -457,13 +482,18 @@ fn render_sync_progress(f: &mut Frame, area: Rect, app: &App) {
         result.chars().rev().collect()
     };
 
-    // Sync mode badge
-    let mode_badge = match metrics.apollo_sync_mode {
-        1 => Span::styled("[TURBO] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        2 => Span::styled("[ENDGAME] ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-        3 => Span::styled("[MICRO] ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        _ => Span::styled("[SYNC] ", Style::default().fg(Color::DarkGray)),
+    // Starship sync phase badge
+    let (badge_text, badge_color) = match metrics.starship_phase.as_str() {
+        "PRELAUNCH"         => ("[PRELAUNCH] ",    Color::DarkGray),
+        "IGNITION"          => ("[IGNITION] ",     Color::Red),
+        "SUPER_HEAVY"       => ("[SUPER HEAVY] ",  Color::Yellow),
+        "HOT_STAGING"       => ("[HOT STAGING] ",  Color::Magenta),
+        "STARSHIP_CRUISE"   => ("[CRUISE] ",       Color::Cyan),
+        "ORBITAL_INSERTION" => ("[INSERTING] ",     Color::Blue),
+        "STATION_KEEPING"   => ("[IN ORBIT] ",     Color::Green),
+        _                   => ("[SYNC] ",         Color::DarkGray),
     };
+    let mode_badge = Span::styled(badge_text, Style::default().fg(badge_color).add_modifier(Modifier::BOLD));
 
     // Chunk progress string
     let chunks_str = if metrics.apollo_chunks_total > 0 {
@@ -664,11 +694,15 @@ fn render_apollo_control_systems(f: &mut Frame, area: Rect, app: &App) {
     let util_bar_w = ((util_ratio * 7.0).round() as usize).min(14);
     let util_color = if util_ratio > 1.2 { Color::Red } else if util_ratio > 0.8 { Color::Green } else { Color::Yellow };
 
-    let mode_label = match metrics.apollo_sync_mode {
-        1 => ("TURBO", Color::Yellow),
-        2 => ("ENDGAME", Color::Magenta),
-        3 => ("MICRO", Color::Cyan),
-        _ => ("IDLE", Color::Green),
+    // Starship phase for PID panel
+    let mode_label = match metrics.starship_phase.as_str() {
+        "SUPER_HEAVY"       => ("BOOST", Color::Yellow),
+        "HOT_STAGING"       => ("STAGING", Color::Magenta),
+        "STARSHIP_CRUISE"   => ("CRUISE", Color::Cyan),
+        "IGNITION"          => ("IGNITE", Color::Red),
+        "ORBITAL_INSERTION" => ("INSERT", Color::Blue),
+        "STATION_KEEPING"   => ("ORBIT", Color::Green),
+        _                   => ("IDLE", Color::DarkGray),
     };
 
     let pid_items = vec![
@@ -704,14 +738,53 @@ fn render_apollo_control_systems(f: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(Color::DarkGray)
             ),
         ])),
-        ListItem::new(Line::from(vec![
-            Span::raw("Mode "),
-            Span::styled(mode_label.0, Style::default().fg(mode_label.1).add_modifier(Modifier::BOLD)),
-            Span::styled(
-                if pid_drift.abs() < 5.0 { " STABLE" } else if pid_drift > 0.0 { " ABOVE" } else { " BELOW" },
-                Style::default().fg(drift_color)
-            ),
-        ])),
+        ListItem::new(Line::from({
+            let phase_dur = metrics.starship_phase_duration_secs;
+            let mission_t = metrics.starship_mission_elapsed_secs;
+            let dur_str = if phase_dur >= 3600 {
+                format!("[{}h{}m]", phase_dur / 3600, (phase_dur % 3600) / 60)
+            } else if phase_dur >= 60 {
+                format!("[{}m{}s]", phase_dur / 60, phase_dur % 60)
+            } else {
+                format!("[{}s]", phase_dur)
+            };
+            let mission_str = if mission_t >= 3600 {
+                format!("T+{}h{}m", mission_t / 3600, (mission_t % 3600) / 60)
+            } else if mission_t >= 60 {
+                format!("T+{}m", mission_t / 60)
+            } else {
+                format!("T+{}s", mission_t)
+            };
+            // Phase-specific status suffix
+            let (orbit_str, orbit_color) = if metrics.starship_phase == "STATION_KEEPING" {
+                if metrics.starship_orbit_stable {
+                    (" STABLE", Color::Green)
+                } else {
+                    (" STBLZ", Color::Blue)
+                }
+            } else if metrics.starship_phase_bps > 100.0 {
+                (">100bps", Color::Green)
+            } else if metrics.starship_phase_bps > 0.0 {
+                ("", Color::Yellow)  // show bps below
+            } else {
+                ("", Color::DarkGray)
+            };
+            let mut spans = vec![
+                Span::styled(mode_label.0, Style::default().fg(mode_label.1).add_modifier(Modifier::BOLD)),
+                Span::styled(format!(" {}", dur_str), Style::default().fg(Color::DarkGray)),
+                Span::raw(" "),
+                Span::styled(mission_str, Style::default().fg(Color::White)),
+            ];
+            if !orbit_str.is_empty() {
+                spans.push(Span::styled(format!(" {}", orbit_str), Style::default().fg(orbit_color)));
+            } else if metrics.starship_phase_bps > 0.0 {
+                spans.push(Span::styled(
+                    format!(" {:.0}bps", metrics.starship_phase_bps),
+                    Style::default().fg(if metrics.starship_phase_bps > 50.0 { Color::Green } else { Color::Yellow })
+                ));
+            }
+            spans
+        })),
     ];
 
     let pid_widget = List::new(pid_items)
@@ -797,6 +870,8 @@ fn render_footer(f: &mut Frame, area: Rect, _app: &App) {
     let footer = Paragraph::new(Line::from(vec![
         Span::styled("[Tab] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         Span::raw("Switch View │ "),
+        Span::styled("[W] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::raw("Wallet │ "),
         Span::styled("[L] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         Span::raw("Logs │ "),
         Span::styled("[M] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),

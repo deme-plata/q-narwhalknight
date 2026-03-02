@@ -12,7 +12,7 @@
 // │ (async)     │                     │ (dedicated)  │                   │          │
 // └─────────────┘                     └──────────────┘                   └──────────┘
 //                                           │
-//                                           ├─ Micro-batching: 512 blocks OR 2ms
+//                                           ├─ Micro-batching: 1024 blocks OR 4ms (v8.6.0)
 //                                           ├─ Amortizes compaction overhead
 //                                           └─ Zero async runtime contention
 
@@ -25,14 +25,17 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
 /// Maximum number of blocks to batch before forcing a write
-const MAX_BATCH_SIZE: usize = 512;
+/// v8.6.0: Increased from 512 to 1024 — larger batches amortize compaction overhead better
+const MAX_BATCH_SIZE: usize = 1024;
 
 /// Maximum time to wait before forcing a write (micro-batching window)
-const MAX_BATCH_WAIT: Duration = Duration::from_millis(2);
+/// v8.6.0: Increased from 2ms to 4ms — wider window captures more writes per batch
+const MAX_BATCH_WAIT: Duration = Duration::from_millis(4);
 
 /// Maximum pending commands before applying backpressure
+/// v8.6.0: Increased from 10K to 20K — more headroom during sync bursts
 /// If queue exceeds this, fail-fast instead of blocking producer
-const MAX_QUEUE_DEPTH: usize = 10_000;
+const MAX_QUEUE_DEPTH: usize = 20_000;
 
 /// Storage command sent from async context to blocking worker thread
 enum StorageCommand {

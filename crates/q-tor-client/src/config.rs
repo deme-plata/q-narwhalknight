@@ -149,7 +149,9 @@ impl TorConfig {
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|| "/var/cache/qnk/tor".to_string()),
             tor_mandatory: self.tor_only,
-            bootstrap_timeout: Duration::from_secs(120),
+            // v8.6.0: reduced from 120s to 45s — faster startup; if Tor can't bootstrap
+            // in 45s the network is likely unreachable and retrying is more productive
+            bootstrap_timeout: Duration::from_secs(45),
             prewarm_circuits: true,
             log_level: "info".to_string(),
             adaptive_rotation: true,
@@ -166,8 +168,10 @@ impl TorConfig {
                 anyhow::bail!("Circuit count must be > 0 when Tor is enabled");
             }
 
-            if self.circuit_count > 10 {
-                anyhow::bail!("Circuit count should not exceed 10 for performance reasons");
+            // v8.6.0: raised from 10 to 12 — mandatory_dedicated_circuits uses 8,
+            // allow headroom for future operation types without hitting the limit
+            if self.circuit_count > 12 {
+                anyhow::bail!("Circuit count should not exceed 12 for performance reasons");
             }
 
             if let Some(target) = self.latency_target_ms {

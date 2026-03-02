@@ -78,10 +78,13 @@ pub struct FailsafeConfig {
 impl Default for FailsafeConfig {
     fn default() -> Self {
         Self {
-            stem_timeout: Duration::from_secs(30),
+            // v8.6.0: reduced from 30s to 20s — with max_stem_hops reduced to 5,
+            // stems complete faster; 20s is sufficient before forcing fluff fallback
+            stem_timeout: Duration::from_secs(20),
             check_interval: Duration::from_secs(1),
             max_retries: 3,
-            retry_delay: Duration::from_millis(500),
+            // v8.6.0: reduced from 500ms to 300ms — faster retries between hops
+            retry_delay: Duration::from_millis(300),
             max_tracked: 10000,
         }
     }

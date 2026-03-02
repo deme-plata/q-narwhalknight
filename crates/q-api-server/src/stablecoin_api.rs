@@ -12,7 +12,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use q_types::{ApiResponse, TokenInfo, TokenType, QUGUSD_TOKEN_ADDRESS, QUG_TOKEN_ADDRESS, QCREDIT_TOKEN_ADDRESS};
+use q_types::{ApiResponse, TokenInfo, TokenType, QUGUSD_TOKEN_ADDRESS, QUG_TOKEN_ADDRESS, QCREDIT_TOKEN_ADDRESS, QUSD_TOKEN_ADDRESS};
 use q_vm::contracts::{CollateralVault, MintResult, PositionHealth, RedeemResult, VaultStats};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -20,6 +20,7 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use crate::AppState;
+use q_api_server::transaction_utils;
 use q_api_server::wallet_auth::AuthenticatedWallet;
 
 /// Multi-token balance response
@@ -275,6 +276,34 @@ pub async fn get_multi_token_balance(
         total_usd_value += qcredit_usd;
     }
 
+    // v8.5.9: Add QUSD balance (issuer-controlled stablecoin, pegged to $1)
+    let qusd_balance = {
+        let token_balances = state.token_balances.read().await;
+        let balance_key = (addr_bytes, QUSD_TOKEN_ADDRESS);
+        token_balances.get(&balance_key).copied().unwrap_or(0)
+    };
+    // Fallback to RocksDB if in-memory is 0
+    let qusd_balance = if qusd_balance == 0 {
+        state.storage_engine.get_token_balance(&addr_bytes, &QUSD_TOKEN_ADDRESS).await.unwrap_or(0)
+    } else {
+        qusd_balance
+    };
+    if qusd_balance > 0 {
+        let qusd_usd = qusd_balance as f64 / QUG_DIVISOR; // QUSD pegged to $1
+        tokens.insert(
+            "QUSD".to_string(),
+            TokenBalance {
+                balance: format!("{:.8}", qusd_balance as f64 / QUG_DIVISOR),
+                balance_base_units: qusd_balance,
+                usd_value: qusd_usd,
+                name: Some("Quillon USD".to_string()),
+                contract_address: Some(hex::encode(QUSD_TOKEN_ADDRESS)),
+                decimals: Some(24),
+            },
+        );
+        total_usd_value += qusd_usd;
+    }
+
     // ============================================
     // 🔧 v2.9.21-beta: CRITICAL FIX - Read token balances from RocksDB, not in-memory HashMap
     // ROOT CAUSE: In-memory HashMap can be stale after swap confirmation
@@ -305,7 +334,7 @@ pub async fn get_multi_token_balance(
         matched_tokens += 1;
 
         // Skip native tokens (already added above)
-        if token_addr == &QUG_TOKEN_ADDRESS || token_addr == &QUGUSD_TOKEN_ADDRESS {
+        if token_addr == &QUG_TOKEN_ADDRESS || token_addr == &QUGUSD_TOKEN_ADDRESS || token_addr == &QUSD_TOKEN_ADDRESS {
             continue;
         }
 
@@ -560,6 +589,30 @@ pub async fn mint_qugusd(
         }
     }
 
+    // v8.7.4: Create StableMint transaction for P2P propagation
+    // This ensures ALL nodes receive the vault state change via block transactions
+    {
+        let nonce = state.nonce_tracker.get_and_increment(&user_address);
+        let mint_tx = transaction_utils::create_stable_mint_transaction(
+            user_address, qug_amount_base_units, mint_result.qugusd_minted as u128, nonce,
+        );
+        let tx_id = mint_tx.id;
+        let tx_id_hex = format!("0x{}", hex::encode(&tx_id[..8]));
+
+        // Record in optimistic_applied_txs to prevent double-application when block arrives
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        state.optimistic_applied_txs.insert(tx_id, now_secs);
+
+        let _result = transaction_utils::submit_transaction(
+            mint_tx, &state.tx_pool, &state.tx_status,
+            state.production_mempool.as_ref(), state.libp2p_discovery.as_ref(),
+        ).await;
+        info!("📤 [v8.7.4] StableMint tx {} submitted for P2P propagation", tx_id_hex);
+    }
+
     Ok(Json(ApiResponse::success(response)))
 }
 
@@ -617,6 +670,29 @@ pub async fn redeem_qug(
         } else {
             info!("💾 CollateralVault persisted after redeem (minted_qugusd={})", vault_clone.total_qugusd_minted);
         }
+    }
+
+    // v8.7.4: Create StableBurn transaction for P2P propagation
+    {
+        let nonce = state.nonce_tracker.get_and_increment(&user_address);
+        let burn_tx = transaction_utils::create_stable_burn_transaction(
+            user_address, qugusd_amount_base_units, nonce,
+        );
+        let tx_id = burn_tx.id;
+        let tx_id_hex = format!("0x{}", hex::encode(&tx_id[..8]));
+
+        // Record in optimistic_applied_txs to prevent double-application when block arrives
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        state.optimistic_applied_txs.insert(tx_id, now_secs);
+
+        let _result = transaction_utils::submit_transaction(
+            burn_tx, &state.tx_pool, &state.tx_status,
+            state.production_mempool.as_ref(), state.libp2p_discovery.as_ref(),
+        ).await;
+        info!("📤 [v8.7.4] StableBurn tx {} submitted for P2P propagation", tx_id_hex);
     }
 
     Ok(Json(ApiResponse::success(response)))
@@ -814,6 +890,29 @@ pub async fn liquidate_position(
         } else {
             info!("💾 CollateralVault persisted after liquidation");
         }
+    }
+
+    // v8.7.4: Create VaultLiquidate transaction for P2P propagation
+    {
+        let nonce = state.nonce_tracker.get_and_increment(&liquidator_address);
+        let liq_tx = transaction_utils::create_vault_liquidate_transaction(
+            liquidator_address, liquidated_bytes, nonce,
+        );
+        let tx_id = liq_tx.id;
+        let tx_id_hex = format!("0x{}", hex::encode(&tx_id[..8]));
+
+        // Record in optimistic_applied_txs to prevent double-application when block arrives
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        state.optimistic_applied_txs.insert(tx_id, now_secs);
+
+        let _result = transaction_utils::submit_transaction(
+            liq_tx, &state.tx_pool, &state.tx_status,
+            state.production_mempool.as_ref(), state.libp2p_discovery.as_ref(),
+        ).await;
+        info!("📤 [v8.7.4] VaultLiquidate tx {} submitted for P2P propagation", tx_id_hex);
     }
 
     Ok(Json(ApiResponse::success(response)))

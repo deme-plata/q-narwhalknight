@@ -442,6 +442,27 @@ pub async fn handle_state_sync_request(
         symbol_to_address.insert(entry.key().clone(), entry.value().clone());
     }
 
+    // v8.7.4: Include vault data for one-time migration to new nodes
+    let vault_data = {
+        let vault = app_state.collateral_vault.read().await;
+        // Only include if vault has any positions
+        if vault.total_qug_locked > 0 || vault.total_qugusd_minted > 0 {
+            match bincode::serialize(&*vault) {
+                Ok(bytes) => {
+                    info!("🏦 [STATE SYNC v8.7.4] Including vault data ({} bytes, locked={}, minted={})",
+                          bytes.len(), vault.total_qug_locked, vault.total_qugusd_minted);
+                    Some(bytes)
+                }
+                Err(e) => {
+                    warn!("⚠️ [STATE SYNC] Failed to serialize vault data: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    };
+
     // Build and sign response
     let mut response = StateSnapshotResponse::new(request.request_id, our_pubkey, our_height);
     response.contracts = contracts;
@@ -449,6 +470,7 @@ pub async fn handle_state_sync_request(
     response.wallet_balances = wallet_balances;
     response.token_balances = token_balances;
     response.symbol_to_address = symbol_to_address;
+    response.vault_data = vault_data;
 
     if let Err(e) = response.sign(&app_state.node_signing_key) {
         error!("🔄 [STATE SYNC] Failed to sign response: {}", e);
@@ -565,6 +587,7 @@ struct MergeResult {
     wallets_added: usize,
     tokens_added: usize,
     symbols_added: usize,
+    vaults_imported: bool,
 }
 
 impl MergeResult {
@@ -575,6 +598,7 @@ impl MergeResult {
             || self.wallets_added > 0
             || self.tokens_added > 0
             || self.symbols_added > 0
+            || self.vaults_imported
     }
 }
 
@@ -689,9 +713,15 @@ async fn merge_p2p_response(
                 pools.insert(entry.pool_id.clone(), pool);
                 result.pools_added += 1;
                 info!("💧 [STATE SYNC] Added pool: {} ({}/{})", entry.pool_id, entry.token0, entry.token1);
-            } else if response.block_height > our_height {
-                // Peer is ahead — update reserves
-                if let Some(local_pool) = pools.get_mut(&entry.pool_id) {
+            } else if let Some(local_pool) = pools.get_mut(&entry.pool_id) {
+                // v8.7.2: Update reserves if peer is ahead OR local reserves are zero (post-restart recovery)
+                let local_empty = local_pool.reserve0 == 0 && local_pool.reserve1 == 0;
+                let peer_has_data = reserve0 > 0 || reserve1 > 0;
+                if response.block_height > our_height || (local_empty && peer_has_data) {
+                    if local_empty && peer_has_data {
+                        info!("🔄 [STATE SYNC P2P] Restoring zero-reserve pool {} from peer (r0={}, r1={})",
+                              entry.pool_id, reserve0, reserve1);
+                    }
                     local_pool.reserve0 = reserve0;
                     local_pool.reserve1 = reserve1;
                     local_pool.lp_token_supply = lp_supply;
@@ -794,6 +824,41 @@ async fn merge_p2p_response(
         if !app_state.symbol_to_address.contains_key(symbol) {
             app_state.symbol_to_address.insert(symbol.clone(), address.clone());
             result.symbols_added += 1;
+        }
+    }
+
+    // ---- v8.7.4: Merge vault data (one-time migration for historical vault state) ----
+    if let Some(ref vault_bytes) = response.vault_data {
+        // Only import if we have NO local vault state (empty vault)
+        let local_vault_empty = {
+            let vault = app_state.collateral_vault.read().await;
+            vault.total_qug_locked == 0 && vault.total_qugusd_minted == 0
+        };
+
+        if local_vault_empty && !vault_bytes.is_empty() {
+            match bincode::deserialize::<q_vm::contracts::CollateralVault>(vault_bytes) {
+                Ok(peer_vault) => {
+                    if peer_vault.total_qug_locked > 0 || peer_vault.total_qugusd_minted > 0 {
+                        info!(
+                            "🏦 [STATE SYNC v8.7.4] Importing vault state from peer: locked={}, minted={}, {} positions",
+                            peer_vault.total_qug_locked,
+                            peer_vault.total_qugusd_minted,
+                            peer_vault.locked_qug.len(),
+                        );
+                        // Persist to storage
+                        if let Err(e) = app_state.storage_engine.save_collateral_vault_data(vault_bytes).await {
+                            warn!("⚠️ [STATE SYNC v8.7.4] Failed to persist vault data: {}", e);
+                        }
+                        // Update in-memory vault
+                        let mut vault = app_state.collateral_vault.write().await;
+                        *vault = peer_vault;
+                        result.vaults_imported = true;
+                    }
+                }
+                Err(e) => {
+                    warn!("⚠️ [STATE SYNC v8.7.4] Failed to deserialize vault data ({} bytes): {}", vault_bytes.len(), e);
+                }
+            }
         }
     }
 
@@ -963,8 +1028,15 @@ async fn merge_http_snapshot(app_state: &Arc<AppState>, snapshot: &FullStateSnap
                         }
                         pools.insert(pool_id.clone(), peer_pool);
                         result.pools_added += 1;
-                    } else if snapshot.block_height > our_height {
-                        if let Some(local_pool) = pools.get_mut(pool_id) {
+                    } else if let Some(local_pool) = pools.get_mut(pool_id) {
+                        // v8.7.2: Update reserves if peer is ahead OR local reserves are zero (post-restart recovery)
+                        let local_empty = local_pool.reserve0 == 0 && local_pool.reserve1 == 0;
+                        let peer_has_data = peer_pool.reserve0 > 0 || peer_pool.reserve1 > 0;
+                        if snapshot.block_height > our_height || (local_empty && peer_has_data) {
+                            if local_empty && peer_has_data {
+                                info!("🔄 [STATE SYNC HTTP] Restoring zero-reserve pool {} from peer (r0={}, r1={})",
+                                      pool_id, peer_pool.reserve0, peer_pool.reserve1);
+                            }
                             local_pool.reserve0 = peer_pool.reserve0;
                             local_pool.reserve1 = peer_pool.reserve1;
                             local_pool.lp_token_supply = peer_pool.lp_token_supply;

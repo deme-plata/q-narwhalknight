@@ -62,9 +62,13 @@ impl CircuitPurpose {
     pub fn rotation_interval(&self) -> Duration {
         match self {
             Self::Control => Duration::from_secs(600), // 10 minutes
-            Self::QuantumBeacon => Duration::from_secs(300), // 5 minutes (more sensitive)
-            Self::BlockGossip => Duration::from_secs(450), // 7.5 minutes
-            Self::AckGossip => Duration::from_secs(450), // 7.5 minutes
+            // v8.6.0: reduced from 300s to 240s — quantum entropy circuits carry
+            // high-value randomness; more frequent rotation limits correlation window
+            Self::QuantumBeacon => Duration::from_secs(240), // 4 minutes
+            // v8.6.0: reduced from 450s to 360s — tighter rotation for gossip circuits
+            // improves traffic analysis resistance with minimal throughput impact
+            Self::BlockGossip => Duration::from_secs(360), // 6 minutes
+            Self::AckGossip => Duration::from_secs(360), // 6 minutes
         }
     }
 }
@@ -549,17 +553,19 @@ mod tests {
             CircuitPurpose::Control.rotation_interval(),
             Duration::from_secs(600)
         );
+        // v8.6.0: updated from 300s to 240s
         assert_eq!(
             CircuitPurpose::QuantumBeacon.rotation_interval(),
-            Duration::from_secs(300)
+            Duration::from_secs(240)
         );
+        // v8.6.0: updated from 450s to 360s
         assert_eq!(
             CircuitPurpose::BlockGossip.rotation_interval(),
-            Duration::from_secs(450)
+            Duration::from_secs(360)
         );
         assert_eq!(
             CircuitPurpose::AckGossip.rotation_interval(),
-            Duration::from_secs(450)
+            Duration::from_secs(360)
         );
     }
 }

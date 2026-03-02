@@ -8,9 +8,12 @@ import { discoverNode, getDiscoveredNodeUrl, onNodeDiscovered } from './nodeDisc
 
 // v4.2.0: Known API server endpoints (primary + fallback)
 // Order matters: first is primary, rest are fallbacks
+// v8.6.2: Added Epsilon (10Gbit supernode) as second failover — fastest sync source
 const API_SERVERS = [
-  'https://quillon.xyz',       // Server Beta — Primary (185.182.185.227)
-  'http://109.205.176.60:8080', // Server Gamma — Secondary
+  'https://quillon.xyz',        // Nginx LB — Primary (Epsilon serves quillon.xyz)
+  'http://89.149.241.126:8080', // Server Epsilon — 10Gbit supernode (direct)
+  'http://5.79.79.158:8080',    // Server Delta — Failover #1 (1Gbit)
+  'http://109.205.176.60:8080', // Server Gamma — Failover #2 (1Gbit)
 ];
 
 // Track which server is currently active (index into API_SERVERS)

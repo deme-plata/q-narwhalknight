@@ -587,6 +587,49 @@ Positions below 120\% collateralization are liquidated:
 \end{algorithmic}
 \end{algorithm}
 
+\subsubsection{Borrowing vs.\ Swapping: Economic Analysis}
+
+A common question arises: \textit{Why borrow QUGUSD against QUG collateral when one could simply swap QUG for QUGUSD on the DEX?} The two operations serve fundamentally different economic purposes.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}p{3.5cm}p{5.5cm}p{5.5cm}@{}}
+\toprule
+\textbf{Property} & \textbf{DEX Swap (QUG $\to$ QUGUSD)} & \textbf{CDP Borrow (QUG collateral)} \\ \midrule
+QUG Ownership & \textcolor{red}{Sold — no longer held} & \textcolor{green!60!black}{Retained — locked as collateral} \\
+Upside Exposure & None — cannot benefit from price increase & Full — if QUG appreciates, position gains value \\
+Cost & Swap fee (0.3\%) & Interest (5.25\% APR on borrowed amount) \\
+Liquidation Risk & None & Yes — if collateral ratio drops below 120\% \\
+Tax Implications & Potentially taxable disposal event & Loan (generally not taxable in most jurisdictions) \\
+Reversibility & Must buy back at market price & Repay loan to unlock collateral at original amount \\
+\bottomrule
+\end{tabular}
+\caption{Comparison of DEX swap vs.\ CDP borrowing for QUGUSD acquisition}
+\label{tab:borrow_vs_swap}
+\end{table}
+
+\textbf{Worked Example.} Suppose a user holds 0.50 QUG when the QUG price is \$3{,}000:
+
+\begin{tcolorbox}[colback=codebg,colframe=qnkblue!50!black,title=CDP Borrowing Scenario]
+\begin{itemize}[leftmargin=*,noitemsep]
+    \item \textbf{Collateral}: 0.50 QUG (\$1{,}500 value)
+    \item \textbf{Borrowed}: 1{,}000 QUGUSD
+    \item \textbf{Collateral Ratio}: $1{,}500 / 1{,}000 = 150\%$
+    \item \textbf{Liquidation Price}: QUG at \$2{,}400 (ratio drops to 120\%)
+    \item \textbf{Annual Interest}: $1{,}000 \times 0.0525 = 52.50$ QUGUSD
+\end{itemize}
+
+\textbf{If QUG rises to \$6{,}000}: Collateral worth \$3{,}000, ratio rises to 300\%. User repays 1{,}000 QUGUSD + interest, unlocks 0.50 QUG now worth \$3{,}000. Net gain: \$1{,}500 minus interest.
+
+\textbf{If QUG falls to \$2{,}200}: Ratio = $1{,}100/1{,}000 = 110\% < 120\%$. Position liquidated — user loses 0.50 QUG but keeps the 1{,}000 QUGUSD borrowed.
+\end{tcolorbox}
+
+\textbf{When to Borrow}: Users who are \textit{bullish} on QUG and want liquidity without selling. Borrowing preserves upside exposure while providing immediate capital—analogous to a home equity loan rather than selling the house.
+
+\textbf{When to Swap}: Users who are \textit{neutral or bearish} on QUG, want zero liquidation risk, or need a permanent exit from QUG exposure.
+
+\textbf{Risk Note}: At 150\% collateral ratio, a $\sim$20\% price decline approaches the liquidation threshold. Conservative borrowers should target 200--300\% collateral ratios by depositing additional collateral or borrowing less.
+
 \subsection{Decentralized Lending}
 
 \subsubsection{Loan Application Protocol}

@@ -435,7 +435,7 @@ phase_e() {
     log "${GREEN}╠═══════════════════════════════════════════════════════════════╣${NC}"
     log "${GREEN}║                                                               ║${NC}"
     log "${GREEN}║  📥 User download link:                                       ║${NC}"
-    log "${GREEN}║  wget https://quillon.xyz/downloads/q-api-server-$VERSION     ║${NC}"
+    log "${GREEN}║  wget https://dl.quillon.xyz/downloads/q-api-server-$VERSION   ║${NC}"
     log "${GREEN}║                                                               ║${NC}"
     log "${GREEN}╚═══════════════════════════════════════════════════════════════╝${NC}"
 }

@@ -384,6 +384,83 @@ pub fn create_swap_transaction(
         .build_with_nonce(nonce, Utc::now())
 }
 
+/// Create a StableMint transaction (lock QUG collateral, mint QUGUSD)
+///
+/// v8.7.4: Follows the same pattern as create_swap_transaction() so that
+/// stablecoin operations propagate via blocks to ALL nodes.
+///
+/// tx.data format: [collateral_amount:16 BE][mint_amount:16 BE]
+/// tx.amount = collateral_amount (QUG locked)
+/// tx.to = QUGUSD_TOKEN_ADDRESS (identifies the stablecoin contract)
+pub fn create_stable_mint_transaction(
+    from: Address,
+    collateral_amount: Amount,
+    mint_amount: Amount,
+    nonce: u64,
+) -> Transaction {
+    let mut data = Vec::with_capacity(32);
+    data.extend_from_slice(&collateral_amount.to_be_bytes());
+    data.extend_from_slice(&mint_amount.to_be_bytes());
+
+    TransactionBuilder::new()
+        .from(from)
+        .to(q_types::QUGUSD_TOKEN_ADDRESS)
+        .amount(collateral_amount)
+        .fee(0) // No fee for vault operations
+        .data(data)
+        .token_type(TokenType::QUG)
+        .fee_token_type(TokenType::QUGUSD)
+        .tx_type(TransactionType::StableMint)
+        .build_with_nonce(nonce, Utc::now())
+}
+
+/// Create a StableBurn transaction (burn QUGUSD, unlock QUG collateral)
+///
+/// v8.7.4: tx.data format: [qugusd_amount:16 BE]
+/// tx.amount = qugusd_amount (QUGUSD to burn)
+pub fn create_stable_burn_transaction(
+    from: Address,
+    qugusd_amount: Amount,
+    nonce: u64,
+) -> Transaction {
+    let mut data = Vec::with_capacity(16);
+    data.extend_from_slice(&qugusd_amount.to_be_bytes());
+
+    TransactionBuilder::new()
+        .from(from)
+        .to(q_types::QUGUSD_TOKEN_ADDRESS)
+        .amount(qugusd_amount)
+        .fee(0)
+        .data(data)
+        .token_type(TokenType::QUGUSD)
+        .fee_token_type(TokenType::QUGUSD)
+        .tx_type(TransactionType::StableBurn)
+        .build_with_nonce(nonce, Utc::now())
+}
+
+/// Create a VaultLiquidate transaction (liquidate undercollateralized position)
+///
+/// v8.7.4: tx.data format: [vault_owner:32]
+/// tx.from = liquidator, tx.to = vault_owner
+pub fn create_vault_liquidate_transaction(
+    liquidator: Address,
+    vault_owner: Address,
+    nonce: u64,
+) -> Transaction {
+    let data = vault_owner.to_vec();
+
+    TransactionBuilder::new()
+        .from(liquidator)
+        .to(vault_owner)
+        .amount(0)
+        .fee(0)
+        .data(data)
+        .token_type(TokenType::QUG)
+        .fee_token_type(TokenType::QUGUSD)
+        .tx_type(TransactionType::VaultLiquidate)
+        .build_with_nonce(nonce, Utc::now())
+}
+
 /// Helper to derive pool_id from two token addresses
 /// Pool ID = SHA3-256(sort(token_a, token_b))
 pub fn derive_pool_id(token_a: &[u8; 32], token_b: &[u8; 32]) -> [u8; 32] {

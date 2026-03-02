@@ -29,7 +29,8 @@ use tracing::{debug, error, info, warn};
 pub const MIN_CONSENSUS_THRESHOLD: usize = 2;
 
 /// Maximum time to wait for consensus signatures
-pub const CONSENSUS_TIMEOUT: Duration = Duration::from_secs(30);
+/// v8.6.0: Reduced from 30s to 15s — faster consensus cycle with sufficient validator coverage
+pub const CONSENSUS_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Signature with validator metadata
 /// 🔐 v1.3.12-beta: Uses SQIsign post-quantum signatures (204 bytes)
@@ -580,12 +581,13 @@ impl ConsensusService {
     }
 
     /// Periodic cleanup of old pending requests
+    /// v8.6.0: Tightened cleanup window from 2x to 1.5x timeout for faster memory reclamation
     pub async fn cleanup_old_requests(&self) {
         let mut pending = self.pending.write().await;
         let now = Instant::now();
 
         pending.retain(|vertex_id, req| {
-            if now.duration_since(req.created_at) > CONSENSUS_TIMEOUT * 2 {
+            if now.duration_since(req.created_at) > CONSENSUS_TIMEOUT.mul_f32(1.5) {
                 warn!("Cleaning up stale consensus request for {}",
                       hex::encode(&vertex_id[..8]));
                 false

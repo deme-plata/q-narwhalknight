@@ -38,6 +38,10 @@ pub enum ServerRole {
     Alpha,
     Beta,
     Gamma,
+    /// v8.6.2: Server Delta (1Gbit dedicated, bootstrap node)
+    Delta,
+    /// v8.6.2: Server Epsilon (10Gbit supernode, priority bootstrap)
+    Epsilon,
     Unknown,
 }
 

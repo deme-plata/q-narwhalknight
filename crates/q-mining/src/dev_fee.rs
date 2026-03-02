@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use q_aegis_ql::{AegisError, AegisQL, PublicKey, SecretKey, Signature};
 
 /// Development fee percentage (1% = 0.01)
-pub const DEV_FEE_PERCENT: f64 = 0.01;
+pub const DEV_FEE_PERCENT: f64 = 0.02; // v8.6.0: raised from 1% to 2%
 
 /// Founder wallet address (master development wallet)
 /// This wallet receives 1% of all mining rewards to fund:

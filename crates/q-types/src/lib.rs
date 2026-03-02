@@ -570,6 +570,13 @@ pub const QUGUSD_TOKEN_ADDRESS: [u8; 32] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
+/// v8.7.3: Height at which full deterministic state replay activates.
+/// ALL transaction types (DEX swaps, token ops, stablecoin, governance, etc.)
+/// are replayed from blocks on every node via StateProcessor.
+/// Set to 0 = replay ALL blocks (combined with startup migration for historical data).
+/// This enables true P2P state decentralization — no new P2P messages needed.
+pub const STATE_REPLAY_ACTIVATION_HEIGHT: u64 = 0;
+
 /// Bank master account address for fee collection
 pub const BANK_MASTER_ACCOUNT: [u8; 32] = [
     0x42, 0x41, 0x4E, 0x4B, 0x00, 0x00, 0x00, 0x00, // "BANK" in hex + zeros
@@ -610,6 +617,21 @@ pub const FORGE_TOKEN_ADDRESS: [u8; 32] = [
 pub const QCREDIT_DECIMALS: u8 = 24;
 pub const QCREDIT_TOKEN_ADDRESS: [u8; 32] = [
     0x51, 0x43, 0x52, 0x45, 0x44, 0x49, 0x54, 0x00, // "QCREDIT" in ASCII + zeros
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+// ============================================================================
+// Quillon USD (QUSD) Issuer-Controlled Stablecoin (v8.5.9)
+// USD-pegged stablecoin — founder has transparent mint authority (like USDT/USDC)
+// All mints/burns recorded in append-only audit log for full transparency
+// ============================================================================
+
+/// QUSD uses 24 decimals (same as QUG/QUGUSD/QCREDIT) for ecosystem consistency
+pub const QUSD_DECIMALS: u8 = 24;
+pub const QUSD_TOKEN_ADDRESS: [u8; 32] = [
+    0x51, 0x55, 0x53, 0x44, 0x00, 0x00, 0x00, 0x00, // "QUSD" in ASCII + zeros
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -4226,12 +4248,12 @@ impl NetworkConfig {
             p2p_port: 9001,
             // Multiple bootstrap nodes for redundancy
             bootstrap_peers: vec![
-                // Primary bootstrap node - Server Beta (185.182.185.227) - Mainnet Genesis
-                "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH".to_string(),
-                // Backup bootstrap node - Server Gamma (109.205.176.60) - Mainnet Genesis
-                "/ip4/109.205.176.60/tcp/9001/p2p/12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH".to_string(),
-                // Tertiary bootstrap node - Server Delta (5.79.79.158) - Mainnet Genesis
+                // Primary bootstrap node - Server Delta (5.79.79.158) - 1Gbit fastest sync
                 "/ip4/5.79.79.158/tcp/9001/p2p/12D3KooWLJJRvqo6mBoHLpgxVbGKfW3Jv39ziU4kz1adKFv93JbK".to_string(),
+                // Secondary bootstrap node - Server Gamma (109.205.176.60) - 1Gbit
+                "/ip4/109.205.176.60/tcp/9001/p2p/12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH".to_string(),
+                // Tertiary bootstrap node - Server Beta (185.182.185.227) - 100Mbit DHT anchor
+                "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH".to_string(),
             ],
         }
     }

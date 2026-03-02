@@ -46,6 +46,76 @@ lazy_static::lazy_static! {
     /// Maps peer_id string → reported bandwidth in Mbps
     /// Read by turbo_sync gravity-assist to seed initial bandwidth estimates
     pub static ref PEER_BANDWIDTH_TIERS: DashMap<String, u32> = DashMap::new();
+
+    /// v8.6.2: Supernode peer ID prefixes from Q_SUPERNODE_PEERS env var
+    /// Other servers set this to Epsilon's peer ID prefix so gravity-assist
+    /// gives it a 10x boost over standard 3x preferred peers.
+    pub static ref SUPERNODE_PEER_IDS: Vec<String> = {
+        std::env::var("Q_SUPERNODE_PEERS")
+            .ok()
+            .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+            .unwrap_or_default()
+    };
+}
+
+/// v8.6.2: Bandwidth tier classification for peer selection
+/// Determines sync boost multiplier and max serve chunk size based on reported bandwidth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BandwidthTier {
+    /// No bandwidth info reported (old nodes)
+    Unknown,
+    /// <500 Mbps (small VPS, residential)
+    Fallback,
+    /// 500-4999 Mbps (typical 1Gbit dedicated servers)
+    Standard,
+    /// >=5000 Mbps (10Gbit+ dedicated servers)
+    Supernode,
+}
+
+impl BandwidthTier {
+    /// Classify bandwidth into tier from reported Mbps
+    pub fn from_mbps(mbps: u32) -> Self {
+        match mbps {
+            0 => BandwidthTier::Unknown,
+            1..=499 => BandwidthTier::Fallback,
+            500..=4999 => BandwidthTier::Standard,
+            _ => BandwidthTier::Supernode,
+        }
+    }
+
+    /// Score multiplier for gravity-assist peer selection
+    /// Supernodes get 10x, standard gets 3x, fallback/unknown get 1x
+    pub fn sync_boost_multiplier(&self) -> f64 {
+        match self {
+            BandwidthTier::Unknown => 1.0,
+            BandwidthTier::Fallback => 1.0,
+            BandwidthTier::Standard => 3.0,
+            BandwidthTier::Supernode => 10.0,
+        }
+    }
+
+    /// Maximum blocks per chunk this tier can reliably serve within timeout
+    /// Supernodes (64GB RAM, 10Gbit, NVMe) can serve 5000 blocks easily
+    /// Standard (8GB RAM, 1Gbit) reliably serves 1000
+    /// Fallback (small VPS) caps at 500
+    pub fn max_serve_chunk_size(&self) -> u64 {
+        match self {
+            BandwidthTier::Unknown => 500,
+            BandwidthTier::Fallback => 500,
+            BandwidthTier::Standard => 1000,
+            BandwidthTier::Supernode => 5000,
+        }
+    }
+
+    /// Display label for logs and TUI
+    pub fn label(&self) -> &'static str {
+        match self {
+            BandwidthTier::Unknown => "UNKNOWN",
+            BandwidthTier::Fallback => "FALLBACK",
+            BandwidthTier::Standard => "STANDARD",
+            BandwidthTier::Supernode => "SUPERNODE",
+        }
+    }
 }
 
 use crate::connection_manager::{PeerInfo, DiscoveryMethod};
@@ -81,16 +151,17 @@ use q_types::QBlock;
 
 /// 🔧 v4.2.0-beta: MULTIPLE HARDCODED BOOTSTRAP PEERS - Mainnet safety
 /// This ensures nodes can connect even when one bootstrap node is down
-/// v8.4.0: 1Gbit servers listed FIRST for faster initial sync
-/// Server Gamma (109.205.176.60) = 1Gbit (preferred for sync)
-/// Server Delta (5.79.79.158) = 1Gbit (preferred for sync)
-/// Server Beta (185.182.185.227) = 100Mbit (DHT coordinator, gossipsub anchor)
+/// v8.6.2: Epsilon 10Gbit FIRST — fastest sync source for new nodes
+/// v8.6.5: Delta 1Gbit FIRST (fastest bootstrap), then Gamma 1Gbit, then Beta 100Mbit
+///
+/// Bandwidth ordering: Epsilon 10Gbit → Delta 1Gbit → Gamma 1Gbit → Beta 100Mbit
 pub const HARDCODED_BOOTSTRAP_PEERS: &[&str] = &[
-    // v8.4.0: 1Gbit servers FIRST — new nodes sync from these, offloading Beta
-    // Server Gamma - 1Gbit (preferred for sync)
-    "/ip4/109.205.176.60/tcp/9001/p2p/12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH",
-    // Server Delta - 1Gbit (preferred for sync)
+    // v8.7.4: Server Epsilon - 10Gbit SUPERNODE (fastest sync, 64GB RAM, 2x Xeon Gold, NVMe)
+    "/ip4/89.149.241.126/tcp/9001/p2p/12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM",
+    // Server Delta - 1Gbit (second fastest)
     "/ip4/5.79.79.158/tcp/9001/p2p/12D3KooWLJJRvqo6mBoHLpgxVbGKfW3Jv39ziU4kz1adKFv93JbK",
+    // Server Gamma - 1Gbit
+    "/ip4/109.205.176.60/tcp/9001/p2p/12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH",
     // Server Beta - 100Mbit (DHT coordinator, gossipsub anchor)
     "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH",
 ];
@@ -98,16 +169,19 @@ pub const HARDCODED_BOOTSTRAP_PEERS: &[&str] = &[
 /// v4.2.0-beta: Bootstrap HTTP API endpoints for dynamic peer ID discovery
 /// Used when hardcoded peer IDs are stale or missing (e.g., new server first boot)
 /// Also used to discover correct P2P port when it differs from hardcoded 9001
-/// v8.4.0: 1Gbit servers first for faster HTTP discovery and state sync
+/// v8.6.5: Delta 1Gbit first for fastest HTTP discovery and state sync
 pub const BOOTSTRAP_HTTP_ENDPOINTS: &[&str] = &[
-    "http://109.205.176.60:8080",   // Gamma - 1Gbit
+    // v8.7.4: Epsilon 10Gbit SUPERNODE first — fastest HTTP discovery and state sync
+    "http://89.149.241.126:8080",   // Epsilon - 10Gbit SUPERNODE
     "http://5.79.79.158:8080",      // Delta - 1Gbit
+    "http://109.205.176.60:8080",   // Gamma - 1Gbit
     "http://185.182.185.227:8080",  // Beta  - 100Mbit
     "http://161.35.219.10:8080",    // Alpha - 1Gbit (canary)
 ];
 
 /// Legacy single bootstrap peer constant (for backwards compatibility)
-pub const HARDCODED_BOOTSTRAP_PEER: &str = "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH";
+/// v8.7.4: Points to Epsilon supernode (10Gbit) for fastest initial sync
+pub const HARDCODED_BOOTSTRAP_PEER: &str = "/ip4/89.149.241.126/tcp/9001/p2p/12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM";
 
 /// v5.1.0: Load bootstrap peers from config.toml in data directory
 fn load_config_bootstrap_peers(data_dir: &str) -> Vec<String> {
@@ -1080,7 +1154,7 @@ impl UnifiedNetworkManager {
         // Load existing identity from disk or generate new one and save
         // This prevents PeerID churn on every restart (breaks bootstrap DHT routing)
         // 🔄 v3.3.7-beta: Track if identity is NEW for connection warmup
-        let data_dir = std::env::var("Q_DB_PATH").unwrap_or_else(|_| "./data-mine12".to_string());
+        let data_dir = std::env::var("Q_DB_PATH").unwrap_or_else(|_| format!("./data-{}", network_config.network_id.as_str()));
         let data_path = std::path::Path::new(&data_dir);
         let (keypair, is_new_identity) = load_or_generate_identity(data_path)?;
         let local_peer_id = PeerId::from(keypair.public());
@@ -1450,19 +1524,22 @@ impl UnifiedNetworkManager {
                     (default_mesh_n, default_flood)
                 };
 
+                // v8.6.0: Bootstrap nodes get higher mesh_n cap (32) for better fanout
+                let mesh_n_cap = if is_bootstrap { 32 } else { 24 };
                 let mesh_n = std::env::var("Q_GOSSIPSUB_MESH_N")
                     .ok()
                     .and_then(|v| v.parse::<usize>().ok())
                     .unwrap_or(default_mesh_n)
-                    .max(6).min(24);  // Clamp to safe range
+                    .max(6).min(mesh_n_cap);
 
                 let flood_publish = std::env::var("Q_GOSSIPSUB_FLOOD_PUBLISH")
                     .map(|v| v == "true" || v == "1")
                     .unwrap_or(default_flood);
 
                 // Derive other mesh parameters from mesh_n
+                // v8.6.0: Raised mesh_n_high cap from 32 to 48 for bootstrap infrastructure
                 let mesh_n_low = (mesh_n / 2).max(4);       // 50% of target, min 4
-                let mesh_n_high = (mesh_n * 4 / 3).min(32); // 133% of target, max 32
+                let mesh_n_high = (mesh_n * 4 / 3).min(48); // 133% of target, max 48
                 let mesh_outbound_min = (mesh_n / 3).max(2); // 33% of target, min 2
 
                 info!("🔧 [ADAPTIVE GOSSIPSUB] Profile: {}", gossipsub_profile);
@@ -1595,7 +1672,7 @@ impl UnifiedNetworkManager {
                 // New values (256/256) allow 100+ blocks/s through the event queues
                 // This matches the actual network capacity (100+ Mbit/s)
                 c.with_idle_connection_timeout(Duration::from_secs(30 * 60))
-                 .with_notify_handler_buffer_size(NonZeroUsize::new(256).unwrap())  // 8x larger
+                 .with_notify_handler_buffer_size(NonZeroUsize::new(512).unwrap())  // v8.6.0: 16x larger (was 256)
                  .with_per_connection_event_buffer_size(256)  // 4x larger
             })
             .build();
@@ -4173,7 +4250,7 @@ impl UnifiedNetworkManager {
         // v1.3.5-beta: Increased direct mode timeout to 65s (60s request timeout + 5s grace)
         // This matches the new 60s request timeout for direct mode to handle large block packs
         let stall_timeout_secs = if self.tor_enabled { 150 } else { 65 };
-        const MAX_CONCURRENT_SYNC: usize = 3;  // Allow 3 parallel requests
+        const MAX_CONCURRENT_SYNC: usize = 8;  // v8.6.0: Allow 8 parallel requests (was 3)
 
         // v1.3.3-beta: Process retry queue - retry failed heights with exponential backoff
         if let Ok(mut retry_queue) = self.sync_retry_queue.lock() {
@@ -4269,7 +4346,7 @@ impl UnifiedNetworkManager {
                     // This caused blocks to be received far ahead, never committed (pointer stuck),
                     // then same blocks re-requested endlessly.
                     // FIX: Cap pipelining to max 15k blocks ahead of local_height
-                    const MAX_PIPELINE_AHEAD: u64 = 15_000;
+                    const MAX_PIPELINE_AHEAD: u64 = 40_000;  // v8.6.0: increased from 15_000
 
                     let max_pending_height = guard.iter()
                         .map(|(_, h, _)| h + batch_size)

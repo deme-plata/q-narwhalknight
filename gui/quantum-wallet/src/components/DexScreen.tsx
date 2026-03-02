@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ArrowDownUp, Search, TrendingUp, TrendingDown, Settings, Info, Droplet, Zap, X, Clock, Shield, AlertTriangle, Brain, Loader2, BarChart3, Activity, Layers, Users, DollarSign, Repeat, PieChart, Wallet, ChevronDown, ChevronUp, ChevronLeft, ChevronRight } from 'lucide-react';
+import { ArrowDownUp, Search, TrendingUp, TrendingDown, Settings, Info, Droplet, Zap, X, Clock, Shield, AlertTriangle, Brain, Loader2, BarChart3, Activity, Layers, Users, DollarSign, Repeat, PieChart, Wallet, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Coins } from 'lucide-react';
 import TokenDetailsModal from './TokenDetailsModal';
 import IndexFundModal from './IndexFundModal';
 import LiquidityModal from './LiquidityModal';
@@ -5523,6 +5523,15 @@ export default function DexScreen() {
                 <svg className={`w-4 h-4 transition-transform ${showDcaOrdersPanel ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
                 </svg>
+              </button>
+
+              {/* 🏦 Mint QUGUSD Stablecoin Button */}
+              <button
+                onClick={() => setIsMintQUGUSDModalOpen(true)}
+                className="w-full py-3 mt-3 bg-gradient-to-r from-amber-500 to-yellow-600 rounded-xl font-bold text-white hover:shadow-lg hover:shadow-amber-500/50 transition-all flex items-center justify-center gap-2"
+              >
+                <Coins className="w-5 h-5" />
+                Mint QUGUSD Stablecoin
               </button>
 
               {/* 💰 v2.4.9-beta: DCA Orders Panel */}

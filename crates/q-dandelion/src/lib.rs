@@ -898,8 +898,12 @@ impl Default for DandelionConfig {
     fn default() -> Self {
         Self {
             stem_probability: 0.9,              // 90% chance to start in stem
-            stem_continuation_probability: 0.8, // 80% chance to continue stem
-            max_stem_hops: 10,
+            // v8.6.0: reduced from 0.8 to 0.75 — increases fluff transition rate per hop,
+            // improving latency while maintaining strong privacy (expected ~3 hops avg)
+            stem_continuation_probability: 0.75,
+            // v8.6.0: reduced from 10 to 5 — Dandelion++ paper recommends 4-5 max hops;
+            // beyond 5 hops adds latency without meaningful anonymity improvement
+            max_stem_hops: 5,
             message_ttl: Duration::from_secs(300), // 5 minutes
             quantum_enhanced: true,
         }
@@ -959,8 +963,10 @@ mod tests {
         let config = DandelionConfig::default();
 
         assert_eq!(config.stem_probability, 0.9);
-        assert_eq!(config.stem_continuation_probability, 0.8);
-        assert_eq!(config.max_stem_hops, 10);
+        // v8.6.0: updated from 0.8 to 0.75
+        assert_eq!(config.stem_continuation_probability, 0.75);
+        // v8.6.0: updated from 10 to 5
+        assert_eq!(config.max_stem_hops, 5);
         assert!(config.quantum_enhanced);
     }
 

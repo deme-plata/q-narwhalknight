@@ -137,8 +137,7 @@ impl AutoUpdateConfig {
             network_id: network_id.to_string(),
             bootstrap_urls: vec![
                 "https://quillon.xyz".to_string(),
-                "http://109.205.176.60:8080".to_string(),
-                "http://5.79.79.158:8080".to_string(),
+                "https://dl.quillon.xyz".to_string(),
             ],
         }
     }
@@ -156,6 +155,14 @@ pub struct RestartMarker {
 
 /// Maximum announcement messages to process per second (rate limit against spam)
 const MAX_ANNOUNCEMENTS_PER_SEC: u32 = 5;
+
+/// Allowed download URL prefixes — defense-in-depth against compromised quorum
+/// pointing to a malicious binary host. Only these domains are accepted.
+const ALLOWED_DOWNLOAD_PREFIXES: &[&str] = &[
+    "https://quillon.xyz/downloads/",
+    "https://dl.quillon.xyz/downloads/",
+    "https://quillon.xyz/dist-final/downloads/",
+];
 
 /// Main auto-updater instance
 pub struct NodeAutoUpdater {
@@ -181,6 +188,9 @@ pub struct NodeAutoUpdater {
     libp2p_command_tx: Option<tokio::sync::mpsc::UnboundedSender<q_network::NetworkCommand>>,
     /// Shutting down flag
     shutting_down: Arc<AtomicBool>,
+    /// v8.6.5: Shared runtime toggle — admin API can enable/disable auto-update at runtime
+    /// This replaces the static config.enabled check so the toggle actually works.
+    auto_update_enabled: Arc<AtomicBool>,
     /// Rate limiter: track announcements processed in the current second
     rate_limit_count: u32,
     rate_limit_window: std::time::Instant,
@@ -197,6 +207,7 @@ impl NodeAutoUpdater {
         is_bootstrap: bool,
         signing_key: Arc<ed25519_dalek::SigningKey>,
         libp2p_command_tx: Option<tokio::sync::mpsc::UnboundedSender<q_network::NetworkCommand>>,
+        auto_update_enabled: Arc<AtomicBool>,
     ) -> (Self, mpsc::UnboundedSender<Vec<u8>>) {
         let initial_state = if config.enabled {
             NodeUpdateState::Idle
@@ -233,6 +244,7 @@ impl NodeAutoUpdater {
                 signing_key,
                 libp2p_command_tx,
                 shutting_down: Arc::new(AtomicBool::new(false)),
+                auto_update_enabled,
                 rate_limit_count: 0,
                 rate_limit_window: std::time::Instant::now(),
             },
@@ -349,28 +361,13 @@ impl NodeAutoUpdater {
             return;
         }
 
-        // 5. Check if signer is trusted
+        // 5. Check if signer is in the hardcoded trusted signers list
         let is_trusted = self
             .trusted_signers
             .iter()
             .any(|key| hex::encode(key.as_bytes()) == announcement.signer_pubkey);
 
-        // During development, also accept announcements signed by ANY valid key
-        // (trusted signers list has placeholder keys). In production, remove this.
-        let accept = is_trusted || {
-            // Accept if at least the signature is valid (dev mode)
-            let placeholder_check = q_types::update_announcement::TRUSTED_UPDATE_SIGNERS
-                .iter()
-                .all(|s| s.starts_with("0000"));
-            if placeholder_check {
-                debug!(
-                    "🔄 [AUTO-UPDATE] Dev mode: accepting non-trusted signer (placeholder keys)"
-                );
-            }
-            placeholder_check
-        };
-
-        if !accept {
+        if !is_trusted {
             warn!(
                 "🔄 [AUTO-UPDATE] Rejecting announcement from untrusted signer: {}",
                 &announcement.signer_pubkey[..16]
@@ -385,9 +382,10 @@ impl NodeAutoUpdater {
             &announcement.sha256_checksum[..16.min(announcement.sha256_checksum.len())]
         );
 
-        // 6. Accumulate for quorum
+        // 6. Accumulate for quorum (prune old entries to prevent unbounded growth)
         let quorum_reached = {
             let mut quorum = self.quorum.lock().await;
+            quorum.prune_older_than(&self.config.current_version);
             quorum.record(&announcement)
         };
 
@@ -400,9 +398,9 @@ impl NodeAutoUpdater {
 
             *self.quorum_announcement.lock().await = Some(announcement.clone());
 
-            if self.config.enabled
-                && (!self.config.mandatory_only || announcement.mandatory)
-            {
+            // v8.6.5: Check shared runtime toggle (admin API can enable/disable)
+            let enabled = self.auto_update_enabled.load(Ordering::Relaxed);
+            if enabled && (!self.config.mandatory_only || announcement.mandatory) {
                 // Auto-update enabled — proceed to download
                 self.download_and_apply(announcement).await;
             } else {
@@ -542,6 +540,21 @@ impl NodeAutoUpdater {
         if temp_path.exists() {
             info!("🔄 [AUTO-UPDATE] Removing stale temp file from previous attempt");
             let _ = tokio::fs::remove_file(&temp_path).await;
+        }
+
+        // v8.6.5: Validate download URL against allowlist (defense-in-depth)
+        let url_allowed = ALLOWED_DOWNLOAD_PREFIXES.iter().any(|prefix| announcement.download_url.starts_with(prefix));
+        if !url_allowed {
+            error!(
+                "🔄 [AUTO-UPDATE] REJECTED: download URL '{}' is not in the allowlist!",
+                announcement.download_url
+            );
+            let _ = self.state_tx.send(NodeUpdateState::Error {
+                version: announcement.version.clone(),
+                message: format!("Download URL rejected: not in allowlist"),
+                retry_count: 0,
+            });
+            return;
         }
 
         match self.download_binary(&announcement.download_url, &temp_path).await {
@@ -712,9 +725,9 @@ impl NodeAutoUpdater {
         }
     }
 
-    /// Download binary from URL to local path
+    /// Download binary from URL to local path (streamed to disk, not loaded into RAM)
     async fn download_binary(&self, url: &str, dest: &Path) -> Result<(), String> {
-        info!("🔄 [AUTO-UPDATE] Downloading from {}", url);
+        info!("🔄 [AUTO-UPDATE] Downloading from {} (streaming to disk)", url);
 
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(600))
@@ -731,14 +744,57 @@ impl NodeAutoUpdater {
             return Err(format!("HTTP {} from {}", response.status(), url));
         }
 
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| format!("Failed to read response body: {}", e))?;
+        let total_size = response.content_length().unwrap_or(0);
 
-        tokio::fs::write(dest, &bytes)
+        // v8.6.5: Stream chunks to disk instead of loading entire binary into memory
+        use futures_util::StreamExt;
+        use tokio::io::AsyncWriteExt;
+
+        let mut file = tokio::fs::File::create(dest)
             .await
-            .map_err(|e| format!("Failed to write file: {}", e))?;
+            .map_err(|e| format!("Failed to create file: {}", e))?;
+
+        let mut stream = response.bytes_stream();
+        let mut downloaded: u64 = 0;
+        let mut last_log = std::time::Instant::now();
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.map_err(|e| format!("Stream error: {}", e))?;
+            downloaded += chunk.len() as u64;
+            file.write_all(&chunk)
+                .await
+                .map_err(|e| format!("Failed to write chunk: {}", e))?;
+
+            // Log progress every 5 seconds
+            if last_log.elapsed().as_secs() >= 5 {
+                let pct = if total_size > 0 {
+                    (downloaded * 100 / total_size) as u8
+                } else {
+                    0
+                };
+                info!(
+                    "🔄 [AUTO-UPDATE] Download progress: {}/{} bytes ({}%)",
+                    downloaded, total_size, pct
+                );
+
+                // Update state with progress
+                let _ = self.state_tx.send(NodeUpdateState::Downloading {
+                    version: String::new(), // Will be overwritten by caller
+                    progress_percent: pct,
+                });
+
+                last_log = std::time::Instant::now();
+            }
+        }
+
+        file.flush()
+            .await
+            .map_err(|e| format!("Failed to flush file: {}", e))?;
+
+        info!(
+            "🔄 [AUTO-UPDATE] Download complete: {} bytes written to {:?}",
+            downloaded, dest
+        );
 
         Ok(())
     }

@@ -27,6 +27,7 @@ import EthereumSwapModal from './EthereumSwapModal';
 import EmailScreen from './EmailScreen';
 import CalendarScreen from './CalendarScreen';
 import { TICKER_SYMBOL } from '../constants/ticker';
+import QuantumLoader from './QuantumLoader';
 
 // v3.6.1-beta: SANITY CHECK - Max possible balance is 21 million QUG (total supply)
 // Any balance exceeding this is corrupted data and must be rejected
@@ -92,9 +93,10 @@ interface WalletBalance {
 
 interface DashboardProps {
   onNavigateToSend?: (coinSymbol: string) => void;
+  liveBalance?: number; // v8.6.5: Live QUG balance from App.tsx SSE (same source as TopBar)
 }
 
-const Dashboard = memo(function Dashboard({ onNavigateToSend }: DashboardProps) {
+const Dashboard = memo(function Dashboard({ onNavigateToSend, liveBalance }: DashboardProps) {
   // 🌐 v3.4.3-browser: P2P real-time block streaming via gossipsub
   const { latestBlock: p2pLatestBlock, blockHistory: p2pBlockHistory, isSubscribed: p2pSubscribed } = useRealtimeBlocks();
 
@@ -136,7 +138,9 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend }: DashboardProps) 
     // v6.5.0: Phase-aware cache clearing — purge stale balances on network phase change
     try {
       const lastPhase = localStorage.getItem('lastNetworkPhase');
-      const currentPhase = 'mainnet2026.1.3';
+      // v1.0.2: Derive phase from server version to auto-clear on upgrades
+      const serverVersion = localStorage.getItem('serverVersion') || '';
+      const currentPhase = `mainnet-v${serverVersion || '8.6.4'}`;
       if (lastPhase && lastPhase !== currentPhase) {
         console.log(`🔄 Phase transition detected: ${lastPhase} → ${currentPhase}. Clearing balance caches.`);
         localStorage.removeItem('cachedBalance');
@@ -300,6 +304,19 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend }: DashboardProps) 
   const [showStakingModal, setShowStakingModal] = useState(false);
   const [showMainnetWelcome, setShowMainnetWelcome] = useState(false);
   const [showBountyModal, setShowBountyModal] = useState(false);
+
+  // v8.5.10: Genie target ref — the TopBar bounty button
+  const bountyGenieRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    bountyGenieRef.current = document.getElementById('bounty-genie-target');
+  }, []);
+
+  // v8.5.10: Listen for TopBar bounty button clicks
+  useEffect(() => {
+    const handleOpenBounty = () => setShowBountyModal(true);
+    window.addEventListener('open-bounty-modal', handleOpenBounty);
+    return () => window.removeEventListener('open-bounty-modal', handleOpenBounty);
+  }, []);
 
   // v7.1.4: Show welcome modal only ONCE. Versioned key + no polling interval.
   useEffect(() => {
@@ -570,17 +587,13 @@ Provide a brief analysis (under 250 tokens) covering:
                 const fetchedBalance = balanceResponse.data.balance_qnk || 0;
                 console.log('✅ Balance fetched:', fetchedBalance, '(highest known:', previousHighest, ', cached:', cachedValue, ')');
 
-                // CRITICAL FIX: Validate balance before accepting
-                // Allow decreases up to 10% or 1 QUG for legitimate transactions
+                // v1.0.2: Accept API balance as authoritative — only reject near-zero from large values
                 const referenceBalance = Math.max(previousHighest, cachedValue);
-                const minAcceptable = Math.max(0, referenceBalance * 0.9 - 1);
 
-                if (fetchedBalance >= minAcceptable || referenceBalance === 0) {
+                if (fetchedBalance > 0 || referenceBalance === 0 || fetchedBalance >= referenceBalance * 0.01) {
                   walletBalance = fetchedBalance;
-                  // Update tracking
-                  if (fetchedBalance > previousHighest) {
-                    highestKnownBalancesRef.current['QUG'] = fetchedBalance;
-                  }
+                  // Update tracking with latest value (not just highest)
+                  highestKnownBalancesRef.current['QUG'] = fetchedBalance;
                   // v2.3.31-beta: Check global cooldown for localStorage write
                   const lsGlobalCooldownUntil = parseInt(localStorage.getItem('dexCooldownUntil') || '0');
                   const lsGlobalCooldownActive = Date.now() < lsGlobalCooldownUntil;
@@ -590,8 +603,8 @@ Provide a brief analysis (under 250 tokens) covering:
                     console.log('🚫 [fetchNodeStatusCore] SKIPPING localStorage write during DEX cooldown (global:', lsGlobalCooldownActive, ')');
                   }
                 } else {
-                  // Suspiciously low - use reference balance
-                  console.warn(`⚠️ Rejecting suspiciously low balance: ${fetchedBalance} (expected ~${referenceBalance})`);
+                  // Near-zero from a large balance — likely stale/corrupt data
+                  console.warn(`⚠️ Rejecting near-zero balance: ${fetchedBalance} (reference: ${referenceBalance})`);
                   walletBalance = referenceBalance;
                 }
               } else {
@@ -681,14 +694,12 @@ Provide a brief analysis (under 250 tokens) covering:
 
           // CRITICAL FIX: Only accept new balance if it's higher than or close to previous
           // Allow small decreases (up to 10% or 1 QUG) for legitimate transactions
+          // v1.0.2: Accept API balance as authoritative — only reject near-zero from large values
           const referenceBalance = Math.max(previousHighest, validCachedBalance);
-          const minAcceptable = Math.max(0, referenceBalance * 0.9 - 1);
-          if (fetchedBalance >= minAcceptable || referenceBalance === 0) {
+          if (fetchedBalance > 0 || referenceBalance === 0 || fetchedBalance >= referenceBalance * 0.01) {
             qugBalance = fetchedBalance;
-            // Update highest known if this is higher
-            if (fetchedBalance > (highestKnownBalancesRef.current['QUG'] || 0)) {
-              highestKnownBalancesRef.current['QUG'] = fetchedBalance;
-            }
+            // Update tracking with latest value
+            highestKnownBalancesRef.current['QUG'] = fetchedBalance;
             // v2.3.31-beta: Check global cooldown for localStorage write
             const wbGlobalCooldownUntil = parseInt(localStorage.getItem('dexCooldownUntil') || '0');
             const wbGlobalCooldownActive = Date.now() < wbGlobalCooldownUntil;
@@ -698,8 +709,8 @@ Provide a brief analysis (under 250 tokens) covering:
               console.log('🚫 [fetchWalletBalances] SKIPPING localStorage write during DEX cooldown (global:', wbGlobalCooldownActive, ')');
             }
           } else {
-            // Fetched balance is suspiciously low - use cached/highest
-            console.warn(`⚠️ Ignoring suspiciously low balance: ${fetchedBalance} (expected ~${referenceBalance})`);
+            // Near-zero from large balance — likely stale/corrupt data
+            console.warn(`⚠️ Rejecting near-zero balance: ${fetchedBalance} (reference: ${referenceBalance})`);
             qugBalance = referenceBalance;
           }
         } else {
@@ -830,6 +841,41 @@ Provide a brief analysis (under 250 tokens) covering:
 
       console.log('📊 [fetchWalletBalances] Initialized QUGUSD with history:', qugusdHistory.length, 'points (', qugusdSavedHistory.length, 'from localStorage), balance:', qugUsdBalance);
 
+      // v8.5.9: Fetch QUSD balance from multi-token API response
+      let qusdBalance = 0;
+      try {
+        const response2 = await qnkAPI.getMultiTokenBalance();
+        if (response2.success && response2.data && response2.data.tokens) {
+          const tokensObj2 = response2.data.tokens;
+          if (tokensObj2.QUSD && tokensObj2.QUSD.balance !== undefined) {
+            qusdBalance = parseFloat(tokensObj2.QUSD.balance) || 0;
+          } else if (tokensObj2.qusd && tokensObj2.qusd.balance !== undefined) {
+            qusdBalance = parseFloat(tokensObj2.qusd.balance) || 0;
+          }
+        }
+      } catch (error) {
+        console.warn('⚠️ Failed to fetch QUSD balance:', error);
+      }
+
+      if (qusdBalance > 0) {
+        const qusdSavedHistory = savedHistory['QUSD'] || [];
+        const qusdHistory: BalanceHistoryPoint[] = [
+          ...qusdSavedHistory,
+          { timestamp: now, balance: qusdBalance }
+        ].slice(-20);
+
+        balances.push({
+          symbol: 'QUSD',
+          name: 'Quillon USD',
+          balance: qusdBalance,
+          usdValue: qusdBalance, // 1:1 peg to USD
+          icon: 'usd',
+          color: 'from-green-400 to-emerald-500',
+          history: qusdHistory
+        });
+        console.log('💵 [Dashboard] QUSD balance:', qusdBalance);
+      }
+
       // Fetch USD balance from payment API - ALWAYS show USD wallet
       let usdValue = 0;
       try {
@@ -921,11 +967,20 @@ Provide a brief analysis (under 250 tokens) covering:
         return; // Don't overwrite the correct DEX-updated balance with stale API data
       }
 
-      setWalletBalances(balances);
-
-      // v8.1.6: Removed balance-update dispatch to App.tsx.
-      // App.tsx has its own SSE connection for balance updates.
-      // Dispatching from API fetch created a competing stale source causing zigzag.
+      // v8.6.2: Merge instead of replace — preserve higher QUG balance from SSE
+      // to prevent flicker when API response races with SSE updates.
+      setWalletBalances(prevWallets => {
+        return balances.map(newWallet => {
+          if (newWallet.symbol === 'QUG') {
+            const prevQug = prevWallets.find(w => w.symbol === 'QUG');
+            if (prevQug && prevQug.balance > newWallet.balance) {
+              // SSE already gave us a higher balance — keep it, just update history
+              return { ...newWallet, balance: prevQug.balance, history: newWallet.history || prevQug.history };
+            }
+          }
+          return newWallet;
+        });
+      });
     };
 
     const fetchRecentTransactionsCore = async () => {
@@ -1771,19 +1826,21 @@ Provide a brief analysis (under 250 tokens) covering:
         return;
       }
 
-      // v8.0.3: Stabilizer — reject balance that goes DOWN from a recent accepted value
-      // (mining rewards should only increase, never decrease)
-      if (!isDexSwap && symbol === 'QUG') {
+      // v1.0.2: Stabilizer — reject spurious balance drops from stale SSE events
+      // Allow legitimate decreases from sends/swaps (check change_reason)
+      const isLegitimateDecrease = reason === 'transaction_sent' || reason === 'send' || reason === 'transfer' || reason === 'dex_swap' || isDexSwap;
+      if (!isDexSwap && !isLegitimateDecrease && symbol === 'QUG') {
         const lastAccepted = lastAcceptedBalanceRef.current[symbol];
-        if (lastAccepted && Date.now() - lastAccepted.timestamp < 5000) {
-          // Within 5s window, only accept if balance is >= last accepted (monotonic increase)
-          if (incomingBalance < lastAccepted.balance * 0.999) {
-            console.log(`🚫 Dashboard: Rejecting balance decrease within 5s window: ${incomingBalance} < ${lastAccepted.balance}`);
+        if (lastAccepted && Date.now() - lastAccepted.timestamp < 10000) {
+          // Within 10s window, only reject > 10% drops (likely stale data, not a real send)
+          if (incomingBalance < lastAccepted.balance * 0.9) {
+            console.log(`🚫 Dashboard: Rejecting large balance drop within 10s window: ${incomingBalance} < ${lastAccepted.balance * 0.9}`);
             return;
           }
         }
-        lastAcceptedBalanceRef.current[symbol] = { balance: incomingBalance, timestamp: Date.now() };
       }
+      // Always update the tracking ref with the latest accepted balance
+      lastAcceptedBalanceRef.current[symbol] = { balance: incomingBalance, timestamp: Date.now() };
 
       console.log(`💰 Dashboard: Received wallet-balance-updated event for ${symbol}:`, incomingBalance, 'Reason:', reason, 'isDexSwap:', isDexSwap);
 
@@ -1856,10 +1913,12 @@ Provide a brief analysis (under 250 tokens) covering:
       const minAcceptable = Math.max(0, referenceBalance * 0.9 - 1);
       let validatedBalance = incomingBalance;
 
-      if (incomingBalance < minAcceptable && referenceBalance > 0) {
-        console.warn(`⚠️ Dashboard: Rejecting suspicious balance update for ${symbol}: ${incomingBalance} (expected ~${referenceBalance})`);
+      // v1.0.2: Only reject if balance drops to near-zero from a large value (likely stale/corrupt)
+      // Allow legitimate decreases (sends, swaps) — the server is authoritative
+      if (incomingBalance < minAcceptable && referenceBalance > 0 && incomingBalance < referenceBalance * 0.01) {
+        console.warn(`⚠️ Dashboard: Rejecting suspicious near-zero balance for ${symbol}: ${incomingBalance} (expected ~${referenceBalance})`);
         validatedBalance = referenceBalance;
-      } else if (incomingBalance > previousHighest) {
+      } else if (incomingBalance !== previousHighest) {
         highestKnownBalancesRef.current[symbol] = incomingBalance;
         // v2.3.27-beta: Don't write to localStorage during DEX cooldown
         if (symbol === 'QUG' && !dexSwapCooldownRef.current) {
@@ -1928,6 +1987,26 @@ Provide a brief analysis (under 250 tokens) covering:
       console.log('🔇 Dashboard: Stopped listening for wallet-balance-updated events');
     };
   }, []);
+
+  // v8.6.5: Sync liveBalance prop (from App.tsx SSE — same source as TopBar) into walletBalances
+  // This ensures Dashboard wallet tab matches TopBar balance in real-time
+  useEffect(() => {
+    if (liveBalance === undefined || liveBalance === null) return;
+    if (!isValidBalance(liveBalance)) return;
+    // Skip during DEX cooldown
+    const globalCooldownUntil = parseInt(localStorage.getItem('dexCooldownUntil') || '0');
+    if (dexSwapCooldownRef.current || Date.now() < globalCooldownUntil) return;
+
+    setWalletBalances(wallets => {
+      const qugWallet = wallets.find(w => w.symbol === 'QUG');
+      if (!qugWallet) return wallets;
+      // Only update if balance actually changed
+      if (Math.abs(qugWallet.balance - liveBalance) < 1e-12) return wallets;
+      return wallets.map(wallet =>
+        wallet.symbol === 'QUG' ? { ...wallet, balance: liveBalance } : wallet
+      );
+    });
+  }, [liveBalance]);
 
   // v7.1.0: Instant SSE-driven transaction updates — mining rewards & transfers appear immediately
   useEffect(() => {
@@ -2193,6 +2272,40 @@ Provide a brief analysis (under 250 tokens) covering:
           console.log('📊 Refresh QUGUSD with history:', qugusdBalance, '(preserved:', qugusdSaved.length, 'points)');
         }
 
+        // v8.5.9: Fetch QUSD balance from same multi-token response
+        let qusdRefreshBalance = 0;
+        try {
+          const qusdResp = await qnkAPI.getMultiTokenBalance();
+          if (qusdResp.success && qusdResp.data && qusdResp.data.tokens) {
+            const t = qusdResp.data.tokens;
+            if (t.QUSD && t.QUSD.balance !== undefined) {
+              qusdRefreshBalance = parseFloat(t.QUSD.balance) || 0;
+            } else if (t.qusd && t.qusd.balance !== undefined) {
+              qusdRefreshBalance = parseFloat(t.qusd.balance) || 0;
+            }
+          }
+        } catch (_e) { /* ignore */ }
+
+        if (qusdRefreshBalance > 0) {
+          const qusdSaved = savedHistory['QUSD'] || [];
+          const qusdLast = qusdSaved[qusdSaved.length - 1];
+          const qusdNeedNew = !qusdLast || Math.abs(qusdRefreshBalance - qusdLast.balance) > 0.01;
+          const qusdHistory = qusdNeedNew
+            ? [...qusdSaved, { timestamp: now, balance: qusdRefreshBalance }].slice(-20)
+            : (qusdSaved.length >= 2 ? qusdSaved : [{ timestamp: now - 60000, balance: qusdRefreshBalance }, { timestamp: now, balance: qusdRefreshBalance }]);
+
+          balances.push({
+            symbol: 'QUSD',
+            name: 'Quillon USD',
+            balance: qusdRefreshBalance,
+            usdValue: qusdRefreshBalance,
+            icon: 'usd' as const,
+            color: 'from-green-400 to-emerald-500',
+            history: qusdHistory
+          });
+          console.log('📊 Refresh QUSD with history:', qusdRefreshBalance, '(preserved:', qusdSaved.length, 'points)');
+        }
+
         // Bridge wallets (with empty history to prevent "Loading..." display)
         balances.push(
           {
@@ -2388,12 +2501,12 @@ Provide a brief analysis (under 250 tokens) covering:
 
   if (loading) {
     return (
-      <div className="space-y-8 animate-pulse">
-        <div className="h-8 bg-quantum-indigo/30 rounded w-64"></div>
-        <div className="h-64 bg-quantum-indigo/30 rounded-3xl"></div>
-        <div className="grid grid-cols-1 gap-8">
-          <div className="h-64 bg-quantum-indigo/30 rounded-3xl"></div>
-        </div>
+      <div className="relative w-full rounded-3xl overflow-hidden" style={{ height: 'calc(100vh - 200px)', minHeight: 480 }}>
+        <QuantumLoader
+          message="Initializing Quantum Dashboard"
+          subMessage="Fetching node telemetry and wallet state..."
+          inline
+        />
       </div>
     );
   }
@@ -2431,9 +2544,12 @@ Provide a brief analysis (under 250 tokens) covering:
       {showMainnetWelcome && (
         <WelcomeMainnetModal onClose={() => setShowMainnetWelcome(false)} />
       )}
-      {/* Bounty Campaign Modal */}
+      {/* Bounty Campaign Modal — genie animates into TopBar button on close */}
       {showBountyModal && (
-        <BountyModal onClose={() => setShowBountyModal(false)} />
+        <BountyModal
+          onClose={() => setShowBountyModal(false)}
+          genieTargetRef={bountyGenieRef}
+        />
       )}
       {/* Phase Transition Modal (legacy) */}
       {showPhaseModal && (

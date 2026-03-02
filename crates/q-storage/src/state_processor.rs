@@ -44,8 +44,8 @@ pub const GAS_PER_STORAGE_WRITE: u64 = 20_000;
 /// Gas for storage read (SLOAD equivalent)
 pub const GAS_PER_STORAGE_READ: u64 = 2_100;
 
-/// Maximum gas per transaction (30M like Ethereum)
-pub const MAX_GAS_PER_TX: u64 = 30_000_000;
+/// Maximum gas per transaction (100M to support higher tx throughput)
+pub const MAX_GAS_PER_TX: u64 = 100_000_000; // v8.6.0: Increased from 30M to 100M for 5x block capacity
 
 /// Execution result containing state changes and gas used
 #[derive(Debug, Clone)]
@@ -279,6 +279,9 @@ impl StateProcessor {
             }
             TransactionType::ClaimRewards => {
                 self.process_claim_rewards(tx, state, &mut changes, &mut logs)
+            }
+            TransactionType::VaultLiquidate => {
+                self.process_vault_liquidate(tx, state, &mut changes, &mut logs)
             }
             // TODO: Implement remaining transaction types
             _ => {
@@ -1205,6 +1208,82 @@ impl StateProcessor {
             debt_amount: new_debt,
             collateral_ratio_bps: ratio_bps,
         });
+
+        Ok(())
+    }
+
+    /// Process vault liquidation (v8.7.4)
+    ///
+    /// Liquidates an undercollateralized vault. The liquidator pays off
+    /// the vault's debt (burns QUGUSD) and receives the collateral (QUG)
+    /// plus a 10% liquidation bonus.
+    ///
+    /// tx.from = liquidator
+    /// tx.to = vault_owner (the address being liquidated)
+    fn process_vault_liquidate<S: StateReader>(
+        &self,
+        tx: &Transaction,
+        state: &S,
+        changes: &mut Vec<StateChange>,
+        _logs: &mut Vec<ExecutionLog>,
+    ) -> Result<()> {
+        let vault_id = tx.to; // Vault owner = liquidated address
+        let vault = state.get_vault(&vault_id)?
+            .ok_or_else(|| anyhow::anyhow!("Vault not found for liquidation"))?;
+
+        if vault.debt_amount == 0 {
+            bail!("Vault has no debt to liquidate");
+        }
+
+        // Check if vault is actually undercollateralized (below 110%)
+        let price = state.get_oracle_price(&QUG_TOKEN_ADDRESS)?.unwrap_or(100_000_000);
+        let collateral_value = (vault.collateral_amount as u128 * price as u128) / 100_000_000;
+        let ratio = collateral_value * 100 / vault.debt_amount as u128;
+        if ratio >= 110 {
+            bail!("Vault is sufficiently collateralized ({}% >= 110%)", ratio);
+        }
+
+        // Liquidator must have enough QUGUSD to cover the debt
+        let liquidator_qugusd = state.get_token_balance(&tx.from, &QUGUSD_TOKEN_ADDRESS)?;
+        if liquidator_qugusd < vault.debt_amount {
+            bail!("Liquidator insufficient QUGUSD: have {}, need {}", liquidator_qugusd, vault.debt_amount);
+        }
+
+        // 10% liquidation bonus
+        let bonus = vault.collateral_amount / 10;
+        let total_seized = vault.collateral_amount;
+
+        // Burn QUGUSD from liquidator (pays off debt)
+        changes.push(StateChange::BalanceDebit {
+            account: tx.from,
+            token: QUGUSD_TOKEN_ADDRESS,
+            amount: vault.debt_amount,
+        });
+
+        // Transfer all collateral QUG to liquidator (including bonus)
+        changes.push(StateChange::BalanceCredit {
+            account: tx.from,
+            token: QUG_TOKEN_ADDRESS,
+            amount: total_seized,
+        });
+
+        // Zero out the vault
+        changes.push(StateChange::VaultUpdate {
+            vault_id,
+            owner: tx.to,
+            collateral_amount: 0,
+            debt_amount: 0,
+            collateral_ratio_bps: 0,
+        });
+
+        info!(
+            "⚡ [STATE] Vault liquidation: liquidator={}, vault_owner={}, seized={} QUG (bonus={}), debt_burned={}",
+            hex::encode(&tx.from[..8]),
+            hex::encode(&tx.to[..8]),
+            total_seized,
+            bonus,
+            vault.debt_amount,
+        );
 
         Ok(())
     }

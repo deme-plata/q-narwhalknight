@@ -295,7 +295,7 @@ pub use pruning::{AdaptivePruningEngine, PruningConfig, PruningMode, PruningStat
 pub use snapshot::SnapshotManager;
 pub use sync::{SyncProtocol, SyncRequest, SyncResponse};
 pub use transaction::{QTransaction, TransactionState};
-pub use turbo_sync::{TurboSyncManager, TurboSyncConfig, BlockPack, BlockPackRequest, NetworkRequest, TurboSyncMetrics, EnhancedPeerRegistry, PeerHeightRecord, DetailedSyncStatus};
+pub use turbo_sync::{TurboSyncManager, TurboSyncConfig, BlockPack, BlockPackRequest, NetworkRequest, TurboSyncMetrics, EnhancedPeerRegistry, PeerHeightRecord, DetailedSyncStatus, StarshipPhase, FlightComputer, StationKeepingState, StarshipTelemetry};
 pub use ml_batch_optimizer::{SyncFeatures, BatchOutcome, BatchSizePredictor, BatchOptimizerConfig};
 // TEMPORARILY DISABLED: Circular dependency with q-api-server
 // pub use turbo_sync_peer_bridge::{TurboSyncPeerBridge, PeerHeightEntry, run_periodic_sync, run_enhanced_periodic_sync};
@@ -335,8 +335,11 @@ pub use state_processor::{
 #[cfg(not(target_os = "windows"))]
 pub use state_applicator::StateApplicator;
 #[cfg(not(target_os = "windows"))]
-pub use block_state_processor::{BlockStateProcessor, BlockProcessingResult, TxProcessingResult};
+pub use block_state_processor::{BlockStateProcessor, BlockProcessingResult, TxProcessingResult, RocksDbStateReader};
 pub use sparse_merkle_trie::{SparseMerkleTrie, MerkleProof, TrieNode, TrieStats, CF_STATE_TRIE, EMPTY_HASH};
+// v8.7.3: Deterministic block state replay for P2P decentralization
+pub use balance_consensus::replay_block_state_changes;
+pub use balance_consensus::migrate_historical_state;
 
 // ========== v1.1.24-beta: Mainnet Safety Infrastructure Exports ==========
 pub use mainnet_safety::{
@@ -3909,6 +3912,56 @@ impl QStorage {
             balances.len()
         );
         Ok(())
+    }
+
+    // ============ v8.5.9: QUSD STABLECOIN AUDIT LOG ============
+
+    /// Save a QUSD audit entry (mint/burn) to persistent storage
+    /// Key format: qusd_audit_{timestamp}_{tx_hash} — append-only for transparency
+    pub async fn save_qusd_audit_entry(&self, entry: &serde_json::Value) -> Result<()> {
+        let timestamp = entry.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
+        let tx_hash = entry.get("tx_hash").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let key = format!("qusd_audit_{}_{}", timestamp, tx_hash);
+        let value = serde_json::to_vec(entry)?;
+        self.hot_db.put(CF_MANIFEST, key.as_bytes(), &value).await?;
+        debug!("💵 [QUSD] Saved audit entry: {}", key);
+        Ok(())
+    }
+
+    /// Load all QUSD audit entries from persistent storage (prefix scan)
+    pub async fn load_qusd_audit_log(&self) -> Result<Vec<serde_json::Value>> {
+        let prefix = b"qusd_audit_";
+        let entries_raw = self.hot_db.scan_prefix(CF_MANIFEST, prefix).await?;
+        let mut entries = Vec::new();
+        for (_key, value) in entries_raw {
+            if let Ok(entry) = serde_json::from_slice::<serde_json::Value>(&value) {
+                entries.push(entry);
+            }
+        }
+        entries.sort_by(|a, b| {
+            let ts_a = a.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
+            let ts_b = b.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
+            ts_a.cmp(&ts_b)
+        });
+        info!("💵 [QUSD] Loaded {} audit entries from RocksDB", entries.len());
+        Ok(entries)
+    }
+
+    /// Get QUSD total supply by scanning audit log (sum of mints - sum of burns)
+    pub async fn get_qusd_total_supply(&self) -> Result<u128> {
+        let entries = self.load_qusd_audit_log().await?;
+        let mut total: u128 = 0;
+        for entry in &entries {
+            let action = entry.get("action").and_then(|v| v.as_str()).unwrap_or("");
+            let amount_str = entry.get("amount_raw").and_then(|v| v.as_str()).unwrap_or("0");
+            let amount: u128 = amount_str.parse().unwrap_or(0);
+            match action {
+                "mint" => total = total.saturating_add(amount),
+                "burn" => total = total.saturating_sub(amount),
+                _ => {}
+            }
+        }
+        Ok(total)
     }
 
     // ============ v2.4.2: TOKEN STAKING STORAGE ============

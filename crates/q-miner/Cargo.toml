@@ -1,6 +1,6 @@
 [package]
 name = "q-miner"
-version = "2.7.1"
+version.workspace = true
 edition = "2021"
 description = "Q-NarwhalKnight High-Performance CPU/GPU Miner with CUDA Support"
 authors = ["Server Beta <server-beta@q-narwhalknight.dev>"]
@@ -104,6 +104,9 @@ unicode-width = "0.1"
 
 # Terminal detection
 atty = "0.2"
+
+# QR code for wallet TUI
+qrcode = "0.14"
 
 # Math and cryptography
 sha3 = { workspace = true }

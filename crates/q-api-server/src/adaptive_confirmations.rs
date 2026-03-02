@@ -151,7 +151,7 @@ impl AdaptiveConfirmationPredictor {
             learning_rate: 0.01,
             outcomes: VecDeque::with_capacity(1000),
             max_outcomes: 1000,
-            min_confirmations: 3,
+            min_confirmations: 1, // v8.6.0: Reduced from 3 — DAG-Knight parallel finality is sufficient at 1
             max_confirmations: 1000,
             block_time_seconds: 2.0,
             feature_stats: FeatureStats::default(),

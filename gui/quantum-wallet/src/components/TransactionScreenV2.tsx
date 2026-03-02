@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Send, QrCode, Sparkles, Check, AlertTriangle, X, Shield, Eye, EyeOff, Camera, Wallet, TrendingDown, Radio, Globe } from 'lucide-react';
 import { qnkAPI, FEE_REDUCTION_ACTIVATION_HEIGHT, CURRENT_MIN_FEE_QUG, NEW_MIN_FEE_QUG } from '../services/api';
-import { signTransactionForP2P } from '../services/walletAuth';
+import { signTransactionForP2P, verifyPasswordHash } from '../services/walletAuth';
 import QRScanner from './QRScanner';
 import QRDisplay from './QRDisplay';
 import QuantumMixerVisualization from './QuantumMixerVisualization';
@@ -231,6 +231,12 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
   // QR Code states
   const [showQRScanner, setShowQRScanner] = useState(false);
   const [showQRDisplay, setShowQRDisplay] = useState(false);
+
+  // v8.6.5: Password confirmation before send
+  const [showPasswordModal, setShowPasswordModal] = useState(false);
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [passwordVerifying, setPasswordVerifying] = useState(false);
 
   // Dynamic fee states (v3.4.0: height-gated 10x fee reduction)
   const [currentFee, setCurrentFee] = useState(CURRENT_MIN_FEE_QUG);
@@ -865,6 +871,7 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
     return { valid: true };
   };
 
+  // v8.6.5: Password confirmation gate — validates before proceeding to actual send
   const handleSendTransaction = async () => {
     // Validate transaction
     const validation = validateTransaction();
@@ -872,20 +879,61 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
       setTransaction(prev => ({ ...prev, error: validation.error || 'Invalid transaction' }));
       return;
     }
-    
+
     const walletAddress = getWalletAddress();
     if (!walletAddress) {
       setTransaction(prev => ({ ...prev, error: 'No wallet address found' }));
       return;
     }
-    
+
+    // Check if password hash exists (user has a wallet password set)
+    const hasPasswordHash = !!localStorage.getItem('walletPasswordHash');
+    if (hasPasswordHash) {
+      // Show password confirmation modal
+      setConfirmPassword('');
+      setPasswordError(null);
+      setShowPasswordModal(true);
+      return; // Wait for password confirmation before sending
+    }
+
+    // No password hash set — proceed directly (e.g. MetaMask-imported wallets)
+    await executeSend();
+  };
+
+  const handlePasswordConfirm = async () => {
+    if (!confirmPassword) {
+      setPasswordError('Please enter your wallet password');
+      return;
+    }
+    setPasswordVerifying(true);
+    setPasswordError(null);
+    try {
+      const isValid = await verifyPasswordHash(confirmPassword);
+      if (!isValid) {
+        setPasswordError('Incorrect password. Please try again.');
+        setPasswordVerifying(false);
+        return;
+      }
+      // Password verified — close modal and proceed with send
+      setShowPasswordModal(false);
+      setConfirmPassword('');
+      setPasswordVerifying(false);
+      await executeSend();
+    } catch (err) {
+      setPasswordError('Password verification failed. Please try again.');
+      setPasswordVerifying(false);
+    }
+  };
+
+  const executeSend = async () => {
+    const walletAddress = getWalletAddress() || '';
     const { toAddress, amount, memo } = transaction;
-    
-    setTransaction(prev => ({ 
-      ...prev, 
-      isProcessing: true, 
-      error: null, 
-      success: false 
+
+    setTransaction(prev => ({
+      ...prev,
+      isProcessing: true,
+      error: null,
+      success: false
     }));
     
     try {
@@ -1640,6 +1688,98 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
           </motion.div>
         </div>
       )}
+
+      {/* v8.6.5: Password Confirmation Modal */}
+      <AnimatePresence>
+        {showPasswordModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+            onClick={() => { setShowPasswordModal(false); setConfirmPassword(''); setPasswordError(null); }}
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="relative w-full max-w-md mx-4 rounded-2xl p-6"
+              style={{
+                background: 'linear-gradient(135deg, rgba(15, 10, 35, 0.95), rgba(30, 20, 60, 0.95))',
+                border: '1px solid rgba(212, 175, 55, 0.3)',
+                boxShadow: '0 0 40px rgba(212, 175, 55, 0.15)',
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-10 h-10 rounded-xl bg-amber-500/20 flex items-center justify-center">
+                  <Shield className="w-5 h-5 text-amber-400" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-white">Confirm Transaction</h3>
+                  <p className="text-xs text-gray-400">Enter your wallet password to authorize</p>
+                </div>
+                <button
+                  onClick={() => { setShowPasswordModal(false); setConfirmPassword(''); setPasswordError(null); }}
+                  className="ml-auto text-gray-400 hover:text-white transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="mb-4 p-3 rounded-xl bg-white/5 border border-white/10">
+                <div className="flex justify-between text-sm mb-1">
+                  <span className="text-gray-400">Sending</span>
+                  <span className="text-white font-mono">{transaction.amount} {selectedCoin}</span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span className="text-gray-400">To</span>
+                  <span className="text-cyan-300 font-mono text-xs">{transaction.toAddress.slice(0, 12)}...{transaction.toAddress.slice(-8)}</span>
+                </div>
+              </div>
+
+              <div className="mb-4">
+                <label className="text-sm text-gray-400 mb-1 block">Wallet Password</label>
+                <input
+                  type="password"
+                  value={confirmPassword}
+                  onChange={(e) => { setConfirmPassword(e.target.value); setPasswordError(null); }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') handlePasswordConfirm(); }}
+                  placeholder="Enter your wallet password"
+                  autoFocus
+                  className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-500 focus:outline-none focus:border-amber-500/50 focus:ring-1 focus:ring-amber-500/30 transition-all"
+                />
+                {passwordError && (
+                  <p className="text-red-400 text-xs mt-2 flex items-center gap-1">
+                    <AlertTriangle className="w-3 h-3" /> {passwordError}
+                  </p>
+                )}
+              </div>
+
+              <div className="flex gap-3">
+                <button
+                  onClick={() => { setShowPasswordModal(false); setConfirmPassword(''); setPasswordError(null); }}
+                  className="flex-1 py-3 rounded-xl text-sm font-medium bg-white/5 border border-white/10 text-gray-300 hover:bg-white/10 transition-all"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handlePasswordConfirm}
+                  disabled={passwordVerifying || !confirmPassword}
+                  className="flex-1 py-3 rounded-xl text-sm font-bold text-white disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                  style={{
+                    background: passwordVerifying || !confirmPassword
+                      ? 'rgba(212, 175, 55, 0.3)'
+                      : 'linear-gradient(135deg, #D4AF37, #FFD700)',
+                  }}
+                >
+                  {passwordVerifying ? 'Verifying...' : 'Confirm & Send'}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Send Button */}
       {selectedWallet && (

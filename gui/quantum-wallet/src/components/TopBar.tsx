@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, memo, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Search, Copy, Check, ExternalLink, Hash, User, Blocks, Shield, X, Clock, ArrowRight, CheckCircle, XCircle, Key, FileCode, Wifi, Zap, Globe, MessageCircle, Bell, Send, UserCircle, CreditCard, LogOut, BookOpen, Palette, Pickaxe, Settings, FileText, Code, Twitter, Facebook, Download, ChevronDown } from 'lucide-react';
+import { Search, Copy, Check, ExternalLink, Hash, User, Blocks, Shield, X, Clock, ArrowRight, CheckCircle, XCircle, Key, FileCode, Wifi, Zap, Globe, MessageCircle, Bell, Send, UserCircle, CreditCard, LogOut, BookOpen, Palette, Pickaxe, Settings, FileText, Code, Twitter, Facebook, Download, ChevronDown, Trophy } from 'lucide-react';
 import { TICKER_SYMBOL } from '../constants/ticker';
 import { qnkAPI } from '../services/api';
 import type { MiningStatsEvent } from '../services/api';
@@ -9,7 +9,9 @@ import SmartContractModal from './SmartContractModal';
 import NetworkMapModal from './NetworkMapModal';
 import ThemeChooserModal from './ThemeChooserModal';
 import MinerLinkModal from './MinerLinkModal';
+import PapersLibraryModal from './PapersLibraryModal';
 import { useMinerLink } from '../hooks/useMinerLink';
+import { sseManager } from '../services/sseManager';
 
 // v3.6.1-beta: SANITY CHECK - Max possible balance is 21 million QUG (total supply)
 // Any balance exceeding this is corrupted data and must be rejected
@@ -119,6 +121,7 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
   const [recentInboxItems, setRecentInboxItems] = useState<any[]>([]);
   const walletAddr = useMemo(() => localStorage.getItem('walletAddress') || '', []);
   const [showMinerLinkModal, setShowMinerLinkModal] = useState(false);
+  const [showPapersLibrary, setShowPapersLibrary] = useState(false);
   const [showTaxModal, setShowTaxModal] = useState(false);
   const minerLink = useMinerLink(walletAddr || null);
 
@@ -131,13 +134,16 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
   // v7.3.0: Node admin check via API (--admin-wallet)
   const [isNodeAdmin, setIsNodeAdmin] = useState(false);
 
+  // v8.5.10: Bounty score from bounty API
+  const [bountyScore, setBountyScore] = useState<number>(0);
+
   // v3.4.16-beta: SSE-updated live metrics
   const [liveBlockHeight, setLiveBlockHeight] = useState(blockHeight);
   const [livePeers, setLivePeers] = useState(peers);
   const [personalHashrate, setPersonalHashrate] = useState<number>(0);
   const [isTorConnected, setIsTorConnected] = useState(false);
   const [minerLinkCount, setMinerLinkCount] = useState(0);
-  const sseRef = useRef<EventSource | null>(null);
+  // v8.6.2: sseRef removed — TopBar now uses shared sseManager instead of its own EventSource
 
   // v3.6.1-beta: Clear corrupted balance caches on mount
   useEffect(() => {
@@ -153,6 +159,18 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
       .then(r => r.json())
       .then(data => setIsNodeAdmin(data.is_admin === true))
       .catch(() => setIsNodeAdmin(false));
+  }, [walletAddr]);
+
+  // v8.5.10: Fetch user's bounty score from bounty API
+  useEffect(() => {
+    if (!walletAddr) return;
+    fetch(`/bounty-api/score/${walletAddr}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data?.total_score !== undefined) setBountyScore(Math.round(data.total_score));
+        else if (data?.score !== undefined) setBountyScore(Math.round(data.score));
+      })
+      .catch(() => {}); // silently fail — bounty server may be down
   }, [walletAddr]);
 
   // MetaMask: Fetch linked account data on mount
@@ -455,101 +473,64 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
     }
   }, []);
 
-  // v3.4.16-beta: SSE subscription for live block height, peers, and hashrate
+  // v8.6.2: SSE subscription via shared sseManager (no duplicate EventSource)
   useEffect(() => {
     const walletAddress = localStorage.getItem('walletAddress') || '';
     if (!walletAddress) return;
 
-    // Create SSE connection for live updates
-    const baseUrl = window.location.hostname.endsWith('.onion')
-      ? '' // Relative URL for .onion
-      : (localStorage.getItem('nodeUrl') || '');
-    const sseUrl = `${baseUrl}/api/v1/events?wallet_address=${encodeURIComponent(walletAddress)}`;
-
-    console.log('📡 [TopBar] Connecting to SSE for live metrics...');
-    const eventSource = new EventSource(sseUrl);
-    sseRef.current = eventSource;
+    const unsubs: (() => void)[] = [];
 
     // Listen for node status updates (block height, peers)
-    eventSource.addEventListener('node-status', (e: MessageEvent) => {
-      try {
-        const data = JSON.parse(e.data);
-        if (data.current_height) {
-          setLiveBlockHeight(data.current_height);
-        }
-        if (data.connected_peers !== undefined) {
-          setLivePeers(data.connected_peers);
-        }
-      } catch (err) {
-        console.error('❌ [TopBar] Failed to parse node-status:', err);
+    unsubs.push(sseManager.on('node-status', (data: any) => {
+      if (data.current_height) {
+        setLiveBlockHeight(data.current_height);
       }
-    });
+      if (data.connected_peers !== undefined) {
+        setLivePeers(data.connected_peers);
+      }
+    }));
 
     // Listen for mining stats updates (personal hashrate)
-    // The periodic API fetch is authoritative for total; SSE just provides instant updates.
-    eventSource.addEventListener('miner-stats', (e: MessageEvent) => {
-      try {
-        const data: MiningStatsEvent = JSON.parse(e.data);
-        const normalizedWallet = walletAddress.replace(/^qnk/, '').toLowerCase();
-        const normalizedMiner = (data.miner_address || '').replace(/^qnk/, '').toLowerCase();
-        if (normalizedMiner === normalizedWallet && data.avg_hash_rate) {
-          setPersonalHashrate(data.avg_hash_rate);
-        }
-      } catch (err) {
-        console.error('❌ [TopBar] Failed to parse miner-stats:', err);
+    unsubs.push(sseManager.on('miner-stats', (data: any) => {
+      const normalizedWallet = walletAddress.replace(/^qnk/, '').toLowerCase();
+      const normalizedMiner = (data.miner_address || '').replace(/^qnk/, '').toLowerCase();
+      if (normalizedMiner === normalizedWallet && data.avg_hash_rate) {
+        setPersonalHashrate(data.avg_hash_rate);
       }
-    });
+    }));
 
     // Also listen for block height from mining rewards
-    eventSource.addEventListener('mining_reward', (e: MessageEvent) => {
-      try {
-        const data = JSON.parse(e.data);
-        if (data.block_height) {
-          setLiveBlockHeight(data.block_height);
-        }
-        // Update hashrate from mining reward if available
-        if (data.hash_rate) {
-          const normalizedWallet = walletAddress.replace(/^qnk/, '').toLowerCase();
-          const normalizedMiner = (data.miner_address || '').replace(/^qnk/, '').toLowerCase();
-          if (normalizedMiner === normalizedWallet) {
-            setPersonalHashrate(data.hash_rate);
-          }
-        }
-      } catch (err) {
-        // Ignore parse errors for mining_reward
+    unsubs.push(sseManager.on('mining_reward', (data: any) => {
+      if (data.block_height) {
+        setLiveBlockHeight(data.block_height);
       }
-    });
-
-    // v6.0.2: Listen for balance-updated SSE events (mixer completions, consensus confirmations)
-    eventSource.addEventListener('balance-updated', (e: MessageEvent) => {
-      try {
-        const data = JSON.parse(e.data);
-        const eventAddr = (data.wallet_address || '').toLowerCase();
+      if (data.hash_rate) {
         const normalizedWallet = walletAddress.replace(/^qnk/, '').toLowerCase();
-        if (eventAddr === normalizedWallet && data.new_balance !== undefined) {
-          console.log('📡 [TopBar] SSE balance-updated:', data.new_balance, 'reason:', data.change_reason);
-          // Dispatch as wallet-balance-updated so the existing handler picks it up
-          window.dispatchEvent(new CustomEvent('wallet-balance-updated', {
-            detail: {
-              symbol: 'QUG',
-              balance: data.new_balance,
-              reason: data.change_reason || 'sse_balance_update'
-            }
-          }));
+        const normalizedMiner = (data.miner_address || '').replace(/^qnk/, '').toLowerCase();
+        if (normalizedMiner === normalizedWallet) {
+          setPersonalHashrate(data.hash_rate);
         }
-      } catch (err) {
-        console.error('❌ [TopBar] Failed to parse balance-updated:', err);
       }
-    });
+    }));
 
-    eventSource.onerror = () => {
-      console.warn('⚠️ [TopBar] SSE connection error, will retry...');
-    };
+    // v6.0.2: Listen for balance-updated SSE events
+    unsubs.push(sseManager.on('balance-updated', (data: any) => {
+      const eventAddr = (data.wallet_address || '').toLowerCase();
+      const normalizedWallet = walletAddress.replace(/^qnk/, '').toLowerCase();
+      if (eventAddr === normalizedWallet && data.new_balance !== undefined) {
+        console.log('[TopBar] SSE balance-updated:', data.new_balance, 'reason:', data.change_reason);
+        window.dispatchEvent(new CustomEvent('wallet-balance-updated', {
+          detail: {
+            symbol: 'QUG',
+            balance: data.new_balance,
+            reason: data.change_reason || 'sse_balance_update'
+          }
+        }));
+      }
+    }));
 
     return () => {
-      console.log('📡 [TopBar] Closing SSE connection');
-      eventSource.close();
-      sseRef.current = null;
+      unsubs.forEach(unsub => unsub());
     };
   }, []);
 
@@ -562,6 +543,30 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
       setLivePeers(peers);
     }
   }, [blockHeight, peers]);
+
+  // v8.5.10: Poll /api/v1/status every 5s for fresh block height (fallback when SSE is slow)
+  const liveBlockHeightRef = useRef(liveBlockHeight);
+  liveBlockHeightRef.current = liveBlockHeight;
+  useEffect(() => {
+    const fetchStatus = async () => {
+      try {
+        const res = await fetch('/api/v1/status');
+        if (!res.ok) return;
+        const json = await res.json();
+        const h = json?.data?.current_height ?? json?.current_height;
+        if (typeof h === 'number' && h > liveBlockHeightRef.current) {
+          setLiveBlockHeight(h);
+        }
+        const p = json?.data?.connected_peers ?? json?.connected_peers;
+        if (typeof p === 'number') {
+          setLivePeers(p);
+        }
+      } catch {}
+    };
+    fetchStatus();
+    const interval = setInterval(fetchStatus, 5000);
+    return () => clearInterval(interval);
+  }, []);
 
   // v7.2.0: Poll miner-link status (lightweight REST check every 10s)
   useEffect(() => {
@@ -1266,11 +1271,11 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
             </motion.div>
           </div>
 
-          {/* v5.1.1: Deploy Panel - Visible for master wallet OR node admin */}
+          {/* v5.1.1: Deploy Panel - Visible for all logged-in users (read-only status) */}
           {(() => {
             const MASTER_WALLET = 'efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723';
             const isMaster = walletAddr.replace('qnk', '').replace('qug', '') === MASTER_WALLET;
-            if (!isMaster && !isNodeAdmin) return null;
+            if (!walletAddr) return null;
             return (
               <>
                 <div className="w-px h-8 bg-amber-500/30 mx-2" />
@@ -1303,6 +1308,45 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
               <Settings className="w-5 h-5 text-blue-400" />
             </motion.button>
           )}
+
+          {/* v8.5.10: Bounty Campaign Button — genie target for BountyModal animation */}
+          <div className="w-px h-8 bg-emerald-500/30 mx-2" />
+          <motion.button
+            id="bounty-genie-target"
+            onClick={() => {
+              window.dispatchEvent(new CustomEvent('open-bounty-modal'));
+            }}
+            className="relative flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-gradient-to-br from-emerald-500/20 to-teal-500/20 border border-emerald-500/40 hover:border-emerald-400/60 transition-all"
+            whileHover={{ scale: 1.08, boxShadow: '0 0 20px rgba(16,185,129,0.3)' }}
+            whileTap={{ scale: 0.92 }}
+            title="Bounty Campaign — Earn rewards"
+            initial={{ opacity: 0, scale: 0.5 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ type: 'spring', damping: 15, stiffness: 300 }}
+          >
+            <motion.div
+              animate={{ rotate: [0, -10, 10, -5, 0] }}
+              transition={{ duration: 2, repeat: Infinity, repeatDelay: 3 }}
+            >
+              <Trophy className="w-4 h-4 text-emerald-400" />
+            </motion.div>
+            <span className="text-emerald-300 text-xs font-bold">Bounty</span>
+            {/* Points badge — shows user's actual score, pulses when > 0 */}
+            <motion.span
+              className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] flex items-center justify-center rounded-full text-[10px] font-black px-1"
+              style={{
+                background: bountyScore > 0
+                  ? 'linear-gradient(135deg, #10B981, #06B6D4)'
+                  : 'linear-gradient(135deg, #374151, #4B5563)',
+                color: '#fff',
+                boxShadow: bountyScore > 0 ? '0 0 8px rgba(16,185,129,0.5)' : 'none',
+              }}
+              animate={bountyScore > 0 ? { scale: [1, 1.15, 1] } : {}}
+              transition={{ duration: 2, repeat: Infinity }}
+            >
+              {bountyScore >= 1000 ? `${(bountyScore / 1000).toFixed(1)}K` : bountyScore}
+            </motion.span>
+          </motion.button>
 
           {/* v3.9.2-beta: Profile Icon - Always visible for all users */}
           <div className="w-px h-8 bg-amber-500/30 mx-2" />
@@ -1588,16 +1632,14 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
                   <span>Source Code</span>
                   <ExternalLink className="w-3 h-3 ml-auto opacity-40" />
                 </a>
-                <a
-                  href="https://drive.proton.me/urls/4VJ9CYH98W#Ibg1AdOuYewX"
-                  target="_blank"
-                  rel="noopener noreferrer"
+                <button
+                  onClick={() => { setShowPapersLibrary(true); setShowProfileModal(false); }}
                   className="w-full flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-slate-700/50 text-slate-400 hover:text-amber-300 transition-colors text-sm"
                 >
-                  <FileText className="w-4 h-4 text-amber-400/60" />
-                  <span>Whitepaper</span>
-                  <ExternalLink className="w-3 h-3 ml-auto opacity-40" />
-                </a>
+                  <BookOpen className="w-4 h-4 text-amber-400/60" />
+                  <span>Research Library</span>
+                  <span className="ml-auto text-[10px] text-amber-500/50 font-mono">60</span>
+                </button>
                 <a
                   href="https://technical-deepdive.quillon.xyz/"
                   target="_blank"
@@ -2035,6 +2077,12 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
         isOpen={showMinerLinkModal}
         onClose={() => setShowMinerLinkModal(false)}
         minerLink={minerLink}
+      />
+
+      {/* Research Library Modal — 60 whitepapers organized by category */}
+      <PapersLibraryModal
+        isOpen={showPapersLibrary}
+        onClose={() => setShowPapersLibrary(false)}
       />
 
       {/* Tax Report Modal */}

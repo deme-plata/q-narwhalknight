@@ -17,7 +17,7 @@ use anyhow::Context;
 use clap::{Arg, ArgAction, Command};
 use q_api_server::{
     aegis_auth_middleware, chat_api, verification_api, handlers,
-    oauth2_provider, payment_api, streaming, update_stats, AppState, Config, ConsoleVisualizer, LiquidityPool,
+    node_setup, oauth2_provider, payment_api, streaming, update_stats, AppState, Config, ConsoleVisualizer, LiquidityPool,
     recursive_proofs_api,  // ✨ v1.4.0-beta: Recursive SNARKs for light client bootstrap
 };
 use q_types::{BlockRequest, BlockResponse, TxHash, TxStatus};
@@ -186,9 +186,10 @@ const QUG_DISPLAY_DIVISOR: f64 = 1_000_000_000_000_000_000_000_000.0; // 10^24
 /// v5.1.0: HTTP bootstrap endpoints for fallback block/status fetching
 /// Tries each in order until one responds. Multiple servers for redundancy.
 const HTTP_BOOTSTRAP_PEERS: &[&str] = &[
-    "http://185.182.185.227:8080",  // Server Beta (primary)
-    "http://109.205.176.60:8080",   // Server Gamma (secondary)
-    "http://161.35.219.10:8080",    // Server Alpha (tertiary)
+    "http://5.79.79.158:8080",      // Server Delta (primary - 1Gbit fastest)
+    "http://109.205.176.60:8080",   // Server Gamma (secondary - 1Gbit)
+    "http://185.182.185.227:8080",  // Server Beta (tertiary - 100Mbit)
+    "http://161.35.219.10:8080",    // Server Alpha (quaternary)
 ];
 
 /// Validator allowlist for P2P balance updates
@@ -835,6 +836,24 @@ async fn update_tui_metrics(
             metrics.apollo_queued = ts.session_queued.load(std::sync::atomic::Ordering::Relaxed);
         }
 
+        // v1.0.2: Starship Flight Computer telemetry for TUI
+        if let Some(ref fc) = app_state.flight_computer {
+            if let Ok(fc_guard) = fc.try_read() {
+                let telem = fc_guard.telemetry(peer_count as u32);
+                metrics.starship_phase = telem.phase;
+                metrics.starship_phase_duration_secs = telem.phase_duration_secs;
+                metrics.starship_orbit_stable = telem.orbit_stable;
+                metrics.starship_mission_elapsed_secs = telem.mission_elapsed_secs;
+                metrics.starship_peer_health = telem.peer_health;
+                metrics.starship_blocks_in_phase = telem.blocks_in_phase;
+                metrics.starship_phase_bps = telem.phase_blocks_per_sec;
+                metrics.starship_total_synced = telem.total_blocks_synced;
+                metrics.starship_mission_avg_bps = telem.mission_avg_bps;
+                metrics.starship_orbit_decays = telem.orbit_decay_warnings;
+                metrics.starship_recommended_throttle = telem.recommended_throttle;
+            }
+        }
+
         // Kalman/PID metrics (pre-collected before lock — no .await needed)
         if let Some(ref km) = apollo_kalman {
             metrics.apollo_kalman_bandwidth_mbps = km.bandwidth_mbps;
@@ -958,6 +977,35 @@ async fn update_tui_metrics(
             // Network params
             metrics.physics_block_rate = block_rate;
             metrics.physics_byzantine_fraction = byzantine_fraction;
+        }
+
+        // v1.0.2: Populate wallet balance metrics for TUI wallet view
+        // Read admin wallet balance from in-memory HashMap (no .await needed — use try_read)
+        if !app_state.admin_wallet.is_empty() {
+            metrics.admin_wallet_address = format!("qnk{}", &app_state.admin_wallet[..16.min(app_state.admin_wallet.len())]);
+            if let Ok(addr_bytes) = hex::decode(&app_state.admin_wallet) {
+                if addr_bytes.len() == 32 {
+                    let mut addr_array = [0u8; 32];
+                    addr_array.copy_from_slice(&addr_bytes);
+                    // Use try_read to avoid deadlock (we already hold write lock on metrics)
+                    if let Ok(balances) = app_state.wallet_balances.try_read() {
+                        let raw_balance = balances.get(&addr_array).copied().unwrap_or(0);
+                        metrics.admin_wallet_balance = raw_balance as f64 / 1e24;
+                    }
+                }
+            }
+            // Founder wallet balance
+            let founder_hex = "8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f1a2b3c4d5e6f7a8b9c0d1e2f3a";
+            if let Ok(founder_bytes) = hex::decode(founder_hex) {
+                if founder_bytes.len() == 32 {
+                    let mut founder_array = [0u8; 32];
+                    founder_array.copy_from_slice(&founder_bytes);
+                    if let Ok(balances) = app_state.wallet_balances.try_read() {
+                        let raw_balance = balances.get(&founder_array).copied().unwrap_or(0);
+                        metrics.founder_wallet_balance = raw_balance as f64 / 1e24;
+                    }
+                }
+            }
         }
     } // Lock dropped here
 
@@ -1493,6 +1541,12 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 .help("SSD-friendly mode: limits RocksDB write rate to 50 MB/s, starts in Conservative throttle. Use this if your SSD is a budget SATA drive or you see high disk latency during sync.")
                 .action(ArgAction::SetTrue),
         )
+        .arg(
+            Arg::new("setup")
+                .long("setup")
+                .help("Run interactive node setup wizard (auto-configure .env, systemd service, and admin wallet via browser login)")
+                .action(ArgAction::SetTrue),
+        )
         .get_matches();
 
     // v8.5.9: --cheap-ssd mode — limits RocksDB write rate and starts in Conservative throttle
@@ -1504,6 +1558,58 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             .ok().and_then(|v| v.parse().ok()).unwrap_or(200);
         if current_rate >= 200 {
             std::env::set_var("Q_ROCKSDB_WRITE_RATE_MB", "50");
+        }
+    }
+
+    // v8.6.5: Node setup wizard — auto-configure .env, systemd, admin wallet
+    {
+        let setup_flag = matches.get_flag("setup");
+        let has_admin_wallet_arg = matches.get_one::<String>("admin-wallet").is_some();
+        let working_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let port: u16 = matches
+            .get_one::<String>("port")
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(8080);
+        let bootstrap_url = std::env::var("Q_BOOTSTRAP_URL")
+            .unwrap_or_else(|_| "https://quillon.xyz".to_string());
+        let binary_path = std::env::current_exe()
+            .unwrap_or_else(|_| std::path::PathBuf::from("./q-api-server"));
+
+        if setup_flag {
+            // Explicit --setup: run wizard and exit
+            match node_setup::run_setup_wizard(&binary_path, &working_dir, port, &bootstrap_url).await {
+                Ok(_result) => {
+                    eprintln!("Setup complete. Start your node with: ./q-api-server --port {}", port);
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("❌ Setup wizard failed: {}", e);
+                    eprintln!("   You can configure manually by creating a .env file.");
+                    std::process::exit(1);
+                }
+            }
+        } else if !has_admin_wallet_arg && node_setup::is_first_boot(&working_dir) {
+            // Auto-detect first boot: no .env AND no --admin-wallet
+            eprintln!();
+            eprintln!("🔍 First boot detected (no .env file found).");
+            eprintln!("   Running setup wizard automatically...");
+            eprintln!("   (Skip this with --admin-wallet <address> or by creating a .env file)");
+            eprintln!();
+
+            match node_setup::run_setup_wizard(&binary_path, &working_dir, port, &bootstrap_url).await {
+                Ok(_result) => {
+                    eprintln!("   Reloading .env and continuing startup...");
+                    // Reload .env so the rest of main() picks up the new values
+                    if let Err(e) = dotenvy::dotenv() {
+                        warn!("Could not reload .env after setup: {}", e);
+                    }
+                }
+                Err(e) => {
+                    warn!("Setup wizard failed: {} — continuing with defaults", e);
+                    eprintln!("   ⚠️  Setup failed: {} — starting with default config", e);
+                    eprintln!("   You can run setup later with: ./q-api-server --setup");
+                }
+            }
         }
     }
 
@@ -4056,6 +4162,35 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     info!("🔄 ════════════════════════════════════════════════════════");
 
     // ========================================
+    // 🔄 v8.7.3: HISTORICAL STATE REPLAY MIGRATION (BACKGROUND)
+    // One-time replay of ALL blocks through StateProcessor to rebuild
+    // DEX pools, token balances, stablecoin vaults, governance state, etc.
+    // Runs in background so the node can serve requests while migrating.
+    // After completion, a flag prevents re-running on future startups.
+    // ========================================
+    #[cfg(not(target_os = "windows"))]
+    {
+        let storage_for_state_migration = state.storage_engine.clone();
+        tokio::spawn(async move {
+            info!("🔄 [STATE MIGRATION] Checking if historical state replay is needed...");
+            match q_storage::migrate_historical_state(&storage_for_state_migration).await {
+                Ok(count) => {
+                    if count > 0 {
+                        info!("✅ [STATE MIGRATION] Historical state replay complete: {} blocks had state changes", count);
+                    } else {
+                        info!("✅ [STATE MIGRATION] Historical state replay: already up to date or no rich transactions");
+                    }
+                }
+                Err(e) => {
+                    warn!("⚠️ [STATE MIGRATION] Historical state replay failed (non-fatal): {}", e);
+                    warn!("   DEX/token/stablecoin state may be incomplete until migration completes");
+                    warn!("   The node will still process new blocks correctly via replay_block_state_changes");
+                }
+            }
+        });
+    }
+
+    // ========================================
     // 🔮 v1.4.2-beta: QNO STORAGE INITIALIZATION
     // Persistent storage for Quantum Neural Oracle prediction staking
     // (Gated: q_storage::qno_storage not available on Windows)
@@ -4240,10 +4375,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
         // 🚀 v1.0.3-beta: CRITICAL FIX #2 - Add P2P peer height announcements
         // BUG: v1.0.2-beta NEVER sends height announcements, causing network_height=0 on all fresh nodes
-        // FIX: Announce our height every 5 seconds so peers can discover network height via P2P
+        // FIX: Announce our height every 30 seconds so peers can discover network height via P2P
+        // v1.0.2: Reduced from 5s to 30s to save bandwidth (height-change guard sends immediately on new blocks)
         // This is the PRIMARY sync discovery mechanism (HTTP bootstrap is fallback only)
         if let Some(command_tx) = &state.libp2p_command_tx {
-            info!("🚀 [PEER HEIGHTS] Starting P2P height announcement task (every 5s)");
+            info!("🚀 [PEER HEIGHTS] Starting P2P height announcement task (every 30s)");
             let command_tx_clone = command_tx.clone();
             let storage_clone = state.storage_engine.clone();
             let network_id = std::env::var("Q_NETWORK_ID")
@@ -4254,9 +4390,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 let peer_info = state.libp2p_peer_info.read().await;
                 peer_info.0.clone()
             };
+            // v8.7.0: Capture admin wallet for distributed operator fee announcements
+            let admin_wallet_clone = state.admin_wallet.clone();
 
             tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
                 interval.tick().await; // Skip first immediate tick
                 let mut last_announced_height: u64 = 0;
 
@@ -4292,6 +4430,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         highest_block: u64,
                         #[serde(default)]
                         tip_hash: Option<String>,
+                        #[serde(default)]
+                        operator_wallet: Option<String>,
                     }
 
                     // v5.2.0: Include tip block hash for fork detection
@@ -4300,15 +4440,33 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         _ => None,
                     };
 
+                    // v8.7.0: Include operator wallet for distributed fee splitting
+                    let op_wallet = {
+                        let w = admin_wallet_clone.clone();
+                        const FOUNDER_WALLET_HEX: &str =
+                            "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+                        if w.is_empty() || w == FOUNDER_WALLET_HEX {
+                            None
+                        } else {
+                            Some(w)
+                        }
+                    };
+
                     let announcement = PeerHeightAnnouncement {
                         peer_id: local_peer_id.clone(),
                         highest_block: current_height,
                         tip_hash: tip_hash_str,
+                        operator_wallet: op_wallet,
                     };
 
-                    // Serialize with postcard (same as receiver expects)
+                    // Serialize with postcard + zstd compression (saves ~50% bandwidth)
                     let announcement_bytes = match postcard::to_allocvec(&announcement) {
-                        Ok(bytes) => bytes,
+                        Ok(raw_bytes) => {
+                            match zstd::encode_all(raw_bytes.as_slice(), 3) {
+                                Ok(compressed) => compressed,
+                                Err(_) => raw_bytes, // Fallback to uncompressed
+                            }
+                        }
                         Err(e) => {
                             error!("📡 [PEER HEIGHTS] Serialization failed: {}", e);
                             continue;
@@ -4531,11 +4689,19 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                         continue;
                                     }
 
-                                    if let Err(e) = tx.commit().await {
-                                        error!(
-                                            "❌ Fallback commit failed for block {}: {:?}",
-                                            block.header.height, e
-                                        );
+                                    match tx.commit().await {
+                                        Ok(_) => {
+                                            // v8.7.3: State replay for fast-sync fallback
+                                            if let Some(rocks_db) = storage_clone.get_rocks_db_handle() {
+                                                q_storage::replay_block_state_changes(&rocks_db, &block);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            error!(
+                                                "❌ Fallback commit failed for block {}: {:?}",
+                                                block.header.height, e
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -4729,6 +4895,13 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     // Commit entire batch atomically
                     match tx.commit().await {
                         Ok(_) => {
+                            // 🔄 v8.7.3: Deterministic state replay for batch-synced blocks
+                            if let Some(rocks_db) = storage_clone.get_rocks_db_handle() {
+                                for block in batch_chunk {
+                                    q_storage::replay_block_state_changes(&rocks_db, block);
+                                }
+                            }
+
                             balance_updates_total += batch_balance_updates;
                             blocks_committed += batch_blocks_saved;
                             blocks_already_processed += batch_already_processed;
@@ -4771,6 +4944,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                         .await;
                                     if fallback_tx.save_qblock(block).await.is_ok() {
                                         if fallback_tx.commit().await.is_ok() {
+                                            // v8.7.3: State replay for fallback path
+                                            if let Some(rocks_db) = storage_clone.get_rocks_db_handle() {
+                                                q_storage::replay_block_state_changes(&rocks_db, block);
+                                            }
                                             blocks_committed += 1;
                                             blocks_failed -= 1;
                                         }
@@ -5755,6 +5932,13 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     let turbo_sync = Arc::new(turbo_sync_manager);
     state.turbo_sync = Some(turbo_sync.clone());
 
+    // v1.0.2: Starship Flight Computer — central sync state machine
+    let flight_computer = Arc::new(tokio::sync::RwLock::new(
+        q_storage::FlightComputer::new(turbo_sync.session_sync_mode.clone())
+    ));
+    state.flight_computer = Some(flight_computer.clone());
+    info!("{} [FLIGHT COMPUTER] Initialized — phase: PRELAUNCH", q_storage::StarshipPhase::Prelaunch.emoji());
+
     // 🌉 v0.9.6-beta: Initialize peer registry bridge (CRITICAL FIX)
     // This bridges libp2p peer discoveries to TurboSync peer registry
     // Fixes: "No peers available with target height" even when peers connected
@@ -5992,6 +6176,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             is_bootstrap_node,
             state.node_signing_key.clone(),
             state.libp2p_command_tx.clone(),
+            state.auto_update_enabled.clone(), // v8.6.5: shared runtime toggle
         );
 
         let auto_update_state_rx = auto_updater.state_receiver();
@@ -8216,10 +8401,17 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                     .load(Ordering::SeqCst);
                                 if block_height > current_highest {
                                     // v8.0.8: Height sanity check — prevent rogue peers from poisoning network height
+                                    // v8.6.7: During initial sync (height < 100K), trust peer heights
+                                    // up to 50M. A fresh node at height 0 needs to accept the real
+                                    // network height (e.g., 5.4M) to track sync progress correctly.
                                     let our_height = app_state_gossip
                                         .current_height_atomic
                                         .load(Ordering::Relaxed);
-                                    let max_reasonable = (our_height * 5).max(our_height + 50_000);
+                                    let max_reasonable = if our_height < 100_000 {
+                                        50_000_000 // Initial sync: allow up to 50M (matches peer-height logic)
+                                    } else {
+                                        (our_height * 5).max(our_height + 50_000)
+                                    };
                                     if block_height > max_reasonable {
                                         warn!("🚫 [BLOCK FALLBACK] Rejecting suspicious block height {} (our: {}, max reasonable: {})",
                                               block_height, our_height, max_reasonable);
@@ -8812,6 +9004,17 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 match tx.commit().await {
                                     Ok(_) => {
                                         // ============================================
+                                        // 🔄 v8.7.3: Deterministic state replay for all tx types
+                                        // After the block is committed, replay non-coinbase/non-transfer
+                                        // transactions through StateProcessor → StateApplicator.
+                                        // This enables DEX, token, stablecoin, governance, etc. state
+                                        // to be deterministically computed on ALL nodes from blocks.
+                                        // ============================================
+                                        if let Some(rocks_db) = storage.get_rocks_db_handle() {
+                                            q_storage::replay_block_state_changes(&rocks_db, &block);
+                                        }
+
+                                        // ============================================
                                         // 🚀 v2.7.2-beta: CRITICAL FIX - P2P BALANCE SSE BROADCAST
                                         // ============================================
                                         // ROOT CAUSE: When blocks arrive via P2P, process_block_mining_rewards_tx
@@ -8960,47 +9163,55 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                                         continue;
                                                     }
 
-                                                    // Extract swap data: [0..32] pool_id, [32] direction, [33..41] amount_out
+                                                    // v8.6.7: Extract swap data and RECALCULATE amount_out deterministically
+                                                    // [0..32] pool_id, [32] direction, [33..49] min_amount_out (u128 BE, slippage only)
+                                                    // CRITICAL FIX: Previous code read data[33..41] as u64 LE and treated it as actual
+                                                    // amount_out — wrong endianness, wrong size, wrong semantics. The tx.data field
+                                                    // only contains min_amount_out for slippage. We must recalculate the actual output
+                                                    // using the same AMM formula as StateProcessor::process_swap().
                                                     let pool_id_hex = hex::encode(&swap_tx.data[0..32]);
                                                     let direction = swap_tx.data[32];
                                                     let amount_in = swap_tx.amount;
-                                                    let amount_out = if swap_tx.data.len() >= 41 {
-                                                        u64::from_le_bytes(swap_tx.data[33..41].try_into().unwrap_or([0; 8])) as u128
-                                                    } else {
-                                                        0u128
-                                                    };
 
-                                                    // Update pool reserves
+                                                    // Recalculate amount_out from pool reserves (deterministic AMM)
                                                     let mut pools = app_state_gossip.liquidity_pools.write().await;
                                                     if let Some(pool) = pools.get_mut(&pool_id_hex) {
+                                                        let (reserve_in, reserve_out) = if direction == 0 {
+                                                            (pool.reserve0, pool.reserve1)
+                                                        } else {
+                                                            (pool.reserve1, pool.reserve0)
+                                                        };
+
+                                                        // Match StateProcessor exactly:
+                                                        // Protocol fee = 5 bps, LP fee = 25 bps, Total = 30 bps
+                                                        let protocol_fee = amount_in * 5u128 / 10_000u128;
+                                                        let amount_after_protocol_fee = amount_in.saturating_sub(protocol_fee);
+                                                        let lp_fee_multiplier = 10_000u128 - 25u128; // 9975
+                                                        let amount_in_with_lp_fee = amount_after_protocol_fee * lp_fee_multiplier;
+                                                        let numerator = reserve_out * amount_in_with_lp_fee;
+                                                        let denominator = reserve_in * 10_000u128 + amount_in_with_lp_fee;
+                                                        let amount_out = if denominator > 0 {
+                                                            numerator / denominator
+                                                        } else {
+                                                            warn!("⚠️ [P2P SWAP] Zero denominator for pool {}, skipping", &pool_id_hex[..8]);
+                                                            drop(pools);
+                                                            continue;
+                                                        };
+
+                                                        // Update pool reserves (same as originating node)
                                                         if direction == 0 {
-                                                            // token0 -> token1: reserve0 += amount_in, reserve1 -= amount_out
                                                             pool.reserve0 = pool.reserve0.saturating_add(amount_in);
                                                             pool.reserve1 = pool.reserve1.saturating_sub(amount_out);
                                                         } else {
-                                                            // token1 -> token0: reserve1 += amount_in, reserve0 -= amount_out
                                                             pool.reserve1 = pool.reserve1.saturating_add(amount_in);
                                                             pool.reserve0 = pool.reserve0.saturating_sub(amount_out);
                                                         }
                                                         swaps_applied += 1;
-                                                    }
-                                                    drop(pools);
 
-                                                    // Update token balances for the swap recipient
-                                                    // The sender's balance is already handled by balance_engine
-                                                    // Token balance credits are in 24-decimal format
-                                                    if amount_out > 0 {
-                                                        let from_addr = swap_tx.from;
-                                                        let to_token_addr = if direction == 0 {
-                                                            // Bought token1, so credit token1 to sender
-                                                            swap_tx.data[0..32].try_into().unwrap_or([0u8; 32])
-                                                        } else {
-                                                            swap_tx.data[0..32].try_into().unwrap_or([0u8; 32])
-                                                        };
-                                                        // Token balance update happens via pool state - log for now
-                                                        debug!("💱 [P2P SWAP] Applied swap in block {}: pool={}, dir={}, in={}, out={}",
+                                                        debug!("💱 [P2P SWAP v8.6.7] Block {}: pool={}, dir={}, in={}, out={} (recalculated)",
                                                             block_height, &pool_id_hex[..8], direction, amount_in, amount_out);
                                                     }
+                                                    drop(pools);
                                                 }
 
                                                 if swaps_applied > 0 || swaps_deduped > 0 {
@@ -9566,6 +9777,13 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 // Single commit for 100 blocks instead of 100 individual commits
                                 match batch_tx.commit().await {
                                     Ok(_) => {
+                                        // 🔄 v8.7.3: Deterministic state replay for turbo-sync batch
+                                        if let Some(rocks_db) = storage.get_rocks_db_handle() {
+                                            for block in &blocks {
+                                                q_storage::replay_block_state_changes(&rocks_db, block);
+                                            }
+                                        }
+
                                         debug!("✅ [BATCH SYNC TX] Committed {} blocks atomically in single transaction", saved_count);
 
                                         // ✅ v0.9.54-beta CRITICAL FIX: Update qblock:latest pointer after batch commit
@@ -9877,6 +10095,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             // Commit transaction atomically (all or nothing)
                             let transaction_success = match tx.commit().await {
                                 Ok(_) => {
+                                    // v8.7.3: State replay for single-block P2P sync
+                                    if let Some(rocks_db) = app_state_gossip.storage_engine.get_rocks_db_handle() {
+                                        q_storage::replay_block_state_changes(&rocks_db, &block);
+                                    }
                                     info!("✅ [SINGLE BLOCK TX] Stored P2P block {} atomically to RocksDB", block_height);
                                     true
                                 }
@@ -10194,6 +10416,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         highest_block: u64,
                         #[serde(default)]
                         tip_hash: Option<String>,
+                        #[serde(default)]
+                        operator_wallet: Option<String>,
                     }
 
                     // 🔍 QNK-101: Log peer-height messages (reduced to trace in v3.4.2 to prevent spam)
@@ -10207,8 +10431,42 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         hex::encode(&data[..data.len().min(64)])
                     );
 
-                    match postcard::from_bytes::<PeerHeightAnnouncement>(&data) {
-                        Ok(announcement) => {
+                    // v1.0.2: Try zstd decompression first (backward compatible with old uncompressed nodes)
+                    let decompressed_data = match zstd::decode_all(data.as_slice()) {
+                        Ok(decompressed) => decompressed,
+                        Err(_) => data.clone(), // Fallback: old nodes send uncompressed postcard
+                    };
+
+                    // v8.6.7: Try postcard first, then JSON, then legacy text format
+                    let parsed_announcement = postcard::from_bytes::<PeerHeightAnnouncement>(&decompressed_data)
+                        .ok()
+                        .or_else(|| {
+                            // Fallback: try JSON (some older versions sent JSON)
+                            serde_json::from_slice::<PeerHeightAnnouncement>(&decompressed_data).ok()
+                        })
+                        .or_else(|| {
+                            // Fallback: legacy raw text format "PeerID:Height" or just peer ID
+                            if let Ok(text) = String::from_utf8(decompressed_data.clone()) {
+                                let text = text.trim();
+                                // Try "PeerID:Height" format
+                                if let Some((peer_id, height_str)) = text.split_once(':') {
+                                    if let Ok(height) = height_str.parse::<u64>() {
+                                        return Some(PeerHeightAnnouncement {
+                                            peer_id: peer_id.to_string(),
+                                            highest_block: height,
+                                            tip_hash: None,
+                                            operator_wallet: None,
+                                        });
+                                    }
+                                }
+                                // Ignore unrecognized text (old node formats we can't parse)
+                                trace!("📡 [PEER HEIGHTS] Ignoring unrecognized legacy format ({} bytes)", data.len());
+                            }
+                            None
+                        });
+
+                    match parsed_announcement {
+                        Some(announcement) => {
                             // ✅ QNK-101: Log successful parse (reduced to trace in v3.4.2)
                             trace!("✅ [QNK-101] Successfully parsed peer height announcement!");
                             trace!("   Peer ID: {}", announcement.peer_id);
@@ -10304,6 +10562,16 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                     // v8.4.0: Seed peer bandwidth from handshake for gravity-assist
                                     if let Some(bw) = q_network::unified_network_manager::PEER_BANDWIDTH_TIERS.get(&peer_id.to_string()) {
                                         turbo_sync.seed_peer_bandwidth(&peer_id.to_string(), *bw);
+                                    }
+
+                                    // v8.7.0: Extract operator wallet for distributed fee splitting
+                                    if let Some(ref wallet) = announcement.operator_wallet {
+                                        if wallet.len() == 64 && hex::decode(wallet).is_ok() {
+                                            app_state_gossip.peer_operator_wallets.insert(
+                                                announcement.peer_id.clone(),
+                                                wallet.clone(),
+                                            );
+                                        }
                                     }
 
                                     // TEMPORARILY DISABLED v1.0.15: Circular dependency with sync_activation
@@ -10646,28 +10914,12 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 }
                             }
                         }
-                        Err(e) => {
-                            // ❌ QNK-101: Comprehensive error logging for parse failures
-                            error!("❌ [QNK-101] Failed to deserialize peer height announcement!");
-                            error!("   Topic: {}", topic);
-                            error!("   Error: {}", e);
-                            error!("   Message size: {} bytes", data.len());
-                            error!("   First 100 bytes: {:?}", &data[..data.len().min(100)]);
-
-                            // Try UTF-8 decode to diagnose format issues
-                            if let Ok(s) = String::from_utf8(data.clone()) {
-                                error!("   Data as UTF-8 string: {}", &s[..s.len().min(200)]);
-                            } else {
-                                error!("   Data is not valid UTF-8");
-                            }
-
-                            // Try to decode as JSON to see if format mismatch
-                            if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&data) {
-                                error!(
-                                    "   Data appears to be JSON: {:?}",
-                                    &json.to_string()[..json.to_string().len().min(200)]
-                                );
-                            }
+                        None => {
+                            // v8.6.7: Downgraded from error! to debug! — these are just legacy
+                            // format messages from older nodes, not real errors. The fallback
+                            // parsers above handle all known formats.
+                            debug!("📡 [QNK-101] Ignoring unrecognized peer height format ({} bytes) on {}", data.len(), topic);
+                            trace!("   First 64 bytes: {:?}", &data[..data.len().min(64)]);
                         }
                     }
                 } else if topic.contains("/ai/") {
@@ -12108,11 +12360,12 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         let peer_info_clone = app_state.libp2p_peer_info.clone();
 
         tokio::spawn(async move {
-            // 🚀 v0.7.1-beta: Reduce interval from 30s to 5s for faster peer discovery
-            // This ensures peer heights update 6x faster, preventing stale peer registry
-            // Network overhead: ~40 bytes every 5 sec = 0.008 KB/sec per peer (negligible)
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
-            info!("🚀 [TURBO SYNC] Starting peer height announcement task (5s interval for fast discovery)");
+            // v1.0.2: Reduced from 5s to 30s for bandwidth optimization
+            // Immediate announcements on height change still happen via block production path
+            // Periodic 30s announcements ensure peers stay discoverable even without new blocks
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            info!("🚀 [TURBO SYNC] Starting peer height announcement task (30s interval, immediate on height change)");
+            let mut last_announced_height: u64 = 0;
 
             loop {
                 interval.tick().await;
@@ -12121,6 +12374,13 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 // This prevents advertising blocks we don't actually have
                 match storage_clone.get_highest_contiguous_block().await {
                     Ok(height) => {
+                        // v1.0.2: Skip redundant announcements (same height)
+                        // Exception: height 0 always announces for bootstrap discovery
+                        if height == last_announced_height && height > 0 {
+                            continue;
+                        }
+                        last_announced_height = height;
+
                         // ✅ v0.9.11-beta FIX #1: Allow height 0 announcements for bootstrap discovery
                         // New nodes MUST announce themselves to receive peer updates and join the network
                         if height == 0 {
@@ -12140,15 +12400,28 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             highest_block: u64,
                             #[serde(default)]
                             tip_hash: Option<String>,
+                            #[serde(default)]
+                            operator_wallet: Option<String>,
                         }
 
                         let announcement = PeerHeightAnnouncement {
                             peer_id: peer_id.clone(),
                             highest_block: height,
                             tip_hash: None, // Lightweight announcement, no tip hash needed
+                            operator_wallet: None, // Cold start: no operator wallet needed
                         };
 
-                        if let Ok(bytes) = postcard::to_allocvec(&announcement) {
+                        if let Ok(raw_bytes) = postcard::to_allocvec(&announcement) {
+                            // v1.0.2: ZStd compress peer height announcements (saves ~50% bandwidth)
+                            let bytes = match zstd::encode_all(raw_bytes.as_slice(), 3) {
+                                Ok(compressed) => {
+                                    trace!("📦 [P2P] Compressed peer height: {} -> {} bytes ({:.0}%)",
+                                        raw_bytes.len(), compressed.len(),
+                                        (1.0 - compressed.len() as f64 / raw_bytes.len() as f64) * 100.0);
+                                    compressed
+                                }
+                                Err(_) => raw_bytes, // Fallback to uncompressed
+                            };
                             // ✅ v0.9.6-beta: Network-aware peer-heights topic (Flaw #3 fix)
                             let network_id = std::env::var("Q_NETWORK_ID")
                                 .ok()
@@ -12293,6 +12566,27 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 // 1. Evict stale peers (not heard from in 60s)
                 if let Some(ref turbo_sync) = app_state_decay.turbo_sync {
                     turbo_sync.evict_stale_peers(60).await;
+
+                    // v8.7.0: Clean up peer_operator_wallets for evicted peers
+                    let registry = turbo_sync.get_enhanced_registry().await;
+                    let active_peer_ids: std::collections::HashSet<String> = registry
+                        .active_peers_by_height()
+                        .iter()
+                        .map(|r| r.peer_id.to_string())
+                        .collect();
+                    drop(registry); // Release the read lock
+                    let stale_op_wallets: Vec<String> = app_state_decay
+                        .peer_operator_wallets
+                        .iter()
+                        .filter(|entry| !active_peer_ids.contains(entry.key()))
+                        .map(|entry| entry.key().clone())
+                        .collect();
+                    for peer_id in &stale_op_wallets {
+                        app_state_decay.peer_operator_wallets.remove(peer_id);
+                    }
+                    if !stale_op_wallets.is_empty() {
+                        trace!("💰 [DISTRIBUTED FEE] Cleaned up {} stale peer operator wallets", stale_op_wallets.len());
+                    }
                 }
 
                 // 2. Decay network height if peer data is stale
@@ -13194,6 +13488,87 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             }
                         }
 
+                        // 💰 v8.7.0: Distributed operator fee pre-computation
+                        // Gather qualified peer operators from turbo_sync registry + peer_operator_wallets
+                        {
+                            use q_api_server::block_producer::{OperatorRewardEntry, DISTRIBUTED_OPERATOR_FEE_HEIGHT};
+                            if current_height >= DISTRIBUTED_OPERATOR_FEE_HEIGHT {
+                                let mut operator_entries: Vec<OperatorRewardEntry> = Vec::new();
+                                let mut seen_wallets = std::collections::HashSet::new();
+
+                                if let Some(ref turbo_sync) = app_state_mining.turbo_sync {
+                                    let registry = turbo_sync.get_enhanced_registry().await;
+                                    let peers = registry.active_peers_by_height();
+
+                                    for record in &peers {
+                                        // Only include peers within 100 blocks of tip
+                                        if record.height + 100 < current_height {
+                                            continue;
+                                        }
+                                        let peer_id_str = record.peer_id.to_string();
+                                        // Look up operator wallet from P2P announcements
+                                        if let Some(wallet_hex) = app_state_mining.peer_operator_wallets.get(&peer_id_str) {
+                                            let wallet_hex = wallet_hex.value().clone();
+                                            if seen_wallets.contains(&wallet_hex) {
+                                                continue; // Dedup by wallet
+                                            }
+                                            if let Ok(bytes) = hex::decode(&wallet_hex) {
+                                                if bytes.len() == 32 {
+                                                    let mut wallet = [0u8; 32];
+                                                    wallet.copy_from_slice(&bytes);
+                                                    // Map bandwidth → weight
+                                                    let bw = q_network::unified_network_manager::PEER_BANDWIDTH_TIERS
+                                                        .get(&peer_id_str)
+                                                        .map(|v| *v)
+                                                        .unwrap_or(0);
+                                                    let weight = if bw >= 5000 { 5 } else if bw >= 500 { 2 } else { 1 };
+                                                    seen_wallets.insert(wallet_hex);
+                                                    operator_entries.push(OperatorRewardEntry {
+                                                        wallet,
+                                                        weight,
+                                                        peer_id_short: peer_id_str[..peer_id_str.len().min(16)].to_string(),
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Include LOCAL node's admin wallet
+                                {
+                                    let local_wallet_hex = app_state_mining.admin_wallet.clone();
+                                    const FOUNDER_WALLET_HEX: &str =
+                                        "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+                                    if !local_wallet_hex.is_empty()
+                                        && local_wallet_hex != FOUNDER_WALLET_HEX
+                                        && !seen_wallets.contains(&local_wallet_hex)
+                                    {
+                                        if let Ok(bytes) = hex::decode(&local_wallet_hex) {
+                                            if bytes.len() == 32 {
+                                                let mut wallet = [0u8; 32];
+                                                wallet.copy_from_slice(&bytes);
+                                                seen_wallets.insert(local_wallet_hex);
+                                                operator_entries.push(OperatorRewardEntry {
+                                                    wallet,
+                                                    weight: 5, // Local node gets max weight
+                                                    peer_id_short: "local".to_string(),
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Sort by weight descending, cap at 20
+                                operator_entries.sort_by(|a, b| b.weight.cmp(&a.weight));
+                                operator_entries.truncate(20);
+
+                                if !operator_entries.is_empty() {
+                                    trace!("💰 [DISTRIBUTED FEE] Setting {} operators for block {}", operator_entries.len(), current_height);
+                                    app_state_mining.block_producer_pool.set_distributed_operators(operator_entries);
+                                }
+                            }
+                        }
+
                         info!("🔨 Block production triggered");
                         let produce_start = std::time::Instant::now();
                         // v8.0.5: Add 60s timeout — produce_blocks() calls DAG-Knight
@@ -14004,6 +14379,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 }
                             }
 
+                            // 🔄 v8.7.3: State replay for locally produced blocks
+                            if let Some(rocks_db) = app_state_mining.storage_engine.get_rocks_db_handle() {
+                                q_storage::replay_block_state_changes(&rocks_db, &new_block);
+                            }
+
                             // 💰 v1.1.23-beta CRITICAL FIX: REMOVED duplicate balance update code
                             //
                             // ROOT CAUSE ANALYSIS:
@@ -14263,18 +14643,36 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                                 highest_block: u64,
                                                 #[serde(default)]
                                                 tip_hash: Option<String>,
+                                                #[serde(default)]
+                                                operator_wallet: Option<String>,
                                             }
+
+                                            // v8.7.0: Include operator wallet for distributed fee splitting
+                                            let op_wallet_immediate = {
+                                                let w = app_state_mining.admin_wallet.clone();
+                                                const FOUNDER_WALLET_HEX: &str =
+                                                    "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+                                                if w.is_empty() || w == FOUNDER_WALLET_HEX {
+                                                    None
+                                                } else {
+                                                    Some(w)
+                                                }
+                                            };
 
                                             let announcement = PeerHeightAnnouncement {
                                                 peer_id: peer_id_str,
                                                 highest_block: new_block.header.height,
                                                 tip_hash: Some(hex::encode(new_block.calculate_hash())),
+                                                operator_wallet: op_wallet_immediate,
                                             };
 
-                                            if let Ok(bytes) = postcard::to_allocvec(&announcement) {
+                                            if let Ok(raw_bytes) = postcard::to_allocvec(&announcement) {
+                                                // v1.0.2: ZStd compress immediate announcements too
+                                                let compressed_bytes = zstd::encode_all(raw_bytes.as_slice(), 3)
+                                                    .unwrap_or(raw_bytes);
                                                 let height_cmd = q_network::NetworkCommand::PublishPeerHeight {
                                                     topic: network_id.peer_heights_topic(),
-                                                    announcement_bytes: bytes,
+                                                    announcement_bytes: compressed_bytes,
                                                     height: new_block.header.height,
                                                 };
                                                 if let Err(e) = cmd_tx.send(height_cmd) {
@@ -15093,6 +15491,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                     error!("❌ TIME-BASED: Failed to process mining rewards for block {}: {:?}", new_block.header.height, e);
                                 }
                             }
+                        }
+
+                        // 🔄 v8.7.3: State replay for time-based block producer path
+                        if let Some(rocks_db) = app_state_block_producer.storage_engine.get_rocks_db_handle() {
+                            q_storage::replay_block_state_changes(&rocks_db, &new_block);
                         }
 
                         // 💰 PROCESS ALL TRANSACTIONS - Update wallet balances (coinbase AND transfers)
@@ -16753,10 +17156,89 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 //   Behind (10-50):          200ms  (aggressive catch-up)
                 //   Far behind (50+):        100ms  (maximum throughput)
                 let sync_gap = network_height.saturating_sub(current_height);
+
+                // v1.0.2: Starship Flight Computer phase transitions
+                if let Some(ref fc) = app_state_sync.flight_computer {
+                    let endgame_thresh = std::env::var("Q_ENDGAME_THRESHOLD")
+                        .ok().and_then(|v| v.parse().ok()).unwrap_or(500u64);
+                    let mut fc_guard = fc.write().await;
+                    // Track tip confirmations when gap == 0
+                    if sync_gap == 0 && network_height > 0 {
+                        fc_guard.confirm_at_tip(current_height);
+                    }
+                    // Check if phase should advance
+                    if let Some(next) = fc_guard.should_advance(sync_gap, current_height, network_height, endgame_thresh) {
+                        fc_guard.transition_to(next, current_height);
+                    }
+                    // Station Keeping maintenance (every 15s tick)
+                    if fc_guard.phase() == q_storage::StarshipPhase::StationKeeping {
+                        let pc = if let Some(ref ts) = app_state_sync.turbo_sync {
+                            ts.cached_peer_count.load(std::sync::atomic::Ordering::Relaxed)
+                        } else { 0 };
+                        fc_guard.station_keeping_tick(pc, current_height, network_height);
+                    }
+                }
+
                 let new_interval = if sync_gap == 0 || network_height == 0 {
                     // Fully synced or no network info — save CPU
                     if let Some(ref turbo_sync) = app_state_sync.turbo_sync {
-                        turbo_sync.set_fully_synced(sync_gap == 0 && network_height > 0);
+                        let was_synced = turbo_sync.is_synced_fast();
+                        let now_synced = sync_gap == 0 && network_height > 0;
+                        turbo_sync.set_fully_synced(now_synced);
+
+                        // v8.6.7: On transition to fully-synced, reload balances from RocksDB
+                        // into the in-memory HashMap. This ensures secondary nodes (Gamma/Delta)
+                        // have correct balances immediately after turbo sync completes.
+                        if now_synced && !was_synced {
+                            info!("🎉 [SYNC COMPLETE v8.6.7] Node fully synced at height {} — reloading balances from RocksDB...", current_height);
+                            match app_state_sync.storage_engine.load_wallet_balances().await {
+                                Ok(persisted) => {
+                                    let count = persisted.len();
+                                    let mut balances = app_state_sync.wallet_balances.write().await;
+                                    // Merge: keep higher of in-memory vs RocksDB (don't lose real-time updates)
+                                    for (addr, amount) in &persisted {
+                                        let current = balances.get(addr).copied().unwrap_or(0);
+                                        if *amount > current {
+                                            balances.insert(*addr, *amount);
+                                        }
+                                    }
+                                    let total: u128 = balances.values().sum();
+                                    drop(balances);
+
+                                    let mut supply = app_state_sync.total_minted_supply.write().await;
+                                    *supply = total;
+                                    drop(supply);
+
+                                    info!("✅ [SYNC COMPLETE v8.6.7] Loaded {} wallets, supply: {} QUG",
+                                          count, total / 1_000_000_000_000_000_000_000_000u128);
+                                }
+                                Err(e) => {
+                                    warn!("⚠️ [SYNC COMPLETE] Failed to reload wallet balances: {}", e);
+                                }
+                            }
+
+                            // v8.7.4: Also reload token_balances from RocksDB — same fix as wallet_balances.
+                            // Without this, secondary nodes (Gamma/Delta/Epsilon) show stale token balances
+                            // even after fully syncing because the in-memory HashMap was never refreshed.
+                            match app_state_sync.storage_engine.load_token_balances().await {
+                                Ok(persisted) if !persisted.is_empty() => {
+                                    let count = persisted.len();
+                                    let mut tb = app_state_sync.token_balances.write().await;
+                                    for (key, amount) in &persisted {
+                                        let current = tb.get(key).copied().unwrap_or(0);
+                                        if *amount > current {
+                                            tb.insert(*key, *amount);
+                                        }
+                                    }
+                                    drop(tb);
+                                    info!("✅ [SYNC COMPLETE v8.7.4] Loaded {} token balances from RocksDB", count);
+                                }
+                                Ok(_) => {}
+                                Err(e) => {
+                                    warn!("⚠️ [SYNC COMPLETE] Failed to reload token balances: {}", e);
+                                }
+                            }
+                        }
                     }
                     2000
                 } else if sync_gap <= 2 {
@@ -17034,9 +17516,49 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 // Previous: HashMap → RocksDB (CORRUPTED RocksDB with stale in-memory values).
                 // balance_consensus is the sole authoritative writer to RocksDB via add_balance_tx.
                 // This periodic task now REFRESHES the HashMap cache from the truth source.
+                //
+                // v8.6.7: CRITICAL FIX — When HashMap is empty (fresh node after turbo sync),
+                // load ALL balances from RocksDB. Previously this `continue`d on empty HashMap,
+                // meaning synced nodes NEVER populated their in-memory balance cache.
+                // This is the root cause of "different balances on different servers" bug.
                 let addresses: Vec<([u8; 32], u128)> = {
                     let balances = app_state_balance_sync.wallet_balances.read().await;
                     if balances.is_empty() {
+                        // HashMap is empty — check if RocksDB has balances from sync
+                        drop(balances);
+                        let current_height = app_state_balance_sync.storage_engine
+                            .get_highest_contiguous_block().await.unwrap_or(0);
+                        if current_height > 0 {
+                            // Node has blocks but no in-memory balances — load from RocksDB
+                            info!("🔄 [BALANCE SEED v8.6.7] HashMap empty but node at height {} — loading ALL balances from RocksDB...", current_height);
+                            match app_state_balance_sync.storage_engine
+                                .load_wallet_balances().await
+                            {
+                                Ok(persisted) if !persisted.is_empty() => {
+                                    let count = persisted.len();
+                                    let mut balances = app_state_balance_sync.wallet_balances.write().await;
+                                    for (addr, amount) in &persisted {
+                                        balances.insert(*addr, *amount);
+                                    }
+                                    drop(balances);
+
+                                    // Also recalculate total supply
+                                    let total: u128 = persisted.values().sum();
+                                    let mut supply = app_state_balance_sync.total_minted_supply.write().await;
+                                    *supply = total;
+                                    drop(supply);
+
+                                    info!("✅ [BALANCE SEED v8.6.7] Loaded {} wallets from RocksDB (supply: {} QUG)",
+                                          count, total / 1_000_000_000_000_000_000_000_000u128);
+                                }
+                                Ok(_) => {
+                                    debug!("💤 [BALANCE SEED] RocksDB also empty — sync still in progress");
+                                }
+                                Err(e) => {
+                                    warn!("⚠️ [BALANCE SEED] Failed to load from RocksDB: {}", e);
+                                }
+                            }
+                        }
                         continue;
                     }
                     balances.iter().map(|(k, v)| (*k, *v)).collect()
@@ -17054,6 +17576,32 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             if actual_balance != *current_in_memory {
                                 balances.insert(*addr, actual_balance);
                                 corrections += 1;
+                            }
+                        }
+                    }
+
+                    // v8.6.7: DISCOVER NEW WALLETS — every 5th cycle (75s), do a full reload
+                    // from RocksDB to pick up wallets created by turbo sync that aren't in
+                    // the HashMap yet. This is the second half of the balance replication fix.
+                    static CYCLE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                    let cycle = CYCLE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if cycle % 5 == 0 {
+                        match app_state_balance_sync.storage_engine.load_wallet_balances().await {
+                            Ok(all_persisted) => {
+                                let mut new_wallets = 0u64;
+                                for (addr, amount) in &all_persisted {
+                                    if !balances.contains_key(addr) {
+                                        balances.insert(*addr, *amount);
+                                        new_wallets += 1;
+                                    }
+                                }
+                                if new_wallets > 0 {
+                                    info!("🆕 [BALANCE DISCOVERY v8.6.7] Found {} new wallets in RocksDB (total: {})",
+                                          new_wallets, balances.len());
+                                }
+                            }
+                            Err(e) => {
+                                debug!("⚠️ [BALANCE DISCOVERY] Failed to scan RocksDB: {}", e);
                             }
                         }
                     }
@@ -17183,58 +17731,106 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     }
 
     // ========================================
-    // 🪙 PERIODIC TOKEN BALANCE SYNC TO DISK
+    // 🪙 v8.7.4: PERIODIC TOKEN BALANCE REFRESH FROM ROCKSDB
     // ========================================
-    // CRITICAL FIX: Token balances were only persisted by individual modules calling
-    // save_token_balance(). Several modules (DCA, swap confirmation, auto-restore)
-    // updated in-memory only, causing token balances to be LOST on restart.
-    // This periodic batch sync acts as a safety net for ALL token balance updates.
+    // CRITICAL FIX: Previously this task wrote FROM HashMap TO RocksDB, which
+    // OVERWROTE correct values that balance_consensus wrote during block processing.
+    // Now reversed (like wallet_balances in v8.3.0) to read FROM RocksDB INTO HashMap.
+    // balance_consensus is the sole authoritative writer to RocksDB for token balances.
     {
         let app_state_token_sync = app_state.clone();
 
         tokio::spawn(async move {
-            info!("🪙 Starting periodic token balance sync to disk (every 15 seconds)...");
+            info!("🪙 [v8.7.4] Starting periodic token balance REFRESH from RocksDB (every 15 seconds)...");
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(15));
 
             loop {
                 interval.tick().await;
 
-                // Read all current token balances from memory
-                let token_balances = app_state_token_sync.token_balances.read().await;
-                let token_count = token_balances.len();
+                // v8.7.4: REVERSED DIRECTION — Read FROM RocksDB INTO HashMap (same as wallet_balances v8.3.0).
+                // balance_consensus writes correct token balances to RocksDB during block processing.
+                // This task refreshes the in-memory cache so API endpoints serve fresh data.
+                let current_entries: Vec<(([u8; 32], [u8; 32]), u128)> = {
+                    let tb = app_state_token_sync.token_balances.read().await;
+                    if tb.is_empty() {
+                        drop(tb);
+                        // HashMap is empty — seed from RocksDB
+                        let current_height = app_state_token_sync.storage_engine
+                            .get_highest_contiguous_block().await.unwrap_or(0);
+                        if current_height > 0 {
+                            match app_state_token_sync.storage_engine.load_token_balances().await {
+                                Ok(persisted) if !persisted.is_empty() => {
+                                    let count = persisted.len();
+                                    let mut tb = app_state_token_sync.token_balances.write().await;
+                                    for (key, amount) in &persisted {
+                                        tb.insert(*key, *amount);
+                                    }
+                                    drop(tb);
+                                    info!("✅ [TOKEN SEED v8.7.4] Loaded {} token balances from RocksDB", count);
+                                }
+                                _ => {}
+                            }
+                        }
+                        continue;
+                    }
+                    tb.iter().map(|(k, v)| (*k, *v)).collect()
+                };
 
-                // Skip if no token balances to sync
-                if token_count == 0 {
-                    continue;
-                }
-
-                // Clone for async persistence (release lock quickly)
-                let token_snapshot = token_balances.clone();
-                drop(token_balances);
-
-                // Persist to RocksDB with synced writes (survives hard kill)
                 let start = std::time::Instant::now();
-                match app_state_token_sync
-                    .storage_engine
-                    .save_token_balances(&token_snapshot)
-                    .await
+                let mut corrections = 0u64;
                 {
-                    Ok(_) => {
-                        let elapsed = start.elapsed();
-                        info!(
-                            "🪙 Synced {} token balances to disk in {:?} (atomic batch write)",
-                            token_count, elapsed
-                        );
+                    let mut tb = app_state_token_sync.token_balances.write().await;
+
+                    // Refresh existing entries from RocksDB
+                    for ((wallet, token), current_in_memory) in &current_entries {
+                        if let Ok(actual_balance) = app_state_token_sync.storage_engine
+                            .get_token_balance(wallet, token).await
+                        {
+                            if actual_balance != *current_in_memory {
+                                tb.insert((*wallet, *token), actual_balance);
+                                corrections += 1;
+                            }
+                        }
                     }
-                    Err(e) => {
-                        error!("❌ Failed to sync token balances to disk: {:?}", e);
-                        error!("   Token balances are still safe in memory but may be lost on crash!");
+
+                    // v8.7.4: DISCOVER NEW TOKEN BALANCES — every 5th cycle (75s),
+                    // full reload from RocksDB to pick up new token balances created
+                    // by block processing (coinbase, swaps, etc.)
+                    static TOKEN_CYCLE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                    let cycle = TOKEN_CYCLE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if cycle % 5 == 0 {
+                        match app_state_token_sync.storage_engine.load_token_balances().await {
+                            Ok(all_persisted) => {
+                                let mut new_tokens = 0u64;
+                                for (key, amount) in &all_persisted {
+                                    if !tb.contains_key(key) {
+                                        tb.insert(*key, *amount);
+                                        new_tokens += 1;
+                                    }
+                                }
+                                if new_tokens > 0 {
+                                    info!("🆕 [TOKEN DISCOVERY v8.7.4] Found {} new token balances in RocksDB (total: {})",
+                                          new_tokens, tb.len());
+                                }
+                            }
+                            Err(e) => {
+                                debug!("⚠️ [TOKEN DISCOVERY] Failed to scan RocksDB: {}", e);
+                            }
+                        }
                     }
+                }
+                let elapsed = start.elapsed();
+                if corrections > 0 {
+                    warn!("🔄 [v8.7.4 TOKEN REFRESH] Corrected {} of {} token balances from RocksDB in {:?}",
+                          corrections, current_entries.len(), elapsed);
+                } else {
+                    info!("🪙 [TOKEN SYNC] {} token balances verified against RocksDB in {:?} (all consistent)",
+                          current_entries.len(), elapsed);
                 }
             }
         });
 
-        info!("✅ Periodic token balance sync task started (15s interval)");
+        info!("✅ [v8.7.4] Periodic token balance refresh task started (15s interval)");
     }
 
     // ========================================
@@ -18310,6 +18906,73 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     //     });
     // }
 
+    // ═══════════════════════════════════════════════════════════════════
+    // v8.6.5: Dune Analytics pipeline — push blocks/txs/rewards/DEX to Dune
+    // ═══════════════════════════════════════════════════════════════════
+    let dune_progress: Option<Arc<tokio::sync::RwLock<q_dune::DuneSyncProgress>>> =
+        if std::env::var("DUNE_API_KEY").is_ok() {
+            match q_dune::DuneConfig::from_env() {
+                Ok(dune_config) => {
+                    info!("📊 [Dune] API key found — starting Dune Analytics sync pipeline (namespace: {})", dune_config.namespace);
+                    let storage_for_dune = app_state.storage_engine.clone();
+                    let bce_for_dune = app_state.balance_consensus_engine.clone();
+                    let height_for_dune = app_state.current_height_atomic.clone();
+
+                    // Network snapshot callback
+                    let peer_count_for_dune = app_state.libp2p_peer_count.clone();
+                    let mining_stats_for_dune = app_state.mining_statistics.clone();
+                    let height_for_snap = app_state.current_height_atomic.clone();
+                    let network_snapshot_fn: q_dune::NetworkSnapshotFn = Arc::new(move || {
+                        let height = height_for_snap.load(std::sync::atomic::Ordering::Relaxed);
+                        let peers = peer_count_for_dune
+                            .as_ref()
+                            .map(|p| p.load(std::sync::atomic::Ordering::Relaxed) as u32)
+                            .unwrap_or(0);
+                        let (miners, hashrate) = if let Some(ref ms) = mining_stats_for_dune {
+                            if let Ok(stats) = ms.try_read() {
+                                (stats.active_miners.len() as u32, 0.0f64)
+                            } else {
+                                (0, 0.0)
+                            }
+                        } else {
+                            (0, 0.0)
+                        };
+                        // Compute blocks_per_minute from hashrate if available
+                        let bpm = if hashrate > 0.0 { (hashrate / 10.0).max(0.1) } else { 0.0 };
+                        // Nakamoto coefficient: miners needed for >50% hashrate
+                        // Rough estimate: if all miners equal, nakamoto = miners/2 + 1
+                        let nakamoto = if miners > 0 { (miners / 2).max(1) } else { 0 };
+                        q_dune::NetworkSnapshot {
+                            block_height: height,
+                            peer_count: peers,
+                            active_miners: miners,
+                            total_hashrate_khs: hashrate,
+                            difficulty: 0.0,
+                            blocks_per_minute: bpm,
+                            nakamoto_coefficient: nakamoto,
+                        }
+                    });
+
+                    let progress = q_dune::start_dune_sync_task(
+                        storage_for_dune,
+                        bce_for_dune,
+                        height_for_dune,
+                        network_snapshot_fn,
+                        dune_config,
+                    )
+                    .await;
+                    Some(progress)
+                }
+                Err(e) => {
+                    warn!("📊 [Dune] Config error (skipping): {}", e);
+                    None
+                }
+            }
+        } else {
+            info!("📊 [Dune] DUNE_API_KEY not set — Dune Analytics pipeline disabled");
+            None
+        };
+
     info!("🔍 DEBUG: About to build application router");
 
     // Build the application router
@@ -18344,6 +19007,18 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/node/status", get(handlers::node_status)) // Dashboard status (detailed, may wait for locks)
         .route("/api/v1/network/supply", get(handlers::network_supply)) // Network supply statistics (max supply, mined coins, hashrate)
         .route("/api/v1/emission/stats", get(handlers::get_emission_stats)) // v6.2.4: Emission analytics (daily history, target vs actual)
+        .route("/api/v1/dune/status", {
+            let dp = dune_progress.clone();
+            get(move || {
+                let dp = dp.clone();
+                async move {
+                    match dp {
+                        Some(progress) => axum::Json(q_dune::dune_status(progress).await),
+                        None => axum::Json(serde_json::json!({"enabled": false, "message": "DUNE_API_KEY not set"})),
+                    }
+                }
+            })
+        }) // v8.6.5: Dune Analytics sync status
         .route("/api/v1/peer-id", get(handlers::get_peer_id)) // libp2p peer ID for dynamic bootstrap discovery
         // v3.9.5-beta: Validator registry endpoints for P2P decentralization
         .route("/api/v1/validators", get(handlers::list_validators)) // List registered validators
@@ -18558,6 +19233,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         // Real-time streaming endpoints
         .route("/api/v1/events", get(streaming::sse_events))
         .route("/api/v1/ws", get(streaming::websocket_handler))
+        .route("/ws/events", get(streaming::websocket_delta_handler))
         // Miner Link - WebSocket relay for wallet ↔ personal miner communication
         .route("/api/v1/miner-link/ws", get(q_api_server::miner_link_api::miner_link_ws_handler))
         .route("/api/v1/miner-link/status/:wallet", get(q_api_server::miner_link_api::get_link_status))
@@ -18962,6 +19638,12 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         // User-level OAuth2 consent management (any authenticated wallet)
         .route("/api/v1/oauth2/my-consents", get(q_api_server::admin_settings_api::my_oauth2_consents))
         .route("/api/v1/oauth2/my-consents/revoke", post(q_api_server::admin_settings_api::my_revoke_consent))
+        // v8.6.5: Public node config endpoint for setup wizard (no auth required)
+        .route("/api/v1/node-config", get(handlers::get_node_config))
+        // v8.6.5: OAuth2 device login for miner/node setup
+        .route("/api/v1/miner/device-login", post(oauth2_provider::device_login_request))
+        .route("/api/v1/miner/device-login/:code", get(oauth2_provider::device_login_poll))
+        .route("/api/v1/miner/device-login/complete", post(oauth2_provider::device_login_complete))
         // HIGH-PERFORMANCE BINARY PROTOCOL ENDPOINTS (1000x improvement)
         .route(
             "/api/v1/binary/transaction",

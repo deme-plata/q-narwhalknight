@@ -311,10 +311,11 @@ pub mod deploy_admin_api; // ✅ v5.1.1: Deploy admin panel API (master-wallet-o
 pub mod node_auto_updater; // ✅ v8.5.0: P2P auto-update with Ed25519 quorum verification
 pub mod state_sync_api; // ✅ v5.2.0: HTTP full state sync (contracts, pools, balances) from bootstrap peers
 pub mod miner_link_api; // ✅ v7.2.0: WebSocket relay for wallet ↔ personal miner communication
+pub mod node_setup; // v8.6.5: Automatic node setup wizard via OAuth2 device login
 
 pub use config::Config;
 pub use console_viz::{update_stats, ConsensusStats, ConsoleVisualizer};
-pub use streaming::{EventBroadcaster, HighPerformanceEmitter, StreamEvent};
+pub use streaming::{EventBroadcaster, HighPerformanceEmitter, StreamEvent, SseQueryParams, WsQueryParams};
 pub use contracts_api::TokenSocialProfile;
 
 // v7.0.0: FaucetState, FaucetRequestRecord, AbusePattern removed — faucet eliminated
@@ -1281,6 +1282,10 @@ pub struct AppState {
     // v7.4.0: Peer JWT public keys for cross-node token verification
     pub peer_jwt_keys: Arc<dashmap::DashMap<String, oauth2_provider::PeerJwtKeyInfo>>,
 
+    // v8.6.0: Distributed node operator fee — maps peer_id → operator_wallet_hex
+    // Populated from PeerHeightAnnouncement gossipsub messages
+    pub peer_operator_wallets: Arc<dashmap::DashMap<String, String>>,
+
     // AI Inference Engine - Privacy-first distributed inference with KV-cache (OLD - slow)
     pub inference_engine: Option<
         Arc<tokio::sync::Mutex<q_ai_inference::distributed_cache::DistributedInferenceWithCache>>,
@@ -1300,6 +1305,9 @@ pub struct AppState {
 
     // 🚀 TURBO SYNC - Git-Inspired 50-250x Faster Blockchain Synchronization
     pub turbo_sync: Option<Arc<q_storage::TurboSyncManager>>,
+
+    // v1.0.2: Starship Flight Computer — central sync state machine
+    pub flight_computer: Option<Arc<tokio::sync::RwLock<q_storage::FlightComputer>>>,
 
     // 🚀 v1.0.4-beta: PHASE 2 DAG-AWARE SYNC - 20-40x Faster with Parallel DAG Layer Fetching
     pub enable_dag_sync: bool, // Feature flag for Phase 2 (default: true)
@@ -2770,6 +2778,7 @@ impl AppState {
 
             // v7.4.0: Peer JWT public keys for cross-node token verification
             peer_jwt_keys: Arc::new(dashmap::DashMap::new()),
+            peer_operator_wallets: Arc::new(dashmap::DashMap::new()),
 
             // Privacy-as-a-Service (PaaS) Components - Initialize with proper constructors
             paas_auth_manager: Arc::new(paas_auth::PaaSAuthManager::new()),
@@ -2794,6 +2803,7 @@ impl AppState {
 
             // Turbo Sync - Git-inspired fast blockchain synchronization (initialized in main.rs)
             turbo_sync: None,
+            flight_computer: None,
 
             // 🚀 v1.0.4-beta: Phase 2 DAG-Aware Sync - Feature flag (set in main.rs)
             enable_dag_sync: false, // Will be set in main.rs based on Q_ENABLE_DAG_SYNC env var
@@ -4190,6 +4200,7 @@ impl AppState {
 
             // v7.4.0: Peer JWT public keys for cross-node token verification
             peer_jwt_keys: Arc::new(dashmap::DashMap::new()),
+            peer_operator_wallets: Arc::new(dashmap::DashMap::new()),
 
             // Privacy-as-a-Service (PaaS) Components - Initialize with proper constructors
             paas_auth_manager: Arc::new(paas_auth::PaaSAuthManager::new()),
@@ -4214,6 +4225,7 @@ impl AppState {
 
             // Turbo Sync - Git-inspired fast blockchain synchronization (initialized in main.rs)
             turbo_sync: None,
+            flight_computer: None,
 
             // 🚀 v1.0.4-beta: Phase 2 DAG-Aware Sync - Feature flag (set in main.rs)
             enable_dag_sync: false, // Will be set in main.rs based on Q_ENABLE_DAG_SYNC env var

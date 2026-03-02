@@ -22,7 +22,28 @@ use tokio::sync::broadcast;
 use tokio_stream::{wrappers::BroadcastStream, StreamExt as TokioStreamExt};
 use tracing::{debug, error, info, trace, warn};
 
+use axum::extract::Query;
 use crate::AppState;
+
+/// v1.0.2: SSE query parameters for bandwidth optimization
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct SseQueryParams {
+    /// Filter events to a single wallet address
+    pub wallet_address: Option<String>,
+    /// When true, NewBlock events send compact headers (~100 bytes) instead of full block data (~2-5KB)
+    #[serde(default)]
+    pub headers_only: bool,
+}
+
+/// v1.0.2: WebSocket query parameters
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct WsQueryParams {
+    /// Filter events to a single wallet address
+    pub wallet_address: Option<String>,
+    /// When true, NewBlock events send compact headers only
+    #[serde(default)]
+    pub headers_only: bool,
+}
 
 /// v1.2.0-beta Phase 3: Default confirmation status for balance updates
 /// Used when deserializing older events without the confirmation_status field
@@ -578,21 +599,25 @@ impl EventBroadcaster {
 }
 
 /// SSE endpoint for real-time event streaming with privacy filtering
-/// Usage: GET /api/v1/events?wallet_address=<address>
+/// Usage: GET /api/v1/events?wallet_address=<address>&headers_only=true
 /// Requires: X-Wallet-Auth header for authentication (optional but recommended)
+///
+/// v1.0.2 Bandwidth optimizations:
+/// - `?headers_only=true` — NewBlock events send compact headers (~100 bytes vs ~2-5KB)
 pub async fn sse_events(
     State(state): State<Arc<AppState>>,
     user_agent: Option<TypedHeader<headers::UserAgent>>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    Query(params): Query<SseQueryParams>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, axum::Error>>> {
     let user_agent_str = user_agent
         .as_ref()
         .map(|ua| ua.as_str())
         .unwrap_or("rust-client");
-    info!("New SSE client connected: {}", user_agent_str);
+    info!("New SSE client connected: {} (headers_only={})", user_agent_str, params.headers_only);
 
     // Extract wallet_address filter parameter (optional)
-    let wallet_filter = params.get("wallet_address").cloned();
+    let wallet_filter = params.wallet_address.clone();
+    let headers_only = params.headers_only;
 
     if let Some(ref wallet) = wallet_filter {
         // 🔒 PRIVACY: Hash wallet address for logging
@@ -756,8 +781,8 @@ pub async fn sse_events(
     let wallet_filter_clone = wallet_filter.clone();
 
     let stream = futures_util::stream::unfold(
-        (rx, wallet_filter, Some(state_clone), wallet_filter_clone),
-        move |(mut rx, filter, state_opt, wallet_filter_for_initial)| async move {
+        (rx, wallet_filter, Some(state_clone), wallet_filter_clone, headers_only),
+        move |(mut rx, filter, state_opt, wallet_filter_for_initial, headers_only)| async move {
             // CRITICAL FIX: Send initial balance event on SSE connection
             // This eliminates the "wait minutes for balance" issue
             if let (Some(state), Some(ref wallet_filter_value)) =
@@ -812,7 +837,7 @@ pub async fn sse_events(
                     // Set state_opt to None so we don't send initial balance again
                     return Some((
                         Ok(Event::default().event("balance-updated").data(json)),
-                        (rx, filter, None, None),
+                        (rx, filter, None, None, headers_only),
                     ));
                 }
             }
@@ -833,7 +858,28 @@ pub async fn sse_events(
                             continue;
                         }
 
-                        match serde_json::to_string(&event) {
+                        // v1.0.2: Compact block events when headers_only=true (~100 bytes vs ~2-5KB)
+                        let json_result = if headers_only {
+                            match &event {
+                                StreamEvent::NewBlock { height, hash, prev_hash, dag_round, timestamp, .. } => {
+                                    serde_json::to_string(&serde_json::json!({
+                                        "type": "NewBlock",
+                                        "data": { "height": height, "hash": hash, "prev_hash": prev_hash, "dag_round": dag_round, "timestamp": timestamp }
+                                    }))
+                                }
+                                StreamEvent::BlockFinalized { height, round, timestamp, .. } => {
+                                    serde_json::to_string(&serde_json::json!({
+                                        "type": "BlockFinalized",
+                                        "data": { "height": height, "round": round, "timestamp": timestamp }
+                                    }))
+                                }
+                                _ => serde_json::to_string(&event),
+                            }
+                        } else {
+                            serde_json::to_string(&event)
+                        };
+
+                        match json_result {
                             Ok(json) => {
                                 let event_name = event_type_name(&event);
                                 // v3.4.0: Downgrade to debug! to reduce log spam
@@ -844,12 +890,12 @@ pub async fn sse_events(
                                 );
                                 return Some((
                                     Ok(Event::default().event(event_name).data(json)),
-                                    (rx, filter, None, None),
+                                    (rx, filter, None, None, headers_only),
                                 ));
                             }
                             Err(e) => {
                                 error!("Failed to serialize event: {}", e);
-                                return Some((Err(axum::Error::new(e)), (rx, filter, None, None)));
+                                return Some((Err(axum::Error::new(e)), (rx, filter, None, None, headers_only)));
                             }
                         }
                     }
@@ -861,7 +907,7 @@ pub async fn sse_events(
                                     Ok(Event::default()
                                         .event("sse-lag")
                                         .data(format!("{{\"lagged_events\": {}}}", n))),
-                                    (rx, filter, None, None),
+                                    (rx, filter, None, None, headers_only),
                                 ))
                             }
                             tokio::sync::broadcast::error::RecvError::Closed => {
@@ -876,7 +922,7 @@ pub async fn sse_events(
                         // will fail and Axum will drop this stream, cleaning up the CLOSE-WAIT.
                         return Some((
                             Ok(Event::default().comment("heartbeat")),
-                            (rx, filter, None, None),
+                            (rx, filter, None, None, headers_only),
                         ));
                     }
                 }
@@ -889,6 +935,95 @@ pub async fn sse_events(
             .interval(std::time::Duration::from_secs(15))
             .text("keep-alive"),
     )
+}
+
+/// v1.0.2: Delta-compressed WebSocket endpoint for bandwidth-efficient streaming
+/// Usage: GET /ws/events?wallet_address=<address>&headers_only=true
+/// Sends initial full state snapshot, then only delta updates
+pub async fn websocket_delta_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<WsQueryParams>,
+) -> Response {
+    info!("New WebSocket delta client connecting (headers_only={})", params.headers_only);
+    ws.on_upgrade(move |socket| websocket_delta_connection(socket, state, params))
+}
+
+/// Handle delta-compressed WebSocket connection
+async fn websocket_delta_connection(socket: WebSocket, state: Arc<AppState>, params: WsQueryParams) {
+    let (mut sender, mut receiver) = FuturesStreamExt::split(socket);
+    let mut rx = state.event_broadcaster.subscribe();
+    let headers_only = params.headers_only;
+
+    // Send initial state snapshot
+    let status = state.node_status.read().await.clone();
+    let initial = serde_json::json!({
+        "type": "InitialState",
+        "data": {
+            "current_height": status.current_height,
+            "connected_peers": status.connected_peers,
+            "is_validator": status.is_validator,
+        }
+    });
+    if let Ok(json) = serde_json::to_string(&initial) {
+        if sender.send(Message::Text(json)).await.is_err() {
+            return;
+        }
+    }
+
+    // Spawn receiver task for client commands
+    tokio::spawn(async move {
+        while let Some(msg) = TokioStreamExt::next(&mut receiver).await {
+            match msg {
+                Ok(Message::Close(_)) | Err(_) => break,
+                _ => {}
+            }
+        }
+    });
+
+    // Stream events with optional headers_only compaction
+    loop {
+        match tokio::time::timeout(std::time::Duration::from_secs(30), rx.recv()).await {
+            Ok(Ok(event)) => {
+                let json_result = if headers_only {
+                    match &event {
+                        StreamEvent::NewBlock { height, hash, prev_hash, dag_round, timestamp, .. } => {
+                            serde_json::to_string(&serde_json::json!({
+                                "type": "NewBlock",
+                                "data": { "height": height, "hash": hash, "prev_hash": prev_hash, "dag_round": dag_round, "timestamp": timestamp }
+                            }))
+                        }
+                        StreamEvent::BlockFinalized { height, round, timestamp, .. } => {
+                            serde_json::to_string(&serde_json::json!({
+                                "type": "BlockFinalized",
+                                "data": { "height": height, "round": round, "timestamp": timestamp }
+                            }))
+                        }
+                        _ => serde_json::to_string(&event),
+                    }
+                } else {
+                    serde_json::to_string(&event)
+                };
+
+                if let Ok(json) = json_result {
+                    if sender.send(Message::Text(json)).await.is_err() {
+                        break;
+                    }
+                }
+            }
+            Ok(Err(broadcast::error::RecvError::Lagged(n))) => {
+                warn!("WebSocket delta client lagged by {} events", n);
+            }
+            Ok(Err(broadcast::error::RecvError::Closed)) => break,
+            Err(_) => {
+                // Heartbeat
+                if sender.send(Message::Ping(vec![])).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    debug!("WebSocket delta client disconnected");
 }
 
 /// WebSocket endpoint for ultra-low latency streaming

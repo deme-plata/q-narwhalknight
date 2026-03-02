@@ -54,7 +54,7 @@ fn default_min_solutions() -> usize {
     1
 }
 fn default_max_solutions() -> usize {
-    100
+    10_000 // v8.6.0: Harmonized with Default impl (was 100, but Default::default() used 10_000)
 }
 fn default_total_validators() -> u64 {
     1

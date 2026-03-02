@@ -185,12 +185,13 @@ journalctl -u q-api-server --since "5 minutes ago" | grep -E "Gossipsub BLOCK fr
 - To compare rewards between nodes, check the server logs, NOT the API endpoints
 - If mining to a non-bootstrap node, check for "DAG-KNIGHT" and "DAG→SSE" log messages on bootstrap
 
-### **P2P Network Bootstrap (Mainnet 2026.1 — ACTIVE until Feb 22):**
-- **Bootstrap Peer ID (Beta)**: `12D3KooWBHTC9FhwwXmvH7YA17YHTLdcxbtLWg2U5xEtxSeqX7jc` (Server Beta Mainnet 2026.1 PeerID, from ./data-mainnet2026.1/libp2p_identity.key)
-- **Bootstrap Peer ID (Gamma)**: `12D3KooWFqPX9TkvF43eyDeH9wwxYTSfnBn8AobLJeA7xRnmpPcv` (Server Gamma Mainnet 2026.1 PeerID)
-- **Bootstrap Peer ID (Delta)**: `12D3KooWQZZAyLA4VQmwNozCBTZXXoWfvKE86ebbaPhSKu6XVmJJ` (Server Delta Mainnet 2026.1 PeerID)
-- **Bootstrap Peer ID (Alpha)**: `12D3KooWPwin4nJcU9PzsxNgUVXj5e6zDnACr84H7RZ1XzmnARsY` (Server Alpha Mainnet 2026.1 PeerID)
-- **Bootstrap Address**: `/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWBHTC9FhwwXmvH7YA17YHTLdcxbtLWg2U5xEtxSeqX7jc`
+### **P2P Network Bootstrap (mainnet-genesis — ACTIVE):**
+- **Bootstrap Peer ID (Epsilon)**: `12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM` (10Gbit SUPERNODE — primary sync target)
+- **Bootstrap Peer ID (Delta)**: `12D3KooWLJJRvqo6mBoHLpgxVbGKfW3Jv39ziU4kz1adKFv93JbK` (1Gbit — second fastest)
+- **Bootstrap Peer ID (Gamma)**: `12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH` (1Gbit)
+- **Bootstrap Peer ID (Beta)**: `12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH` (100Mbit — DHT coordinator)
+- **Bootstrap Peer ID (Alpha)**: `12D3KooWPwin4nJcU9PzsxNgUVXj5e6zDnACr84H7RZ1XzmnARsY` (canary)
+- **Bootstrap Address**: `/ip4/89.149.241.126/tcp/9001/p2p/12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM`
 - **Network ID**: `mainnet2026.1`
 - **Gossipsub Topics**:
   - `/qnk/mainnet2026.1/blocks` - Block propagation

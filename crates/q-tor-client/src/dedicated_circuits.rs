@@ -87,9 +87,13 @@ impl OperationType {
         match self {
             OperationType::BlockPropagation => Duration::from_secs(30),
             OperationType::PeerDiscovery => Duration::from_secs(60),
-            OperationType::TransactionSubmission => Duration::from_secs(15),
+            // v8.6.0: reduced from 15s to 10s — tx submissions should be fast;
+            // if a circuit can't deliver in 10s, fail over to another circuit
+            OperationType::TransactionSubmission => Duration::from_secs(10),
             OperationType::P2PSync => Duration::from_secs(300), // 5 min for bulk sync
-            OperationType::ValidatorCommunication => Duration::from_secs(10),
+            // v8.6.0: reduced from 10s to 8s — validator messages are small and
+            // latency-sensitive; tighter timeout improves consensus responsiveness
+            OperationType::ValidatorCommunication => Duration::from_secs(8),
             OperationType::AIInference => Duration::from_secs(120), // AI can be slow
             OperationType::QuantumEntropy => Duration::from_secs(30),
             OperationType::General => Duration::from_secs(30),
@@ -99,9 +103,10 @@ impl OperationType {
     /// Get circuit rotation interval for this operation type
     pub fn rotation_interval(&self) -> Duration {
         match self {
-            // High-security operations rotate more frequently
-            OperationType::ValidatorCommunication => Duration::from_secs(300),  // 5 min
-            OperationType::TransactionSubmission => Duration::from_secs(300),   // 5 min
+            // v8.6.0: high-security operations rotate more aggressively
+            // Reduced from 300s to 240s — 4-min rotation for privacy-critical ops
+            OperationType::ValidatorCommunication => Duration::from_secs(240),  // 4 min
+            OperationType::TransactionSubmission => Duration::from_secs(240),   // 4 min
             // Normal operations rotate every epoch
             OperationType::BlockPropagation => Duration::from_secs(600),        // 10 min
             OperationType::P2PSync => Duration::from_secs(600),                 // 10 min
@@ -387,7 +392,8 @@ impl Default for DedicatedCircuitConfig {
             data_directory: "/var/lib/qnk/tor".to_string(),
             cache_directory: "/var/cache/qnk/tor".to_string(),
             tor_mandatory: true, // Tor is mandatory by default
-            bootstrap_timeout: Duration::from_secs(120),
+            // v8.6.0: reduced from 120s to 45s — faster startup fallback
+            bootstrap_timeout: Duration::from_secs(45),
             prewarm_circuits: true,
             log_level: "info".to_string(),
             adaptive_rotation: true,

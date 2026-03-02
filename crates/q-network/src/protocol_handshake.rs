@@ -104,14 +104,23 @@ impl ProtocolHandshake {
             build_date,
             network_id: std::env::var("Q_NETWORK_ID")
                 .unwrap_or_else(|_| "mainnet-genesis".to_string()),
-            features: vec![
-                "turbo-sync".to_string(),
-                "balance-consensus".to_string(),
-                "distributed-ai".to_string(),
-                "aegis-ql".to_string(),
-                "pqc-dilithium5".to_string(), // ✨ NEW: Post-quantum signatures
-                "pqc-kyber1024".to_string(),  // ✨ NEW: Post-quantum key exchange
-            ],
+            features: {
+                let mut f = vec![
+                    "turbo-sync".to_string(),
+                    "balance-consensus".to_string(),
+                    "distributed-ai".to_string(),
+                    "aegis-ql".to_string(),
+                    "pqc-dilithium5".to_string(), // ✨ NEW: Post-quantum signatures
+                    "pqc-kyber1024".to_string(),  // ✨ NEW: Post-quantum key exchange
+                ];
+                // v8.6.2: Announce supernode capability when bandwidth >= 5 Gbps
+                let bw = std::env::var("Q_BANDWIDTH_MBPS")
+                    .ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+                if bw >= 5000 {
+                    f.push("supernode".to_string());
+                }
+                f
+            },
             supported_crypto_phases,
             active_crypto_phase,
             // v8.4.0: Self-reported bandwidth for sync peer selection

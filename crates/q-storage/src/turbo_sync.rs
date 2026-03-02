@@ -38,7 +38,7 @@ use tracing::{debug, error, info, warn};
 /// API handlers and tokio workers get the remaining cores for responsive request handling.
 static SYNC_RAYON_POOL: once_cell::sync::Lazy<rayon::ThreadPool> = once_cell::sync::Lazy::new(|| {
     let num_threads = std::env::var("Q_SYNC_RAYON_THREADS")
-        .ok().and_then(|v| v.parse().ok()).unwrap_or(4usize);
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(8usize); // v1.0.2: default 8 threads (was 4)
     rayon::ThreadPoolBuilder::new()
         .num_threads(num_threads)
         .thread_name(|idx| format!("sync-rayon-{}", idx))
@@ -101,6 +101,579 @@ use crate::warp_sync::{MultiPeerDownloader, PrefetchPipeline, ChunkAssignment, C
 
 // Phase 6 DELTA-V: Pre-compressed storage for zero-CPU P2P serving
 use crate::precompressed_storage::{PrecompressedBlock, CompressionAlgorithm};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v1.0.2: Starship Flight Computer — SpaceX-Inspired Sync State Machine
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// SpaceX Starship-inspired sync phase state machine.
+/// Replaces raw AtomicU8 (0=idle, 1=turbo, 2=endgame, 3=micro) with named phases.
+///
+/// Mission profile:
+/// PRELAUNCH -> IGNITION -> SUPER_HEAVY -> HOT_STAGING -> STARSHIP_CRUISE -> ORBITAL_INSERTION -> STATION_KEEPING
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum StarshipPhase {
+    /// Pre-launch: preflight checks, peer discovery, height negotiation
+    Prelaunch        = 10,
+    /// Ignition: first sync trigger, Raptor engines light (chunk planning)
+    Ignition         = 11,
+    /// Super Heavy Boost: bulk turbo download at max thrust (was mode=1 "turbo")
+    SuperHeavy       = 1,   // backward-compat with existing AtomicU8 value
+    /// Hot Staging: separation maneuver, endgame transition (was mode=2 "endgame")
+    HotStaging       = 2,
+    /// Starship Cruise: final approach, micro-sync last blocks (was mode=3 "micro")
+    StarshipCruise   = 3,
+    /// Orbital Insertion: reached tip, transitioning to steady-state
+    OrbitalInsertion = 12,
+    /// Station Keeping: fully synced, maintaining orbit (was mode=0 "fully_synced")
+    StationKeeping   = 0,
+}
+
+impl StarshipPhase {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0  => StarshipPhase::StationKeeping,
+            1  => StarshipPhase::SuperHeavy,
+            2  => StarshipPhase::HotStaging,
+            3  => StarshipPhase::StarshipCruise,
+            10 => StarshipPhase::Prelaunch,
+            11 => StarshipPhase::Ignition,
+            12 => StarshipPhase::OrbitalInsertion,
+            _  => StarshipPhase::StationKeeping,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            StarshipPhase::Prelaunch        => "PRELAUNCH",
+            StarshipPhase::Ignition         => "IGNITION",
+            StarshipPhase::SuperHeavy       => "SUPER_HEAVY",
+            StarshipPhase::HotStaging       => "HOT_STAGING",
+            StarshipPhase::StarshipCruise   => "STARSHIP_CRUISE",
+            StarshipPhase::OrbitalInsertion => "ORBITAL_INSERTION",
+            StarshipPhase::StationKeeping   => "STATION_KEEPING",
+        }
+    }
+
+    pub fn emoji(&self) -> &'static str {
+        match self {
+            StarshipPhase::Prelaunch        => "\u{1f680}", // rocket
+            StarshipPhase::Ignition         => "\u{1f525}", // fire
+            StarshipPhase::SuperHeavy       => "\u{26a1}",  // lightning
+            StarshipPhase::HotStaging       => "\u{1f4ab}", // dizzy/explosion
+            StarshipPhase::StarshipCruise   => "\u{2728}",  // sparkles
+            StarshipPhase::OrbitalInsertion => "\u{1f30d}", // earth
+            StarshipPhase::StationKeeping   => "\u{1f6f0}\u{fe0f}",  // satellite
+        }
+    }
+
+    pub fn is_syncing(&self) -> bool {
+        matches!(self, StarshipPhase::SuperHeavy | StarshipPhase::HotStaging | StarshipPhase::StarshipCruise)
+    }
+
+    pub fn is_bulk(&self) -> bool {
+        matches!(self, StarshipPhase::SuperHeavy)
+    }
+}
+
+impl std::fmt::Display for StarshipPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} {}", self.emoji(), self.as_str())
+    }
+}
+
+/// Station Keeping health monitors (endgame maintenance)
+#[derive(Debug, Clone)]
+pub struct StationKeepingState {
+    pub last_peer_health_check: Instant,
+    pub last_pool_sync: Instant,
+    pub last_reorg_scan: Instant,
+    pub consecutive_tip_confirmations: u32,
+    pub orbit_stable: bool,           // true after 10 consecutive tip confirmations
+    pub orbit_decay_warnings: u32,    // v8.7.0: count of orbit perturbation events
+    pub peak_peer_count: u32,         // v8.7.0: high-water mark for peer count
+    pub peer_health_trend: f64,       // v8.7.0: EWMA of peer health (detects degradation)
+    pub blocks_received_in_orbit: u64, // v8.7.0: blocks received via gossipsub while in orbit
+}
+
+impl Default for StationKeepingState {
+    fn default() -> Self {
+        let now = Instant::now();
+        Self {
+            last_peer_health_check: now,
+            last_pool_sync: now,
+            last_reorg_scan: now,
+            consecutive_tip_confirmations: 0,
+            orbit_stable: false,
+            orbit_decay_warnings: 0,
+            peak_peer_count: 0,
+            peer_health_trend: 0.0,
+            blocks_received_in_orbit: 0,
+        }
+    }
+}
+
+/// Per-phase performance record for telemetry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhaseRecord {
+    pub phase: String,
+    pub duration_secs: f64,
+    pub blocks_processed: u64,
+    pub blocks_per_sec: f64,
+}
+
+/// Starship telemetry snapshot for TUI/SSE consumption
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StarshipTelemetry {
+    pub phase: String,
+    pub phase_duration_secs: u64,
+    pub mission_elapsed_secs: u64,
+    pub orbit_stable: bool,
+    pub peer_health: f64,
+    pub consecutive_tip_confirmations: u32,
+    pub phases_completed: usize,
+    // v8.7.0: Enhanced telemetry
+    pub blocks_in_phase: u64,
+    pub phase_blocks_per_sec: f64,
+    pub total_blocks_synced: u64,
+    pub mission_avg_bps: f64,
+    pub orbit_decay_warnings: u32,
+    pub phase_history: Vec<PhaseRecord>,
+    pub recommended_throttle: String,   // "turbo" / "normal" / "conservative"
+}
+
+/// Central state machine for sync lifecycle.
+/// Owns phase transitions — consolidates all session_sync_mode writes.
+///
+/// v8.7.0: Enhanced with hysteresis bands, per-phase performance tracking,
+/// throttle recommendations, and richer Station Keeping diagnostics.
+pub struct FlightComputer {
+    phase: Arc<AtomicU8>,           // == TurboSyncManager.session_sync_mode (shared ref)
+    current_phase: StarshipPhase,
+    phase_entered_at: Instant,
+    mission_start: Instant,
+    phase_history: Vec<(StarshipPhase, Duration, u64)>,  // (phase, time_spent, blocks_processed)
+    blocks_at_phase_start: u64,
+    blocks_at_mission_start: u64,
+    station_keeping: StationKeepingState,
+    last_known_tip: u64,
+    last_gap: u64,                  // v8.7.0: previous gap for trend detection
+    gap_shrinking_ticks: u32,       // v8.7.0: consecutive ticks where gap decreased
+    gap_growing_ticks: u32,         // v8.7.0: consecutive ticks where gap increased
+    transition_count: u32,          // v8.7.0: total phase transitions (detects oscillation)
+    last_transition_at: Instant,    // v8.7.0: anti-oscillation cooldown
+}
+
+/// v8.7.0: Hysteresis bands prevent phase oscillation.
+/// To transition DOWN (SuperHeavy->HotStaging), gap must be <= threshold.
+/// To transition UP (HotStaging->SuperHeavy), gap must be >= threshold * HYSTERESIS_FACTOR.
+/// This creates a dead zone preventing rapid back-and-forth switching.
+const HYSTERESIS_FACTOR: f64 = 1.5;
+
+/// v8.7.0: Minimum time in a phase before allowing non-emergency transitions (seconds).
+/// Prevents oscillation when gap hovers near a boundary.
+const MIN_PHASE_DWELL_SECS: u64 = 5;
+
+/// v8.7.0: Orbit perturbation threshold — gap must exceed this to leave StationKeeping.
+/// Higher than entry threshold (hysteresis) so small gossipsub delays don't trigger re-sync.
+const ORBIT_PERTURBATION_THRESHOLD: u64 = 10;
+
+impl FlightComputer {
+    /// Create a new FlightComputer sharing the same AtomicU8 as TurboSyncManager
+    pub fn new(phase_atomic: Arc<AtomicU8>) -> Self {
+        let initial = StarshipPhase::from_u8(phase_atomic.load(Ordering::Relaxed));
+        let now = Instant::now();
+        Self {
+            phase: phase_atomic,
+            current_phase: initial,
+            phase_entered_at: now,
+            mission_start: now,
+            phase_history: Vec::new(),
+            blocks_at_phase_start: 0,
+            blocks_at_mission_start: 0,
+            station_keeping: StationKeepingState::default(),
+            last_known_tip: 0,
+            last_gap: 0,
+            gap_shrinking_ticks: 0,
+            gap_growing_ticks: 0,
+            transition_count: 0,
+            last_transition_at: now,
+        }
+    }
+
+    /// Get current phase
+    pub fn phase(&self) -> StarshipPhase {
+        self.current_phase
+    }
+
+    /// How long the current phase has been active
+    pub fn phase_elapsed(&self) -> Duration {
+        self.phase_entered_at.elapsed()
+    }
+
+    /// Transition to a new phase, logging mission telemetry and updating the shared AtomicU8
+    pub fn transition_to(&mut self, new_phase: StarshipPhase, current_height: u64) {
+        if new_phase == self.current_phase {
+            return; // no-op for same phase
+        }
+
+        let time_in_phase = self.phase_entered_at.elapsed();
+        let blocks_in_phase = current_height.saturating_sub(self.blocks_at_phase_start);
+        let bps = if time_in_phase.as_secs_f64() > 0.1 {
+            blocks_in_phase as f64 / time_in_phase.as_secs_f64()
+        } else {
+            0.0
+        };
+
+        // Record history with performance data
+        self.phase_history.push((self.current_phase, time_in_phase, blocks_in_phase));
+        // Cap history to last 20 phases to bound memory
+        if self.phase_history.len() > 20 {
+            self.phase_history.remove(0);
+        }
+
+        self.transition_count += 1;
+
+        info!("{} [FLIGHT COMPUTER] {} -> {} | {:.1}s in {} | {} blocks @ {:.0} bps | transition #{}",
+            new_phase.emoji(),
+            self.current_phase.as_str(),
+            new_phase.as_str(),
+            time_in_phase.as_secs_f64(),
+            self.current_phase.as_str(),
+            blocks_in_phase,
+            bps,
+            self.transition_count,
+        );
+
+        // Update atomic for backward compatibility
+        self.phase.store(new_phase as u8, Ordering::Release);
+
+        // Reset phase tracking
+        self.current_phase = new_phase;
+        self.phase_entered_at = Instant::now();
+        self.last_transition_at = Instant::now();
+        self.blocks_at_phase_start = current_height;
+
+        // Set mission start block on first real sync phase
+        if self.blocks_at_mission_start == 0 && new_phase.is_syncing() {
+            self.blocks_at_mission_start = current_height;
+        }
+
+        // Reset station keeping state on re-entry
+        if new_phase == StarshipPhase::StationKeeping {
+            self.station_keeping = StationKeepingState::default();
+            info!("{} [STATION KEEPING] Orbit achieved at height {} — monitoring peer health, pool freshness, reorg watchdog",
+                new_phase.emoji(), current_height);
+        }
+
+        // Reset gap trend on phase change
+        self.gap_shrinking_ticks = 0;
+        self.gap_growing_ticks = 0;
+    }
+
+    /// v8.7.0: Track gap trend for smarter phase decisions
+    fn update_gap_trend(&mut self, gap: u64) {
+        if gap < self.last_gap {
+            self.gap_shrinking_ticks += 1;
+            self.gap_growing_ticks = 0;
+        } else if gap > self.last_gap {
+            self.gap_growing_ticks += 1;
+            self.gap_shrinking_ticks = 0;
+        }
+        // gap == last_gap: no change to either counter
+        self.last_gap = gap;
+    }
+
+    /// v8.7.0: Check anti-oscillation cooldown
+    fn dwell_satisfied(&self) -> bool {
+        self.phase_entered_at.elapsed().as_secs() >= MIN_PHASE_DWELL_SECS
+    }
+
+    /// Pure function: compute the next phase based on sync gap.
+    /// Returns None if no transition needed.
+    ///
+    /// v8.7.0: Enhanced with hysteresis bands and dwell time to prevent oscillation.
+    /// - Downward transitions (less urgent phase): gap must cross threshold cleanly
+    /// - Upward transitions (more urgent phase): gap must exceed threshold * 1.5x
+    /// - All non-emergency transitions respect MIN_PHASE_DWELL_SECS cooldown
+    pub fn should_advance(&mut self, gap: u64, local_height: u64, _network_height: u64, endgame_threshold: u64) -> Option<StarshipPhase> {
+        self.update_gap_trend(gap);
+        let current = self.current_phase;
+
+        // Hysteresis thresholds: re-entry into a more aggressive phase requires higher gap
+        let endgame_re_entry = (endgame_threshold as f64 * HYSTERESIS_FACTOR) as u64;
+        let cruise_upper = (50.0 * HYSTERESIS_FACTOR) as u64; // 75 blocks
+
+        match current {
+            StarshipPhase::Prelaunch => {
+                // No dwell for prelaunch — transition immediately
+                if gap > 0 {
+                    return Some(StarshipPhase::Ignition);
+                }
+                if local_height > 0 {
+                    return Some(StarshipPhase::StationKeeping);
+                }
+                None
+            }
+            StarshipPhase::Ignition => {
+                // Ignition always transitions out immediately (planning phase)
+                if gap > endgame_threshold {
+                    Some(StarshipPhase::SuperHeavy)
+                } else if gap > 50 {
+                    Some(StarshipPhase::HotStaging)
+                } else if gap > 0 {
+                    Some(StarshipPhase::StarshipCruise)
+                } else {
+                    Some(StarshipPhase::StationKeeping)
+                }
+            }
+            StarshipPhase::SuperHeavy => {
+                // Emergency: gap=0 always transitions (no dwell)
+                if gap == 0 {
+                    return Some(StarshipPhase::OrbitalInsertion);
+                }
+                if !self.dwell_satisfied() { return None; }
+                // Downward: SuperHeavy -> HotStaging (less aggressive)
+                if gap <= endgame_threshold {
+                    if gap <= 50 {
+                        Some(StarshipPhase::StarshipCruise)
+                    } else {
+                        Some(StarshipPhase::HotStaging)
+                    }
+                } else {
+                    None // Stay in SuperHeavy
+                }
+            }
+            StarshipPhase::HotStaging => {
+                if gap == 0 {
+                    return Some(StarshipPhase::OrbitalInsertion);
+                }
+                if !self.dwell_satisfied() { return None; }
+                if gap <= 50 {
+                    Some(StarshipPhase::StarshipCruise)
+                } else if gap > endgame_re_entry {
+                    // Upward with hysteresis: only re-enter SuperHeavy if gap grew past 1.5x threshold
+                    Some(StarshipPhase::SuperHeavy)
+                } else {
+                    None
+                }
+            }
+            StarshipPhase::StarshipCruise => {
+                if gap == 0 {
+                    return Some(StarshipPhase::OrbitalInsertion);
+                }
+                if !self.dwell_satisfied() { return None; }
+                if gap > endgame_re_entry {
+                    Some(StarshipPhase::SuperHeavy)
+                } else if gap > cruise_upper {
+                    // Only escalate to HotStaging if gap clearly above cruise band
+                    Some(StarshipPhase::HotStaging)
+                } else {
+                    None
+                }
+            }
+            StarshipPhase::OrbitalInsertion => {
+                // Stay for 3 tip confirmations, then StationKeeping
+                if self.station_keeping.consecutive_tip_confirmations >= 3 {
+                    return Some(StarshipPhase::StationKeeping);
+                }
+                // Fell behind during insertion — immediate re-entry (no dwell)
+                if gap > endgame_threshold {
+                    Some(StarshipPhase::SuperHeavy)
+                } else if gap > 50 {
+                    Some(StarshipPhase::HotStaging)
+                } else if gap > 0 {
+                    Some(StarshipPhase::StarshipCruise)
+                } else {
+                    None
+                }
+            }
+            StarshipPhase::StationKeeping => {
+                // v8.7.0: Higher threshold to leave orbit (hysteresis)
+                // Small gaps (1-10) are normal gossipsub propagation delay — don't re-enter sync
+                if gap > endgame_re_entry {
+                    self.station_keeping.orbit_decay_warnings += 1;
+                    warn!("{} [STATION KEEPING] Major orbit decay! gap={} — re-entering SuperHeavy (decay event #{})",
+                        StarshipPhase::StationKeeping.emoji(), gap, self.station_keeping.orbit_decay_warnings);
+                    Some(StarshipPhase::SuperHeavy)
+                } else if gap > cruise_upper {
+                    self.station_keeping.orbit_decay_warnings += 1;
+                    warn!("{} [STATION KEEPING] Orbit decay: gap={} — re-entering HotStaging (decay event #{})",
+                        StarshipPhase::StationKeeping.emoji(), gap, self.station_keeping.orbit_decay_warnings);
+                    Some(StarshipPhase::HotStaging)
+                } else if gap > ORBIT_PERTURBATION_THRESHOLD {
+                    self.station_keeping.orbit_decay_warnings += 1;
+                    info!("{} [STATION KEEPING] Orbit perturbation: gap={} — micro-sync (decay event #{})",
+                        StarshipPhase::StationKeeping.emoji(), gap, self.station_keeping.orbit_decay_warnings);
+                    Some(StarshipPhase::StarshipCruise)
+                } else {
+                    None // Stable orbit — normal gossipsub keeps us at tip
+                }
+            }
+        }
+    }
+
+    /// Called every sync loop tick when gap == 0 to track tip confirmations
+    pub fn confirm_at_tip(&mut self, current_height: u64) {
+        if current_height >= self.last_known_tip {
+            self.station_keeping.consecutive_tip_confirmations += 1;
+            self.last_known_tip = current_height;
+            if current_height > self.last_known_tip {
+                self.station_keeping.blocks_received_in_orbit += 1;
+            }
+        } else {
+            // Height went down — reset confirmations (reorg or measurement error)
+            self.station_keeping.consecutive_tip_confirmations = 0;
+            self.station_keeping.orbit_stable = false;
+        }
+
+        if self.station_keeping.consecutive_tip_confirmations >= 10 {
+            self.station_keeping.orbit_stable = true;
+        }
+    }
+
+    /// Called every 15s when in StationKeeping for maintenance checks.
+    /// v8.7.0: Enhanced with EWMA peer health trend and peak tracking.
+    pub fn station_keeping_tick(&mut self, peer_count: u32, current_height: u64, network_height: u64) {
+        let now = Instant::now();
+
+        // Track peak peer count
+        if peer_count > self.station_keeping.peak_peer_count {
+            self.station_keeping.peak_peer_count = peer_count;
+        }
+
+        // Peer health check (every 30s) with EWMA trend
+        if now.duration_since(self.station_keeping.last_peer_health_check) > Duration::from_secs(30) {
+            self.station_keeping.last_peer_health_check = now;
+            let health = Self::compute_peer_health(peer_count);
+            // EWMA: trend = 0.3 * current + 0.7 * previous
+            let alpha = 0.3;
+            self.station_keeping.peer_health_trend =
+                alpha * health + (1.0 - alpha) * self.station_keeping.peer_health_trend;
+
+            // Warn if health is declining
+            let peak = self.station_keeping.peak_peer_count;
+            if peer_count < peak / 2 && peak >= 4 {
+                warn!("{} [STATION KEEPING] Peer count degraded: {} (peak was {}) — health trend: {:.2}",
+                    StarshipPhase::StationKeeping.emoji(), peer_count, peak, self.station_keeping.peer_health_trend);
+            } else {
+                debug!("{} [STATION KEEPING] Peers: {}/{} peak | health: {:.2} (trend {:.2}) | orbit: {} | confirms: {} | gossip blocks: {}",
+                    StarshipPhase::StationKeeping.emoji(),
+                    peer_count, peak, health, self.station_keeping.peer_health_trend,
+                    if self.station_keeping.orbit_stable { "STABLE" } else { "STABILIZING" },
+                    self.station_keeping.consecutive_tip_confirmations,
+                    self.station_keeping.blocks_received_in_orbit,
+                );
+            }
+        }
+
+        // Reorg watchdog (every 60s)
+        if now.duration_since(self.station_keeping.last_reorg_scan) > Duration::from_secs(60) {
+            self.station_keeping.last_reorg_scan = now;
+            let gap = network_height.saturating_sub(current_height);
+            if gap > 2 {
+                warn!("{} [STATION KEEPING] Orbit perturbation: gap={} (local={}, network={}) — watching...",
+                    StarshipPhase::StationKeeping.emoji(), gap, current_height, network_height);
+                if gap > 5 {
+                    self.station_keeping.orbit_stable = false;
+                    self.station_keeping.consecutive_tip_confirmations = 0;
+                }
+            }
+        }
+
+        // Pool freshness check (every 60s)
+        if now.duration_since(self.station_keeping.last_pool_sync) > Duration::from_secs(60) {
+            self.station_keeping.last_pool_sync = now;
+            let mission_t = self.mission_start.elapsed().as_secs();
+            let t_str = if mission_t >= 3600 {
+                format!("T+{}h{}m", mission_t / 3600, (mission_t % 3600) / 60)
+            } else if mission_t >= 60 {
+                format!("T+{}m{}s", mission_t / 60, mission_t % 60)
+            } else {
+                format!("T+{}s", mission_t)
+            };
+            debug!("{} [STATION KEEPING] Maintenance pass @ {} | height: {} | orbit decays: {} | transitions: {}",
+                StarshipPhase::StationKeeping.emoji(), t_str, current_height,
+                self.station_keeping.orbit_decay_warnings, self.transition_count,
+            );
+        }
+    }
+
+    /// Compute peer health score (0.0-1.0) with granular scaling
+    fn compute_peer_health(peer_count: u32) -> f64 {
+        match peer_count {
+            0 => 0.0,
+            1 => 0.3,
+            2 => 0.5,
+            3 => 0.7,
+            4 => 0.85,
+            5..=7 => 0.95,
+            _ => 1.0,  // 8+ peers = maximum health
+        }
+    }
+
+    /// v8.7.0: Recommend throttle mode based on current phase and performance
+    fn recommended_throttle(&self) -> &'static str {
+        match self.current_phase {
+            StarshipPhase::SuperHeavy | StarshipPhase::Ignition => "turbo",
+            StarshipPhase::HotStaging => {
+                // If gap is shrinking fast, stay turbo; otherwise normal
+                if self.gap_shrinking_ticks > 3 { "turbo" } else { "normal" }
+            }
+            StarshipPhase::StarshipCruise => "normal",
+            StarshipPhase::OrbitalInsertion | StarshipPhase::StationKeeping => "conservative",
+            StarshipPhase::Prelaunch => "normal",
+        }
+    }
+
+    /// Snapshot for TUI/SSE — v8.7.0: enhanced with per-phase performance data
+    pub fn telemetry(&self, peer_count: u32) -> StarshipTelemetry {
+        let phase_elapsed = self.phase_entered_at.elapsed();
+        let mission_elapsed = self.mission_start.elapsed();
+        let blocks_in_phase = self.last_known_tip.saturating_sub(self.blocks_at_phase_start);
+        let phase_bps = if phase_elapsed.as_secs_f64() > 1.0 {
+            blocks_in_phase as f64 / phase_elapsed.as_secs_f64()
+        } else {
+            0.0
+        };
+
+        let total_blocks = self.last_known_tip.saturating_sub(self.blocks_at_mission_start);
+        let mission_bps = if mission_elapsed.as_secs_f64() > 1.0 {
+            total_blocks as f64 / mission_elapsed.as_secs_f64()
+        } else {
+            0.0
+        };
+
+        // Build phase history records
+        let history: Vec<PhaseRecord> = self.phase_history.iter().map(|(phase, dur, blocks)| {
+            let bps = if dur.as_secs_f64() > 0.1 { *blocks as f64 / dur.as_secs_f64() } else { 0.0 };
+            PhaseRecord {
+                phase: phase.as_str().to_string(),
+                duration_secs: dur.as_secs_f64(),
+                blocks_processed: *blocks,
+                blocks_per_sec: bps,
+            }
+        }).collect();
+
+        StarshipTelemetry {
+            phase: self.current_phase.as_str().to_string(),
+            phase_duration_secs: phase_elapsed.as_secs(),
+            mission_elapsed_secs: mission_elapsed.as_secs(),
+            orbit_stable: self.station_keeping.orbit_stable,
+            peer_health: Self::compute_peer_health(peer_count),
+            consecutive_tip_confirmations: self.station_keeping.consecutive_tip_confirmations,
+            phases_completed: self.phase_history.len(),
+            blocks_in_phase,
+            phase_blocks_per_sec: phase_bps,
+            total_blocks_synced: total_blocks,
+            mission_avg_bps: mission_bps,
+            orbit_decay_warnings: self.station_keeping.orbit_decay_warnings,
+            phase_history: history,
+            recommended_throttle: self.recommended_throttle().to_string(),
+        }
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // v5.2.0: Enhanced Peer Registry - Monotonicity enforcement & stale eviction
@@ -374,6 +947,11 @@ pub struct TurboSyncConfig {
     /// Read from Q_PREFERRED_SYNC_PEERS="peer_id1,peer_id2"
     /// These peers get a 3x score boost in gravity-assist peer selection
     pub preferred_sync_peers: Vec<String>,
+
+    /// v8.6.2: Supernode peers (10Gbit+ servers) for maximum sync speed
+    /// Read from Q_SUPERNODE_PEERS="peer_id1,peer_id2"
+    /// These peers get a 10x score boost (vs 3x for preferred) and use 5000-block chunks
+    pub supernode_peers: Vec<String>,
 }
 
 impl Default for TurboSyncConfig {
@@ -435,15 +1013,15 @@ impl Default for TurboSyncConfig {
                         sys.refresh_memory();
                         (sys.total_memory() / (1024 * 1024)) as usize
                     };
-                    // v8.0.10: Higher parallel streams — more concurrency = better throughput
+                    // v1.0.2: Increased parallel streams for faster sync throughput
                     // RSS backpressure (with reduced max wait) still prevents OOM
                     match ram_mb {
-                        0..=3999     => 4,    // micro: 4 streams (was 2)
-                        4000..=7999  => 8,    // small: 8 streams (was 4)
-                        8000..=15999 => 16,   // medium: 16 streams (was 8)
-                        16000..=31999 => 24,  // large: 24 streams (was 16)
-                        32000..=63999 => 32,  // xlarge: 32 streams (was 24)
-                        _            => 48,   // xxlarge 64GB+: 48 streams (was 32)
+                        0..=3999     => 4,    // micro: 4 streams
+                        4000..=7999  => 8,    // small: 8 streams
+                        8000..=15999 => 16,   // medium: 16 streams
+                        16000..=31999 => 32,  // large: 32 streams (was 24)
+                        32000..=63999 => 48,  // xlarge: 48 streams (was 32)
+                        _            => 64,   // xxlarge 64GB+: 64 streams (was 48)
                     }
                 }),
             // v8.0.7: P2P-aware chunk size — capped at 500 regardless of local RAM
@@ -459,14 +1037,13 @@ impl Default for TurboSyncConfig {
                         sys.refresh_memory();
                         (sys.total_memory() / (1024 * 1024)) as u64
                     };
-                    // v8.0.10: Aggressive chunk sizes — small chunks = high RTT overhead per block
+                    // v1.0.2: Larger chunk sizes — amortize RTT overhead per block
                     // Each round-trip is ~2-5s regardless of chunk size, so bigger = better BPS
-                    // 500 blocks @ ~50KB avg = ~25MB per chunk (well within memory budget)
                     match ram_mb {
-                        0..=3999     => 250,   // micro: 250 blocks/chunk (was 100)
-                        4000..=7999  => 500,   // small: 500 blocks/chunk (was 250)
-                        8000..=15999 => 1000,  // medium: 1000 blocks/chunk (was 500)
-                        _            => 2000,  // large+: 2000 blocks/chunk (amortize RTT)
+                        0..=3999     => 250,   // micro: 250 blocks/chunk
+                        4000..=7999  => 1000,  // small: 1000 blocks/chunk (was 500)
+                        8000..=15999 => 2000,  // medium: 2000 blocks/chunk (was 1000)
+                        _            => 5000,  // large+: 5000 blocks/chunk (was 2000)
                     }
                 }),
             compression_level: std::env::var("Q_TURBO_COMPRESSION_LEVEL")
@@ -479,7 +1056,7 @@ impl Default for TurboSyncConfig {
             delta_compression: true,
             enable_pipelining: true,
             max_peer_connections: std::env::var("Q_MAX_PEER_CONNECTIONS")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(32),  // v7.1.4: 32 peers (was 16, more peer diversity)
+                .ok().and_then(|v| v.parse().ok()).unwrap_or(64),  // v8.6.0: 64 peers (was 32, more peer diversity)
             smart_protocol: true,
 
             // 🚀 v1.0.89-beta: TURBO SYNC - Batched writes now default TRUE
@@ -597,7 +1174,7 @@ impl Default for TurboSyncConfig {
             endgame_threshold: std::env::var("Q_ENDGAME_THRESHOLD")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(500),  // 500 blocks from tip = endgame mode
+                .unwrap_or(200),  // v1.0.2: 200 blocks from tip = endgame mode (was 500)
 
             // ⚡ Endgame chunk size: Small chunks for fast near-tip requests
             // Smaller chunks = lower latency = faster convergence to tip
@@ -623,6 +1200,13 @@ impl Default for TurboSyncConfig {
             // v8.4.0: Preferred sync peers (comma-separated peer IDs)
             // These peers get a 3x score boost in gravity-assist peer selection
             preferred_sync_peers: std::env::var("Q_PREFERRED_SYNC_PEERS")
+                .ok()
+                .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+                .unwrap_or_default(),
+
+            // v8.6.2: Supernode peers (10Gbit+ servers)
+            // These peers get a 10x score boost and use 5000-block chunks
+            supernode_peers: std::env::var("Q_SUPERNODE_PEERS")
                 .ok()
                 .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
                 .unwrap_or_default(),
@@ -1259,6 +1843,12 @@ pub struct DetailedSyncStatus {
     pub apollo_peers_tracked: u64,
     pub apollo_gravity_best_peer: String,
     pub apollo_gravity_best_heat: f64,
+    // v1.0.2: Starship Flight Computer telemetry
+    pub starship_phase: String,
+    pub phase_duration_secs: u64,
+    pub orbit_stable: bool,
+    pub station_keeping_peer_health: f64,
+    pub mission_elapsed_secs: u64,
 }
 
 impl Default for DetailedSyncStatus {
@@ -1301,6 +1891,11 @@ impl Default for DetailedSyncStatus {
             apollo_peers_tracked: 0,
             apollo_gravity_best_peer: String::new(),
             apollo_gravity_best_heat: 0.0,
+            starship_phase: "PRELAUNCH".to_string(),
+            phase_duration_secs: 0,
+            orbit_stable: false,
+            station_keeping_peer_health: 0.0,
+            mission_elapsed_secs: 0,
         }
     }
 }
@@ -1603,7 +2198,7 @@ impl TurboSyncManager {
         let batch_config = crate::ml_batch_optimizer::BatchOptimizerConfig {
             min_batch_size: min_batch,
             max_batch_size: max_batch,
-            learning_rate: 0.01,
+            learning_rate: 0.05,  // v8.6.0: faster adaptation (was 0.01)
             ema_decay: 0.1,  // Fast adaptation for changing network conditions
             cold_start_threshold: 50,  // Use heuristics until 50 samples
             history_size: 100,
@@ -1786,6 +2381,13 @@ impl TurboSyncManager {
             info!("   • Peer momentum tracking: heat, bandwidth, latency");
             info!("   • 30-second cache heat half-life");
             info!("   Disable with Q_APOLLO_GRAVITY_ASSIST=0 if encountering issues");
+            if !config.supernode_peers.is_empty() {
+                info!("   🚀 v8.6.2: {} SUPERNODE peers configured (10x boost, 5000-block chunks)",
+                      config.supernode_peers.len());
+                for p in &config.supernode_peers {
+                    info!("     ⚡ {}", &p[..p.len().min(16)]);
+                }
+            }
             if !config.preferred_sync_peers.is_empty() {
                 info!("   📡 v8.4.0: {} preferred sync peers configured (3x boost)",
                       config.preferred_sync_peers.len());
@@ -2045,6 +2647,17 @@ impl TurboSyncManager {
             apollo_peers_tracked: peers_tracked,
             apollo_gravity_best_peer: best_peer_name,
             apollo_gravity_best_heat: best_heat,
+            // Starship phase from AtomicU8 — FlightComputer populates these externally
+            starship_phase: match mode_u8 {
+                1 => "SUPER_HEAVY",
+                2 => "HOT_STAGING",
+                3 => "STARSHIP_CRUISE",
+                _ => if is_synced { "STATION_KEEPING" } else { "PRELAUNCH" },
+            }.to_string(),
+            phase_duration_secs: 0,  // populated by FlightComputer externally
+            orbit_stable: is_synced && gap <= 5,
+            station_keeping_peer_health: if peer_count >= 5 { 1.0 } else if peer_count >= 3 { 0.8 } else if peer_count >= 1 { 0.5 } else { 0.0 },
+            mission_elapsed_secs: 0,  // populated by FlightComputer externally
         }
     }
 
@@ -2321,14 +2934,15 @@ impl TurboSyncManager {
 
     /// 🌍 v1.9.0-SLINGSHOT: Select best peer for target range using gravity assist
     /// Returns the peer most likely to have hot cache for the target range
-    /// v8.4.0: Applies 3x boost to preferred sync peers (1Gbit servers)
+    /// v8.6.2: Tiered boost — 10x supernode, 3x preferred, 1x default
     pub fn apollo_select_peer(&self, target_range: &std::ops::Range<u64>, available_peers: &[&str]) -> Option<String> {
         if !self.config.enable_apollo_gravity_assist || available_peers.is_empty() {
             return available_peers.first().map(|s| s.to_string());
         }
 
-        // v8.4.0: If preferred sync peers are configured, apply preference boost
-        if !self.config.preferred_sync_peers.is_empty() {
+        // v8.6.2: Tiered boost for supernode (10x) and preferred (3x) peers
+        let has_tiers = !self.config.supernode_peers.is_empty() || !self.config.preferred_sync_peers.is_empty();
+        if has_tiers {
             let mut best_peer: Option<(String, f64)> = None;
             for &peer_id in available_peers {
                 let base_score = self.apollo_peer_momentum
@@ -2336,10 +2950,18 @@ impl TurboSyncManager {
                     .map(|m| m.selection_score(target_range))
                     .unwrap_or(0.1);
 
+                // v8.7.4: 10x boost for supernode peers (10Gbit+ servers)
+                // Hardcoded Epsilon peer ID + env-configured supernodes
+                const EPSILON_PEER: &str = "12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM";
+                let is_supernode = peer_id.contains(EPSILON_PEER) || EPSILON_PEER.contains(peer_id)
+                    || self.config.supernode_peers.iter()
+                        .any(|p| peer_id.contains(p.as_str()) || p.contains(peer_id));
                 // 3x boost for preferred peers (1Gbit servers)
                 let is_preferred = self.config.preferred_sync_peers.iter()
                     .any(|p| peer_id.contains(p.as_str()) || p.contains(peer_id));
-                let final_score = if is_preferred { base_score * 3.0 } else { base_score };
+
+                let multiplier = if is_supernode { 10.0 } else if is_preferred { 3.0 } else { 1.0 };
+                let final_score = base_score * multiplier;
 
                 match &best_peer {
                     None => best_peer = Some((peer_id.to_string(), final_score)),
@@ -2353,6 +2975,40 @@ impl TurboSyncManager {
         }
 
         self.apollo_peer_momentum.select_best_peer(target_range, available_peers)
+    }
+
+    /// v8.6.2: Get optimal chunk size for a specific peer based on its bandwidth tier
+    /// Supernodes (10Gbit, 64GB RAM) can serve 5000 blocks/chunk
+    /// Standard (1Gbit) can serve 1000 blocks/chunk
+    /// Fallback (unknown/slow) caps at 500 blocks/chunk
+    pub fn get_peer_chunk_size(&self, peer_id: &str) -> u64 {
+        // v8.7.4: Hardcoded Epsilon supernode peer ID — always gets 5000 chunks even without env var
+        const EPSILON_PEER_PREFIX: &str = "12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM";
+        if peer_id.contains(EPSILON_PEER_PREFIX) || EPSILON_PEER_PREFIX.contains(peer_id) {
+            return 5000;
+        }
+        // Check if this peer is a known supernode (configured via Q_SUPERNODE_PEERS)
+        let is_supernode = self.config.supernode_peers.iter()
+            .any(|p| peer_id.contains(p.as_str()) || p.contains(peer_id));
+        if is_supernode {
+            return 5000;
+        }
+
+        // Check if this peer is a known preferred (1Gbit standard) peer
+        let is_preferred = self.config.preferred_sync_peers.iter()
+            .any(|p| peer_id.contains(p.as_str()) || p.contains(peer_id));
+        if is_preferred {
+            return 1000;
+        }
+
+        // Check handshake-seeded bandwidth from momentum tracker
+        if let Some(momentum) = self.apollo_peer_momentum.get_peer_momentum(peer_id) {
+            let bw_mbps = momentum.bandwidth_velocity / 125_000.0; // bytes/s → Mbps
+            return if bw_mbps >= 5000.0 { 5000 } else if bw_mbps >= 500.0 { 1000 } else { 500 };
+        }
+
+        // Default: safe cap that Gamma (7.8GB) can handle
+        500
     }
 
     /// 🌍 v1.9.0-SLINGSHOT: Get peer momentum data for monitoring
@@ -2524,7 +3180,10 @@ impl TurboSyncManager {
             let peer_count = registry.active_peer_count();
             let reference_height = if peer_count >= 3 {
                 // Use median of existing peers as reference (consensus-based)
-                registry.median_height().unwrap_or(our_height)
+                // v8.5.9: ALWAYS use max(median, our_height) — never reject peers
+                // just because a few slow/stale peers drag down the median
+                let median = registry.median_height().unwrap_or(our_height);
+                median.max(our_height)
             } else {
                 our_height
             };
@@ -5225,8 +5884,24 @@ impl TurboSyncManager {
             single_shot
         } else {
             // Normal sync: Use ML-predicted chunk size
+            // v8.6.2: If a supernode is among qualified peers, allow larger chunks (up to 5000)
+            let supernode_boost = if !self.config.supernode_peers.is_empty() {
+                let has_supernode = qualified_peers.iter().any(|p| {
+                    let pid = p.to_string();
+                    self.config.supernode_peers.iter().any(|s| pid.contains(s.as_str()) || s.contains(&pid))
+                });
+                if has_supernode {
+                    info!("🚀 [SUPERNODE] Supernode peer detected among {} qualified peers — allowing 5000-block chunks",
+                          qualified_peers.len());
+                    5000u64
+                } else {
+                    self.config.chunk_size
+                }
+            } else {
+                self.config.chunk_size
+            };
             // 🔭 v1.0.2-KALMAN: Blend Kalman BDP-optimal chunk size (40% weight) when confident
-            let base_chunk = ml_chunk_size.min(memory_cap).min(self.config.chunk_size);
+            let base_chunk = ml_chunk_size.min(memory_cap).min(supernode_boost);
             if self.config.enable_apollo_kalman {
                 let kalman = self.apollo_kalman_predictor.read().await;
                 let state = kalman.get_state();
@@ -5236,7 +5911,7 @@ impl TurboSyncManager {
                     let blended = ((base_chunk as f64 * 0.6) + (kalman_chunk as f64 * 0.4)) as u64;
                     let clamped = blended.clamp(
                         self.config.chunk_size / 4, // min: quarter of config
-                        self.config.chunk_size * 2,  // max: double config
+                        supernode_boost.max(self.config.chunk_size * 2),  // max: supernode or double config
                     ).min(memory_cap);
                     info!("🔭 [KALMAN CHUNK] ML={}, Kalman={}, Blended={} (conf={:.2})",
                           base_chunk, kalman_chunk, clamped, state.confidence);

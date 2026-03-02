@@ -16,8 +16,8 @@ use crate::vm::VmError;
 /// Maximum message size (1MB)
 pub const MAX_MESSAGE_SIZE: usize = 1_048_576;
 
-/// Maximum bytecode size (24KB - Ethereum limit)
-pub const MAX_BYTECODE_SIZE: usize = 24_576;
+/// Maximum bytecode size (64KB) // v8.6.0: Increased from 24KB for 10x VM capacity
+pub const MAX_BYTECODE_SIZE: usize = 65_536;
 
 /// Maximum contract call arguments size (1MB)
 pub const MAX_ARGS_SIZE: usize = 1_000_000;
@@ -897,11 +897,11 @@ impl RemoteExecutionVerifier {
     pub fn new(chain_id: u64) -> Self {
         Self {
             nonce_tracker: NonceTracker::new(),
-            rate_limiter: PeerRateLimiter::new(10), // 10 requests/second per caller
+            rate_limiter: PeerRateLimiter::new(50), // v8.6.0: Increased from 10 to 50 req/s for 10x VM capacity
             access_controller: AccessController::new(),
             resource_quota: ResourceQuotaManager::new(
-                100_000_000, // 100M total gas pool
-                10_000_000,  // 10M max per request
+                1_000_000_000, // v8.6.0: Increased from 100M to 1B total gas pool for 10x VM capacity
+                50_000_000,    // v8.6.0: Increased from 10M to 50M max per request for 10x VM capacity
             ),
             min_balance_required: 1_000_000, // Minimum 1M units to submit
             chain_id,

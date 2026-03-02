@@ -189,10 +189,10 @@ pub async fn ensure_ai_engine_loaded(_state: &Arc<AppState>) -> anyhow::Result<A
             info!("📥 Downloading Mistral-7B model (4.1GB) from bootstrap node...");
             info!("   This is a one-time download and will be cached locally");
             info!(
-                "   Source: https://quillon.xyz/downloads/Mistral-7B-Instruct-v0.3.Q4_K_M.gguf"
+                "   Source: https://dl.quillon.xyz/downloads/Mistral-7B-Instruct-v0.3.Q4_K_M.gguf"
             );
 
-            let url = "https://quillon.xyz/downloads/Mistral-7B-Instruct-v0.3.Q4_K_M.gguf";
+            let url = "https://dl.quillon.xyz/downloads/Mistral-7B-Instruct-v0.3.Q4_K_M.gguf";
             let response = reqwest::get(url).await?;
 
             if !response.status().is_success() {

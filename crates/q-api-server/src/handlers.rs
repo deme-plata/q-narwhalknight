@@ -527,7 +527,7 @@ pub async fn version_info() -> Result<Json<ApiResponse<VersionInfo>>, StatusCode
     let (latest_node_version, latest_node_sha256, latest_node_download_url) =
         match detect_latest_node_version() {
             Some((version, sha256)) => {
-                let url = format!("https://quillon.xyz/downloads/q-api-server-v{}", version);
+                let url = format!("https://dl.quillon.xyz/downloads/q-api-server-v{}", version);
                 (Some(version), sha256, Some(url))
             }
             None => (None, None, None),
@@ -1130,7 +1130,8 @@ pub async fn network_supply(
     // v8.5.3: Get holder count — filter out testnet-contaminated dust wallets.
     // P2P gossipsub rebroadcasts old testnet balances, inflating wallet count.
     // Only count wallets with meaningful balance (>= 0.001 QUG in base units).
-    const MIN_HOLDER_BALANCE: u128 = 1_000_000_000_000_000_000_000; // 0.001 QUG (1e21 base units)
+    // v8.6.0: lowered from 1e21 (0.001 QUG) to count smaller holders
+    const MIN_HOLDER_BALANCE: u128 = 100_000_000_000_000_000_000; // 0.0001 QUG (1e20 base units)
     let holders_count: usize = {
         let wallet_balances = state.wallet_balances.read().await;
         wallet_balances.iter().filter(|(_, &balance)| balance >= MIN_HOLDER_BALANCE).count()
@@ -8380,9 +8381,8 @@ pub async fn submit_mining_solution(
         }
     }
 
-    // v8.5.8: Per-IP rate limiter — cap each IP to 60 mining submissions/second
-    // (was 30 in v1.0.2, doubled since Nginx now distributes across 3 backends)
-    // Breaks the retry storm that caused the Feb 24 deadlock
+    // v8.5.9: Per-IP rate limiter — Tor gets 1000/s, clearnet gets 500/s
+    // Tor miners connect via .onion hidden service (Host header contains ".onion")
     {
         use dashmap::DashMap;
         use std::sync::OnceLock;
@@ -8391,6 +8391,12 @@ pub async fn submit_mining_solution(
         let rate_map = MINING_RATE_MAP.get_or_init(|| DashMap::new());
 
         let client_ip = extract_client_ip(&headers);
+        let is_tor = headers.get("host")
+            .and_then(|h| h.to_str().ok())
+            .map(|h| h.contains(".onion"))
+            .unwrap_or(false);
+        let rate_cap: u32 = if is_tor { 1000 } else { 500 };
+
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -8399,9 +8405,9 @@ pub async fn submit_mining_solution(
         let mut entry = rate_map.entry(client_ip.clone()).or_insert((now_secs, 0));
         if entry.0 == now_secs {
             entry.1 += 1;
-            if entry.1 > 60 {
+            if entry.1 > rate_cap {
                 drop(entry);
-                warn!("⚠️ Mining rate limit: {} exceeded 60 req/s — 429", client_ip);
+                warn!("⚠️ Mining rate limit: {} exceeded {} req/s ({}) — 429", client_ip, rate_cap, if is_tor { "tor" } else { "clearnet" });
                 return Err(StatusCode::TOO_MANY_REQUESTS);
             }
         } else {
@@ -9894,6 +9900,19 @@ pub async fn execute_swap(
             // Pool reserves are also in 24-decimal format.
             // No normalization needed - amount_in_with_fee is already in 24-dec.
 
+            // v8.7.2: ZERO-RESERVE PROTECTION - Reject swaps when pool has no liquidity.
+            // After server restart, pools may exist with zero reserves until state sync restores them.
+            // Swapping against an empty pool produces near-zero output, causing user fund loss.
+            if p.reserve0 == 0 || p.reserve1 == 0 {
+                warn!(
+                    "🚨 [SWAP v8.7.2] ZERO RESERVE DETECTED! Pool {} has r0={}, r1={}. Blocking swap to protect user funds.",
+                    id, p.reserve0, p.reserve1
+                );
+                return Ok(Json(ApiResponse::error(
+                    "Pool has no liquidity. Reserves are being restored after server restart. Please try again in 1-2 minutes.".to_string()
+                )));
+            }
+
             // v4.0.13: POOL CORRUPTION DETECTION - Reject swaps on obviously corrupted pools.
             // A healthy pool should have reserves within a reasonable ratio.
             // If one side is >1 billion tokens (display) while the other is <1 token (display),
@@ -9939,54 +9958,39 @@ pub async fn execute_swap(
                 let amt_out = if let Some(num) = numerator_high {
                     num / denominator.unwrap()
                 } else {
-                    // v4.0.11: Overflow handling with normalized amounts (all 24-decimal)
-                    warn!("📊 [SWAP v4.0.11] Large value - using adaptive scaled arithmetic (no f64)");
-
+                    // v8.7.1: Overflow-safe AMM calculation using divide-first approach.
+                    // amt_out = (amt_in * res_out) / denom
+                    // Rewrite as: amt_out = amt_in * (res_out / denom) + correction
+                    // This avoids the intermediate overflow while preserving precision.
                     let denom = denominator.unwrap();
 
-                    let ratio_result = if p.reserve0 > amount_in_with_fee.saturating_mul(1000) {
-                        let amt_bits = 128 - amount_in_with_fee.leading_zeros();
-                        let res_out_bits = 128 - p.reserve1.leading_zeros();
-                        let combined_bits = amt_bits + res_out_bits;
-                        let scale_bits = if combined_bits > 127 { combined_bits - 127 } else { 0 };
-                        let adaptive_scale = 1u128 << scale_bits.min(60);
+                    // Method: divide both numerator factors by a common scale to fit u128
+                    // Choose scale so that product of scaled values fits in 128 bits
+                    let amt_bits = 128u32.saturating_sub(amount_in_with_fee.leading_zeros());
+                    let res_bits = 128u32.saturating_sub(p.reserve1.leading_zeros());
+                    let total_bits = amt_bits + res_bits;
+                    let shift = if total_bits > 127 { (total_bits - 127 + 1) / 2 } else { 0 };
+                    let scale = 1u128 << shift.min(62);
 
-                        let (scaled_amt, scaled_res_out) = if amount_in_with_fee > p.reserve1 {
-                            (amount_in_with_fee / adaptive_scale, p.reserve1)
-                        } else {
-                            (amount_in_with_fee, p.reserve1 / adaptive_scale)
-                        };
-
-                        let scaled_num = scaled_amt.saturating_mul(scaled_res_out);
-                        let result = scaled_num / denom;
-                        result.saturating_mul(adaptive_scale)
+                    // Scale down the larger operand to prevent overflow
+                    let (a, b, rescale) = if amount_in_with_fee >= p.reserve1 {
+                        (amount_in_with_fee / scale, p.reserve1, scale)
                     } else {
-                        const SCALE: u128 = 1_000_000_000_000;
-                        let scaled_amt = amount_in_with_fee / SCALE;
-                        let scaled_res_out = p.reserve1 / SCALE;
-                        let scaled_res_in = p.reserve0 / SCALE;
-                        let scaled_numerator = scaled_amt.saturating_mul(scaled_res_out);
-                        let scaled_denominator = scaled_res_in.saturating_add(scaled_amt);
-                        if scaled_denominator == 0 {
-                            0u128
-                        } else {
-                            (scaled_numerator / scaled_denominator).saturating_mul(SCALE)
-                        }
+                        (amount_in_with_fee, p.reserve1 / scale, scale)
                     };
 
-                    if ratio_result == 0 && amount_in_with_fee > 0 && p.reserve1 > 0 {
-                        warn!("📊 [SWAP v4.0.11] Zero result from adaptive scaling, using fractional approximation");
-                        let fraction = amount_in_with_fee / denom;
-                        if fraction > 0 {
-                            fraction.saturating_mul(p.reserve1)
-                        } else {
-                            let scale = 1u128 << 40;
-                            let scaled_res = p.reserve1 / scale;
-                            let result = (amount_in_with_fee.saturating_mul(scaled_res)) / denom;
-                            result.saturating_mul(scale)
-                        }
+                    let product = a.saturating_mul(b);
+                    let quotient = product / denom;
+                    let result = quotient.saturating_mul(rescale);
+
+                    if result == 0 && amount_in_with_fee > 0 && p.reserve1 > 0 {
+                        // Fallback: compute as fraction of reserve
+                        warn!("📊 [SWAP v8.7.1] Near-zero result, using ratio fallback");
+                        // amt_out ≈ (amt_in / denom) * res_out
+                        let ratio_scaled = (amount_in_with_fee as f64) / (denom as f64);
+                        (ratio_scaled * p.reserve1 as f64) as u128
                     } else {
-                        ratio_result
+                        result
                     }
                 };
 
@@ -10018,54 +10022,31 @@ pub async fn execute_swap(
                 let amt_out = if let Some(num) = numerator_high {
                     num / denominator.unwrap()
                 } else {
-                    // v4.0.11: Overflow handling with normalized amounts (all 24-decimal)
-                    warn!("📊 [SWAP v4.0.11] Large value - using adaptive scaled arithmetic (reversed, no f64)");
-
+                    // v8.7.1: Overflow-safe AMM calculation (reversed) using divide-first approach.
                     let denom = denominator.unwrap();
 
-                    let ratio_result = if p.reserve1 > amount_in_with_fee.saturating_mul(1000) {
-                        let amt_bits = 128 - amount_in_with_fee.leading_zeros();
-                        let res_out_bits = 128 - p.reserve0.leading_zeros();
-                        let combined_bits = amt_bits + res_out_bits;
-                        let scale_bits = if combined_bits > 127 { combined_bits - 127 } else { 0 };
-                        let adaptive_scale = 1u128 << scale_bits.min(60);
+                    let amt_bits = 128u32.saturating_sub(amount_in_with_fee.leading_zeros());
+                    let res_bits = 128u32.saturating_sub(p.reserve0.leading_zeros());
+                    let total_bits = amt_bits + res_bits;
+                    let shift = if total_bits > 127 { (total_bits - 127 + 1) / 2 } else { 0 };
+                    let scale = 1u128 << shift.min(62);
 
-                        let (scaled_amt, scaled_res_out) = if amount_in_with_fee > p.reserve0 {
-                            (amount_in_with_fee / adaptive_scale, p.reserve0)
-                        } else {
-                            (amount_in_with_fee, p.reserve0 / adaptive_scale)
-                        };
-
-                        let scaled_num = scaled_amt.saturating_mul(scaled_res_out);
-                        let result = scaled_num / denom;
-                        result.saturating_mul(adaptive_scale)
+                    let (a, b, rescale) = if amount_in_with_fee >= p.reserve0 {
+                        (amount_in_with_fee / scale, p.reserve0, scale)
                     } else {
-                        const SCALE: u128 = 1_000_000_000_000;
-                        let scaled_amt = amount_in_with_fee / SCALE;
-                        let scaled_res_out = p.reserve0 / SCALE;
-                        let scaled_res_in = p.reserve1 / SCALE;
-                        let scaled_numerator = scaled_amt.saturating_mul(scaled_res_out);
-                        let scaled_denominator = scaled_res_in.saturating_add(scaled_amt);
-                        if scaled_denominator == 0 {
-                            0u128
-                        } else {
-                            (scaled_numerator / scaled_denominator).saturating_mul(SCALE)
-                        }
+                        (amount_in_with_fee, p.reserve0 / scale, scale)
                     };
 
-                    if ratio_result == 0 && amount_in_with_fee > 0 && p.reserve0 > 0 {
-                        warn!("📊 [SWAP v4.0.11] Zero result from adaptive scaling (reversed), using fractional approximation");
-                        let fraction = amount_in_with_fee / denom;
-                        if fraction > 0 {
-                            fraction.saturating_mul(p.reserve0)
-                        } else {
-                            let scale = 1u128 << 40;
-                            let scaled_res = p.reserve0 / scale;
-                            let result = (amount_in_with_fee.saturating_mul(scaled_res)) / denom;
-                            result.saturating_mul(scale)
-                        }
+                    let product = a.saturating_mul(b);
+                    let quotient = product / denom;
+                    let result = quotient.saturating_mul(rescale);
+
+                    if result == 0 && amount_in_with_fee > 0 && p.reserve0 > 0 {
+                        warn!("📊 [SWAP v8.7.1] Near-zero result (reversed), using ratio fallback");
+                        let ratio_scaled = (amount_in_with_fee as f64) / (denom as f64);
+                        (ratio_scaled * p.reserve0 as f64) as u128
                     } else {
-                        ratio_result
+                        result
                     }
                 };
 
@@ -10156,12 +10137,18 @@ pub async fn execute_swap(
             1.0
         };
         if stale_ratio < 0.50 {
-            // More than 50% worse than expected - this is genuinely bad, reject
+            // More than 50% worse than expected — frontend quote is badly stale.
+            // v8.7.1 FIX: Don't use frontend's min_amount_out (it's unrealistic).
+            // Instead, use server-side slippage check against the ACTUAL output.
+            // The user's slippage_tolerance will gate the swap, not a stale quote.
+            let user_slip = request.slippage_tolerance.unwrap_or(0.5).max(0.1).min(50.0);
+            let server_min = (final_amount_out as f64 * (1.0 - user_slip / 100.0)) as u128;
             warn!(
-                "⚠️ [SWAP v4.5.0] Stale quote AND >50% price impact. Frontend expected {}, actual {}. Rejecting.",
-                request.min_amount_out as f64 / 1e24, final_amount_out as f64 / 1e24
+                "⚠️ [SWAP v8.7.1] Stale frontend quote (expected {:.6}, actual {:.6}, ratio {:.1}%). Using server-side slippage: {:.6} ({}% tolerance)",
+                request.min_amount_out as f64 / 1e24, final_amount_out as f64 / 1e24, stale_ratio * 100.0,
+                server_min as f64 / 1e24, user_slip
             );
-            request.min_amount_out
+            server_min
         } else {
             // Within 50% - accept with actual output as the minimum
             info!(
@@ -13317,11 +13304,26 @@ pub async fn sync_health(
 pub async fn sync_detailed(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<q_storage::DetailedSyncStatus>>, StatusCode> {
-    let status = if let Some(ref turbo_sync) = state.turbo_sync {
+    let mut status = if let Some(ref turbo_sync) = state.turbo_sync {
         turbo_sync.get_detailed_sync_status().await
     } else {
         q_storage::DetailedSyncStatus::default()
     };
+
+    // Enrich with FlightComputer telemetry
+    if let Some(ref fc) = state.flight_computer {
+        if let Ok(fc_guard) = fc.try_read() {
+            let peer_count = if let Some(ref ts) = state.turbo_sync {
+                ts.cached_peer_count.load(std::sync::atomic::Ordering::Relaxed)
+            } else { 0 };
+            let telem = fc_guard.telemetry(peer_count);
+            status.starship_phase = telem.phase;
+            status.phase_duration_secs = telem.phase_duration_secs;
+            status.orbit_stable = telem.orbit_stable;
+            status.station_keeping_peer_health = telem.peer_health;
+            status.mission_elapsed_secs = telem.mission_elapsed_secs;
+        }
+    }
 
     Ok(Json(ApiResponse::success(status)))
 }
@@ -15439,4 +15441,48 @@ pub async fn list_active_validators(
         .collect();
 
     Json(ApiResponse::success(validators))
+}
+
+/// GET /api/v1/node-config — Public endpoint returning recommended config for new nodes.
+/// Called by the setup wizard to auto-configure environment variables and hardware-tuned settings.
+pub async fn get_node_config(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<serde_json::Value>> {
+    // Try to get dynamic peer ID
+    let peer_id = match state.libp2p_peer_info.try_read() {
+        Ok(info) if !info.0.is_empty() => info.0.clone(),
+        _ => String::new(),
+    };
+
+    let network_id = std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "mainnet-genesis".to_string());
+    let bootstrap_ip = "185.182.185.227";
+    let p2p_port: u16 = 9001;
+
+    let mut bootstrap_peers = vec![];
+    if !peer_id.is_empty() {
+        bootstrap_peers.push(format!("/ip4/{}/tcp/{}/p2p/{}", bootstrap_ip, p2p_port, peer_id));
+        bootstrap_peers.push(format!("/dns4/quillon.xyz/tcp/{}/p2p/{}", p2p_port, peer_id));
+    }
+
+    let config = serde_json::json!({
+        "network_id": network_id,
+        "version": env!("CARGO_PKG_VERSION"),
+        "bootstrap_peers": bootstrap_peers,
+        "recommended": {
+            "Q_PREFLIGHT_CHECK": "1",
+            "Q_TURBO_SYNC": "1",
+            "Q_TURBO_CHUNK_SIZE": "500",
+            "Q_GOSSIPSUB_HEARTBEAT_MS": "300",
+            "Q_BATCHED_WRITES": "1",
+            "Q_STATE_SYNC": "1"
+        },
+        "hardware_profiles": {
+            "low":    { "ROCKSDB_BLOCK_CACHE_MB": "512",  "Q_CHEAP_SSD": "1" },
+            "medium": { "ROCKSDB_BLOCK_CACHE_MB": "1024" },
+            "high":   { "ROCKSDB_BLOCK_CACHE_MB": "2048" },
+            "xlarge": { "ROCKSDB_BLOCK_CACHE_MB": "4096" }
+        }
+    });
+
+    Json(ApiResponse::success(config))
 }

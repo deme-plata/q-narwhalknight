@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{info, warn};
 
+use chrono::Utc;
 use crate::AppState;
 
 // ============================================================================
@@ -40,11 +41,31 @@ fn extract_wallet(headers: &HeaderMap) -> Option<String> {
     None
 }
 
-fn is_node_admin(headers: &HeaderMap, state: &AppState) -> bool {
-    match extract_wallet(headers) {
-        Some(wallet) => wallet == state.admin_wallet,
-        None => false,
+async fn is_node_admin(headers: &HeaderMap, state: &AppState) -> bool {
+    // 1) Classic check: X-Wallet-Auth or raw hex Bearer matches admin_wallet
+    if let Some(wallet) = extract_wallet(headers) {
+        if wallet == state.admin_wallet {
+            return true;
+        }
     }
+
+    // 2) OAuth2 check: any valid, non-expired Bearer token → treat as admin
+    //    (node operators who log in via OAuth2 should see admin panel)
+    if let Some(auth) = headers.get("authorization") {
+        if let Ok(auth_str) = auth.to_str() {
+            if let Some(token) = auth_str.strip_prefix("Bearer ") {
+                if !token.is_empty() {
+                    if let Some(access_token) = state.oauth2_storage.get_access_token(token).await {
+                        if access_token.expires_at > Utc::now() {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    false
 }
 
 // ============================================================================
@@ -104,7 +125,7 @@ pub async fn is_admin(
     State(state): State<Arc<AppState>>,
 ) -> Json<IsAdminResponse> {
     Json(IsAdminResponse {
-        is_admin: is_node_admin(&headers, &state),
+        is_admin: is_node_admin(&headers, &state).await,
     })
 }
 
@@ -114,7 +135,7 @@ pub async fn admin_settings(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<AdminSettingsResponse>, StatusCode> {
-    if !is_node_admin(&headers, &state) {
+    if !is_node_admin(&headers, &state).await {
         return Err(StatusCode::FORBIDDEN);
     }
 
@@ -153,7 +174,7 @@ pub async fn oauth2_consents(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<ConsentEntry>>, StatusCode> {
-    if !is_node_admin(&headers, &state) {
+    if !is_node_admin(&headers, &state).await {
         return Err(StatusCode::FORBIDDEN);
     }
 
@@ -179,7 +200,7 @@ pub async fn revoke_consent(
     State(state): State<Arc<AppState>>,
     Json(body): Json<RevokeConsentRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    if !is_node_admin(&headers, &state) {
+    if !is_node_admin(&headers, &state).await {
         return Err(StatusCode::FORBIDDEN);
     }
 
@@ -240,7 +261,7 @@ pub async fn node_info(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<NodeInfoResponse>, StatusCode> {
-    if !is_node_admin(&headers, &state) {
+    if !is_node_admin(&headers, &state).await {
         return Err(StatusCode::FORBIDDEN);
     }
 
@@ -404,7 +425,7 @@ pub async fn get_fee_earnings(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<OperatorFeeEarnings>, StatusCode> {
-    if !is_node_admin(&headers, &state) {
+    if !is_node_admin(&headers, &state).await {
         return Err(StatusCode::FORBIDDEN);
     }
 
@@ -455,7 +476,7 @@ pub async fn check_node_update(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<NodeUpdateInfo>, StatusCode> {
-    if !is_node_admin(&headers, &state) {
+    if !is_node_admin(&headers, &state).await {
         return Err(StatusCode::FORBIDDEN);
     }
 

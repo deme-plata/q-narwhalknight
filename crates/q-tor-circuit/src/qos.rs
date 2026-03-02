@@ -31,7 +31,10 @@ impl Default for QoSTargets {
             max_latency: Duration::from_millis(300),
             avg_latency: Duration::from_millis(200),
             max_packet_loss: 0.01,      // 1% packet loss
-            min_throughput: 1_048_576,  // 1 MB/s
+            // v8.6.0: increased from 1MB/s to 2MB/s — modern Tor relays support
+            // higher throughput; raising the floor triggers optimization sooner
+            // for circuits that underperform
+            min_throughput: 2_097_152,  // 2 MB/s
             utilization_threshold: 0.8, // 80% utilization
         }
     }

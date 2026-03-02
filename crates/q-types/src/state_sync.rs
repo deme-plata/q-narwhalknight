@@ -164,6 +164,11 @@ pub struct StateSnapshotResponse {
     /// Symbol to address mapping: symbol -> hex(address)
     pub symbol_to_address: HashMap<String, String>,
 
+    /// v8.7.4: Collateral vault data (serialized CollateralVault bytes)
+    /// Enables one-time migration of historical vault state to new nodes
+    #[serde(default)]
+    pub vault_data: Option<Vec<u8>>,
+
     /// Unix timestamp
     pub timestamp: u64,
 
@@ -191,6 +196,7 @@ impl StateSnapshotResponse {
             wallet_balances: HashMap::new(),
             token_balances: HashMap::new(),
             symbol_to_address: HashMap::new(),
+            vault_data: None,
             timestamp,
             signature: Vec::new(),
             version: 1,
@@ -215,6 +221,7 @@ impl StateSnapshotResponse {
             hasher.update((self.wallet_balances.len() as u64).to_le_bytes());
             hasher.update((self.token_balances.len() as u64).to_le_bytes());
             hasher.update((self.symbol_to_address.len() as u64).to_le_bytes());
+            hasher.update((self.vault_data.as_ref().map(|v| v.len()).unwrap_or(0) as u64).to_le_bytes());
             hasher.finalize()
         };
         msg.extend_from_slice(&payload_hash);
@@ -254,12 +261,13 @@ impl StateSnapshotResponse {
     /// Summary string for logging
     pub fn summary(&self) -> String {
         format!(
-            "height={}, contracts={}, pools={}, wallets={}, tokens={}",
+            "height={}, contracts={}, pools={}, wallets={}, tokens={}, vault={}",
             self.block_height,
             self.contracts.len(),
             self.pools.len(),
             self.wallet_balances.len(),
             self.token_balances.len(),
+            if self.vault_data.is_some() { "yes" } else { "no" },
         )
     }
 }

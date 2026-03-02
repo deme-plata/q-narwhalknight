@@ -571,7 +571,7 @@ cmd_deploy_beta() {
     done
 
     log_success "Production deployment complete: $version"
-    echo "Download: wget https://quillon.xyz/downloads/$BINARY_NAME-$version"
+    echo "Download: wget https://dl.quillon.xyz/downloads/$BINARY_NAME-$version"
 }
 
 # Rollback to previous binary

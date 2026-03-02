@@ -167,6 +167,12 @@ pub struct SharedMinerState {
     pub using_fallback: Arc<AtomicBool>,
     pub last_challenge_latency_us: Arc<AtomicU64>,
 
+    // v8.6.6: Bandwidth tracking (bytes, atomic for lock-free updates)
+    pub bytes_downloaded: Arc<AtomicU64>,  // total bytes received (challenges, SSE, etc.)
+    pub bytes_uploaded: Arc<AtomicU64>,    // total bytes sent (solutions, heartbeats)
+    pub api_requests_total: Arc<AtomicU64>,   // total API calls made
+    pub api_requests_failed: Arc<AtomicU64>,  // failed API calls
+
     // Config strings (read-only after init)
     pub server_url: String,
     pub wallet_address: String,
@@ -174,6 +180,7 @@ pub struct SharedMinerState {
     pub miner_name: Option<String>,
     pub mining_mode: String,
     pub num_threads: usize,
+    pub proxy_url: Option<String>,
 }
 
 impl SharedMinerState {
@@ -193,6 +200,7 @@ impl SharedMinerState {
         miner_id: String,
         miner_name: Option<String>,
         mining_mode: String,
+        proxy_url: Option<String>,
     ) -> (Arc<Self>, mpsc::UnboundedReceiver<DiagnosticEvent>) {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
@@ -218,12 +226,17 @@ impl SharedMinerState {
             miner_link_connected: Arc::new(AtomicBool::new(false)),
             using_fallback: Arc::new(AtomicBool::new(false)),
             last_challenge_latency_us: Arc::new(AtomicU64::new(0)),
+            bytes_downloaded: Arc::new(AtomicU64::new(0)),
+            bytes_uploaded: Arc::new(AtomicU64::new(0)),
+            api_requests_total: Arc::new(AtomicU64::new(0)),
+            api_requests_failed: Arc::new(AtomicU64::new(0)),
             server_url,
             wallet_address,
             miner_id,
             miner_name,
             mining_mode,
             num_threads,
+            proxy_url,
         });
 
         (state, event_rx)

@@ -105,25 +105,25 @@ pub const MAX_LEVERAGE: u8 = 10;
 pub const MIN_LEVERAGE: u8 = 1;
 
 /// Initial margin requirement (1/leverage)
-pub const INITIAL_MARGIN_RATE: f64 = 0.10; // 10% for 10x
+pub const INITIAL_MARGIN_RATE: f64 = 0.08; // v8.6.0: 8% allows 12.5x leverage (was 10% / 10x)
 
 /// Maintenance margin - liquidation threshold
-pub const MAINTENANCE_MARGIN_RATE: f64 = 0.05; // 5%
+pub const MAINTENANCE_MARGIN_RATE: f64 = 0.065; // v8.6.0: 6.5% safer liquidation threshold (was 5%)
 
 /// Taker fee rate
-pub const TAKER_FEE_RATE: f64 = 0.0005; // 0.05%
+pub const TAKER_FEE_RATE: f64 = 0.002; // 0.20% — v8.6.0: Increased for higher protocol revenue
 
 /// Maker fee rate
-pub const MAKER_FEE_RATE: f64 = 0.0002; // 0.02%
+pub const MAKER_FEE_RATE: f64 = 0.001; // 0.10% — v8.6.0: Increased for higher protocol revenue
 
 /// Funding interval in seconds (8 hours)
 pub const FUNDING_INTERVAL_SECS: u64 = 8 * 60 * 60;
 
 /// Maximum funding rate per interval
-pub const MAX_FUNDING_RATE: f64 = 0.001; // 0.1%
+pub const MAX_FUNDING_RATE: f64 = 0.003; // v8.6.0: 0.3% per 8h (was 0.1%), 3x for stronger spot anchoring
 
 /// Liquidator reward percentage
-pub const LIQUIDATOR_REWARD_RATE: f64 = 0.05; // 5% of remaining margin
+pub const LIQUIDATOR_REWARD_RATE: f64 = 0.08; // 8% of remaining margin — v8.6.0: Increased for higher protocol revenue
 
 /// Minimum position size (in base units with 8 decimals)
 pub const MIN_POSITION_SIZE: u64 = 1_000_000; // 0.01 tokens
@@ -136,7 +136,7 @@ pub const MIN_COLLATERAL: u64 = 10_000_000; // 0.1 QUGUSD
 // ============================================================================
 
 /// Percentage of trading fees that go to insurance fund
-pub const INSURANCE_FUND_FEE_RATE: f64 = 0.20; // 20% of fees go to insurance
+pub const INSURANCE_FUND_FEE_RATE: f64 = 0.35; // 35% of fees go to insurance — v8.6.0: Increased for higher protocol revenue
 
 /// Maximum position size per user (in quote value with 8 decimals)
 pub const MAX_POSITION_SIZE_USD: u64 = 100_000_00_000_000; // $100,000 max position
@@ -148,7 +148,7 @@ pub const MAX_OPEN_INTEREST_USD: u64 = 10_000_000_00_000_000; // $10M total OI
 pub const MAX_POSITIONS_PER_USER: usize = 10;
 
 /// ADL threshold - when insurance fund drops below this % of open interest
-pub const ADL_THRESHOLD_RATE: f64 = 0.01; // 1% of OI
+pub const ADL_THRESHOLD_RATE: f64 = 0.025; // v8.6.0: 2.5% of OI (was 1%), earlier ADL trigger for safety
 
 /// ADL priority score decay factor
 pub const ADL_DECAY_FACTOR: f64 = 0.95;

@@ -43,7 +43,8 @@ pub const DISCOVERY_PORT: u16 = 31337;
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Peer timeout (no heartbeat received)
-pub const PEER_TIMEOUT: Duration = Duration::from_secs(10);
+/// v8.6.0: Increased from 10s to 15s — more resilient peer retention on congested networks
+pub const PEER_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Maximum message size for UDP
 pub const MAX_MESSAGE_SIZE: usize = 1024;

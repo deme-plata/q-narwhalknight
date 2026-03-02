@@ -368,10 +368,21 @@ impl PeerMomentumManager {
             .map(|entry| {
                 let p = entry.value();
                 let (p50, p90, p99) = p.latency_percentiles();
+                // v8.6.2: Classify bandwidth tier from measured velocity (bytes/s → Mbps)
+                let bw_mbps = p.bandwidth_velocity / 1_000_000.0;
+                let tier_label = if bw_mbps >= 625.0 {      // 5000 Mbps = 625 MB/s
+                    "SUPERNODE"
+                } else if bw_mbps >= 62.5 {                 // 500 Mbps = 62.5 MB/s
+                    "STANDARD"
+                } else if bw_mbps > 0.0 {
+                    "FALLBACK"
+                } else {
+                    "UNKNOWN"
+                };
                 PeerStats {
                     peer_id: p.peer_id.clone(),
                     cache_heat: p.current_heat(),
-                    bandwidth_mbps: p.bandwidth_velocity / 1_000_000.0,
+                    bandwidth_mbps: bw_mbps,
                     success_rate: p.success_rate,
                     latency_p50: p50,
                     latency_p90: p90,
@@ -379,6 +390,7 @@ impl PeerMomentumManager {
                     blocks_served: p.blocks_served,
                     bytes_served: p.bytes_served,
                     last_range: format!("{}-{}", p.last_served_range.start, p.last_served_range.end),
+                    bandwidth_tier: tier_label.to_string(),
                 }
             })
             .collect()
@@ -435,6 +447,8 @@ pub struct PeerStats {
     pub blocks_served: u64,
     pub bytes_served: u64,
     pub last_range: String,
+    /// v8.6.2: Bandwidth tier classification ("SUPERNODE", "STANDARD", "FALLBACK", "UNKNOWN")
+    pub bandwidth_tier: String,
 }
 
 /// Request-level peer selection with gravity assist

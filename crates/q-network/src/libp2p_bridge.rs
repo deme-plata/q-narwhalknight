@@ -507,7 +507,7 @@ impl Libp2pBridge {
         peer_id: &PeerId,
     ) -> Result<()> {
         // Security Fix #3: Validate message size (prevent memory exhaustion)
-        const MAX_POOL_ANNOUNCEMENT_SIZE: usize = 2048;  // 2 KB max
+        const MAX_POOL_ANNOUNCEMENT_SIZE: usize = 8192;  // v8.6.0: 8 KB max (was 2 KB)
         if data.len() > MAX_POOL_ANNOUNCEMENT_SIZE {
             warn!(
                 peer = %peer_id,

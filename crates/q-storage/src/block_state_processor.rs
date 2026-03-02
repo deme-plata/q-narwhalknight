@@ -522,12 +522,14 @@ impl BlockStateProcessor {
 }
 
 /// RocksDB-backed state reader for StateProcessor
-struct RocksDbStateReader {
+///
+/// v8.7.3: Made public for use by deterministic block replay in balance_consensus.rs
+pub struct RocksDbStateReader {
     db: Arc<DB>,
 }
 
 impl RocksDbStateReader {
-    fn new(db: Arc<DB>) -> Self {
+    pub fn new(db: Arc<DB>) -> Self {
         Self { db }
     }
 }

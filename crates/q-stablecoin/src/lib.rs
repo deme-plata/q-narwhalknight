@@ -72,7 +72,7 @@ pub struct QuantumStablecoinConfig {
     pub collateral_ratio: BigDecimal,
     /// Liquidation threshold (130% default)
     pub liquidation_threshold: BigDecimal,
-    /// Stability fee (5% annual)
+    /// Stability fee (8% annual, v8.6.0)
     pub stability_fee_annual: BigDecimal,
     /// Quantum uncertainty factor (for price deviation tolerance)
     pub quantum_uncertainty: f64,
@@ -95,7 +95,7 @@ impl Default for QuantumStablecoinConfig {
             quantum_stability_constant: "6.62607015e-34".parse().unwrap(), // Planck's constant scaled
             collateral_ratio: "1.5".parse().unwrap(),
             liquidation_threshold: "1.3".parse().unwrap(),
-            stability_fee_annual: "0.05".parse().unwrap(),
+            stability_fee_annual: "0.08".parse().unwrap(), // v8.6.0: 8% annual (was 5%)
             quantum_uncertainty: 0.01,           // 1% uncertainty tolerance
             wave_collapse_threshold: 0.10,       // 10% deviation triggers intervention
             uncertainty_principle_factor: 0.618, // Golden ratio for optimization

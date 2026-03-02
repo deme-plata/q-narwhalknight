@@ -279,8 +279,8 @@ async fn get_quantum_pair(
         volume_24h: BigDecimal::from(100000),
         fee_rate: 30, // 0.3%
         fee_tier: "0.003".parse().unwrap(),
-        min_trade_size: "0.001".parse().unwrap(),
-        max_trade_size: BigDecimal::from(1000000),
+        min_trade_size: "0.0001".parse().unwrap(), // v8.6.0: lowered from 0.001
+        max_trade_size: BigDecimal::from(10000000), // v8.6.0: raised from 1M to 10M
         liquidity: BigDecimal::from(1000000),
         quantum_secured: true,
         privacy_tier: QuantumPrivacyTier::Quantum,
@@ -314,8 +314,8 @@ async fn list_quantum_pairs(
         volume_24h: BigDecimal::from(100000),
         fee_rate: 30,
         fee_tier: "0.003".parse().unwrap(),
-        min_trade_size: "0.001".parse().unwrap(),
-        max_trade_size: BigDecimal::from(1000000),
+        min_trade_size: "0.0001".parse().unwrap(), // v8.6.0: lowered from 0.001
+        max_trade_size: BigDecimal::from(10000000), // v8.6.0: raised from 1M to 10M
         liquidity: BigDecimal::from(1000000),
         quantum_secured: true,
         privacy_tier: QuantumPrivacyTier::Quantum,

@@ -180,7 +180,7 @@ impl BalanceConsensusEngine {
     /// * `dev_wallet` - Development wallet address (receives 1% fee)
     pub fn new(genesis_timestamp: u64, dev_wallet: String) -> Self {
         // SECURITY FIX (v0.8.0-beta): Bounded cache size to prevent memory exhaustion
-        const MAX_CACHE_SIZE: usize = 100_000;  // ~5 MB memory (32 bytes hash + 1 byte bool + overhead ≈ 50 bytes per entry)
+        const MAX_CACHE_SIZE: usize = 500_000;  // v8.6.0: 5x increase (was 100_000), ~25 MB memory
 
         info!("💰 Initializing Balance Consensus Engine");
         info!("   Genesis timestamp: {} ({})", genesis_timestamp,
@@ -189,7 +189,7 @@ impl BalanceConsensusEngine {
                   .unwrap_or_else(|| "Invalid timestamp".to_string()));
         info!("   Dev wallet: {}", dev_wallet);
         info!("   Dev fee: {}% ({} bps)", DEV_FEE_BPS as f64 / 100.0, DEV_FEE_BPS);
-        info!("   🛡️  Memory protection: LRU cache limited to {} entries (~5 MB)", MAX_CACHE_SIZE);
+        info!("   🛡️  Memory protection: LRU cache limited to {} entries (~25 MB)", MAX_CACHE_SIZE);
         info!("   ✅ Adaptive rewards: Emission scales with throughput for 256-year timeline");
 
         // ✅ v0.9.99-beta: Initialize adaptive emission controller
@@ -1431,6 +1431,365 @@ impl BalanceConsensusEngine {
         // causing block rewards to exceed the remaining supply cap.
         Ok(controller.total_cumulative_emission())
     }
+}
+
+// =============================================================================
+// v8.7.3: Deterministic Block State Replay
+//
+// After STATE_REPLAY_ACTIVATION_HEIGHT, ALL transaction types (DEX swaps,
+// token creates, stablecoin mints, governance, etc.) are deterministically
+// replayed from blocks using StateProcessor + StateApplicator.
+//
+// This enables true P2P state decentralization: every node that has the same
+// blocks computes the same state. No new P2P messages needed.
+//
+// Coinbase and basic Transfer transactions are SKIPPED here because they are
+// already handled by the balance consensus engine above.
+// =============================================================================
+
+/// Replay non-coinbase/non-transfer state changes from a block (v8.7.3)
+///
+/// This function processes all "rich" transaction types (DEX, tokens, stablecoin,
+/// governance, AI credits, staking, contracts) through the StateProcessor pipeline,
+/// producing deterministic state changes that are applied atomically to RocksDB.
+///
+/// # Arguments
+/// * `db` - RocksDB handle (shared Arc)
+/// * `block` - Block to process
+///
+/// # Safety
+/// - Height-gated: only activates for blocks >= STATE_REPLAY_ACTIVATION_HEIGHT
+/// - Fail-open: errors are logged but don't block consensus
+/// - Idempotent: StateApplicator uses absolute values, not deltas (for most ops)
+/// - Skips coinbase + transfer (already handled by balance consensus)
+#[cfg(not(target_os = "windows"))]
+pub fn replay_block_state_changes(
+    db: &std::sync::Arc<rocksdb::DB>,
+    block: &QBlock,
+) {
+    use q_types::{STATE_REPLAY_ACTIVATION_HEIGHT, TransactionType};
+    use crate::state_processor::StateProcessor;
+    use crate::state_applicator::StateApplicator;
+    use crate::block_state_processor::RocksDbStateReader;
+
+    // Height gate: only process blocks at or above activation height
+    if block.header.height < STATE_REPLAY_ACTIVATION_HEIGHT {
+        return;
+    }
+
+    // Skip blocks with no transactions (common in DAG consensus)
+    if block.transactions.is_empty() {
+        return;
+    }
+
+    // Count non-coinbase/non-transfer transactions to avoid unnecessary setup
+    // v8.7.4: Also skip StableMint/StableBurn/VaultLiquidate — these are propagated in blocks
+    // for record-keeping, but the actual vault state updates happen via CollateralVault
+    // (synced through vault_data in StateSnapshotResponse). Processing them through
+    // StateProcessor would double-credit QUGUSD to token_balances, causing balance inflation.
+    let rich_tx_count = block.transactions.iter().filter(|tx| {
+        if tx.is_coinbase() || tx.effective_tx_type() == TransactionType::Transfer {
+            return false;
+        }
+        // Skip vault/stablecoin types — handled by CollateralVault path
+        !matches!(
+            tx.effective_tx_type(),
+            TransactionType::StableMint
+                | TransactionType::StableBurn
+                | TransactionType::VaultLiquidate
+                | TransactionType::VaultLock
+                | TransactionType::VaultUnlock
+        )
+    }).count();
+
+    if rich_tx_count == 0 {
+        return;
+    }
+
+    // Set up the processing pipeline
+    let state_reader = RocksDbStateReader::new(db.clone());
+    let mut processor = StateProcessor::new(1, 1000); // gas_price=1, chain_id=1000
+    processor.set_block_context(block.header.height, block.header.timestamp as i64);
+    let applicator = StateApplicator::new(db.clone(), true);
+
+    let mut applied_count = 0u32;
+    let mut error_count = 0u32;
+
+    for block_tx in &block.transactions {
+        let tx_type = block_tx.effective_tx_type();
+
+        // Skip coinbase and basic transfers — already handled by balance consensus
+        if block_tx.is_coinbase() || tx_type == TransactionType::Transfer {
+            continue;
+        }
+
+        // v8.7.4: Skip vault/stablecoin types — handled by CollateralVault sync path
+        if matches!(
+            tx_type,
+            TransactionType::StableMint
+                | TransactionType::StableBurn
+                | TransactionType::VaultLiquidate
+                | TransactionType::VaultLock
+                | TransactionType::VaultUnlock
+        ) {
+            debug!(
+                "🏦 [STATE REPLAY v8.7.4] Skipping {:?} tx at h={} (handled by vault sync)",
+                tx_type, block.header.height
+            );
+            continue;
+        }
+
+        match processor.process_transaction(block_tx, &state_reader) {
+            Ok(result) if result.error.is_none() && !result.changes.is_empty() => {
+                if let Err(e) = applicator.apply_changes(&result.changes, block.header.height) {
+                    warn!(
+                        "⚠️ [STATE REPLAY] Failed to apply {:?} state changes at h={}: {}",
+                        tx_type, block.header.height, e
+                    );
+                    error_count += 1;
+                } else {
+                    applied_count += 1;
+                    debug!(
+                        "🔄 [STATE REPLAY] Applied {:?} ({} changes) at h={}",
+                        tx_type, result.changes.len(), block.header.height
+                    );
+                }
+            }
+            Ok(result) if result.error.is_some() => {
+                debug!(
+                    "⚠️ [STATE REPLAY] Tx {:?} execution error at h={}: {:?}",
+                    tx_type, block.header.height, result.error
+                );
+                error_count += 1;
+            }
+            Ok(_) => {
+                // No changes produced (e.g., no-op transaction) — skip silently
+            }
+            Err(e) => {
+                warn!(
+                    "⚠️ [STATE REPLAY] Tx {:?} processing error at h={}: {}",
+                    tx_type, block.header.height, e
+                );
+                error_count += 1;
+            }
+        }
+    }
+
+    if applied_count > 0 {
+        info!(
+            "🔄 [STATE REPLAY] Block h={}: replayed {} rich txs ({} errors)",
+            block.header.height, applied_count, error_count
+        );
+    }
+}
+
+/// No-op stub for Windows builds (RocksDB not available)
+#[cfg(target_os = "windows")]
+pub fn replay_block_state_changes(
+    _db: &std::sync::Arc<()>,
+    _block: &QBlock,
+) {
+    // State replay requires RocksDB — not available on Windows
+}
+
+// =============================================================================
+// v8.7.3: Historical State Migration
+//
+// On first startup after upgrade, replays ALL existing blocks through the
+// StateProcessor to build complete DEX/token/stablecoin/governance state.
+// This ensures every node that has the same blocks computes identical state,
+// even for transactions that happened before this code existed.
+//
+// The migration is idempotent and runs once (flagged in CF_MANIFEST).
+// It processes blocks sequentially (lowest to highest) so state builds up
+// correctly (e.g., token must be created before it can be transferred).
+// =============================================================================
+
+/// Migration flag key in CF_MANIFEST
+const STATE_REPLAY_MIGRATION_FLAG: &[u8] = b"state_replay_migration_v1_complete";
+
+/// Replay all historical blocks through StateProcessor to build complete state.
+///
+/// This is called once on startup after upgrade. It iterates ALL blocks from
+/// height 1 to the current tip and replays non-coinbase/non-transfer transactions
+/// through StateProcessor + StateApplicator.
+///
+/// After completion, a flag is set in CF_MANIFEST to skip on future startups.
+///
+/// # Arguments
+/// * `storage` - QStorage instance for block retrieval and flag management
+///
+/// # Returns
+/// Number of blocks that had state changes applied
+#[cfg(not(target_os = "windows"))]
+pub async fn migrate_historical_state(
+    storage: &crate::QStorage,
+) -> anyhow::Result<u64> {
+    use q_types::TransactionType;
+    use crate::state_processor::StateProcessor;
+    use crate::state_applicator::StateApplicator;
+    use crate::block_state_processor::RocksDbStateReader;
+
+    // Check if migration already completed
+    if storage.has_migration_flag(STATE_REPLAY_MIGRATION_FLAG).await {
+        info!("✅ [STATE MIGRATION] Historical state replay already completed — skipping");
+        return Ok(0);
+    }
+
+    // Get the RocksDB handle
+    let db = match storage.get_rocks_db_handle() {
+        Some(db) => db,
+        None => {
+            warn!("⚠️ [STATE MIGRATION] No RocksDB handle available — skipping migration");
+            return Ok(0);
+        }
+    };
+
+    // Get current chain tip
+    let tip_height = storage
+        .get_latest_qblock_height()
+        .await?
+        .unwrap_or(0);
+
+    if tip_height == 0 {
+        info!("✅ [STATE MIGRATION] No blocks in database — nothing to migrate");
+        storage.set_migration_flag(STATE_REPLAY_MIGRATION_FLAG).await;
+        return Ok(0);
+    }
+
+    info!("🔄 [STATE MIGRATION] Starting historical state replay: {} blocks to process", tip_height);
+    info!("   This rebuilds DEX pools, token balances, stablecoin vaults, and all other state");
+    info!("   from the block history. This is a ONE-TIME operation.");
+
+    let state_reader = RocksDbStateReader::new(db.clone());
+    let mut processor = StateProcessor::new(1, 1000); // gas_price=1, chain_id=1000
+    let applicator = StateApplicator::new(db.clone(), true);
+
+    let mut blocks_with_state = 0u64;
+    let mut total_changes = 0u64;
+    let mut total_errors = 0u64;
+    let start_time = std::time::Instant::now();
+    let mut last_log_time = std::time::Instant::now();
+
+    // Process blocks sequentially from genesis to tip
+    // Use batched reads for performance (100 blocks at a time)
+    let batch_size = 100usize;
+    let mut height = 1u64;
+
+    while height <= tip_height {
+        // Read batch of blocks using get_qblocks_range(start_height, limit)
+        let blocks = storage.get_qblocks_range(height, batch_size).await.unwrap_or_default();
+        let batch_end = if blocks.is_empty() {
+            // No blocks found — skip ahead
+            height + batch_size as u64 - 1
+        } else {
+            // Use highest block in batch
+            blocks.last().map(|b| b.header.height).unwrap_or(height + batch_size as u64 - 1)
+        };
+
+        for block in &blocks {
+            // Skip blocks with no transactions
+            if block.transactions.is_empty() {
+                continue;
+            }
+
+            // Count non-coinbase/non-transfer transactions
+            let rich_txs: Vec<_> = block.transactions.iter().filter(|tx| {
+                !tx.is_coinbase() && tx.effective_tx_type() != TransactionType::Transfer
+            }).collect();
+
+            if rich_txs.is_empty() {
+                continue;
+            }
+
+            // Set block context for the processor
+            processor.set_block_context(block.header.height, block.header.timestamp as i64);
+
+            let mut block_changes = 0u32;
+            for block_tx in &rich_txs {
+                match processor.process_transaction(block_tx, &state_reader) {
+                    Ok(result) if result.error.is_none() && !result.changes.is_empty() => {
+                        match applicator.apply_changes(&result.changes, block.header.height) {
+                            Ok(_) => {
+                                block_changes += result.changes.len() as u32;
+                            }
+                            Err(e) => {
+                                // Don't fail the migration — log and continue
+                                trace!(
+                                    "⚠️ [STATE MIGRATION] Apply error at h={} {:?}: {}",
+                                    block.header.height, block_tx.effective_tx_type(), e
+                                );
+                                total_errors += 1;
+                            }
+                        }
+                    }
+                    Ok(result) if result.error.is_some() => {
+                        // Transaction execution error (e.g., insufficient balance) — expected for some txs
+                        trace!(
+                            "[STATE MIGRATION] Tx error at h={}: {:?}",
+                            block.header.height, result.error
+                        );
+                        total_errors += 1;
+                    }
+                    Err(e) => {
+                        trace!(
+                            "⚠️ [STATE MIGRATION] Process error at h={}: {}",
+                            block.header.height, e
+                        );
+                        total_errors += 1;
+                    }
+                    _ => {} // No changes produced
+                }
+            }
+
+            if block_changes > 0 {
+                blocks_with_state += 1;
+                total_changes += block_changes as u64;
+            }
+        }
+
+        height = batch_end + 1;
+
+        // Progress logging every 5 seconds
+        if last_log_time.elapsed().as_secs() >= 5 {
+            let progress_pct = (height as f64 / tip_height as f64 * 100.0).min(100.0);
+            let elapsed = start_time.elapsed();
+            let blocks_per_sec = height as f64 / elapsed.as_secs_f64();
+            let eta_secs = if blocks_per_sec > 0.0 {
+                ((tip_height - height) as f64 / blocks_per_sec) as u64
+            } else {
+                0
+            };
+            info!(
+                "🔄 [STATE MIGRATION] {:.1}% — h={}/{} — {} state blocks, {} changes, {} errors — {:.0} blocks/s — ETA {}s",
+                progress_pct, height, tip_height, blocks_with_state, total_changes, total_errors,
+                blocks_per_sec, eta_secs
+            );
+            last_log_time = std::time::Instant::now();
+        }
+    }
+
+    let elapsed = start_time.elapsed();
+
+    // Set migration flag so this doesn't run again
+    storage.set_migration_flag(STATE_REPLAY_MIGRATION_FLAG).await;
+
+    info!("✅ [STATE MIGRATION] Historical state replay complete!");
+    info!("   Blocks processed: {}", tip_height);
+    info!("   Blocks with state changes: {}", blocks_with_state);
+    info!("   Total state changes applied: {}", total_changes);
+    info!("   Errors (non-fatal): {}", total_errors);
+    info!("   Duration: {:.1}s ({:.0} blocks/s)", elapsed.as_secs_f64(), tip_height as f64 / elapsed.as_secs_f64());
+
+    Ok(blocks_with_state)
+}
+
+/// Windows stub
+#[cfg(target_os = "windows")]
+pub async fn migrate_historical_state(
+    _storage: &crate::QStorage,
+) -> anyhow::Result<u64> {
+    Ok(0)
 }
 
 /// Storage trait for balance updates

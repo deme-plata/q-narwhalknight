@@ -315,8 +315,8 @@ impl QuantumDexManager {
                 .to_u16()
                 .unwrap_or(30), // 30 basis points = 0.3% default
             fee_tier: pool.fee_rate.clone(),
-            min_trade_size: "0.001".parse().unwrap(),
-            max_trade_size: "1000000".parse().unwrap(),
+            min_trade_size: "0.0001".parse().unwrap(), // v8.6.0: lowered from 0.001 for smaller trades
+            max_trade_size: "10000000".parse().unwrap(), // v8.6.0: raised from 1M to 10M for larger trades
             quantum_secured: true,
             privacy_tier: QuantumPrivacyTier::Quantum,
             zk_proof_required: false,
@@ -590,7 +590,7 @@ impl QuantumDexManager {
             reserve_base: initial_reserve_base,
             reserve_quote: initial_reserve_quote,
             total_shares: initial_shares,
-            fee_rate: "0.003".parse().unwrap(), // 0.3% default fee
+            fee_rate: "0.010".parse().unwrap(), // v8.6.0: 1.0% protocol fee (was 0.3%)
             created_at: Utc::now(),
             creator,
             is_active: true,

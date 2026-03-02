@@ -47,6 +47,7 @@ use crate::AppState;
 const ALPHA_URL: &str = "http://161.35.219.10:8080";
 const GAMMA_URL: &str = "http://109.205.176.60:8080";
 const DELTA_URL: &str = "http://5.79.79.158:8080";
+const EPSILON_URL: &str = "http://89.149.241.126:8080";
 const GAMMA_IP: &str = "109.205.176.60";
 
 /// Status of a single server node
@@ -73,6 +74,7 @@ pub struct DeployStatus {
     pub beta: NodeDeployStatus,
     pub gamma: NodeDeployStatus,
     pub delta: NodeDeployStatus,
+    pub epsilon: NodeDeployStatus,
     pub height_delta: i64,
     pub versions_match: bool,
 }
@@ -144,13 +146,13 @@ fn is_master_wallet(headers: &HeaderMap, state: &AppState) -> bool {
 
 /// GET /api/v1/admin/deploy/status
 /// Returns status of both Beta and Gamma servers
+/// v8.6.4: Made public (read-only) — all logged-in users can see node status
 pub async fn deploy_status(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<DeployStatus>>, StatusCode> {
-    if !is_master_wallet(&headers, &state) {
-        return Err(StatusCode::FORBIDDEN);
-    }
+    // v8.6.4: Status is read-only, allow all authenticated users
+    // Deploy/rollback actions still require master wallet
 
     // Get Beta (local) status directly from AppState
     let beta_height = state
@@ -189,7 +191,20 @@ pub async fn deploy_status(
 
     // v1.0.2: Get detailed sync status from local TurboSync
     let beta_sync_details = if let Some(ref turbo_sync) = state.turbo_sync {
-        Some(turbo_sync.get_detailed_sync_status().await)
+        let mut details = turbo_sync.get_detailed_sync_status().await;
+        // Enrich with FlightComputer telemetry
+        if let Some(ref fc) = state.flight_computer {
+            if let Ok(fc_guard) = fc.try_read() {
+                let pc = turbo_sync.cached_peer_count.load(std::sync::atomic::Ordering::Relaxed);
+                let telem = fc_guard.telemetry(pc);
+                details.starship_phase = telem.phase;
+                details.phase_duration_secs = telem.phase_duration_secs;
+                details.orbit_stable = telem.orbit_stable;
+                details.station_keeping_peer_health = telem.peer_health;
+                details.mission_elapsed_secs = telem.mission_elapsed_secs;
+            }
+        }
+        Some(details)
     } else {
         None
     };
@@ -207,11 +222,12 @@ pub async fn deploy_status(
         sync_details: beta_sync_details,
     };
 
-    // Get Alpha, Gamma, and Delta status via HTTP (parallel)
-    let (alpha, gamma, delta) = tokio::join!(
+    // Get Alpha, Gamma, Delta, and Epsilon status via HTTP (parallel)
+    let (alpha, gamma, delta, epsilon) = tokio::join!(
         fetch_node_status("Server Alpha", ALPHA_URL),
         fetch_node_status("Server Gamma", GAMMA_URL),
         fetch_node_status("Server Delta", DELTA_URL),
+        fetch_node_status("Server Epsilon", EPSILON_URL),
     );
 
     let height_delta = beta.height as i64 - gamma.height as i64;
@@ -223,6 +239,7 @@ pub async fn deploy_status(
         beta,
         gamma,
         delta,
+        epsilon,
         height_delta,
         versions_match,
     })))
@@ -1051,9 +1068,15 @@ fn determine_cosmic_phase(
         0.5
     };
 
+    let min_uptime = [status.beta.uptime_secs, status.gamma.uptime_secs]
+        .into_iter()
+        .chain(if status.epsilon.online { Some(status.epsilon.uptime_secs) } else { None })
+        .min()
+        .unwrap_or(0);
+
     DeployCosmicPhase::Harmony {
         collective_k,
-        harmony_duration_secs: status.beta.uptime_secs.min(status.gamma.uptime_secs),
+        harmony_duration_secs: min_uptime,
         version: status.beta.version.clone(),
     }
 }
@@ -1090,13 +1113,12 @@ fn gardener_wisdom(k: f64, phase: &DeployCosmicPhase) -> String {
 
 /// GET /api/v1/admin/deploy/convergence
 /// Returns CCC convergence phase, K-parameters, and readiness assessment.
+/// v8.6.4: Made public (read-only) — all logged-in users can see convergence status
 pub async fn deploy_convergence(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<ConvergenceStatus>>, StatusCode> {
-    if !is_master_wallet(&headers, &state) {
-        return Err(StatusCode::FORBIDDEN);
-    }
+    // v8.6.4: Convergence is read-only status, allow all users
 
     // Gather status from all nodes (same as deploy_status)
     let beta_height = state
@@ -1129,7 +1151,19 @@ pub async fn deploy_convergence(
     };
 
     let conv_beta_sync_details = if let Some(ref turbo_sync) = state.turbo_sync {
-        Some(turbo_sync.get_detailed_sync_status().await)
+        let mut details = turbo_sync.get_detailed_sync_status().await;
+        if let Some(ref fc) = state.flight_computer {
+            if let Ok(fc_guard) = fc.try_read() {
+                let pc = turbo_sync.cached_peer_count.load(std::sync::atomic::Ordering::Relaxed);
+                let telem = fc_guard.telemetry(pc);
+                details.starship_phase = telem.phase;
+                details.phase_duration_secs = telem.phase_duration_secs;
+                details.orbit_stable = telem.orbit_stable;
+                details.station_keeping_peer_health = telem.peer_health;
+                details.mission_elapsed_secs = telem.mission_elapsed_secs;
+            }
+        }
+        Some(details)
     } else {
         None
     };
@@ -1147,10 +1181,11 @@ pub async fn deploy_convergence(
         sync_details: conv_beta_sync_details,
     };
 
-    let (alpha, gamma, delta) = tokio::join!(
+    let (alpha, gamma, delta, epsilon) = tokio::join!(
         fetch_node_status("Server Alpha", ALPHA_URL),
         fetch_node_status("Server Gamma", GAMMA_URL),
         fetch_node_status("Server Delta", DELTA_URL),
+        fetch_node_status("Server Epsilon", EPSILON_URL),
     );
 
     let height_delta = beta.height as i64 - gamma.height as i64;
@@ -1162,25 +1197,27 @@ pub async fn deploy_convergence(
         beta: beta.clone(),
         gamma: gamma.clone(),
         delta: delta.clone(),
+        epsilon: epsilon.clone(),
         height_delta,
         versions_match,
     };
 
     // Calculate K-Kristensen for each node
-    let max_height = [beta.height, gamma.height, alpha.height, delta.height]
+    let max_height = [beta.height, gamma.height, alpha.height, delta.height, epsilon.height]
         .iter()
         .copied()
         .max()
         .unwrap_or(1);
-    let expected_peers = 4usize; // 4-server network
+    let expected_peers = 5usize; // 5-server network
 
     let k_alpha = node_to_k_metrics(&alpha, &beta_version, max_height, expected_peers);
     let k_beta = node_to_k_metrics(&beta, &beta_version, max_height, expected_peers);
     let k_gamma = node_to_k_metrics(&gamma, &beta_version, max_height, expected_peers);
     let k_delta = node_to_k_metrics(&delta, &beta_version, max_height, expected_peers);
+    let k_epsilon = node_to_k_metrics(&epsilon, &beta_version, max_height, expected_peers);
 
     // Collective K: average of online nodes (paper Section 4.1)
-    let online_nodes: Vec<&NodeKMetrics> = [&k_alpha, &k_beta, &k_gamma, &k_delta]
+    let online_nodes: Vec<&NodeKMetrics> = [&k_alpha, &k_beta, &k_gamma, &k_delta, &k_epsilon]
         .iter()
         .filter(|n| n.k_parameter > 0.0)
         .copied()
@@ -1222,7 +1259,7 @@ pub async fn deploy_convergence(
 
     Ok(Json(ApiResponse::success(ConvergenceStatus {
         cosmic_phase,
-        nodes: vec![k_alpha, k_beta, k_gamma, k_delta],
+        nodes: vec![k_alpha, k_beta, k_gamma, k_delta, k_epsilon],
         collective_k,
         predicted_outcome,
         convergence_safe,

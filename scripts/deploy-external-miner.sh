@@ -26,7 +26,7 @@ NC='\033[0m' # No Color
 # Configuration
 BOOTSTRAP_API="https://quillon.xyz/api/v1"
 MINER_DIR="/opt/q-miner"
-MINER_BINARY_URL="https://quillon.xyz/downloads/q-miner-linux-x64"
+MINER_BINARY_URL="https://dl.quillon.xyz/downloads/q-miner-linux-x64"
 SERVICE_NAME="q-miner"
 MINER_THREADS=4
 

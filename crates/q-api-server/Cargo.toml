@@ -81,7 +81,7 @@ uuid = { workspace = true }
 bincode = { workspace = true }
 
 # HTTP client for automatic bootstrap discovery
-reqwest = { version = "0.12", features = ["blocking", "json"] }
+reqwest = { version = "0.12", features = ["blocking", "json", "stream"] }
 
 # v7.3.2: Quillon Mail - DNS resolver for MX/SPF/DKIM lookups
 hickory-resolver = "0.24"
@@ -103,6 +103,7 @@ tracing-subscriber = { workspace = true }
 # Configuration
 config = { workspace = true }
 dotenvy = "0.15"  # Load .env file for environment variables (Stripe keys, etc.)
+open = "5"  # Cross-platform browser opening for setup wizard
 dirs = "5.0"  # Home directory detection for AEGIS-QL key loading
 once_cell = "1.19"  # v1.1.9: Lazy static for P2P balance deduplication cache
 lru = "0.12"  # v1.1.9: LRU cache for P2P balance update deduplication
@@ -128,6 +129,7 @@ q-resonance = { path = "../q-resonance", optional = true } # K-Parameter quantum
 q-vdf = { path = "../q-vdf" }
 q-quantum-crypto = { path = "../q-quantum-crypto" }
 q-dex = { path = "../q-dex" } # ✅ ENABLED - BigDecimal issues fixed!
+q-dune = { path = "../q-dune" } # ✅ v8.6.5: Dune Analytics data pipeline
 q-oracle = { path = "../q-oracle" } # ✅ ENABLED - All compilation errors resolved!
 # q-stablecoin = { path = "../q-stablecoin" } # Disabled - depends on q-dex
 q-quillon-bank = { path = "../q-quillon-bank" } # ✅ ENABLED - Quantum banking with CDP
@@ -168,6 +170,7 @@ lopdf = "0.32"  # Low-level PDF manipulation
 # Real-time event streaming
 tokio-util = { version = "0.7", features = ["codec"] }
 async-stream = "0.3"  # async stream! macro for SSE streaming
+zstd = "0.13"  # v1.0.2: ZStd compression for P2P peer height announcements
 pin-project-lite = "0.2"
 hex = "0.4"
 rand = "0.8"

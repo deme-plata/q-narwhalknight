@@ -135,22 +135,26 @@ impl RocksDBKV {
         };
 
         // RAM tier determines all memory-sensitive defaults
+        // v8.6.0: Added "xxlarge" tier for 64GB+ systems
         let ram_tier = match total_ram_mb {
             0..=3999     => "micro",    // ≤4 GB: bare minimum
             4000..=7999  => "small",    // 4-8 GB: Gamma-class (7.8 GB)
             8000..=15999 => "medium",   // 8-16 GB: comfortable
             16000..=31999 => "large",   // 16-32 GB: recommended
-            _            => "xlarge",   // 32+ GB: power user (Beta 94 GB)
+            32000..=63999 => "xlarge",  // 32-64 GB: power user
+            _            => "xxlarge",  // 64+ GB: high-memory (Beta 94 GB)
         };
 
         // Auto-scale block cache: 2-25% of RAM depending on tier
         // v6.1.0: Reduced small tier to 128MB fixed to prevent OOM on Gamma (7.8GB)
+        // v8.6.0: Doubled large/xlarge/xxlarge tiers for better read throughput
         let auto_cache_mb = match ram_tier {
             "micro"  => 64,                                               // 64 MB fixed
             "small"  => 128,                                              // 128 MB fixed (was 256, OOM fix)
             "medium" => (total_ram_mb * 15 / 100).clamp(512, 2048),     // 15% of RAM, 512 MB-2 GB
-            "large"  => (total_ram_mb * 20 / 100).clamp(1024, 4096),    // 20% of RAM, 1-4 GB
-            _        => (total_ram_mb * 25 / 100).clamp(2048, 16384),   // 25% of RAM, 2-16 GB
+            "large"  => (total_ram_mb * 25 / 100).clamp(2048, 8192),    // v8.6.0: 25% of RAM, 2-8 GB (was 1-4 GB)
+            "xlarge" => (total_ram_mb * 30 / 100).clamp(4096, 16384),   // v8.6.0: 30% of RAM, 4-16 GB (was 2-16 GB)
+            _        => (total_ram_mb * 35 / 100).clamp(8192, 24576),   // v8.6.0: 35% of RAM, 8-24 GB (64GB+ tier)
         };
 
         // Auto-scale write buffer size (DB-level default CF)
@@ -287,13 +291,13 @@ impl RocksDBKV {
         // ========== WAL (Write-Ahead Log) PROTECTION ==========
         opts.set_wal_ttl_seconds(300); // 5 minutes - delete after flush
         opts.set_wal_size_limit_mb(256); // 256MB max - prevents unbounded growth
-        opts.set_max_total_wal_size(64 * 1024 * 1024); // 64MB total WAL budget
+        opts.set_max_total_wal_size(128 * 1024 * 1024); // v8.6.0: 128MB total WAL budget (was 64MB — larger budget reduces WAL rotation stalls)
         // ChatGPT P0: DO NOT set manual_wal_flush(true) - auto flush is safer
         // opts.set_manual_wal_flush(true); // DISABLED per ChatGPT recommendation
 
         // ========== STEADY IO (PREVENT BURST CORRUPTION) ==========
-        opts.set_bytes_per_sync(1024 * 1024); // 1 MiB - sync data in steady chunks
-        opts.set_wal_bytes_per_sync(1024 * 1024); // 1 MiB - sync WAL in steady chunks
+        opts.set_bytes_per_sync(4 * 1024 * 1024); // v8.6.0: 4 MiB - sync data in steady chunks (was 1 MiB)
+        opts.set_wal_bytes_per_sync(4 * 1024 * 1024); // v8.6.0: 4 MiB - sync WAL in steady chunks (was 1 MiB)
 
         // v8.4.4: RocksDB write rate limiter — prevents sync writes from monopolizing disk I/O.
         // During bulk sync, compaction/flush writes can saturate the disk, stalling API reads.
@@ -330,7 +334,7 @@ impl RocksDBKV {
             "micro"  => 32,   // 32MB — very tight
             "small"  => 64,   // 64MB — forces aggressive flushing (was 128, OOM)
             "medium" => 256,  // 256MB
-            _        => 384,  // 384MB — original value for large servers
+            _        => 512,  // v8.6.0: 512MB — higher memtable budget for write throughput (was 384MB)
         };
         opts.set_db_write_buffer_size(memtable_budget_mb * 1024 * 1024);
         info!("🗄️ RocksDB memtable budget: {}MB (tier={})", memtable_budget_mb, ram_tier);
@@ -663,7 +667,7 @@ impl RocksDBKV {
         // Root cause: avoid_flush_during_shutdown=true + unlimited WAL = data loss
         opts.set_write_buffer_size(Self::scale_write_buffer(16)); // 16MB - balanced (~1600 blocks/flush)
         opts.set_min_write_buffer_number_to_merge(1); // Flush immediately
-        opts.set_max_write_buffer_number(2); // Double buffering
+        opts.set_max_write_buffer_number(4); // v8.6.0: quad buffering for write throughput (was 2)
         opts.set_disable_auto_compactions(false); // Enable auto compactions
         opts.set_level_zero_file_num_compaction_trigger(2); // Compact aggressively
 
@@ -726,6 +730,7 @@ impl RocksDBKV {
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4); // Efficient compression
         opts.set_write_buffer_size(Self::scale_write_buffer(64)); // 64MB write buffer
         opts.set_target_file_size_base(128 * 1024 * 1024); // 128MB target file size
+        opts.set_max_write_buffer_number(4); // v8.6.0: quad buffering for write throughput
 
         Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(CF_TRANSACTIONS, opts)
@@ -736,11 +741,11 @@ impl RocksDBKV {
     fn create_balances_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4); // Efficient compression
-        opts.set_write_buffer_size(Self::scale_write_buffer(32)); // 32MB write buffer (frequent updates)
-        opts.set_target_file_size_base(64 * 1024 * 1024); // 64MB target file size
+        opts.set_write_buffer_size(Self::scale_write_buffer(64)); // v8.6.0: 64MB write buffer for higher throughput (was 32MB)
+        opts.set_target_file_size_base(128 * 1024 * 1024); // v8.6.0: 128MB target file size (was 64MB)
 
         // Optimize for frequent balance updates
-        opts.set_max_write_buffer_number(2); // Double buffering for high write load
+        opts.set_max_write_buffer_number(4); // v8.6.0: quad buffering for write throughput (was 2)
         opts.set_level_zero_file_num_compaction_trigger(4); // Compact when 4 files accumulate
 
         Self::apply_shared_block_cache(&mut opts, cache);
@@ -877,7 +882,7 @@ impl RocksDBKV {
 
         // Large values, optimize for sequential writes
         opts.set_write_buffer_size(Self::scale_write_buffer(256)); // 256MB
-        opts.set_max_write_buffer_number(2);
+        opts.set_max_write_buffer_number(4); // v8.6.0: quad buffering for write throughput (was 2)
         opts.set_target_file_size_base(512 * 1024 * 1024); // 512MB
 
         Self::apply_shared_block_cache(&mut opts, cache);
@@ -949,7 +954,7 @@ impl RocksDBKV {
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
         // Keys are 64 bytes (account + token), values are 8 bytes (u64 balance)
         opts.set_write_buffer_size(Self::scale_write_buffer(64)); // 64MB
-        opts.set_max_write_buffer_number(2);
+        opts.set_max_write_buffer_number(4); // v8.6.0: quad buffering for write throughput (was 2)
         // v6.0.8: Removed optimize_for_point_lookup (created separate 256MB cache, overridden by shared cache anyway)
         Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_TOKEN_BALANCES, opts)
@@ -1021,7 +1026,7 @@ impl RocksDBKV {
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
         // Largest CF - contract storage can be huge
         opts.set_write_buffer_size(Self::scale_write_buffer(128)); // 128MB
-        opts.set_max_write_buffer_number(2);
+        opts.set_max_write_buffer_number(4); // v8.6.0: quad buffering for write throughput (was 2)
         Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_CONTRACT_STORAGE, opts)
     }
@@ -1707,21 +1712,25 @@ impl KVStore for RocksDBKV {
     }
 
     async fn compact(&self) -> Result<()> {
-        // Use static list since cf_names() is removed in RocksDB 0.22
-        let cf_names = vec![
-            "default",
-            "blocks",
-            "dag_vertices",
-            "bullshark_cert",
-            "manifest",
-        ];
-        for cf_name in cf_names {
-            if let Some(cf_handle) = self.db.cf_handle(cf_name) {
-                debug!("🗜️ Compacting column family: {}", cf_name);
-                self.db
-                    .compact_range_cf(&cf_handle, None::<&[u8]>, None::<&[u8]>);
+        // v8.7.2: Run compaction on a blocking thread to avoid starving the tokio runtime.
+        // compact_range_cf is synchronous and can take minutes on large DBs — if it runs
+        // on a tokio worker thread it blocks all HTTP requests, causing 504 timeouts.
+        let db = self.db.clone();
+        tokio::task::spawn_blocking(move || {
+            let cf_names = vec![
+                "default",
+                "blocks",
+                "dag_vertices",
+                "bullshark_cert",
+                "manifest",
+            ];
+            for cf_name in cf_names {
+                if let Some(cf_handle) = db.cf_handle(cf_name) {
+                    debug!("🗜️ Compacting column family: {}", cf_name);
+                    db.compact_range_cf(&cf_handle, None::<&[u8]>, None::<&[u8]>);
+                }
             }
-        }
+        }).await.map_err(|e| anyhow::anyhow!("Compaction task failed: {}", e))?;
         Ok(())
     }
 

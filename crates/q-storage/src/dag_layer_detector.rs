@@ -63,7 +63,8 @@ pub struct DagLayerDetector {
 }
 
 /// Default maximum pending headers (prevents memory exhaustion)
-const DEFAULT_MAX_PENDING: usize = 10_000;
+/// v8.6.0: Increased from 10K to 20K — consistent with sync_state_manager
+const DEFAULT_MAX_PENDING: usize = 20_000;
 
 /// Default memory window size in layers
 const DEFAULT_WINDOW_SIZE: usize = 100;

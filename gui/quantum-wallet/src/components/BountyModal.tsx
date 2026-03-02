@@ -12,6 +12,8 @@ const BOUNTY_URL = 'https://bounty.quillon.xyz';
 
 interface BountyModalProps {
   onClose: () => void;
+  /** Ref to the TopBar bounty button — genie animation flies into this element */
+  genieTargetRef?: React.RefObject<HTMLElement | null>;
 }
 
 // ─── Hexagonal Particle Grid ──────────────────────────────────────────────
@@ -280,14 +282,45 @@ const ShootingStar: React.FC<{ delay: number; color: string }> = ({ delay, color
 // ═══════════════════════════════════════════════════════════════════════════
 // MAIN BOUNTY MODAL
 // ═══════════════════════════════════════════════════════════════════════════
-export default function BountyModal({ onClose }: BountyModalProps) {
+export default function BountyModal({ onClose, genieTargetRef }: BountyModalProps) {
   const [step, setStep] = useState(0);
   const totalSteps = 4;
+  const [isClosing, setIsClosing] = useState(false);
+  const cardRef = useRef<HTMLDivElement>(null);
+  const [genieAnim, setGenieAnim] = useState<{
+    x: number; y: number; scale: number; opacity: number;
+  } | null>(null);
 
   const handleClose = useCallback(() => {
     localStorage.setItem(STORAGE_KEY, 'true');
-    onClose();
-  }, [onClose]);
+
+    // If we have a genie target, animate into it
+    if (genieTargetRef?.current && cardRef.current) {
+      const targetRect = genieTargetRef.current.getBoundingClientRect();
+      const cardRect = cardRef.current.getBoundingClientRect();
+
+      // Calculate delta to move card center → target center
+      const targetCenterX = targetRect.left + targetRect.width / 2;
+      const targetCenterY = targetRect.top + targetRect.height / 2;
+      const cardCenterX = cardRect.left + cardRect.width / 2;
+      const cardCenterY = cardRect.top + cardRect.height / 2;
+
+      setGenieAnim({
+        x: targetCenterX - cardCenterX,
+        y: targetCenterY - cardCenterY,
+        scale: targetRect.width / cardRect.width,
+        opacity: 0,
+      });
+      setIsClosing(true);
+
+      // Wait for animation to complete, then unmount
+      setTimeout(() => {
+        onClose();
+      }, 500);
+    } else {
+      onClose();
+    }
+  }, [onClose, genieTargetRef]);
 
   const handleNext = () => setStep(s => Math.min(s + 1, totalSteps - 1));
   const handlePrev = () => setStep(s => Math.max(s - 1, 0));
@@ -346,9 +379,9 @@ export default function BountyModal({ onClose }: BountyModalProps) {
             {/* Big reward stats */}
             <div className="grid grid-cols-3 gap-3 mb-6">
               {[
-                { label: 'Total Pool', value: 50000, suffix: ' QUG', color: '#10B981', icon: <Gift className="w-4 h-4" /> },
+                { label: 'Daily Pool', value: 306, suffix: ' USD', color: '#10B981', icon: <Gift className="w-4 h-4" /> },
                 { label: 'Categories', value: 5, suffix: '', color: '#F43F5E', icon: <Target className="w-4 h-4" /> },
-                { label: 'Max Bonus', value: 2.4, suffix: 'x', color: '#8B5CF6', icon: <Flame className="w-4 h-4" />, decimals: 1 },
+                { label: 'Max Bonus', value: 2.0, suffix: 'x', color: '#8B5CF6', icon: <Flame className="w-4 h-4" />, decimals: 1 },
               ].map((stat, i) => (
                 <motion.div
                   key={stat.label}
@@ -553,7 +586,7 @@ export default function BountyModal({ onClose }: BountyModalProps) {
                 WebkitBackgroundClip: 'text',
                 WebkitTextFillColor: 'transparent',
               }}>
-                <AnimCounter target={2.4} suffix="x" decimals={1} duration={1500} />
+                <AnimCounter target={2.4} suffix="x" decimals={1} duration={1500} /> {/* 2.0x early + 1.2x consistency */}
               </p>
             </motion.div>
           </motion.div>
@@ -649,8 +682,9 @@ export default function BountyModal({ onClose }: BountyModalProps) {
     <AnimatePresence>
       <motion.div
         initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
+        animate={{ opacity: isClosing ? 0 : 1 }}
         exit={{ opacity: 0 }}
+        transition={{ duration: isClosing ? 0.4 : 0.2 }}
         onClick={handleClose}
         style={{
           position: 'fixed',
@@ -672,12 +706,22 @@ export default function BountyModal({ onClose }: BountyModalProps) {
         <ShootingStar delay={9} color="#8B5CF6" />
         <ShootingStar delay={13} color="#06B6D4" />
 
-        {/* Modal card */}
+        {/* Modal card — genie animation on close */}
         <motion.div
+          ref={cardRef}
           initial={{ scale: 0.85, opacity: 0, y: 30 }}
-          animate={{ scale: 1, opacity: 1, y: 0 }}
+          animate={genieAnim ? {
+            x: genieAnim.x,
+            y: genieAnim.y,
+            scale: genieAnim.scale,
+            opacity: 0,
+            borderRadius: 100,
+          } : { scale: 1, opacity: 1, y: 0 }}
           exit={{ scale: 0.85, opacity: 0, y: 30 }}
-          transition={{ type: 'spring', damping: 22, stiffness: 280 }}
+          transition={genieAnim ? {
+            duration: 0.45,
+            ease: [0.4, 0, 0.2, 1],
+          } : { type: 'spring', damping: 22, stiffness: 280 }}
           onClick={e => e.stopPropagation()}
           style={{
             position: 'relative',

@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{timeout, Duration};
-use tracing::{debug, error, info, warn}; // For .catch_unwind() on async functions
+use tracing::{debug, error, info, trace, warn}; // For .catch_unwind() on async functions
 
 use crate::block_producer::{BlockProducer, BlockProducerConfig};
 
@@ -178,6 +178,17 @@ pub enum ProducerCommand {
     /// 💰 v7.1.5: Set configurable dev fee (shared atomic)
     SetDevFeeBps {
         dev_fee_bps: Arc<std::sync::atomic::AtomicU64>,
+    },
+
+    /// 💰 v8.6.1: Set operator fee share (promille of dev fee to admin wallet)
+    SetOperatorFee {
+        promille: Arc<std::sync::atomic::AtomicU64>,
+        admin_wallet: String,
+    },
+
+    /// 💰 v8.7.0: Set distributed operators for fee splitting
+    SetDistributedOperators {
+        operators: Vec<crate::block_producer::OperatorRewardEntry>,
     },
 
     /// Shutdown the producer task gracefully
@@ -401,6 +412,16 @@ impl LockFreeProducer {
 
                 ProducerCommand::SetDevFeeBps { dev_fee_bps } => {
                     producer.set_dev_fee_bps(dev_fee_bps);
+                }
+
+                ProducerCommand::SetOperatorFee { promille, admin_wallet } => {
+                    producer.set_operator_fee(promille, admin_wallet);
+                }
+
+                ProducerCommand::SetDistributedOperators { operators } => {
+                    let count = operators.len();
+                    producer.set_distributed_operators(operators);
+                    trace!("💰 Producer #{}: Distributed operators updated ({} entries)", producer_id, count);
                 }
 
                 ProducerCommand::Shutdown => {
@@ -661,6 +682,17 @@ impl LockFreeProducer {
                 ProducerCommand::SetDevFeeBps { dev_fee_bps } => {
                     producer.set_dev_fee_bps(dev_fee_bps);
                     info!("💰 Producer #{}: Dev fee BPS updated (storage loop)", producer_id);
+                }
+
+                ProducerCommand::SetOperatorFee { promille, admin_wallet } => {
+                    producer.set_operator_fee(promille, admin_wallet);
+                    info!("💰 Producer #{}: Operator fee updated (storage loop)", producer_id);
+                }
+
+                ProducerCommand::SetDistributedOperators { operators } => {
+                    let count = operators.len();
+                    producer.set_distributed_operators(operators);
+                    trace!("💰 Producer #{}: Distributed operators updated ({} entries, storage loop)", producer_id, count);
                 }
 
                 ProducerCommand::Shutdown => {
@@ -1127,6 +1159,16 @@ impl LockFreeProducer {
     /// 💰 v7.1.5: Set configurable dev fee
     pub fn set_dev_fee_bps(&self, dev_fee_bps: Arc<std::sync::atomic::AtomicU64>) {
         let _ = self.command_tx.try_send(ProducerCommand::SetDevFeeBps { dev_fee_bps });
+    }
+
+    /// 💰 v8.6.1: Set operator fee share
+    pub fn set_operator_fee(&self, promille: Arc<std::sync::atomic::AtomicU64>, admin_wallet: String) {
+        let _ = self.command_tx.try_send(ProducerCommand::SetOperatorFee { promille, admin_wallet });
+    }
+
+    /// 💰 v8.7.0: Set distributed operators for fee splitting
+    pub fn set_distributed_operators(&self, operators: Vec<crate::block_producer::OperatorRewardEntry>) {
+        let _ = self.command_tx.try_send(ProducerCommand::SetDistributedOperators { operators });
     }
 
     /// Shutdown producer gracefully
@@ -2162,7 +2204,21 @@ impl LockFreeProducerPool {
         for producer in &self.producers {
             producer.set_dev_fee_bps(dev_fee_bps.clone());
         }
+    }
+
+    /// 💰 v8.6.1: Set operator fee share across all producers
+    pub fn set_operator_fee(&self, promille: Arc<std::sync::atomic::AtomicU64>, admin_wallet: String) {
+        for producer in &self.producers {
+            producer.set_operator_fee(promille.clone(), admin_wallet.clone());
+        }
         info!("💰 Dev fee BPS shared with all {} producers", self.num_producers);
+    }
+
+    /// 💰 v8.7.0: Set distributed operators for fee splitting across all producers
+    pub fn set_distributed_operators(&self, operators: Vec<crate::block_producer::OperatorRewardEntry>) {
+        for producer in &self.producers {
+            producer.set_distributed_operators(operators.clone());
+        }
     }
 
     /// Shutdown all producers gracefully

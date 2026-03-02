@@ -40,7 +40,10 @@ impl Default for RotationPolicy {
             max_interval: Duration::from_secs(600),  // 10 minutes maximum
             randomization_factor: 0.2,               // ±20% randomization
             adaptive_rotation: true,
-            high_usage_threshold: 10_000_000, // 10 MB threshold
+            // v8.6.0: increased from 10MB to 25MB — block propagation can push
+            // substantial data through a single circuit; 10MB triggered premature
+            // rotations under normal load, degrading throughput
+            high_usage_threshold: 25_000_000, // 25 MB threshold
             quantum_entropy_timing: true,
         }
     }
@@ -438,7 +441,9 @@ impl CircuitRotator {
     fn purpose_rotation_interval(&self, purpose: CircuitPurpose) -> Duration {
         match purpose {
             CircuitPurpose::Control => Duration::from_secs(600), // 10 minutes - less frequent
-            CircuitPurpose::QuantumBeacon => Duration::from_secs(180), // 3 minutes - more sensitive
+            // v8.6.0: reduced from 180s to 150s — quantum entropy is high-value;
+            // tighter rotation limits the correlation window for timing attacks
+            CircuitPurpose::QuantumBeacon => Duration::from_secs(150), // 2.5 minutes - more sensitive
             CircuitPurpose::BlockGossip => self.policy.base_interval, // Default interval
             CircuitPurpose::AckGossip => self.policy.base_interval, // Default interval
         }
@@ -566,7 +571,8 @@ mod tests {
         let quantum_interval = rotator.purpose_rotation_interval(CircuitPurpose::QuantumBeacon);
 
         assert_eq!(control_interval, Duration::from_secs(600));
-        assert_eq!(quantum_interval, Duration::from_secs(180));
+        // v8.6.0: updated from 180s to 150s
+        assert_eq!(quantum_interval, Duration::from_secs(150));
     }
 
     #[tokio::test]

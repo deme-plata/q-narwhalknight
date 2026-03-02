@@ -19,7 +19,7 @@ pub fn draw_settings(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(6),  // Thread/intensity controls
-            Constraint::Length(9),  // Config info
+            Constraint::Length(10), // Config info (includes proxy line)
             Constraint::Min(3),    // Hardware info
         ])
         .split(area);
@@ -94,16 +94,17 @@ fn draw_controls(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
 
 #[cfg(feature = "tui")]
 fn draw_config(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
-    let (server, wallet, mode, miner_id, miner_name) = if let Some(ref state) = app.state {
+    let (server, wallet, mode, miner_id, miner_name, proxy) = if let Some(ref state) = app.state {
         (
             state.server_url.clone(),
             state.wallet_address.clone(),
             state.mining_mode.clone(),
             state.miner_id.clone(),
             state.miner_name.clone(),
+            state.proxy_url.clone(),
         )
     } else {
-        ("...".into(), "...".into(), "...".into(), "...".into(), None)
+        ("...".into(), "...".into(), "...".into(), "...".into(), None, None)
     };
 
     let wallet_display = if wallet.len() > 20 {
@@ -111,6 +112,8 @@ fn draw_config(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
     } else {
         wallet.clone()
     };
+
+    let proxy_display = proxy.as_deref().unwrap_or("(direct)");
 
     let text = vec![
         Line::from(vec![
@@ -134,6 +137,13 @@ fn draw_config(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
             Span::styled(
                 miner_name.as_deref().unwrap_or("(not set)"),
                 Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Proxy:      ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                proxy_display,
+                Style::default().fg(if proxy.is_some() { Color::Magenta } else { Color::DarkGray }),
             ),
         ]),
         Line::from(vec![

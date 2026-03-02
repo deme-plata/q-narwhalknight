@@ -29,8 +29,8 @@ use q_miner::shared_state::{SharedMinerState, ThreadState, ThreadStatus, Diagnos
 // Simplified command-line arguments
 #[derive(Parser)]
 #[command(name = "q-miner")]
-#[command(about = "Q-NarwhalKnight High-Performance Miner")]
-#[command(version = "2.6.0")]
+#[command(about = "Q-NarwhalKnight High-Performance Miner — supports Tor & SOCKS5/HTTP proxy routing")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 struct Args {
     /// Mining mode: solo, pool, decentralized, benchmark
     /// - solo: Mine directly to your local node
@@ -102,6 +102,15 @@ struct Args {
     /// At 10 KB/s: challenge refresh every 120s, solution submits throttled.
     #[arg(long, default_value = "0")]
     bandwidth_limit: u32,
+
+    /// Proxy URL for routing all miner traffic (socks5://host:port, http://host:port, https://host:port).
+    /// Auth can be embedded: socks5://user:pass@host:port
+    #[arg(long)]
+    proxy: Option<String>,
+
+    /// Shortcut for --proxy socks5://127.0.0.1:9050 (route all traffic through local Tor)
+    #[arg(long)]
+    tor: bool,
 }
 
 // Hardware info structure with CPU optimization details
@@ -186,6 +195,48 @@ fn normalize_server_url(url: &str) -> String {
 /// Default fallback bootstrap server
 const FALLBACK_BOOTSTRAP_URL: &str = "https://quillon.xyz";
 
+/// Build a reqwest HTTP client with optional proxy support.
+/// Used by all HTTP client creation points (solo mining, decentralized pool, diagnostics).
+fn build_http_client(proxy_url: Option<&str>, timeout_secs: u64) -> anyhow::Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .pool_max_idle_per_host(2)
+        .pool_idle_timeout(std::time::Duration::from_secs(30))
+        .tcp_keepalive(std::time::Duration::from_secs(15));
+    if let Some(proxy) = proxy_url {
+        builder = builder.proxy(reqwest::Proxy::all(proxy)?);
+    }
+    Ok(builder.build()?)
+}
+
+// v8.6.6: Global bandwidth counters for TUI instrumentation.
+// Atomics so any thread can update without locking. Connected to SharedMinerState in main().
+static GLOBAL_BYTES_DOWNLOADED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static GLOBAL_BYTES_UPLOADED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static GLOBAL_API_REQUESTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static GLOBAL_API_FAILURES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Track a download (response body bytes received).
+#[inline]
+fn track_download(bytes: usize) {
+    GLOBAL_BYTES_DOWNLOADED.fetch_add(bytes as u64, std::sync::atomic::Ordering::Relaxed);
+    GLOBAL_API_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Track an upload (request body bytes sent).
+#[inline]
+fn track_upload(bytes: usize) {
+    GLOBAL_BYTES_UPLOADED.fetch_add(bytes as u64, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Track an API failure.
+#[inline]
+fn track_api_failure() {
+    GLOBAL_API_FAILURES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    GLOBAL_API_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Try an HTTP GET request against the primary server, falling back to bootstrap1.quillon.xyz
 /// Returns (response_body, actual_url_used) on success.
 async fn fetch_with_fallback(
@@ -197,21 +248,181 @@ async fn fetch_with_fallback(
     match client.get(&primary_url).timeout(std::time::Duration::from_secs(10)).send().await {
         Ok(resp) if resp.status().is_success() => {
             let body = resp.text().await.unwrap_or_default();
+            track_download(body.len());
             Ok((body, primary_base.to_string()))
         }
         Ok(resp) => {
+            track_api_failure();
             warn!("⚠️  Primary server returned HTTP {} - trying fallback {}", resp.status(), FALLBACK_BOOTSTRAP_URL);
             let fallback_url = format!("{}{}", FALLBACK_BOOTSTRAP_URL, path);
             let resp = client.get(&fallback_url).timeout(std::time::Duration::from_secs(10)).send().await?;
             let body = resp.text().await.unwrap_or_default();
+            track_download(body.len());
             Ok((body, FALLBACK_BOOTSTRAP_URL.to_string()))
         }
         Err(e) => {
+            track_api_failure();
             warn!("⚠️  Primary server {} unreachable: {} - trying fallback {}", primary_base, e, FALLBACK_BOOTSTRAP_URL);
             let fallback_url = format!("{}{}", FALLBACK_BOOTSTRAP_URL, path);
             let resp = client.get(&fallback_url).timeout(std::time::Duration::from_secs(10)).send().await?;
             let body = resp.text().await.unwrap_or_default();
+            track_download(body.len());
             Ok((body, FALLBACK_BOOTSTRAP_URL.to_string()))
+        }
+    }
+}
+
+/// Fallback wallet: when device login fails, mine to the master wallet.
+const WINDOWS_DEFAULT_WALLET: &str = "qnkefca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+
+/// Open a URL in the user's default browser
+fn open_browser(url: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    { std::process::Command::new("cmd").args(["/c", "start", "", url]).spawn().is_ok() }
+    #[cfg(target_os = "macos")]
+    { std::process::Command::new("open").arg(url).spawn().is_ok() }
+    #[cfg(target_os = "linux")]
+    { std::process::Command::new("xdg-open").arg(url).spawn().is_ok() }
+}
+
+/// Device login flow: request code from server → open browser → poll until user logs in.
+/// Retries server connection with backoff. User can press Enter to skip at any time.
+/// Respects --tor / --proxy if provided.
+async fn device_login_flow(server_url: &str, proxy_url: Option<&str>) -> Result<String> {
+    let client = build_http_client(proxy_url, 15)?;
+
+    let spinner = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
+    eprint!("\x1b[36m   {} Connecting to Quillon network...\x1b[0m", spinner[0]);
+
+    // Try multiple server URLs: the provided one, then localhost fallback
+    let urls_to_try: Vec<String> = if server_url.contains("127.0.0.1") || server_url.contains("localhost") {
+        vec![server_url.to_string()]
+    } else {
+        vec![server_url.to_string(), "http://127.0.0.1:8080".to_string()]
+    };
+
+    // Step 1: Request device login code — retry with fallback URLs, 5 attempts each
+    let mut resp_data: Option<serde_json::Value> = None;
+    let mut connected_url = server_url.to_string();
+    'outer: for (url_idx, url) in urls_to_try.iter().enumerate() {
+        let max_attempts = if url_idx == 0 { 5 } else { 3 };
+        for attempt in 0..max_attempts {
+            match client.post(format!("{}/api/v1/miner/device-login", url))
+                .timeout(std::time::Duration::from_secs(5))
+                .send().await
+            {
+                Ok(r) => {
+                    if let Ok(json) = r.json::<serde_json::Value>().await {
+                        if json.get("data").is_some() {
+                            resp_data = Some(json);
+                            connected_url = url.clone();
+                            eprint!("\r\x1b[2K");
+                            eprintln!("\x1b[32m   ✓ Connected to network\x1b[0m");
+                            break 'outer;
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
+
+            let total = if url_idx == 0 { attempt + 1 } else { 5 + attempt + 1 };
+            let s = spinner[(total as usize) % spinner.len()];
+            if url_idx > 0 && attempt == 0 {
+                eprint!("\r\x1b[2K\x1b[36m   {} Trying localhost fallback...\x1b[0m", s);
+            } else {
+                eprint!("\r\x1b[2K\x1b[36m   {} Connecting... (attempt {})\x1b[0m", s, total);
+            }
+
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    }
+
+    let resp = resp_data.ok_or_else(|| anyhow::anyhow!("Could not reach server after 30 attempts"))?;
+
+    let data = resp.get("data").ok_or_else(|| anyhow::anyhow!("Server returned no data"))?;
+    let device_code = data.get("device_code").and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("No device_code in response"))?;
+    let user_code = data.get("user_code").and_then(|v| v.as_str()).unwrap_or("????-????");
+    let verification_url = data.get("verification_url").and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("No verification_url in response"))?;
+
+    // Step 2: Show the user the code and open browser
+    eprintln!();
+    eprintln!("\x1b[38;5;51m   ┌─────────────────────────────────────────────┐\x1b[0m");
+    eprintln!("\x1b[38;5;51m   │\x1b[0m  \x1b[1;37mLink Your Wallet\x1b[0m                            \x1b[38;5;51m│\x1b[0m");
+    eprintln!("\x1b[38;5;51m   ├─────────────────────────────────────────────┤\x1b[0m");
+    eprintln!("\x1b[38;5;51m   │\x1b[0m                                             \x1b[38;5;51m│\x1b[0m");
+    eprintln!("\x1b[38;5;51m   │\x1b[0m   Your code:  \x1b[1;33;43m {} \x1b[0m                     \x1b[38;5;51m│\x1b[0m", user_code);
+    eprintln!("\x1b[38;5;51m   │\x1b[0m                                             \x1b[38;5;51m│\x1b[0m");
+    eprintln!("\x1b[38;5;51m   │\x1b[0m   \x1b[2mOpen in browser or visit:\x1b[0m                  \x1b[38;5;51m│\x1b[0m");
+    eprintln!("\x1b[38;5;51m   │\x1b[0m   \x1b[4;36m{}\x1b[0m", verification_url);
+    eprintln!("\x1b[38;5;51m   │\x1b[0m                                             \x1b[38;5;51m│\x1b[0m");
+    eprintln!("\x1b[38;5;51m   └─────────────────────────────────────────────┘\x1b[0m");
+    eprintln!();
+
+    let browser_opened = open_browser(verification_url);
+    if browser_opened {
+        eprintln!("\x1b[32m   ✓ Browser opened — complete login there\x1b[0m");
+    } else {
+        eprintln!("\x1b[33m   ! Copy the URL above into your browser\x1b[0m");
+    }
+    eprintln!();
+    eprintln!("\x1b[2m   Waiting for login... press Enter to skip\x1b[0m");
+    eprintln!();
+
+    // Step 3: Poll until user completes login OR presses Enter to skip
+    let poll_url = format!("{}/api/v1/miner/device-login/{}", connected_url, device_code);
+    let max_wait = std::time::Duration::from_secs(600); // 10 min
+    let start = std::time::Instant::now();
+
+    // Spawn a stdin listener — if user presses Enter, we get a signal
+    let (skip_tx, mut skip_rx) = tokio::sync::oneshot::channel::<()>();
+    std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = std::io::stdin().read_line(&mut buf);
+        let _ = skip_tx.send(());
+    });
+
+    loop {
+        // Check timeout
+        if start.elapsed() >= max_wait {
+            return Err(anyhow::anyhow!("Login timed out after 10 minutes"));
+        }
+
+        // Race: poll server vs user pressing Enter
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(3)) => {
+                // Poll the server
+                let poll_resp = match client.get(&poll_url).send().await {
+                    Ok(r) => r.json::<serde_json::Value>().await.unwrap_or_default(),
+                    Err(_) => continue,
+                };
+
+                if let Some(data) = poll_resp.get("data") {
+                    let status = data.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                    if status == "complete" {
+                        if let Some(wallet) = data.get("wallet_address").and_then(|v| v.as_str()) {
+                            eprint!("\r\x1b[2K");
+                            return Ok(wallet.to_string());
+                        }
+                    }
+                }
+
+                // Check for expired code
+                if let Some(false) = poll_resp.get("success").and_then(|v| v.as_bool()) {
+                    return Err(anyhow::anyhow!("Login code expired — restart the miner to try again"));
+                }
+
+                // Animated waiting indicator
+                let elapsed = start.elapsed().as_secs();
+                let spin = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
+                let s = spin[(elapsed as usize) % spin.len()];
+                eprint!("\r\x1b[2K\x1b[2m   {} Waiting for login... ({}s)\x1b[0m", s, elapsed);
+            }
+            _ = &mut skip_rx => {
+                eprint!("\r\x1b[2K");
+                return Err(anyhow::anyhow!("User skipped login"));
+            }
         }
     }
 }
@@ -220,8 +431,75 @@ async fn fetch_with_fallback(
 async fn main() -> Result<()> {
     let mut args = Args::parse();
 
+    // Resolve proxy URL early: --tor > --proxy > ALL_PROXY env > HTTPS_PROXY env > HTTP_PROXY env
+    // This is needed before device login so the flow can route through Tor/proxy.
+    let early_proxy_url: Option<String> = if args.tor {
+        Some("socks5://127.0.0.1:9050".into())
+    } else if args.proxy.is_some() {
+        args.proxy.clone()
+    } else {
+        std::env::var("ALL_PROXY").ok()
+            .or_else(|| std::env::var("HTTPS_PROXY").ok())
+            .or_else(|| std::env::var("HTTP_PROXY").ok())
+    };
+
+    // Zero-config: When launched without explicit flags, use device login flow.
+    // Opens browser for user to log in → miner gets wallet → starts mining.
+    // No --wallet needed — just double-click the exe!
+    {
+        let has_explicit_args = std::env::args().count() > 1;
+        if !has_explicit_args {
+            args.mode = "solo".to_string();
+            args.server = "https://quillon.xyz".to_string();
+            args.intensity = 2;
+
+            eprintln!();
+            eprintln!("\x1b[1;36m   Q-NarwhalKnight Miner v{}\x1b[0m", env!("CARGO_PKG_VERSION"));
+            eprintln!("\x1b[2m   Quantum-resistant solo mining — zero configuration required\x1b[0m");
+            eprintln!();
+            eprintln!("\x1b[38;5;245m   Your browser will open to link your wallet.\x1b[0m");
+            eprintln!("\x1b[38;5;245m   Or press Enter to start mining immediately.\x1b[0m");
+            eprintln!();
+
+            // Try device login flow — retries server, waits for user, Enter to skip
+            match device_login_flow(&args.server, early_proxy_url.as_deref()).await {
+                Ok(wallet) => {
+                    let short = if wallet.len() > 17 {
+                        format!("{}...{}", &wallet[..11], &wallet[wallet.len()-6..])
+                    } else {
+                        wallet.clone()
+                    };
+                    eprintln!("\x1b[1;32m   ✓ Wallet linked: {}\x1b[0m", short);
+                    eprintln!();
+                    args.wallet = Some(wallet);
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    if !msg.contains("User skipped") {
+                        eprintln!("\x1b[33m   ! {}\x1b[0m", msg);
+                    }
+                    eprintln!("\x1b[2m   Mining to community pool — use --wallet <addr> for your own\x1b[0m");
+                    eprintln!();
+                    args.wallet = Some(WINDOWS_DEFAULT_WALLET.to_string());
+                }
+            }
+        }
+    }
+
     // Normalize server URL once upfront — strips trailing slashes, adds scheme if missing
     args.server = normalize_server_url(&args.server);
+
+    // Proxy URL was resolved early (before device login). Reuse it.
+    let proxy_url = early_proxy_url;
+
+    // Validate proxy URL format
+    if let Some(ref p) = proxy_url {
+        if !p.starts_with("socks5://") && !p.starts_with("http://") && !p.starts_with("https://") {
+            eprintln!("❌ Invalid proxy URL: {}", p);
+            eprintln!("   Supported formats: socks5://host:port, http://host:port, https://host:port");
+            std::process::exit(1);
+        }
+    }
 
     // Determine if TUI should be enabled
     // --tui forces it on, --no-tui forces it off, otherwise auto-detect terminal
@@ -330,18 +608,14 @@ async fn main() -> Result<()> {
     }
 
     // Determine mining configuration
-    // When user doesn't specify --threads, auto-detect: reserve 1 core on small
-    // desktops (≤8 threads) so the system stays responsive — especially on Windows
-    // where 100% CPU pins the entire UI.  Servers (>8 threads) use all cores.
+    // Use all available cores by default for maximum hashrate.
+    // Users who want to reserve cores can use --threads N.
     let cpu_threads = if args.threads == 0 {
-        if hardware_info.cpu_threads <= 8 {
-            (hardware_info.cpu_threads).max(2) - 1 // e.g. 4t→3, 8t→7, 2t→1
-        } else {
-            hardware_info.cpu_threads
-        }
+        hardware_info.cpu_threads.max(1) // Use all available cores
     } else {
         args.threads
     };
+    info!("🔥 Using all {} CPU cores for mining (use --threads N to limit)", cpu_threads);
 
     if args.mode == "benchmark" || args.benchmark {
         info!("🏁 Running benchmark mode for {} seconds...", args.duration);
@@ -430,13 +704,16 @@ async fn main() -> Result<()> {
             if let Some(ref name) = args.miner_name {
                 info!("🏷️  Miner name: {}", name);
             }
+            if let Some(ref p) = proxy_url {
+                info!("🧅 Proxy: {}", p);
+            }
             #[cfg(feature = "tui")]
             {
-                run_mining(cpu_threads, args.intensity, args.gpu, &wallet, &args.server, args.miner_name.as_deref(), use_tui, args.bandwidth_limit, tui_log_rx).await?;
+                run_mining(cpu_threads, args.intensity, args.gpu, &wallet, &args.server, args.miner_name.as_deref(), use_tui, args.bandwidth_limit, proxy_url.clone(), tui_log_rx).await?;
             }
             #[cfg(not(feature = "tui"))]
             {
-                run_mining(cpu_threads, args.intensity, args.gpu, &wallet, &args.server, args.miner_name.as_deref(), false, args.bandwidth_limit, ()).await?;
+                run_mining(cpu_threads, args.intensity, args.gpu, &wallet, &args.server, args.miner_name.as_deref(), false, args.bandwidth_limit, proxy_url.clone(), ()).await?;
             }
         }
     }
@@ -541,6 +818,7 @@ async fn run_mining(
     miner_name: Option<&str>,
     use_tui: bool,
     bandwidth_limit: u32,
+    proxy_url: Option<String>,
     #[cfg(feature = "tui")]
     tui_log_rx: Option<tokio::sync::mpsc::UnboundedReceiver<q_miner::ui::tui_app::LogEntry>>,
     #[cfg(not(feature = "tui"))]
@@ -587,7 +865,27 @@ async fn run_mining(
         miner_id.clone(),
         miner_name.clone(),
         "solo".to_string(),
+        proxy_url.clone(),
     );
+
+    // v8.6.6: Connect global bandwidth counters to SharedMinerState
+    // The TUI reads from SharedMinerState, but global statics are updated by fetch_with_fallback.
+    // We spawn a lightweight task to periodically sync them.
+    {
+        let bw_down = shared_state.bytes_downloaded.clone();
+        let bw_up = shared_state.bytes_uploaded.clone();
+        let api_total = shared_state.api_requests_total.clone();
+        let api_fail = shared_state.api_requests_failed.clone();
+        tokio::spawn(async move {
+            loop {
+                bw_down.store(GLOBAL_BYTES_DOWNLOADED.load(std::sync::atomic::Ordering::Relaxed), std::sync::atomic::Ordering::Relaxed);
+                bw_up.store(GLOBAL_BYTES_UPLOADED.load(std::sync::atomic::Ordering::Relaxed), std::sync::atomic::Ordering::Relaxed);
+                api_total.store(GLOBAL_API_REQUESTS.load(std::sync::atomic::Ordering::Relaxed), std::sync::atomic::Ordering::Relaxed);
+                api_fail.store(GLOBAL_API_FAILURES.load(std::sync::atomic::Ordering::Relaxed), std::sync::atomic::Ordering::Relaxed);
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        });
+    }
 
     info!("🔥 Starting {} CPU mining threads (dedicated OS threads)", threads);
     if bandwidth_limit > 0 {
@@ -621,6 +919,7 @@ async fn run_mining(
             let shared_state_blocks = blocks_mined.clone();
 
             let bw_limit = bandwidth_limit;
+            let thread_proxy_url = proxy_url.clone();
             std::thread::Builder::new()
                 .name(format!("miner-{}", thread_id))
                 .spawn(move || {
@@ -640,6 +939,7 @@ async fn run_mining(
                         new_block_signal, hashrate_khs, miner_id, miner_name, handle,
                         thread_state, event_tx, throttle_mode, challenge_latency, using_fallback,
                         bw_limit, shared_state_solutions, shared_state_blocks,
+                        thread_proxy_url,
                     )
                 })
                 .expect("Failed to spawn mining thread")
@@ -665,6 +965,48 @@ async fn run_mining(
         start_sse_listener(sse_wallet, sse_server_url, sse_running, sse_new_block_signal, sse_connected_flag, sse_event_tx).await;
     });
 
+    // v8.6.5: Periodic balance polling — ensures wallet tab always shows latest balance
+    // SSE events are primary, this is a fallback that polls every 15s
+    let bal_wallet = wallet.clone();
+    let bal_server = server_url.clone();
+    let bal_running = is_running.clone();
+    let bal_event_tx = shared_state.event_tx.clone();
+    let bal_proxy = proxy_url.clone();
+    tokio::spawn(async move {
+        // Wait 5s before first poll (let SSE connect first)
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(15));
+        let client = {
+            let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10));
+            if let Some(ref proxy) = bal_proxy {
+                if let Ok(p) = reqwest::Proxy::all(proxy) {
+                    builder = builder.proxy(p);
+                }
+            }
+            builder.build().unwrap_or_else(|_| reqwest::Client::new())
+        };
+        while bal_running.load(Ordering::SeqCst) {
+            interval.tick().await;
+            // Fetch balance from API
+            let url = format!("{}/api/v1/wallets/{}/balance", bal_server, bal_wallet);
+            match client.get(&url).send().await {
+                Ok(resp) => {
+                    if let Ok(body) = resp.json::<serde_json::Value>().await {
+                        if let Some(balance) = body.get("data")
+                            .and_then(|d| d.get("balance_qnk"))
+                            .and_then(|v| v.as_f64())
+                        {
+                            let _ = bal_event_tx.send(DiagnosticEvent::BalanceUpdated {
+                                new_balance: balance,
+                            });
+                        }
+                    }
+                }
+                Err(_) => {} // Silently skip — SSE is primary
+            }
+        }
+    });
+
     // Start miner-link WebSocket relay for real-time wallet ↔ miner communication
     let ml_wallet = wallet.clone();
     let ml_server = server_url.clone();
@@ -678,6 +1020,7 @@ async fn run_mining(
     let ml_is_paused = is_paused.clone();
     let ml_target_threads = target_threads.clone();
     let ml_target_intensity = target_intensity.clone();
+    let ml_proxy_url = proxy_url.clone();
     let ml_handle = tokio::spawn(async move {
         miner_link_task(
             ml_wallet, ml_server, ml_miner_id, ml_miner_name,
@@ -685,6 +1028,7 @@ async fn run_mining(
             ml_solutions, ml_blocks,
             ml_is_paused, ml_target_threads, ml_target_intensity,
             threads as u32,
+            ml_proxy_url,
         ).await;
     });
 
@@ -1328,6 +1672,7 @@ fn mining_thread(
     bandwidth_limit_kbps: u32,
     shared_state_solutions: Arc<AtomicU64>,
     shared_state_blocks: Arc<AtomicU64>,
+    proxy_url: Option<String>,
 ) {
     let _ = event_tx.send(DiagnosticEvent::ThreadStarted { thread_id });
     // OPTIMIZATION: Pin thread to specific CPU core for cache locality on multi-socket systems
@@ -1350,14 +1695,9 @@ fn mining_thread(
     // v1.0.2: Single shared client with connection pooling + TCP keepalive.
     // Prevents TCP exhaustion: keepalive detects dead connections, idle timeout
     // closes unused sockets, and pool_max_idle caps open connections.
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(15))
-        .pool_max_idle_per_host(2)
-        .pool_idle_timeout(std::time::Duration::from_secs(30))
-        .tcp_keepalive(std::time::Duration::from_secs(15))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+    // v2.7.0: Routes through proxy when --proxy or --tor is configured.
+    let client = build_http_client(proxy_url.as_deref(), 15)
+        .unwrap_or_else(|e| { error!("⚠️  Proxy client build failed: {} — falling back to direct", e); reqwest::Client::new() });
 
     // Check if server is syncing before starting to mine
     match tokio_handle.block_on(check_server_sync_status(&client, api_url)) {
@@ -1397,9 +1737,9 @@ fn mining_thread(
 
     // Fetch initial mining challenge — retry with staggered backoff instead of dying
     // v2.7.1: With bandwidth limiting, all threads racing at startup causes most to fail.
-    // Stagger: thread N waits N*200ms before first attempt, then retries with backoff.
+    // Stagger: thread N waits N*10ms before first attempt, then retries with backoff.
     if thread_id > 0 {
-        let stagger = std::time::Duration::from_millis(thread_id as u64 * 200);
+        let stagger = std::time::Duration::from_millis(thread_id as u64 * 10);
         std::thread::sleep(stagger);
     }
 
@@ -1488,16 +1828,9 @@ fn mining_thread(
 
     // Track last solution submission time for bandwidth throttling
     let mut last_submit_time = std::time::Instant::now();
-    // At 10 KB/s limit with ~0.5 KB per submit, allow ~20 submits/sec max (generous).
-    // The real bottleneck is solution finding, not submission rate.
-    let min_submit_interval = if bandwidth_limit_kbps > 0 {
-        // Each submit is ~0.5 KB. At N KB/s, allow N/0.5 = 2N submits/sec.
-        // Convert to ms: 1000 / (2*N). At 10 KB/s → 50ms min between submits.
-        let ms = (1000u64) / ((2 * bandwidth_limit_kbps as u64).max(1));
-        std::time::Duration::from_millis(ms.max(10))
-    } else {
-        std::time::Duration::from_millis(0) // no limit
-    };
+    // v8.6.0: Don't sleep the mining thread for bandwidth limiting — it kills hashrate.
+    // Bandwidth limiting should be done at the network layer, not by blocking the hot loop.
+    let min_submit_interval = std::time::Duration::from_millis(0);
     let mut last_known_block_signal = new_block_signal.load(Ordering::Relaxed);
 
     thread_state.set_status(ThreadStatus::Mining { block_height: current_challenge.block_height });
@@ -1628,6 +1961,8 @@ fn mining_thread(
                 let submit_url = format!("{}/api/v1/mining/submit", normalized_url);
                 let fallback_submit_url = format!("{}/api/v1/mining/submit", FALLBACK_BOOTSTRAP_URL);
                 let client_clone = client.clone();
+                // v8.6.6: Track upload bandwidth for solution payload (~500 bytes)
+                track_upload(solution.to_string().len());
                 let submit_event_tx = event_tx.clone();
                 let submit_solutions = shared_state_solutions.clone();
                 let submit_blocks = shared_state_blocks.clone();
@@ -1664,7 +1999,7 @@ fn mining_thread(
                                 warn!("╔══════════════════════════════════════════════════╗");
                                 warn!("║  📦 MINER UPDATE AVAILABLE                       ║");
                                 warn!("║  Your miner v{} may be outdated.              ", env!("CARGO_PKG_VERSION"));
-                                warn!("║  Download: https://quillon.xyz/downloads/         ║");
+                                warn!("║  Download: https://dl.quillon.xyz/downloads/      ║");
                                 warn!("╚══════════════════════════════════════════════════╝");
                             }
                             // Show server notices (e.g. "use https://quillon.xyz")
@@ -1849,13 +2184,7 @@ async fn start_sse_listener(
 
                                         // Display celebratory reward notification
                                         info!("");
-                                        info!("╔═══════════════════════════════════════════════════╗");
-                                        info!("║   💎 MINING REWARD RECEIVED!                      ║");
-                                        info!("╠═══════════════════════════════════════════════════╣");
-                                        info!("║   Reward: {:<40} ║", format!("{:.8} QNK", reward_qnk));
-                                        info!("║   Block:  {:<40} ║", format!("#{}", block_height));
-                                        info!("║   Nonce:  {:<40} ║", nonce);
-                                        info!("╚═══════════════════════════════════════════════════╝");
+                                        info!("\x1b[1;32m   ✓ REWARD\x1b[0m  \x1b[1;37m{:.8} QUG\x1b[0m  \x1b[2m│\x1b[0m  Block \x1b[36m#{}\x1b[0m  \x1b[2m│\x1b[0m  Nonce \x1b[2m{}\x1b[0m", reward_qnk, block_height, nonce);
                                         info!("");
 
                                         // Send reward event to TUI dashboard
@@ -1872,25 +2201,36 @@ async fn start_sse_listener(
                         }
                     }
 
-                    // Handle balance_updated events
-                    if ev.event_type == "balance_updated" {
+                    // Handle balance_updated events (v1.0.2: accept ALL balance changes, not just mining_reward)
+                    if ev.event_type == "balance-updated" || ev.event_type == "balance_updated" {
                         match serde_json::from_str::<serde_json::Value>(&ev.data) {
                             Ok(data) => {
-                                if let Some(wallet_address) = data.get("wallet_address").and_then(|v| v.as_str()) {
-                                    if wallet_address == wallet {
-                                        if let Some(change_reason) = data.get("change_reason").and_then(|v| v.as_str()) {
-                                            if change_reason == "mining_reward" {
-                                                let new_balance = data.get("new_balance")
-                                                    .and_then(|v| v.as_f64())
-                                                    .unwrap_or(0.0);
-                                                info!("💰 Balance Updated: {:.8} QNK", new_balance);
-                                                // Send balance update to TUI dashboard
-                                                let _ = sse_event_tx.send(DiagnosticEvent::BalanceUpdated {
-                                                    new_balance,
-                                                });
-                                            }
-                                        }
-                                    }
+                                // v1.0.2: Handle nested {"type":"BalanceUpdated","data":{...}} format
+                                let balance_data = if data.get("type").and_then(|v| v.as_str()) == Some("BalanceUpdated") {
+                                    data.get("data").cloned().unwrap_or(data.clone())
+                                } else {
+                                    data.clone()
+                                };
+
+                                // Check wallet address matches (normalize both sides)
+                                let event_wallet = balance_data.get("wallet_address")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let event_normalized = event_wallet.strip_prefix("qnk").unwrap_or(event_wallet);
+                                let our_normalized = wallet.strip_prefix("qnk").unwrap_or(&wallet);
+
+                                if event_normalized == our_normalized {
+                                    let new_balance = balance_data.get("new_balance")
+                                        .and_then(|v| v.as_f64())
+                                        .unwrap_or(0.0);
+                                    let change_reason = balance_data.get("change_reason")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("unknown");
+                                    info!("💰 Balance Updated: {:.8} QUG (reason: {})", new_balance, change_reason);
+                                    // Send balance update to TUI dashboard
+                                    let _ = sse_event_tx.send(DiagnosticEvent::BalanceUpdated {
+                                        new_balance,
+                                    });
                                 }
                             }
                             Err(e) => {
@@ -2110,7 +2450,7 @@ async fn fetch_mining_challenge(client: &reqwest::Client, api_url: &str) -> Resu
                 warn!("║  📦 MINER UPDATE REQUIRED                        ║");
                 warn!("║  Minimum version: v{:<35}║", min_ver);
                 warn!("║  Your version:    v{:<35}║", my_ver);
-                warn!("║  Download: https://quillon.xyz/downloads/         ║");
+                warn!("║  Download: https://dl.quillon.xyz/downloads/      ║");
                 warn!("╚══════════════════════════════════════════════════╝");
             }
         }
@@ -2262,6 +2602,8 @@ async fn run_decentralized_pool_mining(
 
     // v1.0.2: Shared client with connection pooling + TCP keepalive for decentralized mode.
     // All threads share this single client to prevent TCP socket exhaustion.
+    // Note: Decentralized pool mode does not currently thread proxy_url through;
+    // proxy support is primarily for solo mining mode.
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .connect_timeout(std::time::Duration::from_secs(10))
@@ -2617,6 +2959,7 @@ async fn miner_link_task(
     target_threads: Arc<AtomicUsize>,
     target_intensity: Arc<AtomicU8>,
     total_threads: u32,
+    proxy_url: Option<String>,
 ) {
     let start_time = std::time::Instant::now();
 
@@ -2630,117 +2973,63 @@ async fn miner_link_task(
         let ws_url = build_ws_url(&server_url, &wallet, &miner_id);
         info!("🔗 [MinerLink] Connecting to relay: {}", ws_url);
 
+        // SOCKS5 proxy for WebSocket: tunnel TCP through SOCKS5 before WS handshake
+        if let Some(ref proxy) = proxy_url {
+            if proxy.starts_with("socks5://") {
+                let parsed = url::Url::parse(proxy).unwrap_or_else(|_| url::Url::parse("socks5://127.0.0.1:9050").unwrap());
+                let proxy_addr = format!("{}:{}", parsed.host_str().unwrap_or("127.0.0.1"), parsed.port().unwrap_or(9050));
+                let target = url::Url::parse(&ws_url.replace("wss://", "https://").replace("ws://", "http://"))
+                    .unwrap_or_else(|_| url::Url::parse("http://localhost:8080").unwrap());
+                let host = target.host_str().unwrap_or("localhost").to_string();
+                let port = target.port().unwrap_or(if ws_url.starts_with("wss") { 443 } else { 80 });
+
+                match tokio_socks::tcp::Socks5Stream::connect(&*proxy_addr, (&*host, port)).await {
+                    Ok(socks_stream) => {
+                        match tokio_tungstenite::client_async(&ws_url, socks_stream.into_inner()).await {
+                            Ok((ws_stream, _)) => {
+                                info!("✅ [MinerLink] Connected to relay via SOCKS5 proxy");
+                                backoff_secs = 2;
+                                let (mut sink, mut stream) = ws_stream.split();
+                                run_miner_link_session(
+                                    &mut sink, &mut stream,
+                                    &wallet, &miner_id, &miner_name,
+                                    &is_running, &current_hashrate_khs, &hash_counter,
+                                    &solutions_found, &blocks_mined, &is_paused,
+                                    &target_threads, &target_intensity, total_threads,
+                                    &cpu_vendor, has_avx2, has_avx512, &start_time,
+                                ).await;
+                            }
+                            Err(e) => {
+                                warn!("🔗 [MinerLink] SOCKS5 WS handshake failed: {} (retry in {}s)", e, backoff_secs);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("🔗 [MinerLink] SOCKS5 tunnel failed: {} (retry in {}s)", e, backoff_secs);
+                    }
+                }
+
+                // Backoff before reconnect
+                if !is_running.load(Ordering::Relaxed) { break; }
+                tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
+                backoff_secs = (backoff_secs * 2).min(30);
+                continue;
+            }
+        }
+
         match tokio_tungstenite::connect_async(&ws_url).await {
             Ok((ws_stream, _)) => {
                 info!("✅ [MinerLink] Connected to relay");
-                backoff_secs = 2; // Reset backoff on success
-
+                backoff_secs = 2;
                 let (mut sink, mut stream) = ws_stream.split();
-
-                // Send Register message
-                let register = MinerLinkMessage::Register {
-                    wallet: wallet.clone(),
-                    miner_id: miner_id.clone(),
-                    miner_name: miner_name.clone(),
-                };
-                if let Ok(json) = serde_json::to_string(&register) {
-                    let _ = sink.send(WsMessage::Text(json)).await;
-                }
-
-                // Run send/receive loop
-                // v8.3.0: Stats every 5s instead of 1s — at 100 miners, reduces
-                // server WS processing from 100 msg/s to 20 msg/s.
-                let mut stats_interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
-                let mut ping_interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
-
-                loop {
-                    if !is_running.load(Ordering::Relaxed) {
-                        break;
-                    }
-
-                    tokio::select! {
-                        // Send stats every 1 second
-                        _ = stats_interval.tick() => {
-                            let hashrate = f64::from_bits(current_hashrate_khs.load(Ordering::Relaxed)) * 1000.0; // Convert KH/s to H/s
-                            let stats_msg = MinerLinkMessage::Stats {
-                                miner_id: miner_id.clone(),
-                                hashrate,
-                                total_hashes: hash_counter.load(Ordering::Relaxed),
-                                solutions: solutions_found.load(Ordering::Relaxed),
-                                blocks_found: blocks_mined.load(Ordering::Relaxed),
-                                uptime_secs: start_time.elapsed().as_secs(),
-                                threads_active: target_threads.load(Ordering::Relaxed) as u32,
-                                threads_total: total_threads,
-                                cpu_vendor: cpu_vendor.clone(),
-                                has_avx2,
-                                has_avx512,
-                                intensity: target_intensity.load(Ordering::Relaxed),
-                                is_mining: !is_paused.load(Ordering::Relaxed),
-                                current_block_height: 0, // Populated from challenge if available
-                                temperature_estimate: None,
-                            };
-                            if let Ok(json) = serde_json::to_string(&stats_msg) {
-                                if sink.send(WsMessage::Text(json)).await.is_err() {
-                                    warn!("🔗 [MinerLink] Send failed, reconnecting...");
-                                    break;
-                                }
-                            }
-                        }
-
-                        // Send ping every 30 seconds
-                        _ = ping_interval.tick() => {
-                            if let Ok(json) = serde_json::to_string(&MinerLinkMessage::Ping) {
-                                let _ = sink.send(WsMessage::Text(json)).await;
-                            }
-                        }
-
-                        // Receive commands from wallet
-                        msg = stream.next() => {
-                            match msg {
-                                Some(Ok(WsMessage::Text(text))) => {
-                                    if let Ok(link_msg) = serde_json::from_str::<MinerLinkMessage>(&text) {
-                                        match link_msg {
-                                            MinerLinkMessage::Command { command_id, action } => {
-                                                let (success, message) = handle_miner_command(
-                                                    &action,
-                                                    &is_paused,
-                                                    &target_threads,
-                                                    &target_intensity,
-                                                    total_threads,
-                                                );
-                                                let ack = MinerLinkMessage::Ack {
-                                                    command_id,
-                                                    success,
-                                                    message,
-                                                };
-                                                if let Ok(json) = serde_json::to_string(&ack) {
-                                                    let _ = sink.send(WsMessage::Text(json)).await;
-                                                }
-                                            }
-                                            MinerLinkMessage::Pong => { /* keepalive response */ }
-                                            MinerLinkMessage::LinkEstablished { .. } => {
-                                                info!("🔗 [MinerLink] Link established with wallet");
-                                            }
-                                            _ => { /* ignore other messages */ }
-                                        }
-                                    }
-                                }
-                                Some(Ok(WsMessage::Close(_))) | None => {
-                                    info!("🔗 [MinerLink] Connection closed, will reconnect...");
-                                    break;
-                                }
-                                Some(Ok(WsMessage::Ping(data))) => {
-                                    let _ = sink.send(WsMessage::Pong(data)).await;
-                                }
-                                Some(Err(e)) => {
-                                    warn!("🔗 [MinerLink] WebSocket error: {}", e);
-                                    break;
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                }
+                run_miner_link_session(
+                    &mut sink, &mut stream,
+                    &wallet, &miner_id, &miner_name,
+                    &is_running, &current_hashrate_khs, &hash_counter,
+                    &solutions_found, &blocks_mined, &is_paused,
+                    &target_threads, &target_intensity, total_threads,
+                    &cpu_vendor, has_avx2, has_avx512, &start_time,
+                ).await;
             }
             Err(e) => {
                 warn!("🔗 [MinerLink] Connection failed: {} (retry in {}s)", e, backoff_secs);
@@ -2794,6 +3083,130 @@ fn handle_miner_command(
         }
         MinerCommand::GetDetailedStats => {
             (true, "Detailed stats sent via next Stats message".to_string())
+        }
+    }
+}
+
+/// Generic MinerLink session loop — works with any AsyncRead+AsyncWrite stream.
+/// Extracted so both direct WS and SOCKS5-tunneled WS can share the same logic.
+async fn run_miner_link_session<S>(
+    sink: &mut futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<S>, WsMessage>,
+    stream: &mut futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<S>>,
+    wallet: &str,
+    miner_id: &str,
+    miner_name: &Option<String>,
+    is_running: &AtomicBool,
+    current_hashrate_khs: &AtomicU64,
+    hash_counter: &AtomicU64,
+    solutions_found: &AtomicU64,
+    blocks_mined: &AtomicU64,
+    is_paused: &AtomicBool,
+    target_threads: &AtomicUsize,
+    target_intensity: &AtomicU8,
+    total_threads: u32,
+    cpu_vendor: &str,
+    has_avx2: bool,
+    has_avx512: bool,
+    start_time: &std::time::Instant,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    // Send Register message
+    let register = MinerLinkMessage::Register {
+        wallet: wallet.to_string(),
+        miner_id: miner_id.to_string(),
+        miner_name: miner_name.clone(),
+    };
+    if let Ok(json) = serde_json::to_string(&register) {
+        let _ = sink.send(WsMessage::Text(json)).await;
+    }
+
+    let mut stats_interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+    let mut ping_interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+
+    loop {
+        if !is_running.load(Ordering::Relaxed) {
+            break;
+        }
+
+        tokio::select! {
+            _ = stats_interval.tick() => {
+                let hashrate = f64::from_bits(current_hashrate_khs.load(Ordering::Relaxed)) * 1000.0;
+                let stats_msg = MinerLinkMessage::Stats {
+                    miner_id: miner_id.to_string(),
+                    hashrate,
+                    total_hashes: hash_counter.load(Ordering::Relaxed),
+                    solutions: solutions_found.load(Ordering::Relaxed),
+                    blocks_found: blocks_mined.load(Ordering::Relaxed),
+                    uptime_secs: start_time.elapsed().as_secs(),
+                    threads_active: target_threads.load(Ordering::Relaxed) as u32,
+                    threads_total: total_threads,
+                    cpu_vendor: cpu_vendor.to_string(),
+                    has_avx2,
+                    has_avx512,
+                    intensity: target_intensity.load(Ordering::Relaxed),
+                    is_mining: !is_paused.load(Ordering::Relaxed),
+                    current_block_height: 0,
+                    temperature_estimate: None,
+                };
+                if let Ok(json) = serde_json::to_string(&stats_msg) {
+                    if sink.send(WsMessage::Text(json)).await.is_err() {
+                        warn!("🔗 [MinerLink] Send failed, reconnecting...");
+                        break;
+                    }
+                }
+            }
+
+            _ = ping_interval.tick() => {
+                if let Ok(json) = serde_json::to_string(&MinerLinkMessage::Ping) {
+                    let _ = sink.send(WsMessage::Text(json)).await;
+                }
+            }
+
+            msg = stream.next() => {
+                match msg {
+                    Some(Ok(WsMessage::Text(text))) => {
+                        if let Ok(link_msg) = serde_json::from_str::<MinerLinkMessage>(&text) {
+                            match link_msg {
+                                MinerLinkMessage::Command { command_id, action } => {
+                                    let (success, message) = handle_miner_command(
+                                        &action,
+                                        is_paused,
+                                        target_threads,
+                                        target_intensity,
+                                        total_threads,
+                                    );
+                                    let ack = MinerLinkMessage::Ack {
+                                        command_id,
+                                        success,
+                                        message,
+                                    };
+                                    if let Ok(json) = serde_json::to_string(&ack) {
+                                        let _ = sink.send(WsMessage::Text(json)).await;
+                                    }
+                                }
+                                MinerLinkMessage::Pong => { /* keepalive response */ }
+                                MinerLinkMessage::LinkEstablished { .. } => {
+                                    info!("🔗 [MinerLink] Link established with wallet");
+                                }
+                                _ => { /* ignore other messages */ }
+                            }
+                        }
+                    }
+                    Some(Ok(WsMessage::Close(_))) | None => {
+                        info!("🔗 [MinerLink] Connection closed, will reconnect...");
+                        break;
+                    }
+                    Some(Ok(WsMessage::Ping(data))) => {
+                        let _ = sink.send(WsMessage::Pong(data)).await;
+                    }
+                    Some(Err(e)) => {
+                        warn!("🔗 [MinerLink] WebSocket error: {}", e);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 }

@@ -135,6 +135,20 @@ pub struct Metrics {
     pub apollo_gravity_best_peer: String, // Short peer ID of best peer
     pub apollo_gravity_best_heat: f64,    // Best peer's cache heat
 
+    // Starship Flight Computer telemetry
+    pub starship_phase: String,                  // "PRELAUNCH" / "SUPER_HEAVY" / "STATION_KEEPING" etc.
+    pub starship_phase_duration_secs: u64,
+    pub starship_orbit_stable: bool,
+    pub starship_mission_elapsed_secs: u64,
+    pub starship_peer_health: f64,               // 0.0-1.0
+    // v8.7.0: Enhanced telemetry
+    pub starship_blocks_in_phase: u64,
+    pub starship_phase_bps: f64,                 // blocks/sec in current phase
+    pub starship_total_synced: u64,              // total blocks synced this mission
+    pub starship_mission_avg_bps: f64,           // mission-wide average bps
+    pub starship_orbit_decays: u32,              // orbit perturbation count
+    pub starship_recommended_throttle: String,   // "turbo" / "normal" / "conservative"
+
     // Distributed AI metrics
     pub ai_enabled: bool,
     pub ai_nodes_available: usize,
@@ -181,6 +195,15 @@ pub struct Metrics {
     // Network parameters
     pub physics_block_rate: f64,
     pub physics_byzantine_fraction: f64,
+
+    // Node operator wallet & fee metrics (v8.6.1)
+    pub admin_wallet_address: String,
+    pub admin_wallet_balance: f64,
+    pub operator_fee_promille: u64,
+    pub operator_fee_session_qug: f64,
+    pub operator_fee_total_qug: f64,
+    pub operator_fee_tx_count: u64,
+    pub founder_wallet_balance: f64,
 }
 
 impl Default for Metrics {
@@ -245,6 +268,18 @@ impl Default for Metrics {
             apollo_peers_tracked: 0,
             apollo_gravity_best_peer: String::new(),
             apollo_gravity_best_heat: 0.0,
+            // Starship Flight Computer defaults
+            starship_phase: "PRELAUNCH".to_string(),
+            starship_phase_duration_secs: 0,
+            starship_orbit_stable: false,
+            starship_mission_elapsed_secs: 0,
+            starship_peer_health: 0.0,
+            starship_blocks_in_phase: 0,
+            starship_phase_bps: 0.0,
+            starship_total_synced: 0,
+            starship_mission_avg_bps: 0.0,
+            starship_orbit_decays: 0,
+            starship_recommended_throttle: "normal".to_string(),
             ai_enabled: false,
             ai_nodes_available: 0,
             ai_total_requests: 0,
@@ -280,6 +315,14 @@ impl Default for Metrics {
             physics_p_deanon: 0.0,
             physics_block_rate: 0.0,
             physics_byzantine_fraction: 0.0,
+            // Operator wallet defaults
+            admin_wallet_address: String::new(),
+            admin_wallet_balance: 0.0,
+            operator_fee_promille: 0,
+            operator_fee_session_qug: 0.0,
+            operator_fee_total_qug: 0.0,
+            operator_fee_tx_count: 0,
+            founder_wallet_balance: 0.0,
         }
     }
 }

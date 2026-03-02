@@ -8,6 +8,7 @@ use std::sync::{Arc, RwLock};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {
     Dashboard,
+    Wallet,
     FullLogs,
     Network,
     Stats,
@@ -202,6 +203,9 @@ impl App {
             KeyCode::Char('l') | KeyCode::Char('L') => {
                 self.view_mode = ViewMode::FullLogs;
             }
+            KeyCode::Char('w') | KeyCode::Char('W') => {
+                self.view_mode = ViewMode::Wallet;
+            }
             KeyCode::Char('d') | KeyCode::Char('D') => {
                 self.view_mode = ViewMode::Dashboard;
             }
@@ -275,7 +279,8 @@ impl App {
 
     fn cycle_view(&mut self) {
         self.view_mode = match self.view_mode {
-            ViewMode::Dashboard => ViewMode::FullLogs,
+            ViewMode::Dashboard => ViewMode::Wallet,
+            ViewMode::Wallet => ViewMode::FullLogs,
             ViewMode::FullLogs => ViewMode::Network,
             ViewMode::Network => ViewMode::Stats,
             ViewMode::Stats => ViewMode::Physics,
@@ -327,7 +332,7 @@ impl App {
             1 => self.view_mode = ViewMode::Network,
             2 => { /* Mining Status - TODO */ }
             3 => { /* Blockchain Explorer - TODO */ }
-            4 => { /* Wallet Management - TODO */ }
+            4 => self.view_mode = ViewMode::Wallet,
             5 => self.view_mode = ViewMode::Bounty,  // Bounty Campaign Registration
             6 => { /* Performance Metrics - TODO */ }
             7 => { /* Configuration - TODO */ }

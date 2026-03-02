@@ -103,17 +103,19 @@ const ERA_0_TOTAL: u128 = 10_500_000_000_000_000_000_000_000_000_000;
 /// 2_625_000 × 10²⁴ = 2.625 × 10³⁰
 pub const BASE_ANNUAL_EMISSION: u128 = 2_625_000_000_000_000_000_000_000_000_000;
 
-/// Minimum reward per block: 0.000001 QUG (10¹⁸ base units)
+/// Minimum reward per block: 0.00001 QUG (10¹⁹ base units)
 /// Prevents division by zero and ensures miners always receive nonzero rewards
-pub const MIN_REWARD: u128 = 1_000_000_000_000_000_000;
+/// v8.6.0: raised from 0.000001 QUG (10¹⁸) to 0.00001 QUG (10¹⁹)
+pub const MIN_REWARD: u128 = 10_000_000_000_000_000_000;
 
-/// Absolute maximum reward per block: 0.5 QUG (5 × 10²³ base units)
+/// Absolute maximum reward per block: 2.0 QUG (2 × 10²⁴ base units)
 /// Hard safety cap that no single block reward can ever exceed, regardless of rate.
 /// The actual per-block cap is computed dynamically by `dynamic_max_reward()` as
 /// 2× the ideal reward for the current block rate, so this only fires for extreme
 /// rate measurement errors (block rate < 0.17 bps).
 /// v7.2.8: Replaced fixed 0.025 QUG cap which caused 92.5% under-emission at 0.77 bps.
-pub const ABSOLUTE_MAX_REWARD_PER_BLOCK: u128 = 500_000_000_000_000_000_000_000;
+/// v8.6.0: raised from 0.5 QUG (5×10²³) to 2.0 QUG (2×10²⁴)
+pub const ABSOLUTE_MAX_REWARD_PER_BLOCK: u128 = 2_000_000_000_000_000_000_000_000;
 
 /// Legacy alias — kept for any external references but no longer used internally
 pub const MAX_REWARD_PER_BLOCK: u128 = ABSOLUTE_MAX_REWARD_PER_BLOCK;

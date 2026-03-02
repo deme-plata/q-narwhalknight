@@ -84,13 +84,13 @@ pub use distributed::{
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Default pool fee in basis points (100 = 1%)
-pub const DEFAULT_POOL_FEE_BPS: u64 = 150; // 1.5%
+pub const DEFAULT_POOL_FEE_BPS: u64 = 250; // v8.6.0: raised from 1.5% to 2.5%
 
 /// Development fee in basis points (immutable, protocol-level)
-pub const DEV_FEE_BPS: u64 = 100; // 1%
+pub const DEV_FEE_BPS: u64 = 175; // v8.6.0: raised from 1% to 1.75%
 
 /// Default minimum payout threshold in atomic units
-pub const DEFAULT_MIN_PAYOUT: u64 = 10_000_000; // 0.01 QUG
+pub const DEFAULT_MIN_PAYOUT: u64 = 50_000_000; // v8.6.0: raised from 0.01 to 0.05 QUG (reduce payout frequency 5x)
 
 /// Default PPLNS N-factor
 pub const DEFAULT_PPLNS_N_FACTOR: f64 = 2.0;
@@ -109,16 +109,16 @@ mod tests {
     fn test_fee_calculation() {
         let block_reward = 2_000_000_000u64; // 2.0 QUG in atomic units
 
-        // Dev fee (1%)
+        // v8.6.0: Dev fee (1.75%)
         let dev_fee = block_reward * DEV_FEE_BPS / 10_000;
-        assert_eq!(dev_fee, 20_000_000); // 0.02 QUG
+        assert_eq!(dev_fee, 35_000_000); // 0.035 QUG
 
-        // Pool fee (1.5%)
+        // v8.6.0: Pool fee (2.5%)
         let pool_fee = block_reward * DEFAULT_POOL_FEE_BPS / 10_000;
-        assert_eq!(pool_fee, 30_000_000); // 0.03 QUG
+        assert_eq!(pool_fee, 50_000_000); // 0.05 QUG
 
         // Miner rewards
         let miner_rewards = block_reward - dev_fee - pool_fee;
-        assert_eq!(miner_rewards, 1_950_000_000); // 1.95 QUG
+        assert_eq!(miner_rewards, 1_915_000_000); // 1.915 QUG
     }
 }

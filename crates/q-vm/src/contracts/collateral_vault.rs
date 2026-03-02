@@ -4,9 +4,9 @@
 /// backed by QUG tokens at a 150% collateralization ratio.
 ///
 /// Key Features:
-/// - Mint QUGUSD by locking QUG as collateral (150% ratio)
+/// - Mint QUGUSD by locking QUG as collateral (135% ratio)
 /// - Redeem QUG by burning QUGUSD
-/// - Liquidate undercollateralized positions (< 110%)
+/// - Liquidate undercollateralized positions (< 115%)
 /// - Oracle-based QUG/USD price feeds
 
 use anyhow::{anyhow, Result};
@@ -15,10 +15,10 @@ use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
 /// Collateralization ratio constants
-pub const MIN_COLLATERAL_RATIO: f64 = 1.50; // 150% minimum
-pub const WARNING_RATIO: f64 = 1.20; // 120% warning threshold
-pub const LIQUIDATION_RATIO: f64 = 1.10; // 110% liquidation threshold
-pub const LIQUIDATION_BONUS: f64 = 0.05; // 5% bonus for liquidators
+pub const MIN_COLLATERAL_RATIO: f64 = 1.35; // v8.6.0: 135% minimum (was 150%, more capital efficient)
+pub const WARNING_RATIO: f64 = 1.18; // v8.6.0: 118% warning threshold (was 120%, tighter warning)
+pub const LIQUIDATION_RATIO: f64 = 1.15; // v8.6.0: 115% liquidation threshold (was 110%, liquidate earlier for safety)
+pub const LIQUIDATION_BONUS: f64 = 0.08; // v8.6.0: 8% bonus for liquidators (was 5%, faster liquidation incentive)
 
 /// Base units divisor for 24-decimal precision (v3.0.4: migrated from 1e8)
 pub const BASE_UNITS_DIVISOR: f64 = 1e24;

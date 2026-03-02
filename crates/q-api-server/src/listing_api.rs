@@ -55,18 +55,18 @@ impl ListingTier {
     /// Price in USD (display units)
     pub fn price_usd(&self) -> f64 {
         match self {
-            ListingTier::Gold => 100_000.0,
-            ListingTier::Silver => 25_000.0,
-            ListingTier::Bronze => 5_000.0,
+            ListingTier::Gold => 200_000.0,   // v8.6.0: doubled from 100K
+            ListingTier::Silver => 50_000.0,  // v8.6.0: doubled from 25K
+            ListingTier::Bronze => 12_000.0,  // v8.6.0: raised from 5K
         }
     }
 
     /// Price in QUGUSD base units (24 decimals)
     pub fn price_qugusd_base(&self) -> u128 {
         match self {
-            ListingTier::Gold => 100_000 * 10u128.pow(24),
-            ListingTier::Silver => 25_000 * 10u128.pow(24),
-            ListingTier::Bronze => 5_000 * 10u128.pow(24),
+            ListingTier::Gold => 200_000 * 10u128.pow(24),   // v8.6.0: doubled from 100K
+            ListingTier::Silver => 50_000 * 10u128.pow(24),  // v8.6.0: doubled from 25K
+            ListingTier::Bronze => 12_000 * 10u128.pow(24),  // v8.6.0: raised from 5K
         }
     }
 
@@ -88,7 +88,7 @@ impl ListingTier {
 
     pub fn marketing_duration_days(&self) -> u32 {
         match self {
-            ListingTier::Gold => 90,
+            ListingTier::Gold => 60, // v8.6.0: reduced from 90 days
             ListingTier::Silver => 30,
             ListingTier::Bronze => 7,
         }
@@ -96,7 +96,7 @@ impl ListingTier {
 
     pub fn influencer_count(&self) -> u32 {
         match self {
-            ListingTier::Gold => 20,
+            ListingTier::Gold => 12, // v8.6.0: reduced from 20
             ListingTier::Silver => 5,
             ListingTier::Bronze => 0,
         }
@@ -106,8 +106,8 @@ impl ListingTier {
         match self {
             ListingTier::Gold => vec![
                 "Top-tier exchange listing application & support",
-                "90-day premium marketing campaign",
-                "20+ crypto influencer partnerships",
+                "60-day premium marketing campaign",
+                "12+ crypto influencer partnerships",
                 "Professional market maker coordination",
                 "CoinGecko & CoinMarketCap priority listing",
                 "Dedicated listing manager",

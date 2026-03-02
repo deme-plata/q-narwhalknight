@@ -9,12 +9,12 @@
 /// effective_confirmations = raw_confirmations × (1 + stake_weight_factor)
 ///
 /// Where stake_weight_factor = (attesting_stake / total_stake) × MAX_STAKE_BONUS
-/// MAX_STAKE_BONUS = 2.0 (stakers can double effective confirmations)
+/// MAX_STAKE_BONUS = 3.0 (stakers can triple effective confirmations) // v8.6.0
 ///
 /// A block is considered:
 /// - Probabilistic Finality: 1+ confirmations (can be reorged)
-/// - Economic Finality: 6 effective confirmations OR 33% stake attestation
-/// - Absolute Finality: 12 effective confirmations AND 67% stake attestation
+/// - Economic Finality: 3 effective confirmations OR 33% stake attestation
+/// - Absolute Finality: 6 effective confirmations AND 67% stake attestation
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -22,8 +22,10 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
-/// Maximum bonus from stake attestations (2x = 200%)
-pub const MAX_STAKE_BONUS: f64 = 2.0;
+/// Maximum bonus from stake attestations (3x = 300%)
+/// v8.6.0: Increased from 2.0 to 3.0 — stronger finality boost for stakers accelerates
+/// economic finality without reducing security (more stake = more skin in the game)
+pub const MAX_STAKE_BONUS: f64 = 3.0;
 
 /// Minimum stake ratio for economic finality
 pub const ECONOMIC_FINALITY_THRESHOLD: f64 = 0.33;
@@ -32,10 +34,10 @@ pub const ECONOMIC_FINALITY_THRESHOLD: f64 = 0.33;
 pub const ABSOLUTE_FINALITY_THRESHOLD: f64 = 0.67;
 
 /// Effective confirmations for economic finality
-pub const ECONOMIC_CONFIRMATION_TARGET: u64 = 6;
+pub const ECONOMIC_CONFIRMATION_TARGET: u64 = 3; // v8.6.0: Halved for 2x faster finality
 
 /// Effective confirmations for absolute finality
-pub const ABSOLUTE_CONFIRMATION_TARGET: u64 = 12;
+pub const ABSOLUTE_CONFIRMATION_TARGET: u64 = 6; // v8.6.0: Halved for 2x faster finality
 
 /// Finality level for a block
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,9 +46,9 @@ pub enum FinalityLevel {
     Pending,
     /// 1+ confirmations, can be reorged
     Probabilistic,
-    /// 6 effective confirmations OR 33% stake
+    /// 3 effective confirmations OR 33% stake
     Economic,
-    /// 12 effective confirmations AND 67% stake
+    /// 6 effective confirmations AND 67% stake
     Absolute,
 }
 

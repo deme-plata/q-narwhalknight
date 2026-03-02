@@ -13,7 +13,8 @@ use tracing::{debug, info, warn};
 pub const MAX_REBALANCE_SLIPPAGE_BPS: u16 = 200; // 2%
 
 /// Minimum trade size to execute (in QUG, 8 decimals)
-pub const MIN_TRADE_SIZE: u64 = 10_000_000; // 0.1 QUG
+// v8.6.0: lowered from 10_000_000 (0.1 QUG) for finer rebalancing granularity
+pub const MIN_TRADE_SIZE: u64 = 1_000_000; // 0.01 QUG
 
 /// Rebalancing engine
 pub struct Rebalancer {
@@ -32,7 +33,7 @@ impl Rebalancer {
     pub fn new(oracle: Arc<PriceOracle>) -> Self {
         Self {
             oracle,
-            max_trades_per_rebalance: 20,
+            max_trades_per_rebalance: 50, // v8.6.0: raised from 20 for finer rebalancing
             dust_threshold_bps: 50, // 0.5%
         }
     }

@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 
 /// Finality depth for network-consensus challenges
 /// Canonical block = tip - FINALITY_DEPTH
-pub const MINING_FINALITY_DEPTH: u64 = 10;
+/// v8.6.0: Reduced from 10 to 6 — DAG-Knight parallel finality makes 6 sufficient,
+/// and faster challenge updates improve miner responsiveness
+pub const MINING_FINALITY_DEPTH: u64 = 6;
 
 /// P2P Mining Solution submission
 /// Broadcast via gossipsub for network-wide reward credit
@@ -149,8 +151,10 @@ pub struct NetworkChallenge {
 }
 
 impl NetworkChallenge {
-    /// Default challenge lifetime: 60 seconds
-    pub const DEFAULT_LIFETIME_MS: u64 = 60_000;
+    /// Default challenge lifetime: 90 seconds
+    /// v8.6.0: Increased from 60s to 90s — gives miners more time for valid submissions,
+    /// especially on high-latency connections and Tor circuits
+    pub const DEFAULT_LIFETIME_MS: u64 = 90_000;
 
     /// Create a new network challenge from a canonical block
     pub fn new(

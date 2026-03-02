@@ -91,10 +91,14 @@ pub struct PoolConfig {
 impl Default for PoolConfig {
     fn default() -> Self {
         Self {
-            max_circuits_per_purpose: 2,
+            // v8.6.0: increased from 2 to 3 — more circuits per purpose improves
+            // load balancing and reduces per-circuit throughput bottleneck
+            max_circuits_per_purpose: 3,
             min_healthy_circuits: 1,
             health_check_interval: Duration::from_secs(30),
-            circuit_creation_timeout: Duration::from_secs(60),
+            // v8.6.0: reduced from 60s to 30s — if a circuit can't be built in 30s,
+            // the relay is likely overloaded; fail fast and try another path
+            circuit_creation_timeout: Duration::from_secs(30),
             max_error_rate: 0.1, // 10% error rate threshold
         }
     }

@@ -4,10 +4,10 @@
 /// This is the CRITICAL foundation for reliable sync operations.
 ///
 /// Key Features:
-/// - Checkpoint every 10 DAG layers for resume capability
+/// - Checkpoint every 20 DAG layers for resume capability (v8.6.0: was 10)
 /// - Track pending blocks awaiting parent resolution
 /// - Atomic state transitions with RocksDB transactions
-/// - Memory-bounded pending block buffer (max 10,000 blocks)
+/// - Memory-bounded pending block buffer (max 20,000 blocks) (v8.6.0: was 10K)
 ///
 /// Design rationale (from expert feedback):
 /// - Without SyncStateManager, interrupted syncs must restart from scratch
@@ -23,10 +23,12 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 /// Checkpoint frequency (save state every N layers)
-const CHECKPOINT_INTERVAL_LAYERS: usize = 10;
+/// v8.6.0: Increased from 10 to 20 — fewer checkpoint writes during sync, better throughput
+const CHECKPOINT_INTERVAL_LAYERS: usize = 20;
 
 /// Maximum pending blocks to prevent memory exhaustion
-const MAX_PENDING_BLOCKS: usize = 10_000;
+/// v8.6.0: Increased from 10K to 20K — more headroom for DAG-parallel block arrival
+const MAX_PENDING_BLOCKS: usize = 20_000;
 
 /// Persistent sync state for crash recovery
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -341,8 +343,9 @@ mod tests {
         manager.start_sync_session(1000).await.unwrap();
 
         // Commit some layers
-        manager.commit_layer(5, 500, 100).await.unwrap();
-        manager.commit_layer(10, 1000, 100).await.unwrap(); // Should trigger checkpoint
+        // v8.6.0: CHECKPOINT_INTERVAL_LAYERS is now 20, so checkpoint at layer 20
+        manager.commit_layer(10, 500, 100).await.unwrap();
+        manager.commit_layer(20, 1000, 100).await.unwrap(); // Should trigger checkpoint
 
         // Create new manager and resume
         let manager2 = SyncStateManager::new(kv);
@@ -350,7 +353,7 @@ mod tests {
 
         assert!(checkpoint.is_some());
         let checkpoint = checkpoint.unwrap();
-        assert_eq!(checkpoint.current_layer, 10);
+        assert_eq!(checkpoint.current_layer, 20);
         assert_eq!(checkpoint.current_height, 1000);
         assert_eq!(checkpoint.blocks_committed, 200);
     }

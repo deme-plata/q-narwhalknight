@@ -158,7 +158,33 @@ pub struct BlockProducer {
 
     /// 💰 v7.1.5: Configurable dev fee (shared atomic with AppState)
     dev_fee_bps: Arc<std::sync::atomic::AtomicU64>,
+
+    /// 💰 v8.6.1: Node operator fee share (promille of dev fee routed to admin wallet)
+    node_operator_fee_promille: Arc<std::sync::atomic::AtomicU64>,
+
+    /// 💰 v8.6.1: Admin wallet hex (node operator's wallet for fee share)
+    admin_wallet_hex: Arc<std::sync::RwLock<String>>,
+
+    /// 💰 v8.7.0: Distributed operator fee — qualified operators from gossipsub
+    /// Pre-computed by main.rs mining loop, sent via SetDistributedOperators command
+    distributed_operators: Arc<std::sync::RwLock<Vec<OperatorRewardEntry>>>,
 }
+
+/// 💰 v8.7.0: Entry for distributed operator fee splitting
+/// Represents one qualified node operator who should receive a share of the 0.1% operator fee
+#[derive(Debug, Clone)]
+pub struct OperatorRewardEntry {
+    /// Operator's wallet address (32 bytes, decoded from hex)
+    pub wallet: [u8; 32],
+    /// Bandwidth-weighted share (Supernode 10G+=5, Standard 1G=2, Basic=1)
+    pub weight: u32,
+    /// Short peer ID for logging (first 16 chars)
+    pub peer_id_short: String,
+}
+
+/// v8.7.0: Activation height for distributed operator fee
+/// Blocks below this height use legacy single-operator behavior
+pub const DISTRIBUTED_OPERATOR_FEE_HEIGHT: u64 = 5_400_000;
 
 /// 📊 v1.0.72-beta: Finality metrics for sub-50ms tracking
 #[derive(Debug, Default)]
@@ -205,7 +231,10 @@ impl BlockProducer {
             local_peer_id: None,     // v2.3.5-beta: P2P mining attribution (use set_node_identity to enable)
             node_name: None,         // v2.3.5-beta: Human-friendly node name
             tx_status: None,         // v3.5.20-beta: Transaction status tracker
-            dev_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(100)), // v7.1.5: default 1%
+            dev_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(200)), // v8.6.2: default 2%
+            node_operator_fee_promille: Arc::new(std::sync::atomic::AtomicU64::new(50)), // v8.6.2: 5% of dev fee = 0.1% of reward to operator
+            admin_wallet_hex: Arc::new(std::sync::RwLock::new(String::new())), // v8.6.1: empty = use founder
+            distributed_operators: Arc::new(std::sync::RwLock::new(Vec::new())), // v8.7.0: distributed fee
         }
     }
 
@@ -237,7 +266,10 @@ impl BlockProducer {
             local_peer_id: None,     // v2.3.5-beta: P2P mining attribution
             node_name: None,         // v2.3.5-beta: Human-friendly node name
             tx_status: None,         // v3.5.20-beta: Transaction status tracker
-            dev_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(100)), // v7.1.5: default 1%
+            dev_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(200)), // v8.6.2: default 2%
+            node_operator_fee_promille: Arc::new(std::sync::atomic::AtomicU64::new(50)), // v8.6.2: 5% of dev fee = 0.1% of reward to operator
+            admin_wallet_hex: Arc::new(std::sync::RwLock::new(String::new())), // v8.6.1: empty = use founder
+            distributed_operators: Arc::new(std::sync::RwLock::new(Vec::new())), // v8.7.0: distributed fee
         }
     }
 
@@ -280,13 +312,31 @@ impl BlockProducer {
             local_peer_id: None,     // v2.3.5-beta: P2P mining attribution
             node_name: None,         // v2.3.5-beta: Human-friendly node name
             tx_status: None,         // v3.5.20-beta: Transaction status tracker
-            dev_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(100)), // v7.1.5: default 1%
+            dev_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(200)), // v8.6.2: default 2%
+            node_operator_fee_promille: Arc::new(std::sync::atomic::AtomicU64::new(50)), // v8.6.2: 5% of dev fee = 0.1% of reward to operator
+            admin_wallet_hex: Arc::new(std::sync::RwLock::new(String::new())), // v8.6.1: empty = use founder
+            distributed_operators: Arc::new(std::sync::RwLock::new(Vec::new())), // v8.7.0: distributed fee
         })
     }
 
     /// 💰 v7.1.5: Set configurable dev fee (shared with AppState)
     pub fn set_dev_fee_bps(&mut self, dev_fee_bps: Arc<std::sync::atomic::AtomicU64>) {
         self.dev_fee_bps = dev_fee_bps;
+    }
+
+    /// 💰 v8.6.1: Set operator fee share (shared with AppState)
+    pub fn set_operator_fee(&mut self, promille: Arc<std::sync::atomic::AtomicU64>, admin_wallet: String) {
+        self.node_operator_fee_promille = promille;
+        if let Ok(mut w) = self.admin_wallet_hex.write() {
+            *w = admin_wallet;
+        }
+    }
+
+    /// 💰 v8.7.0: Set distributed operators for fee splitting
+    pub fn set_distributed_operators(&mut self, operators: Vec<OperatorRewardEntry>) {
+        if let Ok(mut ops) = self.distributed_operators.write() {
+            *ops = operators;
+        }
     }
 
     /// 📡 v2.3.5-beta: Set node identity for P2P mining attribution
@@ -1074,8 +1124,8 @@ impl BlockProducer {
     /// Create coinbase transactions for block rewards + development fee
     ///
     /// CONSENSUS RULE: Every block must include:
-    /// - 99% of mining rewards → individual miners
-    /// - 1% development fee → founder wallet (efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723)
+    /// - 98% of mining rewards → individual miners
+    /// - 2% development fee → 1.9% founder wallet + 0.1% node operator wallet
     ///
     /// This ensures dev fees are blockchain-enforced and visible to all nodes.
     /// Blocks without proper dev fee transactions are rejected by consensus.
@@ -1176,6 +1226,15 @@ impl BlockProducer {
         let dev_fee_amount = total_reward.saturating_mul(dev_fee_bps_val) / BPS_DIVISOR;
         let miner_reward_per_solution = (total_reward.saturating_sub(dev_fee_amount)) / solutions.len() as u128;
 
+        // v8.6.1: Split dev fee between founder and node operator
+        let operator_promille = self.node_operator_fee_promille.load(std::sync::atomic::Ordering::Relaxed) as u128;
+        let operator_fee_amount = if operator_promille > 0 {
+            dev_fee_amount.saturating_mul(operator_promille) / 1000
+        } else {
+            0
+        };
+        let founder_fee_amount = dev_fee_amount.saturating_sub(operator_fee_amount);
+
         // Decode founder wallet
         let founder_wallet_bytes =
             hex::decode(FOUNDER_WALLET_HEX).expect("Invalid founder wallet hex");
@@ -1187,44 +1246,230 @@ impl BlockProducer {
 
         let timestamp = Utc::now();
 
-        // Transaction 1: Development fee (1%)
-        let dev_fee_tx_id = {
-            let mut hasher = Sha256::new();
-            hasher.update(b"DEV_FEE");
-            hasher.update(&dev_fee_amount.to_le_bytes());
-            hasher.update(&founder_wallet);
-            hasher.update(&timestamp.timestamp().to_le_bytes());
-            let hash = hasher.finalize();
-            let mut tx_id = [0u8; 32];
-            tx_id.copy_from_slice(&hash);
-            tx_id
+        // v8.7.0: Check if distributed operator fee is active (height-gated)
+        let distributed_ops = if block_height >= DISTRIBUTED_OPERATOR_FEE_HEIGHT {
+            self.distributed_operators.read().ok()
+                .map(|ops| ops.clone())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
         };
 
-        transactions.push(Transaction {
-            id: dev_fee_tx_id,
-            from: coinbase_from,
-            to: founder_wallet,
-            amount: dev_fee_amount,
-            fee: 0,
-            nonce: 0,
-            signature: vec![0xC0, 0x1B, 0xA5, 0xE], // "COINBASE" marker
-            timestamp,
-            data: b"Development fee (1%) for sustainable quantum consensus research".to_vec(),
-            token_type: TokenType::QUG,
-            fee_token_type: TokenType::QUGUSD,
-            tx_type: TransactionType::Coinbase,
-            pqc_signature: None,
-            signature_phase: TxSignaturePhase::Phase0Ed25519,
-            pqc_public_key: None,
-            // v3.4.2-beta: ZK privacy fields (transparent by default)
-            zk_proof_bundle: None,
-            privacy_level: TransactionPrivacyLevel::Transparent,
-            bulletproof: None,
-            nullifier: None,
-            memo: None,
-        });
+        let use_distributed = block_height >= DISTRIBUTED_OPERATOR_FEE_HEIGHT && !distributed_ops.is_empty();
 
-        // Transaction 2-N: Miner rewards (99% split among all miners)
+        if use_distributed {
+            // ═══════════════════════════════════════════════════════════════
+            // v8.7.0: DISTRIBUTED OPERATOR FEE — split among all qualified operators
+            // ═══════════════════════════════════════════════════════════════
+            let total_weight: u128 = distributed_ops.iter().map(|o| o.weight as u128).sum();
+
+            // Distribute operator_fee_amount proportionally by weight
+            let mut distributed_total: u128 = 0;
+            let mut op_txs: Vec<(OperatorRewardEntry, u128)> = Vec::new();
+            for op in &distributed_ops {
+                let share = operator_fee_amount.saturating_mul(op.weight as u128) / total_weight;
+                distributed_total += share;
+                op_txs.push((op.clone(), share));
+            }
+
+            // Rounding remainder goes to founder TX
+            let remainder = operator_fee_amount.saturating_sub(distributed_total);
+            let actual_founder_amount = founder_fee_amount.saturating_add(remainder);
+
+            // Transaction 1: Founder development fee (1.9% + rounding remainder)
+            let dev_fee_tx_id = {
+                let mut hasher = Sha256::new();
+                hasher.update(b"DEV_FEE");
+                hasher.update(&actual_founder_amount.to_le_bytes());
+                hasher.update(&founder_wallet);
+                hasher.update(&timestamp.timestamp().to_le_bytes());
+                let hash = hasher.finalize();
+                let mut tx_id = [0u8; 32];
+                tx_id.copy_from_slice(&hash);
+                tx_id
+            };
+
+            transactions.push(Transaction {
+                id: dev_fee_tx_id,
+                from: coinbase_from,
+                to: founder_wallet,
+                amount: actual_founder_amount,
+                fee: 0,
+                nonce: 0,
+                signature: vec![0xC0, 0x1B, 0xA5, 0xE],
+                timestamp,
+                data: format!("Development fee (founder share) for sustainable quantum consensus research").into_bytes(),
+                token_type: TokenType::QUG,
+                fee_token_type: TokenType::QUGUSD,
+                tx_type: TransactionType::Coinbase,
+                pqc_signature: None,
+                signature_phase: TxSignaturePhase::Phase0Ed25519,
+                pqc_public_key: None,
+                zk_proof_bundle: None,
+                privacy_level: TransactionPrivacyLevel::Transparent,
+                bulletproof: None,
+                nullifier: None,
+                memo: None,
+            });
+
+            // Transactions 2..N: Distributed operator fee shares
+            for (idx, (op, share)) in op_txs.iter().enumerate() {
+                if *share == 0 { continue; }
+                let op_fee_tx_id = {
+                    let mut hasher = Sha256::new();
+                    hasher.update(b"DIST_OPERATOR_FEE");
+                    hasher.update(&share.to_le_bytes());
+                    hasher.update(&op.wallet);
+                    hasher.update(&(idx as u64).to_le_bytes());
+                    hasher.update(&timestamp.timestamp().to_le_bytes());
+                    let hash = hasher.finalize();
+                    let mut tx_id = [0u8; 32];
+                    tx_id.copy_from_slice(&hash);
+                    tx_id
+                };
+
+                transactions.push(Transaction {
+                    id: op_fee_tx_id,
+                    from: coinbase_from,
+                    to: op.wallet,
+                    amount: *share,
+                    fee: 0,
+                    nonce: (idx + 1) as u64,
+                    signature: vec![0xC0, 0x1B, 0xA5, 0xE],
+                    timestamp,
+                    data: format!("Distributed operator fee (w={}, peer={})", op.weight, op.peer_id_short).into_bytes(),
+                    token_type: TokenType::QUG,
+                    fee_token_type: TokenType::QUGUSD,
+                    tx_type: TransactionType::Coinbase,
+                    pqc_signature: None,
+                    signature_phase: TxSignaturePhase::Phase0Ed25519,
+                    pqc_public_key: None,
+                    zk_proof_bundle: None,
+                    privacy_level: TransactionPrivacyLevel::Transparent,
+                    bulletproof: None,
+                    nullifier: None,
+                    memo: None,
+                });
+            }
+
+            info!(
+                "💰 Block #{}: Distributed operator fee among {} operators ({:.6} QUG total, weights={}/{})",
+                block_height, distributed_ops.len(),
+                operator_fee_amount as f64 / 1e24,
+                distributed_ops.iter().map(|o| format!("{}:{}", &o.peer_id_short[..8.min(o.peer_id_short.len())], o.weight)).collect::<Vec<_>>().join(","),
+                total_weight,
+            );
+        } else {
+            // ═══════════════════════════════════════════════════════════════
+            // LEGACY: Single-operator fee (pre-v8.7.0 behavior)
+            // ═══════════════════════════════════════════════════════════════
+
+            // v8.6.1: Decode operator wallet (if configured and different from founder)
+            let operator_wallet: Option<[u8; 32]> = if operator_fee_amount > 0 {
+                let admin_hex = self.admin_wallet_hex.read().ok()
+                    .and_then(|w| if w.is_empty() { None } else { Some(w.clone()) });
+                if let Some(hex_str) = admin_hex {
+                    if hex_str != FOUNDER_WALLET_HEX {
+                        if let Ok(bytes) = hex::decode(&hex_str) {
+                            if bytes.len() == 32 {
+                                let mut addr = [0u8; 32];
+                                addr.copy_from_slice(&bytes);
+                                Some(addr)
+                            } else { None }
+                        } else { None }
+                    } else { None }
+                } else { None }
+            } else { None };
+
+            // Transaction 1: Founder development fee
+            let actual_founder_amount = if operator_wallet.is_some() { founder_fee_amount } else { dev_fee_amount };
+            let dev_fee_tx_id = {
+                let mut hasher = Sha256::new();
+                hasher.update(b"DEV_FEE");
+                hasher.update(&actual_founder_amount.to_le_bytes());
+                hasher.update(&founder_wallet);
+                hasher.update(&timestamp.timestamp().to_le_bytes());
+                let hash = hasher.finalize();
+                let mut tx_id = [0u8; 32];
+                tx_id.copy_from_slice(&hash);
+                tx_id
+            };
+
+            let founder_pct = if operator_wallet.is_some() {
+                format!("{:.1}%", (1000 - operator_promille) as f64 / 10.0)
+            } else {
+                "100%".to_string()
+            };
+
+            transactions.push(Transaction {
+                id: dev_fee_tx_id,
+                from: coinbase_from,
+                to: founder_wallet,
+                amount: actual_founder_amount,
+                fee: 0,
+                nonce: 0,
+                signature: vec![0xC0, 0x1B, 0xA5, 0xE],
+                timestamp,
+                data: format!("Development fee ({} founder share) for sustainable quantum consensus research", founder_pct).into_bytes(),
+                token_type: TokenType::QUG,
+                fee_token_type: TokenType::QUGUSD,
+                tx_type: TransactionType::Coinbase,
+                pqc_signature: None,
+                signature_phase: TxSignaturePhase::Phase0Ed25519,
+                pqc_public_key: None,
+                zk_proof_bundle: None,
+                privacy_level: TransactionPrivacyLevel::Transparent,
+                bulletproof: None,
+                nullifier: None,
+                memo: None,
+            });
+
+            // v8.6.1: Transaction 2 (optional): Node operator fee share
+            if let Some(op_wallet) = operator_wallet {
+                let op_fee_tx_id = {
+                    let mut hasher = Sha256::new();
+                    hasher.update(b"OPERATOR_FEE");
+                    hasher.update(&operator_fee_amount.to_le_bytes());
+                    hasher.update(&op_wallet);
+                    hasher.update(&timestamp.timestamp().to_le_bytes());
+                    let hash = hasher.finalize();
+                    let mut tx_id = [0u8; 32];
+                    tx_id.copy_from_slice(&hash);
+                    tx_id
+                };
+
+                let op_pct = format!("{:.1}%", operator_promille as f64 / 10.0);
+                info!(
+                    "💰 Block #{}: Operator fee = {:.6} QUG ({} of dev fee)",
+                    block_height, operator_fee_amount as f64 / 1e24, op_pct
+                );
+
+                transactions.push(Transaction {
+                    id: op_fee_tx_id,
+                    from: coinbase_from,
+                    to: op_wallet,
+                    amount: operator_fee_amount,
+                    fee: 0,
+                    nonce: 1,
+                    signature: vec![0xC0, 0x1B, 0xA5, 0xE],
+                    timestamp,
+                    data: format!("Node operator fee ({} of dev fee)", op_pct).into_bytes(),
+                    token_type: TokenType::QUG,
+                    fee_token_type: TokenType::QUGUSD,
+                    tx_type: TransactionType::Coinbase,
+                    pqc_signature: None,
+                    signature_phase: TxSignaturePhase::Phase0Ed25519,
+                    pqc_public_key: None,
+                    zk_proof_bundle: None,
+                    privacy_level: TransactionPrivacyLevel::Transparent,
+                    bulletproof: None,
+                    nullifier: None,
+                    memo: None,
+                });
+            }
+        }
+
+        // Transaction 3-N: Miner rewards (99% split among all miners)
         for (idx, solution) in solutions.iter().enumerate() {
             let miner_tx_id = {
                 let mut hasher = Sha256::new();
@@ -1311,10 +1556,10 @@ impl BlockProducer {
     }
 
     /// 🚀 v1.0.72-beta: Fetch fee-ordered user transactions from ProductionMempool
-    /// Returns up to 1000 transactions ordered by fee (highest first)
+    /// Returns up to 5000 transactions ordered by fee (highest first)
     /// This enables real transaction processing beyond mining rewards
     async fn fetch_user_transactions_from_mempool(&self) -> Vec<Transaction> {
-        const MAX_USER_TXS_PER_BLOCK: usize = 1000; // Limit to prevent block bloat
+        const MAX_USER_TXS_PER_BLOCK: usize = 5000; // v8.6.0: Increased from 1000 to 5000 for 5x throughput
 
         match &self.production_mempool {
             Some(mempool) => {

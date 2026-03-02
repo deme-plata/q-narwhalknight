@@ -62,11 +62,11 @@ pub struct DexActivityConfig {
 impl Default for DexActivityConfig {
     fn default() -> Self {
         Self {
-            min_trade_interval_secs: 60,    // 1 minute minimum
-            max_trade_interval_secs: 3600,   // 1 hour maximum
+            min_trade_interval_secs: 30,    // v8.6.0: lowered from 60s for more responsive trading
+            max_trade_interval_secs: 1800,   // v8.6.0: lowered from 3600s (30 min max gap)
             min_trade_size_percent: Decimal::new(1, 2),  // 0.01 = 1%
-            max_trade_size_percent: Decimal::new(5, 2),  // 0.05 = 5%
-            target_daily_trades: 100,
+            max_trade_size_percent: Decimal::new(8, 2),  // v8.6.0: raised from 0.05 to 0.08 = 8%
+            target_daily_trades: 200, // v8.6.0: raised from 100 for more DEX activity
             max_price_deviation_percent: Decimal::new(2, 2), // 2%
             mean_reversion_enabled: true,
             primary_token: "QBANK".to_string(),

@@ -42,8 +42,9 @@ use crate::{GlobalMiningStats, MiningEvent};
 
 const HASHRATE_HISTORY_SIZE: usize = 120;
 const LATENCY_HISTORY_SIZE: usize = 60;
+const BANDWIDTH_HISTORY_SIZE: usize = 60; // 60 ticks of bandwidth samples
 const MAX_LOG_ENTRIES: usize = 1000;
-const TAB_COUNT: usize = 5;
+const TAB_COUNT: usize = 6;
 
 // ═══════════════════════════════════════════════════════════════════
 // Log entry types for the TUI log viewer
@@ -155,6 +156,25 @@ impl tracing::field::Visit for MessageVisitor {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// Wallet password persistence (SHA-256 hash stored in .wallet_password file)
+// ═══════════════════════════════════════════════════════════════════
+
+fn wallet_password_path() -> std::path::PathBuf {
+    // Store next to node data in current working directory
+    std::path::PathBuf::from(".wallet_password")
+}
+
+fn load_wallet_password_hash() -> Option<String> {
+    let path = wallet_password_path();
+    std::fs::read_to_string(&path).ok().map(|s| s.trim().to_string()).filter(|s| s.len() == 64)
+}
+
+fn save_wallet_password_hash(hash: &str) {
+    let path = wallet_password_path();
+    let _ = std::fs::write(&path, hash);
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // MinerTuiApp: Main application state
 // ═══════════════════════════════════════════════════════════════════
 
@@ -177,6 +197,29 @@ pub struct MinerTuiApp {
     pub log_filter: usize,         // 0=All, 1=Info+, 2=Warn+, 3=Error
     pub log_scroll_offset: usize,  // 0=auto-scroll (latest), >0=manual scroll
 
+    // Wallet tab state
+    pub wallet_balance: f64,
+    pub wallet_send_mode: bool,       // true = showing send form
+    pub wallet_send_address: String,  // recipient address being typed
+    pub wallet_send_amount: String,   // amount being typed
+    pub wallet_send_field: u8,        // 0=address, 1=amount
+    pub wallet_send_status: Option<String>, // result message
+    pub wallet_send_confirming: bool, // awaiting Enter to confirm
+    // v8.6.5: Password protection for sends
+    pub wallet_send_password: String,      // password being typed in confirm step
+    pub wallet_send_password_err: bool,    // true if last password check failed
+    pub wallet_password_hash: Option<String>, // stored SHA-256 hash of wallet password
+    pub wallet_password_setting: bool,      // true = currently setting a new password
+    pub wallet_password_new: String,        // new password being typed
+
+    // v8.6.6: Bandwidth statistics
+    pub bandwidth_down_history: VecDeque<f64>,  // KB/s download per tick
+    pub bandwidth_up_history: VecDeque<f64>,    // KB/s upload per tick
+    pub prev_bytes_down: u64,                    // previous tick's total bytes
+    pub prev_bytes_up: u64,
+    pub total_api_requests: u64,
+    pub total_api_failures: u64,
+
     // UI state
     pub running: bool,
     pub show_help: bool,
@@ -184,6 +227,7 @@ pub struct MinerTuiApp {
     // Timing
     pub start_time: Instant,
     last_diagnostics_run: Instant,
+    last_bandwidth_tick: Instant,
 }
 
 impl MinerTuiApp {
@@ -200,10 +244,29 @@ impl MinerTuiApp {
             logs: VecDeque::with_capacity(MAX_LOG_ENTRIES),
             log_filter: 0,
             log_scroll_offset: 0,
+            wallet_balance: 0.0,
+            wallet_send_mode: false,
+            wallet_send_address: String::new(),
+            wallet_send_amount: String::new(),
+            wallet_send_field: 0,
+            wallet_send_status: None,
+            wallet_send_confirming: false,
+            wallet_send_password: String::new(),
+            wallet_send_password_err: false,
+            wallet_password_hash: load_wallet_password_hash(),
+            wallet_password_setting: false,
+            wallet_password_new: String::new(),
+            bandwidth_down_history: VecDeque::with_capacity(BANDWIDTH_HISTORY_SIZE),
+            bandwidth_up_history: VecDeque::with_capacity(BANDWIDTH_HISTORY_SIZE),
+            prev_bytes_down: 0,
+            prev_bytes_up: 0,
+            total_api_requests: 0,
+            total_api_failures: 0,
             running: true,
             show_help: false,
             start_time: Instant::now(),
             last_diagnostics_run: Instant::now(),
+            last_bandwidth_tick: Instant::now(),
         }
     }
 
@@ -234,6 +297,36 @@ impl MinerTuiApp {
             if self.latency_history.len() > LATENCY_HISTORY_SIZE {
                 self.latency_history.pop_front();
             }
+        }
+
+        // Update bandwidth statistics
+        if let Some(ref state) = self.state {
+            let elapsed = self.last_bandwidth_tick.elapsed().as_secs_f64().max(0.1);
+            self.last_bandwidth_tick = Instant::now();
+
+            let cur_down = state.bytes_downloaded.load(Ordering::Relaxed);
+            let cur_up = state.bytes_uploaded.load(Ordering::Relaxed);
+
+            let delta_down = cur_down.saturating_sub(self.prev_bytes_down);
+            let delta_up = cur_up.saturating_sub(self.prev_bytes_up);
+
+            let kbs_down = (delta_down as f64 / 1024.0) / elapsed;
+            let kbs_up = (delta_up as f64 / 1024.0) / elapsed;
+
+            self.bandwidth_down_history.push_back(kbs_down);
+            self.bandwidth_up_history.push_back(kbs_up);
+            if self.bandwidth_down_history.len() > BANDWIDTH_HISTORY_SIZE {
+                self.bandwidth_down_history.pop_front();
+            }
+            if self.bandwidth_up_history.len() > BANDWIDTH_HISTORY_SIZE {
+                self.bandwidth_up_history.pop_front();
+            }
+
+            self.prev_bytes_down = cur_down;
+            self.prev_bytes_up = cur_up;
+
+            self.total_api_requests = state.api_requests_total.load(Ordering::Relaxed);
+            self.total_api_failures = state.api_requests_failed.load(Ordering::Relaxed);
         }
 
         // Auto-run diagnostics every 10 seconds
@@ -311,6 +404,7 @@ impl MinerTuiApp {
                 });
             }
             DiagnosticEvent::BalanceUpdated { new_balance } => {
+                self.wallet_balance = new_balance;
                 self.add_log(LogEntry {
                     timestamp: now,
                     level: LogLevel::Success,
@@ -539,13 +633,47 @@ fn handle_key_press(app: &mut MinerTuiApp, code: KeyCode, modifiers: KeyModifier
             app.running = false;
         }
 
-        // Tab navigation
-        KeyCode::Tab => app.next_tab(),
-        KeyCode::BackTab => app.prev_tab(),
-        KeyCode::Char('1') if app.current_tab == 3 => app.log_filter = 0,
-        KeyCode::Char('2') if app.current_tab == 3 => app.log_filter = 1,
-        KeyCode::Char('3') if app.current_tab == 3 => app.log_filter = 2,
-        KeyCode::Char('4') if app.current_tab == 3 => app.log_filter = 3,
+        // Tab navigation — Tab, Shift+Tab, Left/Right arrows, or F1-F6
+        KeyCode::Tab if !app.wallet_send_mode => app.next_tab(),
+        KeyCode::BackTab if !app.wallet_send_mode => app.prev_tab(),
+        KeyCode::Right if !app.wallet_send_mode => app.next_tab(),
+        KeyCode::Left if !app.wallet_send_mode => app.prev_tab(),
+        KeyCode::F(n) if n >= 1 && n <= 6 => { app.current_tab = (n as usize) - 1; }
+
+        // Events tab log filters (only when on Events tab)
+        KeyCode::Char('1') if app.current_tab == 4 => app.log_filter = 0,
+        KeyCode::Char('2') if app.current_tab == 4 => app.log_filter = 1,
+        KeyCode::Char('3') if app.current_tab == 4 => app.log_filter = 2,
+        KeyCode::Char('4') if app.current_tab == 4 => app.log_filter = 3,
+
+        // Wallet tab: password setting mode
+        _ if app.current_tab == 1 && app.wallet_password_setting => {
+            handle_password_setting(app, code);
+            return;
+        }
+        // Wallet tab input handling
+        _ if app.current_tab == 1 && app.wallet_send_mode => {
+            handle_wallet_input(app, code, modifiers);
+            return;
+        }
+        // Toggle send mode with 's' on wallet tab
+        KeyCode::Char('s') | KeyCode::Char('S') if app.current_tab == 1 => {
+            app.wallet_send_mode = !app.wallet_send_mode;
+            if app.wallet_send_mode {
+                app.wallet_send_address.clear();
+                app.wallet_send_amount.clear();
+                app.wallet_send_field = 0;
+                app.wallet_send_status = None;
+                app.wallet_send_confirming = false;
+            }
+            return;
+        }
+        // v8.6.5: Set/change wallet send password with 'P' on wallet tab
+        KeyCode::Char('P') if app.current_tab == 1 && !app.wallet_send_mode => {
+            app.wallet_password_setting = true;
+            app.wallet_password_new.clear();
+            return;
+        }
 
         // Pause/resume
         KeyCode::Char('p') => {
@@ -616,37 +744,211 @@ fn handle_key_press(app: &mut MinerTuiApp, code: KeyCode, modifiers: KeyModifier
 
         // Scroll (Events tab)
         KeyCode::Up => {
-            if app.current_tab == 3 {
+            if app.current_tab == 4 {
                 app.log_scroll_offset = app.log_scroll_offset.saturating_add(1);
             }
         }
         KeyCode::Down => {
-            if app.current_tab == 3 {
+            if app.current_tab == 4 {
                 app.log_scroll_offset = app.log_scroll_offset.saturating_sub(1);
             }
         }
         KeyCode::PageUp => {
-            if app.current_tab == 3 {
+            if app.current_tab == 4 {
                 app.log_scroll_offset = app.log_scroll_offset.saturating_add(10);
             }
         }
         KeyCode::PageDown => {
-            if app.current_tab == 3 {
+            if app.current_tab == 4 {
                 app.log_scroll_offset = app.log_scroll_offset.saturating_sub(10);
             }
         }
         KeyCode::Home => {
-            if app.current_tab == 3 {
+            if app.current_tab == 4 {
                 app.log_scroll_offset = app.logs.len(); // Scroll to top
             }
         }
         KeyCode::End => {
-            if app.current_tab == 3 {
+            if app.current_tab == 4 {
                 app.log_scroll_offset = 0; // Auto-scroll (latest)
             }
         }
 
         _ => {}
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Wallet Send Input Handler
+// ═══════════════════════════════════════════════════════════════════
+
+#[cfg(feature = "tui")]
+fn handle_wallet_input(app: &mut MinerTuiApp, code: KeyCode, _modifiers: KeyModifiers) {
+    match code {
+        KeyCode::Esc => {
+            app.wallet_send_mode = false;
+            app.wallet_send_confirming = false;
+            app.wallet_send_password.clear();
+            app.wallet_send_password_err = false;
+        }
+        KeyCode::Tab => {
+            if !app.wallet_send_confirming {
+                // Toggle between address and amount fields
+                app.wallet_send_field = if app.wallet_send_field == 0 { 1 } else { 0 };
+            }
+        }
+        KeyCode::Backspace => {
+            if app.wallet_send_confirming {
+                // In confirmation mode: backspace on password field
+                if app.wallet_password_hash.is_some() {
+                    app.wallet_send_password.pop();
+                    app.wallet_send_password_err = false;
+                } else {
+                    app.wallet_send_confirming = false;
+                }
+                return;
+            }
+            if app.wallet_send_field == 0 {
+                app.wallet_send_address.pop();
+            } else {
+                app.wallet_send_amount.pop();
+            }
+        }
+        KeyCode::Enter => {
+            if app.wallet_send_confirming {
+                // v8.6.5: If password is required, verify before sending
+                if let Some(ref stored_hash) = app.wallet_password_hash {
+                    use sha2::{Sha256, Digest};
+                    let mut hasher = Sha256::new();
+                    hasher.update(app.wallet_send_password.as_bytes());
+                    let computed = hex::encode(hasher.finalize());
+                    if computed != *stored_hash {
+                        app.wallet_send_password_err = true;
+                        app.wallet_send_password.clear();
+                        return;
+                    }
+                }
+                // Password verified (or no password set) — execute the send
+                let to = app.wallet_send_address.clone();
+                let amt = app.wallet_send_amount.clone();
+                if let Some(ref state) = app.state {
+                    let server_url = state.server_url.clone();
+                    let from = state.wallet_address.clone();
+                    let proxy = state.proxy_url.clone();
+                    let to_clone = to.clone();
+                    let amt_clone = amt.clone();
+                    tokio::spawn(async move {
+                        match send_qug_transfer(&server_url, &from, &to_clone, &amt_clone, proxy.as_deref()).await {
+                            Ok(msg) => tracing::info!("Transfer sent: {}", msg),
+                            Err(e) => tracing::error!("Transfer failed: {}", e),
+                        }
+                    });
+                    app.wallet_send_status = Some(format!("Sending {} QUG to {}...", amt, &to[..20.min(to.len())]));
+                }
+                app.wallet_send_confirming = false;
+                app.wallet_send_mode = false;
+                app.wallet_send_password.clear();
+                app.wallet_send_password_err = false;
+            } else if !app.wallet_send_address.is_empty() && !app.wallet_send_amount.is_empty() {
+                // Show confirmation (with password field if password is set)
+                app.wallet_send_confirming = true;
+                app.wallet_send_password.clear();
+                app.wallet_send_password_err = false;
+            }
+        }
+        KeyCode::Char(c) => {
+            if app.wallet_send_confirming {
+                // v8.6.5: Type into password field during confirmation
+                if app.wallet_password_hash.is_some() {
+                    app.wallet_send_password.push(c);
+                    app.wallet_send_password_err = false;
+                }
+                return;
+            }
+            if app.wallet_send_field == 0 {
+                // Address field — only hex chars
+                if c.is_ascii_hexdigit() && app.wallet_send_address.len() < 64 {
+                    app.wallet_send_address.push(c);
+                }
+            } else {
+                // Amount field — digits and dot
+                if (c.is_ascii_digit() || c == '.') && app.wallet_send_amount.len() < 20 {
+                    app.wallet_send_amount.push(c);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Password Setting Input Handler
+// ═══════════════════════════════════════════════════════════════════
+
+#[cfg(feature = "tui")]
+fn handle_password_setting(app: &mut MinerTuiApp, code: KeyCode) {
+    match code {
+        KeyCode::Esc => {
+            app.wallet_password_setting = false;
+            app.wallet_password_new.clear();
+        }
+        KeyCode::Backspace => {
+            app.wallet_password_new.pop();
+        }
+        KeyCode::Enter => {
+            if app.wallet_password_new.len() >= 4 {
+                // Hash and save the password
+                use sha2::{Sha256, Digest};
+                let mut hasher = Sha256::new();
+                hasher.update(app.wallet_password_new.as_bytes());
+                let hash = hex::encode(hasher.finalize());
+                save_wallet_password_hash(&hash);
+                app.wallet_password_hash = Some(hash);
+                app.wallet_password_setting = false;
+                app.wallet_password_new.clear();
+                app.wallet_send_status = Some("Wallet password set successfully".to_string());
+            }
+        }
+        KeyCode::Char(c) => {
+            if app.wallet_password_new.len() < 64 {
+                app.wallet_password_new.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Send QUG Transfer via API
+// ═══════════════════════════════════════════════════════════════════
+
+async fn send_qug_transfer(
+    server_url: &str,
+    from: &str,
+    to: &str,
+    amount: &str,
+    proxy_url: Option<&str>,
+) -> anyhow::Result<String> {
+    let mut builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .danger_accept_invalid_certs(true);
+    if let Some(proxy) = proxy_url {
+        builder = builder.proxy(reqwest::Proxy::all(proxy)?);
+    }
+    let client = builder.build()?;
+    let url = format!("{}/api/v1/transfer", server_url.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "from": from,
+        "to": to,
+        "amount": amount,
+    });
+    let resp = client.post(&url).json(&body).send().await?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if status.is_success() {
+        Ok(format!("Success: {}", text))
+    } else {
+        Err(anyhow::anyhow!("HTTP {}: {}", status, text))
     }
 }
 
@@ -694,7 +996,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
         env!("CARGO_PKG_VERSION"), status, hrs, mins
     );
 
-    let tab_titles = vec!["Dashboard", "Diagnostics", "Network", "Events", "Settings"];
+    let tab_titles = vec!["Dashboard", "Wallet", "Diagnostics", "Network", "Events", "Settings"];
     let tabs = Tabs::new(tab_titles)
         .block(
             Block::default()
@@ -797,6 +1099,27 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
         Line::from(vec![
             Span::styled("  >/<         ", Style::default().fg(Color::Yellow)),
             Span::raw("Adjust intensity"),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            " Wallet Tab",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            Span::styled("  S           ", Style::default().fg(Color::Yellow)),
+            Span::raw("Open/close Send form"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Tab         ", Style::default().fg(Color::Yellow)),
+            Span::raw("Switch Address/Amount field"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Enter       ", Style::default().fg(Color::Yellow)),
+            Span::raw("Confirm → Send"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Esc         ", Style::default().fg(Color::Yellow)),
+            Span::raw("Cancel send"),
         ]),
         Line::from(""),
         Line::from(Span::styled(

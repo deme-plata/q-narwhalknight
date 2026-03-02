@@ -69,10 +69,10 @@ impl Default for OptimizedMinerConfig {
         Self {
             miner_address: [0u8; 32],
             num_threads: 0, // Auto-detect
-            batch_size: 4096, // Process 4K nonces per batch
+            batch_size: 8192, // v8.6.0: Increased from 4K to 8K nonces per batch for better throughput
             enable_simd: true,
             enable_cpu_affinity: true,
-            stats_interval: Duration::from_secs(5),
+            stats_interval: Duration::from_secs(3), // v8.6.0: Reduced from 5s for faster miner feedback
             quantum_enhancement: 0.7,
             enable_security_tracking: true,
             vdf_base_difficulty: 16,

@@ -415,7 +415,7 @@ fn denormalize_from_24_decimals(amount_24: u128, decimals: u8) -> u128 {
 ///
 /// For NEW pools:
 /// - Formula: sqrt(amount0 * amount1) - MINIMUM_LIQUIDITY
-/// - MINIMUM_LIQUIDITY (1000 tokens) is permanently locked to prevent division by zero
+/// - MINIMUM_LIQUIDITY (100 tokens, v8.6.0) is permanently locked to prevent division by zero
 /// - Uses integer sqrt (Newton's method) to avoid f64 precision loss
 /// - Applies golden ratio optimization for balanced initial liquidity
 ///
@@ -460,7 +460,8 @@ fn calculate_lp_tokens(
         _ => {
             // New pool - geometric mean (Uniswap V2 formula)
             // MINIMUM_LIQUIDITY is permanently locked to prevent attacks on tiny pools
-            const MINIMUM_LIQUIDITY: u128 = 1000;
+            // v8.6.0: lowered from 1000 to 100 for easier pool bootstrapping
+            const MINIMUM_LIQUIDITY: u128 = 100;
 
             let product = amount0 * amount1;
             // FIXED: Use integer sqrt instead of f64 to avoid precision loss

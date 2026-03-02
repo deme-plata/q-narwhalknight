@@ -2,13 +2,13 @@
  * v5.7.0: Deploy Control Panel - CCC Convergence-Aware Deployment Management
  *
  * Integrates the K-Kristensen Convergence Readiness framework from the
- * "Cosmic Arcology Mission" paper into the 4-server HA deployment pipeline.
+ * "Cosmic Arcology Mission" paper into the 5-server HA deployment pipeline.
  *
  * Cosmic phases map to deployment stages:
  *   Isolation → Alpha + Delta deploying in parallel
  *   Convergence → Gamma verifying, syncing with Beta
  *   Aeon Transition → Beta deploying (conformal boundary crossing)
- *   Harmony → All 4 servers unified, same version, synced
+ *   Harmony → All 5 servers unified, same version, synced
  *
  * Pipeline: Alpha+Delta (parallel) → Gamma (verify) → Beta (primary)
  * Only visible to the master wallet (FOUNDER_WALLET).
@@ -97,6 +97,7 @@ interface DeployStatus {
   beta: NodeStatus;
   gamma: NodeStatus;
   delta: NodeStatus;
+  epsilon: NodeStatus;
   height_delta: number;
   versions_match: boolean;
 }
@@ -383,7 +384,7 @@ function SyncModeBadge({ mode }: { mode: string }) {
   );
 }
 
-function ServerCard({ node, isActive, role, syncMetrics }: { node: NodeStatus; isActive: boolean; role: 'canary' | 'primary' | 'backup' | 'bootstrap'; syncMetrics?: SyncMetrics }) {
+function ServerCard({ node, isActive, role, syncMetrics }: { node: NodeStatus; isActive: boolean; role: 'canary' | 'primary' | 'backup' | 'bootstrap' | 'supernode'; syncMetrics?: SyncMetrics }) {
   const [expanded, setExpanded] = useState(false);
   const sd = node.sync_details;
   const roleConfig = {
@@ -391,6 +392,7 @@ function ServerCard({ node, isActive, role, syncMetrics }: { node: NodeStatus; i
     primary: { label: 'PRIMARY', color: 'text-emerald-300', bg: 'bg-emerald-500/20', border: 'border-emerald-400/40' },
     bootstrap: { label: 'BOOTSTRAP', color: 'text-cyan-300', bg: 'bg-cyan-500/20', border: 'border-cyan-400/40' },
     backup: { label: 'BACKUP', color: 'text-blue-300', bg: 'bg-blue-500/20', border: 'border-blue-400/40' },
+    supernode: { label: 'SUPERNODE', color: 'text-amber-300', bg: 'bg-amber-500/20', border: 'border-amber-400/40' },
   }[role];
 
   // Prefer server-side speed/ETA when available
@@ -649,6 +651,7 @@ export default function DeployControlPanel() {
   const cleanWallet = walletAddress.replace('qnk', '').replace('qug', '');
   const isMasterWallet = cleanWallet === MASTER_WALLET;
   const isMaster = isMasterWallet || isNodeAdmin; // Node admin can also open the panel
+  const isLoggedIn = !!walletAddress; // v8.6.4: Any logged-in user can see status
 
   // v7.3.0: Check if current wallet is the node's --admin-wallet
   useEffect(() => {
@@ -717,8 +720,9 @@ export default function DeployControlPanel() {
   }, []);
 
   // Fetch deploy status + convergence data in parallel
+  // v8.6.4: Status is public, convergence/dev-fee may require admin
   const fetchStatus = useCallback(async () => {
-    if (!isMaster) return;
+    if (!isLoggedIn) return;
     setLoading(true);
     setError(null);
     const headers = {
@@ -729,7 +733,7 @@ export default function DeployControlPanel() {
       const [statusResp, convResp, devFeeResp] = await Promise.all([
         fetch('/api/v1/admin/deploy/status', { headers }),
         fetch('/api/v1/admin/deploy/convergence', { headers }).catch(() => null),
-        fetch('/api/v1/admin/dev-fee', { headers }).catch(() => null),
+        isMaster ? fetch('/api/v1/admin/dev-fee', { headers }).catch(() => null) : Promise.resolve(null),
       ]);
 
       if (statusResp.status === 403) {
@@ -757,9 +761,16 @@ export default function DeployControlPanel() {
               peers: 0, uptime_secs: 0, status: 'offline',
             };
           }
+          if (!data.epsilon) {
+            data.epsilon = {
+              name: 'Server Epsilon', url: 'http://89.149.241.126:8080',
+              online: false, version: '', height: 0, network_height: 0,
+              peers: 0, uptime_secs: 0, status: 'offline',
+            };
+          }
           // v8.2.9: Enforce peak heights — NEVER show a height decrease
           // This prevents the "rollback scare" when a node restarts and syncs back up
-          for (const [key, node] of Object.entries({ alpha: data.alpha, beta: data.beta, gamma: data.gamma, delta: data.delta }) as [string, any][]) {
+          for (const [key, node] of Object.entries({ alpha: data.alpha, beta: data.beta, gamma: data.gamma, delta: data.delta, epsilon: data.epsilon }) as [string, any][]) {
             if (!node || !node.online || node.height === 0) continue;
             const prevPeak = peakHeightsRef.current[key] || 0;
             if (node.height > prevPeak) {
@@ -903,25 +914,26 @@ export default function DeployControlPanel() {
   }, [walletAddress, addBankLog, fetchBankData]);
 
   // Auto-refresh when panel opens
+  // v8.6.4: Status refresh for all logged-in users, bank/bridge only for isMaster
   useEffect(() => {
-    if (isOpen && isMaster) {
+    if (isOpen && isLoggedIn) {
       fetchStatus();
       setConnInfo(getConnectionInfo());
-      if (activeTab === 'bank') fetchBankData();
-      if (activeTab === 'bridge') {
+      if (isMaster && activeTab === 'bank') fetchBankData();
+      if (isMaster && activeTab === 'bridge') {
         fetch('/api/v1/bridge/status').then(r => r.json()).then(d => { if (d.success) setBridgeData(d.data); }).catch(() => {});
       }
       const interval = setInterval(() => {
         fetchStatus();
         setConnInfo(getConnectionInfo());
-        if (activeTab === 'bank') fetchBankData();
-        if (activeTab === 'bridge') {
+        if (isMaster && activeTab === 'bank') fetchBankData();
+        if (isMaster && activeTab === 'bridge') {
           fetch('/api/v1/bridge/status').then(r => r.json()).then(d => { if (d.success) setBridgeData(d.data); }).catch(() => {});
         }
       }, 15000);
       return () => clearInterval(interval);
     }
-  }, [isOpen, isMaster, fetchStatus, activeTab, fetchBankData]);
+  }, [isOpen, isLoggedIn, isMaster, fetchStatus, activeTab, fetchBankData]);
 
   // v7.3.0: Fetch node settings data when settings tab is active
   const fetchSettingsData = useCallback(async () => {
@@ -1115,7 +1127,7 @@ export default function DeployControlPanel() {
 
   // v5.6.0: Trigger full deploy pipeline
   const triggerDeployAll = useCallback(async () => {
-    if (!confirm('Deploy to all 4 servers?\n\nPipeline: Alpha+Delta (parallel) -> Gamma (verify) -> Beta (primary)')) return;
+    if (!confirm('Deploy to all 5 servers?\n\nPipeline: Epsilon+Alpha+Delta (parallel) -> Gamma (verify) -> Beta (primary)')) return;
     setError(null);
     setVerifyEvents([]);
     try {
@@ -1207,7 +1219,8 @@ export default function DeployControlPanel() {
     };
   }, []);
 
-  if (!isMaster) return null;
+  // v8.6.4: Show status for all logged-in users; admin features need isMaster
+  if (!isLoggedIn) return null;
 
   const allPassed = verifyEvents.length > 0 &&
     verifyEvents.some(e => e.step === 'RESULT' && e.status === 'passed');
@@ -1262,8 +1275,9 @@ export default function DeployControlPanel() {
             {/* Tab Bar */}
             <div className="flex items-center gap-1 px-5 pt-3 pb-0">
               {([
+                // v8.6.4: Servers tab visible for all logged-in users
+                { id: 'overview' as const, icon: Server, label: 'Servers' },
                 ...(isMasterWallet ? [
-                  { id: 'overview' as const, icon: Server, label: 'Servers' },
                   { id: 'bank' as const, icon: Landmark, label: 'Bank CLI' },
                   { id: 'bridge' as const, icon: Globe, label: 'Bridge Pairs' },
                   { id: 'bounty' as const, icon: Award, label: 'Bounty' },
@@ -1369,12 +1383,12 @@ export default function DeployControlPanel() {
               {/* Server Status Cards */}
               {deployStatus ? (
                 <>
-                  <div className="grid grid-cols-4 gap-2">
+                  <div className="grid grid-cols-5 gap-2">
                     <ServerCard
-                      node={deployStatus.alpha}
-                      isActive={false}
-                      role="canary"
-                      syncMetrics={syncMetricsMap.alpha}
+                      node={deployStatus.epsilon}
+                      isActive={true}
+                      role="supernode"
+                      syncMetrics={syncMetricsMap.epsilon}
                     />
                     <ServerCard
                       node={deployStatus.beta}
@@ -1393,6 +1407,12 @@ export default function DeployControlPanel() {
                       isActive={false}
                       role="bootstrap"
                       syncMetrics={syncMetricsMap.delta}
+                    />
+                    <ServerCard
+                      node={deployStatus.alpha}
+                      isActive={false}
+                      role="canary"
+                      syncMetrics={syncMetricsMap.alpha}
                     />
                   </div>
 
@@ -1415,7 +1435,7 @@ export default function DeployControlPanel() {
                             if (p === 'Isolation') return `Isolation Phase — Each server is operating independently, like separate galaxies drifting through space before they discover each other. In cosmology, this mirrors the era before gravitational attraction pulls matter together. During this deployment phase, Alpha and Delta are receiving the new binary in parallel but haven't yet verified compatibility with the primary network. No traffic is being shifted yet — the servers are "isolated" test environments. Think of it like running an experiment in a sealed lab before releasing results to the world.`;
                             if (p === 'Convergence') return `Convergence Phase — The servers are beginning to find each other and synchronize, like galaxies drawn together by gravity. In physics, convergence describes systems approaching a stable equilibrium point. During this deployment phase, Gamma has received the new binary and is actively syncing its blockchain state with Beta (the primary). The system is verifying that the new version produces identical consensus results. This is the critical "trust but verify" stage — Gamma must prove it can handle real-world traffic before the network commits.`;
                             if (p === 'Aeon Transition') return `Aeon Transition Phase — A conformal boundary crossing, like the moment a star collapses into a new state of matter. In Roger Penrose's Conformal Cyclic Cosmology, an "aeon transition" is the boundary between one universe-epoch and the next. During this deployment phase, Beta (the primary production server) is being upgraded. Traffic has been shifted to Gamma, and Beta is crossing the boundary from old-version to new-version. This is the most delicate moment — like performing heart surgery while the patient is still alive. The network continues serving users through Gamma while Beta transforms.`;
-                            if (p === 'Harmony') return `Harmony Phase — All servers have converged into a unified, synchronized state — like a solar system where all planets orbit in resonance. In physics, harmonic resonance occurs when oscillating systems naturally synchronize their frequencies. During this deployment phase, all 4 servers (Alpha, Beta, Gamma, Delta) are running the same version, synced to the same blockchain height, and serving traffic together. This is the ideal end-state: maximum redundancy, zero version mismatch, and the network is at peak resilience. The cosmic gardener's garden is in full bloom.`;
+                            if (p === 'Harmony') return `Harmony Phase — All servers have converged into a unified, synchronized state — like a solar system where all planets orbit in resonance. In physics, harmonic resonance occurs when oscillating systems naturally synchronize their frequencies. During this deployment phase, all 5 servers (Epsilon, Alpha, Beta, Gamma, Delta) are running the same version, synced to the same blockchain height, and serving traffic together. This is the ideal end-state: maximum redundancy, zero version mismatch, and the network is at peak resilience. The cosmic gardener's garden is in full bloom.`;
                             return `Cosmic Phase — The current stage of the deployment lifecycle, modeled after phases of cosmic evolution. Each phase represents a different level of network convergence and stability.`;
                           })()}>
                             <span className="text-lg cursor-help">{getPhaseInfo(convergence.cosmic_phase).icon}</span>
@@ -1569,13 +1589,13 @@ export default function DeployControlPanel() {
                     <div className="rounded-lg bg-slate-800/40 border border-slate-700/40 p-2 text-center">
                       <div className="text-[10px] text-amber-200/50 uppercase tracking-wider mb-1">Total Peers</div>
                       <div className="text-sm font-bold text-blue-400">
-                        {(deployStatus.alpha.online ? deployStatus.alpha.peers : 0) + (deployStatus.beta.online ? deployStatus.beta.peers : 0) + (deployStatus.gamma.online ? deployStatus.gamma.peers : 0) + (deployStatus.delta?.online ? deployStatus.delta.peers : 0)}
+                        {(deployStatus.alpha.online ? deployStatus.alpha.peers : 0) + (deployStatus.beta.online ? deployStatus.beta.peers : 0) + (deployStatus.gamma.online ? deployStatus.gamma.peers : 0) + (deployStatus.delta?.online ? deployStatus.delta.peers : 0) + (deployStatus.epsilon?.online ? deployStatus.epsilon.peers : 0)}
                       </div>
                     </div>
                     <div className="rounded-lg bg-slate-800/40 border border-slate-700/40 p-2 text-center">
                       <div className="text-[10px] text-amber-200/50 uppercase tracking-wider mb-1">Servers</div>
                       <div className="text-sm font-bold text-emerald-400">
-                        {(deployStatus.alpha.online ? 1 : 0) + (deployStatus.beta.online ? 1 : 0) + (deployStatus.gamma.online ? 1 : 0) + (deployStatus.delta?.online ? 1 : 0)}/4
+                        {(deployStatus.alpha.online ? 1 : 0) + (deployStatus.beta.online ? 1 : 0) + (deployStatus.gamma.online ? 1 : 0) + (deployStatus.delta?.online ? 1 : 0) + (deployStatus.epsilon?.online ? 1 : 0)}/5
                       </div>
                     </div>
                   </div>
@@ -1817,7 +1837,8 @@ export default function DeployControlPanel() {
                 </div>
               </div>
 
-              {/* Action Buttons */}
+              {/* Action Buttons — v8.6.4: Only visible for master/admin wallet */}
+              {isMaster && (<>
               <div className="flex gap-2">
                 <motion.button
                   onClick={startVerification}
@@ -1876,6 +1897,7 @@ export default function DeployControlPanel() {
                 <RotateCcw className="w-4 h-4" />
                 Rollback
               </motion.button>
+              </>)}
               </>)}
 
               {/* ═══════════════════════════════════════════════════════════ */}

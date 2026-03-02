@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Sparkles, Key, AlertCircle, Search, HelpCircle, X, Shield, Zap, Lock, Globe, Pickaxe, Download, Monitor, Laptop, Terminal as TerminalIcon, Blocks, Activity, Cpu, Users, Clock, ChevronDown, Hash, TrendingUp, Wallet } from 'lucide-react';
+import { Sparkles, Key, AlertCircle, Search, HelpCircle, X, Shield, Zap, Lock, Globe, Pickaxe, Download, Monitor, Laptop, Terminal as TerminalIcon, Blocks, Activity, Cpu, Users, Clock, ChevronDown, Hash, TrendingUp, Wallet, BookOpen } from 'lucide-react';
 import { qnkAPI } from '../services/api';
 import { storeWallet, walletSession, verifyPasswordHash, hasPasswordHash } from '../services/walletAuth';
 import ExplorerSearchBar from './ExplorerSearchBar';
+import PapersLibraryModal from './PapersLibraryModal';
 
 interface LoginScreenProps {
   onAuthenticate: () => void;
@@ -443,6 +444,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
   const [showMinerModal, setShowMinerModal] = useState(false);
   const [showNodeModal, setShowNodeModal] = useState(false);
   const [showSlintModal, setShowSlintModal] = useState(false);
+  const [showPapersLibrary, setShowPapersLibrary] = useState(false);
   const [isMetaMaskConnecting, setIsMetaMaskConnecting] = useState(false);
   const [hasMetaMask, setHasMetaMask] = useState(false);
   // Persisted Tor onion address - fetched from backend, fallback to hardcoded
@@ -1047,6 +1049,24 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
               <path d="M50 20 Q60 15 58 25 Q55 30 50 25" fill="#27AE60"/>
             </svg>
             <div className="absolute inset-0 rounded-full bg-purple-500/0 group-hover:bg-purple-500/20 transition-all blur-md" />
+          </motion.button>
+
+          {/* Research Library Icon */}
+          <motion.button
+            className="p-2 bg-amber-600/30 hover:bg-amber-600/50 border border-amber-400/50 rounded-full transition-all cursor-pointer group backdrop-blur-sm relative"
+            whileHover={{ scale: 1.15, rotate: -8 }}
+            whileTap={{ scale: 0.95 }}
+            initial={{ opacity: 0, scale: 0, rotate: 15 }}
+            animate={{ opacity: 1, scale: 1, rotate: 0 }}
+            transition={{ delay: 0.35, type: "spring", stiffness: 200 }}
+            title="Research Library — 60 Whitepapers"
+            onClick={() => setShowPapersLibrary(true)}
+          >
+            <BookOpen className="w-7 h-7 text-amber-400" />
+            <div className="absolute inset-0 rounded-full bg-amber-500/0 group-hover:bg-amber-500/20 transition-all blur-md" />
+            <span className="absolute -top-1 -right-1 w-4 h-4 bg-amber-500 rounded-full flex items-center justify-center z-20 border border-amber-300/80">
+              <span className="text-[6px] font-black text-white leading-none">60</span>
+            </span>
           </motion.button>
 
           {/* Help Icon */}
@@ -1789,7 +1809,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
               <div className="space-y-3">
                 {/* Linux x64 */}
                 <a
-                  href="https://dl.quillon.xyz/downloads/q-api-server-v8.4.3"
+                  href="https://dl.quillon.xyz/downloads/q-api-server-v8.6.4"
                   download="q-api-server"
                   className="w-full p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-cyan-500/20 hover:border-cyan-500/40 rounded-xl transition-all flex items-center gap-4 group block"
                 >
@@ -1852,9 +1872,9 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
               <div className="mt-3 p-3 bg-slate-800/40 rounded-xl border border-cyan-500/10">
                 <h3 className="text-sm font-bold text-cyan-300 mb-2">Quick Start (Linux)</h3>
                 <code className="text-[11px] text-cyan-100/70 block whitespace-pre-wrap break-all font-mono leading-relaxed">
-{`wget https://dl.quillon.xyz/downloads/q-api-server-v8.4.3
-chmod +x q-api-server-v8.4.3
-./q-api-server-v8.4.3 --port 8080`}
+{`wget https://dl.quillon.xyz/downloads/q-api-server-v8.6.4
+chmod +x q-api-server-v8.6.4
+./q-api-server-v8.6.4 --port 8080`}
                 </code>
                 <div className="text-[10px] text-emerald-400/70 mt-2">WarpSync auto-discovers peers & syncs 900K+ blocks in minutes</div>
               </div>
@@ -2017,9 +2037,9 @@ cargo build --release --package q-api-server
               <div className="mt-5 p-4 bg-slate-800/40 rounded-xl border border-amber-500/10">
                 <h3 className="text-sm font-bold text-amber-300 mb-2">Quick Start (Linux)</h3>
                 <code className="text-xs text-amber-100/70 block whitespace-pre-wrap break-all font-mono">
-{`wget https://dl.quillon.xyz/downloads/q-miner-v8.3.0
-chmod +x q-miner-v8.3.0
-./q-miner-v8.3.0 --mode solo --wallet YOUR_WALLET --threads 4 --server https://quillon.xyz`}
+{`wget https://dl.quillon.xyz/downloads/q-miner-v8.6.4
+chmod +x q-miner-v8.6.4
+./q-miner-v8.6.4 --mode solo --wallet YOUR_WALLET --threads 4 --server https://quillon.xyz`}
                 </code>
               </div>
 
@@ -2234,6 +2254,12 @@ chmod +x slint-wallet-linux-x86_64
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Research Library Modal */}
+      <PapersLibraryModal
+        isOpen={showPapersLibrary}
+        onClose={() => setShowPapersLibrary(false)}
+      />
 
     </div>
   );

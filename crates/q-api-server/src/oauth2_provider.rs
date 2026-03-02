@@ -3,7 +3,7 @@
 // Uses post-quantum encryption (Kyber1024) for all sensitive data
 
 use axum::{
-    extract::{Json, Query, State},
+    extract::{Json, Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Redirect},
 };
@@ -94,6 +94,18 @@ pub struct PeerJwtKeyInfo {
 // methods directly: state.oauth2_storage.get_client() - no outer lock.
 // ============================================================================
 
+/// v8.5.9: Device login code for miner OAuth2 flow
+/// Miner generates a code, user visits URL in browser, logs in, miner polls for wallet
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceLoginCode {
+    pub code: String,
+    pub user_code: String,     // Short code shown to user (e.g., "ABCD-1234")
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub wallet_address: Option<String>,  // Filled when user completes login
+    pub completed: bool,
+}
+
 pub struct OAuth2Storage {
     clients: RwLock<HashMap<String, OAuth2Client>>,
     auth_codes: RwLock<HashMap<String, AuthorizationCode>>,
@@ -102,6 +114,8 @@ pub struct OAuth2Storage {
     user_consents: RwLock<HashMap<(String, String), UserConsent>>, // (wallet, client_id) -> consent
     consent_hashes: RwLock<std::collections::HashSet<String>>, // v7.4.0: on-chain consent hashes
     storage: Option<Arc<q_storage::StorageEngine>>, // v7.3.5: RocksDB persistence for clients
+    // v8.5.9: Device login codes for miner browser-based login
+    pub device_codes: RwLock<HashMap<String, DeviceLoginCode>>, // code -> login state
 }
 
 impl OAuth2Storage {
@@ -114,6 +128,7 @@ impl OAuth2Storage {
             user_consents: RwLock::new(HashMap::new()),
             consent_hashes: RwLock::new(std::collections::HashSet::new()),
             storage: None,
+            device_codes: RwLock::new(HashMap::new()),
         }
     }
 
@@ -127,6 +142,7 @@ impl OAuth2Storage {
             user_consents: RwLock::new(HashMap::new()),
             consent_hashes: RwLock::new(std::collections::HashSet::new()),
             storage: Some(storage),
+            device_codes: RwLock::new(HashMap::new()),
         }
     }
 
@@ -1273,5 +1289,124 @@ pub async fn get_client_info(
             info!("❌ Client not found: {}", client_id);
             Ok(Json(ApiResponse::error("Client not found".to_string())))
         }
+    }
+}
+
+// ============================================================================
+// v8.5.9: DEVICE LOGIN FLOW FOR MINER
+// Miner requests a code → user opens URL in browser → logs in → miner polls for wallet
+// Similar to GitHub CLI / smart TV login flow
+// ============================================================================
+
+/// POST /api/v1/miner/device-login — Miner requests a login code
+/// Returns a URL for the user to visit in their browser
+pub async fn device_login_request(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    // Generate a short user-friendly code (8 chars)
+    let user_code = format!(
+        "{}-{}",
+        &generate_random_token(4)[..4].to_uppercase(),
+        &generate_random_token(4)[..4].to_uppercase()
+    );
+    // Use hex instead of base64 for device code — base64 has '/' and '=' which break URL paths
+    let device_code = {
+        use rand::Rng;
+        let bytes: Vec<u8> = (0..32).map(|_| rand::thread_rng().gen::<u8>()).collect();
+        hex::encode(&bytes)
+    };
+
+    let login = DeviceLoginCode {
+        code: device_code.clone(),
+        user_code: user_code.clone(),
+        created_at: Utc::now(),
+        expires_at: Utc::now() + Duration::seconds(600), // 10 min expiry
+        wallet_address: None,
+        completed: false,
+    };
+
+    state.oauth2_storage.device_codes.write().await.insert(device_code.clone(), login);
+
+    info!("🔑 [DEVICE-LOGIN] Created device login code: {} (user_code: {})", &device_code[..16], user_code);
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "device_code": device_code,
+        "user_code": user_code,
+        "verification_url": format!("https://quillon.xyz/miner-login?code={}", device_code),
+        "expires_in": 600,
+        "interval": 3,
+    }))))
+}
+
+/// GET /api/v1/miner/device-login/:code — Miner polls to check if user completed login
+pub async fn device_login_poll(
+    Path(code): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let device_codes = state.oauth2_storage.device_codes.read().await;
+
+    match device_codes.get(&code) {
+        Some(login) => {
+            if Utc::now() > login.expires_at {
+                return Ok(Json(ApiResponse::error("Login code expired. Please restart the miner.".to_string())));
+            }
+            if login.completed {
+                let wallet = login.wallet_address.clone().unwrap_or_default();
+                info!("✅ [DEVICE-LOGIN] Miner claimed wallet: {}...", &wallet[..wallet.len().min(16)]);
+                Ok(Json(ApiResponse::success(serde_json::json!({
+                    "status": "complete",
+                    "wallet_address": wallet,
+                }))))
+            } else {
+                Ok(Json(ApiResponse::success(serde_json::json!({
+                    "status": "pending",
+                }))))
+            }
+        }
+        None => Ok(Json(ApiResponse::error("Invalid or expired device code".to_string()))),
+    }
+}
+
+/// POST /api/v1/miner/device-login/complete — User completes login from browser
+/// Called by the frontend after user logs in / enters mnemonic
+#[derive(Debug, Deserialize)]
+pub struct DeviceLoginCompleteRequest {
+    pub device_code: String,
+    pub wallet_address: String,
+}
+
+pub async fn device_login_complete(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<DeviceLoginCompleteRequest>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let mut device_codes = state.oauth2_storage.device_codes.write().await;
+
+    match device_codes.get_mut(&req.device_code) {
+        Some(login) => {
+            if Utc::now() > login.expires_at {
+                return Ok(Json(ApiResponse::error("Login code expired".to_string())));
+            }
+            if login.completed {
+                return Ok(Json(ApiResponse::error("Login already completed".to_string())));
+            }
+
+            // Validate wallet format
+            let wallet = req.wallet_address.trim().to_string();
+            if !wallet.starts_with("qnk") || wallet.len() < 67 {
+                return Ok(Json(ApiResponse::error("Invalid wallet address format".to_string())));
+            }
+
+            login.wallet_address = Some(wallet.clone());
+            login.completed = true;
+
+            info!("✅ [DEVICE-LOGIN] User completed login for code {} → wallet {}...",
+                &req.device_code[..req.device_code.len().min(16)], &wallet[..wallet.len().min(16)]);
+
+            Ok(Json(ApiResponse::success(serde_json::json!({
+                "status": "complete",
+                "message": "Login successful! Your miner will start automatically.",
+            }))))
+        }
+        None => Ok(Json(ApiResponse::error("Invalid or expired device code".to_string()))),
     }
 }

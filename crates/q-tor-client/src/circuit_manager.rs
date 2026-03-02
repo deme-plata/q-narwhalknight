@@ -604,9 +604,11 @@ impl CircuitManager {
         }
     }
 
-    /// Check if circuits need rotation (every epoch = 5 minutes)
+    /// Check if circuits need rotation (every epoch)
     pub fn should_rotate_circuits(&self) -> bool {
-        self.last_rotation.elapsed() > Duration::from_secs(300) // 5 minutes
+        // v8.6.0: reduced from 300s to 240s — tighter rotation window improves
+        // traffic analysis resistance with negligible throughput cost
+        self.last_rotation.elapsed() > Duration::from_secs(240) // 4 minutes
     }
 
     /// Broadcast transaction to all peers through Tor circuits (for Dandelion++ fluff phase)

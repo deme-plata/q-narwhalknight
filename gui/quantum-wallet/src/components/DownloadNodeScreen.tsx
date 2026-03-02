@@ -18,7 +18,7 @@ export default function DownloadNodeScreen() {
         </p>
         <div className="inline-flex items-center gap-2 px-4 py-2 bg-quantum-cyan/20 border border-quantum-cyan/50 rounded-full">
           <span className="w-2 h-2 bg-quantum-cyan rounded-full animate-pulse"></span>
-          <span className="text-sm font-bold text-quantum-cyan">v8.5.9 • Post-Quantum + DAG-Knight + DeFi Stack</span>
+          <span className="text-sm font-bold text-quantum-cyan">v8.6.4 • Post-Quantum + DAG-Knight + DeFi Stack</span>
         </div>
       </motion.div>
 
@@ -135,12 +135,12 @@ export default function DownloadNodeScreen() {
 
           <div className="space-y-3">
             <a
-              href="https://dl.quillon.xyz/downloads/q-api-server-v8.5.9"
+              href="https://dl.quillon.xyz/downloads/q-api-server-v8.6.4"
               download="q-api-server"
               className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-quantum-cyan to-quantum-purple rounded-xl font-bold text-white hover:shadow-lg hover:shadow-quantum-cyan/50 transition-all"
             >
               <Download className="w-5 h-5" />
-              Download Linux Binary (v8.5.9)
+              Download Linux Binary (v8.6.4)
             </a>
             <p className="text-center text-sm text-gray-200">
               Size: ~83 MB | Bitcoin-Style 21M Emission + P2P Gossipsub + DeFi Stack
@@ -151,9 +151,9 @@ export default function DownloadNodeScreen() {
           <div className="mt-6 p-4 bg-quantum-dark/50 rounded-xl border border-quantum-purple/20">
             <p className="text-sm font-mono text-gray-100 mb-2">Quick Start:</p>
             <pre className="text-xs text-quantum-cyan overflow-x-auto">
-{`wget https://dl.quillon.xyz/downloads/q-api-server-v8.5.9
-chmod +x q-api-server-v8.5.9
-./q-api-server-v8.5.9 --port 8080 --tui --admin-wallet YOUR_WALLET_ADDRESS`}
+{`wget https://dl.quillon.xyz/downloads/q-api-server-v8.6.4
+chmod +x q-api-server-v8.6.4
+./q-api-server-v8.6.4 --port 8080 --tui --admin-wallet YOUR_WALLET_ADDRESS`}
             </pre>
             <p className="text-xs text-quantum-green mt-2">
               WarpSync auto-discovers peers & syncs 900K+ blocks in minutes
@@ -285,6 +285,13 @@ chmod +x q-api-server-v8.5.9
                   <p className="text-sm text-orange-100">Optimized SIMD hashing with adaptive nonce ranges</p>
                 </div>
               </div>
+              <div className="flex items-start gap-3">
+                <Wallet className="w-5 h-5 text-purple-400 flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-purple-300 font-semibold">OAuth2 Zero-Config Login</p>
+                  <p className="text-sm text-orange-100">Double-click to mine — approve in browser, no mnemonic paste needed</p>
+                </div>
+              </div>
             </div>
 
             <div className="space-y-3">
@@ -318,20 +325,20 @@ chmod +x q-api-server-v8.5.9
 
               {/* Windows */}
               <a
-                href="https://dl.quillon.xyz/downloads/q-miner-windows-x64.exe"
-                download="q-miner-windows-x64.exe"
+                href="https://dl.quillon.xyz/downloads/q-miner-v8.6.4.exe"
+                download="q-miner-v8.6.4.exe"
                 className="w-full flex items-center justify-center gap-3 px-6 py-3 bg-gradient-to-r from-purple-600 to-blue-600 rounded-xl font-bold text-purple-100 hover:shadow-lg hover:shadow-purple-500/50 transition-all"
               >
                 <Download className="w-5 h-5" />
-                Download Miner — Windows x64
+                Download Miner — Windows x64 (v8.6.4)
               </a>
-              <p className="text-center text-xs text-orange-200">v2.7.1 — improved networking, std::thread mining, jemalloc/mimalloc, batched atomics</p>
+              <p className="text-center text-xs text-orange-200">v8.6.4 — OAuth2 zero-config login, TUI wallet QR code, Tor support, improved networking</p>
 
               {/* Universal wget download */}
               <div className="p-4 rounded-xl border border-amber-600" style={{ backgroundColor: '#0d0a00' }}>
                 <p className="text-sm font-mono text-amber-200 font-bold mb-2">Quick Download (wget):</p>
                 <pre className="text-xs text-amber-300 overflow-x-auto whitespace-pre-wrap select-all cursor-pointer p-2 rounded" style={{ backgroundColor: '#000000' }}>
-{`wget https://quillon.xyz/downloads/q-miner-v2.7.1 && chmod +x q-miner-v2.7.1`}
+{`wget https://dl.quillon.xyz/downloads/q-miner-v8.6.4 && chmod +x q-miner-v8.6.4`}
                 </pre>
               </div>
 
@@ -351,7 +358,7 @@ chmod +x q-miner-linux-x64-native
                 <p className="text-sm font-mono text-purple-200 font-bold mb-2">Windows Quick Start (PowerShell):</p>
                 <pre className="text-xs text-purple-300 overflow-x-auto whitespace-pre-wrap" style={{ backgroundColor: '#000000', padding: '8px', borderRadius: '6px' }}>
 {`# Download from browser or:
-Invoke-WebRequest -Uri https://dl.quillon.xyz/downloads/q-miner-windows-x64.exe -OutFile q-miner.exe
+Invoke-WebRequest -Uri https://dl.quillon.xyz/downloads/q-miner-v8.6.4.exe -OutFile q-miner.exe
 .\\q-miner.exe --mode solo --wallet YOUR_WALLET_ADDRESS --threads 4 --server https://quillon.xyz`}
                 </pre>
               </div>

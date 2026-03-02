@@ -20,6 +20,7 @@ import DeployControlPanel from './components/DeployControlPanel';
 import NodeSettingsModal from './components/NodeSettingsModal';
 import SupplyCorrectionModal from './components/SupplyCorrectionModal';
 import OAuthConsentPage from './components/OAuthConsentPage';
+import MinerLoginPage from './components/MinerLoginPage';
 import { sseManager } from './services/sseManager';
 import './App.css';
 
@@ -695,6 +696,13 @@ function App() {
     return <OAuthConsentPage />;
   }
 
+  // v8.5.9: Miner device login page — user opens this from the miner to link their wallet
+  if (window.location.pathname === '/miner-login') {
+    const urlParams = new URLSearchParams(window.location.search);
+    const deviceCode = urlParams.get('code') || '';
+    return <MinerLoginPage deviceCode={deviceCode} />;
+  }
+
   if (!authenticated) {
     console.log('🔓 Rendering LoginScreen');
     // v3.4.2-beta: Login page gets full quality - no frame, always show QuantumBackground
@@ -791,7 +799,7 @@ function App() {
               {/* Without this, Dashboard unmounts when on DEX, misses balance update events, */}
               {/* then refetches stale data from API when remounted - causing "two balances" bug */}
               <div style={{ display: currentScreen === 'dashboard' ? 'block' : 'none' }}>
-                <Dashboard key="dashboard-stable" onNavigateToSend={handleCoinSendClick} />
+                <Dashboard key="dashboard-stable" onNavigateToSend={handleCoinSendClick} liveBalance={nodeData.balance} />
               </div>
               {currentScreen === 'transactions' && <TransactionScreenV2 currentBalance={nodeData.balance} />}
               {/* v2.3.12-beta: Keep DexScreen mounted to preserve swap state */}

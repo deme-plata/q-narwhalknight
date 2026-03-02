@@ -17,10 +17,12 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
-/// Default bootstrap servers (Server Beta + Server Alpha)
+/// Default bootstrap servers — Delta 1Gbit first for fastest sync
 pub const DEFAULT_BOOTSTRAP_SERVERS: &[&str] = &[
-    "http://185.182.185.227:8080", // Server Beta (primary production)
-    "http://161.35.219.10:8082",   // Server Alpha (secondary/testing) - port 8082
+    "http://5.79.79.158:8080",     // Server Delta (primary - 1Gbit fastest)
+    "http://109.205.176.60:8080",  // Server Gamma (secondary - 1Gbit)
+    "http://185.182.185.227:8080", // Server Beta (tertiary - 100Mbit)
+    "http://161.35.219.10:8082",   // Server Alpha (quaternary/testing) - port 8082
 ];
 
 /// Bootstrap server with health status

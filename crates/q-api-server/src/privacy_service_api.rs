@@ -27,13 +27,13 @@ use q_types::{ApiResponse, PrivacyLevel};
 /// PaaS pricing in QUG tokens (atomic units: 1 QUG = 100,000,000 atomic units)
 pub mod pricing {
     // Pay-per-use pricing
-    pub const TOR_RELAY_PER_MB: u64 = 100_000; // 0.001 QUG/MB
-    pub const MIXING_FEE_BASIS_POINTS: u64 = 10; // 0.1% of transaction value
-    pub const MIXING_FEE_MINIMUM: u64 = 1_000_000; // 0.01 QUG minimum
-    pub const RING_SIGNATURE_FEE: u64 = 100_000; // 0.001 QUG
-    pub const STEALTH_ADDRESS_FEE: u64 = 10_000; // 0.0001 QUG
-    pub const ZK_STARK_PROOF_FEE: u64 = 1_000_000; // 0.01 QUG
-    pub const ATOMIC_SWAP_FEE: u64 = 5_000_000; // 0.05 QUG
+    pub const TOR_RELAY_PER_MB: u64 = 1_000_000; // 0.01 QUG/MB (10x)
+    pub const MIXING_FEE_BASIS_POINTS: u64 = 50; // 0.5% of transaction value (5x)
+    pub const MIXING_FEE_MINIMUM: u64 = 10_000_000; // 0.10 QUG minimum (10x)
+    pub const RING_SIGNATURE_FEE: u64 = 1_000_000; // 0.01 QUG (10x)
+    pub const STEALTH_ADDRESS_FEE: u64 = 500_000; // 0.005 QUG (50x)
+    pub const ZK_STARK_PROOF_FEE: u64 = 10_000_000; // 0.10 QUG (10x)
+    pub const ATOMIC_SWAP_FEE: u64 = 15_000_000; // 0.15 QUG (3x)
 
     // Enterprise tier monthly subscriptions (in USD equivalent QUG)
     pub const PROFESSIONAL_TIER_MONTHLY: u64 = 499_00000000; // $499

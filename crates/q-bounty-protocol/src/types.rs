@@ -118,13 +118,13 @@ impl BountyTier {
 /// Category-specific score breakdown
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CategoryScores {
-    /// Node operations: uptime, blocks, governance (30% weight)
+    /// Node operations: uptime, blocks, governance (35% weight) // v8.6.0: raised from 30% to prioritize infrastructure
     pub node_ops: f64,
 
-    /// Transaction volume and diversity (25% weight)
+    /// Transaction volume and diversity (10% weight) // v8.6.0: reduced from 25% to discourage tx farming
     pub transactions: f64,
 
-    /// Bug reports and fixes (20% weight)
+    /// Bug reports and fixes (30% weight) // v8.6.0: raised from 20% to prioritize security
     pub bug_reports: f64,
 
     /// Community contributions: docs, tutorials (15% weight)
@@ -136,10 +136,11 @@ pub struct CategoryScores {
 
 impl CategoryScores {
     /// Calculate the weighted total score
+    /// v8.6.0: rebalanced weights — infrastructure 35%, security 30%, tx 10%
     pub fn calculate_total(&self) -> f64 {
-        0.30 * self.node_ops
-            + 0.25 * self.transactions
-            + 0.20 * self.bug_reports
+        0.35 * self.node_ops
+            + 0.10 * self.transactions
+            + 0.30 * self.bug_reports
             + 0.15 * self.community
             + 0.10 * self.social
     }
@@ -157,11 +158,12 @@ pub enum ActivityCategory {
 
 impl ActivityCategory {
     /// Get the scoring weight for this category
+    /// v8.6.0: rebalanced — infra 35%, security 30%, tx 10%
     pub fn weight(&self) -> f64 {
         match self {
-            ActivityCategory::NodeOps => 0.30,
-            ActivityCategory::Transactions => 0.25,
-            ActivityCategory::BugReports => 0.20,
+            ActivityCategory::NodeOps => 0.35,       // v8.6.0: was 0.30
+            ActivityCategory::Transactions => 0.10,  // v8.6.0: was 0.25
+            ActivityCategory::BugReports => 0.30,    // v8.6.0: was 0.20
             ActivityCategory::Community => 0.15,
             ActivityCategory::Social => 0.10,
         }
@@ -226,10 +228,11 @@ pub enum BugSeverity {
 
 impl BugSeverity {
     /// Get the score multiplier for this severity
+    /// v8.6.0: doubled Critical (200) and High (100) to incentivize security research
     pub fn score_multiplier(&self) -> f64 {
         match self {
-            BugSeverity::Critical => 100.0,
-            BugSeverity::High => 50.0,
+            BugSeverity::Critical => 200.0, // v8.6.0: was 100.0
+            BugSeverity::High => 100.0,     // v8.6.0: was 50.0
             BugSeverity::Medium => 20.0,
             BugSeverity::Low => 10.0,
         }

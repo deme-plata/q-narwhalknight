@@ -65,7 +65,7 @@ impl MinerDiagnostics {
         self.checks.len()
     }
 
-    /// Run all 10 health checks against current state (non-async, reads atomics)
+    /// Run all health checks against current state (non-async, reads atomics)
     pub fn run_checks(&mut self, state: &Arc<SharedMinerState>) {
         self.checks.clear();
         self.last_run = Instant::now();
@@ -99,6 +99,9 @@ impl MinerDiagnostics {
 
         // 10. Version Current
         self.check_version(state);
+
+        // 11. Proxy Health (only when proxy is configured)
+        self.check_proxy(state);
     }
 
     fn check_server_reachable(&mut self, state: &Arc<SharedMinerState>) {
@@ -348,6 +351,38 @@ impl MinerDiagnostics {
                     "Download latest: wget https://quillon.xyz/downloads/q-miner-v{}\nchmod +x q-miner-v{}",
                     self.min_miner_version.as_deref().unwrap_or(my_ver),
                     self.min_miner_version.as_deref().unwrap_or(my_ver),
+                ))
+            } else {
+                None
+            },
+        });
+    }
+
+    fn check_proxy(&mut self, state: &Arc<SharedMinerState>) {
+        let proxy = match &state.proxy_url {
+            Some(p) => p.clone(),
+            None => return, // No proxy configured — skip this check entirely
+        };
+
+        let active = state.active_thread_count();
+        let elapsed = state.start_time.elapsed().as_secs();
+
+        let status = if active > 0 {
+            CheckStatus::Pass
+        } else if elapsed > 20 {
+            CheckStatus::Fail("Proxy configured but no threads connected after 20s".into())
+        } else {
+            CheckStatus::Pass // Still starting up
+        };
+
+        self.checks.push(HealthCheck {
+            name: "Proxy Health",
+            status: status.clone(),
+            fix_suggestion: if matches!(status, CheckStatus::Fail(_)) {
+                Some(format!(
+                    "Check proxy is running: {}\nTest with: curl --socks5 {} https://quillon.xyz/api/v1/status\nOr try without proxy: remove --proxy/--tor flag",
+                    proxy,
+                    proxy.trim_start_matches("socks5://"),
                 ))
             } else {
                 None
