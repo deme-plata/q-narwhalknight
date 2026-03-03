@@ -1,9 +1,0 @@
-[package]
-name = "k-dark-sector"
-version = "0.1.0"
-edition = "2021"
-authors = ["OroBit Research Consortium"]
-description = "Dark matter and dark energy coupling for K-Parameter framework"
-
-[dependencies]
-k-constants = { path = "../k-constants" }

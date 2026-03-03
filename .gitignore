@@ -131,3 +131,35 @@ node_modules/
 !K-Parameter_Whitepaper.pdf
 aireply*.rs
 2
+
+# Old release directories and artifacts (already removed from tracking)
+q-narwhalknight-linux*/
+q-narwhalknight-v*/
+q-narwhalknight-windows/
+mining-releases/
+build-output/
+target-glibc-compat/
+simple_bench/
+presentation-app/
+network-tests/
+factory_output/
+higgs_simulation_output/
+multiverse_output/
+k-parameter-system/
+node*_data/
+sdk/
+api-docs/
+
+# Test binaries in project root
+test_*
+*_test
+*_demo
+demo
+validate_*
+quick_*
+simple_*
+
+# Misc junk
+looksgoodbutslow*
+*.ini
+*.vtk

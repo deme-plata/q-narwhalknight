@@ -1,8 +1,0 @@
-[package]
-name = "k-constants"
-version = "0.1.0"
-edition = "2021"
-authors = ["OroBit Research Consortium"]
-description = "Physical constants and fundamental parameters for K-Parameter framework"
-
-[dependencies]
