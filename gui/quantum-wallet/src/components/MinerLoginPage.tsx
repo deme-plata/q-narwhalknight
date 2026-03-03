@@ -39,6 +39,26 @@ const MinerLoginPage: React.FC<MinerLoginPageProps> = ({ deviceCode }) => {
     setWalletAddress(addr);
   }, []);
 
+  const doComplete = async (code: string, wallet: string): Promise<{ success: boolean; error?: string }> => {
+    const resp = await fetch(`/api/v1/miner/device-login/complete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ device_code: code, wallet_address: wallet }),
+    });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => '');
+      if (text.startsWith('<!') || text.startsWith('<html')) {
+        throw new Error(`Server busy (${resp.status}). Retrying...`);
+      }
+      throw new Error(text || `HTTP ${resp.status}`);
+    }
+    const ct = resp.headers.get('content-type') || '';
+    if (!ct.includes('json')) {
+      throw new Error(`Server busy. Retrying...`);
+    }
+    return resp.json();
+  };
+
   const handleApprove = async () => {
     if (!deviceCode) {
       setError('Invalid login link. Please restart the miner.');
@@ -52,27 +72,28 @@ const MinerLoginPage: React.FC<MinerLoginPageProps> = ({ deviceCode }) => {
     setLoading(true);
     setError('');
 
-    try {
-      const resp = await fetch(`/api/v1/miner/device-login/complete`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          device_code: deviceCode,
-          wallet_address: walletAddress,
-        }),
-      });
-
-      const data = await resp.json();
-      if (data.success) {
-        setSuccess(true);
-      } else {
-        setError(data.message || data.error || 'Authorization failed. Code may have expired.');
+    // Retry up to 3 times (server may be momentarily busy)
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const data = await doComplete(deviceCode, walletAddress);
+        if (data.success) {
+          setSuccess(true);
+          return;
+        } else {
+          setError((data as any).message || (data as any).error || 'Authorization failed. Code may have expired.');
+          return;
+        }
+      } catch (err: any) {
+        if (attempt < 2 && (err.message || '').includes('Retrying')) {
+          await new Promise(r => setTimeout(r, 1500));
+          continue;
+        }
+        setError(err.message || 'Network error. Please try again.');
+        return;
       }
-    } catch (err: any) {
-      setError(`Error: ${err.message || 'Network error'}`);
-    } finally {
-      setLoading(false);
     }
+
+    setLoading(false);
   };
 
   const handleDeny = () => {
@@ -117,23 +138,26 @@ const MinerLoginPage: React.FC<MinerLoginPageProps> = ({ deviceCode }) => {
       }
       setLoading(true);
       setError('');
-      try {
-        const resp = await fetch('/api/v1/miner/device-login/complete', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ device_code: deviceCode, wallet_address: addr }),
-        });
-        const data = await resp.json();
-        if (data.success) {
-          setSuccess(true);
-        } else {
-          setError(data.message || data.error || 'Authorization failed. Code may have expired.');
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const data = await doComplete(deviceCode, addr);
+          if (data.success) {
+            setSuccess(true);
+            return;
+          } else {
+            setError((data as any).message || (data as any).error || 'Authorization failed. Code may have expired.');
+            return;
+          }
+        } catch (err: any) {
+          if (attempt < 2 && (err.message || '').includes('Retrying')) {
+            await new Promise(r => setTimeout(r, 1500));
+            continue;
+          }
+          setError(err.message || 'Network error. Please try again.');
+          return;
         }
-      } catch (err: any) {
-        setError(`Error: ${err.message || 'Network error'}`);
-      } finally {
-        setLoading(false);
       }
+      setLoading(false);
     };
 
     return (

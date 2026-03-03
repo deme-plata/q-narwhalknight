@@ -22,6 +22,7 @@ interface QuantumLoaderProps {
   progress?: number;
   onComplete?: () => void;
   inline?: boolean;
+  backgroundOnly?: boolean; // Canvas-only mode: no overlays, no text — just particles
 }
 
 interface Particle {
@@ -61,6 +62,7 @@ const QuantumLoader: React.FC<QuantumLoaderProps> = ({
   progress,
   onComplete,
   inline = false,
+  backgroundOnly = false,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef<number>(0);
@@ -608,66 +610,70 @@ const QuantumLoader: React.FC<QuantumLoaderProps> = ({
   }, [inline]);
 
   return (
-    <div className={`${inline ? 'absolute inset-0' : 'fixed inset-0 z-[9999]'} bg-[#060810] flex flex-col items-center justify-center overflow-hidden`}>
+    <div className={`${inline ? 'absolute inset-0' : 'fixed inset-0 z-[9999]'} ${backgroundOnly ? '' : 'bg-[#060810]'} flex flex-col items-center justify-center overflow-hidden`}>
       <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />
 
-      {/* Center overlay — Q logo + status */}
-      <div className="relative z-10 flex flex-col items-center gap-3 pointer-events-none">
-        <div
-          className="w-14 h-14 rounded-xl flex items-center justify-center"
-          style={{
-            background: 'linear-gradient(135deg, rgba(212,175,55,0.15), rgba(255,215,0,0.1))',
-            border: '1px solid rgba(212,175,55,0.25)',
-            boxShadow: '0 0 40px rgba(212,175,55,0.15), 0 0 80px rgba(212,175,55,0.05)',
-            backdropFilter: 'blur(8px)',
-          }}
-        >
-          <span className="text-amber-400 font-bold text-2xl" style={{ textShadow: '0 0 15px rgba(212,175,55,0.5)' }}>Q</span>
-        </div>
+      {/* Center overlay — Q logo + status (hidden in backgroundOnly mode) */}
+      {!backgroundOnly && (
+        <div className="relative z-10 flex flex-col items-center gap-3 pointer-events-none">
+          <div
+            className="w-14 h-14 rounded-xl flex items-center justify-center"
+            style={{
+              background: 'linear-gradient(135deg, rgba(212,175,55,0.15), rgba(255,215,0,0.1))',
+              border: '1px solid rgba(212,175,55,0.25)',
+              boxShadow: '0 0 40px rgba(212,175,55,0.15), 0 0 80px rgba(212,175,55,0.05)',
+              backdropFilter: 'blur(8px)',
+            }}
+          >
+            <span className="text-amber-400 font-bold text-2xl" style={{ textShadow: '0 0 15px rgba(212,175,55,0.5)' }}>Q</span>
+          </div>
 
-        <p className="text-sm text-gray-300/60 font-mono tracking-wide">{message}</p>
-        <p className="text-[10px] text-cyan-500/30 font-mono tracking-wider h-3 transition-opacity duration-300">{statusText}</p>
+          <p className="text-sm text-gray-300/60 font-mono tracking-wide">{message}</p>
+          <p className="text-[10px] text-cyan-500/30 font-mono tracking-wider h-3 transition-opacity duration-300">{statusText}</p>
 
-        {progress !== undefined ? (
-          <div className="w-48 mt-1">
-            <div className="h-[2px] w-full bg-gray-800/40 rounded-full overflow-hidden">
-              <div className="h-full rounded-full" style={{
-                width: `${progress}%`,
-                background: 'linear-gradient(90deg, #d4af37, #06b6d4, #8b5cf6)',
-                boxShadow: '0 0 8px rgba(212,175,55,0.5)',
-                transition: 'width 0.3s ease-out',
-              }} />
+          {progress !== undefined ? (
+            <div className="w-48 mt-1">
+              <div className="h-[2px] w-full bg-gray-800/40 rounded-full overflow-hidden">
+                <div className="h-full rounded-full" style={{
+                  width: `${progress}%`,
+                  background: 'linear-gradient(90deg, #d4af37, #06b6d4, #8b5cf6)',
+                  boxShadow: '0 0 8px rgba(212,175,55,0.5)',
+                  transition: 'width 0.3s ease-out',
+                }} />
+              </div>
             </div>
-          </div>
-        ) : (
-          <div className="flex gap-1.5 mt-1">
-            {[0, 1, 2, 3, 4, 5, 6].map(i => (
-              <div key={i} className="w-[3px] h-[3px] rounded-full" style={{
-                backgroundColor: `hsla(${40 + i * 20}, 70%, 55%, 0.5)`,
-                animation: `qDot 1.2s ease-in-out ${i * 0.1}s infinite`,
-              }} />
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* Bottom telemetry */}
-      <div className="absolute bottom-4 left-0 right-0 flex justify-center z-10">
-        <div className="flex gap-6 text-[8px] font-mono tracking-[0.2em] uppercase text-gray-600/40">
-          <span>CONSENSUS: <span className="text-cyan-500/40">ACTIVE</span></span>
-          <span className="text-gray-800/20">|</span>
-          <span>P2P: <span className="text-green-500/40">CONNECTED</span></span>
-          <span className="text-gray-800/20">|</span>
-          <span>PQ-CRYPTO: <span className="text-purple-400/40">READY</span></span>
+          ) : (
+            <div className="flex gap-1.5 mt-1">
+              {[0, 1, 2, 3, 4, 5, 6].map(i => (
+                <div key={i} className="w-[3px] h-[3px] rounded-full" style={{
+                  backgroundColor: `hsla(${40 + i * 20}, 70%, 55%, 0.5)`,
+                  animation: `qDot 1.2s ease-in-out ${i * 0.1}s infinite`,
+                }} />
+              ))}
+            </div>
+          )}
         </div>
-      </div>
+      )}
 
-      <style>{`
+      {/* Bottom telemetry (hidden in backgroundOnly mode) */}
+      {!backgroundOnly && (
+        <div className="absolute bottom-4 left-0 right-0 flex justify-center z-10">
+          <div className="flex gap-6 text-[8px] font-mono tracking-[0.2em] uppercase text-gray-600/40">
+            <span>CONSENSUS: <span className="text-cyan-500/40">ACTIVE</span></span>
+            <span className="text-gray-800/20">|</span>
+            <span>P2P: <span className="text-green-500/40">CONNECTED</span></span>
+            <span className="text-gray-800/20">|</span>
+            <span>PQ-CRYPTO: <span className="text-purple-400/40">READY</span></span>
+          </div>
+        </div>
+      )}
+
+      {!backgroundOnly && <style>{`
         @keyframes qDot {
           0%, 100% { transform: scaleY(0.4); opacity: 0.2; }
           50% { transform: scaleY(3); opacity: 0.9; }
         }
-      `}</style>
+      `}</style>}
     </div>
   );
 };

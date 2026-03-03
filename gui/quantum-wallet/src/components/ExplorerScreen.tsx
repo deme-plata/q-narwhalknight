@@ -1323,7 +1323,7 @@ const StatsModal = ({ networkStats, liveMetrics, hashpowerSecurity, postQuantumS
                   LIVE
                 </span>
                 <a
-                  href="https://dl.quillon.xyz/downloads/theoretical-physics-node-system.pdf"
+                  href="https://quillon.xyz/downloads/theoretical-physics-node-system.pdf"
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-xs text-quantum-purple hover:text-quantum-cyan transition-colors ml-auto"
@@ -2152,6 +2152,8 @@ export default function ExplorerScreen() {
   const [selectedDetail, setSelectedDetail] = useState<{type: string, data: any} | null>(null);
   const [dataSource, setDataSource] = useState<string>(''); // Track where data came from
   const [showStatsModal, setShowStatsModal] = useState(false);
+  // Explorer data debug state (hidden in production)
+  const [debugInfo, setDebugInfo] = useState<string>('');
   const [networkStats, setNetworkStats] = useState<NetworkStats>({
     currentHeight: 0,
     currentRound: 0,
@@ -2370,6 +2372,8 @@ export default function ExplorerScreen() {
           qnkAPI.getNetworkSupply(),
         ]);
         if (!isMounted) return;
+        // Debug logging (console only)
+        console.debug('[Explorer] nodeStatus:', nodeStatus?.success, 'supply:', supplyResponse?.success);
         if (supplyResponse.success && supplyResponse.data) {
           const newTotalMined = supplyResponse.data.total_mined;
 
@@ -2406,77 +2410,80 @@ export default function ExplorerScreen() {
           }
         }
 
-        // Fetch optional metrics in parallel (non-blocking)
-        const [hashpowerResponse, priceResponse, emissionResponse, progressResponse, resonanceResponse, physicsResponse] = await Promise.allSettled([
-          qnkAPI.getHashpowerSecurity(),
-          qnkAPI.getAMMPrice('QUG'),
-          qnkAPI.getEmissionStats(30),
-          qnkAPI.getStartupProgress(),
-          qnkAPI.getResonanceMetrics(),
-          qnkAPI.getPhysicsMetrics(),
-        ]);
-        if (!isMounted) return;
-
-        if (hashpowerResponse.status === 'fulfilled' && hashpowerResponse.value.success && hashpowerResponse.value.data) {
-          setHashpowerSecurity(hashpowerResponse.value.data);
-        }
-        if (priceResponse.status === 'fulfilled' && priceResponse.value.success && priceResponse.value.data && priceResponse.value.data.price_usd != null && priceResponse.value.data.price_usd > 0) {
-          setQugPriceUsd(priceResponse.value.data!.price_usd!);
-        }
-        if (emissionResponse.status === 'fulfilled' && emissionResponse.value.success && emissionResponse.value.data) {
-          setEmissionStats(emissionResponse.value.data);
-        }
-        if (progressResponse.status === 'fulfilled' && progressResponse.value.success && progressResponse.value.data) {
-          setStartupProgress(progressResponse.value.data);
-        }
-        if (resonanceResponse.status === 'fulfilled' && resonanceResponse.value.success && resonanceResponse.value.data?.metrics) {
-          const rd = resonanceResponse.value.data!;
-          const m = rd.metrics!;
-          setResonanceMetrics({
-            mode: rd.mode,
-            agreement_rate: m!.agreement_rate,
-            resonance_weight: m!.resonance_weight,
-            primary_latency_ms: m!.primary_latency_ms,
-            shadow_latency_ms: m!.shadow_latency_ms,
-            harmony_score: rd.visualization?.harmony_score || 0,
-            energy_state: rd.visualization?.energy_state || 'initializing',
-            spectral_health: rd.visualization?.spectral_health || 'unknown',
-            byzantine_detected: m!.shadow_byzantine_detected,
-            total_rounds: m!.total_rounds,
-          });
-        }
-        if (physicsResponse.status === 'fulfilled' && physicsResponse.value.success && physicsResponse.value.data) {
-          setPhysicsMetrics(physicsResponse.value.data);
-        }
-
-        // v2.3.8-beta: CRITICAL FIX - Prevent height flickering from stale data
-        // Only accept height if it's >= highest known to prevent backwards jumps
+        // v1.0.3: Set core network stats IMMEDIATELY after nodeStatus resolves
+        // Previously this was after 6 optional Promise.allSettled calls — if any handler
+        // threw an exception, setNetworkStats was never reached and UI showed all zeros.
         const newHeight = nodeStatus.data?.current_height || 0;
         const effectiveHeight = Math.max(newHeight, highestKnownHeightRef.current);
         if (newHeight >= highestKnownHeightRef.current) {
           highestKnownHeightRef.current = newHeight;
         }
 
-        // Update network stats with ONLY real data from API
         setNetworkStats({
           currentHeight: effectiveHeight,
-          currentRound: nodeStatus.data?.current_round || Math.floor((nodeStatus.data?.current_height || 0) / 100), // Estimate round from height
+          currentRound: nodeStatus.data?.current_round || Math.floor((nodeStatus.data?.current_height || 0) / 100),
           currentTps: nodeStatus.data?.tps_current || 0,
-          totalTransactions: 0, // TODO: Add API endpoint for total tx count
+          totalTransactions: 0,
           activePeers: nodeStatus.data?.connected_peers || 0,
           networkHealth: nodeStatus.data?.is_validator ? 0.95 : 0.8,
           consensusParticipation: nodeStatus.data?.is_validator ? 1.0 : 0.0,
           mempoolSize: nodeStatus.data?.tx_pool_size || 0,
-          quantumEntropy: 0.92, // TODO: Add quantum entropy API endpoint
+          quantumEntropy: 0.92,
           avgBlockTime: nodeStatus.data?.system_metrics?.avg_block_time_seconds || 2.3,
-          networkHashRate: (nodeStatus.data?.tps_current || 0) * 1000, // Estimated from TPS
+          networkHashRate: (nodeStatus.data?.tps_current || 0) * 1000,
           byzantineTolerance: (nodeStatus.data?.connected_peers || 0) >= 4 ? 0.95 : 0.75,
-          postQuantumReady: 0.88 // TODO: Add PQ readiness API endpoint
+          postQuantumReady: 0.88
         });
 
-        // v8.5.1: Track TPS history for the performance modal (last 60 samples)
         const currentTps = nodeStatus.data?.tps_current || 0;
         setTpsHistory(prev => [...prev.slice(-59), currentTps]);
+
+        // Fetch optional metrics in parallel (non-blocking, failures don't affect core stats)
+        try {
+          const [hashpowerResponse, priceResponse, emissionResponse, progressResponse, resonanceResponse, physicsResponse] = await Promise.allSettled([
+            qnkAPI.getHashpowerSecurity(),
+            qnkAPI.getAMMPrice('QUG'),
+            qnkAPI.getEmissionStats(30),
+            qnkAPI.getStartupProgress(),
+            qnkAPI.getResonanceMetrics(),
+            qnkAPI.getPhysicsMetrics(),
+          ]);
+          if (!isMounted) return;
+
+          if (hashpowerResponse.status === 'fulfilled' && hashpowerResponse.value.success && hashpowerResponse.value.data) {
+            setHashpowerSecurity(hashpowerResponse.value.data);
+          }
+          if (priceResponse.status === 'fulfilled' && priceResponse.value.success && priceResponse.value.data && priceResponse.value.data.price_usd != null && priceResponse.value.data.price_usd > 0) {
+            setQugPriceUsd(priceResponse.value.data!.price_usd!);
+          }
+          if (emissionResponse.status === 'fulfilled' && emissionResponse.value.success && emissionResponse.value.data) {
+            setEmissionStats(emissionResponse.value.data);
+          }
+          if (progressResponse.status === 'fulfilled' && progressResponse.value.success && progressResponse.value.data) {
+            setStartupProgress(progressResponse.value.data);
+          }
+          if (resonanceResponse.status === 'fulfilled' && resonanceResponse.value.success && resonanceResponse.value.data?.metrics) {
+            const rd = resonanceResponse.value.data!;
+            const m = rd.metrics!;
+            setResonanceMetrics({
+              mode: rd.mode,
+              agreement_rate: m!.agreement_rate,
+              resonance_weight: m!.resonance_weight,
+              primary_latency_ms: m!.primary_latency_ms,
+              shadow_latency_ms: m!.shadow_latency_ms,
+              harmony_score: rd.visualization?.harmony_score || 0,
+              energy_state: rd.visualization?.energy_state || 'initializing',
+              spectral_health: rd.visualization?.spectral_health || 'unknown',
+              byzantine_detected: m!.shadow_byzantine_detected,
+              total_rounds: m!.total_rounds,
+            });
+          }
+          if (physicsResponse.status === 'fulfilled' && physicsResponse.value.success && physicsResponse.value.data) {
+            setPhysicsMetrics(physicsResponse.value.data);
+          }
+        } catch (optionalErr) {
+          console.warn('[Explorer] Optional metrics failed (core stats unaffected):', optionalErr);
+        }
 
         // Fetch activity data in parallel
         const [transactionsResponse, blocksResponse, verticesResponse, contractsResponse] = await Promise.allSettled([
@@ -4246,7 +4253,7 @@ export default function ExplorerScreen() {
                             Every node independently verifies. No central authority. Deterministic u128 integer arithmetic.
                           </div>
                         </div>
-                        <a href="https://dl.quillon.xyz/downloads/qug-emission-economics-whitepaper.pdf" target="_blank"
+                        <a href="https://quillon.xyz/downloads/qug-emission-economics-whitepaper.pdf" target="_blank"
                           className="shrink-0 px-3 py-1.5 rounded-lg bg-amber-500/15 border border-amber-500/30 text-[10px] font-semibold text-amber-300 hover:bg-amber-500/25 transition-colors">
                           📄 Read Whitepaper
                         </a>

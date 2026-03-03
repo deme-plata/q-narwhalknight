@@ -489,6 +489,45 @@ fn calculate_lp_tokens(
 ///
 /// # Returns
 /// (amount_out, price_impact, effective_price)
+/// v8.8.5: Overflow-safe (a * b) / d using divide-first decomposition.
+/// When a * b overflows u128, decomposes as: a * (b/d) + a * (b%d) / d.
+/// The first term is exact when a * (b/d) fits in u128 (true for all practical AMM swaps).
+/// The second term uses f64 only for the small correction when a * (b%d) also overflows.
+/// This fixes the critical bug where saturating_mul capped intermediate products at u128::MAX,
+/// producing near-zero swap outputs for QUG/QUGUSD pairs with large 24-decimal reserves.
+pub fn mul_div_u128(a: u128, b: u128, d: u128) -> u128 {
+    if d == 0 {
+        return 0;
+    }
+
+    // Fast path: no overflow
+    if let Some(product) = a.checked_mul(b) {
+        return product / d;
+    }
+
+    // Overflow path: decompose b = q*d + r, then a*b/d = a*q + a*r/d
+    let q = b / d;
+    let r = b % d;
+
+    // Main term: a * q (rate × amount). For AMM this is amount_in × (reserve_out/denominator)
+    // which equals amount_in × effective_price. This fits u128 for all practical swap sizes.
+    let main_part = a.checked_mul(q).unwrap_or_else(|| {
+        // Extreme case: use f64 (maintains ~15 digits of precision)
+        ((a as f64) * (q as f64)) as u128
+    });
+
+    // Correction term: a * r / d. Since r < d, this term is < a (always small).
+    let correction = match a.checked_mul(r) {
+        Some(ar) => ar / d,
+        None => {
+            // a * r overflows. Since correction < a, f64 precision is sufficient.
+            ((a as f64) * (r as f64) / (d as f64)) as u128
+        }
+    };
+
+    main_part.saturating_add(correction)
+}
+
 /// v4.0.13: PRECISION FIX - Use integer math for AMM calculation to match handlers.rs.
 /// The old f64 path lost precision for amounts > 2^53 base units (~9M display tokens).
 pub fn calculate_quantum_swap(
@@ -516,28 +555,7 @@ pub fn calculate_quantum_swap(
         return (0, 1.0, 0.0);
     }
 
-    let amount_out = if let Some(numerator) = amount_in_with_fee.checked_mul(reserve_out) {
-        numerator / denominator
-    } else {
-        // Overflow: use adaptive scaled arithmetic (same pattern as handlers.rs)
-        let bits_a = 128 - amount_in_with_fee.leading_zeros();
-        let bits_b = 128 - reserve_out.leading_zeros();
-        let total_bits = bits_a + bits_b;
-        if total_bits <= 128 {
-            // Shouldn't happen since checked_mul failed, but safety fallback
-            (amount_in_with_fee / denominator).saturating_mul(reserve_out)
-        } else {
-            let shift = ((total_bits - 128) / 2) + 1;
-            let a_scaled = amount_in_with_fee >> shift;
-            let b_scaled = reserve_out >> shift;
-            let d_scaled = denominator >> (shift * 2).min(127);
-            if d_scaled == 0 {
-                reserve_out.saturating_sub(1) // Nearly drain the pool (extreme case)
-            } else {
-                a_scaled.saturating_mul(b_scaled).saturating_mul(1u128 << shift.min(63)) / d_scaled
-            }
-        }
-    };
+    let amount_out = mul_div_u128(amount_in_with_fee, reserve_out, denominator);
 
     // Calculate price impact using display-scale f64 (safe for display purposes)
     let r_in_d = reserve_in as f64 / 1e24;

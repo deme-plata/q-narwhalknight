@@ -8,12 +8,10 @@ import { discoverNode, getDiscoveredNodeUrl, onNodeDiscovered } from './nodeDisc
 
 // v4.2.0: Known API server endpoints (primary + fallback)
 // Order matters: first is primary, rest are fallbacks
-// v8.6.2: Added Epsilon (10Gbit supernode) as second failover — fastest sync source
+// v8.8.3: Removed direct IP:8080 URLs — all servers now firewalled to nginx-only
+// Failover uses HTTPS through each server's nginx (rate-limited, cached, secure)
 const API_SERVERS = [
   'https://quillon.xyz',        // Nginx LB — Primary (Epsilon serves quillon.xyz)
-  'http://89.149.241.126:8080', // Server Epsilon — 10Gbit supernode (direct)
-  'http://5.79.79.158:8080',    // Server Delta — Failover #1 (1Gbit)
-  'http://109.205.176.60:8080', // Server Gamma — Failover #2 (1Gbit)
 ];
 
 // Track which server is currently active (index into API_SERVERS)
@@ -25,6 +23,13 @@ const FAILOVER_COOLDOWN_MS = 30000; // Don't failover more than once per 30s
 const getApiBaseUrl = () => {
   const storedBaseURL = localStorage.getItem('apiBaseURL');
   if (storedBaseURL) {
+    // v8.8.3: Clear stale direct-IP failover URLs — servers now firewalled to nginx-only
+    if (storedBaseURL.includes(':8080')) {
+      console.log('🔄 [API] Clearing stale direct-IP failover URL:', storedBaseURL);
+      localStorage.removeItem('apiBaseURL');
+      localStorage.removeItem('failoverServer');
+      return import.meta.env.VITE_API_URL || '/api';
+    }
     return storedBaseURL + '/api';
   }
   return import.meta.env.VITE_API_URL || '/api';
@@ -644,12 +649,19 @@ class QNarwhalKnightAPI {
 
           console.log(`🌐 [API REQUEST] ${options?.method || 'GET'} ${endpoint} (attempt ${attempt + 1}/${retries + 1})`);
 
+          // v8.9.0: Only set Content-Type for requests with a body (POST/PUT/PATCH)
+          // GET requests don't have a body, and Content-Type: application/json
+          // triggers unnecessary CORS preflight OPTIONS requests in browsers
+          const method = options?.method || 'GET';
+          const needsContentType = method !== 'GET' && method !== 'HEAD' && method !== 'DELETE';
+          const headers: Record<string, string> = {
+            ...(needsContentType ? { 'Content-Type': 'application/json' } : {}),
+            ...options?.headers as Record<string, string>,
+          };
+
           const response = await fetch(url, {
             ...options,
-            headers: {
-              'Content-Type': 'application/json',
-              ...options?.headers,
-            },
+            headers,
           });
 
           // Handle rate limiting with exponential backoff (DISABLED - no rate limiting)

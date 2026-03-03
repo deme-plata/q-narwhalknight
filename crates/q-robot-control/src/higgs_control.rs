@@ -934,5 +934,6 @@ where
 {
     let secs = u64::deserialize(deserializer)?;
     let duration = std::time::Duration::from_secs(secs);
-    Ok(Instant::now() - duration)
+    // Use checked_sub to avoid panic on Windows where Instant is based on uptime
+    Ok(Instant::now().checked_sub(duration).unwrap_or(Instant::now()))
 }

@@ -1,14 +1,14 @@
 /// Quillon Mail SMTP Server: Inbound email receiving
 /// v7.3.2: SMTP server for receiving mail on ports 25 (MX) and 587 (submission)
+/// v8.7.5: STARTTLS support — required for Gmail/Outlook/Yahoo inbound delivery
 ///
-/// Ported from axum-mail-server with wallet-based auth for Quillon ecosystem.
-/// Handles SMTP state machine: HELO -> AUTH -> MAIL FROM -> RCPT TO -> DATA
+/// Handles SMTP state machine: HELO -> STARTTLS -> AUTH -> MAIL FROM -> RCPT TO -> DATA
 /// Local delivery via storage_engine, outbound queued for MTA.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, warn};
 
@@ -36,6 +36,7 @@ struct SmtpSession {
     mail_from: Option<String>,
     rcpt_to: Vec<String>,
     data: Option<String>,
+    tls_active: bool,
 }
 
 impl SmtpSession {
@@ -48,6 +49,7 @@ impl SmtpSession {
             mail_from: None,
             rcpt_to: Vec::new(),
             data: None,
+            tls_active: false,
         }
     }
 
@@ -64,6 +66,93 @@ impl SmtpSession {
 }
 
 // ---------------------------------------------------------------------------
+// TLS configuration
+// ---------------------------------------------------------------------------
+
+/// Load TLS config from Let's Encrypt certs.
+/// Tries mail.quillon.xyz first, falls back to quillon.xyz.
+fn load_tls_config() -> Option<Arc<rustls::ServerConfig>> {
+    let cert_paths = [
+        (
+            "/etc/letsencrypt/live/mail.quillon.xyz/fullchain.pem",
+            "/etc/letsencrypt/live/mail.quillon.xyz/privkey.pem",
+        ),
+        (
+            "/etc/letsencrypt/live/quillon.xyz/fullchain.pem",
+            "/etc/letsencrypt/live/quillon.xyz/privkey.pem",
+        ),
+        (
+            "/etc/letsencrypt/live/beta.quillon.xyz/fullchain.pem",
+            "/etc/letsencrypt/live/beta.quillon.xyz/privkey.pem",
+        ),
+    ];
+
+    // Also check environment override
+    let env_cert = std::env::var("SMTP_TLS_CERT").ok();
+    let env_key = std::env::var("SMTP_TLS_KEY").ok();
+
+    let mut all_paths: Vec<(&str, &str)> = Vec::new();
+    if let (Some(c), Some(k)) = (env_cert.as_deref(), env_key.as_deref()) {
+        all_paths.push((c, k));
+    }
+    for (c, k) in &cert_paths {
+        all_paths.push((c, k));
+    }
+
+    // Ensure ring crypto provider is installed for rustls
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    for (cert_path, key_path) in &all_paths {
+        match load_certs_and_key(cert_path, key_path) {
+            Ok((certs, key)) => {
+                match rustls::ServerConfig::builder()
+                    .with_no_client_auth()
+                    .with_single_cert(certs, key)
+                {
+                    Ok(config) => {
+                        info!("📧 [SMTP TLS] Loaded certificate from {}", cert_path);
+                        return Some(Arc::new(config));
+                    }
+                    Err(e) => {
+                        warn!("📧 [SMTP TLS] Failed to build config from {}: {}", cert_path, e);
+                    }
+                }
+            }
+            Err(e) => {
+                debug!("📧 [SMTP TLS] Cert not at {}: {}", cert_path, e);
+            }
+        }
+    }
+
+    warn!("📧 [SMTP TLS] No TLS certificates found — STARTTLS will be unavailable");
+    warn!("📧 [SMTP TLS] Gmail/Outlook/Yahoo may refuse to deliver mail without TLS!");
+    None
+}
+
+fn load_certs_and_key(
+    cert_path: &str,
+    key_path: &str,
+) -> anyhow::Result<(Vec<rustls::pki_types::CertificateDer<'static>>, rustls::pki_types::PrivateKeyDer<'static>)> {
+    use std::io::BufReader as StdBufReader;
+
+    let cert_file = std::fs::File::open(cert_path)?;
+    let mut cert_reader = StdBufReader::new(cert_file);
+    let certs: Vec<_> = rustls_pemfile::certs(&mut cert_reader)
+        .filter_map(|r| r.ok())
+        .collect();
+    if certs.is_empty() {
+        return Err(anyhow::anyhow!("No certificates found in {}", cert_path));
+    }
+
+    let key_file = std::fs::File::open(key_path)?;
+    let mut key_reader = StdBufReader::new(key_file);
+    let key = rustls_pemfile::private_key(&mut key_reader)?
+        .ok_or_else(|| anyhow::anyhow!("No private key found in {}", key_path))?;
+
+    Ok((certs, key))
+}
+
+// ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
@@ -74,24 +163,34 @@ pub async fn start_smtp_server(state: Arc<AppState>, port: u16) {
     let listener = match TcpListener::bind(&bind).await {
         Ok(l) => l,
         Err(e) => {
-            error!("SMTP: failed to bind {}: {}", bind, e);
+            error!("📧 SMTP: failed to bind {}: {}", bind, e);
             return;
         }
     };
-    info!("SMTP server listening on {}", bind);
+
+    // Load TLS config once at startup
+    let tls_config = load_tls_config();
+    let tls_acceptor = tls_config.map(tokio_rustls::TlsAcceptor::from);
+
+    if tls_acceptor.is_some() {
+        info!("📧 SMTP server listening on {} (STARTTLS enabled)", bind);
+    } else {
+        warn!("📧 SMTP server listening on {} (NO TLS — inbound mail may be rejected by senders)", bind);
+    }
 
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
                 let st = state.clone();
+                let acceptor = tls_acceptor.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(st, stream, addr).await {
-                        debug!("SMTP connection error from {}: {}", addr, e);
+                    if let Err(e) = handle_connection(st, stream, addr, acceptor).await {
+                        debug!("📧 SMTP connection error from {}: {}", addr, e);
                     }
                 });
             }
             Err(e) => {
-                error!("SMTP accept error: {}", e);
+                error!("📧 SMTP accept error: {}", e);
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
@@ -99,21 +198,24 @@ pub async fn start_smtp_server(state: Arc<AppState>, port: u16) {
 }
 
 // ---------------------------------------------------------------------------
-// Connection handler
+// Connection handler — plain text phase, then optional TLS upgrade
 // ---------------------------------------------------------------------------
 
 async fn handle_connection(
     state: Arc<AppState>,
     stream: TcpStream,
     addr: SocketAddr,
+    tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
 ) -> anyhow::Result<()> {
     let mut session = SmtpSession::new(addr);
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
-    let mut line = String::new();
 
     // Greeting
-    send(&mut writer, "220 mail.quillon.xyz ESMTP Quillon Mail\r\n").await?;
+    send_raw(&mut writer, "220 mail.quillon.xyz ESMTP Quillon Mail\r\n").await?;
+
+    let has_tls = tls_acceptor.is_some();
+    let mut line = String::new();
 
     loop {
         line.clear();
@@ -122,33 +224,32 @@ async fn handle_connection(
             Ok(Ok(n)) => n,
             Ok(Err(e)) => return Err(e.into()),
             Err(_) => {
-                let _ = send(&mut writer, "421 Timeout\r\n").await;
+                let _ = send_raw(&mut writer, "421 Timeout\r\n").await;
                 return Ok(());
             }
         };
         if n == 0 {
-            break; // client disconnected
+            break;
         }
 
         let trimmed = line.trim().to_string();
         debug!("SMTP [{}] << {}", addr, trimmed);
-
         let upper = trimmed.to_uppercase();
 
-        // --- QUIT (always allowed) ---
+        // --- QUIT ---
         if upper.starts_with("QUIT") {
-            send(&mut writer, "221 Bye\r\n").await?;
+            send_raw(&mut writer, "221 Bye\r\n").await?;
             break;
         }
 
         // --- NOOP / RSET ---
         if upper.starts_with("NOOP") {
-            send(&mut writer, "250 OK\r\n").await?;
+            send_raw(&mut writer, "250 OK\r\n").await?;
             continue;
         }
         if upper.starts_with("RSET") {
             session.reset_transaction();
-            send(&mut writer, "250 OK\r\n").await?;
+            send_raw(&mut writer, "250 OK\r\n").await?;
             continue;
         }
 
@@ -158,28 +259,72 @@ async fn handle_connection(
             session.helo_domain = Some(domain.clone());
             session.state = SmtpState::Greeted;
             if upper.starts_with("EHLO") {
-                let resp = format!(
-                    "250-mail.quillon.xyz Hello {}\r\n250-AUTH PLAIN LOGIN\r\n250-SIZE 10485760\r\n250 OK\r\n",
-                    domain
-                );
-                send(&mut writer, &resp).await?;
+                let mut resp = format!("250-mail.quillon.xyz Hello {}\r\n", domain);
+                if has_tls {
+                    resp.push_str("250-STARTTLS\r\n");
+                }
+                resp.push_str("250-AUTH PLAIN LOGIN\r\n");
+                resp.push_str("250-SIZE 10485760\r\n");
+                resp.push_str("250 OK\r\n");
+                send_raw(&mut writer, &resp).await?;
             } else {
-                send(&mut writer, &format!("250 Hello {}\r\n", domain)).await?;
+                send_raw(&mut writer, &format!("250 Hello {}\r\n", domain)).await?;
             }
             continue;
         }
 
-        // --- AUTH (wallet-based: AUTH PLAIN base64(\0wallet_hex\0signature_hex)) ---
+        // --- STARTTLS ---
+        if upper.starts_with("STARTTLS") {
+            if let Some(ref acceptor) = tls_acceptor {
+                send_raw(&mut writer, "220 Ready to start TLS\r\n").await?;
+
+                // Reunite the split halves back into a TcpStream for TLS handshake
+                let tcp_stream = reader.into_inner().reunite(writer)
+                    .map_err(|e| anyhow::anyhow!("Failed to reunite TCP stream: {}", e))?;
+
+                // Perform TLS handshake
+                let tls_stream = match tokio::time::timeout(
+                    Duration::from_secs(30),
+                    acceptor.accept(tcp_stream),
+                ).await {
+                    Ok(Ok(s)) => s,
+                    Ok(Err(e)) => {
+                        warn!("📧 SMTP STARTTLS handshake failed from {}: {}", addr, e);
+                        return Ok(());
+                    }
+                    Err(_) => {
+                        warn!("📧 SMTP STARTTLS handshake timeout from {}", addr);
+                        return Ok(());
+                    }
+                };
+
+                info!("📧 SMTP STARTTLS active for {}", addr);
+                session.tls_active = true;
+                // Reset state — RFC 3207 requires client to re-EHLO after STARTTLS
+                session.state = SmtpState::Connected;
+                session.helo_domain = None;
+
+                // Continue SMTP session over TLS
+                let (tls_reader, tls_writer) = tokio::io::split(tls_stream);
+                let tls_reader = BufReader::new(tls_reader);
+                return smtp_loop(state, tls_reader, tls_writer, &mut session).await;
+            } else {
+                send_raw(&mut writer, "454 TLS not available\r\n").await?;
+                continue;
+            }
+        }
+
+        // --- AUTH ---
         if upper.starts_with("AUTH") {
             if session.state == SmtpState::Connected {
-                send(&mut writer, "503 Send EHLO first\r\n").await?;
+                send_raw(&mut writer, "503 Send EHLO first\r\n").await?;
                 continue;
             }
             match handle_auth(&state, &mut session, &trimmed).await {
-                Ok(resp) => send(&mut writer, &resp).await?,
+                Ok(resp) => send_raw(&mut writer, &resp).await?,
                 Err(e) => {
                     warn!("SMTP AUTH error from {}: {}", addr, e);
-                    send(&mut writer, "535 Authentication failed\r\n").await?;
+                    send_raw(&mut writer, "535 Authentication failed\r\n").await?;
                 }
             }
             continue;
@@ -188,64 +333,203 @@ async fn handle_connection(
         // --- MAIL FROM ---
         if upper.starts_with("MAIL FROM:") {
             if session.state == SmtpState::Connected {
-                send(&mut writer, "503 Send EHLO first\r\n").await?;
+                send_raw(&mut writer, "503 Send EHLO first\r\n").await?;
                 continue;
             }
             let from = extract_angle_addr(&trimmed[10..]);
             session.mail_from = Some(from.clone());
             session.state = SmtpState::MailFrom;
-            send(&mut writer, &format!("250 Sender <{}> OK\r\n", from)).await?;
+            send_raw(&mut writer, &format!("250 Sender <{}> OK\r\n", from)).await?;
             continue;
         }
 
         // --- RCPT TO ---
         if upper.starts_with("RCPT TO:") {
             if session.mail_from.is_none() {
-                send(&mut writer, "503 Need MAIL FROM first\r\n").await?;
+                send_raw(&mut writer, "503 Need MAIL FROM first\r\n").await?;
                 continue;
             }
             let to = extract_angle_addr(&trimmed[8..]);
-
-            // Local domain check: allow delivery. External: require auth.
             if !is_local_domain(&to) && session.authenticated_wallet.is_none() {
-                send(&mut writer, "550 Relay denied\r\n").await?;
+                send_raw(&mut writer, "550 Relay denied\r\n").await?;
                 continue;
             }
             session.rcpt_to.push(to.clone());
             session.state = SmtpState::RcptTo;
-            send(&mut writer, &format!("250 Recipient <{}> OK\r\n", to)).await?;
+            send_raw(&mut writer, &format!("250 Recipient <{}> OK\r\n", to)).await?;
             continue;
         }
 
         // --- DATA ---
         if upper.starts_with("DATA") {
             if session.rcpt_to.is_empty() {
-                send(&mut writer, "503 Need RCPT TO first\r\n").await?;
+                send_raw(&mut writer, "503 Need RCPT TO first\r\n").await?;
                 continue;
             }
-            send(&mut writer, "354 End data with <CR><LF>.<CR><LF>\r\n").await?;
-
-            // Read message body until lone "."
-            let body = read_data(&mut reader).await?;
+            send_raw(&mut writer, "354 End data with <CR><LF>.<CR><LF>\r\n").await?;
+            let body = read_data_generic(&mut reader).await?;
             session.data = Some(body);
-
-            // Process and deliver
             match process_message(&state, &session).await {
-                Ok(()) => send(&mut writer, "250 OK message accepted\r\n").await?,
+                Ok(()) => send_raw(&mut writer, "250 OK message accepted\r\n").await?,
                 Err(e) => {
                     error!("SMTP message processing error: {}", e);
-                    send(&mut writer, "451 Processing error\r\n").await?;
+                    send_raw(&mut writer, "451 Processing error\r\n").await?;
                 }
             }
             session.reset_transaction();
             continue;
         }
 
-        // Unknown command
-        send(&mut writer, "500 Unknown command\r\n").await?;
+        send_raw(&mut writer, "500 Unknown command\r\n").await?;
     }
 
     debug!("SMTP connection closed: {}", addr);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Generic SMTP command loop (used for TLS-upgraded connections)
+// ---------------------------------------------------------------------------
+
+async fn smtp_loop<R, W>(
+    state: Arc<AppState>,
+    mut reader: BufReader<R>,
+    mut writer: W,
+    session: &mut SmtpSession,
+) -> anyhow::Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let addr = session.client_addr;
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        let n = tokio::time::timeout(Duration::from_secs(300), reader.read_line(&mut line)).await;
+        let n = match n {
+            Ok(Ok(n)) => n,
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => {
+                let _ = send_generic(&mut writer, "421 Timeout\r\n").await;
+                return Ok(());
+            }
+        };
+        if n == 0 {
+            break;
+        }
+
+        let trimmed = line.trim().to_string();
+        debug!("SMTP [{}] (TLS) << {}", addr, trimmed);
+        let upper = trimmed.to_uppercase();
+
+        if upper.starts_with("QUIT") {
+            send_generic(&mut writer, "221 Bye\r\n").await?;
+            break;
+        }
+        if upper.starts_with("NOOP") {
+            send_generic(&mut writer, "250 OK\r\n").await?;
+            continue;
+        }
+        if upper.starts_with("RSET") {
+            session.reset_transaction();
+            send_generic(&mut writer, "250 OK\r\n").await?;
+            continue;
+        }
+
+        // --- EHLO / HELO (re-issued after STARTTLS per RFC 3207) ---
+        if upper.starts_with("EHLO") || upper.starts_with("HELO") {
+            let domain = trimmed.splitn(2, ' ').nth(1).unwrap_or("unknown").to_string();
+            session.helo_domain = Some(domain.clone());
+            session.state = SmtpState::Greeted;
+            if upper.starts_with("EHLO") {
+                let resp = format!(
+                    "250-mail.quillon.xyz Hello {}\r\n250-AUTH PLAIN LOGIN\r\n250-SIZE 10485760\r\n250 OK\r\n",
+                    domain
+                );
+                send_generic(&mut writer, &resp).await?;
+            } else {
+                send_generic(&mut writer, &format!("250 Hello {}\r\n", domain)).await?;
+            }
+            continue;
+        }
+
+        // STARTTLS already done — reject duplicate
+        if upper.starts_with("STARTTLS") {
+            send_generic(&mut writer, "503 TLS already active\r\n").await?;
+            continue;
+        }
+
+        // --- AUTH ---
+        if upper.starts_with("AUTH") {
+            if session.state == SmtpState::Connected {
+                send_generic(&mut writer, "503 Send EHLO first\r\n").await?;
+                continue;
+            }
+            match handle_auth(&state, session, &trimmed).await {
+                Ok(resp) => send_generic(&mut writer, &resp).await?,
+                Err(e) => {
+                    warn!("SMTP AUTH error from {}: {}", addr, e);
+                    send_generic(&mut writer, "535 Authentication failed\r\n").await?;
+                }
+            }
+            continue;
+        }
+
+        // --- MAIL FROM ---
+        if upper.starts_with("MAIL FROM:") {
+            if session.state == SmtpState::Connected {
+                send_generic(&mut writer, "503 Send EHLO first\r\n").await?;
+                continue;
+            }
+            let from = extract_angle_addr(&trimmed[10..]);
+            session.mail_from = Some(from.clone());
+            session.state = SmtpState::MailFrom;
+            send_generic(&mut writer, &format!("250 Sender <{}> OK\r\n", from)).await?;
+            continue;
+        }
+
+        // --- RCPT TO ---
+        if upper.starts_with("RCPT TO:") {
+            if session.mail_from.is_none() {
+                send_generic(&mut writer, "503 Need MAIL FROM first\r\n").await?;
+                continue;
+            }
+            let to = extract_angle_addr(&trimmed[8..]);
+            if !is_local_domain(&to) && session.authenticated_wallet.is_none() {
+                send_generic(&mut writer, "550 Relay denied\r\n").await?;
+                continue;
+            }
+            session.rcpt_to.push(to.clone());
+            session.state = SmtpState::RcptTo;
+            send_generic(&mut writer, &format!("250 Recipient <{}> OK\r\n", to)).await?;
+            continue;
+        }
+
+        // --- DATA ---
+        if upper.starts_with("DATA") {
+            if session.rcpt_to.is_empty() {
+                send_generic(&mut writer, "503 Need RCPT TO first\r\n").await?;
+                continue;
+            }
+            send_generic(&mut writer, "354 End data with <CR><LF>.<CR><LF>\r\n").await?;
+            let body = read_data_generic(&mut reader).await?;
+            session.data = Some(body);
+            match process_message(&state, session).await {
+                Ok(()) => send_generic(&mut writer, "250 OK message accepted\r\n").await?,
+                Err(e) => {
+                    error!("SMTP message processing error: {}", e);
+                    send_generic(&mut writer, "451 Processing error\r\n").await?;
+                }
+            }
+            session.reset_transaction();
+            continue;
+        }
+
+        send_generic(&mut writer, "500 Unknown command\r\n").await?;
+    }
+
+    debug!("SMTP (TLS) connection closed: {}", addr);
     Ok(())
 }
 
@@ -258,7 +542,6 @@ async fn handle_auth(
     session: &mut SmtpSession,
     line: &str,
 ) -> anyhow::Result<String> {
-    // We support AUTH PLAIN with base64 payload: \0<wallet_hex>\0<password_or_sig>
     let parts: Vec<&str> = line.splitn(3, ' ').collect();
     if parts.len() < 2 {
         return Ok("501 Syntax error\r\n".into());
@@ -282,7 +565,7 @@ async fn handle_auth(
     if fields.len() < 3 {
         return Ok("535 Bad credentials format\r\n".into());
     }
-    let username = fields[1]; // wallet hex or email
+    let username = fields[1];
     let password = fields[2];
 
     // Try wallet-based auth: username is hex wallet address
@@ -292,7 +575,6 @@ async fn handle_auth(
                 let mut addr = [0u8; 32];
                 addr.copy_from_slice(&wallet_bytes);
 
-                // Verify password against stored hash
                 let pw_hashes = state.wallet_password_hashes.read().await;
                 if let Some(hash) = pw_hashes.get(&addr) {
                     if bcrypt::verify(password, hash).unwrap_or(false) {
@@ -320,10 +602,8 @@ async fn process_message(state: &Arc<AppState>, session: &SmtpSession) -> anyhow
         .unwrap_or_default()
         .as_secs();
 
-    // Parse subject from headers
     let subject = parse_header(raw_data, "Subject").unwrap_or_else(|| "No Subject".into());
 
-    // Split headers from body
     let body = if let Some(pos) = raw_data.find("\r\n\r\n") {
         &raw_data[pos + 4..]
     } else if let Some(pos) = raw_data.find("\n\n") {
@@ -334,7 +614,6 @@ async fn process_message(state: &Arc<AppState>, session: &SmtpSession) -> anyhow
 
     for recipient in &session.rcpt_to {
         if is_local_domain(recipient) {
-            // Local delivery: store as EmailMessage
             let wallet = resolve_wallet_for_email(state, recipient).await;
             let email_id = uuid::Uuid::new_v4().to_string();
 
@@ -361,10 +640,9 @@ async fn process_message(state: &Arc<AppState>, session: &SmtpSession) -> anyhow
             if let Err(e) = state.storage_engine.save_email(&email).await {
                 error!("Failed to save inbound email for {}: {}", recipient, e);
             } else {
-                info!("SMTP: delivered local email to {}", recipient);
+                info!("📧 SMTP: delivered local email to {} (TLS={})", recipient, session.tls_active);
             }
         } else {
-            // Outbound: queue for MTA delivery
             let outbound = OutboundEmail {
                 id: uuid::Uuid::new_v4().to_string(),
                 from_wallet: session.authenticated_wallet.unwrap_or([0u8; 32]),
@@ -384,7 +662,7 @@ async fn process_message(state: &Arc<AppState>, session: &SmtpSession) -> anyhow
             if let Err(e) = state.storage_engine.save_outbound_email(&outbound).await {
                 error!("Failed to queue outbound email to {}: {}", recipient, e);
             } else {
-                info!("SMTP: queued outbound email to {}", recipient);
+                info!("📧 SMTP: queued outbound email to {}", recipient);
             }
         }
     }
@@ -393,10 +671,11 @@ async fn process_message(state: &Arc<AppState>, session: &SmtpSession) -> anyhow
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// I/O helpers
 // ---------------------------------------------------------------------------
 
-async fn send(
+/// Send on a concrete OwnedWriteHalf (plain text phase)
+async fn send_raw(
     writer: &mut tokio::net::tcp::OwnedWriteHalf,
     msg: &str,
 ) -> anyhow::Result<()> {
@@ -405,7 +684,18 @@ async fn send(
     Ok(())
 }
 
-async fn read_data(reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>) -> anyhow::Result<String> {
+/// Send on any AsyncWrite (TLS phase)
+async fn send_generic<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    msg: &str,
+) -> anyhow::Result<()> {
+    writer.write_all(msg.as_bytes()).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+/// Read DATA body from any AsyncBufRead
+async fn read_data_generic<R: AsyncBufRead + Unpin>(reader: &mut R) -> anyhow::Result<String> {
     let mut data = String::new();
     let mut line = String::new();
     let max_size: usize = 10 * 1024 * 1024; // 10 MB
@@ -447,7 +737,6 @@ fn extract_angle_addr(s: &str) -> String {
             return s[start + 1..end].trim().to_string();
         }
     }
-    // No angle brackets: return trimmed
     s.to_string()
 }
 
@@ -465,7 +754,7 @@ fn parse_header(raw: &str, name: &str) -> Option<String> {
     let prefix_lower = prefix.to_lowercase();
     for line in raw.lines() {
         if line.is_empty() || line == "\r" {
-            break; // end of headers
+            break;
         }
         if line.to_lowercase().starts_with(&prefix_lower) {
             return Some(line[prefix.len()..].trim().to_string());
@@ -474,10 +763,38 @@ fn parse_header(raw: &str, name: &str) -> Option<String> {
     None
 }
 
-/// Resolve a wallet address for a local email address.
-/// Returns `Some([u8; 32])` if a wallet is registered for the address, else `None`.
 async fn resolve_wallet_for_email(state: &Arc<AppState>, email: &str) -> Option<[u8; 32]> {
-    // Email-to-wallet lookup not yet implemented in storage layer
-    let _ = (state, email); // suppress unused warnings
+    // Extract local part (before @)
+    let local_part = email.split('@').next().unwrap_or("").trim().to_lowercase();
+    if local_part.is_empty() {
+        return None;
+    }
+
+    // 1. Try as custom alias (e.g. "demetri@quillon.xyz" → alias "demetri")
+    if let Ok(Some(wallet_hex)) = state.storage_engine.get_email_alias_wallet(&local_part).await {
+        if let Ok(bytes) = hex::decode(&wallet_hex) {
+            if bytes.len() == 32 {
+                let mut addr = [0u8; 32];
+                addr.copy_from_slice(&bytes);
+                info!("📧 [SMTP INBOUND] Resolved alias '{}' to wallet {}", local_part, &wallet_hex[..8]);
+                return Some(addr);
+            }
+        }
+    }
+
+    // 2. Try as direct wallet hex (e.g. "efca1e8c@quillon.xyz" → first 8 chars of wallet)
+    //    Check all known wallets for a prefix match
+    if local_part.len() >= 8 && local_part.chars().all(|c| c.is_ascii_hexdigit()) {
+        let balances = state.wallet_balances.read().await;
+        for addr in balances.keys() {
+            let addr_hex = hex::encode(addr);
+            if addr_hex.starts_with(&local_part) {
+                info!("📧 [SMTP INBOUND] Resolved wallet prefix '{}' to {}", local_part, &addr_hex[..16]);
+                return Some(*addr);
+            }
+        }
+    }
+
+    warn!("📧 [SMTP INBOUND] Could not resolve '{}' to any wallet", local_part);
     None
 }

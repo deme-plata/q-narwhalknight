@@ -64,7 +64,7 @@ members = [
 , "sdk/rust", "crates/q-ai-inference", "crates/q-crypto-advanced", "crates/q-index-fund", "crates/q-mining-pool", "crates/q-temporal-shield", "crates/q-bitnet-ffi", "crates/q-consensus-guard", "crates/q-bio-dsl", "crates/q-eternal-cypher", "crates/q-dune"]
 
 [workspace.package]
-version = "8.8.0"  # v8.8.0: Dune Analytics pipeline, QuantumLoader particle visualization, Epsilon deployment
+version = "8.9.5"  # v8.9.5: Zero-drop mining queue — wait for space instead of dropping, 10x capacity (2.6M on Epsilon)
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"
@@ -267,7 +267,9 @@ bulletproofs = "4.0"
 # Additional dependencies for testing
 zeroize = { version = "1.5", features = ["derive"] }  # v0.9.14 FIX: Enable derive macros for q-aegis-ql
 pin-project = "1.1"
-rustls = "0.23"
+rustls = { version = "0.23", features = ["ring"] }
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
 idna = "0.4"
 
 # Bitcoin integration for anonymous peer discovery - using workspace version

@@ -1061,6 +1061,19 @@ impl EmissionController {
     /// Get total cumulative emission
     pub fn total_cumulative_emission(&self) -> u128 { self.total_cumulative_emission }
 
+    /// v8.8.4: Set total cumulative emission (used by migration to sync after replay)
+    pub fn set_total_cumulative_emission(&mut self, total: u128) {
+        self.total_cumulative_emission = total;
+    }
+
+    /// v8.8.6: Clear rate measurement windows after migration.
+    /// Pre-migration rate samples contain inflated emission data that would poison
+    /// the correction factor calculation. Call this after setting total_cumulative_emission.
+    pub fn clear_rate_windows(&mut self) {
+        self.block_windows.clear();
+        self.wallclock_windows.clear();
+    }
+
     /// v8.0.3: Get rate measurement diagnostics for ultra-advanced analytics
     pub fn get_rate_diagnostics(&self) -> RateDiagnostics {
         let wall_now = SystemTime::now()

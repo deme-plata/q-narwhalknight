@@ -1,7 +1,8 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Trophy, TrendingUp, Zap, Clock, Award, Sparkles, DollarSign, HelpCircle } from 'lucide-react';
+import { Trophy, TrendingUp, Zap, Clock, Award, Sparkles, DollarSign, HelpCircle, Shield } from 'lucide-react';
 import { qnkAPI, type MiningRewardEvent, type BalanceUpdateEvent, type MiningStatsEvent, type WalletMiningStats } from '../services/api';
+import SecurityBitsVisualization from './SecurityBitsVisualization';
 
 interface MiningStats {
   totalRewards: number;
@@ -43,6 +44,7 @@ export default function MiningDashboard() {
   const [miners, setMiners] = useState<Map<string, MinerInfo>>(new Map());
   const [showMinerTooltip, setShowMinerTooltip] = useState(false);
   const [showVdfTooltip, setShowVdfTooltip] = useState(false);
+  const [showSecurityTooltip, setShowSecurityTooltip] = useState(false);
   const [connectedMiners, setConnectedMiners] = useState(0);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const animFrameRef = useRef<number>(0);
@@ -87,11 +89,11 @@ export default function MiningDashboard() {
 
     const dpr = window.devicePixelRatio || 1;
     const rect = canvas.getBoundingClientRect();
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
+    const W = rect.width || canvas.parentElement?.clientWidth || 800;
+    const H = rect.height || canvas.parentElement?.clientHeight || 300;
+    canvas.width = W * dpr;
+    canvas.height = H * dpr;
     ctx.scale(dpr, dpr);
-    const W = rect.width;
-    const H = rect.height;
     const cx = W / 2;
     const cy = H / 2;
     const maxR = Math.min(W, H) * 0.42;
@@ -605,9 +607,14 @@ export default function MiningDashboard() {
   }, [walletAddress]);
 
   // v7.4.4: Auto-start VDF Forge canvas animation
+  // v8.9.3: Use requestAnimationFrame delay to ensure canvas is laid out before reading dimensions
   useEffect(() => {
-    startMiningEngineCanvas();
+    // Wait one frame so the motion.div has been laid out by the browser
+    const raf = requestAnimationFrame(() => {
+      startMiningEngineCanvas();
+    });
     return () => {
+      cancelAnimationFrame(raf);
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
     };
   }, [startMiningEngineCanvas]);
@@ -1013,17 +1020,17 @@ export default function MiningDashboard() {
         </motion.div>
       </div>
 
-      {/* ═══ VDF Mining Engine — Always-Visible Full-Width Visualization ═══ */}
+      {/* ═══ VDF Mining Engine — Full-Width Visualization ═══ */}
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.33 }}
-        className="bg-gradient-to-br from-[#0c0318]/80 to-[#050210]/90 backdrop-blur-xl border border-quantum-cyan/25 rounded-xl overflow-hidden relative"
-        style={{ height: 300 }}
+        className="bg-gradient-to-br from-[#0c0318]/80 to-[#050210]/90 backdrop-blur-xl border border-quantum-cyan/25 rounded-xl overflow-hidden"
+        style={{ position: 'relative', height: 300, width: '100%' }}
       >
         <canvas
           ref={canvasRef}
-          className="w-full h-full"
+          style={{ width: '100%', height: '100%', display: 'block' }}
         />
 
         {/* "?" Help icon — reveals educational VDF tooltip */}
@@ -1150,12 +1157,134 @@ export default function MiningDashboard() {
                 </div>
 
                 <p className="text-gray-500 text-[10px] mt-2 text-center italic">
-                  Read the full technical whitepaper at dl.quillon.xyz/downloads/Q-NarwhalKnight-Miner-Whitepaper.pdf
+                  Read the full technical whitepaper at quillon.xyz/downloads/Q-NarwhalKnight-Miner-Whitepaper.pdf
                 </p>
               </div>
             </motion.div>
           )}
         </AnimatePresence>
+      </motion.div>
+
+      {/* ═══ Security Bits Hardening — Full-Width Visualization ═══ */}
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.45 }}
+        className="bg-gradient-to-br from-[#030818]/80 to-[#020210]/90 backdrop-blur-xl border border-cyan-500/25 rounded-xl overflow-hidden relative"
+        style={{ height: 340 }}
+      >
+          {/* Label badge */}
+          <div className="absolute top-2 left-3 z-10 flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-black/40 border border-cyan-400/20">
+            <Shield className="w-3 h-3 text-cyan-400" />
+            <span className="text-[10px] font-bold text-cyan-400/80 tracking-wider">SECURITY HARDENING</span>
+          </div>
+
+          {/* "?" Help icon for security tooltip */}
+          <div
+            className="absolute top-2 right-3 z-10"
+            onMouseEnter={() => setShowSecurityTooltip(true)}
+            onMouseLeave={() => setShowSecurityTooltip(false)}
+          >
+            <div className="w-6 h-6 rounded-full bg-white/10 hover:bg-white/20 backdrop-blur-sm flex items-center justify-center cursor-help transition-colors border border-white/10">
+              <HelpCircle className="w-3.5 h-3.5 text-gray-300" />
+            </div>
+          </div>
+
+          <SecurityBitsVisualization
+            connectedMiners={connectedMiners}
+            networkHashRate={stats.networkHashRate / 1000} // Convert H/s to kH/s
+            blockHeight={latestReward?.block_height || 0}
+            height={340}
+          />
+
+          {/* Educational tooltip — Security Bits explained */}
+          <AnimatePresence>
+            {showSecurityTooltip && (
+              <motion.div
+                initial={{ opacity: 0, y: -8, scale: 0.96 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: -8, scale: 0.96 }}
+                transition={{ duration: 0.2 }}
+                className="absolute top-12 right-4 z-50 w-[420px] max-h-[520px] overflow-y-auto bg-[#0d0b1a]/98 backdrop-blur-2xl border border-cyan-400/30 rounded-xl p-5 shadow-2xl shadow-black/60"
+                onMouseEnter={() => setShowSecurityTooltip(true)}
+                onMouseLeave={() => setShowSecurityTooltip(false)}
+              >
+                <h3 className="text-sm font-bold text-cyan-400 mb-3 flex items-center gap-2">
+                  <Shield className="w-4 h-4 text-cyan-400" />
+                  How Network Security Hardens
+                </h3>
+
+                <div className="space-y-3 text-xs text-gray-300 leading-relaxed">
+                  <p>
+                    This visualization shows Q-NarwhalKnight's <span className="text-white font-semibold">real-time security hardening</span> —
+                    every miner that joins the network adds <span className="text-cyan-400 font-semibold">bits of computational security</span> to the protocol's
+                    cryptographic shield.
+                  </p>
+
+                  <div className="bg-white/5 rounded-lg p-3 border border-white/5">
+                    <p className="font-semibold text-cyan-400 mb-1.5">Security Bits = Hashpower Density</p>
+                    <p>
+                      In cryptography, <span className="text-white font-medium">"bits of security"</span> measures how much work
+                      an attacker would need to break the system. A{' '}
+                      <span className="text-yellow-400">128-bit</span> system requires 2<sup>128</sup> operations to defeat —
+                      more than all atoms in the universe.
+                    </p>
+                  </div>
+
+                  <div className="bg-white/5 rounded-lg p-3 border border-white/5">
+                    <p className="font-semibold text-emerald-400 mb-1.5">The 8 Security Rings</p>
+                    <p>
+                      Each concentric ring represents a <span className="text-white font-medium">32-bit security layer</span> (8 rings &times; 32 = 256 bits maximum).
+                      As miners join, binary digits (<span className="text-cyan-300">0</span>s and <span className="text-cyan-300">1</span>s) stream inward and
+                      <span className="text-white font-medium"> lock into the lattice</span>, filling each ring.
+                    </p>
+                    <div className="mt-2 grid grid-cols-2 gap-1">
+                      <div className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-red-500"></div><span className="text-[10px]">Ring 0: Outer (32-bit)</span></div>
+                      <div className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-orange-500"></div><span className="text-[10px]">Ring 1-2: Mid-outer</span></div>
+                      <div className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-yellow-400"></div><span className="text-[10px]">Ring 3-4: Mid</span></div>
+                      <div className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-cyan-400"></div><span className="text-[10px]">Ring 5-7: Inner (256-bit)</span></div>
+                    </div>
+                  </div>
+
+                  <div className="bg-white/5 rounded-lg p-3 border border-white/5">
+                    <p className="font-semibold text-red-400 mb-1.5">Attack Deflection</p>
+                    <p>
+                      Red arrows represent theoretical <span className="text-red-400 font-medium">51% attacks</span>.
+                      Watch them <span className="text-emerald-400 font-medium">deflect off the shield</span> — the stronger
+                      your network's security (more locked bits), the harder the deflection.
+                      A fully-hardened 256-bit shield makes attacks computationally impossible.
+                    </p>
+                  </div>
+
+                  <div className="bg-white/5 rounded-lg p-3 border border-white/5">
+                    <p className="font-semibold text-purple-400 mb-1.5">Security Tiers</p>
+                    <div className="space-y-1 mt-1">
+                      <div className="flex justify-between"><span className="text-red-400">VULNERABLE</span><span className="text-gray-500">32-bit (1 miner)</span></div>
+                      <div className="flex justify-between"><span className="text-orange-400">WEAK</span><span className="text-gray-500">64-bit (3+ miners)</span></div>
+                      <div className="flex justify-between"><span className="text-yellow-400">STRONG</span><span className="text-gray-500">128-bit (10+ miners)</span></div>
+                      <div className="flex justify-between"><span className="text-emerald-400">FORTIFIED</span><span className="text-gray-500">192-bit (50+ miners)</span></div>
+                      <div className="flex justify-between"><span className="text-cyan-400">FORTRESS</span><span className="text-gray-500">256-bit (100+ miners)</span></div>
+                    </div>
+                  </div>
+
+                  <div className="bg-gradient-to-r from-cyan-500/10 to-purple-500/10 rounded-lg p-3 border border-cyan-500/10">
+                    <p className="font-semibold text-white mb-1">Why This Matters</p>
+                    <p>
+                      Every miner running the Q-NarwhalKnight node doesn't just earn QUG rewards —
+                      they're <span className="text-cyan-400 font-semibold">actively hardening</span> the protocol's security for everyone.
+                      The hexagonal shield tessellation at the center represents the{' '}
+                      <span className="text-white font-medium">DAG-Knight consensus lattice</span> — each facet strengthens
+                      as the network grows. More hashpower = more bits = stronger shield = safer for all users.
+                    </p>
+                  </div>
+
+                  <p className="text-gray-500 text-[10px] mt-2 text-center italic">
+                    Q-NarwhalKnight uses BLAKE3 &times; 101 VDF mining — ASIC-resistant, CPU-friendly, quantum-ready
+                  </p>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
       </motion.div>
 
       {/* Network Stats Row */}
@@ -1392,7 +1521,7 @@ export default function MiningDashboard() {
         </p>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <a
-            href="https://dl.quillon.xyz/downloads/q-miner-linux-x64"
+            href="https://quillon.xyz/downloads/q-miner-linux-x64"
             download
             className="flex items-center justify-center gap-2 bg-quantum-green/20 hover:bg-quantum-green/30 border border-quantum-green/50 text-quantum-green font-bold py-3 px-4 rounded-lg transition-all"
           >
@@ -1400,7 +1529,7 @@ export default function MiningDashboard() {
             Linux x64 (Latest)
           </a>
           <a
-            href="https://dl.quillon.xyz/downloads/q-miner-windows-x64.exe"
+            href="https://quillon.xyz/downloads/q-miner-windows-x64.exe"
             download
             className="flex items-center justify-center gap-2 bg-quantum-cyan/20 hover:bg-quantum-cyan/30 border border-quantum-cyan/50 text-quantum-cyan font-bold py-3 px-4 rounded-lg transition-all"
           >
@@ -1408,7 +1537,7 @@ export default function MiningDashboard() {
             Windows x64
           </a>
           <a
-            href="https://dl.quillon.xyz/downloads/q-miner-macos-arm64"
+            href="https://quillon.xyz/downloads/q-miner-macos-arm64"
             download
             className="flex items-center justify-center gap-2 bg-quantum-purple/20 hover:bg-quantum-purple/30 border border-quantum-purple/50 text-quantum-purple font-bold py-3 px-4 rounded-lg transition-all"
           >
@@ -1416,7 +1545,7 @@ export default function MiningDashboard() {
             macOS ARM64
           </a>
           <a
-            href="https://dl.quillon.xyz/downloads/q-miner-macos-x64"
+            href="https://quillon.xyz/downloads/q-miner-macos-x64"
             download
             className="flex items-center justify-center gap-2 bg-quantum-yellow/20 hover:bg-quantum-yellow/30 border border-quantum-yellow/50 text-quantum-yellow font-bold py-3 px-4 rounded-lg transition-all"
           >

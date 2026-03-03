@@ -20,13 +20,10 @@ export const PROTOCOL_VERSION = '6.6.0'
  * Port 9444: Tor bridge (currently returns 502 - not yet functional)
  */
 export const BOOTSTRAP_PEERS = [
-  // Server Beta (EU) - WebSocket Bootstrap
+  // Server Epsilon (EU) - WebSocket Bootstrap via quillon.xyz
   // Port 9443: nginx WSS proxy → libp2p WebSocket listener on port 9001
-  // PeerID: will be updated after Mainnet servers start (Mainnet)
-  '/dns4/quillon.xyz/tcp/9443/wss/p2p/12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH',
-
-  // TODO: Fix Tor bridge on port 9444 (websockify → SOCKS5 → Tor)
-  // '/dns4/quillon.xyz/tcp/9444/wss/p2p/12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH',
+  // PeerID: Epsilon mainnet-genesis (v8.8.2)
+  '/dns4/quillon.xyz/tcp/9443/wss/p2p/12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM',
 ]
 
 /**

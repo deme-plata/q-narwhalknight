@@ -18,7 +18,7 @@ export default function DownloadNodeScreen() {
         </p>
         <div className="inline-flex items-center gap-2 px-4 py-2 bg-quantum-cyan/20 border border-quantum-cyan/50 rounded-full">
           <span className="w-2 h-2 bg-quantum-cyan rounded-full animate-pulse"></span>
-          <span className="text-sm font-bold text-quantum-cyan">v8.6.4 • Post-Quantum + DAG-Knight + DeFi Stack</span>
+          <span className="text-sm font-bold text-quantum-cyan">v8.9.0 • Post-Quantum + DAG-Knight + DeFi Stack</span>
         </div>
       </motion.div>
 
@@ -135,12 +135,12 @@ export default function DownloadNodeScreen() {
 
           <div className="space-y-3">
             <a
-              href="https://dl.quillon.xyz/downloads/q-api-server-v8.6.4"
+              href="https://quillon.xyz/downloads/q-api-server-v8.9.0"
               download="q-api-server"
               className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-quantum-cyan to-quantum-purple rounded-xl font-bold text-white hover:shadow-lg hover:shadow-quantum-cyan/50 transition-all"
             >
               <Download className="w-5 h-5" />
-              Download Linux Binary (v8.6.4)
+              Download Linux Binary (v8.9.0)
             </a>
             <p className="text-center text-sm text-gray-200">
               Size: ~83 MB | Bitcoin-Style 21M Emission + P2P Gossipsub + DeFi Stack
@@ -151,9 +151,9 @@ export default function DownloadNodeScreen() {
           <div className="mt-6 p-4 bg-quantum-dark/50 rounded-xl border border-quantum-purple/20">
             <p className="text-sm font-mono text-gray-100 mb-2">Quick Start:</p>
             <pre className="text-xs text-quantum-cyan overflow-x-auto">
-{`wget https://dl.quillon.xyz/downloads/q-api-server-v8.6.4
-chmod +x q-api-server-v8.6.4
-./q-api-server-v8.6.4 --port 8080 --tui --admin-wallet YOUR_WALLET_ADDRESS`}
+{`wget https://quillon.xyz/downloads/q-api-server-v8.9.0
+chmod +x q-api-server-v8.9.0
+./q-api-server-v8.9.0 --port 8080 --tui --admin-wallet YOUR_WALLET_ADDRESS`}
             </pre>
             <p className="text-xs text-quantum-green mt-2">
               WarpSync auto-discovers peers & syncs 900K+ blocks in minutes
@@ -190,15 +190,15 @@ chmod +x q-api-server-v8.6.4
             <div className="flex items-start gap-3">
               <CheckCircle className="w-5 h-5 text-quantum-green flex-shrink-0 mt-0.5" />
               <div>
-                <p className="text-white font-medium">Complete Windows Package</p>
-                <p className="text-sm text-gray-200">All-in-one ZIP with node binary + required DLLs</p>
+                <p className="text-white font-medium">Single EXE — No Install Needed</p>
+                <p className="text-sm text-gray-200">Download and run. No ZIP extraction, no DLLs required.</p>
               </div>
             </div>
             <div className="flex items-start gap-3">
               <CheckCircle className="w-5 h-5 text-quantum-green flex-shrink-0 mt-0.5" />
               <div>
-                <p className="text-white font-medium">Full Node + P2P Sync</p>
-                <p className="text-sm text-gray-200">Block validation, wallet, DEX, mining - all included</p>
+                <p className="text-white font-medium">Full Node + TUI + P2P Sync</p>
+                <p className="text-sm text-gray-200">Block validation, wallet, DEX, mining, and TUI dashboard built-in</p>
               </div>
             </div>
             <div className="flex items-start gap-3">
@@ -212,26 +212,25 @@ chmod +x q-api-server-v8.6.4
 
           <div className="space-y-3">
             <a
-              href="https://dl.quillon.xyz/downloads/q-narwhalknight-windows-x64.zip"
-              download="q-narwhalknight-windows-x64.zip"
+              href="https://quillon.xyz/downloads/q-api-server-v8.9.0-windows-x64.exe"
+              download="q-api-server-v8.9.0-windows-x64.exe"
               className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-quantum-purple to-quantum-pink rounded-xl font-bold text-white hover:shadow-lg hover:shadow-quantum-purple/50 transition-all"
             >
               <Download className="w-5 h-5" />
-              Download Windows Package (ZIP)
+              Download Windows Node (v8.9.0)
             </a>
             <p className="text-center text-sm text-gray-200">
-              Size: 44 MB (compressed) | Node + Miner + DLLs included
+              Size: ~70 MB | Single EXE — Full Node + TUI + DeFi Stack
             </p>
           </div>
 
           {/* Quick Start */}
           <div className="mt-6 p-4 bg-quantum-dark/50 rounded-xl border border-quantum-purple/20">
-            <p className="text-sm font-mono text-gray-100 mb-2">Quick Start:</p>
+            <p className="text-sm font-mono text-gray-100 mb-2">Quick Start (PowerShell):</p>
             <pre className="text-xs text-quantum-purple overflow-x-auto">
-{`# 1. Extract the ZIP to a folder
-# 2. Open PowerShell in that folder
-# 3. Run:
-.\\q-api-server.exe --port 9090 --p2p-port 9001`}
+{`# Download from browser or PowerShell:
+Invoke-WebRequest -Uri https://quillon.xyz/downloads/q-api-server-v8.9.0-windows-x64.exe -OutFile q-api-server.exe
+.\\q-api-server.exe --port 8080 --tui --admin-wallet YOUR_WALLET_ADDRESS`}
             </pre>
             <p className="text-xs text-gray-100 mt-2">
               Tip: Use port 9090 to avoid permission issues, or run as Administrator for port 8080
@@ -299,7 +298,7 @@ chmod +x q-api-server-v8.6.4
               <div className="p-3 rounded-xl border border-yellow-600" style={{ backgroundColor: '#2a1a00' }}>
                 <p className="text-xs text-yellow-300 font-bold mb-2 uppercase tracking-wider">Native CPU Optimized — Modern CPUs</p>
                 <a
-                  href="https://dl.quillon.xyz/downloads/q-miner-linux-x64-native"
+                  href="https://quillon.xyz/downloads/q-miner-linux-x64-native"
                   download="q-miner-linux-x64-native"
                   className="w-full flex items-center justify-center gap-3 px-6 py-3 bg-gradient-to-r from-yellow-600 to-orange-600 rounded-xl font-bold text-yellow-100 hover:shadow-lg hover:shadow-yellow-500/50 transition-all"
                 >
@@ -313,7 +312,7 @@ chmod +x q-api-server-v8.6.4
               <div className="p-3 rounded-xl border border-gray-600" style={{ backgroundColor: '#15101e' }}>
                 <p className="text-xs text-orange-200 font-bold mb-2 uppercase tracking-wider">Legacy — Portable (Older CPUs)</p>
                 <a
-                  href="https://dl.quillon.xyz/downloads/q-miner-linux-x64-legacy"
+                  href="https://quillon.xyz/downloads/q-miner-linux-x64-legacy"
                   download="q-miner-linux-x64-legacy"
                   className="w-full flex items-center justify-center gap-3 px-5 py-3 bg-gradient-to-r from-orange-700 to-rose-700 rounded-xl font-bold text-orange-100 hover:shadow-lg hover:shadow-orange-500/30 transition-all text-sm"
                 >
@@ -325,27 +324,27 @@ chmod +x q-api-server-v8.6.4
 
               {/* Windows */}
               <a
-                href="https://dl.quillon.xyz/downloads/q-miner-v8.6.4.exe"
-                download="q-miner-v8.6.4.exe"
+                href="https://quillon.xyz/downloads/q-miner-windows-x64.exe"
+                download="q-miner-windows-x64.exe"
                 className="w-full flex items-center justify-center gap-3 px-6 py-3 bg-gradient-to-r from-purple-600 to-blue-600 rounded-xl font-bold text-purple-100 hover:shadow-lg hover:shadow-purple-500/50 transition-all"
               >
                 <Download className="w-5 h-5" />
-                Download Miner — Windows x64 (v8.6.4)
+                Download Miner — Windows x64 (v8.9.0)
               </a>
-              <p className="text-center text-xs text-orange-200">v8.6.4 — OAuth2 zero-config login, TUI wallet QR code, Tor support, improved networking</p>
+              <p className="text-center text-xs text-orange-200">v8.9.0 — OAuth2 zero-config login, TUI wallet QR code, Tor by default, improved networking</p>
 
               {/* Universal wget download */}
               <div className="p-4 rounded-xl border border-amber-600" style={{ backgroundColor: '#0d0a00' }}>
                 <p className="text-sm font-mono text-amber-200 font-bold mb-2">Quick Download (wget):</p>
                 <pre className="text-xs text-amber-300 overflow-x-auto whitespace-pre-wrap select-all cursor-pointer p-2 rounded" style={{ backgroundColor: '#000000' }}>
-{`wget https://dl.quillon.xyz/downloads/q-miner-v8.6.4 && chmod +x q-miner-v8.6.4`}
+{`wget https://quillon.xyz/downloads/q-miner-v8.9.0 && chmod +x q-miner-v8.9.0`}
                 </pre>
               </div>
 
               <div className="p-4 rounded-xl border border-orange-600" style={{ backgroundColor: '#0d0a00' }}>
                 <p className="text-sm font-mono text-orange-200 font-bold mb-2">Linux Quick Start (Native):</p>
                 <pre className="text-xs text-amber-300 overflow-x-auto whitespace-pre-wrap" style={{ backgroundColor: '#000000', padding: '8px', borderRadius: '6px' }}>
-{`wget https://dl.quillon.xyz/downloads/q-miner-linux-x64-native
+{`wget https://quillon.xyz/downloads/q-miner-linux-x64-native
 chmod +x q-miner-linux-x64-native
 ./q-miner-linux-x64-native \\
   --mode solo \\
@@ -358,7 +357,7 @@ chmod +x q-miner-linux-x64-native
                 <p className="text-sm font-mono text-purple-200 font-bold mb-2">Windows Quick Start (PowerShell):</p>
                 <pre className="text-xs text-purple-300 overflow-x-auto whitespace-pre-wrap" style={{ backgroundColor: '#000000', padding: '8px', borderRadius: '6px' }}>
 {`# Download from browser or:
-Invoke-WebRequest -Uri https://dl.quillon.xyz/downloads/q-miner-v8.6.4.exe -OutFile q-miner.exe
+Invoke-WebRequest -Uri https://quillon.xyz/downloads/q-miner-windows-x64.exe -OutFile q-miner.exe
 .\\q-miner.exe --mode solo --wallet YOUR_WALLET_ADDRESS --threads 4 --server https://quillon.xyz`}
                 </pre>
               </div>
@@ -418,7 +417,7 @@ Invoke-WebRequest -Uri https://dl.quillon.xyz/downloads/q-miner-v8.6.4.exe -OutF
 
             <div className="space-y-3">
               <a
-                href="https://dl.quillon.xyz/downloads/slint-wallet-linux-x86_64"
+                href="https://quillon.xyz/downloads/slint-wallet-linux-x86_64"
                 download="slint-wallet-linux-x86_64"
                 className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-emerald-500 to-teal-500 rounded-xl font-bold text-white hover:shadow-lg hover:shadow-emerald-500/50 transition-all"
               >
@@ -426,7 +425,7 @@ Invoke-WebRequest -Uri https://dl.quillon.xyz/downloads/q-miner-v8.6.4.exe -OutF
                 Download Wallet — Linux x64
               </a>
               <a
-                href="https://dl.quillon.xyz/downloads/slint-wallet-windows-x64.exe"
+                href="https://quillon.xyz/downloads/slint-wallet-windows-x64.exe"
                 download="slint-wallet-windows-x64.exe"
                 className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-teal-500 to-cyan-500 rounded-xl font-bold text-white hover:shadow-lg hover:shadow-teal-500/50 transition-all"
               >
@@ -438,7 +437,7 @@ Invoke-WebRequest -Uri https://dl.quillon.xyz/downloads/q-miner-v8.6.4.exe -OutF
               <div className="p-4 bg-black/30 rounded-xl border border-emerald-400/30">
                 <p className="text-sm font-mono text-white mb-2">Linux Quick Start:</p>
                 <pre className="text-xs text-white overflow-x-auto whitespace-pre-wrap">
-{`wget https://dl.quillon.xyz/downloads/slint-wallet-linux-x86_64
+{`wget https://quillon.xyz/downloads/slint-wallet-linux-x86_64
 chmod +x slint-wallet-linux-x86_64
 ./slint-wallet-linux-x86_64`}
                 </pre>
@@ -506,7 +505,7 @@ cargo build --release --package q-api-server
         <div className="p-4 bg-white/10 rounded-xl border border-yellow-500/20 mb-4">
           <p className="text-sm font-bold text-yellow-300 mb-2">Option 1: One-Line Install (SSH)</p>
           <p className="text-xs text-gray-100 mb-2">SSH into your rig and run:</p>
-          <pre className="text-xs text-yellow-300 overflow-x-auto whitespace-pre-wrap select-all cursor-pointer bg-black/30 p-2 rounded">{`curl -sL https://dl.quillon.xyz/downloads/install-hiveos.sh | bash`}</pre>
+          <pre className="text-xs text-yellow-300 overflow-x-auto whitespace-pre-wrap select-all cursor-pointer bg-black/30 p-2 rounded">{`curl -sL https://quillon.xyz/downloads/install-hiveos.sh | bash`}</pre>
         </div>
 
         <div className="p-4 bg-white/10 rounded-xl border border-yellow-500/20">
@@ -518,7 +517,7 @@ cargo build --release --package q-api-server
 
           <div className="mb-3 p-3 bg-black/40 border border-yellow-400/50 rounded-lg">
             <p className="text-xs text-white mb-1 font-semibold">Installation URL (copy this exactly):</p>
-            <pre className="text-sm text-yellow-300 font-mono select-all cursor-pointer break-all">https://dl.quillon.xyz/downloads/q-miner-hiveos.tar.gz</pre>
+            <pre className="text-sm text-yellow-300 font-mono select-all cursor-pointer break-all">https://quillon.xyz/downloads/q-miner-hiveos.tar.gz</pre>
           </div>
 
           <ol className="space-y-2 text-sm text-gray-200">
@@ -528,7 +527,7 @@ cargo build --release --package q-api-server
             <li><span className="text-yellow-400 font-mono mr-2">4.</span>Pool URL: <span className="font-mono text-yellow-300">https://quillon.xyz</span></li>
             <li><span className="text-yellow-400 font-mono mr-2">5.</span>Miner: <span className="text-white font-medium">Custom</span>
               <ul className="ml-6 mt-1 space-y-1 text-gray-100 text-xs">
-                <li>Installation URL: <span className="font-mono text-yellow-300 font-bold select-all">https://dl.quillon.xyz/downloads/q-miner-hiveos.tar.gz</span></li>
+                <li>Installation URL: <span className="font-mono text-yellow-300 font-bold select-all">https://quillon.xyz/downloads/q-miner-hiveos.tar.gz</span></li>
                 <li>Hash algorithm: <span className="font-mono text-yellow-300">qnk-dagknight</span></li>
                 <li>Wallet template: <span className="font-mono text-yellow-300">%WAL%</span></li>
                 <li>Pool URL: <span className="font-mono text-yellow-300">https://quillon.xyz</span></li>

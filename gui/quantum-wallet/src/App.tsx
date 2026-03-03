@@ -19,6 +19,7 @@ import AnimatedBorder from './components/AnimatedBorder';
 import DeployControlPanel from './components/DeployControlPanel';
 import NodeSettingsModal from './components/NodeSettingsModal';
 import SupplyCorrectionModal from './components/SupplyCorrectionModal';
+import AIWheelButton from './components/AIWheelButton';
 import OAuthConsentPage from './components/OAuthConsentPage';
 import MinerLoginPage from './components/MinerLoginPage';
 import { sseManager } from './services/sseManager';
@@ -822,6 +823,8 @@ function App() {
           </div>
         </div>
       </div>
+      {/* v8.9.0: AI Wheel Button — floating AI assistant with radial tool wheel */}
+      <AIWheelButton />
     </AnimatedBorder>
   );
 }

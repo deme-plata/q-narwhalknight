@@ -1062,7 +1062,7 @@ const FinanceModal: React.FC<FinanceModalProps> = ({ isOpen, onClose }) => {
                       {/* Whitepaper Link */}
                       <div className="p-4 rounded-xl bg-amber-500/5 border border-amber-500/20 text-center">
                         <a
-                          href="https://dl.quillon.xyz/downloads/qug-emission-economics-whitepaper.pdf"
+                          href="https://quillon.xyz/downloads/qug-emission-economics-whitepaper.pdf"
                           target="_blank"
                           className="text-amber-400 hover:text-amber-300 underline font-semibold"
                         >

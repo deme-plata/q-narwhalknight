@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, memo, useRef } from 'react';
 import { motion, AnimatePresence, Reorder } from 'framer-motion';
-import { Activity, Zap, AlertCircle, Copy, Check, Wallet, ChevronLeft, ChevronRight, Calendar, DollarSign, TrendingUp, TrendingDown, QrCode, Info, Plus, Send, BarChart3, Radio, Mail, MessageCircle, Settings2, GripVertical, ArrowUp, ArrowDown } from 'lucide-react';
+import { Activity, Zap, AlertCircle, Copy, Check, Wallet, ChevronLeft, ChevronRight, Calendar, DollarSign, TrendingUp, TrendingDown, QrCode, Info, Plus, Send, BarChart3, Radio, Mail, MessageCircle, Settings2, GripVertical, ArrowUp, ArrowDown, Globe } from 'lucide-react';
 import { qnkAPI, type NodeStatus } from '../services/api'; // debounce not needed - SSE in App.tsx
 import TransactionDetailsModal from './TransactionDetailsModal';
 // 🌐 v3.4.3-browser: P2P real-time block streaming
@@ -26,6 +26,7 @@ import IronFishWalletModal from './IronFishWalletModal';
 import EthereumSwapModal from './EthereumSwapModal';
 import EmailScreen from './EmailScreen';
 import CalendarScreen from './CalendarScreen';
+import WebSearchScreen from './WebSearchScreen';
 import { TICKER_SYMBOL } from '../constants/ticker';
 import QuantumLoader from './QuantumLoader';
 
@@ -119,14 +120,19 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend, liveBalance }: Das
   const [showZcashWalletModal, setShowZcashWalletModal] = useState(false);
   const [showIronFishWalletModal, setShowIronFishWalletModal] = useState(false);
   const [showEthereumSwapModal, setShowEthereumSwapModal] = useState(false);
-  const [activeDashboardTab, setActiveDashboardTab] = useState<'wallet' | 'mail' | 'calendar' | 'chat'>('wallet');
+  const [activeDashboardTab, setActiveDashboardTab] = useState<'wallet' | 'mail' | 'calendar' | 'chat' | 'search'>('wallet');
   const [unreadEmailCount, setUnreadEmailCount] = useState(0);
-  const [tabOrder, setTabOrder] = useState<Array<'wallet' | 'mail' | 'calendar' | 'chat'>>(() => {
+  const [tabOrder, setTabOrder] = useState<Array<'wallet' | 'mail' | 'calendar' | 'chat' | 'search'>>(() => {
     try {
       const saved = localStorage.getItem('dashboardTabOrder');
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        // Ensure 'search' tab exists in saved order (migration)
+        if (!parsed.includes('search')) parsed.push('search');
+        return parsed;
+      }
     } catch {}
-    return ['wallet', 'mail', 'calendar', 'chat'];
+    return ['wallet', 'search', 'mail', 'calendar', 'chat'];
   });
   const [showTabSettings, setShowTabSettings] = useState(false);
   const [btcBalance, setBtcBalance] = useState(0);
@@ -2539,7 +2545,12 @@ Provide a brief analysis (under 250 tokens) covering:
   }
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-8 relative">
+      {/* Persistent quantum particle background at 10% opacity */}
+      <div className="fixed inset-0 z-0 pointer-events-none" style={{ opacity: 0.1 }}>
+        <QuantumLoader backgroundOnly />
+      </div>
+
       {/* Welcome to Mainnet Modal */}
       {showMainnetWelcome && (
         <WelcomeMainnetModal onClose={() => setShowMainnetWelcome(false)} />
@@ -2615,6 +2626,7 @@ Provide a brief analysis (under 250 tokens) covering:
             {(() => {
               const tabDefs: Record<string, { label: string; Icon: any; comingSoon?: boolean }> = {
                 wallet: { label: 'WALLET', Icon: Wallet },
+                search: { label: 'SEARCH', Icon: Globe },
                 mail: { label: 'MAIL', Icon: Mail },
                 calendar: { label: 'CALENDAR', Icon: Calendar },
                 chat: { label: 'CHAT', Icon: MessageCircle, comingSoon: true },
@@ -2754,8 +2766,8 @@ Provide a brief analysis (under 250 tokens) covering:
                   </div>
                   <div className="space-y-1">
                     {tabOrder.map((tabId, idx) => {
-                      const labels: Record<string, string> = { wallet: 'Wallet', mail: 'Mail', calendar: 'Calendar', chat: 'Chat' };
-                      const Icons: Record<string, any> = { wallet: Wallet, mail: Mail, calendar: Calendar, chat: MessageCircle };
+                      const labels: Record<string, string> = { wallet: 'Wallet', search: 'Search', mail: 'Mail', calendar: 'Calendar', chat: 'Chat' };
+                      const Icons: Record<string, any> = { wallet: Wallet, search: Globe, mail: Mail, calendar: Calendar, chat: MessageCircle };
                       const TabIcon = Icons[tabId];
                       return (
                         <div
@@ -2816,6 +2828,11 @@ Provide a brief analysis (under 250 tokens) covering:
           <motion.div key="calendar-tab" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} transition={{ duration: 0.25 }}
             style={{ position: 'relative', minHeight: 600 }}>
             <CalendarScreen />
+          </motion.div>
+        )}
+        {activeDashboardTab === 'search' && (
+          <motion.div key="search-tab" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} transition={{ duration: 0.25 }}>
+            <WebSearchScreen />
           </motion.div>
         )}
         {activeDashboardTab === 'chat' && (

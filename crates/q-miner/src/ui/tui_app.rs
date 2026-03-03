@@ -1086,7 +1086,7 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled("  T           ", Style::default().fg(Color::Yellow)),
-            Span::raw("Cycle network throttle (Off/Light/Heavy)"),
+            Span::raw("Cycle network throttle (Off/UltraLight/Light/Heavy)"),
         ]),
         Line::from(vec![
             Span::styled("  R           ", Style::default().fg(Color::Yellow)),

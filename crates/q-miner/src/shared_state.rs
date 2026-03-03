@@ -109,9 +109,12 @@ pub enum DiagnosticEvent {
 }
 
 /// Network throttle mode — cycles with `T` key
+/// v8.8.3: Added UltraLight mode with LZ4 compression for <10 KB/s on 256 threads
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MinerThrottleMode {
     Off,
+    /// LZ4-compressed requests + extended refresh intervals. Target: <10 KB/s total.
+    UltraLight,
     Light,
     Heavy,
 }
@@ -119,7 +122,8 @@ pub enum MinerThrottleMode {
 impl MinerThrottleMode {
     pub fn next(self) -> Self {
         match self {
-            MinerThrottleMode::Off => MinerThrottleMode::Light,
+            MinerThrottleMode::Off => MinerThrottleMode::UltraLight,
+            MinerThrottleMode::UltraLight => MinerThrottleMode::Light,
             MinerThrottleMode::Light => MinerThrottleMode::Heavy,
             MinerThrottleMode::Heavy => MinerThrottleMode::Off,
         }
@@ -128,14 +132,32 @@ impl MinerThrottleMode {
     pub fn delay_ms(self) -> u64 {
         match self {
             MinerThrottleMode::Off => 0,
+            MinerThrottleMode::UltraLight => 0, // no hash-loop delay, bandwidth saved via compression
             MinerThrottleMode::Light => 100,
             MinerThrottleMode::Heavy => 500,
         }
     }
 
+    /// Challenge refresh interval for thread 0 in this throttle mode.
+    /// Higher = fewer API calls = less bandwidth.
+    pub fn challenge_refresh_secs(self) -> u64 {
+        match self {
+            MinerThrottleMode::Off => 50,
+            MinerThrottleMode::UltraLight => 120,  // 2 min between fetches
+            MinerThrottleMode::Light => 50,
+            MinerThrottleMode::Heavy => 50,
+        }
+    }
+
+    /// Whether to use LZ4 compression on API payloads.
+    pub fn use_compression(self) -> bool {
+        matches!(self, MinerThrottleMode::UltraLight)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             MinerThrottleMode::Off => "Off",
+            MinerThrottleMode::UltraLight => "UltraLight (LZ4+gzip)",
             MinerThrottleMode::Light => "Light (100ms)",
             MinerThrottleMode::Heavy => "Heavy (500ms)",
         }

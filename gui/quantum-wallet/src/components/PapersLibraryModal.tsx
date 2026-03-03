@@ -26,6 +26,7 @@ type Category = (typeof CATEGORIES)[number];
 
 const PAPERS: Paper[] = [
   // ── Core Protocol ──
+  { title: 'Yellow Paper: Formal Protocol Specification', description: 'The definitive QNK technical reference — sub-second finality, 48K+ TPS, DAG-Knight consensus, VDF mining, emission schedule, P2P networking, and cryptographic primitives', score: 10, category: 'Core Protocol', filename: 'qnk-yellow-paper.pdf' },
   { title: 'DAG-Knight Architecture', description: 'Detailed architecture of the DAG-Knight consensus protocol with quantum anchor election', score: 10, category: 'Core Protocol', filename: 'dagknight-architecture-detailed.pdf' },
   { title: 'Consensus Security Analysis', description: 'Formal security analysis of Q-NarwhalKnight consensus under adversarial conditions', score: 9, category: 'Core Protocol', filename: 'q-narwhalknight-consensus-security-analysis.pdf' },
   { title: 'BFT Slashing Protocol', description: 'Byzantine fault tolerance with economic slashing for misbehaving validators', score: 9, category: 'Core Protocol', filename: 'qnk-bft-slashing-whitepaper.pdf' },
@@ -33,6 +34,7 @@ const PAPERS: Paper[] = [
   { title: 'Hashpower Security', description: 'Security model for hashpower-based consensus resistance against 51% attacks', score: 8, category: 'Core Protocol', filename: 'qnk-hashpower-security-whitepaper.pdf' },
   { title: 'Block Validation & Rewards', description: 'Mainnet block reward schedule, validation rules, and issuance mechanics', score: 8, category: 'Core Protocol', filename: 'mainnet-rewards.pdf' },
   { title: 'Block Rewards (Draft)', description: 'Draft specification for mainnet block reward distribution curves', score: 6, category: 'Core Protocol', filename: 'mainnet-block-rewards-DRAFT.pdf' },
+  { title: 'Deterministic Balance Migration', description: 'Mathematically rigorous framework for ledger state recovery via first-principles chain replay with proportional emission normalization (v8.8.6)', score: 9, category: 'Core Protocol', filename: 'deterministic-balance-migration-v886.pdf' },
 
   // ── Cryptography ──
   { title: 'Recursive SNARKs & Weak Subjectivity', description: 'Eliminating weak subjectivity through recursive SNARK proofs for trustless sync', score: 10, category: 'Cryptography', filename: 'recursive-snark-weak-subjectivity-elimination.pdf' },
@@ -45,7 +47,7 @@ const PAPERS: Paper[] = [
   { title: 'K-Parameter Quantum Frontiers', description: 'Extending the K-parameter to quantum computing frontiers and post-quantum readiness', score: 9, category: 'Cryptography', filename: 'k-parameter-quantum-frontiers.pdf' },
 
   // ── Privacy ──
-  { title: 'Privacy Layer', description: 'Comprehensive privacy layer with ring signatures, stealth addresses, and bulletproofs', score: 10, category: 'Privacy', filename: 'qnk-privacy-layer-whitepaper.pdf' },
+  { title: 'Privacy Layer v3', description: 'Network-layer privacy through Tor-integrated dedicated circuits — comprehensive privacy architecture for quantum-resistant blockchain infrastructure', score: 10, category: 'Privacy', filename: 'qnk-privacy-layer-whitepaper.pdf' },
   { title: 'Privacy Philosophy', description: 'Philosophical foundations of privacy as a fundamental right in digital consensus', score: 8, category: 'Privacy', filename: 'privacy-philosophy-whitepaper.pdf' },
   { title: 'Quantum Mixer v3', description: 'Third-generation quantum-resistant transaction mixer with zero-knowledge proofs', score: 9, category: 'Privacy', filename: 'quantum_mixer_whitepaper_v3.pdf' },
   { title: 'Quantum Mixer v2', description: 'Enhanced quantum mixer with improved anonymity sets and mixing efficiency', score: 8, category: 'Privacy', filename: 'quantum_mixer_whitepaper_v2.pdf' },
@@ -60,6 +62,7 @@ const PAPERS: Paper[] = [
   { title: 'RWA Tokenization', description: 'Real-world asset tokenization framework with compliance and oracle integration', score: 8, category: 'Economics', filename: 'rwa-tokenization-whitepaper.pdf' },
   { title: 'Quillon Vault', description: 'Decentralized vault system for yield-bearing QUG deposits with insurance', score: 8, category: 'Economics', filename: 'quillon-vault-whitepaper.pdf' },
   { title: 'Bank Aegis QL', description: 'Institutional-grade banking layer with quantum-secure custody and settlement', score: 8, category: 'Economics', filename: 'quillon_bank_aegis_ql_whitepaper.pdf' },
+  { title: 'The Quantum Millionaire Mind', description: 'Secrets of blockchain wealth from the Q-NarwhalKnight founder — rewriting your financial blueprint with Rust, u128 arithmetic, and 4,000 tests', score: 8, category: 'Economics', filename: 'the-quantum-millionaire-mind.pdf' },
 
   // ── Infrastructure ──
   { title: 'Networking Whitepaper', description: 'libp2p-based networking stack with gossipsub, Kademlia DHT, and Tor support', score: 9, category: 'Infrastructure', filename: 'q-narwhalknight-networking-whitepaper.pdf' },
@@ -72,7 +75,7 @@ const PAPERS: Paper[] = [
   { title: 'Blockchain Pruning Review', description: 'Technical review of pruning strategies across blockchain architectures', score: 7, category: 'Infrastructure', filename: 'blockchain-pruning-technical-review.pdf' },
   { title: 'Browser P2P Integration', description: 'WebRTC and libp2p integration for browser-native P2P connectivity', score: 8, category: 'Infrastructure', filename: 'browser-p2p-libp2p-integration.pdf' },
   { title: 'Q Miner', description: 'Mining client architecture, proof-of-work algorithms, and pool protocol', score: 8, category: 'Infrastructure', filename: 'q-miner-whitepaper.pdf' },
-  { title: 'Node Operator Guide', description: 'Complete guide for running and maintaining a Q-NarwhalKnight node — setup, configuration, monitoring, and troubleshooting', score: 9, category: 'Infrastructure', filename: 'qnk-node-operator-guide.pdf' },
+  { title: 'Node Operator Guide v2', description: 'Zero-config setup, fee structure (0.1% block rewards + DEX protocol fees), admin wallet linking, and OAuth2 wallet integration', score: 9, category: 'Infrastructure', filename: 'qnk-node-operator-guide.pdf' },
 
   // ── Applications ──
   { title: 'VM & DEX Whitepaper', description: 'WASM virtual machine and decentralized exchange with AMM liquidity pools', score: 9, category: 'Applications', filename: 'q-narwhalknight-vm-dex-whitepaper.pdf' },
@@ -101,7 +104,7 @@ const PAPERS: Paper[] = [
   { title: 'Quantum Water Robots Kingdom', description: 'Quantum-mechanical modeling of water robot swarm coordination', score: 5, category: 'Physics', filename: 'quantum-water-robots-kingdom.pdf' },
 ];
 
-const DL_BASE = 'https://dl.quillon.xyz';
+const DL_BASE = 'https://quillon.xyz';
 
 function scoreBadgeColor(score: number): string {
   if (score >= 9) return 'from-amber-400 to-yellow-500';
@@ -337,7 +340,7 @@ export default function PapersLibraryModal({ isOpen, onClose }: PapersLibraryMod
                   <Star className="w-3 h-3" />
                   <span>Score reflects relevance to Q-NarwhalKnight core technology</span>
                 </div>
-                <span className="text-[10px] text-slate-600 font-mono">dl.quillon.xyz</span>
+                <span className="text-[10px] text-slate-600 font-mono">quillon.xyz</span>
               </div>
             </div>
           </motion.div>

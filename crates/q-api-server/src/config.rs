@@ -20,6 +20,10 @@ pub struct Config {
     pub node_id: Option<NodeId>,
     /// Tor configuration
     pub tor: TorConfig,
+    /// v8.9.x: AIOC service auth shared secret (HMAC-SHA256)
+    /// Set via Q_AIOC_SERVICE_SECRET env var. When set, allows AIOC on localhost
+    /// to call authenticated endpoints on behalf of logged-in wallet users.
+    pub aioc_service_secret: Option<String>,
 
     // v0.0.22-beta: Quick Wins #1, #2, #4
     /// Allow manual block trigger endpoint (default: false for security)
@@ -114,6 +118,7 @@ impl Default for Config {
             enable_metrics: true,
             node_id: None,
             tor: TorConfig::default(),
+            aioc_service_secret: None,
             allow_manual_trigger: false,  // v0.0.22-beta: default secure
             block_interval_secs: 0, // v8.0.10: 0 = produce as fast as possible (10+ BPS target)
             min_solutions_per_block: 1, // v0.0.22-beta: default 1
@@ -360,6 +365,13 @@ impl Config {
 
         if let Ok(total_validators) = env::var("Q_TOTAL_VALIDATORS") {
             config.total_validators = total_validators.parse().unwrap_or(1);
+        }
+
+        // v8.9.x: AIOC service auth
+        if let Ok(aioc_secret) = env::var("Q_AIOC_SERVICE_SECRET") {
+            if !aioc_secret.is_empty() {
+                config.aioc_service_secret = Some(aioc_secret);
+            }
         }
 
         Ok(config)

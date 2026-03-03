@@ -213,6 +213,9 @@ pqcrypto-traits = "0.3"  # PQCrypto trait definitions
 # Stripe payment processing integration - ✅ ENABLED (Rust 1.90.0)
 async-stripe = { version = "0.38", default-features = false, features = ["runtime-tokio-hyper-rustls"] }
 hmac = "0.12"  # HMAC-SHA256 for Stripe webhook signature verification
+tokio-rustls = { workspace = true }   # v8.7.5: STARTTLS for inbound SMTP
+rustls-pemfile = { workspace = true } # v8.7.5: PEM cert/key parsing for SMTP TLS
+rustls = { workspace = true }         # v8.7.5: TLS config for SMTP STARTTLS
 rust_decimal = "1.33"  # For precise USD amount handling
 
 # TemporalShield: Post-quantum secure secret sharing with zk-STARK (NO TRUSTED SETUP)

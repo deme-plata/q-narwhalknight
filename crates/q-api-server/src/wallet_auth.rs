@@ -15,6 +15,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signature as DalekSignature, Verifier, VerifyingKey};
+use hmac::{Hmac, Mac};
 use q_aegis_ql::{AegisQL, PublicKey as AegisPublicKey, Signature as AegisSignature};
 use q_types::{Address, ApiResponse};
 use q_wallet::{
@@ -22,8 +23,11 @@ use q_wallet::{
     sphincs_wallet::{OperationType, SphincsPlusKeyPair},
 };
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use sha3::{Digest, Sha3_256};
 use std::sync::Arc;
+
+type HmacSha256 = Hmac<Sha256>;
 
 /// Cryptographic scheme used for authentication
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -124,6 +128,11 @@ impl FromRequestParts<std::sync::Arc<crate::AppState>> for AuthenticatedWallet {
         // v8.0.1: Try Bearer token first (OAuth2 flow), then fall back to X-Wallet-Auth
         if let Some(bearer_result) = try_bearer_auth(parts, state).await {
             return bearer_result;
+        }
+
+        // v8.9.x: Try AIOC service auth (AI Operations Center on localhost)
+        if let Some(aioc_result) = try_aioc_service_auth(parts, state).await {
+            return aioc_result;
         }
 
         // Extract cryptographic authentication header
@@ -541,6 +550,168 @@ pub fn generate_auth_challenge(address: &Address, path: &str, timestamp: i64) ->
     hasher.update(&timestamp.to_le_bytes());
     hasher.update(path.as_bytes());
     hasher.finalize().to_vec()
+}
+
+/// v8.9.x: AIOC Service Authentication header
+#[derive(Debug, Deserialize)]
+struct AiocServiceHeader {
+    service: String,
+    wallet_address: String,
+    hmac: String,
+    timestamp: i64,
+}
+
+/// v8.9.x: Try AIOC service authentication.
+/// Allows the AI Operations Center (running on localhost) to call authenticated
+/// endpoints on behalf of a logged-in wallet user via HMAC-SHA256 shared secret.
+///
+/// Returns Some(Ok(...)) if AIOC auth succeeded, Some(Err(...)) if header was present but invalid,
+/// None if no X-AIOC-Service-Auth header was present (fall through to X-Wallet-Auth).
+async fn try_aioc_service_auth(
+    parts: &Parts,
+    state: &Arc<crate::AppState>,
+) -> Option<Result<AuthenticatedWallet, AuthError>> {
+    let raw_header = parts.headers.get("X-AIOC-Service-Auth");
+    if raw_header.is_none() {
+        return None; // No AIOC header at all — fall through silently
+    }
+    tracing::info!("🤖 [AIOC AUTH] Header found, attempting authentication...");
+    let header_value = raw_header?.to_str().ok()?;
+    if header_value.is_empty() {
+        tracing::warn!("🤖 [AIOC AUTH] Header present but empty");
+        return None;
+    }
+
+    // Parse the JSON header
+    let aioc_header: AiocServiceHeader = match serde_json::from_str(header_value) {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!("🤖 [AIOC AUTH] Invalid JSON in X-AIOC-Service-Auth: {}", e);
+            return Some(Err(AuthError {
+                error: "invalid_aioc_header".to_string(),
+                message: format!("Invalid AIOC service auth JSON: {}", e),
+            }));
+        }
+    };
+
+    // Verify service name
+    if aioc_header.service != "aioc" {
+        return Some(Err(AuthError {
+            error: "invalid_aioc_service".to_string(),
+            message: "Invalid service identifier".to_string(),
+        }));
+    }
+
+    // Verify timestamp within 5 minutes (replay protection)
+    let now = Utc::now().timestamp();
+    let age = now - aioc_header.timestamp;
+    if age.abs() > 300 {
+        tracing::warn!(
+            "🤖 [AIOC AUTH] Expired timestamp: age={}s for wallet {}",
+            age,
+            &aioc_header.wallet_address
+        );
+        return Some(Err(AuthError {
+            error: "expired_aioc_auth".to_string(),
+            message: "AIOC service auth expired. Timestamp must be within 5 minutes.".to_string(),
+        }));
+    }
+
+    // Verify request comes from localhost
+    let connect_info = parts
+        .extensions
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>();
+    let is_localhost = connect_info
+        .map(|ci| {
+            let ip = ci.0.ip();
+            tracing::debug!("🤖 [AIOC AUTH] Request from IP: {}", ip);
+            ip.is_loopback()
+        })
+        .unwrap_or_else(|| {
+            tracing::warn!("🤖 [AIOC AUTH] ConnectInfo not available — allowing (HMAC verified)");
+            true // If ConnectInfo unavailable, trust HMAC alone
+        });
+
+    if !is_localhost {
+        tracing::warn!(
+            "🤖 [AIOC AUTH] Rejected non-localhost request from {:?} for wallet {}",
+            connect_info.map(|ci| ci.0),
+            &aioc_header.wallet_address
+        );
+        return Some(Err(AuthError {
+            error: "aioc_not_localhost".to_string(),
+            message: "AIOC service auth is only allowed from localhost".to_string(),
+        }));
+    }
+
+    // Load shared secret from environment
+    let secret = match std::env::var("Q_AIOC_SERVICE_SECRET") {
+        Ok(s) if !s.is_empty() => s,
+        _ => {
+            tracing::warn!("🤖 [AIOC AUTH] Q_AIOC_SERVICE_SECRET not configured");
+            return Some(Err(AuthError {
+                error: "aioc_not_configured".to_string(),
+                message: "AIOC service auth not configured on this node".to_string(),
+            }));
+        }
+    };
+
+    // Verify HMAC-SHA256(wallet_address + timestamp, secret)
+    let mut mac = match HmacSha256::new_from_slice(secret.as_bytes()) {
+        Ok(m) => m,
+        Err(_) => {
+            return Some(Err(AuthError {
+                error: "aioc_hmac_error".to_string(),
+                message: "HMAC initialization failed".to_string(),
+            }));
+        }
+    };
+    mac.update(aioc_header.wallet_address.as_bytes());
+    mac.update(&aioc_header.timestamp.to_le_bytes());
+
+    let expected_hmac = hex::decode(&aioc_header.hmac).unwrap_or_default();
+    if mac.verify_slice(&expected_hmac).is_err() {
+        tracing::warn!(
+            "🤖 [AIOC AUTH] HMAC verification failed for wallet {}",
+            &aioc_header.wallet_address
+        );
+        return Some(Err(AuthError {
+            error: "invalid_aioc_hmac".to_string(),
+            message: "AIOC service auth HMAC verification failed".to_string(),
+        }));
+    }
+
+    // Parse wallet address
+    let addr_str = &aioc_header.wallet_address;
+    let hex_part = if addr_str.starts_with("qnk") {
+        &addr_str[3..]
+    } else {
+        addr_str
+    };
+
+    let address_bytes = match hex::decode(hex_part) {
+        Ok(b) if b.len() == 32 => b,
+        _ => {
+            return Some(Err(AuthError {
+                error: "invalid_aioc_address".to_string(),
+                message: "Invalid wallet address in AIOC service auth".to_string(),
+            }));
+        }
+    };
+
+    let mut address = [0u8; 32];
+    address.copy_from_slice(&address_bytes);
+
+    tracing::info!(
+        "🤖 [AIOC AUTH] Service auth accepted for wallet qnk{}...",
+        &hex_part[..8.min(hex_part.len())]
+    );
+
+    Some(Ok(AuthenticatedWallet {
+        address,
+        timestamp: DateTime::from_timestamp(aioc_header.timestamp, 0).unwrap_or_else(Utc::now),
+        scheme: AuthScheme::Ed25519, // AIOC service auth doesn't have a crypto scheme
+    }))
 }
 
 #[cfg(test)]

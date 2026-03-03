@@ -179,6 +179,7 @@ fn draw_throttle_control(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
 
     let (mode_label, mode_color) = match mode {
         crate::shared_state::MinerThrottleMode::Off => ("OFF", Color::Green),
+        crate::shared_state::MinerThrottleMode::UltraLight => ("ULTRALIGHT (LZ4+gzip <10KB/s)", Color::Cyan),
         crate::shared_state::MinerThrottleMode::Light => ("LIGHT (100ms delay)", Color::Yellow),
         crate::shared_state::MinerThrottleMode::Heavy => ("HEAVY (500ms delay)", Color::Red),
     };
@@ -194,7 +195,7 @@ fn draw_throttle_control(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
         Line::from(vec![
             Span::raw("  "),
             Span::styled("[T]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(" Cycle: Off → Light → Heavy → Off"),
+            Span::raw(" Cycle: Off → UltraLight → Light → Heavy → Off"),
         ]),
     ];
 
@@ -296,15 +297,17 @@ fn draw_monte_carlo(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
     let hash_time_per_round_ms = 1000.0; // 1 second of hashing per round
 
     // Run Monte Carlo for each throttle mode
+    // v8.8.3: Added UltraLight with LZ4+gzip compression (~80% payload reduction)
     let scenarios = [
-        ("Off", 0.0),
-        ("Light", 100.0),
-        ("Heavy", 500.0),
+        ("Off", 0.0, 1.0),          // (label, delay_ms, compression_ratio: 1.0 = no compression)
+        ("UltraLt", 0.0, 0.2),      // LZ4+gzip: ~80% compression, 0 delay
+        ("Light", 100.0, 1.0),
+        ("Heavy", 500.0, 1.0),
     ];
 
     let mut results: Vec<(String, f64, f64, f64)> = Vec::new(); // (label, eff_hashrate%, bw_saved%, stale_risk%)
 
-    for &(label, delay_ms) in &scenarios {
+    for &(label, delay_ms, compression_ratio) in &scenarios {
         // Effective time per mining cycle:
         // cycle = hash_time + network_io_time + throttle_delay
         // network_io_time = challenge_fetch_latency (one fetch per cycle)
@@ -314,12 +317,14 @@ fn draw_monte_carlo(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
         // Hash utilization: fraction of cycle spent actually mining
         let hash_utilization = hash_time_per_round_ms / cycle_time;
 
-        // Bandwidth reduction: fewer API calls per unit time
+        // Bandwidth reduction: fewer API calls per unit time + compression
         let calls_per_minute = (60_000.0 / cycle_time) * num_threads as f64;
         let base_calls = (60_000.0 / (hash_time_per_round_ms + avg_lat)) * num_threads as f64;
-        let bw_saved = if base_calls > 0.0 {
-            (1.0 - calls_per_minute / base_calls) * 100.0
+        let call_reduction = if base_calls > 0.0 {
+            1.0 - calls_per_minute / base_calls
         } else { 0.0 };
+        // Total savings = call reduction + compression savings on remaining calls
+        let bw_saved = (call_reduction + (1.0 - call_reduction) * (1.0 - compression_ratio)) * 100.0;
 
         // Stale work risk: longer cycles = more chance block changes mid-hash
         // Model: block time ~60s, risk = 1 - e^(-cycle_time/60000)
@@ -330,8 +335,9 @@ fn draw_monte_carlo(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
 
     let current_idx = match current_mode {
         crate::shared_state::MinerThrottleMode::Off => 0,
-        crate::shared_state::MinerThrottleMode::Light => 1,
-        crate::shared_state::MinerThrottleMode::Heavy => 2,
+        crate::shared_state::MinerThrottleMode::UltraLight => 1,
+        crate::shared_state::MinerThrottleMode::Light => 2,
+        crate::shared_state::MinerThrottleMode::Heavy => 3,
     };
 
     let mut text = vec![
@@ -364,8 +370,9 @@ fn draw_monte_carlo(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
 
         let mode_color = match i {
             0 => Color::Green,
-            1 => Color::Yellow,
-            2 => Color::Red,
+            1 => Color::Cyan,
+            2 => Color::Yellow,
+            3 => Color::Red,
             _ => Color::White,
         };
 
@@ -414,7 +421,8 @@ fn draw_monte_carlo(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
     let rec_label = &results[best_idx].0;
     let rec_color = match best_idx {
         0 => Color::Green,
-        1 => Color::Yellow,
+        1 => Color::Cyan,
+        2 => Color::Yellow,
         _ => Color::Red,
     };
 

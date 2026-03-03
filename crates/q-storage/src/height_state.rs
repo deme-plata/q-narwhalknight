@@ -42,7 +42,8 @@ impl HeightState {
         Self {
             cached: Arc::new(AtomicU64::new(initial)),
             // Set last refresh to long ago to force initial refresh
-            last_refresh: Arc::new(RwLock::new(Instant::now() - Duration::from_secs(3600))),
+            // Use checked_sub to avoid panic on Windows where Instant is based on uptime
+            last_refresh: Arc::new(RwLock::new(Instant::now().checked_sub(Duration::from_secs(3600)).unwrap_or(Instant::now()))),
             shutdown: Arc::new(AtomicBool::new(false)),
             tx,
             rx,

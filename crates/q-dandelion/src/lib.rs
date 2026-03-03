@@ -565,7 +565,8 @@ impl QuantumDandelion {
                 interval.tick().await;
 
                 let mut seen = seen_messages.write().await;
-                let cutoff = Instant::now() - cleanup_interval;
+                // Use checked_sub to avoid panic on Windows where Instant is based on uptime
+                let cutoff = Instant::now().checked_sub(cleanup_interval).unwrap_or(Instant::now());
 
                 seen.retain(|_, &mut timestamp| timestamp > cutoff);
 

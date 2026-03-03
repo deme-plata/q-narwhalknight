@@ -171,8 +171,9 @@ impl Updater {
         tokio::io::AsyncWriteExt::flush(&mut file).await?;
         drop(file);
 
-        // Verify SHA-256 checksum (prevents MITM / corrupt downloads)
-        if let Some(expected) = self.expected_sha256.lock().unwrap().as_ref() {
+        // Verify SHA-256 checksum (MANDATORY — prevents MITM / corrupt downloads)
+        let expected = self.expected_sha256.lock().unwrap().clone();
+        if let Some(expected) = expected.as_ref() {
             let file_data = tokio::fs::read(&temp_path).await?;
             let mut hasher = Sha256::new();
             hasher.update(&file_data);
@@ -193,7 +194,14 @@ impl Updater {
             }
             tracing::info!("✅ [UPDATE] SHA-256 verified: {}...", &actual[..16]);
         } else {
-            tracing::warn!("⚠️ [UPDATE] No SHA-256 from server — skipping checksum verification");
+            // v8.6.5: Refuse updates without checksum — prevents blind binary replacement
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            let msg = "Server did not provide SHA-256 checksum — refusing update for safety".to_string();
+            let _ = self.state_tx.send(UpdateState::Error {
+                version: version_owned,
+                message: msg.clone(),
+            });
+            return Err(anyhow!(msg));
         }
 
         // Make executable on Unix

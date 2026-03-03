@@ -1638,7 +1638,7 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
                 >
                   <BookOpen className="w-4 h-4 text-amber-400/60" />
                   <span>Research Library</span>
-                  <span className="ml-auto text-[10px] text-amber-500/50 font-mono">60</span>
+                  <span className="ml-auto text-[10px] text-amber-500/50 font-mono">78</span>
                 </button>
                 <a
                   href="https://technical-deepdive.quillon.xyz/"
@@ -2079,7 +2079,7 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
         minerLink={minerLink}
       />
 
-      {/* Research Library Modal — 60 whitepapers organized by category */}
+      {/* Research Library Modal — 78 whitepapers organized by category */}
       <PapersLibraryModal
         isOpen={showPapersLibrary}
         onClose={() => setShowPapersLibrary(false)}

@@ -156,6 +156,24 @@ pub fn spawn_state_sync_task(app_state: Arc<AppState>, our_port: u16) {
         info!("🔄 [STATE SYNC] Starting initial state sync (P2P primary, HTTP fallback)...");
         do_combined_state_sync(&app_state, our_port).await;
 
+        // 🔧 v9.0.0: ONE-TIME AUTHORITATIVE BALANCE SYNC
+        // When Q_BALANCE_AUTHORITY_PEER is set (e.g., "http://89.149.241.126:8080"),
+        // fetch wallet balances from that peer and OVERWRITE local RocksDB values.
+        // This fixes balance divergence after chain replay (which misses DEX protocol fees).
+        // The env var is consumed and the flag is set so it only runs ONCE.
+        if let Ok(authority_peer) = std::env::var("Q_BALANCE_AUTHORITY_PEER") {
+            info!("🔑 [AUTHORITY SYNC] Q_BALANCE_AUTHORITY_PEER set to {}", authority_peer);
+            info!("   Fetching authoritative wallet balances from trusted peer...");
+            match do_authoritative_balance_sync(&app_state, &authority_peer).await {
+                Ok(count) => {
+                    info!("✅ [AUTHORITY SYNC] Imported {} wallet balances from {}", count, authority_peer);
+                }
+                Err(e) => {
+                    error!("❌ [AUTHORITY SYNC] Failed to sync from {}: {}", authority_peer, e);
+                }
+            }
+        }
+
         // Periodic sync every 5 minutes
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(300));
         interval.tick().await; // consume the first immediate tick
@@ -734,23 +752,83 @@ async fn merge_p2p_response(
         }
     }
 
-    // ---- Wallet balances: DISABLED (v8.5.4 money glitch fix) ----
-    // v8.5.4: CRITICAL FIX — Wallet balance import from peers PERMANENTLY DISABLED.
-    //
-    // ROOT CAUSE OF MONEY GLITCH: DEX swaps are off-chain (not in blocks). When a user
-    // swaps QUG for tokens, the swap debit only exists on the local node's RocksDB.
-    // Other nodes still have the pre-swap (higher) balance. The "take higher balance"
-    // merge logic would overwrite the local debited balance with the peer's stale higher
-    // balance — effectively refunding the spent QUG while the user keeps the swapped tokens.
-    //
-    // This ran every 5 minutes AND 10s after every restart, causing the "money glitch"
-    // where QUG reappeared after being spent on DEX swaps.
-    //
-    // Balance consensus from block coinbase transactions is the sole authoritative source.
-    // DEX swap debits are applied locally and must never be overwritten by peer state.
+    // ---- Wallet balances: ONE-TIME BOOTSTRAP SYNC (v8.8.1) ----
+    // v8.5.4: Ongoing wallet balance import disabled (DEX swap debit erasure).
+    // v8.8.1: ONE-TIME bootstrap import for nodes that have never imported before.
+    // Safe because during initial state sync there are no local DEX swaps to protect.
+    // Capture BEFORE wallet bootstrap runs — used for QUGUSD gating below.
+    let bootstrap_was_done_before_this_sync = app_state.bootstrap_wallet_sync_done
+        .load(std::sync::atomic::Ordering::SeqCst);
     if !response.wallet_balances.is_empty() {
-        debug!("🔒 [STATE SYNC v8.5.4] Skipping {} wallet balances from P2P peer (disabled — prevents DEX swap debit erasure)",
-               response.wallet_balances.len());
+        let already_done = bootstrap_was_done_before_this_sync;
+
+        if already_done {
+            debug!("🔒 [STATE SYNC v8.5.4] Skipping {} wallet balances (bootstrap already done)",
+                   response.wallet_balances.len());
+        } else {
+            let our_height = app_state.current_height_atomic
+                .load(std::sync::atomic::Ordering::SeqCst);
+            let our_wallet_count = {
+                let wb = app_state.wallet_balances.read().await;
+                wb.len()
+            };
+            let peer_wallet_count = response.wallet_balances.len();
+            // Only import if peer is ahead AND has more wallets
+            let peer_has_more = peer_wallet_count > our_wallet_count + 5;
+
+            if response.block_height > our_height && peer_has_more {
+                info!("🚀 [BOOTSTRAP SYNC v8.8.1] One-time wallet balance import: {} wallets from peer \
+                       at height {} (we have {} wallets at height {})",
+                      peer_wallet_count, response.block_height, our_wallet_count, our_height);
+
+                let mut imported = 0u64;
+                let mut updated = 0u64;
+                {
+                    let mut balances = app_state.wallet_balances.write().await;
+                    for (addr_hex, amount_str) in &response.wallet_balances {
+                        let addr_bytes = match hex_to_32bytes(addr_hex) {
+                            Some(b) => b,
+                            None => continue,
+                        };
+                        let amount: u128 = match amount_str.parse() {
+                            Ok(a) if a > 0 => a,
+                            _ => continue,
+                        };
+                        let current = balances.get(&addr_bytes).copied().unwrap_or(0);
+                        if amount > current {
+                            if let Err(e) = app_state.storage_engine
+                                .save_wallet_balance(&addr_bytes, amount).await
+                            {
+                                warn!("⚠️ [BOOTSTRAP SYNC] Failed to persist: {}", e);
+                                continue;
+                            }
+                            if current == 0 { imported += 1; } else { updated += 1; }
+                            balances.insert(addr_bytes, amount);
+                        }
+                    }
+                }
+                // Recalculate total supply
+                {
+                    let balances = app_state.wallet_balances.read().await;
+                    let total: u128 = balances.values().sum();
+                    let mut supply = app_state.total_minted_supply.write().await;
+                    *supply = total;
+                    info!("✅ [BOOTSTRAP SYNC v8.8.1] Imported {} new + updated {} wallets. \
+                           Total supply: {} QUG",
+                          imported, updated, total / 1_000_000_000_000_000_000_000_000u128);
+                }
+                // Set migration flag — never do this again
+                let _ = app_state.storage_engine
+                    .set_migration_flag(crate::BOOTSTRAP_WALLET_SYNC_FLAG).await;
+                app_state.bootstrap_wallet_sync_done
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                result.wallets_added = imported as usize;
+            } else {
+                debug!("🔒 [BOOTSTRAP v8.8.1] Skipping: peer not ahead enough or insufficient extra wallets \
+                        (peer height={}, our height={}, peer wallets={}, our wallets={})",
+                       response.block_height, our_height, peer_wallet_count, our_wallet_count);
+            }
+        }
     }
 
     // ---- Merge token balances (add-only for NEW tokens, never overwrite existing) ----
@@ -786,7 +864,10 @@ async fn merge_p2p_response(
             };
 
             // v8.5.6: Block QUGUSD from P2P — ghost balance propagation prevention
-            if token_bytes == qugusd_addr {
+            // v8.8.2: Allow QUGUSD only on FIRST state sync (before wallet bootstrap completes).
+            // Uses `bootstrap_was_done_before_this_sync` (captured BEFORE wallet import above),
+            // so QUGUSD flows through in the same response that imports wallets.
+            if token_bytes == qugusd_addr && bootstrap_was_done_before_this_sync {
                 qugusd_rejected += 1;
                 continue;
             }
@@ -930,6 +1011,141 @@ async fn do_http_state_sync(app_state: &Arc<AppState>, our_port: u16) {
     }
 
     warn!("🔄 [STATE SYNC] Could not reach any peer (P2P or HTTP) for state sync");
+}
+
+/// v9.0.0: One-time authoritative balance sync from a trusted peer.
+/// Fetches ALL wallet balances from the authority peer and overwrites local RocksDB values.
+/// This fixes balance divergence after incomplete chain replay (which misses DEX protocol fees).
+async fn do_authoritative_balance_sync(app_state: &Arc<AppState>, authority_url: &str) -> anyhow::Result<usize> {
+    let url = format!("{}/api/v1/sync/full-state", authority_url.trim_end_matches('/'));
+    info!("🔑 [AUTHORITY SYNC] Fetching state from {}", url);
+
+    let snapshot = fetch_with_timeout(&url).await?;
+    info!("🔑 [AUTHORITY SYNC] Received snapshot: {} wallet balances, height {}",
+          snapshot.wallet_balances.len(), snapshot.block_height);
+
+    if snapshot.wallet_balances.is_empty() {
+        anyhow::bail!("Authority peer returned 0 wallet balances");
+    }
+
+    let qug_unit: u128 = 1_000_000_000_000_000_000_000_000;
+    let mut imported = 0usize;
+    let mut total_supply: u128 = 0;
+
+    // Overwrite ALL wallet balances in RocksDB
+    for (address_hex, balance_str) in &snapshot.wallet_balances {
+        let balance: u128 = match balance_str.parse() {
+            Ok(b) => b,
+            Err(_) => {
+                warn!("🔑 [AUTHORITY SYNC] Invalid balance for {}: {}", &address_hex[..16], balance_str);
+                continue;
+            }
+        };
+
+        let key = format!("wallet_balance_{}", address_hex);
+        if let Err(e) = app_state.storage_engine.db_put("manifest", key.as_bytes(), &balance.to_le_bytes()).await {
+            warn!("🔑 [AUTHORITY SYNC] Failed to write balance for {}: {}", &address_hex[..16], e);
+            continue;
+        }
+
+        total_supply = total_supply.saturating_add(balance);
+        imported += 1;
+
+        // Log significant balances
+        if balance > qug_unit {
+            info!("🔑 [AUTHORITY SYNC] {} → {} QUG",
+                  &address_hex[..16], balance / qug_unit);
+        }
+    }
+
+    // Update in-memory wallet_balances HashMap
+    {
+        let mut balances = app_state.wallet_balances.write().await;
+        for (address_hex, balance_str) in &snapshot.wallet_balances {
+            let balance: u128 = match balance_str.parse() {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let addr_bytes: [u8; 32] = match hex::decode(address_hex) {
+                Ok(bytes) if bytes.len() == 32 => {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&bytes);
+                    arr
+                }
+                _ => continue,
+            };
+            balances.insert(addr_bytes, balance);
+        }
+    }
+
+    // Update total supply in storage
+    if let Err(e) = app_state.storage_engine.db_put(
+        "manifest",
+        b"total_supply",
+        &total_supply.to_le_bytes(),
+    ).await {
+        warn!("🔑 [AUTHORITY SYNC] Failed to update total_supply: {}", e);
+    }
+
+    // v8.9.0: Also import token balances (QUGUSD, etc.) from authority peer
+    let mut token_imported = 0usize;
+    if !snapshot.token_balances.is_empty() {
+        info!("🔑 [AUTHORITY SYNC] Importing {} token balances...", snapshot.token_balances.len());
+
+        // Update in-memory token_balances
+        let mut token_bals = app_state.token_balances.write().await;
+        for (composite_key, balance_str) in &snapshot.token_balances {
+            let balance: u128 = match balance_str.parse() {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+
+            // Key format: "{wallet_hex}_{token_hex}" (64+1+64 = 129 chars min)
+            let parts: Vec<&str> = composite_key.splitn(2, '_').collect();
+            if parts.len() != 2 { continue; }
+
+            let wallet_bytes: [u8; 32] = match hex::decode(parts[0]) {
+                Ok(bytes) if bytes.len() == 32 => {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&bytes);
+                    arr
+                }
+                _ => continue,
+            };
+
+            let token_bytes: [u8; 32] = match hex::decode(parts[1]) {
+                Ok(bytes) if bytes.len() == 32 => {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&bytes);
+                    arr
+                }
+                Ok(bytes) if bytes.len() < 32 => {
+                    // Pad short token IDs (e.g. 8-byte token symbols)
+                    let mut arr = [0u8; 32];
+                    arr[..bytes.len()].copy_from_slice(&bytes);
+                    arr
+                }
+                _ => continue,
+            };
+
+            // Persist to RocksDB state_sync storage
+            let db_key = format!("token_balance_{}_{}", parts[0], parts[1]);
+            let _ = app_state.storage_engine.db_put(
+                "manifest", db_key.as_bytes(), &balance.to_le_bytes()
+            ).await;
+
+            token_bals.insert((wallet_bytes, token_bytes), balance);
+            token_imported += 1;
+        }
+        drop(token_bals);
+
+        info!("🔑 [AUTHORITY SYNC] Imported {} token balances", token_imported);
+    }
+
+    info!("🔑 [AUTHORITY SYNC] Complete: {} wallets + {} token balances imported, total supply: {} QUG",
+          imported, token_imported, total_supply / qug_unit);
+
+    Ok(imported)
 }
 
 async fn fetch_with_timeout(url: &str) -> anyhow::Result<FullStateSnapshot> {

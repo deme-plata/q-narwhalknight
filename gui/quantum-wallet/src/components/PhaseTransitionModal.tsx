@@ -97,10 +97,10 @@ const PhaseTransitionModal: React.FC<PhaseTransitionModalProps> = ({ onClose }) 
                 <h3>📥 Download v8.4.3</h3>
                 <p>Download the latest binary:</p>
                 <div className="download-links">
-                  <a href="https://dl.quillon.xyz/downloads/q-api-server-v8.4.3" className="download-btn" download style={{marginRight: '10px'}}>
+                  <a href="https://quillon.xyz/downloads/q-api-server-v8.4.3" className="download-btn" download style={{marginRight: '10px'}}>
                     📦 Node v8.4.3
                   </a>
-                  <a href="https://dl.quillon.xyz/downloads/q-miner-v8.3.0" className="download-btn" download>
+                  <a href="https://quillon.xyz/downloads/q-miner-v8.3.0" className="download-btn" download>
                     ⛏️ Miner v8.3.0
                   </a>
                 </div>
@@ -109,8 +109,8 @@ const PhaseTransitionModal: React.FC<PhaseTransitionModalProps> = ({ onClose }) 
                     # Stop your old node<br/>
                     pkill -f q-api-server<br/><br/>
                     # Download v8.4.3<br/>
-                    wget https://dl.quillon.xyz/downloads/q-api-server-v8.4.3<br/>
-                    wget https://dl.quillon.xyz/downloads/q-miner-v8.3.0<br/>
+                    wget https://quillon.xyz/downloads/q-api-server-v8.4.3<br/>
+                    wget https://quillon.xyz/downloads/q-miner-v8.3.0<br/>
                     chmod +x q-api-server-v8.4.3 q-miner-v8.3.0<br/><br/>
                     # Start node<br/>
                     ./q-api-server-v8.4.3 --port 8080<br/><br/>

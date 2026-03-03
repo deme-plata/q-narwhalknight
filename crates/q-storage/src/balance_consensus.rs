@@ -53,7 +53,7 @@ pub fn active_genesis_timestamp() -> u64 {
 
 // v1.4.5-beta: Use integer basis points instead of floating-point for cross-platform determinism
 // 100 basis points = 1% (10_000 bps = 100%)
-pub const DEV_FEE_BPS: u128 = 100; // 1% = 100 basis points
+pub const DEV_FEE_BPS: u128 = 190; // 1.9% = 190 basis points (mainnet)
 pub const BPS_DIVISOR: u128 = 10_000; // Basis points divisor for percentage calculation
 
 /// Development fee percentage (1%) - DEPRECATED, use DEV_FEE_BPS for calculations
@@ -1330,6 +1330,11 @@ impl BalanceConsensusEngine {
         controller.get_rate_diagnostics()
     }
 
+    /// v8.8.4: Get mutable access to emission controller for migration sync
+    pub async fn emission_controller_write(&self) -> tokio::sync::RwLockWriteGuard<'_, crate::emission_controller::EmissionController> {
+        self.emission_controller.write().await
+    }
+
     /// v7.1.0: Serialize emission controller state for persistence
     pub async fn serialize_emission_state(&self) -> anyhow::Result<Vec<u8>> {
         let controller = self.emission_controller.read().await;
@@ -1460,7 +1465,8 @@ impl BalanceConsensusEngine {
 /// # Safety
 /// - Height-gated: only activates for blocks >= STATE_REPLAY_ACTIVATION_HEIGHT
 /// - Fail-open: errors are logged but don't block consensus
-/// - Idempotent: StateApplicator uses absolute values, not deltas (for most ops)
+/// - Watermark-protected: blocks at or below state_replay_watermark are skipped
+///   to prevent double-credit (StateApplicator uses incremental add/sub, NOT absolute writes)
 /// - Skips coinbase + transfer (already handled by balance consensus)
 #[cfg(not(target_os = "windows"))]
 pub fn replay_block_state_changes(
@@ -1475,6 +1481,22 @@ pub fn replay_block_state_changes(
     // Height gate: only process blocks at or above activation height
     if block.header.height < STATE_REPLAY_ACTIVATION_HEIGHT {
         return;
+    }
+
+    // v8.9.1: State replay watermark — prevents double-credit from replaying
+    // the same block twice. StateApplicator uses incremental balance updates
+    // (current + delta), so replaying a block twice DOUBLES the effect.
+    // This watermark is persisted in RocksDB and survives restarts.
+    let watermark_key = b"state_replay_watermark";
+    if let Some(cf) = db.cf_handle("manifest") {
+        if let Ok(Some(bytes)) = db.get_cf(&cf, watermark_key) {
+            if bytes.len() == 8 {
+                let watermark = u64::from_le_bytes(bytes[..8].try_into().unwrap_or([0u8; 8]));
+                if block.header.height <= watermark {
+                    return; // Already replayed — skip to prevent double-credit
+                }
+            }
+        }
     }
 
     // Skip blocks with no transactions (common in DAG consensus)
@@ -1581,6 +1603,86 @@ pub fn replay_block_state_changes(
             block.header.height, applied_count, error_count
         );
     }
+
+    // v8.9.1: Update state replay watermark AFTER all state changes are applied.
+    // Only advance the watermark (never go backwards) to maintain monotonicity.
+    // This prevents double-credit if the same block is replayed after restart.
+    if applied_count > 0 || error_count == 0 {
+        if let Some(cf) = db.cf_handle("manifest") {
+            let _ = db.put_cf(&cf, watermark_key, &block.header.height.to_le_bytes());
+        }
+    }
+}
+
+/// v8.9.1: After replay_block_state_changes(), extract updated token balances
+/// for wallets affected by this block's "rich" transactions.
+///
+/// Returns a Vec of ((wallet, token), balance) pairs read from CF_TOKEN_BALANCES.
+/// The caller should merge these into the in-memory token_balances HashMap.
+#[cfg(not(target_os = "windows"))]
+pub fn get_updated_token_balances_for_block(
+    db: &std::sync::Arc<rocksdb::DB>,
+    block: &QBlock,
+) -> Vec<(([u8; 32], [u8; 32]), u128)> {
+    use q_types::TransactionType;
+
+    let cf = match db.cf_handle(crate::CF_TOKEN_BALANCES) {
+        Some(cf) => cf,
+        None => return Vec::new(),
+    };
+
+    // Collect unique wallet addresses involved in rich transactions
+    let mut wallets: Vec<[u8; 32]> = Vec::new();
+    let mut token_addresses: Vec<[u8; 32]> = Vec::new();
+    for tx in &block.transactions {
+        let tx_type = tx.effective_tx_type();
+        if tx.is_coinbase() || tx_type == TransactionType::Transfer {
+            continue;
+        }
+        // Skip vault types (handled separately)
+        if matches!(tx_type,
+            TransactionType::StableMint | TransactionType::StableBurn
+            | TransactionType::VaultLiquidate | TransactionType::VaultLock
+            | TransactionType::VaultUnlock
+        ) {
+            continue;
+        }
+        // The `to` field is typically the contract address for DEX/token txs
+        if !wallets.contains(&tx.from) { wallets.push(tx.from); }
+        if !wallets.contains(&tx.to) { wallets.push(tx.to); }
+        if tx.to != [0u8; 32] && !token_addresses.contains(&tx.to) {
+            token_addresses.push(tx.to);
+        }
+    }
+
+    if wallets.is_empty() || token_addresses.is_empty() {
+        return Vec::new();
+    }
+
+    // Read current balances for all (wallet, token) pairs from CF_TOKEN_BALANCES
+    let mut results = Vec::new();
+    for wallet in &wallets {
+        for token in &token_addresses {
+            let mut key = Vec::with_capacity(64);
+            key.extend_from_slice(wallet);
+            key.extend_from_slice(token);
+
+            if let Ok(Some(value)) = db.get_cf(&cf, &key) {
+                let balance = if value.len() >= 16 {
+                    u128::from_le_bytes(value[..16].try_into().unwrap_or([0u8; 16]))
+                } else if value.len() >= 8 {
+                    (u64::from_le_bytes(value[..8].try_into().unwrap_or([0u8; 8])) as u128) * 10u128.pow(16)
+                } else {
+                    0u128
+                };
+                if balance > 0 {
+                    results.push(((*wallet, *token), balance));
+                }
+            }
+        }
+    }
+
+    results
 }
 
 /// No-op stub for Windows builds (RocksDB not available)
@@ -1590,6 +1692,15 @@ pub fn replay_block_state_changes(
     _block: &QBlock,
 ) {
     // State replay requires RocksDB — not available on Windows
+}
+
+/// Windows stub for get_updated_token_balances_for_block
+#[cfg(target_os = "windows")]
+pub fn get_updated_token_balances_for_block(
+    _db: &std::sync::Arc<()>,
+    _block: &QBlock,
+) -> Vec<(([u8; 32], [u8; 32]), u128)> {
+    Vec::new()
 }
 
 // =============================================================================

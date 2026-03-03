@@ -340,6 +340,8 @@ pub use sparse_merkle_trie::{SparseMerkleTrie, MerkleProof, TrieNode, TrieStats,
 // v8.7.3: Deterministic block state replay for P2P decentralization
 pub use balance_consensus::replay_block_state_changes;
 pub use balance_consensus::migrate_historical_state;
+// v8.9.1: Token balance refresh after state replay
+pub use balance_consensus::get_updated_token_balances_for_block;
 
 // ========== v1.1.24-beta: Mainnet Safety Infrastructure Exports ==========
 pub use mainnet_safety::{
@@ -2192,7 +2194,7 @@ impl QStorage {
 
     /// Windows stub: RocksDB not available on Windows
     #[cfg(target_os = "windows")]
-    pub fn get_rocks_db_handle(&self) -> Option<()> {
+    pub fn get_rocks_db_handle(&self) -> Option<Arc<()>> {
         None
     }
 
@@ -5451,6 +5453,352 @@ impl QStorage {
         Ok(true)
     }
 
+    /// v8.8.1: Full chain-based balance rebuild with proportional scaling.
+    ///
+    /// The v8.5.7 `reconcile_balances_with_dex_swaps` destroyed all wallet balances by
+    /// using flat block-slot shares instead of actual coinbase amounts, and used an
+    /// incomplete emission controller total. This threw away real proportions and zeroed
+    /// transfer-only wallets.
+    ///
+    /// This migration:
+    /// 1. Replays every block for correct RELATIVE proportions (coinbase + transfers)
+    /// 2. Scales total down to match the emission controller's real total (~69K QUG)
+    /// 3. Preserves everyone's proportional share accurately
+    ///
+    /// `emission_total_supply`: The emission controller's authoritative total (u128, 24 decimals).
+    ///
+    /// Idempotent: runs once, sets migration flag, never runs again.
+    pub async fn full_chain_balance_rebuild_v881(&self, emission_total_supply: u128) -> Result<bool> {
+        const MIGRATION_FLAG: &[u8] = b"migration_full_chain_rebuild_v882_done";
+
+        if let Ok(Some(_)) = self.hot_db.get(CF_MANIFEST, MIGRATION_FLAG).await {
+            return Ok(false); // Already done
+        }
+
+        let qug_unit: u128 = 1_000_000_000_000_000_000_000_000;
+        let min_emission_for_rebuild: u128 = 50_000 * qug_unit; // 50K QUG
+
+        // v8.8.2: Skip chain rebuild if local emission controller has incomplete data.
+        // Nodes with low emission totals (e.g. recently synced) should rely on bootstrap
+        // from the primary server instead of rebuilding from local chain data.
+        if emission_total_supply < min_emission_for_rebuild {
+            info!("⏭️ [v8.8.2 CHAIN REBUILD] Skipping — local emission total {} QUG < 50K threshold",
+                  emission_total_supply / qug_unit);
+            info!("   This node will get correct balances from peer bootstrap instead.");
+            self.hot_db.put(CF_MANIFEST, MIGRATION_FLAG, b"skipped_low_emission").await?;
+            return Ok(false);
+        }
+
+        let old_balances = self.load_wallet_balances().await.unwrap_or_default();
+        let old_total: u128 = old_balances.values().sum();
+        let old_count = old_balances.len();
+
+        info!("🔧 [v8.8.2 CHAIN REBUILD] Starting full balance rebuild from chain data...");
+        info!("   Before: {} wallets, {} QUG total supply", old_count, old_total / qug_unit);
+        info!("   Emission controller total: {} QUG", emission_total_supply / qug_unit);
+
+        // Purge existing wallet_balance_ keys first
+        let deleted = self.delete_by_prefix(b"wallet_balance_").await.unwrap_or(0);
+        let _ = self.hot_db.delete(CF_MANIFEST, b"total_minted_supply").await;
+        info!("   Purged {} old wallet_balance entries", deleted);
+
+        // Rebuild from actual chain data (coinbase + transfers) — gets correct proportions
+        let (mut balances, chain_total) = self.rebuild_balances_from_chain().await?;
+
+        info!("   Chain replay: {} wallets, {} QUG raw chain total",
+              balances.len(), chain_total / qug_unit);
+
+        // Scale balances to match emission controller total (the correct supply)
+        // This preserves relative proportions while fixing the 34× inflation
+        if emission_total_supply > 0 && chain_total > emission_total_supply * 2 {
+            info!("   Scaling by ≈{}× to match emission total",
+                  chain_total / emission_total_supply);
+
+            // Delete the chain-rebuilt balances (rebuild_balances_from_chain persists them)
+            let _ = self.delete_by_prefix(b"wallet_balance_").await;
+            let _ = self.hot_db.delete(CF_MANIFEST, b"total_minted_supply").await;
+
+            let mut scaled_total: u128 = 0;
+            // Use division by scale_divisor to avoid u128 overflow
+            let scale_divisor = chain_total / emission_total_supply;
+            for (_addr, amount) in balances.iter_mut() {
+                let scaled = *amount / scale_divisor;
+                *amount = scaled;
+                scaled_total += scaled;
+            }
+
+            // Persist scaled balances
+            self.save_wallet_balances(&balances).await?;
+            self.save_total_supply(scaled_total).await?;
+
+            info!("✅ [v8.8.2 CHAIN REBUILD] Complete with proportional scaling!");
+            info!("   After: {} wallets, {} QUG total supply (scaled from {} QUG chain)",
+                  balances.len(), scaled_total / qug_unit, chain_total / qug_unit);
+        } else {
+            // No scaling needed — chain total is close to emission total
+            info!("✅ [v8.8.2 CHAIN REBUILD] Complete (no scaling needed)!");
+            info!("   After: {} wallets, {} QUG total supply",
+                  balances.len(), chain_total / qug_unit);
+        }
+
+        self.hot_db.put(CF_MANIFEST, MIGRATION_FLAG, b"done").await?;
+        Ok(true)
+    }
+
+    /// v8.8.5: Deterministic full-chain transaction replay + proportional scaling.
+    ///
+    /// Replays EVERY block from genesis, processing all transactions:
+    /// - Blocks WITH transactions: replay coinbase + transfers as-is (dev fee already embedded)
+    /// - Legacy blocks (no transactions): compute reward with correct genesis, split 1.9% dev fee
+    ///
+    /// Then scales ALL balances proportionally to match the **deterministic emission target**
+    /// computed from first principles (genesis timestamp + halving schedule). Does NOT trust
+    /// the emission controller's persisted state — derives the target mathematically.
+    ///
+    /// This is needed because blocks from the 34× emission overshoot era contain inflated
+    /// coinbase amounts. Scaling preserves relative proportions (who mined what %) while
+    /// matching the correct total supply.
+    pub async fn deterministic_tx_replay_v885(&self) -> Result<bool> {
+        // v8.8.9: Reverted to v885 flag — replay should NOT re-run.
+        // The replay is incomplete (misses DEX transactions) and overwrites correct balances.
+        const MIGRATION_FLAG: &[u8] = b"migration_deterministic_replay_v885_done";
+
+        if let Ok(Some(_)) = self.hot_db.get(CF_MANIFEST, MIGRATION_FLAG).await {
+            return Ok(false); // Already done
+        }
+
+        let genesis_ts = crate::balance_consensus::active_genesis_timestamp();
+        let tip = self.height_cache.cached();
+        if tip == 0 { return Ok(false); }
+
+        info!("🔄 [v8.8.5 DETERMINISTIC REPLAY] Starting full chain replay (blocks 1..{})...", tip);
+        info!("   Using genesis timestamp: {} (network-aware)", genesis_ts);
+
+        // Compute expected emission from FIRST PRINCIPLES — pure math, no controller state.
+        // Uses genesis_timestamp + halving schedule to derive what total supply SHOULD be.
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let elapsed_since_genesis = now_secs.saturating_sub(genesis_ts);
+        let expected_total = crate::emission_controller::target_cumulative_at_time(elapsed_since_genesis);
+        let qug_unit: u128 = 1_000_000_000_000_000_000_000_000;
+
+        info!("   Expected emission (from first principles): {} QUG ({} seconds since genesis)",
+              expected_total / qug_unit, elapsed_since_genesis);
+
+        if expected_total == 0 {
+            warn!("⚠️ [v8.8.5] Expected emission is 0 — cannot scale. Aborting.");
+            return Ok(false);
+        }
+
+        // Purge ALL existing wallet balances
+        let deleted = self.delete_by_prefix(b"wallet_balance_").await.unwrap_or(0);
+        let _ = self.hot_db.delete(CF_MANIFEST, b"total_minted_supply").await;
+        info!("   Purged {} old wallet_balance entries", deleted);
+
+        // Parse founder wallet address bytes (strip "qnk" prefix, decode hex)
+        let founder_hex = &crate::balance_consensus::FOUNDER_WALLET[3..];
+        let founder_bytes: [u8; 32] = {
+            let decoded = hex::decode(founder_hex).unwrap_or_default();
+            let mut arr = [0u8; 32];
+            if decoded.len() == 32 { arr.copy_from_slice(&decoded); }
+            arr
+        };
+
+        let mut balances: HashMap<[u8; 32], u128> = HashMap::new();
+        let mut blocks_processed = 0u64;
+        let mut legacy_blocks = 0u64;
+        let mut tx_blocks = 0u64;
+        let mut last_block_ts = genesis_ts;
+
+        for height in 1..=tip {
+            let height_key = format!("qblock:height:{}", height);
+            let block_data = match self.hot_db.get(CF_BLOCKS, height_key.as_bytes()).await {
+                Ok(Some(data)) => data,
+                Ok(None) => continue,
+                Err(_) => continue,
+            };
+
+            let block: q_types::block::QBlock = if precompressed_storage::is_precompressed(&block_data) {
+                match precompressed_storage::PrecompressedBlock::from_bytes(&block_data)
+                    .and_then(|c| c.decompress().map_err(|e| e.into()))
+                    .and_then(|raw| q_types::legacy::deserialize_qblock_with_fallback(&raw)
+                        .map_err(|e| anyhow::anyhow!("{}", e)))
+                {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                }
+            } else {
+                match q_types::legacy::deserialize_qblock_with_fallback(&block_data) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                }
+            };
+
+            if block.header.timestamp > 0 && block.header.timestamp < genesis_ts {
+                continue;
+            }
+
+            blocks_processed += 1;
+            if block.header.timestamp > last_block_ts {
+                last_block_ts = block.header.timestamp;
+            }
+
+            if !block.transactions.is_empty() {
+                tx_blocks += 1;
+                for block_tx in &block.transactions {
+                    let is_coinbase = block_tx.is_coinbase() || block_tx.tx_type.is_coinbase();
+                    if is_coinbase {
+                        if block_tx.to != [0u8; 32] && block_tx.amount > 0 {
+                            let entry = balances.entry(block_tx.to).or_insert(0);
+                            *entry = entry.saturating_add(block_tx.amount);
+                        }
+                    } else {
+                        if block_tx.amount == 0 { continue; }
+                        if let Some(sender_bal) = balances.get_mut(&block_tx.from) {
+                            *sender_bal = sender_bal.saturating_sub(block_tx.amount);
+                        }
+                        let entry = balances.entry(block_tx.to).or_insert(0);
+                        *entry = entry.saturating_add(block_tx.amount);
+                    }
+                }
+            } else {
+                legacy_blocks += 1;
+                for solution in &block.mining_solutions {
+                    if solution.miner_address != [0u8; 32] {
+                        let elapsed = block.header.timestamp.saturating_sub(genesis_ts);
+                        let era = crate::emission_controller::era_at_time(elapsed);
+                        let annual = crate::emission_controller::annual_emission(era);
+                        let reward = (annual / 31_557_600u128).max(crate::emission_controller::MIN_REWARD);
+
+                        let dev_fee = reward.saturating_mul(crate::balance_consensus::DEV_FEE_BPS)
+                            / crate::balance_consensus::BPS_DIVISOR;
+                        let miner_reward = reward.saturating_sub(dev_fee);
+
+                        let entry = balances.entry(solution.miner_address).or_insert(0);
+                        *entry = entry.saturating_add(miner_reward);
+                        if dev_fee > 0 {
+                            let founder_entry = balances.entry(founder_bytes).or_insert(0);
+                            *founder_entry = founder_entry.saturating_add(dev_fee);
+                        }
+                    }
+                }
+            }
+
+            if height % 50_000 == 0 {
+                info!("   Progress: {}/{} blocks ({} tx-blocks, {} legacy)",
+                      height, tip, tx_blocks, legacy_blocks);
+            }
+        }
+
+        balances.retain(|_, v| *v > 0);
+        let chain_total: u128 = balances.values().sum();
+
+        info!("✅ [v8.8.5] Chain replay complete: {} wallets, {} QUG raw chain total",
+              balances.len(), chain_total / qug_unit);
+        info!("   {} blocks processed ({} with txs, {} legacy)",
+              blocks_processed, tx_blocks, legacy_blocks);
+
+        // Always scale to match deterministic emission target (no heuristic threshold).
+        // Uses (balance × expected_total) / chain_total for maximum precision.
+        // Overflow-safe: decompose multiplication to avoid u128 overflow.
+        if chain_total > 0 && chain_total != expected_total {
+            let scale_ratio_display = chain_total as f64 / expected_total as f64;
+            info!("   Scaling {} wallets: chain {} QUG → target {} QUG (ratio {:.2}×)",
+                  balances.len(), chain_total / qug_unit, expected_total / qug_unit, scale_ratio_display);
+
+            for (_addr, amount) in balances.iter_mut() {
+                // (amount × expected_total) / chain_total — overflow-safe decomposition
+                // Split: result = (amount / chain_total) × expected_total
+                //                + ((amount % chain_total) × expected_total) / chain_total
+                let quot = *amount / chain_total;
+                let rem = *amount % chain_total;
+                // For the remainder term, if rem × expected_total overflows, use f64 fallback
+                let term1 = quot.saturating_mul(expected_total);
+                let term2 = if let Some(prod) = rem.checked_mul(expected_total) {
+                    prod / chain_total
+                } else {
+                    // Fallback: use intermediate f64 (53-bit precision, sufficient for remainder)
+                    ((rem as f64) * (expected_total as f64) / (chain_total as f64)) as u128
+                };
+                *amount = term1.saturating_add(term2);
+            }
+            balances.retain(|_, v| *v > 0);
+        }
+
+        let final_total: u128 = balances.values().sum();
+
+        info!("   Final: {} wallets, {} QUG total supply (target was {} QUG)",
+              balances.len(), final_total / qug_unit, expected_total / qug_unit);
+        info!("   Founder wallet: {} QUG",
+              balances.get(&founder_bytes).unwrap_or(&0) / qug_unit);
+
+        // Persist — atomic batch via save_wallet_balances
+        self.save_wallet_balances(&balances).await?;
+        self.save_total_supply(final_total).await?;
+
+        // Set migration flag AFTER successful persist
+        self.hot_db.put(CF_MANIFEST, MIGRATION_FLAG, b"done").await?;
+
+        info!("🔒 [v8.8.5] Migration flag set. This replay will NOT run again.");
+        Ok(true)
+    }
+
+    /// v8.8.6: Post-migration emission controller sync + collateral vault reset.
+    ///
+    /// The v8.8.5 migration scaled wallet balances but did NOT sync the emission controller
+    /// or scale the collateral vault. This causes:
+    /// - Emission controller thinks 49M QUG was minted (old inflated value)
+    /// - Correction factor = 0.01 → miners get 1% of normal rewards
+    /// - Collateral vault has inflated locked_qug amounts
+    /// - Rate windows contain pre-migration poisoned samples
+    ///
+    /// Returns (old_emission_total, new_emission_total) if migration ran.
+    pub async fn post_migration_emission_sync_v886(&self) -> Result<Option<(u128, u128)>> {
+        // Reverted to v886 flag — emission sync should NOT re-run
+        const MIGRATION_FLAG: &[u8] = b"migration_emission_sync_v886_done";
+
+        if let Ok(Some(_)) = self.hot_db.get(CF_MANIFEST, MIGRATION_FLAG).await {
+            return Ok(None); // Already done
+        }
+
+        // Only run if v8.8.5/v8.8.9 already completed (this is a post-migration fixup)
+        const V889_FLAG: &[u8] = b"migration_deterministic_replay_v889_done";
+        const V885_FLAG: &[u8] = b"migration_deterministic_replay_v885_done";
+        if self.hot_db.get(CF_MANIFEST, V889_FLAG).await?.is_none()
+            && self.hot_db.get(CF_MANIFEST, V885_FLAG).await?.is_none() {
+            return Ok(None); // v8.8.5 hasn't run yet, skip
+        }
+
+        info!("🔄 [v8.8.6] Post-migration emission sync starting...");
+
+        // Read the current (correct) wallet totals from RocksDB
+        let balances = self.load_wallet_balances().await?;
+        let wallet_total: u128 = balances.values().sum();
+        let qug_unit: u128 = 1_000_000_000_000_000_000_000_000;
+
+        info!("   Wallet total from RocksDB: {} QUG ({} wallets)",
+              wallet_total / qug_unit, balances.len());
+
+        // Save the wallet total as the corrected emission total
+        // (This will be picked up by main.rs to sync the in-memory emission controller)
+        self.save_total_supply(wallet_total).await?;
+
+        // Set the balance watermark to current tip to prevent re-inflation
+        let tip = self.height_cache.cached();
+        if tip > 0 {
+            self.save_balance_watermark(tip).await?;
+            info!("   Balance watermark set to height {}", tip);
+        }
+
+        // Set migration flag
+        self.hot_db.put(CF_MANIFEST, MIGRATION_FLAG, b"done").await?;
+
+        info!("✅ [v8.8.6] Emission sync flag set. Main.rs will sync in-memory state.");
+        Ok(Some((0, wallet_total))) // old_total unknown at storage layer
+    }
+
     /// v8.5.0: Save balance processed watermark to RocksDB.
     /// The watermark tracks the highest block height whose balance effects have been
     /// persisted. On restart, blocks at or below this height are skipped to prevent
@@ -5462,6 +5810,25 @@ impl QStorage {
     /// v8.5.0: Load balance processed watermark from RocksDB.
     pub async fn load_balance_watermark(&self) -> Result<u64> {
         match self.hot_db.get(CF_MANIFEST, b"balance_processed_watermark").await? {
+            Some(bytes) if bytes.len() == 8 => {
+                Ok(u64::from_le_bytes(bytes[..8].try_into().unwrap()))
+            }
+            _ => Ok(0),
+        }
+    }
+
+    /// v8.9.1: Save state replay watermark to RocksDB.
+    /// Tracks the highest block height whose DEX/token state changes have been
+    /// replayed via StateApplicator. On restart, blocks at or below this height
+    /// are skipped to prevent double-credit (StateApplicator uses incremental
+    /// add/sub, NOT absolute writes).
+    pub async fn save_state_replay_watermark(&self, height: u64) -> Result<()> {
+        self.hot_db.put(CF_MANIFEST, b"state_replay_watermark", &height.to_le_bytes()).await
+    }
+
+    /// v8.9.1: Load state replay watermark from RocksDB.
+    pub async fn load_state_replay_watermark(&self) -> Result<u64> {
+        match self.hot_db.get(CF_MANIFEST, b"state_replay_watermark").await? {
             Some(bytes) if bytes.len() == 8 => {
                 Ok(u64::from_le_bytes(bytes[..8].try_into().unwrap()))
             }

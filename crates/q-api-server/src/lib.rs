@@ -13,6 +13,12 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Miner versions are independent from server versions (q-miner v2.x vs q-api-server v8.x).
 pub const MIN_MINER_VERSION: &str = "2.6.0";
 
+/// v8.8.2: Migration flag for one-time bootstrap wallet balance sync.
+/// Once set in RocksDB CF_MANIFEST, wallet balance import from peers is permanently disabled.
+/// Also gates QUGUSD: before flag is set, QUGUSD flows through from peers (bootstrap).
+/// After flag is set, QUGUSD is blocked (ghost prevention resumes).
+pub const BOOTSTRAP_WALLET_SYNC_FLAG: &[u8] = b"migration_bootstrap_wallet_sync_v882_done";
+
 // DEACTIVATED: use q_bep44_discovery::DiscoveryEngine;
 // DEACTIVATED: use q_bitcoin_bridge::bridge::IntegratedBitcoinBridge;
 // DEACTIVATED: use q_dns_phantom::DNSPhantomNetwork;
@@ -464,6 +470,27 @@ pub struct MiningSubmission {
     pub challenge_hash_bytes: Option<[u8; 32]>,
     /// v1.0.2: Miner version for update check (moved from HTTP-only to background SSE)
     pub miner_version: Option<String>,
+}
+
+/// ⚡ v8.9.0: Lightweight SSE mining event for decoupled broadcast pipeline.
+/// Batch processors send these to the SSE aggregator task at 10Hz.
+#[derive(Debug, Clone)]
+pub enum SseMiningEvent {
+    /// A mining reward was accepted (pending consensus confirmation)
+    MiningReward {
+        wallet: String,
+        hash_rate: f64,
+        nonce: u64,
+        miner_id: Option<String>,
+        worker_name: Option<String>,
+    },
+    /// Balance update notification (pending, for UI feedback)
+    BalanceUpdate {
+        wallet: String,
+        old_balance: u128,
+        new_balance: u128,
+        solution_count: usize,
+    },
 }
 
 // v7.0.0: FaucetState impl removed — faucet eliminated
@@ -941,6 +968,16 @@ pub struct AppState {
     /// Flag indicating if mining is healthy (true = solutions arriving)
     pub mining_is_healthy: Arc<std::sync::atomic::AtomicBool>,
 
+    // ⚡ v8.9.0: Lock-free solution counters (replaces RwLock for hot path stats)
+    pub mining_solutions_submitted: Arc<std::sync::atomic::AtomicU64>,
+    pub mining_solutions_accepted: Arc<std::sync::atomic::AtomicU64>,
+
+    // ⚡ v8.9.0: Miner stats channel (batch processor → stats aggregator at 1Hz)
+    pub miner_stats_tx: Option<tokio::sync::mpsc::Sender<(String, f64, Option<String>, Option<String>)>>,
+
+    // ⚡ v8.9.0: SSE mining event channel (batch processor → SSE aggregator at 10Hz)
+    pub sse_mining_event_tx: Option<tokio::sync::mpsc::Sender<SseMiningEvent>>,
+
     // Quantum Privacy Mixer State
     pub mixing_requests: Arc<RwLock<HashMap<String, PendingMixingRequest>>>, // participant_id -> request
     pub quantum_mixer: Option<Arc<QuantumMixingEngine>>,
@@ -1057,6 +1094,12 @@ pub struct AppState {
     // Initialized from Q_AUTO_UPDATE env var, can be toggled via POST /api/v1/admin/update/toggle
     pub auto_update_enabled: Arc<std::sync::atomic::AtomicBool>,
 
+    // 🚀 v8.8.2: One-time bootstrap wallet balance sync flag
+    // Set to true after first successful wallet balance import from a trusted peer.
+    // Once set, wallet balance import is permanently disabled (v8.5.4 safety preserved).
+    // Also gates QUGUSD: captured BEFORE wallet import runs, so QUGUSD can flow in the same response.
+    pub bootstrap_wallet_sync_done: Arc<std::sync::atomic::AtomicBool>,
+
     // 🔄 v8.5.1: Admin notification email for update alerts
     // Set via POST /api/v1/admin/update/notification-email or Q_ADMIN_NOTIFICATION_EMAIL env
     pub admin_notification_email: Arc<tokio::sync::RwLock<Option<String>>>,
@@ -1075,7 +1118,10 @@ pub struct AppState {
 
     // Mining submission queue (async processing to prevent server overload)
     // ✅ v1.0.2-beta Layer 3 FIX: Changed to bounded channel with 10,000 capacity
-    pub mining_submission_tx: Option<tokio::sync::mpsc::Sender<MiningSubmission>>,
+    // ⚡ v8.9.0: Sharded N-way parallel pipeline for 1M+ TPS
+    pub mining_submission_tx: Option<tokio::sync::mpsc::Sender<MiningSubmission>>, // legacy single (unused if shards active)
+    pub mining_submission_txs: Option<Arc<Vec<tokio::sync::mpsc::Sender<MiningSubmission>>>>,
+    pub mining_shard_index: Option<Arc<std::sync::atomic::AtomicUsize>>,
 
     // 🔒 v4.1.3: Mining nonce deduplication — prevents double-reward attacks
     // Tracks (challenge_hash_prefix, nonce) pairs. Entries auto-expire when challenge rotates.
@@ -2516,7 +2562,7 @@ impl AppState {
             highest_network_height: Arc::new(std::sync::atomic::AtomicU64::new(0)), // Sync mode tracking
             last_peer_height_update: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v5.2.0: Peer height staleness
             sync_trigger: Arc::new(tokio::sync::Notify::new()), // v5.2.0: Immediate sync wake-up
-            dev_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(100)), // v7.1.5: 100 bps = 1%
+            dev_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(190)), // v8.8.1: 190 bps = 1.9% mainnet dev fee
             node_operator_fee_promille: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v7.3.1: disabled by default
             dex_protocol_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(5)), // v7.3.1: 5 bps = 0.05% protocol fee from swaps
             operator_fees_earned_session: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v8.1.1
@@ -2534,6 +2580,7 @@ impl AppState {
             auto_update_enabled: Arc::new(std::sync::atomic::AtomicBool::new(
                 std::env::var("Q_AUTO_UPDATE").unwrap_or_else(|_| "0".to_string()) == "1"
             )), // 🔄 v8.5.1: Runtime auto-update toggle
+            bootstrap_wallet_sync_done: Arc::new(std::sync::atomic::AtomicBool::new(false)), // 🚀 v8.8.2: Bootstrap sync (test mode: not done)
             admin_notification_email: Arc::new(tokio::sync::RwLock::new(
                 std::env::var("Q_ADMIN_NOTIFICATION_EMAIL").ok()
             )), // 🔄 v8.5.1: Admin notification email
@@ -2542,6 +2589,12 @@ impl AppState {
             sync_start_time: Arc::new(std::sync::RwLock::new(None)), // 🎨 v0.6.6-beta: Progress bar sync tracking
             sync_start_height: Arc::new(std::sync::atomic::AtomicU64::new(0)), // 🎨 v0.6.6-beta: Progress bar sync tracking
             mining_submission_tx: None, // Disabled in test mode
+            mining_submission_txs: None, // v8.9.0: Sharded pipeline (disabled in test mode)
+            mining_shard_index: None,
+            mining_solutions_submitted: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            mining_solutions_accepted: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            miner_stats_tx: None,
+            sse_mining_event_tx: None,
             mining_nonce_dedup: Arc::new(dashmap::DashMap::new()),
             optimistic_applied_txs: Arc::new(dashmap::DashMap::new()),
             connection_manager: None,
@@ -3840,7 +3893,7 @@ impl AppState {
             highest_network_height: Arc::new(std::sync::atomic::AtomicU64::new(0)), // Sync mode tracking
             last_peer_height_update: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v5.2.0: Peer height staleness
             sync_trigger: Arc::new(tokio::sync::Notify::new()), // v5.2.0: Immediate sync wake-up
-            dev_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(100)), // v7.1.5: 100 bps = 1%
+            dev_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(190)), // v8.8.1: 190 bps = 1.9% mainnet dev fee
             node_operator_fee_promille: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v7.3.1: disabled by default
             dex_protocol_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(5)), // v7.3.1: 5 bps = 0.05% protocol fee from swaps
             operator_fees_earned_session: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v8.1.1
@@ -3858,6 +3911,9 @@ impl AppState {
             auto_update_enabled: Arc::new(std::sync::atomic::AtomicBool::new(
                 std::env::var("Q_AUTO_UPDATE").unwrap_or_else(|_| "0".to_string()) == "1"
             )), // 🔄 v8.5.1: Runtime auto-update toggle
+            bootstrap_wallet_sync_done: Arc::new(std::sync::atomic::AtomicBool::new(
+                storage_engine.has_migration_flag(crate::BOOTSTRAP_WALLET_SYNC_FLAG).await
+            )), // 🚀 v8.8.2: One-time bootstrap wallet sync (loaded from RocksDB)
             admin_notification_email: Arc::new(tokio::sync::RwLock::new(
                 std::env::var("Q_ADMIN_NOTIFICATION_EMAIL").ok()
             )), // 🔄 v8.5.1: Admin notification email
@@ -3868,6 +3924,12 @@ impl AppState {
 
             // Mining submission async queue
             mining_submission_tx: None, // Will be initialized in main.rs
+            mining_submission_txs: None, // v8.9.0: Sharded pipeline (initialized in main.rs)
+            mining_shard_index: None,
+            mining_solutions_submitted: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            mining_solutions_accepted: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            miner_stats_tx: None,
+            sse_mining_event_tx: None,
             mining_nonce_dedup: Arc::new(dashmap::DashMap::new()),
             optimistic_applied_txs: Arc::new(dashmap::DashMap::new()),
 
