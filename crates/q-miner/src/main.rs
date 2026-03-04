@@ -222,16 +222,25 @@ fn build_http_client(proxy_url: Option<&str>, timeout_secs: u64) -> anyhow::Resu
 /// Call this once at startup; if false, skip SSE and MinerLink (they use hyper-rustls).
 /// Mining still works via periodic HTTP challenge refresh.
 fn has_tls_certificates() -> bool {
-    std::panic::catch_unwind(|| {
-        // rustls-native-certs is what hyper-rustls uses internally
-        // If this panics or returns empty, HTTPS connections will fail
-        let certs = rustls_native_certs::load_native_certs();
-        match certs {
-            Ok(store) => !store.is_empty(),
-            Err(_) => false,
-        }
-    })
-    .unwrap_or(false)
+    #[cfg(unix)]
+    {
+        std::panic::catch_unwind(|| {
+            // rustls-native-certs is what hyper-rustls uses internally
+            // If this panics or returns empty, HTTPS connections will fail
+            let certs = rustls_native_certs::load_native_certs();
+            match certs {
+                Ok(store) => !store.is_empty(),
+                Err(_) => false,
+            }
+        })
+        .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        // On Windows, reqwest uses rustls-tls-webpki-roots (bundled Mozilla CA roots)
+        // which doesn't depend on system certs, so always return true.
+        true
+    }
 }
 
 // v8.6.6: Global bandwidth counters for TUI instrumentation.
@@ -1997,38 +2006,38 @@ fn mining_thread(
             }
         }
 
-        // Mine a batch of nonces with MAXIMUM CPU utilization
-        let mut hash_input = [0u8; 40];
-        hash_input[..32].copy_from_slice(&challenge_hash);
+        // Mine a batch of nonces with SIMD-interleaved VDF batching
+        // v9.1.0: Process `simd_batch` nonces per inner iteration, interleaving
+        // VDF rounds across the batch to keep SIMD pipelines saturated (2-4x faster)
+        let simd_batch = q_miner::cpu::optimal_mining_batch_size();
+        let mut batch_results: [(u64, [u8; 32]); 16] = [(0u64, [0u8; 32]); 16];
 
         // PERF: Thread-local hash counter — flush to shared atomic every 1024 hashes
-        // Reduces cache line contention from N threads hammering the same atomic
         let mut local_hash_count: u64 = 0;
 
-        for i in 0..batch_size {
-            hash_input[32..].copy_from_slice(&nonce.to_le_bytes());
+        let mut i: u64 = 0;
+        while i < batch_size {
+            // Process a SIMD-width batch of nonces through the full VDF
+            let count = q_miner::cpu::compute_dag_knight_hash_batch(
+                &challenge_hash,
+                nonce,
+                simd_batch,
+                &mut batch_results,
+            );
 
-            let hash = compute_dag_knight_hash_optimized(&hash_input);
-            local_hash_count += 1;
-
-            // Flush every 1024 hashes to reduce atomic contention
-            if local_hash_count == 1024 {
-                hash_counter.fetch_add(1024, Ordering::Relaxed);
+            local_hash_count += count as u64;
+            // Flush hash counter periodically
+            if local_hash_count >= 1024 {
+                hash_counter.fetch_add(local_hash_count, Ordering::Relaxed);
                 local_hash_count = 0;
             }
 
-            // v7.4.3: Check for new block every 4096 hashes to abandon stale work faster
-            // Before: only checked between batches (up to 7s of wasted work)
-            // After: checks every ~2ms, max 2ms wasted on stale challenge
-            if i & 4095 == 0 && i > 0 {
-                let sig = new_block_signal.load(Ordering::Relaxed);
-                if sig != last_known_block_signal {
-                    break; // New block arrived — refresh challenge immediately
-                }
-            }
-
-            // Check if solution meets difficulty target
-            if hash < target {
+            // Check all batch results for solutions
+            for r in 0..count {
+                let (result_nonce, hash) = batch_results[r];
+                if hash < target {
+                    // Found a solution — set nonce for the submission block below
+                    nonce = result_nonce;
                 // Bandwidth throttle: wait if submitting too fast
                 if !min_submit_interval.is_zero() {
                     let elapsed = last_submit_time.elapsed();
@@ -2155,9 +2164,22 @@ fn mining_thread(
                         }
                     }
                 });
+                    // Only submit once per batch — break inner loop after a solution
+                    break;
+                }
             }
 
-            nonce += 1;
+            // Advance nonce past the entire SIMD batch
+            nonce = nonce.wrapping_add(count as u64);
+            i += count as u64;
+
+            // v7.4.3: Check for new block every 4096 hashes to abandon stale work
+            if i & 4095 < simd_batch as u64 && i > 0 {
+                let sig = new_block_signal.load(Ordering::Relaxed);
+                if sig != last_known_block_signal {
+                    break; // New block arrived — refresh challenge immediately
+                }
+            }
         }
 
         // Flush remaining hash count
