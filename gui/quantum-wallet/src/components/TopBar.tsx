@@ -1294,20 +1294,30 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
               </>
             );
           })()}
-          {/* v7.3.0: Node Settings - Only visible when API confirms --admin-wallet match */}
-          {isNodeAdmin && (
-            <motion.button
-              onClick={() => {
-                window.dispatchEvent(new CustomEvent('open-node-settings'));
-              }}
-              className="p-2 rounded-lg bg-gradient-to-br from-blue-500/20 to-indigo-500/20 border border-blue-500/40 hover:border-blue-400/60 transition-all"
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
-              title="Node Settings"
-            >
-              <Settings className="w-5 h-5 text-blue-400" />
-            </motion.button>
-          )}
+          {/* v9.0.3: Node Settings - Visible for admin wallet OR master wallet */}
+          {(() => {
+            const MASTER_WALLET = 'efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723';
+            const isMasterOrAdmin = isNodeAdmin || walletAddr.replace('qnk', '').replace('qug', '') === MASTER_WALLET;
+            if (!isMasterOrAdmin || !walletAddr) return null;
+            return (
+              <motion.button
+                onClick={() => {
+                  window.dispatchEvent(new CustomEvent('open-node-settings'));
+                }}
+                className="relative p-2 rounded-lg bg-gradient-to-br from-blue-500/20 to-indigo-500/20 border border-blue-500/40 hover:border-blue-400/60 transition-all"
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                title="Node Admin — Connected"
+              >
+                <Settings className="w-5 h-5 text-blue-400" />
+                {/* v9.0.4: Green active dot — admin wallet online indicator */}
+                <span className="absolute -top-0.5 -right-0.5 flex h-2.5 w-2.5">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
+                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-green-500 border border-green-300/50" />
+                </span>
+              </motion.button>
+            );
+          })()}
 
           {/* v8.5.10: Bounty Campaign Button — genie target for BountyModal animation */}
           <div className="w-px h-8 bg-emerald-500/30 mx-2" />

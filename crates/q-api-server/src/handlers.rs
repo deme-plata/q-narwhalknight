@@ -8402,12 +8402,21 @@ pub async fn submit_mining_solution(
         if net_h > local_h { net_h - local_h } else { 0 }
     };
 
+    // v9.0.3: Check Q_ALLOW_SOLO_MINING BEFORE hard reject — bootstrap validators must always mine
+    let allow_solo = std::env::var("Q_ALLOW_SOLO_MINING")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+
     // Hard reject when severely behind — sync MUST have priority
-    if sync_behind > 1000 {
+    // But skip for bootstrap validators (Q_ALLOW_SOLO_MINING=true)
+    if sync_behind > 1000 && !allow_solo {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
 
-    let dynamic_cap: u32 = if sync_behind > 100 { 50 } else if sync_behind > 10 { 200 } else { 1000 };
+    let dynamic_cap: u32 = if allow_solo {
+        // Bootstrap validators: always allow full mining throughput
+        1000
+    } else if sync_behind > 100 { 50 } else if sync_behind > 10 { 200 } else { 1000 };
 
     // Check if we're over the dynamic cap before even trying the semaphore
     let current_in_flight = MINING_IN_FLIGHT.load(std::sync::atomic::Ordering::Relaxed);
@@ -8471,9 +8480,7 @@ pub async fn submit_mining_solution(
         // Old 5× multiplier allowed 1.6M poison at 468K (max was 2.3M)
         let max_reasonable = local_h + 5_000;
         let net_h = if raw_net_h > max_reasonable { local_h } else { raw_net_h };
-        let allow_solo = std::env::var("Q_ALLOW_SOLO_MINING")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
+        // v9.0.3: Reuse allow_solo from earlier check (avoid redundant env var lookup)
         if net_h > 0 && local_h + 10 < net_h && !allow_solo {
             static LAST_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let now_secs = std::time::SystemTime::now()
@@ -8726,12 +8733,14 @@ pub async fn submit_mining_solution(
                     }
                 }
                 if !queued {
-                    // v8.9.9: All shards full — instant 503 for failover.
-                    // 500ms wait was still causing 38K+ connection pileup because
-                    // 3000 req/s × 0.5s = 1500 connections just waiting.
-                    // 50ms is enough for 1-2 batch drain cycles.
+                    // v9.0.4: Increased from 50ms → 2000ms. The 50ms timeout was set for
+                    // nginx connection pileup prevention (3000 req/s × 0.5s = 1500 conns).
+                    // With Caddy Connection:close, pileup is prevented at the TLS layer.
+                    // 2s wait allows batch processor to drain 1-2 cycles (each ~50-65s for
+                    // 500 submissions), dramatically reducing 503 errors under heavy load.
+                    // Miners already have 10s HTTP timeout, so 2s wait is acceptable.
                     match tokio::time::timeout(
-                        std::time::Duration::from_millis(50),
+                        std::time::Duration::from_millis(2000),
                         txs[idx].send(submission.clone()),
                     ).await {
                         Ok(Ok(())) => {
@@ -8743,7 +8752,7 @@ pub async fn submit_mining_solution(
                             warn!("❌ Mining shard {} channel closed during wait", idx);
                         }
                         Err(_timeout) => {
-                            // 3-second timeout expired — return 503 for nginx failover
+                            // 2s timeout expired — return 503 for reverse proxy failover
                             static LAST_CAPACITY_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                             let now_secs = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
@@ -8751,7 +8760,7 @@ pub async fn submit_mining_solution(
                                 .as_secs();
                             let prev = LAST_CAPACITY_LOG.load(std::sync::atomic::Ordering::Relaxed);
                             if now_secs >= prev + 10 && LAST_CAPACITY_LOG.compare_exchange(prev, now_secs, std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed).is_ok() {
-                                warn!("🚨 All {} mining shards full for 500ms — returning 503 for nginx failover", shard_count);
+                                warn!("🚨 All {} mining shards full for 2s — returning 503", shard_count);
                             }
                             return Err(StatusCode::SERVICE_UNAVAILABLE);
                         }
@@ -9116,7 +9125,14 @@ pub async fn get_mining_challenge(
         expires_at,
     };
 
-    *state.current_challenge.write().await = Some(cached_challenge.clone());
+    // v9.0.4: Use try_write() instead of .write().await to prevent lock contention.
+    // With 400+ miners hitting /challenge, a blocking .write().await causes all
+    // concurrent try_read() calls to fail, cascading into mass challenge regeneration.
+    // If the lock is held (height update or another writer), just return the challenge
+    // without caching — the next request will cache it.
+    if let Ok(mut guard) = state.current_challenge.try_write() {
+        *guard = Some(cached_challenge.clone());
+    }
 
     Ok(Json(ApiResponse::success(MiningChallengeResponse {
         challenge_hash: cached_challenge.challenge_hash,

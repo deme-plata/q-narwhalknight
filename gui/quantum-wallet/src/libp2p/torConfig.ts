@@ -34,7 +34,7 @@ export const TOR_CONFIG = {
   // Onion address of bootstrap node
   // Format: /onion3/<56-char-address>:<port>/p2p/<peer-id>
   // This allows Tor Browser users to connect directly via .onion
-  onionBootstrap: '/onion3/vyjmkppguki7xpqcfzxqqapgphejhhybx3hm3ljzcgszdin5cypghjad:9001/p2p/12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH',
+  onionBootstrap: '/onion3/ca3jpub2haxboxjw4ws6run36ekdh3pv7pneqg2tbac5rxzvxhd2i5id:9001/p2p/12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM',
 
   // Connection timeout for Tor (longer due to circuit establishment)
   dialTimeout: 45000, // 45 seconds - Tor circuits take time

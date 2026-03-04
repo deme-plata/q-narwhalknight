@@ -15,6 +15,12 @@ use std::sync::atomic::Ordering;
 
 #[cfg(feature = "tui")]
 pub fn draw_dashboard(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
+    // v9.0.4: Show Starship sync panel when node is syncing
+    if app.sync_info.is_some() {
+        draw_syncing_dashboard(f, area, app);
+        return;
+    }
+
     // v8.5.5: Dynamic thread panel height — wraps to multiple rows for 192/384+ threads
     let thread_count = app.state.as_ref().map(|s| s.num_threads).unwrap_or(0);
     let thread_panel_width = (area.width / 2).saturating_sub(4) as usize;
@@ -38,6 +44,240 @@ pub fn draw_dashboard(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
     draw_thread_and_block_info(f, chunks[2], app);
     draw_connection_bar(f, chunks[3], app);
     draw_mini_log(f, chunks[4], app);
+}
+
+/// v9.0.4: Full-screen Starship sync dashboard — shows when node is catching up
+#[cfg(feature = "tui")]
+fn draw_syncing_dashboard(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(9),   // Starship flight panel
+            Constraint::Length(5),   // Phase timeline + stats
+            Constraint::Length(3),   // Connection bar
+            Constraint::Min(3),      // Mini-log
+        ])
+        .split(area);
+
+    draw_starship_panel(f, chunks[0], app);
+    draw_sync_stats(f, chunks[1], app);
+    draw_connection_bar(f, chunks[2], app);
+    draw_mini_log(f, chunks[3], app);
+}
+
+/// Starship flight computer display — the hero panel during sync
+#[cfg(feature = "tui")]
+fn draw_starship_panel(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
+    let info = match &app.sync_info {
+        Some(i) => i,
+        None => return,
+    };
+
+    let pct = info.sync_progress.min(100.0).max(0.0);
+    let bar_width = area.width.saturating_sub(6) as usize;
+    let filled = ((pct as f64 / 100.0) * bar_width as f64).round() as usize;
+    let empty = bar_width.saturating_sub(filled);
+
+    // Phase emoji + color
+    let (phase_icon, phase_color) = match info.phase.as_str() {
+        "Prelaunch" => ("\u{1F4E1}", Color::DarkGray),  // 📡
+        "Ignition" => ("\u{1F525}", Color::Red),          // 🔥
+        "SuperHeavy" => ("\u{1F680}", Color::Cyan),       // 🚀
+        "HotStaging" => ("\u{2604}", Color::Yellow),      // ☄
+        "StarshipCruise" => ("\u{1F6F8}", Color::Magenta),// 🛸
+        "StationKeeping" => ("\u{1F30D}", Color::Green),  // 🌍
+        _ => ("\u{1F680}", Color::Cyan),                   // 🚀
+    };
+
+    // ETA display
+    let eta_str = if info.eta_secs > 0 {
+        format!("ETA {}", format_duration(info.eta_secs))
+    } else if info.sync_speed_bps > 0.0 {
+        "ETA calculating...".to_string()
+    } else {
+        "ETA --".to_string()
+    };
+
+    // Speed display
+    let speed_str = if info.sync_speed_bps > 0.0 {
+        format!("{:.0} blk/s", info.sync_speed_bps)
+    } else {
+        "-- blk/s".to_string()
+    };
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(
+                format!("  {} STARSHIP FLIGHT COMPUTER", phase_icon),
+                Style::default().fg(phase_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  Phase: {}", info.phase),
+                Style::default().fg(phase_color),
+            ),
+        ]),
+        Line::from(""),
+        // Progress bar
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                "\u{2595}",  // ▕
+                Style::default().fg(phase_color),
+            ),
+            Span::styled(
+                "\u{2588}".repeat(filled),
+                Style::default().fg(phase_color),
+            ),
+            Span::styled(
+                "\u{2591}".repeat(empty),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                "\u{258F}",  // ▏
+                Style::default().fg(phase_color),
+            ),
+            Span::styled(
+                format!(" {:.1}%", pct),
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(""),
+        // Height + blocks behind
+        Line::from(vec![
+            Span::styled("  Height  ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("#{}", format_with_commas(info.local_height)),
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" / #{}", format_with_commas(info.network_height)),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                format!("  ({} behind)", format_with_commas(info.blocks_behind)),
+                Style::default().fg(Color::Yellow),
+            ),
+        ]),
+        // Speed + ETA
+        Line::from(vec![
+            Span::styled("  Speed   ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                &speed_str,
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  \u{2502}  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                &eta_str,
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        // Peers + mission time
+        Line::from(vec![
+            Span::styled("  Peers   ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{}", info.peer_count),
+                Style::default().fg(if info.peer_count > 0 { Color::Green } else { Color::Red }).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  \u{2502}  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("Mission T+{}", format_duration(info.mission_elapsed_secs)),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+    ];
+
+    let border_color = if pct > 90.0 { Color::Green } else if pct > 50.0 { Color::Yellow } else { phase_color };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color))
+        .title(Span::styled(
+            " \u{2728} Node Syncing \u{2014} Mining paused ",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ));
+
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// Phase timeline and sync statistics
+#[cfg(feature = "tui")]
+fn draw_sync_stats(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
+    let info = match &app.sync_info {
+        Some(i) => i,
+        None => return,
+    };
+
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(area);
+
+    // Phase timeline
+    let phases = ["Prelaunch", "Ignition", "SuperHeavy", "HotStaging", "StarshipCruise", "StationKeeping"];
+    let phase_icons = ["\u{1F4E1}", "\u{1F525}", "\u{1F680}", "\u{2604}\u{FE0F}", "\u{1F6F8}", "\u{1F30D}"];
+    let current_idx = phases.iter().position(|p| *p == info.phase.as_str()).unwrap_or(2);
+
+    let mut phase_spans: Vec<Span> = vec![Span::raw("  ")];
+    for (i, (phase, icon)) in phases.iter().zip(phase_icons.iter()).enumerate() {
+        let (color, style) = if i < current_idx {
+            (Color::Green, Modifier::DIM)       // completed
+        } else if i == current_idx {
+            (Color::Cyan, Modifier::BOLD)        // active
+        } else {
+            (Color::DarkGray, Modifier::DIM)     // future
+        };
+        phase_spans.push(Span::styled(
+            format!("{} ", icon),
+            Style::default().fg(color).add_modifier(style),
+        ));
+        if i < phases.len() - 1 {
+            let arrow_color = if i < current_idx { Color::Green } else { Color::DarkGray };
+            phase_spans.push(Span::styled("\u{2192} ", Style::default().fg(arrow_color)));
+        }
+    }
+
+    let timeline = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled("  Phase Timeline", Style::default().fg(Color::Gray)),
+        ]),
+        Line::from(""),
+        Line::from(phase_spans),
+    ]).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray)));
+    f.render_widget(timeline, cols[0]);
+
+    // Orbit status
+    let orbit_icon = if info.orbit_stable { "\u{2705}" } else { "\u{1F504}" }; // ✅ or 🔄
+    let orbit_text = if info.orbit_stable { "Stable" } else { "Acquiring..." };
+    let phase_time = format_duration(info.phase_duration_secs);
+
+    let status = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled("  Orbit  ", Style::default().fg(Color::Gray)),
+            Span::styled(format!("{} {}", orbit_icon, orbit_text), Style::default().fg(if info.orbit_stable { Color::Green } else { Color::Yellow })),
+        ]),
+        Line::from(vec![
+            Span::styled("  Phase  ", Style::default().fg(Color::Gray)),
+            Span::styled(format!("{} for {}", info.phase, phase_time), Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from(vec![
+            Span::styled("  Status ", Style::default().fg(Color::Gray)),
+            Span::styled("Mining auto-starts on sync", Style::default().fg(Color::DarkGray)),
+        ]),
+    ]).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray)));
+    f.render_widget(status, cols[1]);
+}
+
+/// Format number with commas: 7410000 → "7,410,000"
+#[cfg(feature = "tui")]
+fn format_with_commas(n: u64) -> String {
+    let s = n.to_string();
+    let mut result = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result
 }
 
 #[cfg(feature = "tui")]

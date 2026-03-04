@@ -24,7 +24,7 @@ use core_affinity::CoreId;
 use raw_cpuid::CpuId;
 use serde_json::Value;
 
-use q_miner::shared_state::{SharedMinerState, ThreadState, ThreadStatus, DiagnosticEvent, MinerThrottleMode};
+use q_miner::shared_state::{SharedMinerState, ThreadState, ThreadStatus, DiagnosticEvent, MinerThrottleMode, StarshipSyncInfo};
 
 // Simplified command-line arguments
 #[derive(Parser)]
@@ -215,6 +215,23 @@ fn build_http_client(proxy_url: Option<&str>, timeout_secs: u64) -> anyhow::Resu
         builder = builder.proxy(reqwest::Proxy::all(proxy)?);
     }
     Ok(builder.build()?)
+}
+
+/// v9.0.2: Check if the system has TLS/CA certificates available.
+/// hyper-rustls panics (!) if no native certs exist (bare Docker, minimal installs).
+/// Call this once at startup; if false, skip SSE and MinerLink (they use hyper-rustls).
+/// Mining still works via periodic HTTP challenge refresh.
+fn has_tls_certificates() -> bool {
+    std::panic::catch_unwind(|| {
+        // rustls-native-certs is what hyper-rustls uses internally
+        // If this panics or returns empty, HTTPS connections will fail
+        let certs = rustls_native_certs::load_native_certs();
+        match certs {
+            Ok(store) => !store.is_empty(),
+            Err(_) => false,
+        }
+    })
+    .unwrap_or(false)
 }
 
 // v8.6.6: Global bandwidth counters for TUI instrumentation.
@@ -972,15 +989,25 @@ async fn run_mining(
     });
 
     // Start SSE listener for real-time mining rewards AND new blocks
+    // v9.0.2: Skip SSE if no TLS certs — hyper-rustls panics without them (bare Docker)
+    let tls_available = has_tls_certificates();
+    if !tls_available {
+        warn!("⚠️  No TLS/CA certificates found (install ca-certificates package)");
+        warn!("   SSE and MinerLink disabled — mining uses periodic challenge refresh");
+    }
     let sse_wallet = wallet.clone();
     let sse_server_url = server_url.clone();
     let sse_running = is_running.clone();
     let sse_new_block_signal = new_block_signal.clone();
     let sse_connected_flag = shared_state.sse_connected.clone();
     let sse_event_tx = shared_state.event_tx.clone();
-    let sse_handle = tokio::spawn(async move {
-        start_sse_listener(sse_wallet, sse_server_url, sse_running, sse_new_block_signal, sse_connected_flag, sse_event_tx).await;
-    });
+    let sse_handle = if tls_available {
+        Some(tokio::spawn(async move {
+            start_sse_listener(sse_wallet, sse_server_url, sse_running, sse_new_block_signal, sse_connected_flag, sse_event_tx).await;
+        }))
+    } else {
+        None
+    };
 
     // v8.6.5: Periodic balance polling — ensures wallet tab always shows latest balance
     // SSE events are primary, this is a fallback that polls every 15s
@@ -1038,16 +1065,21 @@ async fn run_mining(
     let ml_target_threads = target_threads.clone();
     let ml_target_intensity = target_intensity.clone();
     let ml_proxy_url = proxy_url.clone();
-    let ml_handle = tokio::spawn(async move {
-        miner_link_task(
-            ml_wallet, ml_server, ml_miner_id, ml_miner_name,
-            ml_running, ml_hashrate, ml_hash_counter,
-            ml_solutions, ml_blocks,
-            ml_is_paused, ml_target_threads, ml_target_intensity,
-            threads as u32,
-            ml_proxy_url,
-        ).await;
-    });
+    // v9.0.2: MinerLink uses tokio-tungstenite which also needs TLS for wss://
+    let ml_handle = if tls_available {
+        Some(tokio::spawn(async move {
+            miner_link_task(
+                ml_wallet, ml_server, ml_miner_id, ml_miner_name,
+                ml_running, ml_hashrate, ml_hash_counter,
+                ml_solutions, ml_blocks,
+                ml_is_paused, ml_target_threads, ml_target_intensity,
+                threads as u32,
+                ml_proxy_url,
+            ).await;
+        }))
+    } else {
+        None
+    };
 
     if gpu_enabled {
         info!("🚀 GPU mining would be enabled (placeholder)");
@@ -1093,8 +1125,8 @@ async fn run_mining(
         let _ = handle.join();
     }
     monitor_handle.abort();
-    sse_handle.abort();
-    ml_handle.abort();
+    if let Some(h) = sse_handle { h.abort(); }
+    if let Some(h) = ml_handle { h.abort(); }
 
     let total_hashes = hash_counter.load(Ordering::Relaxed);
     info!("👋 Q-NarwhalKnight miner stopped. Total hashes: {}", total_hashes);
@@ -1718,11 +1750,13 @@ fn mining_thread(
         .unwrap_or_else(|e| { error!("⚠️  Proxy client build failed: {} — falling back to direct", e); reqwest::Client::new() });
 
     // Check if server is syncing before starting to mine
+    // v9.0.4: Enhanced with Starship telemetry for TUI progress display
     match tokio_handle.block_on(check_server_sync_status(&client, api_url)) {
-        Ok((is_syncing, blocks_behind)) if is_syncing => {
-            thread_state.set_status(ThreadStatus::WaitingForSync { blocks_behind });
-            let _ = event_tx.send(DiagnosticEvent::ServerSyncing { blocks_behind });
-            info!("⏸️  Thread {} waiting: Server is syncing ({} blocks behind network)", thread_id, blocks_behind);
+        Ok((is_syncing, ref sync_info)) if is_syncing => {
+            thread_state.set_status(ThreadStatus::WaitingForSync { blocks_behind: sync_info.blocks_behind });
+            let _ = event_tx.send(DiagnosticEvent::ServerSyncing { sync_info: sync_info.clone() });
+            info!("⏸️  Thread {} waiting: Server syncing ({} blocks behind, phase: {})",
+                thread_id, sync_info.blocks_behind, sync_info.phase);
             info!("   Mining will start automatically when sync is complete");
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(5));
@@ -1736,9 +1770,13 @@ fn mining_thread(
                         info!("✅ Thread {} detected sync complete - starting mining", thread_id);
                         break;
                     }
-                    Ok((true, behind)) => {
-                        thread_state.set_status(ThreadStatus::WaitingForSync { blocks_behind: behind });
-                        info!("⏸️  Thread {} still waiting: {} blocks behind", thread_id, behind);
+                    Ok((true, ref info)) => {
+                        thread_state.set_status(ThreadStatus::WaitingForSync { blocks_behind: info.blocks_behind });
+                        let _ = event_tx.send(DiagnosticEvent::ServerSyncing { sync_info: info.clone() });
+                        if info.blocks_behind % 100 < 5 || info.blocks_behind < 50 {
+                            info!("⏸️  Thread {} syncing: {} behind | {:.1}% | {:.0} blk/s | phase: {}",
+                                thread_id, info.blocks_behind, info.sync_progress, info.sync_speed_bps, info.phase);
+                        }
                     }
                     Err(_) => {}
                 }
@@ -2204,9 +2242,15 @@ async fn start_sse_listener(
 
         let url = if use_fallback { &fallback_url } else { &primary_url };
 
-        let client = match eventsource::ClientBuilder::for_url(url) {
-            Ok(builder) => builder.build(),
-            Err(e) => {
+        // v9.0.2: Catch panics from hyper-rustls when no CA certificates are installed
+        // (bare Docker containers, minimal Linux installs). Mining still works via periodic
+        // challenge refresh — SSE just makes it faster.
+        let client_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            eventsource::ClientBuilder::for_url(url).map(|b| b.build())
+        }));
+        let client = match client_result {
+            Ok(Ok(c)) => c,
+            Ok(Err(e)) => {
                 warn!("Failed to create SSE client for {}: {}", url, e);
                 if !use_fallback {
                     primary_fail_count += 1;
@@ -2218,6 +2262,13 @@ async fn start_sse_listener(
                 }
                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                 continue;
+            }
+            Err(_) => {
+                // hyper-rustls panics when no CA certificates found on system
+                warn!("⚠️  SSE unavailable: no TLS certificates found (install ca-certificates)");
+                warn!("   Mining continues with periodic challenge refresh (slightly slower)");
+                // Don't retry — certs won't appear. Just exit the SSE loop.
+                return;
             }
         };
 
@@ -2397,9 +2448,13 @@ async fn decentralized_sse_listener(
 
         let url = if use_fallback { &fallback_url } else { &primary_url };
 
-        let client = match eventsource::ClientBuilder::for_url(url) {
-            Ok(builder) => builder.build(),
-            Err(e) => {
+        // v9.0.2: Catch panics from hyper-rustls when no CA certificates
+        let client_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            eventsource::ClientBuilder::for_url(url).map(|b| b.build())
+        }));
+        let client = match client_result {
+            Ok(Ok(c)) => c,
+            Ok(Err(e)) => {
                 warn!("[decentralized-SSE] Failed to create SSE client: {}", e);
                 if !use_fallback {
                     primary_fail_count += 1;
@@ -2411,6 +2466,10 @@ async fn decentralized_sse_listener(
                 }
                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                 continue;
+            }
+            Err(_) => {
+                warn!("⚠️  [decentralized-SSE] No TLS certificates — SSE disabled, periodic refresh only");
+                return;
             }
         };
 
@@ -2483,10 +2542,10 @@ async fn decentralized_sse_listener(
     info!("[decentralized-SSE] Listener stopped");
 }
 
-/// Check if server is currently syncing (returns is_syncing, blocks_behind)
+/// Check if server is currently syncing — returns full Starship telemetry.
+/// v9.0.4: Enhanced to parse Starship phase, speed, progress, ETA for TUI display.
 /// Falls back to bootstrap1.quillon.xyz if primary server is unreachable.
-/// v8.3.0: Accepts shared client to reuse TCP connections (was creating new client per call).
-async fn check_server_sync_status(client: &reqwest::Client, api_url: &str) -> Result<(bool, u64)> {
+async fn check_server_sync_status(client: &reqwest::Client, api_url: &str) -> Result<(bool, StarshipSyncInfo)> {
     let path = "/api/v1/status";
 
     let (body, _used_url) = fetch_with_fallback(&client, api_url, path).await?;
@@ -2508,7 +2567,69 @@ async fn check_server_sync_status(client: &reqwest::Client, api_url: &str) -> Re
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
 
-    Ok((is_syncing, blocks_behind))
+    let local_height = data.get("current_height")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let network_height = data.get("highest_network_height")
+        .and_then(|v| v.as_u64())
+        .or_else(|| data.get("network_height").and_then(|v| v.as_u64()))
+        .unwrap_or(0);
+
+    let sync_progress = data.get("sync_progress")
+        .and_then(|v| v.as_f64())
+        .unwrap_or_else(|| {
+            if network_height > 0 { (local_height as f64 / network_height as f64 * 100.0).min(100.0) } else { 0.0 }
+        }) as f32;
+
+    let sync_speed_bps = data.get("sync_speed_blocks_per_sec")
+        .and_then(|v| v.as_f64())
+        .or_else(|| data.get("starship_phase_bps").and_then(|v| v.as_f64()))
+        .unwrap_or(0.0) as f32;
+
+    let phase = data.get("starship_phase")
+        .and_then(|v| v.as_str())
+        .unwrap_or(if is_syncing { "SuperHeavy" } else { "StationKeeping" })
+        .to_string();
+
+    let phase_duration_secs = data.get("starship_phase_duration_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let mission_elapsed_secs = data.get("starship_mission_elapsed_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let peer_count = data.get("peer_count")
+        .and_then(|v| v.as_u64())
+        .or_else(|| data.get("connected_peers").and_then(|v| v.as_u64()))
+        .unwrap_or(0);
+
+    let orbit_stable = data.get("starship_orbit_stable")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(!is_syncing);
+
+    let eta_secs = if sync_speed_bps > 0.0 && blocks_behind > 0 {
+        (blocks_behind as f64 / sync_speed_bps as f64) as u64
+    } else {
+        0
+    };
+
+    let info = StarshipSyncInfo {
+        blocks_behind,
+        local_height,
+        network_height,
+        sync_progress,
+        sync_speed_bps,
+        phase,
+        phase_duration_secs,
+        mission_elapsed_secs,
+        peer_count,
+        orbit_stable,
+        eta_secs,
+    };
+
+    Ok((is_syncing, info))
 }
 
 /// Fetch current mining challenge from API server (with fallback to bootstrap1.quillon.xyz)

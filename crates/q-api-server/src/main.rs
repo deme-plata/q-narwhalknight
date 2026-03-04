@@ -9221,7 +9221,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                                                     let old = app_state_emergency.current_height_atomic.load(std::sync::atomic::Ordering::Acquire);
                                                                     if db_height > old {
                                                                         app_state_emergency.current_height_atomic.store(db_height, std::sync::atomic::Ordering::Release);
-                                                                        *app_state_emergency.current_challenge.write().await = None;
+                                                                        // v9.0.4: try_write to avoid blocking miners' try_read()
+                                                                        if let Ok(mut guard) = app_state_emergency.current_challenge.try_write() { *guard = None; }
                                                                         info!("📈 [EMERGENCY SYNC] current_height_atomic updated {} → {} (mining API fix)", old, db_height);
                                                                     }
                                                                 }
@@ -9351,7 +9352,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                             let old_atomic = app_state_gossip.current_height_atomic.load(std::sync::atomic::Ordering::Acquire);
                                             if block_height > old_atomic {
                                                 app_state_gossip.current_height_atomic.store(block_height, std::sync::atomic::Ordering::Release);
-                                                *app_state_gossip.current_challenge.write().await = None;
+                                                // v9.0.4: try_write to avoid blocking miners' try_read()
+                                                if let Ok(mut guard) = app_state_gossip.current_challenge.try_write() { *guard = None; }
                                                 if block_height % 100 == 0 || block_height > old_atomic + 10 {
                                                     info!("📈 [GOSSIPSUB] current_height_atomic {} → {} (mining API fix)", old_atomic, block_height);
                                                 }
@@ -10666,7 +10668,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                         let old_atomic = app_state_gossip.current_height_atomic.load(std::sync::atomic::Ordering::Acquire);
                                         if new_height > old_atomic {
                                             app_state_gossip.current_height_atomic.store(new_height, std::sync::atomic::Ordering::Release);
-                                            *app_state_gossip.current_challenge.write().await = None;
+                                            // v9.0.4: try_write to avoid blocking miners' try_read()
+                                            if let Ok(mut guard) = app_state_gossip.current_challenge.try_write() { *guard = None; }
                                         }
                                     }
                                 }
@@ -13191,7 +13194,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     if db_height > atomic_height + 1 {
                         // Significant drift detected - fix it
                         app_state_height_reconcile.current_height_atomic.store(db_height, std::sync::atomic::Ordering::Release);
-                        *app_state_height_reconcile.current_challenge.write().await = None;
+                        // v9.0.4: try_write to avoid blocking miners' try_read()
+                        if let Ok(mut guard) = app_state_height_reconcile.current_challenge.try_write() { *guard = None; }
                         if db_height > atomic_height + 10 {
                             warn!("🔧 [HEIGHT RECONCILE] current_height_atomic drifted! {} → {} (Δ{})",
                                   atomic_height, db_height, db_height - atomic_height);
@@ -14865,7 +14869,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 );
 
                                 // 🔧 v1.0.4-beta: Clear cached challenge (height advanced)
-                                *app_state_mining.current_challenge.write().await = None;
+                                // v9.0.4: try_write to avoid blocking miners' try_read()
+                                if let Ok(mut guard) = app_state_mining.current_challenge.try_write() { *guard = None; }
                             } else {
                                 // Save failed - skip this block, continue producing
                                 error!("🚨 [v1.0.9-beta] SKIPPING height advancement (save_succeeded=false) - THIS IS THE BUG!");
@@ -15931,7 +15936,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 app_state_block_producer.upgrade_manager.set_height(new_block.header.height);
 
                                 // 3. Clear cached challenge (keeps state clean even if mining disabled)
-                                *app_state_block_producer.current_challenge.write().await = None;
+                                // v9.0.4: try_write to avoid blocking miners' try_read()
+                                if let Ok(mut guard) = app_state_block_producer.current_challenge.try_write() { *guard = None; }
 
                                 info!("✅ [v1.0.9-beta TIME-BASED] Producer #{} height advanced to {} (all state synchronized)",
                                       producer_id, new_block.header.height);
@@ -16570,17 +16576,26 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 let fast_peer_count_for_http = app_state_sync.turbo_sync.as_ref()
                     .map(|ts| ts.peer_count_fast())
                     .unwrap_or(0);
-                let needs_http_height = network_height == 0
-                    || (fast_peer_count_for_http < 2 && current_height + 50_000 < network_height);
+                let p2p_only = std::env::var("Q_P2P_ONLY").ok().as_deref() == Some("1");
+                let needs_http_height = !p2p_only && (network_height == 0
+                    || (fast_peer_count_for_http < 2 && current_height + 50_000 < network_height));
                 if needs_http_height {
                     debug!("🌐 [BOOTSTRAP HTTP FALLBACK] network_height={}, peers={}, refreshing from HTTP", network_height, fast_peer_count_for_http);
                     debug!("   Attempting HTTP bootstrap discovery from {} peers...", HTTP_BOOTSTRAP_PEERS.len());
 
                     // v5.1.0: Try multiple bootstrap peers for height discovery
+                    // v9.0.3: CRITICAL FIX — Add 5s timeout per peer to prevent sync loop stall.
+                    // BUG: reqwest::get() with no timeout blocked the entire sync loop for minutes
+                    // when bootstrap peers were unresponsive, causing the node to fall further behind.
+                    let http_client = reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(5))
+                        .connect_timeout(std::time::Duration::from_secs(3))
+                        .build()
+                        .unwrap_or_else(|_| reqwest::Client::new());
                     'bootstrap_discovery: for bootstrap_peer in HTTP_BOOTSTRAP_PEERS {
                     let url = format!("{}/api/v1/node/status", bootstrap_peer);
 
-                    match reqwest::get(&url).await {
+                    match http_client.get(&url).send().await {
                         Ok(response) => {
                             let status = response.status();
                             debug!("🌐 [BOOTSTRAP HTTP FALLBACK] HTTP status: {}", status);
@@ -20340,10 +20355,12 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         // non-Default type. Timeout needs Body: Default, so it must wrap the raw axum routes.
         .layer(
             ServiceBuilder::new()
-                // v8.9.9: Raised from 200→5000. Mining alone needs 27 miners × 7 threads = 189.
-                // SSE connections, dashboard, API calls, etc. easily exceed 200.
-                // The mining handler has its own in-flight cap (500) for self-protection.
-                .layer(tower::limit::ConcurrencyLimitLayer::new(5000))
+                // v9.0.4: Raised from 5000→100000. With 270+ miners × 7 threads = 1890
+                // concurrent mining submissions, plus SSE, dashboard, sync, P2P API calls,
+                // 5000 is too low and causes silent 503 rejections (tower returns 503
+                // BEFORE handlers run, so no application-level logging).
+                // On 48-core 62GB Epsilon with Caddy Connection:close, 100K is safe.
+                .layer(tower::limit::ConcurrencyLimitLayer::new(100_000))
                 .layer(TraceLayer::new_for_http())
                 .layer(tower_http::timeout::TimeoutLayer::new(std::time::Duration::from_secs(30)))
                 .layer(CorsLayer::permissive())

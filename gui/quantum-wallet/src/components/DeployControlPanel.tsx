@@ -380,19 +380,32 @@ function KMetricsBar({ metrics }: { metrics: NodeKMetrics }) {
     },
   ];
 
+  // v9.0.4: Color map per factor letter for consistent visual identity
+  const factorColors: Record<string, { bar: string; text: string; bg: string }> = {
+    'G': { bar: 'bg-emerald-500', text: 'text-emerald-400', bg: 'bg-emerald-500/20' },
+    'Q': { bar: 'bg-cyan-500', text: 'text-cyan-400', bg: 'bg-cyan-500/20' },
+    'T': { bar: 'bg-orange-500', text: 'text-orange-400', bg: 'bg-orange-500/20' },
+    'I': { bar: 'bg-blue-500', text: 'text-blue-400', bg: 'bg-blue-500/20' },
+    'R': { bar: 'bg-purple-500', text: 'text-purple-400', bg: 'bg-purple-500/20' },
+  };
+
   return (
-    <div className="flex items-center gap-1">
+    <div className="flex items-center gap-1.5">
       {factors.map(f => {
-        const color = f.value > 0.8 ? 'bg-emerald-500' : f.value > 0.5 ? 'bg-amber-500' : 'bg-red-500';
+        const fc = factorColors[f.key] || { bar: 'bg-emerald-500', text: 'text-amber-200/60', bg: 'bg-slate-700/30' };
+        const barColor = f.value > 0.8 ? fc.bar : f.value > 0.5 ? 'bg-amber-500' : 'bg-red-500';
         return (
           <div key={f.key} className="flex-1 min-w-0">
             <KTooltip wide text={f.tooltip(f.value)}>
               <div className="cursor-help">
-                <div className="h-1.5 rounded-full bg-slate-700/50 overflow-hidden">
-                  <div className={`h-full rounded-full ${color} transition-all duration-700`}
-                    style={{ width: `${f.value * 100}%` }} />
+                <div className="flex items-center gap-1 mb-0.5">
+                  <span className={`text-[9px] font-bold ${fc.text}`}>{f.key}</span>
+                  <span className="text-[8px] text-amber-200/30 font-mono">{(f.value * 100).toFixed(0)}%</span>
                 </div>
-                <div className="text-[7px] text-amber-200/40 text-center mt-0.5 font-bold">{f.key}</div>
+                <div className="h-2.5 rounded bg-slate-700/40 overflow-hidden border border-slate-600/20">
+                  <div className={`h-full rounded ${barColor} transition-all duration-700`}
+                    style={{ width: `${Math.max(f.value * 100, 2)}%` }} />
+                </div>
               </div>
             </KTooltip>
           </div>
@@ -1939,16 +1952,18 @@ export default function DeployControlPanel() {
 
                       {/* K-Formula legend */}
                       <KTooltip wide text={`The K-Parameter Formula — Inspired by the Drake Equation from astrobiology.\n\nk = G^0.25 × Q^0.20 × T^0.20 × I^0.15 × R^0.20\n\nEach letter represents a measurable property of a network node:\n\n• G (Genetic Stability, weight 25%) — Are all servers running compatible software versions? Like DNA compatibility in biology, mismatched versions cause "genetic" conflicts. This has the highest weight because version mismatch is the #1 cause of deployment failures.\n\n• Q (Quantum Coherence, weight 20%) — How well is the node maintaining consensus with its peers? Named after quantum coherence in physics, where particles maintain correlated states. High Q means the node's blockchain state is identical to the network's.\n\n• T (Thermodynamic Efficiency, weight 20%) — Is the node using its resources (CPU, memory, disk I/O) efficiently? In thermodynamics, efficiency measures useful work vs. wasted energy. A node with high CPU usage but low block production has poor T.\n\n• I (Information Density, weight 15%) — How much useful data is the node processing per unit time? In information theory, density measures signal vs. noise. A node producing many blocks with valid transactions has high I. This has the lowest weight because information throughput varies naturally with network load.\n\n• R (Network Resilience, weight 20%) — Can the node recover from failures and maintain connections? Like ecological resilience, this measures how well the node bounces back from disruptions — network partitions, peer disconnections, or high latency.\n\nThe final K is always between 0 and 1. Because the factors are MULTIPLIED (not averaged), a single zero factor kills the entire score — just like one broken link breaks a chain.`}>
-                        <div className="flex items-center justify-center gap-2 text-[8px] text-amber-200/30 mb-2 cursor-help border-b border-dotted border-amber-200/10 pb-1 mx-auto w-fit">
-                          <span>k = G<sup>.25</sup></span>
-                          <span>&times;</span>
-                          <span>Q<sup>.20</sup></span>
-                          <span>&times;</span>
-                          <span>T<sup>.20</sup></span>
-                          <span>&times;</span>
-                          <span>I<sup>.15</sup></span>
-                          <span>&times;</span>
-                          <span>R<sup>.20</sup></span>
+                        <div className="flex items-center justify-center gap-1 text-[10px] text-amber-200/40 mb-2 cursor-help border-b border-dotted border-amber-200/10 pb-1 mx-auto w-fit font-mono">
+                          <span className="text-amber-200/60 font-bold italic">k</span>
+                          <span>=</span>
+                          <span className="text-emerald-400/70">G</span><span className="text-[7px] text-amber-200/30 relative" style={{top: '-4px'}}>.25</span>
+                          <span className="text-amber-200/20 mx-0.5">&times;</span>
+                          <span className="text-cyan-400/70">Q</span><span className="text-[7px] text-amber-200/30 relative" style={{top: '-4px'}}>.20</span>
+                          <span className="text-amber-200/20 mx-0.5">&times;</span>
+                          <span className="text-orange-400/70">T</span><span className="text-[7px] text-amber-200/30 relative" style={{top: '-4px'}}>.20</span>
+                          <span className="text-amber-200/20 mx-0.5">&times;</span>
+                          <span className="text-blue-400/70">I</span><span className="text-[7px] text-amber-200/30 relative" style={{top: '-4px'}}>.15</span>
+                          <span className="text-amber-200/20 mx-0.5">&times;</span>
+                          <span className="text-purple-400/70">R</span><span className="text-[7px] text-amber-200/30 relative" style={{top: '-4px'}}>.20</span>
                         </div>
                       </KTooltip>
 

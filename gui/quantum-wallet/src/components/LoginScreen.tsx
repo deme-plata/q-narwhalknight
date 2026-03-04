@@ -448,7 +448,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
   const [isMetaMaskConnecting, setIsMetaMaskConnecting] = useState(false);
   const [hasMetaMask, setHasMetaMask] = useState(false);
   // Persisted Tor onion address - fetched from backend, fallback to hardcoded
-  const [torOnionUrl, setTorOnionUrl] = useState("http://vyjmkppguki7xpqcfzxqqapgphejhhybx3hm3ljzcgszdin5cypghjad.onion");
+  const [torOnionUrl, setTorOnionUrl] = useState("http://ca3jpub2haxboxjw4ws6run36ekdh3pv7pneqg2tbac5rxzvxhd2i5id.onion");
 
   // Explorer dropdown state - live data from API + SSE
   const [showExplorerDropdown, setShowExplorerDropdown] = useState(false);

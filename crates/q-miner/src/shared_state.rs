@@ -95,8 +95,8 @@ pub enum DiagnosticEvent {
     ServerNotice { message: String },
     UpdateAvailable { min_miner_version: String },
 
-    // Sync events
-    ServerSyncing { blocks_behind: u64 },
+    // Sync events — v9.0.4: Enhanced with Starship telemetry
+    ServerSyncing { sync_info: StarshipSyncInfo },
     ServerSyncComplete,
 
     // Block events
@@ -106,6 +106,40 @@ pub enum DiagnosticEvent {
 
     // Throttle
     ThrottleChanged { mode: MinerThrottleMode },
+}
+
+/// v9.0.4: Starship sync telemetry — rich sync progress for TUI
+#[derive(Debug, Clone)]
+pub struct StarshipSyncInfo {
+    pub blocks_behind: u64,
+    pub local_height: u64,
+    pub network_height: u64,
+    pub sync_progress: f32,         // 0.0 - 100.0
+    pub sync_speed_bps: f32,        // blocks per second
+    pub phase: String,              // Prelaunch, SuperHeavy, HotStaging, StarshipCruise, StationKeeping
+    pub phase_duration_secs: u64,
+    pub mission_elapsed_secs: u64,
+    pub peer_count: u64,
+    pub orbit_stable: bool,
+    pub eta_secs: u64,              // estimated time to completion
+}
+
+impl Default for StarshipSyncInfo {
+    fn default() -> Self {
+        Self {
+            blocks_behind: 0,
+            local_height: 0,
+            network_height: 0,
+            sync_progress: 0.0,
+            sync_speed_bps: 0.0,
+            phase: "Unknown".to_string(),
+            phase_duration_secs: 0,
+            mission_elapsed_secs: 0,
+            peer_count: 0,
+            orbit_stable: false,
+            eta_secs: 0,
+        }
+    }
 }
 
 /// Network throttle mode — cycles with `T` key

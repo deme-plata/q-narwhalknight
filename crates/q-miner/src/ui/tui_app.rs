@@ -27,7 +27,7 @@ use crossterm::{
 };
 
 use crate::diagnostics::MinerDiagnostics;
-use crate::shared_state::{DiagnosticEvent, MinerThrottleMode, SharedMinerState};
+use crate::shared_state::{DiagnosticEvent, MinerThrottleMode, SharedMinerState, StarshipSyncInfo};
 use anyhow::Result;
 use std::collections::VecDeque;
 use std::io;
@@ -220,6 +220,9 @@ pub struct MinerTuiApp {
     pub total_api_requests: u64,
     pub total_api_failures: u64,
 
+    // v9.0.4: Starship sync telemetry for TUI
+    pub sync_info: Option<StarshipSyncInfo>,
+
     // UI state
     pub running: bool,
     pub show_help: bool,
@@ -262,6 +265,7 @@ impl MinerTuiApp {
             prev_bytes_up: 0,
             total_api_requests: 0,
             total_api_failures: 0,
+            sync_info: None,
             running: true,
             show_help: false,
             start_time: Instant::now(),
@@ -455,18 +459,28 @@ impl MinerTuiApp {
                         min_miner_version, env!("CARGO_PKG_VERSION")),
                 });
             }
-            DiagnosticEvent::ServerSyncing { blocks_behind } => {
-                self.add_log(LogEntry {
-                    timestamp: now,
-                    level: LogLevel::Warn,
-                    message: format!("Server syncing: {} blocks behind", blocks_behind),
-                });
+            DiagnosticEvent::ServerSyncing { sync_info } => {
+                // Only log every ~30s (6 polls at 5s interval) to avoid spam
+                let should_log = self.sync_info.is_none()
+                    || sync_info.blocks_behind % 500 < 5
+                    || sync_info.blocks_behind < 20;
+                if should_log {
+                    self.add_log(LogEntry {
+                        timestamp: now,
+                        level: LogLevel::Warn,
+                        message: format!("\u{1F680} {} | {:.1}% | {:.0} blk/s | {} behind",
+                            sync_info.phase, sync_info.sync_progress,
+                            sync_info.sync_speed_bps, sync_info.blocks_behind),
+                    });
+                }
+                self.sync_info = Some(sync_info);
             }
             DiagnosticEvent::ServerSyncComplete => {
+                self.sync_info = None;
                 self.add_log(LogEntry {
                     timestamp: now,
                     level: LogLevel::Success,
-                    message: "Server sync complete - mining starts".into(),
+                    message: "\u{1F30D} Orbit achieved - mining online!".into(),
                 });
             }
             DiagnosticEvent::ThreadStarted { thread_id } => {
