@@ -2009,7 +2009,11 @@ fn mining_thread(
         // Mine a batch of nonces with SIMD-interleaved VDF batching
         // v9.1.0: Process `simd_batch` nonces per inner iteration, interleaving
         // VDF rounds across the batch to keep SIMD pipelines saturated (2-4x faster)
+        // v9.0.6: Use inline fallbacks on Windows (cross-compile can't resolve cpu:: symbols)
+        #[cfg(unix)]
         let simd_batch = q_miner::cpu::optimal_mining_batch_size();
+        #[cfg(not(unix))]
+        let simd_batch: usize = 4; // Default SSE batch size for Windows
         let mut batch_results: [(u64, [u8; 32]); 16] = [(0u64, [0u8; 32]); 16];
 
         // PERF: Thread-local hash counter — flush to shared atomic every 1024 hashes
@@ -2018,12 +2022,28 @@ fn mining_thread(
         let mut i: u64 = 0;
         while i < batch_size {
             // Process a SIMD-width batch of nonces through the full VDF
+            #[cfg(unix)]
             let count = q_miner::cpu::compute_dag_knight_hash_batch(
                 &challenge_hash,
                 nonce,
                 simd_batch,
                 &mut batch_results,
             );
+            #[cfg(not(unix))]
+            let count = {
+                // Inline VDF batch for Windows cross-compile compatibility
+                let bs = simd_batch.min(16).min(batch_results.len());
+                for bi in 0..bs {
+                    let n = nonce.wrapping_add(bi as u64);
+                    let mut input = [0u8; 40];
+                    input[..32].copy_from_slice(&challenge_hash);
+                    input[32..].copy_from_slice(&n.to_le_bytes());
+                    let mut h = *blake3::hash(&input).as_bytes();
+                    for _ in 0..99 { h = *blake3::hash(&h).as_bytes(); }
+                    batch_results[bi] = (n, h);
+                }
+                bs
+            };
 
             local_hash_count += count as u64;
             // Flush hash counter periodically
