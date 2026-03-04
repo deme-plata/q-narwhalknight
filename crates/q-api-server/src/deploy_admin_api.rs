@@ -119,6 +119,22 @@ pub struct MiningCapacityAll {
     pub alpha: Option<MiningCapacityLocal>,
 }
 
+/// v9.0.2: Decentralization Index — composite network health metric
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecentralizationMetrics {
+    pub unique_wallets: usize,
+    pub total_workers: usize,
+    pub top_miner_pct: f64,
+    pub top3_miners_pct: f64,
+    pub nakamoto_coefficient: usize,
+    pub gini_coefficient: f64,
+    pub hhi: f64,
+    pub node_count: usize,
+    pub peer_count: usize,
+    pub decentralization_index: f64,
+    pub grade: String,
+}
+
 /// Shared verification state for SSE streaming
 pub struct DeployState {
     pub verification_running: bool,
@@ -1943,4 +1959,361 @@ pub async fn mining_capacity(
         epsilon,
         alpha,
     })))
+}
+
+// =============================================================================
+// v8.9.9: Nginx Load Balancer Stats API
+// =============================================================================
+
+/// Nginx stub_status metrics (parsed from /nginx_status text output)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NginxStubStatus {
+    pub active_connections: u64,
+    pub accepts: u64,
+    pub handled: u64,
+    pub requests: u64,
+    pub reading: u64,
+    pub writing: u64,
+    pub waiting: u64,
+}
+
+/// A single server entry in an nginx upstream block
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NginxUpstreamServer {
+    pub address: String,
+    pub role: String,
+    pub weight: u32,
+    pub status: String, // "up", "down"
+}
+
+/// An nginx upstream block
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NginxUpstream {
+    pub name: String,
+    pub method: String, // "ip_hash", "least_conn", "round_robin"
+    pub servers: Vec<NginxUpstreamServer>,
+}
+
+/// Combined nginx stats response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NginxStats {
+    pub stub_status: Option<NginxStubStatus>,
+    pub upstreams: Vec<NginxUpstream>,
+    pub requests_per_second: f64,
+    pub server_name: String,
+}
+
+/// All-servers nginx stats
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NginxStatsAll {
+    pub beta: Option<NginxStats>,
+    pub epsilon: Option<NginxStats>,
+}
+
+/// Parse nginx stub_status text format:
+/// ```
+/// Active connections: 1234
+/// server accepts handled requests
+///  5432 5432 12450
+/// Reading: 12 Writing: 45 Waiting: 1177
+/// ```
+fn parse_nginx_stub_status(text: &str) -> Option<NginxStubStatus> {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() < 4 { return None; }
+
+    // Line 0: "Active connections: N"
+    let active = lines[0].split(':').nth(1)?.trim().parse::<u64>().ok()?;
+
+    // Line 2: " N N N" (accepts handled requests)
+    let nums: Vec<u64> = lines[2].split_whitespace()
+        .filter_map(|s| s.parse::<u64>().ok())
+        .collect();
+    if nums.len() < 3 { return None; }
+
+    // Line 3: "Reading: N Writing: N Waiting: N"
+    let rw_parts: Vec<u64> = lines[3].split_whitespace()
+        .filter_map(|s| s.parse::<u64>().ok())
+        .collect();
+    if rw_parts.len() < 3 { return None; }
+
+    Some(NginxStubStatus {
+        active_connections: active,
+        accepts: nums[0],
+        handled: nums[1],
+        requests: nums[2],
+        reading: rw_parts[0],
+        writing: rw_parts[1],
+        waiting: rw_parts[2],
+    })
+}
+
+/// Compute requests/sec from two snapshots (uses static to track previous)
+fn compute_rps(current_requests: u64) -> f64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static PREV_REQUESTS: AtomicU64 = AtomicU64::new(0);
+    static PREV_TIME_MS: AtomicU64 = AtomicU64::new(0);
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let prev_req = PREV_REQUESTS.swap(current_requests, Ordering::Relaxed);
+    let prev_time = PREV_TIME_MS.swap(now_ms, Ordering::Relaxed);
+
+    if prev_time == 0 || now_ms <= prev_time {
+        return 0.0;
+    }
+
+    let dt_secs = (now_ms - prev_time) as f64 / 1000.0;
+    let dreqs = current_requests.saturating_sub(prev_req) as f64;
+    dreqs / dt_secs
+}
+
+/// GET /api/v1/admin/nginx/stats-local — local nginx stats (no auth, aggregate only)
+pub async fn nginx_stats_local(
+) -> Json<ApiResponse<NginxStats>> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .unwrap_or_default();
+
+    // Fetch local nginx stub_status
+    let stub = match client.get("http://127.0.0.1:81/nginx_status").send().await {
+        Ok(resp) if resp.status().is_success() => {
+            let text = resp.text().await.unwrap_or_default();
+            parse_nginx_stub_status(&text)
+        }
+        _ => None,
+    };
+
+    let rps = stub.as_ref().map(|s| compute_rps(s.requests)).unwrap_or(0.0);
+
+    // Hardcoded upstream topology — matches nginx config
+    // The actual up/down status would require parsing the config file
+    let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| {
+        std::fs::read_to_string("/etc/hostname")
+            .unwrap_or_else(|_| "unknown".to_string())
+            .trim().to_string()
+    });
+
+    Json(ApiResponse::success(NginxStats {
+        stub_status: stub,
+        upstreams: vec![], // Local endpoint doesn't need upstream topology
+        requests_per_second: rps,
+        server_name: hostname,
+    }))
+}
+
+/// GET /api/v1/admin/nginx/stats — aggregated nginx stats from all servers (admin auth)
+pub async fn nginx_stats(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<NginxStatsAll>>, StatusCode> {
+    if !is_master_wallet(&headers, &state) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .unwrap_or_default();
+
+    // Fetch local (Beta) nginx stats
+    let Json(beta_resp) = nginx_stats_local().await;
+    let mut beta_stats = beta_resp.data;
+
+    // Add upstream topology to beta (beta has the main load balancer)
+    if let Some(ref mut stats) = beta_stats {
+        stats.upstreams = get_upstream_topology();
+    }
+
+    // Fetch Epsilon nginx stats
+    let epsilon_stats = {
+        let c = client.clone();
+        async move {
+            match c.get(format!("{}/api/v1/admin/nginx/stats-local", EPSILON_URL)).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    #[derive(Deserialize)]
+                    struct Wrap { data: Option<NginxStats> }
+                    resp.json::<Wrap>().await.ok().and_then(|w| w.data)
+                }
+                _ => None,
+            }
+        }
+    }.await;
+
+    Ok(Json(ApiResponse::success(NginxStatsAll {
+        beta: beta_stats,
+        epsilon: epsilon_stats,
+    })))
+}
+
+/// GET /api/v1/admin/decentralization
+/// Returns decentralization index and sub-metrics computed from active mining data.
+pub async fn decentralization_metrics(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<DecentralizationMetrics>>, StatusCode> {
+    if !is_master_wallet(&headers, &state) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Collect per-wallet hashrates from active_miners (key = "address:worker_id")
+    let mut wallet_hashrates: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    let mut total_workers = 0usize;
+
+    if let Some(ref mining_stats_arc) = state.mining_statistics {
+        if let Ok(stats) = mining_stats_arc.try_read() {
+            total_workers = stats.active_miners.len();
+            for (key, miner) in &stats.active_miners {
+                // Key format: "address:worker_id" — extract wallet address
+                let wallet = key.split(':').next().unwrap_or(key).to_string();
+                *wallet_hashrates.entry(wallet).or_insert(0.0) += miner.last_hashrate.max(0.0);
+            }
+        }
+    }
+
+    let unique_wallets = wallet_hashrates.len();
+    let total_hashrate: f64 = wallet_hashrates.values().sum();
+
+    // Sort wallets by hashrate descending
+    let mut sorted: Vec<f64> = wallet_hashrates.values().copied().collect();
+    sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Top miner % and top 3 %
+    let top_miner_pct = if total_hashrate > 0.0 {
+        (sorted.first().copied().unwrap_or(0.0) / total_hashrate * 100.0)
+    } else { 0.0 };
+
+    let top3_miners_pct = if total_hashrate > 0.0 {
+        (sorted.iter().take(3).sum::<f64>() / total_hashrate * 100.0)
+    } else { 0.0 };
+
+    // Nakamoto coefficient: min entities to control >= 51%
+    let nakamoto_coefficient = if total_hashrate > 0.0 {
+        let threshold = total_hashrate * 0.51;
+        let mut cumulative = 0.0;
+        let mut count = 0usize;
+        for &hr in &sorted {
+            cumulative += hr;
+            count += 1;
+            if cumulative >= threshold { break; }
+        }
+        count
+    } else { 0 };
+
+    // Gini coefficient (standard algorithm on sorted ascending)
+    let gini_coefficient = if unique_wallets > 1 && total_hashrate > 0.0 {
+        let mut asc: Vec<f64> = sorted.clone();
+        asc.reverse(); // sorted was desc, reverse to asc
+        let n = asc.len() as f64;
+        let mut numerator = 0.0;
+        for (i, &val) in asc.iter().enumerate() {
+            numerator += (2.0 * (i as f64 + 1.0) - n - 1.0) * val;
+        }
+        (numerator / (n * total_hashrate)).abs()
+    } else { 0.0 };
+
+    // HHI: sum of (market_share_pct^2)
+    let hhi = if total_hashrate > 0.0 {
+        sorted.iter().map(|&hr| {
+            let share = hr / total_hashrate * 100.0;
+            share * share
+        }).sum::<f64>()
+    } else { 0.0 };
+
+    // Node count and peer count from deploy status (quick local check)
+    let node_count = {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap_or_default();
+        let urls = [ALPHA_URL, GAMMA_URL, DELTA_URL, EPSILON_URL];
+        let mut online = 1usize; // Beta is always online
+        let futs: Vec<_> = urls.iter().map(|u| {
+            let c = client.clone();
+            let url = format!("{}/api/v1/health", u);
+            async move { c.get(&url).send().await.map(|r| r.status().is_success()).unwrap_or(false) }
+        }).collect();
+        let results = futures_util::future::join_all(futs).await;
+        online += results.iter().filter(|&&r| r).count();
+        online
+    };
+
+    let peer_count = state.libp2p_peer_count.as_ref()
+        .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(0);
+
+    // Composite DI score (0-100)
+    let nakamoto_score = ((nakamoto_coefficient as f64) / 10.0 * 100.0).min(100.0);
+    let gini_score = (1.0 - gini_coefficient) * 100.0;
+    let miner_diversity = ((unique_wallets as f64) / 50.0 * 100.0).min(100.0);
+    let node_score = ((node_count as f64) / 5.0 * 100.0).min(100.0);
+    let peer_score = ((peer_count as f64) / 30.0 * 100.0).min(100.0);
+
+    let di = nakamoto_score * 0.30
+        + gini_score * 0.25
+        + miner_diversity * 0.20
+        + node_score * 0.15
+        + peer_score * 0.10;
+    let di = di.min(100.0).max(0.0);
+
+    let grade = if di >= 90.0 { "A+" }
+        else if di >= 75.0 { "A" }
+        else if di >= 60.0 { "B" }
+        else if di >= 40.0 { "C" }
+        else if di >= 20.0 { "D" }
+        else { "F" }.to_string();
+
+    Ok(Json(ApiResponse::success(DecentralizationMetrics {
+        unique_wallets,
+        total_workers,
+        top_miner_pct,
+        top3_miners_pct,
+        nakamoto_coefficient,
+        gini_coefficient,
+        hhi,
+        node_count,
+        peer_count,
+        decentralization_index: di,
+        grade,
+    })))
+}
+
+/// Hardcoded upstream topology matching the nginx config.
+/// Avoids fragile config file parsing — update when nginx config changes.
+fn get_upstream_topology() -> Vec<NginxUpstream> {
+    vec![
+        NginxUpstream {
+            name: "qnk_api".to_string(),
+            method: "ip_hash".to_string(),
+            servers: vec![
+                NginxUpstreamServer { address: "89.149.241.126:8080".into(), role: "Epsilon".into(), weight: 20, status: "up".into() },
+                NginxUpstreamServer { address: "127.0.0.1:8080".into(), role: "Beta".into(), weight: 10, status: "up".into() },
+                NginxUpstreamServer { address: "5.79.79.158:8080".into(), role: "Delta".into(), weight: 5, status: "down".into() },
+                NginxUpstreamServer { address: "109.205.176.60:8080".into(), role: "Gamma".into(), weight: 2, status: "down".into() },
+            ],
+        },
+        NginxUpstream {
+            name: "qnk_mining".to_string(),
+            method: "least_conn".to_string(),
+            servers: vec![
+                NginxUpstreamServer { address: "89.149.241.126:8080".into(), role: "Epsilon".into(), weight: 20, status: "up".into() },
+                NginxUpstreamServer { address: "127.0.0.1:8080".into(), role: "Beta".into(), weight: 8, status: "up".into() },
+                NginxUpstreamServer { address: "109.205.176.60:8080".into(), role: "Gamma".into(), weight: 3, status: "up".into() },
+                NginxUpstreamServer { address: "5.79.79.158:8080".into(), role: "Delta".into(), weight: 8, status: "down".into() },
+            ],
+        },
+        NginxUpstream {
+            name: "qnk_sse".to_string(),
+            method: "ip_hash".to_string(),
+            servers: vec![
+                NginxUpstreamServer { address: "89.149.241.126:8080".into(), role: "Epsilon".into(), weight: 20, status: "up".into() },
+                NginxUpstreamServer { address: "127.0.0.1:8080".into(), role: "Beta".into(), weight: 10, status: "up".into() },
+                NginxUpstreamServer { address: "109.205.176.60:8080".into(), role: "Gamma".into(), weight: 2, status: "up".into() },
+                NginxUpstreamServer { address: "5.79.79.158:8080".into(), role: "Delta".into(), weight: 5, status: "down".into() },
+            ],
+        },
+    ]
 }

@@ -3005,7 +3005,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             let mut wb = state.wallet_balances.write().await;
                             wb.clear();
                             for (addr, amount) in &new_balances {
-                                wb.insert(hex::encode(addr), *amount);
+                                wb.insert(*addr, *amount);
                             }
                             info!("✅ [v1.0.3] Loaded {} wallets into memory ({} QUG)",
                                   wallet_count, wallet_total / qug);
@@ -20245,6 +20245,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/admin/update/notification-email", post(q_api_server::deploy_admin_api::admin_set_notification_email))
         // v1.0.2: Mining capacity metrics (admin — aggregates all servers)
         .route("/api/v1/admin/mining/capacity", get(q_api_server::deploy_admin_api::mining_capacity))
+        // v9.0.2: Decentralization Index (admin — composite network health metric)
+        .route("/api/v1/admin/decentralization", get(q_api_server::deploy_admin_api::decentralization_metrics))
         // v8.9.9: Nginx load balancer stats (admin — aggregates Beta + Epsilon)
         .route("/api/v1/admin/nginx/stats", get(q_api_server::deploy_admin_api::nginx_stats))
         // v8.2.0: Admin-only balance rebuild from chain (deterministic balance consensus)
