@@ -8378,6 +8378,27 @@ pub async fn submit_mining_solution(
     State(state): State<Arc<AppState>>,
     Json(request): Json<MiningSolutionRequest>,
 ) -> Result<Json<ApiResponse<MiningSolutionResponse>>, StatusCode> {
+    // v8.9.9: CONCURRENT REQUEST CAP — prevent connection pileup under heavy load
+    // This is NOT rate limiting (per-IP req/s). It limits how many mining requests
+    // are being processed simultaneously across ALL miners. When the cap is hit,
+    // new requests get instant 503 → miner retries or nginx fails over.
+    // Without this, 400+ miners × 7 threads = 2800 req/s overwhelm tokio when
+    // background work (VDF, sync, balance) saturates CPU, causing 38K+ connection pileup.
+    static MINING_IN_FLIGHT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    const MAX_MINING_CONCURRENCY: u32 = 500;
+    struct MiningConcurrencyGuard;
+    impl Drop for MiningConcurrencyGuard {
+        fn drop(&mut self) {
+            MINING_IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    let in_flight = MINING_IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if in_flight >= MAX_MINING_CONCURRENCY {
+        MINING_IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let _concurrency_guard = MiningConcurrencyGuard;
+
     // v1.0.2: SYNC GATE — O(1) atomic check, return 503 so nginx routes to synced upstream
     // v8.1.7: TIGHTENED cap from 5× to +5000 to prevent rogue height poisoning from blocking mining
     // v8.1.7: Added Q_ALLOW_SOLO_MINING bypass — bootstrap validators must always accept mining
@@ -8644,11 +8665,12 @@ pub async fn submit_mining_solution(
                     }
                 }
                 if !queued {
-                    // v8.9.6: All shards full — short wait then fast 503 for failover.
-                    // 500ms is enough for batch processor to drain (~100 drain cycles).
-                    // 3s was causing 40K+ TCP connection pileup with 400+ miners.
+                    // v8.9.9: All shards full — instant 503 for failover.
+                    // 500ms wait was still causing 38K+ connection pileup because
+                    // 3000 req/s × 0.5s = 1500 connections just waiting.
+                    // 50ms is enough for 1-2 batch drain cycles.
                     match tokio::time::timeout(
-                        std::time::Duration::from_millis(500),
+                        std::time::Duration::from_millis(50),
                         txs[idx].send(submission.clone()),
                     ).await {
                         Ok(Ok(())) => {
@@ -8787,12 +8809,13 @@ pub async fn get_mining_challenge(
     {
         // Check 1: Do we have any peers? (offline detection)
         // Use libp2p_peer_count from AppState (atomic, lock-free)
+        // v8.9.9: Use atomic peer count (lock-free). Fallback uses try_read to avoid blocking.
         let peer_count = if let Some(ref peer_count_atomic) = state.libp2p_peer_count {
             peer_count_atomic.load(std::sync::atomic::Ordering::Acquire)
-        } else {
-            // Fallback to connected_peers from node_status if libp2p_peer_count not initialized
-            let node_status = state.node_status.read().await;
+        } else if let Ok(node_status) = state.node_status.try_read() {
             node_status.connected_peers as usize
+        } else {
+            1 // Assume connected if lock is contended (conservative — don't reject mining)
         };
 
         // ✅ v1.0.13-beta: Allow mining on bootstrap nodes even with 0 peers
@@ -8901,10 +8924,18 @@ pub async fn get_mining_challenge(
             ))));
         }
 
-        info!(
-            "✅ [MINING-DIAG] All checks passed | local={} | network={} | behind={} | peers={} | effective_solo={}",
-            local_height, network_height, blocks_behind, peer_count, effective_solo_mining
-        );
+        // v8.9.9: Rate-limit this log — was firing 2800+/sec with 400 miners, wasting I/O
+        {
+            static LAST_DIAG_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let now_s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+            let prev = LAST_DIAG_LOG.load(std::sync::atomic::Ordering::Relaxed);
+            if now_s >= prev + 30 && LAST_DIAG_LOG.compare_exchange(prev, now_s, std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed).is_ok() {
+                info!(
+                    "✅ [MINING-DIAG] All checks passed | local={} | network={} | behind={} | peers={} | effective_solo={}",
+                    local_height, network_height, blocks_behind, peer_count, effective_solo_mining
+                );
+            }
+        }
     }
 
     // NOW safe to proceed with cache check and challenge generation
@@ -8913,9 +8944,13 @@ pub async fn get_mining_challenge(
     let block_height = local_height + 1;
 
     // 🔧 v1.0.5-beta: Check if we have a cached challenge for current height (with grace period)
+    // v8.9.9: Use try_read() instead of read().await — same fix as submit handler.
+    // When write-locked (challenge refresh/fork), skip cache and regenerate below.
+    // Prevents 2800+ challenge requests from blocking on RwLock under heavy sync.
     {
-        let cached = state.current_challenge.read().await;
-        if let Some(challenge) = cached.as_ref() {
+        let cached = state.current_challenge.try_read();
+        if let Ok(ref guard) = cached {
+        if let Some(challenge) = guard.as_ref() {
             // Challenge matches current height - check age-based expiry with grace period
             if challenge.block_height == block_height {
                 let age_seconds = (chrono::Utc::now() - challenge.issued_at).num_seconds();
@@ -8962,6 +8997,7 @@ pub async fn get_mining_challenge(
                 }
             }
         }
+        } // if let Ok(guard) = try_read
     }
 
     // No cached challenge or it's expired/wrong height - generate new one
