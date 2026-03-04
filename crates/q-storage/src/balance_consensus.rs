@@ -962,36 +962,85 @@ impl BalanceConsensusEngine {
             warn!("⚠️ Failed to track block {} for emission: {}", block.header.height, e);
         }
 
-        // Process ONLY coinbase transactions
+        // v1.0.2: Process coinbase AND transfer transactions
+        // Previously skipped transfers for speed, but this caused transfer-only wallets
+        // to never be created in RocksDB on fast-syncing nodes, leading to balance divergence.
+        // Transfer processing is cheap (just subtract+add), the expensive part (DEX/token replay)
+        // is still skipped.
         for (idx, block_tx) in block.transactions.iter().enumerate() {
             let is_coinbase = block_tx.is_coinbase() || block_tx.tx_type.is_coinbase();
-            if !is_coinbase {
-                continue; // Skip transfers for speed
+
+            if is_coinbase {
+                let miner_address = hex::encode(&block_tx.to);
+                let reward_amount = block_tx.amount;
+
+                self.add_balance_tx(tx, &miner_address, reward_amount).await
+                    .map_err(|e| BalanceConsensusError::BatchOperation(e.to_string()))?;
+
+                // Record emission
+                {
+                    let mut controller = self.emission_controller.write().await;
+                    controller.record_emission(reward_amount);
+                    controller.record_daily_emission(block.header.timestamp, reward_amount);
+                }
+
+                updates.push(BalanceUpdate {
+                    address: miner_address.clone(),
+                    amount: reward_amount,
+                    reason: ChangeReason::MiningReward,
+                    block_height: block.header.height,
+                    solution_index: idx,
+                });
+
+                trace!("💰 [COINBASE-ONLY] height {}: {} → {} QUG",
+                       block.header.height, &miner_address[..16.min(miner_address.len())], reward_amount);
+            } else {
+                // v1.0.2: Process transfer transactions (same logic as process_block_mining_rewards_tx)
+                let from_address = hex::encode(&block_tx.from);
+                let to_address = hex::encode(&block_tx.to);
+                let transfer_amount = block_tx.amount;
+
+                if transfer_amount == 0 {
+                    continue;
+                }
+
+                // Debit from sender
+                match self.subtract_balance_tx(tx, &from_address, transfer_amount).await {
+                    Ok(_) => {
+                        trace!("💸 [FAST-SYNC TRANSFER] Debited {} from {} at height {}",
+                               transfer_amount, &from_address[..16.min(from_address.len())], block.header.height);
+                    }
+                    Err(e) => {
+                        warn!("⚠️ [FAST-SYNC TRANSFER] Failed to debit {} from {}: {}",
+                              transfer_amount, &from_address[..16.min(from_address.len())], e);
+                        continue;
+                    }
+                }
+
+                // Credit to receiver
+                self.add_balance_tx(tx, &to_address, transfer_amount).await
+                    .map_err(|e| BalanceConsensusError::BatchOperation(e.to_string()))?;
+
+                updates.push(BalanceUpdate {
+                    address: from_address.clone(),
+                    amount: transfer_amount,
+                    reason: ChangeReason::TransferSent,
+                    block_height: block.header.height,
+                    solution_index: idx,
+                });
+
+                updates.push(BalanceUpdate {
+                    address: to_address.clone(),
+                    amount: transfer_amount,
+                    reason: ChangeReason::TransferReceived,
+                    block_height: block.header.height,
+                    solution_index: idx,
+                });
+
+                trace!("💸 [FAST-SYNC TRANSFER] height {}: {} → {} ({} QUG)",
+                       block.header.height, &from_address[..16.min(from_address.len())],
+                       &to_address[..16.min(to_address.len())], transfer_amount);
             }
-
-            let miner_address = hex::encode(&block_tx.to);
-            let reward_amount = block_tx.amount;
-
-            self.add_balance_tx(tx, &miner_address, reward_amount).await
-                .map_err(|e| BalanceConsensusError::BatchOperation(e.to_string()))?;
-
-            // Record emission
-            {
-                let mut controller = self.emission_controller.write().await;
-                controller.record_emission(reward_amount);
-                controller.record_daily_emission(block.header.timestamp, reward_amount);
-            }
-
-            updates.push(BalanceUpdate {
-                address: miner_address.clone(),
-                amount: reward_amount,
-                reason: ChangeReason::MiningReward,
-                block_height: block.header.height,
-                solution_index: idx,
-            });
-
-            trace!("💰 [COINBASE-ONLY] height {}: {} → {} QUG",
-                   block.header.height, &miner_address[..16.min(miner_address.len())], reward_amount);
         }
 
         // v7.1.3: Block already marked as processed at entry (atomic check-and-set)

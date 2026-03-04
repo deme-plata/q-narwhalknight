@@ -88,6 +88,37 @@ pub struct VerifyProgressEvent {
     pub timestamp: u64,
 }
 
+/// v1.0.2: Mining capacity metrics for a single server
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MiningCapacityLocal {
+    /// Queue used / capacity
+    pub queue_used: u64,
+    pub queue_capacity: u64,
+    pub queue_pct: f64,
+    /// Network hashrate (H/s) and active miners
+    pub hashrate_hs: u64,
+    pub active_miners: usize,
+    /// Acceptance rate
+    pub solutions_submitted: u64,
+    pub solutions_accepted: u64,
+    pub acceptance_pct: f64,
+    /// Health
+    pub is_healthy: bool,
+    pub last_solution_secs_ago: u64,
+    /// Shard count (informational)
+    pub shard_count: usize,
+}
+
+/// v1.0.2: Aggregated mining capacity for all servers
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MiningCapacityAll {
+    pub beta: Option<MiningCapacityLocal>,
+    pub gamma: Option<MiningCapacityLocal>,
+    pub delta: Option<MiningCapacityLocal>,
+    pub epsilon: Option<MiningCapacityLocal>,
+    pub alpha: Option<MiningCapacityLocal>,
+}
+
 /// Shared verification state for SSE streaming
 pub struct DeployState {
     pub verification_running: bool,
@@ -1769,4 +1800,147 @@ pub async fn send_update_notification_email(
             );
         }
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v1.0.2: Mining Capacity Metrics — real-time queue/hashrate/acceptance stats
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// GET /api/v1/mining/capacity-local
+/// No auth required — returns aggregate mining stats for this node only.
+/// All data from in-memory atomics (<1ms response).
+pub async fn mining_capacity_local(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<MiningCapacityLocal>> {
+    use std::sync::atomic::Ordering;
+
+    // --- Queue health ---
+    let (queue_used, queue_capacity, shard_count) = if let Some(ref txs) = state.mining_submission_txs {
+        let count = txs.len();
+        // tokio mpsc Sender doesn't expose len(), so we estimate from capacity.
+        // We stored capacity at init time; measure used via capacity() - max_capacity() delta.
+        // Actually, Sender has no len(). We can only report capacity.
+        // The best proxy: track submitted - accepted (in-flight approximation).
+        let submitted = state.mining_solutions_submitted.load(Ordering::Relaxed);
+        let accepted = state.mining_solutions_accepted.load(Ordering::Relaxed);
+        // In-flight = submitted but not yet accepted/rejected
+        let in_flight = submitted.saturating_sub(accepted);
+        // Capacity: reconstruct from the same formula used in main.rs
+        let cpus = num_cpus::get().min(64).max(4);
+        let total_cap = if cpus > 16 {
+            1_000_000 + (cpus - 16) * 50_000
+        } else {
+            1_000_000
+        };
+        (in_flight, total_cap as u64, count)
+    } else {
+        (0u64, 0u64, 0)
+    };
+    let queue_pct = if queue_capacity > 0 {
+        (queue_used as f64 / queue_capacity as f64 * 100.0).min(100.0)
+    } else {
+        0.0
+    };
+
+    // --- Hashrate ---
+    let (hashrate_hs, active_miners) = if let Some(ref mining_stats_arc) = state.mining_statistics {
+        if let Ok(mut stats) = mining_stats_arc.try_write() {
+            let hr = stats.calculate_network_hashrate() as u64;
+            let mc = stats.active_miner_count();
+            (hr, mc)
+        } else {
+            (0, 0)
+        }
+    } else {
+        (0, 0)
+    };
+
+    // --- Acceptance rate ---
+    let solutions_submitted = state.mining_solutions_submitted.load(Ordering::Relaxed);
+    let solutions_accepted = state.mining_solutions_accepted.load(Ordering::Relaxed);
+    let acceptance_pct = if solutions_submitted > 0 {
+        (solutions_accepted as f64 / solutions_submitted as f64 * 100.0).min(100.0)
+    } else {
+        100.0 // No submissions yet = healthy
+    };
+
+    // --- Health ---
+    let is_healthy = state.mining_is_healthy.load(Ordering::Relaxed);
+    let last_solution_time = state.last_mining_solution_time.load(Ordering::Relaxed);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let last_solution_secs_ago = if last_solution_time > 0 {
+        now.saturating_sub(last_solution_time)
+    } else {
+        u64::MAX // Never received a solution
+    };
+
+    Json(ApiResponse::success(MiningCapacityLocal {
+        queue_used,
+        queue_capacity,
+        queue_pct,
+        hashrate_hs,
+        active_miners,
+        solutions_submitted,
+        solutions_accepted,
+        acceptance_pct,
+        is_healthy,
+        last_solution_secs_ago,
+        shard_count,
+    }))
+}
+
+/// GET /api/v1/admin/mining/capacity
+/// Admin-only — fetches local + all 4 remote servers in parallel (3s timeout).
+pub async fn mining_capacity(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<MiningCapacityAll>>, StatusCode> {
+    // Admin auth check
+    if !is_master_wallet(&headers, &state) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Get local (Beta) capacity
+    let beta_local = {
+        let Json(resp) = mining_capacity_local(State(state.clone())).await;
+        resp.data
+    };
+
+    // Fetch remote servers in parallel with 3s timeout
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .unwrap_or_default();
+
+    let fetch_remote = |url: &'static str| {
+        let c = client.clone();
+        async move {
+            match c.get(format!("{}/api/v1/mining/capacity-local", url)).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    #[derive(Deserialize)]
+                    struct Wrap { data: Option<MiningCapacityLocal> }
+                    resp.json::<Wrap>().await.ok().and_then(|w| w.data)
+                }
+                _ => None,
+            }
+        }
+    };
+
+    let (gamma, delta, epsilon, alpha) = tokio::join!(
+        fetch_remote(GAMMA_URL),
+        fetch_remote(DELTA_URL),
+        fetch_remote(EPSILON_URL),
+        fetch_remote(ALPHA_URL),
+    );
+
+    Ok(Json(ApiResponse::success(MiningCapacityAll {
+        beta: beta_local,
+        gamma,
+        delta,
+        epsilon,
+        alpha,
+    })))
 }

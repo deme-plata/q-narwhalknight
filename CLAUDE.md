@@ -42,6 +42,26 @@ This guide explains how to set up distributed development with multiple Claude C
 - **RAM**: 7.8GB + 4GB swap (swap required to prevent OOM during sync)
 - **Note**: Has Claude Code installed for remote administration
 
+#### **Server Epsilon (10Gbit SUPERNODE — Primary Sync Target)**
+- **IP Address**: `89.149.241.126`
+- **Role**: Primary bootstrap node, 10Gbit supernode, fastest sync source
+- **API Port**: `8080` (HTTP REST API)
+- **P2P Port**: `9001` (libp2p gossipsub + Kademlia DHT)
+- **SSH**: `root@89.149.241.126` (SSH key auth from Beta)
+- **Service**: `systemd` service at `/etc/systemd/system/q-api-server.service`
+- **Binary**: `/opt/orobit/shared/q-narwhalknight/q-api-server-v889` (name in systemd service)
+- **Working Directory**: `/opt/orobit/shared/q-narwhalknight`
+- **Nginx Root**: `/home/orobit/q-narwhalknight/dist-final/` (DIFFERENT from Beta!)
+- **Peer ID**: `12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM`
+- **⚠️ CRITICAL: ALWAYS use /home paths on Epsilon, NEVER /tmp or /root!**
+  - `/tmp` is on a tiny 40GB root partition (always near full)
+  - `/home` is on a 1.8TB NVMe partition with 1.4TB free
+  - **Git clone destination**: `/home/orobit/q-narwhalknight/` (NOT /tmp/q-source)
+  - **Build/temp files**: `/home/orobit/tmp/` (git tmpdir configured here)
+  - **Frontend deploy**: `/home/orobit/q-narwhalknight/dist-final/`
+  - **Binary deploy**: `/opt/orobit/shared/q-narwhalknight/q-api-server-v889`
+- **NEVER**: `git clone ... /tmp/...` or write large files to `/tmp` or `/root`
+
 ### **🔄 HA Rolling Deployment Pipeline (v5.5.4+ / 3-Server)**
 
 **This is the ONLY way to deploy code changes. No cowboy coding.**
@@ -993,21 +1013,34 @@ docker exec q-test-v${VERSION} curl -s localhost:8080/api/v1/status
 9. **NEVER DELETE USER DOWNLOAD BINARIES**
    - When updating frontend, PRESERVE the downloads folder
    - Users rely on downloading binaries with specific version names
-   - After building, always copy to the CORRECT location:
+
+   **⚠️ CRITICAL: quillon.xyz DNS → Epsilon (89.149.241.126), NOT Beta!**
+   Downloads are served by Epsilon's nginx. Files on Beta are NOT accessible to users.
+   **After EVERY build, copy binaries to BOTH Beta AND Epsilon:**
+
      ```bash
-     # CORRECT path - use FULL PATH starting with /opt/orobit/
+     # Step 1: Copy to Beta's local downloads (for backup/reference)
      cp target/release/q-api-server /opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads/q-api-server-v{VERSION}
      cp target/release/q-api-server /opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads/q-api-server-linux-x86_64
      cp target/release/q-miner /opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads/q-miner-v{VERSION}
      cp target/release/q-miner /opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads/q-miner-linux-x64
 
-     # Verify the file exists at the nginx-served location:
-     ls -lh /opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads/q-api-server-v{VERSION}
+     # Step 2: SCP to Epsilon (THIS IS WHAT USERS ACTUALLY DOWNLOAD)
+     scp target/release/q-api-server root@89.149.241.126:/home/orobit/q-narwhalknight/dist-final/downloads/q-api-server-v{VERSION}
+     scp target/release/q-api-server root@89.149.241.126:/home/orobit/q-narwhalknight/dist-final/downloads/q-api-server-linux-x86_64
+     scp target/release/q-miner root@89.149.241.126:/home/orobit/q-narwhalknight/dist-final/downloads/q-miner-v{VERSION}
+     scp target/release/q-miner root@89.149.241.126:/home/orobit/q-narwhalknight/dist-final/downloads/q-miner-linux-x64
 
-     # Check DownloadNodeScreen.tsx for the exact filename expected by the download link
-     # The href="/downloads/q-api-server-v{VERSION}" must match the actual filename
-     # IMPORTANT: Do NOT append "-beta" to download filenames
+     # Step 3: VERIFY on Epsilon before giving links to users
+     ssh root@89.149.241.126 "ls -lh /home/orobit/q-narwhalknight/dist-final/downloads/q-api-server-v{VERSION}"
+     ssh root@89.149.241.126 "ls -lh /home/orobit/q-narwhalknight/dist-final/downloads/q-miner-v{VERSION}"
+
+     # ONLY THEN give download links:
+     # wget https://quillon.xyz/downloads/q-api-server-v{VERSION}
+     # wget https://quillon.xyz/downloads/q-miner-v{VERSION}
      ```
+
+   **NEVER give a download link without verifying the file exists on Epsilon first!**
 
 10. **SLINT WALLET AUTO-UPDATE BUILD & PUBLISH PROCEDURE**
    - The Slint wallet has a built-in auto-updater (`gui/slint-wallet/src/updater.rs`)

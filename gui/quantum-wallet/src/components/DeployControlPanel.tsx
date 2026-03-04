@@ -102,6 +102,29 @@ interface DeployStatus {
   versions_match: boolean;
 }
 
+// v1.0.2: Mining capacity metrics per server
+interface MiningCapacityLocal {
+  queue_used: number;
+  queue_capacity: number;
+  queue_pct: number;
+  hashrate_hs: number;
+  active_miners: number;
+  solutions_submitted: number;
+  solutions_accepted: number;
+  acceptance_pct: number;
+  is_healthy: boolean;
+  last_solution_secs_ago: number;
+  shard_count: number;
+}
+
+interface MiningCapacityAll {
+  beta: MiningCapacityLocal | null;
+  gamma: MiningCapacityLocal | null;
+  delta: MiningCapacityLocal | null;
+  epsilon: MiningCapacityLocal | null;
+  alpha: MiningCapacityLocal | null;
+}
+
 interface VerifyEvent {
   step: string;
   status: string;
@@ -368,6 +391,110 @@ function formatEta(secs: number): string {
   return `~${h}h${m}m`;
 }
 
+// v1.0.2: Format hashrate with appropriate unit
+function formatHashrate(hs: number): string {
+  if (hs >= 1e12) return `${(hs / 1e12).toFixed(1)} TH/s`;
+  if (hs >= 1e9) return `${(hs / 1e9).toFixed(1)} GH/s`;
+  if (hs >= 1e6) return `${(hs / 1e6).toFixed(1)} MH/s`;
+  if (hs >= 1e3) return `${(hs / 1e3).toFixed(1)} KH/s`;
+  return `${hs} H/s`;
+}
+
+// v1.0.2: Mining Capacity Bar — queue health, hashrate, acceptance rate
+function MiningCapacityBar({ cap }: { cap: MiningCapacityLocal }) {
+  const queueColor = cap.queue_pct < 50 ? 'from-cyan-500 to-cyan-400'
+    : cap.queue_pct < 80 ? 'from-amber-500 to-amber-400'
+    : 'from-red-500 to-red-400';
+  const queueTextColor = cap.queue_pct < 50 ? 'text-cyan-400'
+    : cap.queue_pct < 80 ? 'text-amber-400'
+    : 'text-red-400';
+
+  const acceptColor = cap.acceptance_pct >= 95 ? 'from-emerald-500 to-emerald-400'
+    : cap.acceptance_pct >= 80 ? 'from-amber-500 to-amber-400'
+    : 'from-red-500 to-red-400';
+  const acceptTextColor = cap.acceptance_pct >= 95 ? 'text-emerald-400'
+    : cap.acceptance_pct >= 80 ? 'text-amber-400'
+    : 'text-red-400';
+
+  // Log-scale for hashrate bar (0 H/s = 0%, 1M H/s = 100%)
+  const hrLog = cap.hashrate_hs > 0 ? Math.min(Math.log10(cap.hashrate_hs) / 6 * 100, 100) : 0;
+
+  const isActive = cap.is_healthy && cap.last_solution_secs_ago < 300;
+  const lastSolText = cap.last_solution_secs_ago < 60 ? `${cap.last_solution_secs_ago}s ago`
+    : cap.last_solution_secs_ago < 3600 ? `${Math.floor(cap.last_solution_secs_ago / 60)}m ago`
+    : cap.last_solution_secs_ago < 86400 ? `${Math.floor(cap.last_solution_secs_ago / 3600)}h ago`
+    : cap.last_solution_secs_ago >= 4294967295 ? 'never' : `${Math.floor(cap.last_solution_secs_ago / 86400)}d ago`;
+
+  return (
+    <div className="mt-2 pt-2 border-t border-slate-700/30">
+      {/* Mining status badge */}
+      <div className="flex items-center justify-between mb-1.5">
+        <div className="flex items-center gap-1.5">
+          <Cpu className="w-3 h-3 text-amber-200/50" />
+          <span className="text-[10px] text-amber-200/50 font-medium">Mining</span>
+        </div>
+        <div className="flex items-center gap-1">
+          <span className={`inline-block w-1.5 h-1.5 rounded-full ${isActive ? 'bg-emerald-400 animate-pulse' : 'bg-red-400'}`} />
+          <span className={`text-[9px] font-bold ${isActive ? 'text-emerald-300' : 'text-red-300'}`}>
+            {isActive ? 'ACTIVE' : 'STALLED'}
+          </span>
+        </div>
+      </div>
+
+      {/* Queue health */}
+      <div className="mb-1.5">
+        <div className="flex justify-between text-[9px] mb-0.5">
+          <span className="text-amber-200/40">Queue</span>
+          <span className={queueTextColor}>{cap.queue_pct.toFixed(0)}% ({cap.shard_count} shards)</span>
+        </div>
+        <div className="w-full h-1 bg-slate-700/50 rounded-full overflow-hidden">
+          <div
+            className={`h-full rounded-full bg-gradient-to-r ${queueColor} transition-all duration-700`}
+            style={{ width: `${Math.max(cap.queue_pct, 1)}%` }}
+          />
+        </div>
+      </div>
+
+      {/* Hashrate */}
+      <div className="mb-1.5">
+        <div className="flex justify-between text-[9px] mb-0.5">
+          <span className="text-amber-200/40">Hashrate</span>
+          <span className="text-cyan-300">{formatHashrate(cap.hashrate_hs)} ({cap.active_miners} miners)</span>
+        </div>
+        <div className="w-full h-1 bg-slate-700/50 rounded-full overflow-hidden">
+          <div
+            className={`h-full rounded-full transition-all duration-700 ${
+              cap.hashrate_hs > 0
+                ? 'bg-gradient-to-r from-emerald-500 to-cyan-400 mining-shimmer'
+                : 'bg-slate-600'
+            }`}
+            style={{ width: `${Math.max(hrLog, 1)}%` }}
+          />
+        </div>
+      </div>
+
+      {/* Acceptance rate */}
+      <div className="mb-1">
+        <div className="flex justify-between text-[9px] mb-0.5">
+          <span className="text-amber-200/40">Accepted</span>
+          <span className={acceptTextColor}>{cap.acceptance_pct.toFixed(1)}% ({cap.solutions_accepted.toLocaleString()}/{cap.solutions_submitted.toLocaleString()})</span>
+        </div>
+        <div className="w-full h-1 bg-slate-700/50 rounded-full overflow-hidden">
+          <div
+            className={`h-full rounded-full bg-gradient-to-r ${acceptColor} transition-all duration-700`}
+            style={{ width: `${Math.max(cap.acceptance_pct, 1)}%` }}
+          />
+        </div>
+      </div>
+
+      {/* Last solution footer */}
+      <div className="text-[8px] text-amber-200/30 text-right">
+        Last solution: {lastSolText}
+      </div>
+    </div>
+  );
+}
+
 function SyncModeBadge({ mode }: { mode: string }) {
   const config: Record<string, { label: string; color: string; bg: string }> = {
     fully_synced: { label: 'SYNCED', color: 'text-emerald-300', bg: 'bg-emerald-500/20' },
@@ -384,7 +511,7 @@ function SyncModeBadge({ mode }: { mode: string }) {
   );
 }
 
-function ServerCard({ node, isActive, role, syncMetrics }: { node: NodeStatus; isActive: boolean; role: 'canary' | 'primary' | 'backup' | 'bootstrap' | 'supernode'; syncMetrics?: SyncMetrics }) {
+function ServerCard({ node, isActive, role, syncMetrics, miningCap }: { node: NodeStatus; isActive: boolean; role: 'canary' | 'primary' | 'backup' | 'bootstrap' | 'supernode'; syncMetrics?: SyncMetrics; miningCap?: MiningCapacityLocal | null }) {
   const [expanded, setExpanded] = useState(false);
   const sd = node.sync_details;
   const roleConfig = {
@@ -520,6 +647,9 @@ function ServerCard({ node, isActive, role, syncMetrics }: { node: NodeStatus; i
         </div>
       )}
 
+      {/* Mining capacity bars */}
+      {miningCap && node.online && <MiningCapacityBar cap={miningCap} />}
+
       {/* Expandable details (click to toggle) */}
       {sd && node.online && (
         <button
@@ -598,6 +728,7 @@ export default function DeployControlPanel() {
   const [devFeeSaving, setDevFeeSaving] = useState(false);
   const [devFeeMsg, setDevFeeMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [syncMetricsMap, setSyncMetricsMap] = useState<Record<string, SyncMetrics>>({});
+  const [miningCapacity, setMiningCapacity] = useState<MiningCapacityAll | null>(null);
   const prevHeightsRef = useRef<Record<string, { height: number; ts: number }>>({});
   // v8.2.9: Peak height tracking — never show a height decrease (prevents "rollback" scare)
   const peakHeightsRef = useRef<Record<string, number>>({});
@@ -730,10 +861,11 @@ export default function DeployControlPanel() {
       'Authorization': `Bearer ${walletAddress}`,
     };
     try {
-      const [statusResp, convResp, devFeeResp] = await Promise.all([
+      const [statusResp, convResp, devFeeResp, mCapResp] = await Promise.all([
         fetch('/api/v1/admin/deploy/status', { headers }),
         fetch('/api/v1/admin/deploy/convergence', { headers }).catch(() => null),
         isMaster ? fetch('/api/v1/admin/dev-fee', { headers }).catch(() => null) : Promise.resolve(null),
+        isMaster ? fetch('/api/v1/admin/mining/capacity', { headers }).catch(() => null) : Promise.resolve(null),
       ]);
 
       if (statusResp.status === 403) {
@@ -812,6 +944,16 @@ export default function DeployControlPanel() {
             if (!devFeeInput) {
               setDevFeeInput(String(devFeeJson.data.fee_bps));
             }
+          }
+        } catch {}
+      }
+
+      // Parse mining capacity
+      if (mCapResp && mCapResp.ok) {
+        try {
+          const mCapJson = await mCapResp.json();
+          if (mCapJson.data) {
+            setMiningCapacity(mCapJson.data);
           }
         } catch {}
       }
@@ -1230,6 +1372,17 @@ export default function DeployControlPanel() {
     <AnimatePresence>
       {isOpen && (
         <>
+          {/* Mining shimmer animation */}
+          <style>{`
+            @keyframes mining-shimmer {
+              0% { background-position: -200% center; }
+              100% { background-position: 200% center; }
+            }
+            .mining-shimmer {
+              background-size: 200% 100%;
+              animation: mining-shimmer 2s linear infinite;
+            }
+          `}</style>
           {/* Backdrop */}
           <motion.div
             initial={{ opacity: 0 }}
@@ -1389,30 +1542,35 @@ export default function DeployControlPanel() {
                       isActive={true}
                       role="supernode"
                       syncMetrics={syncMetricsMap.epsilon}
+                      miningCap={miningCapacity?.epsilon}
                     />
                     <ServerCard
                       node={deployStatus.beta}
                       isActive={connInfo.isPrimary}
                       role="primary"
                       syncMetrics={syncMetricsMap.beta}
+                      miningCap={miningCapacity?.beta}
                     />
                     <ServerCard
                       node={deployStatus.gamma}
                       isActive={!connInfo.isPrimary}
                       role="backup"
                       syncMetrics={syncMetricsMap.gamma}
+                      miningCap={miningCapacity?.gamma}
                     />
                     <ServerCard
                       node={deployStatus.delta}
                       isActive={false}
                       role="bootstrap"
                       syncMetrics={syncMetricsMap.delta}
+                      miningCap={miningCapacity?.delta}
                     />
                     <ServerCard
                       node={deployStatus.alpha}
                       isActive={false}
                       role="canary"
                       syncMetrics={syncMetricsMap.alpha}
+                      miningCap={miningCapacity?.alpha}
                     />
                   </div>
 

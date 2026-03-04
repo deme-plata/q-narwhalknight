@@ -5182,13 +5182,27 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     let mut sse_updates: Vec<(String, u128, u128)> = Vec::new(); // (addr, old, new)
 
                     // Phase 1: Read from RocksDB WITHOUT holding the write lock
+                    // v1.0.2: Include ALL affected addresses (coinbase + transfers), not just coinbase.
+                    // Previously only coinbase recipients were synced, so transfer-only wallets
+                    // were never loaded into the HashMap after fast-sync.
                     let mut db_reads: Vec<([u8; 32], String, u128)> = Vec::new();
+                    let mut seen_addresses: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
                     for block in &blocks {
                         for tx in &block.transactions {
-                            if tx.from == [0u8; 32] {
+                            // Always include recipient
+                            if !seen_addresses.contains(&tx.to) {
+                                seen_addresses.insert(tx.to);
                                 let address_hex = hex::encode(&tx.to);
                                 if let Ok(actual_balance) = storage_clone.get_balance(&address_hex).await {
                                     db_reads.push((tx.to, address_hex, actual_balance));
+                                }
+                            }
+                            // Include sender if non-coinbase
+                            if tx.from != [0u8; 32] && !seen_addresses.contains(&tx.from) {
+                                seen_addresses.insert(tx.from);
+                                let address_hex = hex::encode(&tx.from);
+                                if let Ok(actual_balance) = storage_clone.get_balance(&address_hex).await {
+                                    db_reads.push((tx.from, address_hex, actual_balance));
                                 }
                             }
                         }
@@ -17973,19 +17987,35 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     if cycle % 5 == 0 {
                         match app_state_balance_sync.storage_engine.load_wallet_balances().await {
                             Ok(all_persisted) => {
-                                // Briefly acquire write lock to insert new wallets only
+                                // v1.0.2: Also correct existing values that differ from RocksDB,
+                                // not just insert missing wallets. RocksDB is the source of truth
+                                // (written by balance_consensus during block processing).
                                 let mut balances = app_state_balance_sync.wallet_balances.write().await;
                                 let mut new_wallets = 0u64;
+                                let mut corrected_wallets = 0u64;
+                                let hashmap_count = balances.len();
                                 for (addr, amount) in &all_persisted {
-                                    if !balances.contains_key(addr) {
-                                        balances.insert(*addr, *amount);
-                                        new_wallets += 1;
+                                    let existing = balances.get(addr).copied();
+                                    match existing {
+                                        None => {
+                                            balances.insert(*addr, *amount);
+                                            new_wallets += 1;
+                                        }
+                                        Some(current) if current != *amount => {
+                                            balances.insert(*addr, *amount);
+                                            corrected_wallets += 1;
+                                        }
+                                        _ => {} // already correct
                                     }
                                 }
                                 drop(balances);
-                                if new_wallets > 0 {
-                                    info!("🆕 [BALANCE DISCOVERY v8.6.7] Found {} new wallets in RocksDB (total: {})",
-                                          new_wallets, all_persisted.len());
+                                if new_wallets > 0 || corrected_wallets > 0 {
+                                    info!("🆕 [BALANCE DISCOVERY v1.0.2] new={} corrected={} | HashMap={} RocksDB={}",
+                                          new_wallets, corrected_wallets, hashmap_count, all_persisted.len());
+                                } else if cycle % 25 == 0 {
+                                    // Log wallet count comparison every ~375s for monitoring
+                                    info!("💾 [BALANCE DISCOVERY] HashMap={} RocksDB={} (consistent)",
+                                          hashmap_count, all_persisted.len());
                                 }
                             }
                             Err(e) => {
@@ -19387,6 +19417,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         )
         .route("/api/v1/mining/health", get(handlers::get_mining_health)) // v0.8.9-beta: Mining heartbeat health check
         .route("/api/v1/mining/diagnostics", get(handlers::get_mining_diagnostics)) // v2.7.0-beta: Mining system diagnostics
+        .route("/api/v1/mining/capacity-local", get(q_api_server::deploy_admin_api::mining_capacity_local)) // v1.0.2: Mining capacity metrics (no auth)
         .route("/api/v1/mining/stats/:wallet", get(handlers::get_wallet_mining_stats)) // v3.5.0-beta: Wallet mining stats
         // v0.0.22-beta Quick Win #1: Manual trigger endpoint REMOVED from default routes
         // Added conditionally below based on config.allow_manual_trigger
@@ -20007,6 +20038,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/admin/update/toggle", post(q_api_server::deploy_admin_api::admin_update_toggle))
         .route("/api/v1/admin/update/notification-email", get(q_api_server::deploy_admin_api::admin_get_notification_email))
         .route("/api/v1/admin/update/notification-email", post(q_api_server::deploy_admin_api::admin_set_notification_email))
+        // v1.0.2: Mining capacity metrics (admin — aggregates all servers)
+        .route("/api/v1/admin/mining/capacity", get(q_api_server::deploy_admin_api::mining_capacity))
         // v8.2.0: Admin-only balance rebuild from chain (deterministic balance consensus)
         .route("/api/v1/admin/rebuild-balances", post(handlers::admin_rebuild_balances))
         .route("/api/v1/admin/purge-phase-data", post(admin_purge_phase_data))
