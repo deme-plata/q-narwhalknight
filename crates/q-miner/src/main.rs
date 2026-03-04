@@ -2184,9 +2184,12 @@ async fn start_sse_listener(
     // Normalize URL to prevent double slashes
     let normalized_url = normalize_server_url(&server_url);
 
-    // Include wallet_address parameter for filtered SSE events
-    let primary_url = format!("{}/api/v1/events?wallet_address={}", normalized_url, wallet);
-    let fallback_url = format!("{}/api/v1/events?wallet_address={}", FALLBACK_BOOTSTRAP_URL, wallet);
+    // v9.0.1: headers_only=true sends compact ~100-byte block headers instead of ~2-5KB full blocks.
+    // miner_mode=true tells the server to only forward mining-relevant events, dropping
+    // MetricsUpdate, NodeStatusUpdate, TokenPriceUpdate, emails, calendar, etc.
+    // Combined savings: ~111 KB/s → ~2-5 KB/s for 256-thread miners.
+    let primary_url = format!("{}/api/v1/events?wallet_address={}&headers_only=true&miner_mode=true", normalized_url, wallet);
+    let fallback_url = format!("{}/api/v1/events?wallet_address={}&headers_only=true&miner_mode=true", FALLBACK_BOOTSTRAP_URL, wallet);
     let mut use_fallback = false;
     let mut primary_fail_count = 0u32;
 
@@ -2373,8 +2376,9 @@ async fn decentralized_sse_listener(
     use futures::StreamExt;
 
     let normalized_url = normalize_server_url(&server_url);
-    let primary_url = format!("{}/api/v1/events?wallet_address={}", normalized_url, wallet);
-    let fallback_url = format!("{}/api/v1/events?wallet_address={}", FALLBACK_BOOTSTRAP_URL, wallet);
+    // v9.0.1: headers_only + miner_mode for bandwidth optimization
+    let primary_url = format!("{}/api/v1/events?wallet_address={}&headers_only=true&miner_mode=true", normalized_url, wallet);
+    let fallback_url = format!("{}/api/v1/events?wallet_address={}&headers_only=true&miner_mode=true", FALLBACK_BOOTSTRAP_URL, wallet);
     let mut use_fallback = false;
     let mut primary_fail_count = 0u32;
 

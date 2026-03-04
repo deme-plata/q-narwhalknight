@@ -33,6 +33,12 @@ pub struct SseQueryParams {
     /// When true, NewBlock events send compact headers (~100 bytes) instead of full block data (~2-5KB)
     #[serde(default)]
     pub headers_only: bool,
+    /// v9.0.1: When true, only forward mining-relevant events (NewBlock, MiningReward,
+    /// BalanceUpdated, PendingMiningReward, MiningStats). Drops all noise events
+    /// (MetricsUpdate, NodeStatusUpdate, TokenPriceUpdate, emails, calendar, etc.)
+    /// reducing miner bandwidth from ~111 KB/s to ~2-5 KB/s.
+    #[serde(default)]
+    pub miner_mode: bool,
 }
 
 /// v1.0.2: WebSocket query parameters
@@ -599,11 +605,16 @@ impl EventBroadcaster {
 }
 
 /// SSE endpoint for real-time event streaming with privacy filtering
-/// Usage: GET /api/v1/events?wallet_address=<address>&headers_only=true
+/// Usage: GET /api/v1/events?wallet_address=<address>&headers_only=true&miner_mode=true
 /// Requires: X-Wallet-Auth header for authentication (optional but recommended)
 ///
 /// v1.0.2 Bandwidth optimizations:
 /// - `?headers_only=true` — NewBlock events send compact headers (~100 bytes vs ~2-5KB)
+/// v9.0.1 Bandwidth optimizations:
+/// - `?miner_mode=true` — Only forward mining-relevant events (NewBlock, MiningReward,
+///   BalanceUpdated, PendingMiningReward, MiningStats). Drops all noise events
+///   (MetricsUpdate, NodeStatusUpdate, TokenPriceUpdate, emails, calendar, etc.)
+///   reducing miner bandwidth from ~111 KB/s to ~2-5 KB/s.
 pub async fn sse_events(
     State(state): State<Arc<AppState>>,
     user_agent: Option<TypedHeader<headers::UserAgent>>,
@@ -613,11 +624,12 @@ pub async fn sse_events(
         .as_ref()
         .map(|ua| ua.as_str())
         .unwrap_or("rust-client");
-    info!("New SSE client connected: {} (headers_only={})", user_agent_str, params.headers_only);
+    info!("New SSE client connected: {} (headers_only={}, miner_mode={})", user_agent_str, params.headers_only, params.miner_mode);
 
     // Extract wallet_address filter parameter (optional)
     let wallet_filter = params.wallet_address.clone();
     let headers_only = params.headers_only;
+    let miner_mode = params.miner_mode;
 
     if let Some(ref wallet) = wallet_filter {
         // 🔒 PRIVACY: Hash wallet address for logging
@@ -781,8 +793,8 @@ pub async fn sse_events(
     let wallet_filter_clone = wallet_filter.clone();
 
     let stream = futures_util::stream::unfold(
-        (rx, wallet_filter, Some(state_clone), wallet_filter_clone, headers_only),
-        move |(mut rx, filter, state_opt, wallet_filter_for_initial, headers_only)| async move {
+        (rx, wallet_filter, Some(state_clone), wallet_filter_clone, headers_only, miner_mode),
+        move |(mut rx, filter, state_opt, wallet_filter_for_initial, headers_only, miner_mode)| async move {
             // CRITICAL FIX: Send initial balance event on SSE connection
             // This eliminates the "wait minutes for balance" issue
             if let (Some(state), Some(ref wallet_filter_value)) =
@@ -837,7 +849,7 @@ pub async fn sse_events(
                     // Set state_opt to None so we don't send initial balance again
                     return Some((
                         Ok(Event::default().event("balance-updated").data(json)),
-                        (rx, filter, None, None, headers_only),
+                        (rx, filter, None, None, headers_only, miner_mode),
                     ));
                 }
             }
@@ -852,6 +864,25 @@ pub async fn sse_events(
                     rx.recv()
                 ).await {
                     Ok(Ok(event)) => {
+                        // v9.0.1: miner_mode — only forward mining-relevant events.
+                        // Drops ~80 KB/s of noise (MetricsUpdate, NodeStatusUpdate,
+                        // TokenPriceUpdate, LiquidityPoolUpdate, emails, calendar, etc.)
+                        if miner_mode {
+                            match &event {
+                                StreamEvent::NewBlock { .. }
+                                | StreamEvent::MiningReward { .. }
+                                | StreamEvent::BalanceUpdated { .. }
+                                | StreamEvent::PendingMiningReward { .. }
+                                | StreamEvent::MiningStats { .. } => {
+                                    // These are mining-relevant — keep them
+                                }
+                                _ => {
+                                    // Everything else is noise for miners — skip
+                                    continue;
+                                }
+                            }
+                        }
+
                         // Filter event based on wallet address
                         if !is_event_relevant(&event, &filter) {
                             // Skip this event, continue to next
@@ -890,12 +921,12 @@ pub async fn sse_events(
                                 );
                                 return Some((
                                     Ok(Event::default().event(event_name).data(json)),
-                                    (rx, filter, None, None, headers_only),
+                                    (rx, filter, None, None, headers_only, miner_mode),
                                 ));
                             }
                             Err(e) => {
                                 error!("Failed to serialize event: {}", e);
-                                return Some((Err(axum::Error::new(e)), (rx, filter, None, None, headers_only)));
+                                return Some((Err(axum::Error::new(e)), (rx, filter, None, None, headers_only, miner_mode)));
                             }
                         }
                     }
@@ -907,7 +938,7 @@ pub async fn sse_events(
                                     Ok(Event::default()
                                         .event("sse-lag")
                                         .data(format!("{{\"lagged_events\": {}}}", n))),
-                                    (rx, filter, None, None, headers_only),
+                                    (rx, filter, None, None, headers_only, miner_mode),
                                 ))
                             }
                             tokio::sync::broadcast::error::RecvError::Closed => {
@@ -922,7 +953,7 @@ pub async fn sse_events(
                         // will fail and Axum will drop this stream, cleaning up the CLOSE-WAIT.
                         return Some((
                             Ok(Event::default().comment("heartbeat")),
-                            (rx, filter, None, None, headers_only),
+                            (rx, filter, None, None, headers_only, miner_mode),
                         ));
                     }
                 }
