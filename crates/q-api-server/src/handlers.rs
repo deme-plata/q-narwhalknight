@@ -8521,10 +8521,16 @@ pub async fn submit_mining_solution(
     // ========================================
     // 🔒 v4.1.3: SERVER-SIDE DIFFICULTY ENFORCEMENT + CHALLENGE FRESHNESS + NONCE DEDUP
     // Don't trust client-submitted difficulty_target — use the server's current challenge
+    // v8.9.8: Use try_read() instead of read().await — if write-locked (challenge refresh
+    // or fork resolution), skip server-side difficulty override. The background batch
+    // processor will verify difficulty anyway. This prevents the mining handler from
+    // blocking on the RwLock during heavy sync, which caused 3s+ latency and 75K
+    // connection pileup when 400+ miners were submitting.
     // ========================================
     {
-        let cached_challenge = state.current_challenge.read().await;
-        if let Some(ref challenge) = *cached_challenge {
+        let cached_challenge = state.current_challenge.try_read();
+        if let Ok(ref guard) = cached_challenge {
+        if let Some(ref challenge) = **guard {
             // 1. CHALLENGE FRESHNESS: Reject submissions against expired challenges
             let now = chrono::Utc::now();
             let challenge_age_secs = (now - challenge.issued_at).num_seconds();
@@ -8557,6 +8563,7 @@ pub async fn submit_mining_solution(
             let challenge_height = challenge.block_height;
             let _ = challenge_height; // suppress unused warning
         }
+        } // if let Ok(guard) = try_read
     }
 
     // ==================================================================================
@@ -8637,12 +8644,11 @@ pub async fn submit_mining_solution(
                     }
                 }
                 if !queued {
-                    // v1.0.4: All shards full — WAIT for space instead of dropping.
-                    // Use send().await with 3s timeout on the primary shard.
-                    // The batch processor drains ~500 submissions every 5ms, so 3s
-                    // gives >300K drain cycles — virtually guaranteed to find space.
+                    // v8.9.6: All shards full — short wait then fast 503 for failover.
+                    // 500ms is enough for batch processor to drain (~100 drain cycles).
+                    // 3s was causing 40K+ TCP connection pileup with 400+ miners.
                     match tokio::time::timeout(
-                        std::time::Duration::from_secs(3),
+                        std::time::Duration::from_millis(500),
                         txs[idx].send(submission.clone()),
                     ).await {
                         Ok(Ok(())) => {
@@ -8662,7 +8668,7 @@ pub async fn submit_mining_solution(
                                 .as_secs();
                             let prev = LAST_CAPACITY_LOG.load(std::sync::atomic::Ordering::Relaxed);
                             if now_secs >= prev + 10 && LAST_CAPACITY_LOG.compare_exchange(prev, now_secs, std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed).is_ok() {
-                                warn!("🚨 All {} mining shards full for 3s — returning 503 for nginx failover", shard_count);
+                                warn!("🚨 All {} mining shards full for 500ms — returning 503 for nginx failover", shard_count);
                             }
                             return Err(StatusCode::SERVICE_UNAVAILABLE);
                         }
@@ -8678,7 +8684,7 @@ pub async fn submit_mining_solution(
     } else if let Some(tx) = &state.mining_submission_tx {
         // Legacy single-channel fallback — also use send().await with timeout
         match tokio::time::timeout(
-            std::time::Duration::from_secs(3),
+            std::time::Duration::from_millis(500),
             tx.send(submission),
         ).await {
             Ok(Ok(())) => true,

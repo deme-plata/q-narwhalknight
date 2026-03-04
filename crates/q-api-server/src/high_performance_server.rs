@@ -3,15 +3,12 @@
 /// This module provides optimized TCP socket configuration for Axum
 /// designed for extreme transaction throughput:
 ///
-/// - Optimized TCP socket configuration (NODELAY, large buffers, REUSEPORT)
-/// - Connection pooling and backlog management
-/// - Zero-copy request handling via Axum's default behavior
+/// - Optimized TCP socket configuration (NODELAY, keepalive, REUSEADDR)
 /// - v1.0.53: Automatic port detection if requested port is in use
+/// - v8.9.8: Reduced TCP buffers (4MB→256KB) to prevent 17GB kernel memory
+///           usage with 75K+ connections. Added connection-aware backlog.
 ///
 /// Target Performance: 1,000,000+ TPS with binary protocol
-///
-/// Note: HTTP/2 support is enabled automatically by Axum when the client
-/// requests it via ALPN negotiation.
 use axum::Router;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
@@ -36,11 +33,14 @@ impl HighPerformanceServer {
         Self {
             app,
             addr,
-            tcp_recv_buffer_size: 4 * 1024 * 1024, // 4MB receive buffer
-            tcp_send_buffer_size: 4 * 1024 * 1024, // 4MB send buffer
-            tcp_backlog: 1024,                     // 1024 pending connections (up from default 128)
-            auto_port_detection: true,             // v1.0.53: Enable by default
-            max_port_attempts: 10,                 // Try up to 10 ports
+            // v8.9.8: Reduced from 4MB to 256KB per connection
+            // 4MB × 75K connections = 300GB kernel pressure (caused 20GB RSS, load 52)
+            // 256KB is more than enough for JSON API responses (typically < 1KB)
+            tcp_recv_buffer_size: 256 * 1024,  // 256KB receive buffer
+            tcp_send_buffer_size: 256 * 1024,  // 256KB send buffer
+            tcp_backlog: 4096,                 // v8.9.8: 4096 pending connections (was 1024)
+            auto_port_detection: true,         // v1.0.53: Enable by default
+            max_port_attempts: 10,             // Try up to 10 ports
         }
     }
 
@@ -76,9 +76,9 @@ impl HighPerformanceServer {
         info!("🚀 Starting High-Performance HTTP Server");
         info!("   Requested address: {}", self.addr);
         info!(
-            "   TCP buffer size: {} MB recv, {} MB send",
-            self.tcp_recv_buffer_size / (1024 * 1024),
-            self.tcp_send_buffer_size / (1024 * 1024)
+            "   TCP buffer size: {} KB recv, {} KB send",
+            self.tcp_recv_buffer_size / 1024,
+            self.tcp_send_buffer_size / 1024
         );
         info!("   TCP backlog: {} pending connections", self.tcp_backlog);
         info!("   Target throughput: 1,000,000+ TPS");
@@ -292,7 +292,7 @@ mod tests {
 
         let server = HighPerformanceServer::new(app, addr);
         assert_eq!(server.addr, addr);
-        assert_eq!(server.tcp_recv_buffer_size, 4 * 1024 * 1024);
+        assert_eq!(server.tcp_recv_buffer_size, 256 * 1024);
     }
 
     #[test]
