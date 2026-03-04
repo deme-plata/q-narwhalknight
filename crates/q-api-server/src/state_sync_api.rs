@@ -485,10 +485,25 @@ pub async fn handle_state_sync_request(
     let mut response = StateSnapshotResponse::new(request.request_id, our_pubkey, our_height);
     response.contracts = contracts;
     response.pools = pools;
-    response.wallet_balances = wallet_balances;
+    response.wallet_balances = wallet_balances.clone();
     response.token_balances = token_balances;
     response.symbol_to_address = symbol_to_address;
     response.vault_data = vault_data;
+
+    // v1.0.3: Compute balance state hash for divergence detection
+    // Hash is computed from sorted wallet balances to be deterministic
+    {
+        let mut sorted_balances: Vec<(&String, &String)> = wallet_balances.iter().collect();
+        sorted_balances.sort_by_key(|(k, _)| k.clone());
+        let mut hasher = blake3::Hasher::new();
+        for (addr, amount) in &sorted_balances {
+            hasher.update(addr.as_bytes());
+            hasher.update(b":");
+            hasher.update(amount.as_bytes());
+            hasher.update(b"\n");
+        }
+        response.balance_state_hash = Some(hasher.finalize().to_hex().to_string());
+    }
 
     if let Err(e) = response.sign(&app_state.node_signing_key) {
         error!("🔄 [STATE SYNC] Failed to sign response: {}", e);
@@ -865,11 +880,16 @@ async fn merge_p2p_response(
 
             // v8.5.6: Block QUGUSD from P2P — ghost balance propagation prevention
             // v8.8.2: Allow QUGUSD only on FIRST state sync (before wallet bootstrap completes).
-            // Uses `bootstrap_was_done_before_this_sync` (captured BEFORE wallet import above),
-            // so QUGUSD flows through in the same response that imports wallets.
+            // v1.0.3: After convergence migration, QUGUSD is chain-derived and correct.
+            //         Ghost prevention only needed for pre-migration nodes.
             if token_bytes == qugusd_addr && bootstrap_was_done_before_this_sync {
-                qugusd_rejected += 1;
-                continue;
+                let convergence_done = app_state.storage_engine
+                    .has_migration_flag(b"migration_safe_convergence_v103_done").await;
+                if !convergence_done {
+                    qugusd_rejected += 1;
+                    continue;
+                }
+                // Post-convergence: allow QUGUSD from peers (chain is source of truth)
             }
 
             let key = (wallet_bytes, token_bytes);
@@ -908,27 +928,68 @@ async fn merge_p2p_response(
         }
     }
 
-    // ---- v8.7.4: Merge vault data (one-time migration for historical vault state) ----
+    // ---- v1.0.3: Balance state hash divergence detection ----
+    if let Some(ref peer_hash) = response.balance_state_hash {
+        let our_height = app_state.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
+        // Only compare if we're at similar heights (within 100 blocks)
+        if our_height > 0 && response.block_height > 0
+            && (our_height as i64 - response.block_height as i64).unsigned_abs() < 100
+        {
+            // Compute our own balance state hash
+            let our_hash = {
+                let wb = app_state.wallet_balances.read().await;
+                let mut sorted: Vec<(&String, &u128)> = wb.iter().collect();
+                sorted.sort_by_key(|(k, _)| k.clone());
+                let mut hasher = blake3::Hasher::new();
+                for (addr, amount) in &sorted {
+                    hasher.update(addr.as_bytes());
+                    hasher.update(b":");
+                    hasher.update(amount.to_string().as_bytes());
+                    hasher.update(b"\n");
+                }
+                hasher.finalize().to_hex().to_string()
+            };
+
+            if &our_hash == peer_hash {
+                info!("✅ [DIVERGENCE CHECK] Balance hash MATCHES peer at heights ~{}/{} (hash={}..)",
+                      our_height, response.block_height, &peer_hash[..12]);
+            } else {
+                error!("🚨 [DIVERGENCE CHECK] CRITICAL: Balance hash MISMATCH with peer!");
+                error!("   Our height: {}, peer height: {}", our_height, response.block_height);
+                error!("   Our hash:  {}", &our_hash[..24]);
+                error!("   Peer hash: {}", &peer_hash[..24]);
+                error!("   Run convergence migration to fix: delete RocksDB flag 'migration_safe_convergence_v103_done' and restart");
+            }
+        }
+    }
+
+    // ---- v8.7.4 / v1.0.3: Merge vault data ----
+    // v1.0.3: Import vault from peer if local is empty OR if peer has significantly
+    // more vault activity (processed more blocks with vault txs). After convergence
+    // migration, vault state is chain-derived so the "empty-only" restriction is relaxed.
     if let Some(ref vault_bytes) = response.vault_data {
-        // Only import if we have NO local vault state (empty vault)
-        let local_vault_empty = {
+        let should_import = {
             let vault = app_state.collateral_vault.read().await;
-            vault.total_qug_locked == 0 && vault.total_qugusd_minted == 0
+            let local_empty = vault.total_qug_locked == 0 && vault.total_qugusd_minted == 0;
+            let our_height = app_state.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
+            // Import if empty OR if peer is significantly ahead (processed more vault txs)
+            local_empty || (response.block_height > our_height + 1000)
         };
 
-        if local_vault_empty && !vault_bytes.is_empty() {
+        if should_import && !vault_bytes.is_empty() {
             match bincode::deserialize::<q_vm::contracts::CollateralVault>(vault_bytes) {
                 Ok(peer_vault) => {
                     if peer_vault.total_qug_locked > 0 || peer_vault.total_qugusd_minted > 0 {
                         info!(
-                            "🏦 [STATE SYNC v8.7.4] Importing vault state from peer: locked={}, minted={}, {} positions",
+                            "🏦 [STATE SYNC v1.0.3] Importing vault state from peer: locked={}, minted={}, {} positions (peer height={})",
                             peer_vault.total_qug_locked,
                             peer_vault.total_qugusd_minted,
                             peer_vault.locked_qug.len(),
+                            response.block_height,
                         );
                         // Persist to storage
                         if let Err(e) = app_state.storage_engine.save_collateral_vault_data(vault_bytes).await {
-                            warn!("⚠️ [STATE SYNC v8.7.4] Failed to persist vault data: {}", e);
+                            warn!("⚠️ [STATE SYNC v1.0.3] Failed to persist vault data: {}", e);
                         }
                         // Update in-memory vault
                         let mut vault = app_state.collateral_vault.write().await;
@@ -937,7 +998,7 @@ async fn merge_p2p_response(
                     }
                 }
                 Err(e) => {
-                    warn!("⚠️ [STATE SYNC v8.7.4] Failed to deserialize vault data ({} bytes): {}", vault_bytes.len(), e);
+                    warn!("⚠️ [STATE SYNC v1.0.3] Failed to deserialize vault data ({} bytes): {}", vault_bytes.len(), e);
                 }
             }
         }
@@ -1334,9 +1395,14 @@ async fn merge_http_snapshot(app_state: &Arc<AppState>, snapshot: &FullStateSnap
             let amount: u128 = match amount_str.parse() { Ok(a) => a, Err(_) => continue };
 
             // v8.5.6: Block QUGUSD from HTTP state sync — ghost balance propagation prevention
+            // v1.0.3: After convergence migration, QUGUSD is chain-derived. Allow from peers.
             if token_bytes == qugusd_addr {
-                qugusd_rejected += 1;
-                continue;
+                let convergence_done = app_state.storage_engine
+                    .has_migration_flag(b"migration_safe_convergence_v103_done").await;
+                if !convergence_done {
+                    qugusd_rejected += 1;
+                    continue;
+                }
             }
 
             let key = (wallet_bytes, token_bytes);

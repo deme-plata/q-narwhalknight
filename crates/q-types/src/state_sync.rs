@@ -169,6 +169,12 @@ pub struct StateSnapshotResponse {
     #[serde(default)]
     pub vault_data: Option<Vec<u8>>,
 
+    /// v1.0.3: Balance state hash (blake3 hex) for divergence detection.
+    /// Computed from sorted wallet balances at this height. Allows nodes to detect
+    /// if they have identical balance state without transmitting all balances.
+    #[serde(default)]
+    pub balance_state_hash: Option<String>,
+
     /// Unix timestamp
     pub timestamp: u64,
 
@@ -197,6 +203,7 @@ impl StateSnapshotResponse {
             token_balances: HashMap::new(),
             symbol_to_address: HashMap::new(),
             vault_data: None,
+            balance_state_hash: None,
             timestamp,
             signature: Vec::new(),
             version: 1,

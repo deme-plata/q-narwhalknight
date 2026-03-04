@@ -2986,6 +2986,82 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         }
     }
 
+    // v1.0.3: Full state convergence migration — deterministic replay of QUG + vault state.
+    // Replays entire chain to rebuild wallet balances AND CollateralVault from block data.
+    // Runs ONCE per node (flag: migration_safe_convergence_v103_done).
+    {
+        match state.storage_engine.safe_batched_convergence_v103().await {
+            Ok(true) => {
+                let qug = 1_000_000_000_000_000_000_000_000u128;
+
+                // Refresh in-memory wallet balances from RocksDB
+                match state.storage_engine.load_wallet_balances().await {
+                    Ok(new_balances) => {
+                        let wallet_total: u128 = new_balances.values().sum();
+                        let wallet_count = new_balances.len();
+
+                        // Update in-memory wallet_balances HashMap
+                        {
+                            let mut wb = state.wallet_balances.write().await;
+                            wb.clear();
+                            for (addr, amount) in &new_balances {
+                                wb.insert(hex::encode(addr), *amount);
+                            }
+                            info!("✅ [v1.0.3] Loaded {} wallets into memory ({} QUG)",
+                                  wallet_count, wallet_total / qug);
+                        }
+
+                        // Sync emission controller to match wallet total
+                        {
+                            let mut ec = balance_engine.emission_controller_write().await;
+                            ec.set_total_cumulative_emission(wallet_total);
+                            ec.clear_rate_windows();
+                        }
+
+                        // Update total_minted_supply
+                        {
+                            let mut supply = state.total_minted_supply.write().await;
+                            *supply = wallet_total;
+                        }
+
+                        // Persist emission state
+                        if let Ok(bytes) = balance_engine.serialize_emission_state().await {
+                            let _ = state.storage_engine.save_emission_state(&bytes).await;
+                        }
+                    }
+                    Err(e) => warn!("⚠️ [v1.0.3] Failed to reload wallet balances: {}", e),
+                }
+
+                // Refresh in-memory CollateralVault from RocksDB
+                match state.storage_engine.load_collateral_vault_data().await {
+                    Ok(Some(vault_bytes)) => {
+                        match bincode::deserialize::<q_vm::contracts::CollateralVault>(&vault_bytes) {
+                            Ok(new_vault) => {
+                                let mut vault = state.collateral_vault.write().await;
+                                info!("✅ [v1.0.3] Vault loaded: {} QUG locked, {} QUGUSD minted, {} positions",
+                                      new_vault.total_qug_locked / qug, new_vault.total_qugusd_minted / qug,
+                                      new_vault.locked_qug.len());
+                                *vault = new_vault;
+                            }
+                            Err(e) => warn!("⚠️ [v1.0.3] Failed to deserialize vault: {}", e),
+                        }
+                    }
+                    Ok(None) => info!("[v1.0.3] No vault data after migration (no vault operations in chain)"),
+                    Err(e) => warn!("⚠️ [v1.0.3] Failed to load vault data: {}", e),
+                }
+
+                // Set balance watermark
+                {
+                    let tip = state.storage_engine.get_highest_contiguous_block().await.unwrap_or(0);
+                    balance_engine.set_balance_watermark(tip);
+                    info!("✅ [v1.0.3] Balance watermark set to height {}", tip);
+                }
+            }
+            Ok(false) => debug!("[v1.0.3] Convergence migration already done"),
+            Err(e) => warn!("⚠️ [v1.0.3] Convergence migration failed: {}", e),
+        }
+    }
+
     // v7.2.0: Initialize Bitcoin atomic swap bridge (QNK ↔ BTC)
     {
         let btc_rpc_url = std::env::var("BTC_RPC_URL")
@@ -9514,6 +9590,134 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                                 if swaps_applied > 0 || swaps_deduped > 0 {
                                                     info!("💱 [P2P SWAP] Block {}: {} swaps applied, {} deduped (already applied locally)",
                                                         block_height, swaps_applied, swaps_deduped);
+                                                }
+                                            }
+                                        }
+
+                                        // ============================================
+                                        // 🏦 v1.0.3: PROCESS VAULT TRANSACTIONS FROM P2P BLOCKS
+                                        // ============================================
+                                        // When blocks with StableMint/StableBurn txs arrive via gossipsub,
+                                        // we must update the CollateralVault on this node to keep vault
+                                        // state consistent across the network.
+                                        // Dedup via optimistic_applied_txs prevents double-application.
+                                        // ============================================
+                                        {
+                                            let vault_txs: Vec<&q_types::Transaction> = block.transactions.iter()
+                                                .filter(|tx| matches!(
+                                                    tx.effective_tx_type(),
+                                                    q_types::TransactionType::StableMint | q_types::TransactionType::StableBurn
+                                                ))
+                                                .collect();
+
+                                            if !vault_txs.is_empty() {
+                                                let mut mints_applied = 0u32;
+                                                let mut burns_applied = 0u32;
+                                                let mut vault_deduped = 0u32;
+                                                let qug_unit: u128 = 1_000_000_000_000_000_000_000_000;
+
+                                                for vault_tx in &vault_txs {
+                                                    // Check optimistic dedup — skip if we originated this tx
+                                                    if app_state_gossip.optimistic_applied_txs.contains_key(&vault_tx.id) {
+                                                        vault_deduped += 1;
+                                                        app_state_gossip.optimistic_applied_txs.remove(&vault_tx.id);
+                                                        continue;
+                                                    }
+
+                                                    match vault_tx.effective_tx_type() {
+                                                        q_types::TransactionType::StableMint => {
+                                                            if vault_tx.data.len() >= 32 {
+                                                                let collateral_amount = u128::from_be_bytes(
+                                                                    vault_tx.data[0..16].try_into().unwrap_or([0u8; 16])
+                                                                );
+                                                                let mint_amount = u128::from_be_bytes(
+                                                                    vault_tx.data[16..32].try_into().unwrap_or([0u8; 16])
+                                                                );
+
+                                                                if collateral_amount > 0 && mint_amount > 0 {
+                                                                    let mut vault = app_state_gossip.collateral_vault.write().await;
+                                                                    let locked = vault.locked_qug.entry(vault_tx.from).or_insert(0);
+                                                                    *locked = locked.saturating_add(collateral_amount);
+                                                                    let minted = vault.minted_qugusd.entry(vault_tx.from).or_insert(0);
+                                                                    *minted = minted.saturating_add(mint_amount);
+                                                                    vault.total_qug_locked = vault.total_qug_locked.saturating_add(collateral_amount);
+                                                                    vault.total_qugusd_minted = vault.total_qugusd_minted.saturating_add(mint_amount);
+
+                                                                    // Persist vault
+                                                                    let vault_snapshot = vault.clone();
+                                                                    drop(vault);
+                                                                    if let Ok(vault_bytes) = bincode::serialize(&vault_snapshot) {
+                                                                        let _ = app_state_gossip.storage_engine.save_collateral_vault_data(&vault_bytes).await;
+                                                                    }
+                                                                    mints_applied += 1;
+
+                                                                    debug!("🏦 [P2P VAULT] Block {}: StableMint from={}, locked={} QUG, minted={} QUGUSD",
+                                                                        block_height, hex::encode(&vault_tx.from[..4]),
+                                                                        collateral_amount / qug_unit, mint_amount / qug_unit);
+                                                                }
+                                                            }
+                                                        }
+                                                        q_types::TransactionType::StableBurn => {
+                                                            if vault_tx.data.len() >= 16 {
+                                                                let qugusd_burned = u128::from_be_bytes(
+                                                                    vault_tx.data[0..16].try_into().unwrap_or([0u8; 16])
+                                                                );
+
+                                                                if qugusd_burned > 0 {
+                                                                    let mut vault = app_state_gossip.collateral_vault.write().await;
+                                                                    let user = vault_tx.from;
+                                                                    let user_locked = vault.locked_qug.get(&user).copied().unwrap_or(0);
+                                                                    let user_minted = vault.minted_qugusd.get(&user).copied().unwrap_or(0);
+
+                                                                    // Proportional QUG unlock (deterministic, price-independent)
+                                                                    let qug_to_unlock = if user_minted > 0 {
+                                                                        let quot = user_locked / user_minted;
+                                                                        let rem = user_locked % user_minted;
+                                                                        let term1 = quot.saturating_mul(qugusd_burned);
+                                                                        let term2 = if let Some(prod) = rem.checked_mul(qugusd_burned) {
+                                                                            prod / user_minted
+                                                                        } else {
+                                                                            ((rem as f64) * (qugusd_burned as f64) / (user_minted as f64)) as u128
+                                                                        };
+                                                                        term1.saturating_add(term2).min(user_locked)
+                                                                    } else {
+                                                                        0
+                                                                    };
+
+                                                                    // Update vault positions
+                                                                    if let Some(locked) = vault.locked_qug.get_mut(&user) {
+                                                                        *locked = locked.saturating_sub(qug_to_unlock);
+                                                                        if *locked == 0 { vault.locked_qug.remove(&user); }
+                                                                    }
+                                                                    let actual_burn = qugusd_burned.min(user_minted);
+                                                                    if let Some(minted) = vault.minted_qugusd.get_mut(&user) {
+                                                                        *minted = minted.saturating_sub(actual_burn);
+                                                                        if *minted == 0 { vault.minted_qugusd.remove(&user); }
+                                                                    }
+                                                                    vault.total_qug_locked = vault.total_qug_locked.saturating_sub(qug_to_unlock);
+                                                                    vault.total_qugusd_minted = vault.total_qugusd_minted.saturating_sub(actual_burn);
+
+                                                                    // Persist vault
+                                                                    let vault_snapshot = vault.clone();
+                                                                    drop(vault);
+                                                                    if let Ok(vault_bytes) = bincode::serialize(&vault_snapshot) {
+                                                                        let _ = app_state_gossip.storage_engine.save_collateral_vault_data(&vault_bytes).await;
+                                                                    }
+                                                                    burns_applied += 1;
+
+                                                                    debug!("🏦 [P2P VAULT] Block {}: StableBurn from={}, unlocked={} QUG, burned={} QUGUSD",
+                                                                        block_height, hex::encode(&vault_tx.from[..4]),
+                                                                        qug_to_unlock / qug_unit, qugusd_burned / qug_unit);
+                                                                }
+                                                            }
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                }
+
+                                                if mints_applied > 0 || burns_applied > 0 || vault_deduped > 0 {
+                                                    info!("🏦 [P2P VAULT] Block {}: {} mints, {} burns applied, {} deduped",
+                                                        block_height, mints_applied, burns_applied, vault_deduped);
                                                 }
                                             }
                                         }
@@ -19418,6 +19622,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/mining/health", get(handlers::get_mining_health)) // v0.8.9-beta: Mining heartbeat health check
         .route("/api/v1/mining/diagnostics", get(handlers::get_mining_diagnostics)) // v2.7.0-beta: Mining system diagnostics
         .route("/api/v1/mining/capacity-local", get(q_api_server::deploy_admin_api::mining_capacity_local)) // v1.0.2: Mining capacity metrics (no auth)
+        .route("/api/v1/admin/nginx/stats-local", get(q_api_server::deploy_admin_api::nginx_stats_local)) // v8.9.9: Local nginx stats (no auth)
         .route("/api/v1/mining/stats/:wallet", get(handlers::get_wallet_mining_stats)) // v3.5.0-beta: Wallet mining stats
         // v0.0.22-beta Quick Win #1: Manual trigger endpoint REMOVED from default routes
         // Added conditionally below based on config.allow_manual_trigger
@@ -20040,6 +20245,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/admin/update/notification-email", post(q_api_server::deploy_admin_api::admin_set_notification_email))
         // v1.0.2: Mining capacity metrics (admin — aggregates all servers)
         .route("/api/v1/admin/mining/capacity", get(q_api_server::deploy_admin_api::mining_capacity))
+        // v8.9.9: Nginx load balancer stats (admin — aggregates Beta + Epsilon)
+        .route("/api/v1/admin/nginx/stats", get(q_api_server::deploy_admin_api::nginx_stats))
         // v8.2.0: Admin-only balance rebuild from chain (deterministic balance consensus)
         .route("/api/v1/admin/rebuild-balances", post(handlers::admin_rebuild_balances))
         .route("/api/v1/admin/purge-phase-data", post(admin_purge_phase_data))
@@ -20131,7 +20338,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         // non-Default type. Timeout needs Body: Default, so it must wrap the raw axum routes.
         .layer(
             ServiceBuilder::new()
-                .layer(tower::limit::ConcurrencyLimitLayer::new(200))
+                // v8.9.9: Raised from 200→5000. Mining alone needs 27 miners × 7 threads = 189.
+                // SSE connections, dashboard, API calls, etc. easily exceed 200.
+                // The mining handler has its own in-flight cap (500) for self-protection.
+                .layer(tower::limit::ConcurrencyLimitLayer::new(5000))
                 .layer(TraceLayer::new_for_http())
                 .layer(tower_http::timeout::TimeoutLayer::new(std::time::Duration::from_secs(30)))
                 .layer(CorsLayer::permissive())
