@@ -334,13 +334,24 @@ pub fn write_env_file(
     lines.push(format!("Q_P2P_PORT=9001"));
     lines.push(String::new());
 
-    // Hardware-tuned settings
+    // Hardware-tuned settings (v9.0.2: added sync tuning to prevent mining 503s during sync)
     lines.push("# Hardware-tuned (auto-detected)".to_string());
     lines.push(format!("ROCKSDB_BLOCK_CACHE_MB={}", cache_mb));
     if !hardware.is_ssd {
         lines.push("Q_CHEAP_SSD=1".to_string());
         lines.push("# HDD detected — SSD-friendly mode enabled to reduce write amplification".to_string());
     }
+
+    // Sync tuning — prevents sync from starving mining handlers
+    let (parallel_streams, sync_concurrency, rocksdb_write_rate) = match hardware.tier {
+        HardwareTier::Low => ("4", "2", "50"),
+        HardwareTier::Medium => ("8", "4", "100"),
+        HardwareTier::High => ("16", "8", "200"),
+        HardwareTier::XLarge => ("16", "8", "400"),
+    };
+    lines.push(format!("Q_TURBO_PARALLEL_STREAMS={}", parallel_streams));
+    lines.push(format!("Q_SYNC_MAX_CONCURRENCY={}", sync_concurrency));
+    lines.push(format!("Q_ROCKSDB_WRITE_RATE_MB={}", rocksdb_write_rate));
     lines.push(String::new());
 
     // Merge recommended values from bootstrap (skip keys we already set)
@@ -349,6 +360,7 @@ pub fn write_env_file(
             "Q_NETWORK_ID", "Q_DB_PATH", "Q_ADMIN_WALLET", "Q_PREFLIGHT_CHECK",
             "Q_TURBO_SYNC", "Q_BATCHED_WRITES", "Q_STATE_SYNC", "Q_IS_VALIDATOR",
             "Q_P2P_PORT", "ROCKSDB_BLOCK_CACHE_MB", "Q_CHEAP_SSD",
+            "Q_TURBO_PARALLEL_STREAMS", "Q_SYNC_MAX_CONCURRENCY", "Q_ROCKSDB_WRITE_RATE_MB",
         ]
         .iter()
         .copied()
