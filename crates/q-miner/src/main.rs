@@ -308,14 +308,16 @@ async fn device_login_flow(server_url: &str, proxy_url: Option<&str>) -> Result<
         vec![server_url.to_string(), "http://127.0.0.1:8080".to_string()]
     };
 
-    // Step 1: Request device login code — retry with fallback URLs, 5 attempts each
+    // Step 1: Request device login code — retry with fallback URLs
+    // v9.0.1: Increased attempts from 5→15 and timeout 5s→10s to handle
+    // server startup/syncing (503s) without giving up too early.
     let mut resp_data: Option<serde_json::Value> = None;
     let mut connected_url = server_url.to_string();
     'outer: for (url_idx, url) in urls_to_try.iter().enumerate() {
-        let max_attempts = if url_idx == 0 { 5 } else { 3 };
+        let max_attempts = if url_idx == 0 { 15 } else { 5 };
         for attempt in 0..max_attempts {
             match client.post(format!("{}/api/v1/miner/device-login", url))
-                .timeout(std::time::Duration::from_secs(5))
+                .timeout(std::time::Duration::from_secs(10))
                 .send().await
             {
                 Ok(r) => {
@@ -344,7 +346,7 @@ async fn device_login_flow(server_url: &str, proxy_url: Option<&str>) -> Result<
         }
     }
 
-    let resp = resp_data.ok_or_else(|| anyhow::anyhow!("Could not reach server after 30 attempts"))?;
+    let resp = resp_data.ok_or_else(|| anyhow::anyhow!("Could not reach server after 20 attempts"))?;
 
     let data = resp.get("data").ok_or_else(|| anyhow::anyhow!("Server returned no data"))?;
     let device_code = data.get("device_code").and_then(|v| v.as_str())
