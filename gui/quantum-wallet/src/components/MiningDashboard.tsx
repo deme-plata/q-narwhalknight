@@ -65,7 +65,10 @@ export default function MiningDashboard() {
   const [qugPriceUsd, setQugPriceUsd] = useState(0);
   const [blockReward, setBlockReward] = useState(0);
   // v8.2.8: Fetch actual daily emission from API instead of hardcoded constant
+  // v9.0.3: Use ACTUAL emission rate (prorated from today's data) instead of theoretical target
   const [dailyEmissionQug, setDailyEmissionQug] = useState(7186.07); // 2,625,000 / 365.25 default
+  const [dailyTargetQug, setDailyTargetQug] = useState(7186.07); // theoretical max (for display)
+  const [networkCapacityPct, setNetworkCapacityPct] = useState(100);
 
   // v8.5.5: Keep refs in sync — animation reads refs (no re-render dependency)
   connectedMinersRef.current = connectedMiners;
@@ -564,13 +567,29 @@ export default function MiningDashboard() {
           const reward = json.data?.block_reward || 0;
           if (reward > 0) setBlockReward(reward);
         }
-        // v8.2.8: Get actual daily emission target from emission controller
+        // v9.0.3: Use ACTUAL emission rate from today's data, not theoretical target.
+        // The theoretical target assumes 100% uptime — actual is lower during sync/restarts.
+        // This prevents the "Expected 300/day but got 20" confusion.
         if (emissionRes?.ok) {
           const json = await emissionRes.json();
           const dailyTarget = json.data?.summary?.daily_target_qug || 0;
+          const todayEmitted = json.data?.summary?.today_emitted_qug || 0;
           if (dailyTarget > 0) {
+            setDailyTargetQug(dailyTarget);
+          }
+          // Calculate actual daily rate from today's emission prorated to 24h
+          const now = new Date();
+          const hoursElapsedToday = now.getUTCHours() + now.getUTCMinutes() / 60;
+          if (hoursElapsedToday > 1 && todayEmitted > 0 && dailyTarget > 0) {
+            const projectedDaily = (todayEmitted / hoursElapsedToday) * 24;
+            const capacity = Math.min(100, Math.round((projectedDaily / dailyTarget) * 100));
+            setDailyEmissionQug(projectedDaily);
+            setNetworkCapacityPct(capacity);
+            console.log(`📊 Actual emission rate: ${projectedDaily.toFixed(0)} QUG/day (${capacity}% of ${dailyTarget.toFixed(0)} target)`);
+          } else if (dailyTarget > 0) {
+            // Early in the day or no data — use theoretical target
             setDailyEmissionQug(dailyTarget);
-            console.log('📊 Daily emission target from API:', dailyTarget, 'QUG/day');
+            setNetworkCapacityPct(100);
           }
         }
       } catch { /* endpoints may not be available */ }
@@ -1301,19 +1320,30 @@ export default function MiningDashboard() {
             <span className="text-sm text-gray-400">Est. Daily Earnings</span>
           </div>
           {(() => {
-            // v8.2.8: Use actual daily emission from /api/v1/emission/stats instead of hardcoded constant.
-            // Old value (224.7465) was ~32x too low — it should be 2,625,000/365.25 ≈ 7,186 QUG/day.
-            // Now fetched dynamically from the emission controller which tracks the real target.
+            // v9.0.3: Use ACTUAL daily emission rate (prorated from today's data) instead of theoretical.
+            // Shows realistic earnings based on current network performance, not best-case scenario.
             const DEV_FEE = 0.01; // 1% dev fee
             const yourShare = stats.networkHashRate > 0 ? displayHashRate / stats.networkHashRate : 0;
             const dailyQug = yourShare * dailyEmissionQug * (1 - DEV_FEE);
             const dailyUsd = dailyQug * qugPriceUsd;
+            const maxDailyQug = yourShare * dailyTargetQug * (1 - DEV_FEE);
+            const showCapacityWarning = networkCapacityPct < 90;
             return (
               <>
                 <div className="text-3xl font-bold text-white mb-1">
                   {dailyUsd > 0 ? `$${dailyUsd.toFixed(2)}` : '$0.00'}
                 </div>
                 <div className="text-sm text-emerald-400">{dailyQug.toFixed(4)} QUG/day</div>
+                {showCapacityWarning && maxDailyQug > 0 && (
+                  <div className="text-xs text-yellow-400 mt-1">
+                    Max potential: {maxDailyQug.toFixed(2)} QUG/day
+                  </div>
+                )}
+                {showCapacityWarning && (
+                  <div className="text-xs text-yellow-500/80 mt-0.5">
+                    Network at {networkCapacityPct}% capacity
+                  </div>
+                )}
                 {qugPriceUsd > 0 && (
                   <div className="text-xs text-gray-500 mt-1">@ ${qugPriceUsd.toFixed(2)}/QUG</div>
                 )}

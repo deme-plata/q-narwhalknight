@@ -935,16 +935,18 @@ async fn merge_p2p_response(
         if our_height > 0 && response.block_height > 0
             && (our_height as i64 - response.block_height as i64).unsigned_abs() < 100
         {
-            // Compute our own balance state hash
+            // Compute our own balance state hash (same format as response builder)
             let our_hash = {
                 let wb = app_state.wallet_balances.read().await;
-                let mut sorted: Vec<(&String, &u128)> = wb.iter().collect();
-                sorted.sort_by_key(|(k, _)| k.clone());
+                let mut sorted: Vec<(String, String)> = wb.iter()
+                    .map(|(addr, amount)| (hex::encode(addr), amount.to_string()))
+                    .collect();
+                sorted.sort_by(|(a, _), (b, _)| a.cmp(b));
                 let mut hasher = blake3::Hasher::new();
                 for (addr, amount) in &sorted {
                     hasher.update(addr.as_bytes());
                     hasher.update(b":");
-                    hasher.update(amount.to_string().as_bytes());
+                    hasher.update(amount.as_bytes());
                     hasher.update(b"\n");
                 }
                 hasher.finalize().to_hex().to_string()

@@ -3327,7 +3327,7 @@ export default function ExplorerScreen() {
           {/* v6.2.5: Live Emission Analytics Card with hover dropdown */}
           {(() => {
             // v7.3.3: Use genesis_timestamp from API when available (handles different networks)
-            const GENESIS_TS = emissionStats?.summary.genesis_timestamp ?? 1739836800; // Fallback: rehearsal Feb 18, 2026
+            const GENESIS_TS = emissionStats?.summary.genesis_timestamp ?? 1771761600; // Fallback: mainnet-genesis Feb 22, 2026 12:00 UTC
             const SECS_PER_ERA = 126_230_400; // 4 × 365.25 × 86400 (v7.0.0: corrected for leap years)
             const nowSec = Math.floor(Date.now() / 1000);
             // Clamp era >= 0 to prevent negative era when before genesis

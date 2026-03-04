@@ -648,18 +648,17 @@ Provide a brief analysis (under 250 tokens) covering:
 
           if (bestBalance > 0) {
             console.log('💰 Using best known balance after node status error:', bestBalance);
-            setNodeStatus({
+            setNodeStatus(prev => ({
+              ...(prev || {} as NodeStatus),
               balance: bestBalance,
               network_health: 'unknown',
               consensus_status: 'unknown',
-              is_validator: false,
-              current_round: 0,
-              current_height: 0,
-              tx_pool_size: 0,
-              tps_current: 0,
-              tps_average: 0,
-              uptime_formatted: '0h 0m 0s',
-            } as NodeStatus);
+              // Keep previous height/stats if available — don't reset to 0
+              current_height: prev?.current_height || 0,
+              tps_current: prev?.tps_current || 0,
+              tps_average: prev?.tps_average || 0,
+              uptime_formatted: prev?.uptime_formatted || '0h 0m 0s',
+            } as NodeStatus));
           } else {
             setError('Failed to connect to Q-NarwhalKnight node');
           }
@@ -1201,34 +1200,23 @@ Provide a brief analysis (under 250 tokens) covering:
     // ============================================
 
     const loadData = async (retryCount = 0) => {
-      console.log(`🚀 [loadData] START - Loading dashboard data... (attempt ${retryCount + 1})`);
       setLoading(true);
-      let loadSuccess = false;
       try {
-        console.log('🚀 [loadData] Step 1: Generating wallet address...');
         await generateWalletAddress();
-        console.log('🚀 [loadData] Step 2: Calling fetchNodeStatus and fetchRecentTransactions (DIRECT - bypass debounce)...');
-        // For initial load, call core functions directly to bypass debounce
-        await Promise.all([fetchNodeStatusCore(), fetchRecentTransactionsCore(), fetchWalletBalances()]);
-        console.log('🚀 [loadData] Step 3: All API calls completed');
-        loadSuccess = true;
+        // v8.9.9: Add 15s timeout to prevent infinite hang when API doesn't respond
+        await Promise.race([
+          Promise.all([fetchNodeStatusCore(), fetchRecentTransactionsCore(), fetchWalletBalances()]),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Dashboard load timeout')), 15000)),
+        ]);
+        setLoading(false);
       } catch (error) {
-        console.error('❌ [loadData] Error loading data:', error);
-        // v3.4.15: Auto-retry on initial load failure (likely API discovery timing issue)
+        console.error('[loadData] Error:', error);
         if (retryCount < 2 && mounted) {
-          console.log(`🔄 [loadData] Retrying in ${(retryCount + 1) * 500}ms...`);
-          setTimeout(() => {
-            if (mounted) {
-              loadData(retryCount + 1);
-            }
-          }, (retryCount + 1) * 500); // 500ms, 1000ms delays
-          return; // Don't set loading=false yet
-        }
-      } finally {
-        // Set loading to false on success or final retry
-        if (loadSuccess || retryCount >= 2) {
+          // Retry with backoff — don't touch loading state (retry will handle it)
+          setTimeout(() => { if (mounted) loadData(retryCount + 1); }, (retryCount + 1) * 500);
+        } else {
+          // Final retry failed or unmounted — always clear loading
           setLoading(false);
-          console.log('✅ [loadData] COMPLETE - Dashboard data loaded');
         }
       }
     };

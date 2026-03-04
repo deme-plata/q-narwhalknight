@@ -2186,12 +2186,14 @@ async fn start_sse_listener(
     // Normalize URL to prevent double slashes
     let normalized_url = normalize_server_url(&server_url);
 
-    // v9.0.1: headers_only=true sends compact ~100-byte block headers instead of ~2-5KB full blocks.
-    // miner_mode=true tells the server to only forward mining-relevant events, dropping
-    // MetricsUpdate, NodeStatusUpdate, TokenPriceUpdate, emails, calendar, etc.
-    // Combined savings: ~111 KB/s → ~2-5 KB/s for 256-thread miners.
-    let primary_url = format!("{}/api/v1/events?wallet_address={}&headers_only=true&miner_mode=true", normalized_url, wallet);
-    let fallback_url = format!("{}/api/v1/events?wallet_address={}&headers_only=true&miner_mode=true", FALLBACK_BOOTSTRAP_URL, wallet);
+    // v9.0.2: Use miner_mode=true to drop non-mining SSE events (MetricsUpdate,
+    // NodeStatusUpdate, etc.) — saves ~80 KB/s. Server ignores unknown params, so
+    // this is backwards-compatible with older servers.
+    // NOTE: headers_only removed — it changes NewBlock format and older servers
+    // send compact headers the miner can't always parse. Re-enable when all servers
+    // are upgraded to v9.0.1+.
+    let primary_url = format!("{}/api/v1/events?wallet_address={}&miner_mode=true", normalized_url, wallet);
+    let fallback_url = format!("{}/api/v1/events?wallet_address={}&miner_mode=true", FALLBACK_BOOTSTRAP_URL, wallet);
     let mut use_fallback = false;
     let mut primary_fail_count = 0u32;
 
@@ -2232,7 +2234,11 @@ async fn start_sse_listener(
                     if ev.event_type == "new-block" {
                         match serde_json::from_str::<serde_json::Value>(&ev.data) {
                             Ok(data) => {
-                                if let Some(block_height) = data.get("height").and_then(|v| v.as_u64()) {
+                                // v9.0.2: Handle both flat format {"height": N} and
+                                // serde tagged enum format {"type": "NewBlock", "data": {"height": N}}
+                                let block_height = data.get("height").and_then(|v| v.as_u64())
+                                    .or_else(|| data.get("data").and_then(|d| d.get("height")).and_then(|v| v.as_u64()));
+                                if let Some(block_height) = block_height {
                                     let new_signal = new_block_signal.fetch_add(1, Ordering::SeqCst) + 1;
                                     let _ = sse_event_tx.send(DiagnosticEvent::NewBlockSignal { block_height });
                                     info!("🔔 NEW BLOCK #{} detected via SSE - signaling mining threads (signal: {})",
@@ -2378,9 +2384,9 @@ async fn decentralized_sse_listener(
     use futures::StreamExt;
 
     let normalized_url = normalize_server_url(&server_url);
-    // v9.0.1: headers_only + miner_mode for bandwidth optimization
-    let primary_url = format!("{}/api/v1/events?wallet_address={}&headers_only=true&miner_mode=true", normalized_url, wallet);
-    let fallback_url = format!("{}/api/v1/events?wallet_address={}&headers_only=true&miner_mode=true", FALLBACK_BOOTSTRAP_URL, wallet);
+    // v9.0.2: miner_mode drops non-mining SSE events (backwards-compatible)
+    let primary_url = format!("{}/api/v1/events?wallet_address={}&miner_mode=true", normalized_url, wallet);
+    let fallback_url = format!("{}/api/v1/events?wallet_address={}&miner_mode=true", FALLBACK_BOOTSTRAP_URL, wallet);
     let mut use_fallback = false;
     let mut primary_fail_count = 0u32;
 
@@ -2416,7 +2422,10 @@ async fn decentralized_sse_listener(
                 Some(Ok(eventsource::SSE::Event(ev))) => {
                     if ev.event_type == "new-block" {
                         if let Ok(data) = serde_json::from_str::<serde_json::Value>(&ev.data) {
-                            if let Some(block_height) = data.get("height").and_then(|v| v.as_u64()) {
+                            // v9.0.2: Handle both flat and tagged enum formats
+                            let block_height = data.get("height").and_then(|v| v.as_u64())
+                                .or_else(|| data.get("data").and_then(|d| d.get("height")).and_then(|v| v.as_u64()));
+                            if let Some(block_height) = block_height {
                                 let new_signal = new_block_signal.fetch_add(1, Ordering::SeqCst) + 1;
                                 info!("[decentralized-SSE] NEW BLOCK #{} - signaling threads (signal: {})",
                                      block_height, new_signal);

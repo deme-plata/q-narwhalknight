@@ -125,6 +125,57 @@ interface MiningCapacityAll {
   alpha: MiningCapacityLocal | null;
 }
 
+// v8.9.9: Nginx load balancer stats
+interface NginxStubStatus {
+  active_connections: number;
+  accepts: number;
+  handled: number;
+  requests: number;
+  reading: number;
+  writing: number;
+  waiting: number;
+}
+
+interface NginxUpstreamServer {
+  address: string;
+  role: string;
+  weight: number;
+  status: string;
+}
+
+interface NginxUpstream {
+  name: string;
+  method: string;
+  servers: NginxUpstreamServer[];
+}
+
+interface NginxStats {
+  stub_status: NginxStubStatus | null;
+  upstreams: NginxUpstream[];
+  requests_per_second: number;
+  server_name: string;
+}
+
+interface NginxStatsAll {
+  beta: NginxStats | null;
+  epsilon: NginxStats | null;
+}
+
+// v9.0.2: Decentralization Index metrics
+interface DecentralizationMetrics {
+  unique_wallets: number;
+  total_workers: number;
+  top_miner_pct: number;
+  top3_miners_pct: number;
+  nakamoto_coefficient: number;
+  gini_coefficient: number;
+  hhi: number;
+  node_count: number;
+  peer_count: number;
+  decentralization_index: number;
+  grade: string;
+}
+
 interface VerifyEvent {
   step: string;
   status: string;
@@ -528,7 +579,7 @@ function ServerCard({ node, isActive, role, syncMetrics, miningCap }: { node: No
   const isSyncing = sd ? sd.total_chunks > 0 && sd.completed_chunks < sd.total_chunks : false;
 
   return (
-    <div className={`rounded-xl border p-3 relative ${
+    <div className={`rounded-xl border p-4 relative ${
       node.online
         ? isActive
           ? 'border-emerald-400/50 bg-emerald-500/10 ring-1 ring-emerald-400/20'
@@ -729,6 +780,8 @@ export default function DeployControlPanel() {
   const [devFeeMsg, setDevFeeMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [syncMetricsMap, setSyncMetricsMap] = useState<Record<string, SyncMetrics>>({});
   const [miningCapacity, setMiningCapacity] = useState<MiningCapacityAll | null>(null);
+  const [nginxStats, setNginxStats] = useState<NginxStatsAll | null>(null);
+  const [decentral, setDecentral] = useState<DecentralizationMetrics | null>(null);
   const prevHeightsRef = useRef<Record<string, { height: number; ts: number }>>({});
   // v8.2.9: Peak height tracking — never show a height decrease (prevents "rollback" scare)
   const peakHeightsRef = useRef<Record<string, number>>({});
@@ -861,11 +914,12 @@ export default function DeployControlPanel() {
       'Authorization': `Bearer ${walletAddress}`,
     };
     try {
-      const [statusResp, convResp, devFeeResp, mCapResp] = await Promise.all([
+      const [statusResp, convResp, devFeeResp, mCapResp, diResp] = await Promise.all([
         fetch('/api/v1/admin/deploy/status', { headers }),
         fetch('/api/v1/admin/deploy/convergence', { headers }).catch(() => null),
         isMaster ? fetch('/api/v1/admin/dev-fee', { headers }).catch(() => null) : Promise.resolve(null),
         isMaster ? fetch('/api/v1/admin/mining/capacity', { headers }).catch(() => null) : Promise.resolve(null),
+        isMaster ? fetch('/api/v1/admin/decentralization', { headers }).catch(() => null) : Promise.resolve(null),
       ]);
 
       if (statusResp.status === 403) {
@@ -954,6 +1008,29 @@ export default function DeployControlPanel() {
           const mCapJson = await mCapResp.json();
           if (mCapJson.data) {
             setMiningCapacity(mCapJson.data);
+          }
+        } catch {}
+      }
+
+      // Parse decentralization index
+      if (diResp && diResp.ok) {
+        try {
+          const diJson = await diResp.json();
+          if (diJson.data) setDecentral(diJson.data);
+        } catch {}
+      }
+
+      // v8.9.9: Fetch nginx stats (admin only)
+      if (isMaster) {
+        try {
+          const nginxResp = await fetch(`${connInfo.apiBaseUrl}/api/v1/admin/nginx/stats`, {
+            headers: { 'X-Wallet-Auth': walletAddress || '' },
+          });
+          if (nginxResp.ok) {
+            const nginxJson = await nginxResp.json();
+            if (nginxJson.data) {
+              setNginxStats(nginxJson.data);
+            }
           }
         } catch {}
       }
@@ -1398,7 +1475,7 @@ export default function DeployControlPanel() {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -40 }}
             transition={{ type: 'spring', damping: 25, stiffness: 300 }}
-            className="fixed top-4 left-1/2 transform -translate-x-1/2 w-[820px] max-w-[95vw] max-h-[90vh] overflow-y-auto rounded-2xl z-[99999]"
+            className="fixed top-4 left-1/2 transform -translate-x-1/2 w-[1640px] max-w-[95vw] max-h-[90vh] overflow-y-auto rounded-2xl z-[99999]"
             style={{
               background: 'linear-gradient(135deg, rgba(15, 10, 35, 0.98) 0%, rgba(30, 20, 55, 0.98) 100%)',
               border: '2px solid rgba(16, 185, 129, 0.3)',
@@ -1525,6 +1602,98 @@ export default function DeployControlPanel() {
                 </div>
               </div>
 
+              {/* v8.9.9: Nginx Load Balancer Stats */}
+              {isMasterWallet && nginxStats && (
+                <div className="rounded-xl border border-cyan-500/30 bg-cyan-500/5 p-3">
+                  <div className="flex items-center gap-2 mb-3">
+                    <Globe className="w-4 h-4 text-cyan-400" />
+                    <span className="text-xs font-semibold text-cyan-200">Nginx Load Balancer</span>
+                  </div>
+
+                  {/* Connection Gauges — Beta + Epsilon side by side */}
+                  <div className="grid grid-cols-2 gap-3 mb-3">
+                    {[
+                      { label: 'Beta', stats: nginxStats.beta },
+                      { label: 'Epsilon', stats: nginxStats.epsilon },
+                    ].map(({ label, stats: s }) => (
+                      <div key={label} className="bg-slate-800/40 rounded-lg p-2">
+                        <div className="text-[10px] text-cyan-300/60 mb-1.5 font-semibold">{label} nginx</div>
+                        {s?.stub_status ? (
+                          <>
+                            <div className="grid grid-cols-4 gap-1.5 text-[10px]">
+                              <div className="text-center">
+                                <div className={`text-sm font-bold ${
+                                  s.stub_status.active_connections > 10000 ? 'text-red-400' :
+                                  s.stub_status.active_connections > 2000 ? 'text-amber-400' : 'text-cyan-300'
+                                }`}>
+                                  {s.stub_status.active_connections > 1000
+                                    ? `${(s.stub_status.active_connections / 1000).toFixed(1)}K`
+                                    : s.stub_status.active_connections}
+                                </div>
+                                <div className="text-cyan-300/50">Active</div>
+                              </div>
+                              <div className="text-center">
+                                <div className="text-sm font-bold text-blue-300">{s.stub_status.reading}</div>
+                                <div className="text-cyan-300/50">Reading</div>
+                              </div>
+                              <div className="text-center">
+                                <div className="text-sm font-bold text-amber-300">{s.stub_status.writing}</div>
+                                <div className="text-cyan-300/50">Writing</div>
+                              </div>
+                              <div className="text-center">
+                                <div className="text-sm font-bold text-emerald-300">{s.stub_status.waiting}</div>
+                                <div className="text-cyan-300/50">Waiting</div>
+                              </div>
+                            </div>
+                            <div className="mt-1.5 text-[10px] text-cyan-300/40 flex justify-between">
+                              <span>{s.requests_per_second > 0 ? `${s.requests_per_second.toFixed(0)} req/s` : '—'}</span>
+                              <span>{(s.stub_status.requests / 1000000).toFixed(1)}M total reqs</span>
+                            </div>
+                          </>
+                        ) : (
+                          <div className="text-[10px] text-red-400/60">Offline</div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Upstream Topology */}
+                  {nginxStats.beta?.upstreams && nginxStats.beta.upstreams.length > 0 && (
+                    <div className="space-y-2">
+                      <div className="text-[10px] text-cyan-300/50 uppercase tracking-wider">Upstreams</div>
+                      {nginxStats.beta.upstreams.map(upstream => (
+                        <div key={upstream.name} className="bg-slate-800/30 rounded-lg p-2">
+                          <div className="flex items-center gap-2 mb-1.5">
+                            <span className="text-[10px] font-mono font-semibold text-cyan-200">{upstream.name}</span>
+                            <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-slate-700/50 text-amber-300/70">
+                              {upstream.method}
+                            </span>
+                          </div>
+                          <div className="flex gap-1 flex-wrap">
+                            {upstream.servers.map(srv => (
+                              <div
+                                key={srv.address}
+                                className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] ${
+                                  srv.status === 'up'
+                                    ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300'
+                                    : 'bg-red-500/10 border border-red-500/20 text-red-400/60'
+                                }`}
+                              >
+                                <div className={`w-1.5 h-1.5 rounded-full ${
+                                  srv.status === 'up' ? 'bg-emerald-400' : 'bg-red-400/40'
+                                }`} />
+                                <span className="font-medium">{srv.role}</span>
+                                <span className="text-amber-200/40">w={srv.weight}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* Error */}
               {error && (
                 <div className="flex items-center gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/30">
@@ -1536,7 +1705,7 @@ export default function DeployControlPanel() {
               {/* Server Status Cards */}
               {deployStatus ? (
                 <>
-                  <div className="grid grid-cols-5 gap-2">
+                  <div className="grid grid-cols-5 gap-3">
                     <ServerCard
                       node={deployStatus.epsilon}
                       isActive={true}
@@ -1573,6 +1742,82 @@ export default function DeployControlPanel() {
                       miningCap={miningCapacity?.alpha}
                     />
                   </div>
+
+                  {/* Decentralization Index Gauge */}
+                  {decentral && (
+                    <div className="rounded-xl border border-cyan-500/30 bg-cyan-500/5 p-4">
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-2">
+                          <Globe className="w-4 h-4 text-cyan-400" />
+                          <span className="text-sm font-bold text-cyan-200 tracking-wide">DECENTRALIZATION INDEX</span>
+                        </div>
+                        <div className={`px-3 py-1 rounded-full text-lg font-black ${
+                          decentral.grade.startsWith('A') ? 'bg-emerald-500/20 text-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.3)]'
+                          : decentral.grade === 'B' ? 'bg-blue-500/20 text-blue-300 shadow-[0_0_12px_rgba(59,130,246,0.3)]'
+                          : decentral.grade === 'C' ? 'bg-amber-500/20 text-amber-300 shadow-[0_0_12px_rgba(245,158,11,0.3)]'
+                          : 'bg-red-500/20 text-red-300 shadow-[0_0_12px_rgba(239,68,68,0.3)]'
+                        }`}>
+                          {decentral.grade}
+                        </div>
+                      </div>
+
+                      {/* Main progress bar */}
+                      <div className="relative h-4 rounded-full bg-slate-700/50 overflow-hidden mb-4">
+                        <div
+                          className="h-full rounded-full transition-all duration-1000 relative overflow-hidden"
+                          style={{
+                            width: `${decentral.decentralization_index}%`,
+                            background: decentral.decentralization_index >= 75
+                              ? 'linear-gradient(90deg, #10b981, #06b6d4)'
+                              : decentral.decentralization_index >= 40
+                              ? 'linear-gradient(90deg, #f59e0b, #10b981)'
+                              : 'linear-gradient(90deg, #ef4444, #f59e0b)',
+                          }}
+                        >
+                          <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent animate-[shimmer_2s_infinite]"
+                            style={{ animation: 'shimmer 2s infinite linear', backgroundSize: '200% 100%' }} />
+                        </div>
+                        <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[11px] font-bold text-white/80">
+                          {decentral.decentralization_index.toFixed(0)}/100
+                        </span>
+                      </div>
+
+                      {/* Sub-metric cards */}
+                      <div className="grid grid-cols-5 gap-3 mb-3">
+                        {[
+                          { label: 'Nakamoto', value: decentral.nakamoto_coefficient, display: String(decentral.nakamoto_coefficient), pct: Math.min(decentral.nakamoto_coefficient / 10 * 100, 100) },
+                          { label: 'Gini', value: decentral.gini_coefficient, display: decentral.gini_coefficient.toFixed(2), pct: (1 - decentral.gini_coefficient) * 100 },
+                          { label: 'Miners', value: decentral.unique_wallets, display: String(decentral.unique_wallets), pct: Math.min(decentral.unique_wallets / 50 * 100, 100) },
+                          { label: 'Nodes', value: decentral.node_count, display: `${decentral.node_count}/5`, pct: Math.min(decentral.node_count / 5 * 100, 100) },
+                          { label: 'Peers', value: decentral.peer_count, display: String(decentral.peer_count), pct: Math.min(decentral.peer_count / 30 * 100, 100) },
+                        ].map(m => (
+                          <div key={m.label} className="rounded-lg bg-slate-800/50 border border-slate-700/50 p-2.5 text-center">
+                            <div className="text-[10px] text-slate-400 mb-1">{m.label}</div>
+                            <div className="text-sm font-bold text-white mb-1.5">{m.display}</div>
+                            <div className="h-1.5 rounded-full bg-slate-700/50 overflow-hidden mb-1">
+                              <div className={`h-full rounded-full transition-all duration-700 ${
+                                m.pct >= 75 ? 'bg-emerald-500' : m.pct >= 40 ? 'bg-amber-500' : 'bg-red-500'
+                              }`} style={{ width: `${m.pct}%` }} />
+                            </div>
+                            <div className="text-[9px] text-slate-500">{m.pct.toFixed(0)}%</div>
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* Footer stats */}
+                      <div className="flex items-center justify-center gap-4 text-[10px] text-slate-400">
+                        <span>Top miner: <span className="text-white/70">{decentral.top_miner_pct.toFixed(1)}%</span></span>
+                        <span className="text-slate-600">·</span>
+                        <span>Top 3: <span className="text-white/70">{decentral.top3_miners_pct.toFixed(1)}%</span></span>
+                        <span className="text-slate-600">·</span>
+                        <span>HHI: <span className="text-white/70">{decentral.hhi.toFixed(0)}</span>
+                          <span className="ml-1">({decentral.hhi < 1500 ? 'unconcentrated' : decentral.hhi < 2500 ? 'moderate' : 'concentrated'})</span>
+                        </span>
+                        <span className="text-slate-600">·</span>
+                        <span>{decentral.total_workers} workers</span>
+                      </div>
+                    </div>
+                  )}
 
                   {/* CCC Convergence Readiness Panel */}
                   {convergence && (

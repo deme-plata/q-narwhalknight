@@ -8390,13 +8390,24 @@ pub async fn submit_mining_solution(
     static MINING_SEMAPHORE: Lazy<tokio::sync::Semaphore> = Lazy::new(|| tokio::sync::Semaphore::new(1000));
     static MINING_IN_FLIGHT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-    // Adaptive cap based on sync state
+    // Adaptive cap based on sync state — AGGRESSIVE throttling when far behind
+    // v9.0.2: Reduced caps drastically to prevent mining from starving sync loop.
+    // When >1000 behind: instant reject ALL mining (sync needs 100% CPU)
+    // When >100 behind: cap 50 (was 300 — 300 still saturated CPU at 42s/batch)
+    // When >10 behind: cap 200 (was 600)
+    // At tip: cap 1000 (full throughput)
     let sync_behind = {
         let local_h = state.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
         let net_h = state.highest_network_height.load(std::sync::atomic::Ordering::Relaxed);
         if net_h > local_h { net_h - local_h } else { 0 }
     };
-    let dynamic_cap: u32 = if sync_behind > 100 { 300 } else if sync_behind > 10 { 600 } else { 1000 };
+
+    // Hard reject when severely behind — sync MUST have priority
+    if sync_behind > 1000 {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    let dynamic_cap: u32 = if sync_behind > 100 { 50 } else if sync_behind > 10 { 200 } else { 1000 };
 
     // Check if we're over the dynamic cap before even trying the semaphore
     let current_in_flight = MINING_IN_FLIGHT.load(std::sync::atomic::Ordering::Relaxed);
