@@ -125,43 +125,39 @@ interface MiningCapacityAll {
   alpha: MiningCapacityLocal | null;
 }
 
-// v8.9.9: Nginx load balancer stats
-interface NginxStubStatus {
-  active_connections: number;
-  accepts: number;
-  handled: number;
-  requests: number;
-  reading: number;
-  writing: number;
-  waiting: number;
+// v9.0.6: Caddy reverse proxy metrics (replaces nginx stats)
+interface CaddyRequestsByStatus {
+  ok_2xx: number;
+  redirect_3xx: number;
+  client_err_4xx: number;
+  server_err_5xx: number;
+  websocket_101: number;
 }
 
-interface NginxUpstreamServer {
+interface CaddyUpstream {
   address: string;
-  role: string;
-  weight: number;
-  status: string;
+  healthy: boolean;
 }
 
-interface NginxUpstream {
-  name: string;
-  method: string;
-  servers: NginxUpstreamServer[];
-}
-
-interface NginxStats {
-  stub_status: NginxStubStatus | null;
-  upstreams: NginxUpstream[];
+interface CaddyStats {
+  total_requests: number;
+  requests_by_status: CaddyRequestsByStatus;
   requests_per_second: number;
+  avg_response_ms: number;
+  p99_response_ms: number;
+  goroutines: number;
+  memory_mb: number;
+  upstreams: CaddyUpstream[];
   server_name: string;
+  last_reload: number;
+  online: boolean;
 }
 
-interface NginxStatsAll {
-  beta: NginxStats | null;
-  epsilon: NginxStats | null;
+interface CaddyStatsAll {
+  epsilon: CaddyStats | null;
 }
 
-// v9.0.2: Decentralization Index metrics
+// v9.0.6: Decentralization Index metrics — sqrt scaling, EMA smoothing, wealth Gini, Shannon entropy
 interface DecentralizationMetrics {
   unique_wallets: number;
   total_workers: number;
@@ -172,6 +168,11 @@ interface DecentralizationMetrics {
   hhi: number;
   node_count: number;
   peer_count: number;
+  wealth_gini: number;
+  entropy_score: number;
+  infrastructure_nodes: number;
+  community_nodes: number;
+  decentralization_index_raw: number;
   decentralization_index: number;
   grade: string;
 }
@@ -793,7 +794,7 @@ export default function DeployControlPanel() {
   const [devFeeMsg, setDevFeeMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [syncMetricsMap, setSyncMetricsMap] = useState<Record<string, SyncMetrics>>({});
   const [miningCapacity, setMiningCapacity] = useState<MiningCapacityAll | null>(null);
-  const [nginxStats, setNginxStats] = useState<NginxStatsAll | null>(null);
+  const [caddyStats, setCaddyStats] = useState<CaddyStatsAll | null>(null);
   const [decentral, setDecentral] = useState<DecentralizationMetrics | null>(null);
   const prevHeightsRef = useRef<Record<string, { height: number; ts: number }>>({});
   // v8.2.9: Peak height tracking — never show a height decrease (prevents "rollback" scare)
@@ -1036,13 +1037,13 @@ export default function DeployControlPanel() {
       // v8.9.9: Fetch nginx stats (admin only)
       if (isMaster) {
         try {
-          const nginxResp = await fetch(`${connInfo.apiBaseUrl}/api/v1/admin/nginx/stats`, {
+          const caddyResp = await fetch(`${connInfo.apiBaseUrl}/api/v1/admin/caddy/stats`, {
             headers: { 'X-Wallet-Auth': walletAddress || '' },
           });
-          if (nginxResp.ok) {
-            const nginxJson = await nginxResp.json();
-            if (nginxJson.data) {
-              setNginxStats(nginxJson.data);
+          if (caddyResp.ok) {
+            const caddyJson = await caddyResp.json();
+            if (caddyJson.data) {
+              setCaddyStats(caddyJson.data);
             }
           }
         } catch {}
@@ -1615,94 +1616,139 @@ export default function DeployControlPanel() {
                 </div>
               </div>
 
-              {/* v8.9.9: Nginx Load Balancer Stats */}
-              {isMasterWallet && nginxStats && (
+              {/* v9.0.6: Caddy Reverse Proxy Metrics */}
+              {isMasterWallet && caddyStats?.epsilon && (
                 <div className="rounded-xl border border-cyan-500/30 bg-cyan-500/5 p-3">
-                  <div className="flex items-center gap-2 mb-3">
-                    <Globe className="w-4 h-4 text-cyan-400" />
-                    <span className="text-xs font-semibold text-cyan-200">Nginx Load Balancer</span>
-                  </div>
-
-                  {/* Connection Gauges — Beta + Epsilon side by side */}
-                  <div className="grid grid-cols-2 gap-3 mb-3">
-                    {[
-                      { label: 'Beta', stats: nginxStats.beta },
-                      { label: 'Epsilon', stats: nginxStats.epsilon },
-                    ].map(({ label, stats: s }) => (
-                      <div key={label} className="bg-slate-800/40 rounded-lg p-2">
-                        <div className="text-[10px] text-cyan-300/60 mb-1.5 font-semibold">{label} nginx</div>
-                        {s?.stub_status ? (
-                          <>
-                            <div className="grid grid-cols-4 gap-1.5 text-[10px]">
-                              <div className="text-center">
-                                <div className={`text-sm font-bold ${
-                                  s.stub_status.active_connections > 10000 ? 'text-red-400' :
-                                  s.stub_status.active_connections > 2000 ? 'text-amber-400' : 'text-cyan-300'
-                                }`}>
-                                  {s.stub_status.active_connections > 1000
-                                    ? `${(s.stub_status.active_connections / 1000).toFixed(1)}K`
-                                    : s.stub_status.active_connections}
-                                </div>
-                                <div className="text-cyan-300/50">Active</div>
-                              </div>
-                              <div className="text-center">
-                                <div className="text-sm font-bold text-blue-300">{s.stub_status.reading}</div>
-                                <div className="text-cyan-300/50">Reading</div>
-                              </div>
-                              <div className="text-center">
-                                <div className="text-sm font-bold text-amber-300">{s.stub_status.writing}</div>
-                                <div className="text-cyan-300/50">Writing</div>
-                              </div>
-                              <div className="text-center">
-                                <div className="text-sm font-bold text-emerald-300">{s.stub_status.waiting}</div>
-                                <div className="text-cyan-300/50">Waiting</div>
-                              </div>
-                            </div>
-                            <div className="mt-1.5 text-[10px] text-cyan-300/40 flex justify-between">
-                              <span>{s.requests_per_second > 0 ? `${s.requests_per_second.toFixed(0)} req/s` : '—'}</span>
-                              <span>{(s.stub_status.requests / 1000000).toFixed(1)}M total reqs</span>
-                            </div>
-                          </>
-                        ) : (
-                          <div className="text-[10px] text-red-400/60">Offline</div>
-                        )}
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-2">
+                      <Globe className="w-4 h-4 text-cyan-400" />
+                      <span className="text-xs font-semibold text-cyan-200">Caddy Reverse Proxy</span>
+                      <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">Epsilon</span>
+                    </div>
+                    {caddyStats.epsilon.online && (
+                      <div className="flex items-center gap-1">
+                        <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                        <span className="text-[9px] text-emerald-300/70">Live</span>
                       </div>
-                    ))}
+                    )}
                   </div>
 
-                  {/* Upstream Topology */}
-                  {nginxStats.beta?.upstreams && nginxStats.beta.upstreams.length > 0 && (
-                    <div className="space-y-2">
-                      <div className="text-[10px] text-cyan-300/50 uppercase tracking-wider">Upstreams</div>
-                      {nginxStats.beta.upstreams.map(upstream => (
-                        <div key={upstream.name} className="bg-slate-800/30 rounded-lg p-2">
-                          <div className="flex items-center gap-2 mb-1.5">
-                            <span className="text-[10px] font-mono font-semibold text-cyan-200">{upstream.name}</span>
-                            <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-slate-700/50 text-amber-300/70">
-                              {upstream.method}
+                  {caddyStats.epsilon.online ? (() => {
+                    const s = caddyStats.epsilon!;
+                    const totalByStatus = s.requests_by_status.ok_2xx + s.requests_by_status.client_err_4xx + s.requests_by_status.server_err_5xx + s.requests_by_status.redirect_3xx + s.requests_by_status.websocket_101;
+                    const errRate = totalByStatus > 0 ? ((s.requests_by_status.server_err_5xx / totalByStatus) * 100) : 0;
+                    return (
+                      <>
+                        {/* Top row: key gauges */}
+                        <div className="grid grid-cols-5 gap-2 mb-3">
+                          <div className="bg-slate-800/40 rounded-lg p-2 text-center">
+                            <div className={`text-base font-bold ${
+                              s.requests_per_second > 500 ? 'text-amber-300' : 'text-cyan-300'
+                            }`}>
+                              {s.requests_per_second > 0 ? s.requests_per_second.toFixed(0) : '0'}
+                            </div>
+                            <div className="text-[9px] text-cyan-300/50">req/s</div>
+                          </div>
+                          <div className="bg-slate-800/40 rounded-lg p-2 text-center">
+                            <div className={`text-base font-bold ${
+                              s.avg_response_ms > 500 ? 'text-red-400' :
+                              s.avg_response_ms > 100 ? 'text-amber-300' : 'text-emerald-300'
+                            }`}>
+                              {s.avg_response_ms < 1 ? '<1' : s.avg_response_ms.toFixed(0)}
+                            </div>
+                            <div className="text-[9px] text-cyan-300/50">avg ms</div>
+                          </div>
+                          <div className="bg-slate-800/40 rounded-lg p-2 text-center">
+                            <div className={`text-base font-bold ${
+                              s.p99_response_ms > 2000 ? 'text-red-400' :
+                              s.p99_response_ms > 500 ? 'text-amber-300' : 'text-emerald-300'
+                            }`}>
+                              {s.p99_response_ms < 1 ? '<1' : s.p99_response_ms >= 1000 ? `${(s.p99_response_ms / 1000).toFixed(1)}s` : `${s.p99_response_ms.toFixed(0)}`}
+                            </div>
+                            <div className="text-[9px] text-cyan-300/50">p99 ms</div>
+                          </div>
+                          <div className="bg-slate-800/40 rounded-lg p-2 text-center">
+                            <div className={`text-base font-bold ${
+                              errRate > 5 ? 'text-red-400' :
+                              errRate > 1 ? 'text-amber-300' : 'text-emerald-300'
+                            }`}>
+                              {errRate > 0 ? errRate.toFixed(1) : '0'}%
+                            </div>
+                            <div className="text-[9px] text-cyan-300/50">5xx err</div>
+                          </div>
+                          <div className="bg-slate-800/40 rounded-lg p-2 text-center">
+                            <div className="text-base font-bold text-blue-300">
+                              {s.goroutines > 1000 ? `${(s.goroutines / 1000).toFixed(1)}K` : s.goroutines}
+                            </div>
+                            <div className="text-[9px] text-cyan-300/50">goroutines</div>
+                          </div>
+                        </div>
+
+                        {/* Status code breakdown bar */}
+                        <div className="mb-3">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-[9px] text-cyan-300/50 uppercase tracking-wider">Response Codes</span>
+                            <span className="text-[9px] text-cyan-300/40">
+                              {s.total_requests > 1000000 ? `${(s.total_requests / 1000000).toFixed(1)}M` :
+                               s.total_requests > 1000 ? `${(s.total_requests / 1000).toFixed(1)}K` :
+                               s.total_requests} total
                             </span>
                           </div>
-                          <div className="flex gap-1 flex-wrap">
-                            {upstream.servers.map(srv => (
-                              <div
-                                key={srv.address}
-                                className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] ${
-                                  srv.status === 'up'
-                                    ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300'
-                                    : 'bg-red-500/10 border border-red-500/20 text-red-400/60'
-                                }`}
-                              >
-                                <div className={`w-1.5 h-1.5 rounded-full ${
-                                  srv.status === 'up' ? 'bg-emerald-400' : 'bg-red-400/40'
-                                }`} />
-                                <span className="font-medium">{srv.role}</span>
-                                <span className="text-amber-200/40">w={srv.weight}</span>
-                              </div>
+                          {totalByStatus > 0 && (
+                            <div className="h-2 rounded-full overflow-hidden flex bg-slate-800/60">
+                              {s.requests_by_status.ok_2xx > 0 && (
+                                <div className="bg-emerald-500 h-full" style={{ width: `${(s.requests_by_status.ok_2xx / totalByStatus) * 100}%` }}
+                                  title={`2xx: ${s.requests_by_status.ok_2xx.toLocaleString()}`} />
+                              )}
+                              {s.requests_by_status.redirect_3xx > 0 && (
+                                <div className="bg-blue-500 h-full" style={{ width: `${(s.requests_by_status.redirect_3xx / totalByStatus) * 100}%` }}
+                                  title={`3xx: ${s.requests_by_status.redirect_3xx.toLocaleString()}`} />
+                              )}
+                              {s.requests_by_status.client_err_4xx > 0 && (
+                                <div className="bg-amber-500 h-full" style={{ width: `${(s.requests_by_status.client_err_4xx / totalByStatus) * 100}%` }}
+                                  title={`4xx: ${s.requests_by_status.client_err_4xx.toLocaleString()}`} />
+                              )}
+                              {s.requests_by_status.server_err_5xx > 0 && (
+                                <div className="bg-red-500 h-full" style={{ width: `${(s.requests_by_status.server_err_5xx / totalByStatus) * 100}%` }}
+                                  title={`5xx: ${s.requests_by_status.server_err_5xx.toLocaleString()}`} />
+                              )}
+                              {s.requests_by_status.websocket_101 > 0 && (
+                                <div className="bg-purple-500 h-full" style={{ width: `${(s.requests_by_status.websocket_101 / totalByStatus) * 100}%` }}
+                                  title={`101 WS: ${s.requests_by_status.websocket_101.toLocaleString()}`} />
+                              )}
+                            </div>
+                          )}
+                          <div className="flex gap-3 mt-1">
+                            {[
+                              { label: '2xx', count: s.requests_by_status.ok_2xx, color: 'text-emerald-400' },
+                              { label: '3xx', count: s.requests_by_status.redirect_3xx, color: 'text-blue-400' },
+                              { label: '4xx', count: s.requests_by_status.client_err_4xx, color: 'text-amber-400' },
+                              { label: '5xx', count: s.requests_by_status.server_err_5xx, color: 'text-red-400' },
+                              { label: 'WS', count: s.requests_by_status.websocket_101, color: 'text-purple-400' },
+                            ].filter(x => x.count > 0).map(x => (
+                              <span key={x.label} className={`text-[9px] ${x.color}`}>
+                                {x.label}: {x.count > 1000 ? `${(x.count / 1000).toFixed(1)}K` : x.count}
+                              </span>
                             ))}
                           </div>
                         </div>
-                      ))}
-                    </div>
+
+                        {/* Bottom row: memory + upstreams */}
+                        <div className="flex items-center justify-between text-[9px] text-cyan-300/40">
+                          <span>Heap: {s.memory_mb.toFixed(0)} MB</span>
+                          <div className="flex gap-2">
+                            {s.upstreams.map(u => (
+                              <span key={u.address} className="flex items-center gap-1">
+                                <div className={`w-1.5 h-1.5 rounded-full ${u.healthy ? 'bg-emerald-400' : 'bg-red-400'}`} />
+                                <span className={u.healthy ? 'text-emerald-300/70' : 'text-red-300/70'}>{u.address}</span>
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      </>
+                    );
+                  })() : (
+                    <div className="text-[10px] text-red-400/60">Caddy metrics offline</div>
                   )}
                 </div>
               )}
@@ -1795,30 +1841,32 @@ export default function DeployControlPanel() {
                         </span>
                       </div>
 
-                      {/* Sub-metric cards */}
-                      <div className="grid grid-cols-5 gap-3 mb-3">
+                      {/* Sub-metric cards (7 cards: sqrt scaling matches backend) */}
+                      <div className="grid grid-cols-7 gap-2 mb-3">
                         {[
-                          { label: 'Nakamoto', value: decentral.nakamoto_coefficient, display: String(decentral.nakamoto_coefficient), pct: Math.min(decentral.nakamoto_coefficient / 10 * 100, 100) },
-                          { label: 'Gini', value: decentral.gini_coefficient, display: decentral.gini_coefficient.toFixed(2), pct: (1 - decentral.gini_coefficient) * 100 },
-                          { label: 'Miners', value: decentral.unique_wallets, display: String(decentral.unique_wallets), pct: Math.min(decentral.unique_wallets / 50 * 100, 100) },
-                          { label: 'Nodes', value: decentral.node_count, display: `${decentral.node_count}/5`, pct: Math.min(decentral.node_count / 5 * 100, 100) },
-                          { label: 'Peers', value: decentral.peer_count, display: String(decentral.peer_count), pct: Math.min(decentral.peer_count / 30 * 100, 100) },
+                          { label: 'Nakamoto', display: String(decentral.nakamoto_coefficient), pct: Math.min(Math.sqrt(decentral.nakamoto_coefficient / 10) * 100, 100) },
+                          { label: 'Mine Gini', display: decentral.gini_coefficient.toFixed(2), pct: (1 - decentral.gini_coefficient) * 100 },
+                          { label: 'Wealth Gini', display: (decentral.wealth_gini ?? 0).toFixed(2), pct: (1 - (decentral.wealth_gini ?? 0)) * 100 },
+                          { label: 'Entropy', display: `${(decentral.entropy_score ?? 0).toFixed(0)}%`, pct: decentral.entropy_score ?? 0 },
+                          { label: 'Miners', display: String(decentral.unique_wallets), pct: Math.min(Math.sqrt(decentral.unique_wallets / 100) * 100, 100) },
+                          { label: 'Nodes', display: `${decentral.infrastructure_nodes ?? decentral.node_count}+${decentral.community_nodes ?? 0}`, pct: Math.min(Math.sqrt(decentral.node_count / 20) * 100, 100) },
+                          { label: 'Peers', display: String(decentral.peer_count), pct: Math.min(Math.sqrt(decentral.peer_count / 100) * 100, 100) },
                         ].map(m => (
-                          <div key={m.label} className="rounded-lg bg-slate-800/50 border border-slate-700/50 p-2.5 text-center">
-                            <div className="text-[10px] text-slate-400 mb-1">{m.label}</div>
-                            <div className="text-sm font-bold text-white mb-1.5">{m.display}</div>
+                          <div key={m.label} className="rounded-lg bg-slate-800/50 border border-slate-700/50 p-2 text-center">
+                            <div className="text-[9px] text-slate-400 mb-1 truncate">{m.label}</div>
+                            <div className="text-xs font-bold text-white mb-1">{m.display}</div>
                             <div className="h-1.5 rounded-full bg-slate-700/50 overflow-hidden mb-1">
                               <div className={`h-full rounded-full transition-all duration-700 ${
                                 m.pct >= 75 ? 'bg-emerald-500' : m.pct >= 40 ? 'bg-amber-500' : 'bg-red-500'
                               }`} style={{ width: `${m.pct}%` }} />
                             </div>
-                            <div className="text-[9px] text-slate-500">{m.pct.toFixed(0)}%</div>
+                            <div className="text-[8px] text-slate-500">{m.pct.toFixed(0)}%</div>
                           </div>
                         ))}
                       </div>
 
                       {/* Footer stats */}
-                      <div className="flex items-center justify-center gap-4 text-[10px] text-slate-400">
+                      <div className="flex items-center justify-center gap-4 text-[10px] text-slate-400 flex-wrap">
                         <span>Top miner: <span className="text-white/70">{decentral.top_miner_pct.toFixed(1)}%</span></span>
                         <span className="text-slate-600">·</span>
                         <span>Top 3: <span className="text-white/70">{decentral.top3_miners_pct.toFixed(1)}%</span></span>
@@ -1828,6 +1876,8 @@ export default function DeployControlPanel() {
                         </span>
                         <span className="text-slate-600">·</span>
                         <span>{decentral.total_workers} workers</span>
+                        <span className="text-slate-600">·</span>
+                        <span>Raw: <span className="text-white/70">{(decentral.decentralization_index_raw ?? decentral.decentralization_index).toFixed(1)}</span></span>
                       </div>
                     </div>
                   )}

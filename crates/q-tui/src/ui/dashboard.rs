@@ -12,23 +12,30 @@ pub fn render(f: &mut Frame, app: &App) {
     let metrics = app.metrics.read().unwrap();
 
     // Dynamic layout based on sync state
+    let has_compute = metrics.compute_network_hashrate_hs > 0.0
+        || metrics.compute_connected_peers > 0
+        || !metrics.compute_simd_tier.is_empty();
     let constraints = if metrics.is_syncing {
-        vec![
+        let mut v = vec![
             Constraint::Length(3),   // Header
             Constraint::Length(4),   // Sync Progress Bar
             Constraint::Length(9),   // Metrics cards
-            Constraint::Length(9),   // APOLLO Control Systems (replaces TPS during sync)
-            Constraint::Min(4),      // Logs (smaller when syncing)
-            Constraint::Length(3),   // Footer
-        ]
+        ];
+        if has_compute { v.push(Constraint::Length(5)); } // Compute Power cards
+        v.push(Constraint::Length(9));  // APOLLO Control Systems
+        v.push(Constraint::Min(4));    // Logs
+        v.push(Constraint::Length(3)); // Footer
+        v
     } else {
-        vec![
+        let mut v = vec![
             Constraint::Length(3),   // Header
             Constraint::Length(9),   // Metrics cards
-            Constraint::Length(7),   // TPS Chart or AI Metrics
-            Constraint::Min(8),      // Logs
-            Constraint::Length(3),   // Footer
-        ]
+        ];
+        if has_compute { v.push(Constraint::Length(5)); } // Compute Power cards
+        v.push(Constraint::Length(7)); // TPS Chart or AI Metrics
+        v.push(Constraint::Min(8));   // Logs
+        v.push(Constraint::Length(3)); // Footer
+        v
     };
     drop(metrics); // Release lock
 
@@ -38,19 +45,30 @@ pub fn render(f: &mut Frame, app: &App) {
         .split(f.size());
 
     let metrics = app.metrics.read().unwrap();
+    let has_compute_data = metrics.compute_network_hashrate_hs > 0.0
+        || metrics.compute_connected_peers > 0
+        || !metrics.compute_simd_tier.is_empty();
     let mut idx = 0;
 
     render_header(f, chunks[idx], app);
     idx += 1;
 
     if metrics.is_syncing {
+        drop(metrics);
         render_sync_progress(f, chunks[idx], app);
         idx += 1;
+    } else {
+        drop(metrics);
     }
-    drop(metrics);
 
     render_metrics_grid(f, chunks[idx], app);
     idx += 1;
+
+    // v9.1.0: Compute Power Layer cards (shown when data available)
+    if has_compute_data {
+        render_compute_power_cards(f, chunks[idx], app);
+        idx += 1;
+    }
 
     // Always show APOLLO control systems — they track live network state even when synced
     {
@@ -364,6 +382,119 @@ fn render_metrics_grid(f: &mut Frame, area: Rect, app: &App) {
                 .style(Style::default().fg(Color::Green))
         );
     f.render_widget(performance, chunks[2]);
+}
+
+/// v9.1.0: Compute Power Layer — 4-card row showing SIMD, network hashrate, security, tunnel
+fn render_compute_power_cards(f: &mut Frame, area: Rect, app: &App) {
+    let metrics = app.metrics.read().unwrap();
+
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+        ])
+        .split(area);
+
+    // ── Card 1: SIMD Tier ──
+    let simd_str = if metrics.compute_simd_tier.is_empty() {
+        "Detecting...".to_string()
+    } else {
+        metrics.compute_simd_tier.clone()
+    };
+    let simd_items = vec![
+        ListItem::new(Line::from(vec![
+            Span::raw("Tier:  "),
+            Span::styled(&simd_str, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        ])),
+    ];
+    let simd_widget = List::new(simd_items)
+        .block(Block::default().borders(Borders::ALL)
+            .title(Span::styled("\u{2301} SIMD", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
+    f.render_widget(simd_widget, cols[0]);
+
+    // ── Card 2: Network Hashrate ──
+    let net_hr = metrics.compute_network_hashrate_hs;
+    let hr_str = if net_hr >= 1e12 { format!("{:.2} TH/s", net_hr / 1e12) }
+        else if net_hr >= 1e9 { format!("{:.2} GH/s", net_hr / 1e9) }
+        else if net_hr >= 1e6 { format!("{:.2} MH/s", net_hr / 1e6) }
+        else if net_hr >= 1e3 { format!("{:.1} kH/s", net_hr / 1e3) }
+        else if net_hr > 0.0 { format!("{:.0} H/s", net_hr) }
+        else { "--".to_string() };
+    let net_items = vec![
+        ListItem::new(Line::from(vec![
+            Span::raw("Total: "),
+            Span::styled(&hr_str, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::raw("Peers: "),
+            Span::styled(
+                format!("{}", metrics.compute_connected_peers),
+                Style::default().fg(if metrics.compute_connected_peers > 0 { Color::Green } else { Color::DarkGray }),
+            ),
+        ])),
+    ];
+    let net_widget = List::new(net_items)
+        .block(Block::default().borders(Borders::ALL)
+            .title(Span::styled("\u{26A1} Network", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
+    f.render_widget(net_widget, cols[1]);
+
+    // ── Card 3: Live Security Bits ──
+    let sec_bits = metrics.compute_live_security_bits;
+    let sec_color = if sec_bits >= 128.0 { Color::Green }
+        else if sec_bits >= 80.0 { Color::Yellow }
+        else if sec_bits > 0.0 { Color::Red }
+        else { Color::DarkGray };
+    let tier = if sec_bits >= 256.0 { "FORTRESS" }
+        else if sec_bits >= 192.0 { "FORTIFIED" }
+        else if sec_bits >= 128.0 { "STRONG" }
+        else if sec_bits >= 80.0 { "MODERATE" }
+        else if sec_bits > 0.0 { "EMERGING" }
+        else { "--" };
+    let sec_items = vec![
+        ListItem::new(Line::from(vec![
+            Span::raw("Bits:  "),
+            Span::styled(
+                if sec_bits > 0.0 { format!("{:.0}-bit", sec_bits) } else { "--".to_string() },
+                Style::default().fg(sec_color).add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::raw("Tier:  "),
+            Span::styled(tier, Style::default().fg(sec_color)),
+        ])),
+    ];
+    let sec_widget = List::new(sec_items)
+        .block(Block::default().borders(Borders::ALL)
+            .title(Span::styled("\u{1F6E1} Security", Style::default().fg(sec_color).add_modifier(Modifier::BOLD))));
+    f.render_widget(sec_widget, cols[2]);
+
+    // ── Card 4: Tunnel (local contribution %) ──
+    let local_hs = metrics.compute_local_hashrate_hs;
+    let contribution_pct = if net_hr > 0.0 { (local_hs / net_hr * 100.0).min(100.0) } else { 0.0 };
+    let bar_w: usize = 10;
+    let filled = ((contribution_pct / 100.0) * bar_w as f64).round() as usize;
+    let empty = bar_w.saturating_sub(filled);
+    let tunnel_items = vec![
+        ListItem::new(Line::from(vec![
+            Span::raw("Share: "),
+            Span::styled(
+                if contribution_pct > 0.0 { format!("{:.1}%", contribution_pct) } else { "--".to_string() },
+                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::raw("      "),
+            Span::styled("\u{2588}".repeat(filled), Style::default().fg(Color::Magenta)),
+            Span::styled("\u{2591}".repeat(empty), Style::default().fg(Color::DarkGray)),
+        ])),
+    ];
+    let tunnel_widget = List::new(tunnel_items)
+        .block(Block::default().borders(Borders::ALL)
+            .title(Span::styled("\u{1F310} Tunnel", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))));
+    f.render_widget(tunnel_widget, cols[3]);
 }
 
 fn render_tps_chart(f: &mut Frame, area: Rect, app: &App) {

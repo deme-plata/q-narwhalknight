@@ -119,7 +119,8 @@ pub struct MiningCapacityAll {
     pub alpha: Option<MiningCapacityLocal>,
 }
 
-/// v9.0.2: Decentralization Index — composite network health metric
+/// v9.0.6: Decentralization Index — composite network health metric
+/// Sqrt scaling, EMA smoothing, wealth Gini, Shannon entropy
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecentralizationMetrics {
     pub unique_wallets: usize,
@@ -131,6 +132,17 @@ pub struct DecentralizationMetrics {
     pub hhi: f64,
     pub node_count: usize,
     pub peer_count: usize,
+    /// Wealth Gini coefficient (balance distribution, 0=equal, 1=one wallet has all)
+    pub wealth_gini: f64,
+    /// Shannon entropy of mining power (bits), normalized 0-100
+    pub entropy_score: f64,
+    /// Infrastructure nodes (team-operated bootstrap servers)
+    pub infrastructure_nodes: usize,
+    /// Community nodes (unique peers not in bootstrap list)
+    pub community_nodes: usize,
+    /// Raw DI before EMA smoothing
+    pub decentralization_index_raw: f64,
+    /// EMA-smoothed DI (alpha=0.1)
     pub decentralization_index: f64,
     pub grade: String,
 }
@@ -1962,93 +1974,227 @@ pub async fn mining_capacity(
 }
 
 // =============================================================================
-// v8.9.9: Nginx Load Balancer Stats API
+// v9.0.6: Caddy Reverse Proxy Metrics API (replaces nginx stats)
 // =============================================================================
 
-/// Nginx stub_status metrics (parsed from /nginx_status text output)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NginxStubStatus {
-    pub active_connections: u64,
-    pub accepts: u64,
-    pub handled: u64,
-    pub requests: u64,
-    pub reading: u64,
-    pub writing: u64,
-    pub waiting: u64,
+/// Per-status-code request counts parsed from Caddy Prometheus metrics
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CaddyRequestsByStatus {
+    pub ok_2xx: u64,
+    pub redirect_3xx: u64,
+    pub client_err_4xx: u64,
+    pub server_err_5xx: u64,
+    pub websocket_101: u64,
 }
 
-/// A single server entry in an nginx upstream block
+/// Caddy upstream health status
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NginxUpstreamServer {
+pub struct CaddyUpstream {
     pub address: String,
-    pub role: String,
-    pub weight: u32,
-    pub status: String, // "up", "down"
+    pub healthy: bool,
 }
 
-/// An nginx upstream block
+/// Caddy metrics for a single server
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NginxUpstream {
-    pub name: String,
-    pub method: String, // "ip_hash", "least_conn", "round_robin"
-    pub servers: Vec<NginxUpstreamServer>,
-}
-
-/// Combined nginx stats response
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NginxStats {
-    pub stub_status: Option<NginxStubStatus>,
-    pub upstreams: Vec<NginxUpstream>,
+pub struct CaddyStats {
+    /// Total requests handled since Caddy (re)start
+    pub total_requests: u64,
+    /// Requests broken down by status category
+    pub requests_by_status: CaddyRequestsByStatus,
+    /// Computed requests/sec (delta between polls)
     pub requests_per_second: f64,
+    /// Average response time in ms (from histogram sum/count)
+    pub avg_response_ms: f64,
+    /// p99 response time estimate in ms (from histogram buckets)
+    pub p99_response_ms: f64,
+    /// Current Go goroutines (proxy for active connections)
+    pub goroutines: u64,
+    /// Caddy process heap memory in MB
+    pub memory_mb: f64,
+    /// Reverse proxy upstream health
+    pub upstreams: Vec<CaddyUpstream>,
+    /// Server hostname
     pub server_name: String,
+    /// Caddy last reload timestamp
+    pub last_reload: f64,
+    /// Whether Caddy metrics endpoint is reachable
+    pub online: bool,
 }
 
-/// All-servers nginx stats
+/// All-servers Caddy stats
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NginxStatsAll {
-    pub beta: Option<NginxStats>,
-    pub epsilon: Option<NginxStats>,
+pub struct CaddyStatsAll {
+    pub epsilon: Option<CaddyStats>,
 }
 
-/// Parse nginx stub_status text format:
-/// ```
-/// Active connections: 1234
-/// server accepts handled requests
-///  5432 5432 12450
-/// Reading: 12 Writing: 45 Waiting: 1177
-/// ```
-fn parse_nginx_stub_status(text: &str) -> Option<NginxStubStatus> {
-    let lines: Vec<&str> = text.lines().collect();
-    if lines.len() < 4 { return None; }
+/// Parse Caddy Prometheus metrics text into CaddyStats
+fn parse_caddy_metrics(text: &str) -> CaddyStats {
+    let mut total_requests: u64 = 0;
+    let mut by_status = CaddyRequestsByStatus::default();
+    let mut duration_sum: f64 = 0.0;
+    let mut duration_count: u64 = 0;
+    let mut goroutines: u64 = 0;
+    let mut heap_bytes: f64 = 0.0;
+    let mut upstreams: Vec<CaddyUpstream> = Vec::new();
+    let mut last_reload: f64 = 0.0;
 
-    // Line 0: "Active connections: N"
-    let active = lines[0].split(':').nth(1)?.trim().parse::<u64>().ok()?;
+    // Histogram buckets for p99 estimation
+    let mut buckets: Vec<(f64, u64)> = Vec::new();
+    let mut bucket_total_count: u64 = 0;
 
-    // Line 2: " N N N" (accepts handled requests)
-    let nums: Vec<u64> = lines[2].split_whitespace()
-        .filter_map(|s| s.parse::<u64>().ok())
-        .collect();
-    if nums.len() < 3 { return None; }
+    for line in text.lines() {
+        if line.starts_with('#') || line.is_empty() { continue; }
 
-    // Line 3: "Reading: N Writing: N Waiting: N"
-    let rw_parts: Vec<u64> = lines[3].split_whitespace()
-        .filter_map(|s| s.parse::<u64>().ok())
-        .collect();
-    if rw_parts.len() < 3 { return None; }
+        // caddy_http_request_duration_seconds_count{code="200",...} 1234
+        if line.starts_with("caddy_http_request_duration_seconds_count{") {
+            if let Some(count) = extract_metric_value(line) {
+                let c = count as u64;
+                total_requests += c;
 
-    Some(NginxStubStatus {
-        active_connections: active,
-        accepts: nums[0],
-        handled: nums[1],
-        requests: nums[2],
-        reading: rw_parts[0],
-        writing: rw_parts[1],
-        waiting: rw_parts[2],
-    })
+                if let Some(code) = extract_label(line, "code") {
+                    match code.chars().next() {
+                        Some('2') => by_status.ok_2xx += c,
+                        Some('3') => by_status.redirect_3xx += c,
+                        Some('4') => by_status.client_err_4xx += c,
+                        Some('5') => by_status.server_err_5xx += c,
+                        _ => {
+                            if code == "101" { by_status.websocket_101 += c; }
+                        }
+                    }
+                }
+            }
+        }
+
+        // caddy_http_request_duration_seconds_sum{...} 123.456
+        if line.starts_with("caddy_http_request_duration_seconds_sum{") {
+            if let Some(val) = extract_metric_value(line) {
+                duration_sum += val;
+            }
+        }
+        if line.starts_with("caddy_http_request_duration_seconds_count{") {
+            if let Some(val) = extract_metric_value(line) {
+                duration_count += val as u64;
+            }
+        }
+
+        // Histogram buckets for p99 — only from subroute handler (avoids double-counting)
+        if line.starts_with("caddy_http_request_duration_seconds_bucket{") {
+            if line.contains("handler=\"subroute\"") && line.contains("server=\"srv0\"") {
+                if let (Some(le), Some(count)) = (extract_label(line, "le"), extract_metric_value(line)) {
+                    if let Ok(le_val) = le.parse::<f64>() {
+                        buckets.push((le_val, count as u64));
+                        if le_val == f64::INFINITY || le == "+Inf" {
+                            bucket_total_count = count as u64;
+                        }
+                    }
+                }
+            }
+        }
+
+        // go_goroutines 123
+        if line.starts_with("go_goroutines ") {
+            if let Some(val) = line.split_whitespace().nth(1).and_then(|v| v.parse::<u64>().ok()) {
+                goroutines = val;
+            }
+        }
+
+        // go_memstats_heap_inuse_bytes 12345678
+        if line.starts_with("go_memstats_heap_inuse_bytes ") {
+            if let Some(val) = line.split_whitespace().nth(1).and_then(|v| v.parse::<f64>().ok()) {
+                heap_bytes = val;
+            }
+        }
+
+        // caddy_reverse_proxy_upstreams_healthy{upstream="localhost:8080"} 1
+        if line.starts_with("caddy_reverse_proxy_upstreams_healthy{") {
+            if let (Some(addr), Some(val)) = (extract_label(line, "upstream"), extract_metric_value(line)) {
+                upstreams.push(CaddyUpstream {
+                    address: addr.to_string(),
+                    healthy: val >= 1.0,
+                });
+            }
+        }
+
+        // caddy_config_last_reload_success_timestamp_seconds 1.772e+09
+        if line.starts_with("caddy_config_last_reload_success_timestamp_seconds ") {
+            if let Some(val) = line.split_whitespace().nth(1).and_then(|v| v.parse::<f64>().ok()) {
+                last_reload = val;
+            }
+        }
+    }
+
+    // Compute average response time
+    let avg_response_ms = if duration_count > 0 {
+        (duration_sum / duration_count as f64) * 1000.0
+    } else { 0.0 };
+
+    // Estimate p99 from histogram buckets
+    let p99_response_ms = estimate_percentile(&buckets, bucket_total_count, 0.99) * 1000.0;
+
+    // Deduplicate upstreams (may appear multiple times in metrics)
+    upstreams.sort_by(|a, b| a.address.cmp(&b.address));
+    upstreams.dedup_by(|a, b| {
+        if a.address == b.address {
+            b.healthy = b.healthy || a.healthy; // healthy if ANY says healthy
+            true
+        } else { false }
+    });
+
+    // We count _count lines twice (once for total, once for duration_count), fix by halving
+    // Actually the first loop counts total_requests, the second just accumulates
+    // duration_count. They parse the same lines so total_requests == duration_count. That's fine.
+
+    CaddyStats {
+        total_requests,
+        requests_by_status: by_status,
+        requests_per_second: compute_caddy_rps(total_requests),
+        avg_response_ms,
+        p99_response_ms,
+        goroutines,
+        memory_mb: heap_bytes / (1024.0 * 1024.0),
+        upstreams,
+        server_name: String::new(), // filled by caller
+        last_reload,
+        online: true,
+    }
 }
 
-/// Compute requests/sec from two snapshots (uses static to track previous)
-fn compute_rps(current_requests: u64) -> f64 {
+/// Extract a Prometheus metric value (the number after the last space/brace)
+fn extract_metric_value(line: &str) -> Option<f64> {
+    line.split_whitespace().last().and_then(|v| v.parse::<f64>().ok())
+}
+
+/// Extract a label value from a Prometheus metric line: `label="value"`
+fn extract_label<'a>(line: &'a str, label: &str) -> Option<&'a str> {
+    let pattern = format!("{}=\"", label);
+    if let Some(start) = line.find(&pattern) {
+        let start = start + pattern.len();
+        if let Some(end) = line[start..].find('"') {
+            return Some(&line[start..start + end]);
+        }
+    }
+    None
+}
+
+/// Estimate a percentile from histogram buckets using linear interpolation
+fn estimate_percentile(buckets: &[(f64, u64)], total: u64, percentile: f64) -> f64 {
+    if total == 0 || buckets.is_empty() { return 0.0; }
+    let target = (total as f64 * percentile) as u64;
+    let mut sorted: Vec<(f64, u64)> = buckets.iter().copied()
+        .filter(|(le, _)| le.is_finite())
+        .collect();
+    sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    for &(le, count) in &sorted {
+        if count >= target {
+            return le;
+        }
+    }
+    sorted.last().map(|(le, _)| *le).unwrap_or(0.0)
+}
+
+/// Compute requests/sec from two snapshots (delta-based, like the old nginx version)
+fn compute_caddy_rps(current_requests: u64) -> f64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static PREV_REQUESTS: AtomicU64 = AtomicU64::new(0);
     static PREV_TIME_MS: AtomicU64 = AtomicU64::new(0);
@@ -2061,55 +2207,54 @@ fn compute_rps(current_requests: u64) -> f64 {
     let prev_req = PREV_REQUESTS.swap(current_requests, Ordering::Relaxed);
     let prev_time = PREV_TIME_MS.swap(now_ms, Ordering::Relaxed);
 
-    if prev_time == 0 || now_ms <= prev_time {
-        return 0.0;
-    }
+    if prev_time == 0 || now_ms <= prev_time { return 0.0; }
 
     let dt_secs = (now_ms - prev_time) as f64 / 1000.0;
     let dreqs = current_requests.saturating_sub(prev_req) as f64;
     dreqs / dt_secs
 }
 
-/// GET /api/v1/admin/nginx/stats-local — local nginx stats (no auth, aggregate only)
-pub async fn nginx_stats_local(
-) -> Json<ApiResponse<NginxStats>> {
+/// GET /api/v1/admin/caddy/stats-local — local Caddy metrics (no auth, for cross-server aggregation)
+pub async fn caddy_stats_local() -> Json<ApiResponse<CaddyStats>> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build()
         .unwrap_or_default();
 
-    // Fetch local nginx stub_status
-    let stub = match client.get("http://127.0.0.1:81/nginx_status").send().await {
+    let stats = match client.get("http://127.0.0.1:2019/metrics").send().await {
         Ok(resp) if resp.status().is_success() => {
             let text = resp.text().await.unwrap_or_default();
-            parse_nginx_stub_status(&text)
+            let mut s = parse_caddy_metrics(&text);
+            s.server_name = std::env::var("HOSTNAME").unwrap_or_else(|_| {
+                std::fs::read_to_string("/etc/hostname")
+                    .unwrap_or_else(|_| "unknown".to_string())
+                    .trim().to_string()
+            });
+            s
         }
-        _ => None,
+        _ => CaddyStats {
+            total_requests: 0,
+            requests_by_status: CaddyRequestsByStatus::default(),
+            requests_per_second: 0.0,
+            avg_response_ms: 0.0,
+            p99_response_ms: 0.0,
+            goroutines: 0,
+            memory_mb: 0.0,
+            upstreams: vec![],
+            server_name: "unknown".into(),
+            last_reload: 0.0,
+            online: false,
+        },
     };
 
-    let rps = stub.as_ref().map(|s| compute_rps(s.requests)).unwrap_or(0.0);
-
-    // Hardcoded upstream topology — matches nginx config
-    // The actual up/down status would require parsing the config file
-    let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| {
-        std::fs::read_to_string("/etc/hostname")
-            .unwrap_or_else(|_| "unknown".to_string())
-            .trim().to_string()
-    });
-
-    Json(ApiResponse::success(NginxStats {
-        stub_status: stub,
-        upstreams: vec![], // Local endpoint doesn't need upstream topology
-        requests_per_second: rps,
-        server_name: hostname,
-    }))
+    Json(ApiResponse::success(stats))
 }
 
-/// GET /api/v1/admin/nginx/stats — aggregated nginx stats from all servers (admin auth)
-pub async fn nginx_stats(
+/// GET /api/v1/admin/caddy/stats — Caddy metrics from Epsilon (admin auth)
+pub async fn caddy_stats(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<ApiResponse<NginxStatsAll>>, StatusCode> {
+) -> Result<Json<ApiResponse<CaddyStatsAll>>, StatusCode> {
     if !is_master_wallet(&headers, &state) {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -2119,34 +2264,33 @@ pub async fn nginx_stats(
         .build()
         .unwrap_or_default();
 
-    // Fetch local (Beta) nginx stats
-    let Json(beta_resp) = nginx_stats_local().await;
-    let mut beta_stats = beta_resp.data;
-
-    // Add upstream topology to beta (beta has the main load balancer)
-    if let Some(ref mut stats) = beta_stats {
-        stats.upstreams = get_upstream_topology();
-    }
-
-    // Fetch Epsilon nginx stats
-    let epsilon_stats = {
-        let c = client.clone();
-        async move {
-            match c.get(format!("{}/api/v1/admin/nginx/stats-local", EPSILON_URL)).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    #[derive(Deserialize)]
-                    struct Wrap { data: Option<NginxStats> }
-                    resp.json::<Wrap>().await.ok().and_then(|w| w.data)
-                }
-                _ => None,
-            }
+    // Fetch Epsilon Caddy stats (Epsilon is the primary frontend server)
+    let epsilon_stats = match client.get(format!("{}/api/v1/admin/caddy/stats-local", EPSILON_URL)).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            #[derive(Deserialize)]
+            struct Wrap { data: Option<CaddyStats> }
+            resp.json::<Wrap>().await.ok().and_then(|w| w.data)
         }
-    }.await;
+        _ => None,
+    };
 
-    Ok(Json(ApiResponse::success(NginxStatsAll {
-        beta: beta_stats,
+    Ok(Json(ApiResponse::success(CaddyStatsAll {
         epsilon: epsilon_stats,
     })))
+}
+
+// Keep old nginx endpoints as aliases that return empty data (backwards compat)
+/// GET /api/v1/admin/nginx/stats-local — deprecated, returns Caddy stats
+pub async fn nginx_stats_local() -> Json<ApiResponse<CaddyStats>> {
+    caddy_stats_local().await
+}
+
+/// GET /api/v1/admin/nginx/stats — deprecated, returns Caddy stats
+pub async fn nginx_stats(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<CaddyStatsAll>>, StatusCode> {
+    caddy_stats(headers, State(state)).await
 }
 
 /// GET /api/v1/admin/decentralization
@@ -2245,19 +2389,86 @@ pub async fn decentralization_metrics(
         .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
         .unwrap_or(0);
 
-    // Composite DI score (0-100)
-    let nakamoto_score = ((nakamoto_coefficient as f64) / 10.0 * 100.0).min(100.0);
-    let gini_score = (1.0 - gini_coefficient) * 100.0;
-    let miner_diversity = ((unique_wallets as f64) / 50.0 * 100.0).min(100.0);
-    let node_score = ((node_count as f64) / 5.0 * 100.0).min(100.0);
-    let peer_score = ((peer_count as f64) / 30.0 * 100.0).min(100.0);
+    // --- Wealth Gini (from wallet_balances) ---
+    let wealth_gini = {
+        let balances = state.wallet_balances.read().await;
+        let mut vals: Vec<f64> = balances.values()
+            .filter(|&&b| b > 0)
+            .map(|&b| b as f64)
+            .collect();
+        if vals.len() > 1 {
+            vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let n = vals.len() as f64;
+            let total: f64 = vals.iter().sum();
+            let mut numerator = 0.0;
+            for (i, &val) in vals.iter().enumerate() {
+                numerator += (2.0 * (i as f64 + 1.0) - n - 1.0) * val;
+            }
+            (numerator / (n * total)).abs()
+        } else {
+            0.0
+        }
+    };
 
-    let di = nakamoto_score * 0.30
-        + gini_score * 0.25
-        + miner_diversity * 0.20
+    // --- Shannon entropy of mining power ---
+    let (entropy_score, _raw_entropy) = if unique_wallets > 1 && total_hashrate > 0.0 {
+        let shares: Vec<f64> = sorted.iter()
+            .map(|&hr| hr / total_hashrate)
+            .filter(|&s| s > 0.0)
+            .collect();
+        let entropy: f64 = -shares.iter().map(|&p| p * p.ln()).sum::<f64>();
+        let max_entropy = (unique_wallets as f64).ln();
+        let score = if max_entropy > 0.0 { (entropy / max_entropy * 100.0).min(100.0) } else { 0.0 };
+        (score, entropy)
+    } else {
+        (0.0, 0.0)
+    };
+
+    // --- Infrastructure vs community nodes ---
+    // All health-checked nodes (Alpha/Beta/Gamma/Delta/Epsilon) are team-operated infra.
+    // Community nodes = unique libp2p peers minus those infra servers.
+    let infrastructure_nodes = node_count;
+    let community_nodes = if peer_count > infrastructure_nodes {
+        peer_count - infrastructure_nodes
+    } else {
+        0
+    };
+
+    // --- Sqrt scaling helper ---
+    fn sqrt_score(value: f64, target: f64) -> f64 {
+        ((value / target).sqrt() * 100.0).min(100.0)
+    }
+
+    // --- Composite DI score with sqrt scaling (0-100) ---
+    // Weights: Nakamoto 25%, Mining Gini 15%, Wealth Gini 10%, Entropy 10%,
+    //          Miner Diversity 15%, Nodes 15%, Peers 10%
+    let nakamoto_score = sqrt_score(nakamoto_coefficient as f64, 10.0);
+    let gini_score = (1.0 - gini_coefficient) * 100.0; // already 0-100
+    let wealth_gini_score = (1.0 - wealth_gini) * 100.0;
+    let miner_diversity = sqrt_score(unique_wallets as f64, 100.0);
+    let node_score = sqrt_score(node_count as f64, 20.0);
+    let peer_score = sqrt_score(peer_count as f64, 100.0);
+
+    let di_raw = nakamoto_score * 0.25
+        + gini_score * 0.15
+        + wealth_gini_score * 0.10
+        + entropy_score * 0.10
+        + miner_diversity * 0.15
         + node_score * 0.15
         + peer_score * 0.10;
-    let di = di.min(100.0).max(0.0);
+    let di_raw = di_raw.min(100.0).max(0.0);
+
+    // --- EMA smoothing (alpha=0.1) ---
+    let alpha = 0.1_f64;
+    let prev_bits = state.di_ema.load(std::sync::atomic::Ordering::Relaxed);
+    let prev_ema = f64::from_bits(prev_bits);
+    let di = if prev_ema == 0.0 || prev_bits == 0 {
+        // First call — seed with raw value
+        di_raw
+    } else {
+        alpha * di_raw + (1.0 - alpha) * prev_ema
+    };
+    state.di_ema.store(di.to_bits(), std::sync::atomic::Ordering::Relaxed);
 
     let grade = if di >= 90.0 { "A+" }
         else if di >= 75.0 { "A" }
@@ -2276,44 +2487,13 @@ pub async fn decentralization_metrics(
         hhi,
         node_count,
         peer_count,
+        wealth_gini,
+        entropy_score,
+        infrastructure_nodes,
+        community_nodes,
+        decentralization_index_raw: di_raw,
         decentralization_index: di,
         grade,
     })))
 }
 
-/// Hardcoded upstream topology matching the nginx config.
-/// Avoids fragile config file parsing — update when nginx config changes.
-fn get_upstream_topology() -> Vec<NginxUpstream> {
-    vec![
-        NginxUpstream {
-            name: "qnk_api".to_string(),
-            method: "ip_hash".to_string(),
-            servers: vec![
-                NginxUpstreamServer { address: "89.149.241.126:8080".into(), role: "Epsilon".into(), weight: 20, status: "up".into() },
-                NginxUpstreamServer { address: "127.0.0.1:8080".into(), role: "Beta".into(), weight: 10, status: "up".into() },
-                NginxUpstreamServer { address: "5.79.79.158:8080".into(), role: "Delta".into(), weight: 5, status: "down".into() },
-                NginxUpstreamServer { address: "109.205.176.60:8080".into(), role: "Gamma".into(), weight: 2, status: "down".into() },
-            ],
-        },
-        NginxUpstream {
-            name: "qnk_mining".to_string(),
-            method: "least_conn".to_string(),
-            servers: vec![
-                NginxUpstreamServer { address: "89.149.241.126:8080".into(), role: "Epsilon".into(), weight: 20, status: "up".into() },
-                NginxUpstreamServer { address: "127.0.0.1:8080".into(), role: "Beta".into(), weight: 8, status: "up".into() },
-                NginxUpstreamServer { address: "109.205.176.60:8080".into(), role: "Gamma".into(), weight: 3, status: "up".into() },
-                NginxUpstreamServer { address: "5.79.79.158:8080".into(), role: "Delta".into(), weight: 8, status: "down".into() },
-            ],
-        },
-        NginxUpstream {
-            name: "qnk_sse".to_string(),
-            method: "ip_hash".to_string(),
-            servers: vec![
-                NginxUpstreamServer { address: "89.149.241.126:8080".into(), role: "Epsilon".into(), weight: 20, status: "up".into() },
-                NginxUpstreamServer { address: "127.0.0.1:8080".into(), role: "Beta".into(), weight: 10, status: "up".into() },
-                NginxUpstreamServer { address: "109.205.176.60:8080".into(), role: "Gamma".into(), weight: 2, status: "up".into() },
-                NginxUpstreamServer { address: "5.79.79.158:8080".into(), role: "Delta".into(), weight: 5, status: "down".into() },
-            ],
-        },
-    ]
-}

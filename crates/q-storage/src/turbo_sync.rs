@@ -2960,7 +2960,10 @@ impl TurboSyncManager {
                 let is_preferred = self.config.preferred_sync_peers.iter()
                     .any(|p| peer_id.contains(p.as_str()) || p.contains(peer_id));
 
-                let multiplier = if is_supernode { 10.0 } else if is_preferred { 3.0 } else { 1.0 };
+                let tier_multiplier = if is_supernode { 10.0 } else if is_preferred { 3.0 } else { 1.0 };
+                // v9.1.0: Factor in peer's announced compute power (hashrate)
+                let compute_boost = crate::compute_power_boost(peer_id);
+                let multiplier = tier_multiplier * compute_boost;
                 let final_score = base_score * multiplier;
 
                 match &best_peer {

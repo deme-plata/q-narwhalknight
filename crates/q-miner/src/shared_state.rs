@@ -106,6 +106,13 @@ pub enum DiagnosticEvent {
 
     // Throttle
     ThrottleChanged { mode: MinerThrottleMode },
+
+    // v9.1.0: Compute Power Layer updates (from challenge response)
+    ComputePowerUpdate {
+        network_hashrate_hs: f64,
+        connected_miners: u32,
+        live_security_bits: f64,
+    },
 }
 
 /// v9.0.4: Starship sync telemetry — rich sync progress for TUI

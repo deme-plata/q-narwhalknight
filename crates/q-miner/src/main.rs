@@ -108,9 +108,9 @@ struct Args {
     #[arg(long)]
     proxy: Option<String>,
 
-    /// Route all traffic through local Tor (socks5://127.0.0.1:9050). Enabled by default.
-    /// Use --no-tor to disable.
-    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    /// Route all traffic through local Tor (socks5://127.0.0.1:9050).
+    /// Disabled by default. Use --tor to enable (requires Tor daemon running).
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
     tor: bool,
 }
 
@@ -124,6 +124,147 @@ pub struct HardwareInfo {
     pub has_avx2: bool,
     pub has_avx512: bool,
     pub cache_line_size: usize,
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// EMBEDDED TOR (arti) — no system Tor daemon needed
+// Bootstraps an embedded Tor client and runs a local SOCKS5 proxy
+// ═══════════════════════════════════════════════════════════════════
+#[cfg(feature = "tor-support")]
+mod embedded_tor {
+    use anyhow::Result;
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tracing::{info, warn, debug};
+
+    /// Bootstrap embedded arti and start a local SOCKS5 proxy.
+    /// Returns the SOCKS5 proxy URL (e.g. "socks5://127.0.0.1:19050").
+    pub async fn start_embedded_tor() -> Result<String> {
+        use arti_client::{TorClient, TorClientConfig};
+        use tor_rtcompat::tokio::TokioNativeTlsRuntime;
+
+        eprintln!("\x1b[36m   Bootstrapping embedded Tor (arti)...\x1b[0m");
+
+        let runtime = TokioNativeTlsRuntime::current()
+            .map_err(|e| anyhow::anyhow!("Failed to get Tokio runtime for arti: {}", e))?;
+
+        let config = TorClientConfig::default();
+
+        let arti_client = Arc::new(
+            TorClient::with_runtime(runtime)
+                .config(config)
+                .create_bootstrapped()
+                .await
+                .map_err(|e| anyhow::anyhow!("Tor bootstrap failed: {}", e))?
+        );
+
+        eprintln!("\x1b[32m   Tor bootstrapped — starting local SOCKS5 proxy\x1b[0m");
+
+        // Bind a local SOCKS5 proxy on a random port
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let proxy_url = format!("socks5://127.0.0.1:{}", port);
+
+        info!("Embedded Tor SOCKS5 proxy listening on 127.0.0.1:{}", port);
+
+        // Spawn the SOCKS5 proxy task
+        let client = arti_client.clone();
+        tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((mut stream, _)) => {
+                        let client = client.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = handle_socks5_connection(&mut stream, &client).await {
+                                debug!("SOCKS5 connection error: {}", e);
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        warn!("SOCKS5 accept error: {}", e);
+                    }
+                }
+            }
+        });
+
+        eprintln!("\x1b[32m   Tor SOCKS5 proxy ready on port {}\x1b[0m", port);
+        Ok(proxy_url)
+    }
+
+    /// Handle a single SOCKS5 CONNECT request, tunneling through arti.
+    async fn handle_socks5_connection<R: tor_rtcompat::Runtime>(
+        stream: &mut tokio::net::TcpStream,
+        client: &arti_client::TorClient<R>,
+    ) -> Result<()> {
+        // SOCKS5 greeting: client sends [0x05, nmethods, methods...]
+        let mut buf = [0u8; 258];
+        let n = stream.read(&mut buf).await?;
+        if n < 2 || buf[0] != 0x05 {
+            return Err(anyhow::anyhow!("Not SOCKS5"));
+        }
+
+        // Reply: no auth required [0x05, 0x00]
+        stream.write_all(&[0x05, 0x00]).await?;
+
+        // SOCKS5 request: [0x05, cmd, 0x00, atype, addr..., port_hi, port_lo]
+        let n = stream.read(&mut buf).await?;
+        if n < 7 || buf[0] != 0x05 || buf[1] != 0x01 {
+            // Only CONNECT (0x01) supported
+            stream.write_all(&[0x05, 0x07, 0x00, 0x01, 0,0,0,0, 0,0]).await?;
+            return Err(anyhow::anyhow!("Only CONNECT supported"));
+        }
+
+        // Parse target address
+        let (host, port, _consumed) = match buf[3] {
+            0x01 => {
+                // IPv4
+                if n < 10 { return Err(anyhow::anyhow!("Short IPv4")); }
+                let ip = format!("{}.{}.{}.{}", buf[4], buf[5], buf[6], buf[7]);
+                let port = ((buf[8] as u16) << 8) | buf[9] as u16;
+                (ip, port, 10)
+            }
+            0x03 => {
+                // Domain name
+                let len = buf[4] as usize;
+                if n < 5 + len + 2 { return Err(anyhow::anyhow!("Short domain")); }
+                let domain = String::from_utf8_lossy(&buf[5..5+len]).to_string();
+                let port = ((buf[5+len] as u16) << 8) | buf[6+len] as u16;
+                (domain, port, 7 + len)
+            }
+            _ => {
+                stream.write_all(&[0x05, 0x08, 0x00, 0x01, 0,0,0,0, 0,0]).await?;
+                return Err(anyhow::anyhow!("Unsupported address type"));
+            }
+        };
+
+        debug!("SOCKS5 CONNECT to {}:{}", host, port);
+
+        // Connect through Tor
+        let target = format!("{}:{}", host, port);
+        let tor_stream = match client.connect(target.as_str()).await {
+            Ok(s) => s,
+            Err(e) => {
+                // Connection refused
+                stream.write_all(&[0x05, 0x05, 0x00, 0x01, 0,0,0,0, 0,0]).await?;
+                return Err(anyhow::anyhow!("Tor connect failed: {}", e));
+            }
+        };
+
+        // Success reply
+        stream.write_all(&[0x05, 0x00, 0x00, 0x01, 127,0,0,1, 0,0]).await?;
+
+        // Bidirectional copy
+        let (mut client_read, mut client_write) = stream.split();
+        let (mut tor_read, mut tor_write) = tor_stream.split();
+
+        let _result = tokio::select! {
+            r = tokio::io::copy(&mut client_read, &mut tor_write) => r,
+            r = tokio::io::copy(&mut tor_read, &mut client_write) => r,
+        };
+
+        Ok(())
+    }
 }
 
 // Mining challenge from API server
@@ -144,6 +285,15 @@ pub struct MiningChallenge {
     /// v2.7.0: Minimum miner version required by the server
     #[serde(default)]
     pub min_miner_version: Option<String>,
+    /// v9.1.0: Network hashrate (H/s) from compute power layer
+    #[serde(default)]
+    pub network_hashrate_hs: Option<f64>,
+    /// v9.1.0: Number of active mining peers on the network
+    #[serde(default)]
+    pub connected_miners: Option<u32>,
+    /// v9.1.0: Live security bits (boosted by real-time network hashpower)
+    #[serde(default)]
+    pub live_security_bits: Option<f64>,
 }
 
 // API response wrapper
@@ -469,7 +619,35 @@ async fn main() -> Result<()> {
     // Resolve proxy URL early: --tor > --proxy > ALL_PROXY env > HTTPS_PROXY env > HTTP_PROXY env
     // This is needed before device login so the flow can route through Tor/proxy.
     let early_proxy_url: Option<String> = if args.tor {
-        Some("socks5://127.0.0.1:9050".into())
+        // v9.0.7: Try system Tor first, then fall back to embedded arti
+        let system_tor = std::net::TcpStream::connect_timeout(
+            &"127.0.0.1:9050".parse().unwrap(),
+            std::time::Duration::from_secs(2),
+        ).is_ok();
+
+        if system_tor {
+            eprintln!("\x1b[32m   System Tor detected at 127.0.0.1:9050\x1b[0m");
+            Some("socks5://127.0.0.1:9050".into())
+        } else {
+            // No system Tor — bootstrap embedded arti
+            #[cfg(feature = "tor-support")]
+            {
+                match embedded_tor::start_embedded_tor().await {
+                    Ok(proxy_url) => Some(proxy_url),
+                    Err(e) => {
+                        eprintln!("\x1b[33m   Warning: Embedded Tor failed: {}\x1b[0m", e);
+                        eprintln!("\x1b[33m   Falling back to direct connection\x1b[0m");
+                        None
+                    }
+                }
+            }
+            #[cfg(not(feature = "tor-support"))]
+            {
+                eprintln!("\x1b[33m   Warning: --tor requires tor-support feature or system Tor at 127.0.0.1:9050\x1b[0m");
+                eprintln!("\x1b[33m   Falling back to direct connection\x1b[0m");
+                None
+            }
+        }
     } else if args.proxy.is_some() {
         args.proxy.clone()
     } else {
@@ -1837,6 +2015,17 @@ fn mining_thread(
                         let _ = event_tx.send(DiagnosticEvent::UpdateAvailable { min_miner_version: min_ver.clone() });
                     }
                 }
+                // v9.1.0: Emit compute power update from initial challenge
+                if challenge.network_hashrate_hs.is_some()
+                    || challenge.connected_miners.is_some()
+                    || challenge.live_security_bits.is_some()
+                {
+                    let _ = event_tx.send(DiagnosticEvent::ComputePowerUpdate {
+                        network_hashrate_hs: challenge.network_hashrate_hs.unwrap_or(0.0),
+                        connected_miners: challenge.connected_miners.unwrap_or(0),
+                        live_security_bits: challenge.live_security_bits.unwrap_or(0.0),
+                    });
+                }
                 break challenge;
             }
             Err(e) => {
@@ -1975,6 +2164,18 @@ fn mining_thread(
                         }
                         if let Ok(t) = hex_to_bytes(&current_challenge.difficulty_target) {
                             target = t;
+                        }
+
+                        // v9.1.0: Emit compute power update from challenge response
+                        if current_challenge.network_hashrate_hs.is_some()
+                            || current_challenge.connected_miners.is_some()
+                            || current_challenge.live_security_bits.is_some()
+                        {
+                            let _ = event_tx.send(DiagnosticEvent::ComputePowerUpdate {
+                                network_hashrate_hs: current_challenge.network_hashrate_hs.unwrap_or(0.0),
+                                connected_miners: current_challenge.connected_miners.unwrap_or(0),
+                                live_security_bits: current_challenge.live_security_bits.unwrap_or(0.0),
+                            });
                         }
 
                         last_challenge_refresh = std::time::Instant::now();

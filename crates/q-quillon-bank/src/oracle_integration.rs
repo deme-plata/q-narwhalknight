@@ -104,6 +104,7 @@ impl BankingOracleIntegration {
         let assets = vec![
             AssetType::BTC,
             AssetType::ETH,
+            AssetType::ZEC,
             AssetType::USDC,
             AssetType::Gold,
         ];
@@ -157,30 +158,40 @@ impl BankingOracleIntegration {
         Ok(price)
     }
 
-    /// Fetch cryptocurrency price from CoinGecko API
+    /// Fetch cryptocurrency price from CoinGecko API (v9.0.4: Binance fallback on ANY failure)
     async fn fetch_crypto_price(&self, coin_id: &str) -> Result<BigDecimal> {
         let url = format!(
             "https://api.coingecko.com/api/v3/simple/price?ids={}&vs_currencies=usd",
             coin_id
         );
 
-        match self.http_client.get(&url).send().await {
+        let coingecko_result = match self.http_client.get(&url).send().await {
             Ok(response) => {
                 if response.status().is_success() {
-                    let json: serde_json::Value = response.json().await?;
-                    if let Some(price) = json[coin_id]["usd"].as_f64() {
-                        info!("💹 Fetched {} price: ${:.2}", coin_id, price);
-                        // v8.2.7: Use string parsing to preserve decimal precision
-                        // (was: BigDecimal::from(price as i64) which truncated decimals)
-                        use std::str::FromStr;
-                        return Ok(BigDecimal::from_str(&format!("{:.2}", price))
-                            .unwrap_or_else(|_| BigDecimal::from(price as i64)));
+                    match response.json::<serde_json::Value>().await {
+                        Ok(json) => {
+                            if let Some(price) = json[coin_id]["usd"].as_f64() {
+                                info!("💹 Fetched {} price: ${:.2}", coin_id, price);
+                                use std::str::FromStr;
+                                Ok(BigDecimal::from_str(&format!("{:.2}", price))
+                                    .unwrap_or_else(|_| BigDecimal::from(price as i64)))
+                            } else {
+                                Err(anyhow!("CoinGecko returned unexpected JSON for {}", coin_id))
+                            }
+                        }
+                        Err(e) => Err(anyhow!("CoinGecko JSON parse error: {}", e)),
                     }
+                } else {
+                    Err(anyhow!("CoinGecko HTTP {}", response.status()))
                 }
-                Err(anyhow!("Failed to parse price from CoinGecko"))
             }
+            Err(e) => Err(anyhow!("CoinGecko network error: {}", e)),
+        };
+
+        match coingecko_result {
+            Ok(price) => Ok(price),
             Err(e) => {
-                warn!("⚠️  CoinGecko API failed: {}, using fallback", e);
+                warn!("⚠️  CoinGecko failed for {}: {}, trying Binance", coin_id, e);
                 self.fetch_binance_price(coin_id).await
             }
         }

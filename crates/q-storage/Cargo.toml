@@ -59,6 +59,9 @@ num_cpus = "1.16"
 # DashMap for concurrent peer trust tracking (v0.9.15-beta)
 dashmap = "5.5"
 
+# lazy_static for global compute power map (v9.1.0)
+lazy_static = { workspace = true }
+
 # 🚀 v3.4.6-beta: parking_lot for faster synchronous locks (10-20% speedup in hot paths)
 parking_lot = "0.12"
 

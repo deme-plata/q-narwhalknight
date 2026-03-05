@@ -42,9 +42,13 @@ fn extract_wallet(headers: &HeaderMap) -> Option<String> {
 }
 
 async fn is_node_admin(headers: &HeaderMap, state: &AppState) -> bool {
-    // 1) Classic check: X-Wallet-Auth or raw hex Bearer matches admin_wallet
+    // 1) Classic check: X-Wallet-Auth or raw hex Bearer matches admin_wallet or FOUNDER_WALLET
     if let Some(wallet) = extract_wallet(headers) {
         if wallet == state.admin_wallet {
+            return true;
+        }
+        // v9.0.3: Also accept FOUNDER_WALLET (master wallet always has admin access)
+        if wallet == crate::aegis_auth_middleware::FOUNDER_WALLET {
             return true;
         }
     }
@@ -55,8 +59,17 @@ async fn is_node_admin(headers: &HeaderMap, state: &AppState) -> bool {
         if let Ok(auth_str) = auth.to_str() {
             if let Some(token) = auth_str.strip_prefix("Bearer ") {
                 if !token.is_empty() {
+                    // Check as OAuth2 access token
                     if let Some(access_token) = state.oauth2_storage.get_access_token(token).await {
                         if access_token.expires_at > Utc::now() {
+                            return true;
+                        }
+                    }
+                    // v9.0.3: Also check if the Bearer value is a wallet address
+                    // (frontend sends wallet as Bearer when no OAuth2 token exists)
+                    let clean = token.replace("qnk", "").replace("qug", "");
+                    if clean.len() == 64 {
+                        if clean == state.admin_wallet || clean == crate::aegis_auth_middleware::FOUNDER_WALLET {
                             return true;
                         }
                     }
@@ -320,12 +333,13 @@ pub struct UpdateOperatorFeeRequest {
 }
 
 /// GET /api/v1/admin/operator-fees
-/// Returns node operator fee settings. Master-wallet-only.
+/// Returns node operator fee settings. v9.0.3: Any admin can read (master wallet required to write).
 pub async fn get_operator_fees(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<NodeOperatorFeeResponse>, StatusCode> {
-    if !is_master_wallet(&headers, &state) {
+    // v9.0.3: Allow any admin to READ fee settings (not just master wallet)
+    if !is_master_wallet(&headers, &state) && !is_node_admin(&headers, &state).await {
         return Err(StatusCode::FORBIDDEN);
     }
 

@@ -885,6 +885,40 @@ async fn update_tui_metrics(
             metrics.apollo_gravity_best_heat = 0.0;
         }
 
+        // v9.1.0: Compute Power Layer metrics for TUI
+        {
+            let total_peer_hashrate: f64 = q_storage::PEER_COMPUTE_POWER.iter()
+                .map(|e| e.value().0)
+                .sum::<f64>() + total_hashrate;
+            let connected_compute_peers = q_storage::PEER_COMPUTE_POWER.len() as u32;
+            let live_bits = q_mining::hashpower_security::HashpowerSecurityManager::live_security_bits(
+                0.0, total_peer_hashrate
+            );
+            metrics.compute_network_hashrate_hs = total_peer_hashrate;
+            metrics.compute_connected_peers = connected_compute_peers;
+            metrics.compute_live_security_bits = live_bits;
+            metrics.compute_local_hashrate_hs = total_hashrate;
+
+            // Detect SIMD tier (only once)
+            if metrics.compute_simd_tier.is_empty() {
+                #[cfg(target_arch = "x86_64")]
+                {
+                    let tier = if is_x86_feature_detected!("avx512f") { "AVX-512" }
+                        else if is_x86_feature_detected!("avx2") { "AVX2" }
+                        else { "SSE2" };
+                    metrics.compute_simd_tier = tier.to_string();
+                }
+                #[cfg(target_arch = "aarch64")]
+                {
+                    metrics.compute_simd_tier = "NEON".to_string();
+                }
+                #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+                {
+                    metrics.compute_simd_tier = "Scalar".to_string();
+                }
+            }
+        }
+
         // Physics Dashboard — Theoretical Consensus Metrics
         {
             let height = block_height as f64;
@@ -12224,6 +12258,42 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         } // end if mining_stats_arc
                     } // end for stats_update in stats_updates
                 // ========================================
+                // ⚡ v9.1.0: COMPUTE POWER ANNOUNCEMENT HANDLER
+                // Receives hashrate announcements from peers for network-wide compute power tracking
+                // Feeds into gravity-assist peer routing and live security bits
+                // ========================================
+                } else if topic.ends_with("/compute-power") {
+                    match serde_json::from_slice::<q_api_server::ComputePowerAnnouncement>(&data) {
+                        Ok(announcement) => {
+                            // Skip our own announcements
+                            let our_peer_id = {
+                                let info = app_state_gossip.libp2p_peer_info.read().await;
+                                info.0.clone()
+                            };
+                            if announcement.peer_id != our_peer_id {
+                                // Store in BOTH global maps:
+                                // 1. q-storage map (read by turbo_sync gravity-assist)
+                                q_storage::PEER_COMPUTE_POWER.insert(
+                                    announcement.peer_id.clone(),
+                                    (announcement.total_hashrate_hs, announcement.active_miners, announcement.timestamp),
+                                );
+                                // 2. q-network map (read by direct network code)
+                                q_network::unified_network_manager::PEER_COMPUTE_POWER.insert(
+                                    announcement.peer_id.clone(),
+                                    (announcement.total_hashrate_hs, announcement.active_miners, announcement.timestamp),
+                                );
+                                trace!("⚡ [COMPUTE POWER] Peer {} announced {:.2} H/s ({} miners, {} SIMD)",
+                                    &announcement.peer_id[..12.min(announcement.peer_id.len())],
+                                    announcement.total_hashrate_hs,
+                                    announcement.active_miners,
+                                    announcement.simd_tier);
+                            }
+                        }
+                        Err(e) => {
+                            debug!("⚠️ Failed to deserialize compute power announcement: {}", e);
+                        }
+                    }
+                // ========================================
                 // ========================================
                 // 📤 v3.3.0-beta: P2P MEMPOOL TRANSACTION PROPAGATION HANDLER
                 // Receives transactions broadcast by other nodes for real-time mempool sync
@@ -12976,6 +13046,101 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         });
 
         info!("✅ [TURBO SYNC] Peer height announcement task started");
+    }
+
+    // ========================================
+    // ⚡ v9.1.0: COMPUTE POWER ANNOUNCEMENT TASK
+    // Publishes aggregate hashrate to gossipsub every 30s
+    // Enables network-wide compute power awareness for routing and security
+    // ========================================
+    if let Some(network_tx) = &app_state.libp2p_command_tx {
+        let network_clone = network_tx.clone();
+        let peer_info_clone = app_state.libp2p_peer_info.clone();
+        let mining_stats_clone = app_state.mining_statistics.clone();
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            info!("⚡ [COMPUTE POWER] Starting compute power announcement task (30s interval)");
+
+            loop {
+                interval.tick().await;
+
+                // Gather hashrate from local mining stats
+                let (total_hashrate, active_miners) = if let Some(ref ms) = mining_stats_clone {
+                    let mut stats = ms.write().await;
+                    let hr = stats.calculate_network_hashrate();
+                    let count = stats.active_miner_count() as u32;
+                    (hr, count)
+                } else {
+                    (0.0, 0)
+                };
+
+                // Skip announcement if no miners connected
+                if total_hashrate <= 0.0 && active_miners == 0 {
+                    continue;
+                }
+
+                let peer_id = {
+                    let info = peer_info_clone.read().await;
+                    info.0.clone()
+                };
+
+                // Detect SIMD tier
+                let simd_tier = {
+                    #[cfg(target_arch = "x86_64")]
+                    {
+                        if is_x86_feature_detected!("avx512f") {
+                            "avx512"
+                        } else if is_x86_feature_detected!("avx2") {
+                            "avx2"
+                        } else {
+                            "sse2"
+                        }
+                    }
+                    #[cfg(target_arch = "aarch64")]
+                    { "neon" }
+                    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+                    { "scalar" }
+                };
+
+                let announcement = q_api_server::ComputePowerAnnouncement {
+                    peer_id: peer_id.clone(),
+                    total_hashrate_hs: total_hashrate,
+                    active_miners,
+                    simd_tier: simd_tier.to_string(),
+                    security_bits: {
+                        // v9.1.0: Aggregate live security bits from all peers
+                        let total_peer_hashrate: f64 = q_storage::PEER_COMPUTE_POWER.iter()
+                            .map(|e| e.value().0)
+                            .sum::<f64>() + total_hashrate; // Include our own
+                        q_mining::hashpower_security::HashpowerSecurityManager::live_security_bits(
+                            0.0, total_peer_hashrate,
+                        )
+                    },
+                    timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                    signature: String::new(), // TODO: Sign with node key
+                };
+
+                if let Ok(json_bytes) = serde_json::to_vec(&announcement) {
+                    let network_id = std::env::var("Q_NETWORK_ID")
+                        .ok()
+                        .and_then(|s| s.parse::<q_types::NetworkId>().ok())
+                        .unwrap_or(q_types::NetworkId::MainnetGenesis);
+
+                    let _ = network_clone.send(q_network::NetworkCommand::PublishBlock {
+                        topic: network_id.compute_power_topic(),
+                        block_bytes: json_bytes,
+                        block_height: 0, // Not block-related
+                    });
+                    debug!("⚡ [COMPUTE POWER] Announced {:.2} H/s from {} miners ({} SIMD)",
+                        total_hashrate, active_miners, simd_tier);
+                }
+            }
+        });
+        info!("✅ [COMPUTE POWER] Compute power announcement task started");
     }
 
     // ========================================
@@ -19637,7 +19802,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/mining/health", get(handlers::get_mining_health)) // v0.8.9-beta: Mining heartbeat health check
         .route("/api/v1/mining/diagnostics", get(handlers::get_mining_diagnostics)) // v2.7.0-beta: Mining system diagnostics
         .route("/api/v1/mining/capacity-local", get(q_api_server::deploy_admin_api::mining_capacity_local)) // v1.0.2: Mining capacity metrics (no auth)
-        .route("/api/v1/admin/nginx/stats-local", get(q_api_server::deploy_admin_api::nginx_stats_local)) // v8.9.9: Local nginx stats (no auth)
+        .route("/api/v1/admin/nginx/stats-local", get(q_api_server::deploy_admin_api::nginx_stats_local)) // v8.9.9: deprecated, returns caddy stats
+        .route("/api/v1/admin/caddy/stats-local", get(q_api_server::deploy_admin_api::caddy_stats_local)) // v9.0.6: Local Caddy metrics (no auth)
         .route("/api/v1/mining/stats/:wallet", get(handlers::get_wallet_mining_stats)) // v3.5.0-beta: Wallet mining stats
         // v0.0.22-beta Quick Win #1: Manual trigger endpoint REMOVED from default routes
         // Added conditionally below based on config.allow_manual_trigger
@@ -20262,8 +20428,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/admin/mining/capacity", get(q_api_server::deploy_admin_api::mining_capacity))
         // v9.0.2: Decentralization Index (admin — composite network health metric)
         .route("/api/v1/admin/decentralization", get(q_api_server::deploy_admin_api::decentralization_metrics))
-        // v8.9.9: Nginx load balancer stats (admin — aggregates Beta + Epsilon)
+        // v8.9.9: Nginx load balancer stats (deprecated, returns caddy stats)
         .route("/api/v1/admin/nginx/stats", get(q_api_server::deploy_admin_api::nginx_stats))
+        // v9.0.6: Caddy reverse proxy metrics (admin)
+        .route("/api/v1/admin/caddy/stats", get(q_api_server::deploy_admin_api::caddy_stats))
         // v8.2.0: Admin-only balance rebuild from chain (deterministic balance consensus)
         .route("/api/v1/admin/rebuild-balances", post(handlers::admin_rebuild_balances))
         .route("/api/v1/admin/purge-phase-data", post(admin_purge_phase_data))
@@ -20621,13 +20789,15 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         addr
     );
 
-    // v7.1.6: 96GB RAM / 19 vCPU — increase buffers and backlog
-    // v8.2.2: DISABLE auto-port-detection — silent port changes break nginx proxy routing
-    // If port 8080 is in TIME_WAIT, SO_REUSEADDR handles it. If another process has it,
-    // we MUST fail loudly so the operator knows nginx is broken.
+    // v9.0.5: TCP tuning for 10Gbit / millions of miners
+    // v8.2.2: DISABLE auto-port-detection — silent port changes break reverse proxy routing
+    // v9.0.5: TCP buffers reduced to 256KB (was 8MB from v7.1.6). 8MB × 2K connections =
+    // 32GB kernel buffer RAM (Linux doubles SO_RCVBUF). API responses are <1KB JSON — 256KB
+    // is 256× more than needed. Matches v8.9.8 default in HighPerformanceServer constructor.
+    // v9.0.5: Backlog raised to 65535 to match kernel somaxconn — prevents SYN drops under spike.
     let high_perf_server = HighPerformanceServer::new(app, addr)
-        .with_tcp_buffers(8 * 1024 * 1024, 8 * 1024 * 1024) // 8MB buffers (was 4MB)
-        .with_backlog(4096) // 4096 pending connections (was 1024)
+        .with_tcp_buffers(256 * 1024, 256 * 1024) // 256KB — enough for JSON API (was 8MB = OOM risk)
+        .with_backlog(65535) // Match kernel somaxconn for zero SYN drops
         .with_auto_port_detection(false); // v8.2.2: CRITICAL — never silently change port
 
     // v1.4.15-beta: Mark startup as complete - server is ready to accept connections

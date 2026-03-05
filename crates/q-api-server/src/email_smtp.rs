@@ -350,7 +350,7 @@ async fn handle_connection(
                 continue;
             }
             let to = extract_angle_addr(&trimmed[8..]);
-            if !is_local_domain(&to) && session.authenticated_wallet.is_none() {
+            if !is_local_domain(&to) && session.authenticated_wallet.is_none() && !is_trusted_relay(&addr) {
                 send_raw(&mut writer, "550 Relay denied\r\n").await?;
                 continue;
             }
@@ -496,7 +496,7 @@ where
                 continue;
             }
             let to = extract_angle_addr(&trimmed[8..]);
-            if !is_local_domain(&to) && session.authenticated_wallet.is_none() {
+            if !is_local_domain(&to) && session.authenticated_wallet.is_none() && !is_trusted_relay(&session.client_addr) {
                 send_generic(&mut writer, "550 Relay denied\r\n").await?;
                 continue;
             }
@@ -744,6 +744,17 @@ fn is_local_domain(email: &str) -> bool {
     let local = ["quillon.xyz", "mail.quillon.xyz"];
     if let Some(domain) = email.split('@').nth(1) {
         local.iter().any(|d| d.eq_ignore_ascii_case(domain))
+    } else {
+        false
+    }
+}
+
+/// Check if a client IP is in the trusted relay list (Q_SMTP_TRUSTED_RELAY_IPS).
+/// Trusted relays can send mail to external recipients without authentication.
+fn is_trusted_relay(addr: &SocketAddr) -> bool {
+    let ip_str = addr.ip().to_string();
+    if let Ok(trusted) = std::env::var("Q_SMTP_TRUSTED_RELAY_IPS") {
+        trusted.split(',').any(|t| t.trim() == ip_str)
     } else {
         false
     }

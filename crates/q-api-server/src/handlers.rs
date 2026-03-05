@@ -5487,6 +5487,14 @@ pub async fn hashpower_security_metrics(
         0.0
     };
 
+    // v9.1.0: Live security bits boosted by real-time network hashpower
+    let total_live_hashrate: f64 = q_storage::PEER_COMPUTE_POWER.iter()
+        .map(|entry| entry.value().0)
+        .sum();
+    let live_security_bits = q_mining::hashpower_security::HashpowerSecurityManager::live_security_bits(
+        cumulative_work_bits, total_live_hashrate,
+    );
+
     // Security tiers based on cumulative work bits
     let (security_tier, tier_description) = match cumulative_work_bits as u32 {
         0..=25 => ("BOOTSTRAP", "Network bootstrapping - minimal security"),
@@ -5789,6 +5797,8 @@ pub async fn hashpower_security_metrics(
         "metrics": {
             "blocks_processed": current_height,
             "security_bits": cumulative_work_bits,
+            "live_security_bits": live_security_bits,
+            "live_network_hashrate_hs": total_live_hashrate,
             "effective_difficulty": effective_difficulty,
             "security_tier": security_tier,
             "tier_description": tier_description,
@@ -10876,21 +10886,29 @@ pub async fn execute_swap(
 
         // Deduct input token from user
         if from_is_qug {
-            // v3.6.9-beta: CRITICAL FIX - Deduct QUG from wallet_balances when swapping QUG → custom token
-            // This was missing in v3.6.8, causing QUG to not be deducted during swaps
+            // v9.0.5: CRITICAL FIX — Update in-memory wallet_balances for instant UI feedback,
+            // but do NOT persist to RocksDB. The RocksDB balance will be updated by
+            // balance_consensus when the swap TX is confirmed in a block.
+            //
+            // Previously (v3.6.9), execute_swap called set_balance() to persist immediately.
+            // This caused DOUBLE DEDUCTION: execute_swap sets RocksDB to (balance - amount_in),
+            // then balance_consensus subtracts amount_in again → user loses 2x the swap amount.
+            //
+            // In-memory update provides instant UI feedback (balance shows deducted immediately).
+            // When balance_consensus processes the block, it subtracts from the non-persisted
+            // RocksDB value and persists the correct final balance. On next API call,
+            // wallet_balances is synced from storage (line ~9781).
             drop(token_balances);
             let mut wallet_balances = state.wallet_balances.write().await;
             let old_qug_balance = wallet_balances.get(&wallet_addr).copied().unwrap_or(0);
             let new_qug_balance = old_qug_balance.saturating_sub(request.amount_in as u128);
             wallet_balances.insert(wallet_addr, new_qug_balance);
-            info!("💸 [SWAP v3.6.9] Deducted {} QUG from user (was: {}, now: {})",
+            info!("💸 [SWAP v9.0.5] Deducted {} QUG from user in-memory (was: {}, now: {}). RocksDB update deferred to block confirmation.",
                 request.amount_in as f64 / 1e24, old_qug_balance as f64 / 1e24, new_qug_balance as f64 / 1e24);
             drop(wallet_balances);
 
-            // Persist QUG balance to storage
-            if let Err(e) = state.storage_engine.set_balance(&hex::encode(wallet_addr), new_qug_balance).await {
-                warn!("⚠️ [SWAP v3.6.9] Failed to persist deducted QUG balance: {}", e);
-            }
+            // v9.0.5: DO NOT persist to RocksDB here — balance_consensus will handle it
+            // when the swap TX is confirmed in a block. Persisting here caused double deduction.
             token_balances = state.token_balances.write().await;
         } else if from_is_qugusd {
             // v4.0.3: Deduct QUGUSD from token_balances using standard QUGUSD_TOKEN_ADDRESS

@@ -982,6 +982,23 @@ impl HashpowerSecurityManager {
     pub async fn attack_cost_bits(&self, from_height: u64) -> f64 {
         self.cumulative_work.read().await.attack_cost_bits(from_height)
     }
+
+    /// v9.1.0: Live security bits that account for real-time network hashpower.
+    /// Takes the maximum of cumulative-work-based security bits (historical) and
+    /// log2 of the total live network hashrate (current). This means security
+    /// never drops below what cumulative work provides, but can be boosted when
+    /// live hashpower is higher than what blocks alone would indicate.
+    ///
+    /// `total_network_hashrate_hs` should be the sum of all peers' announced
+    /// hashrates from the compute power gossipsub topic.
+    pub fn live_security_bits(cumulative_bits: f64, total_network_hashrate_hs: f64) -> f64 {
+        if total_network_hashrate_hs <= 0.0 {
+            return cumulative_bits;
+        }
+        // log2(hashrate) gives "bits of security" from live compute power
+        let live_bits = total_network_hashrate_hs.log2();
+        cumulative_bits.max(live_bits)
+    }
 }
 
 impl Default for HashpowerSecurityManager {

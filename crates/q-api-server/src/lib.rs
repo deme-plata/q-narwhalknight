@@ -222,6 +222,30 @@ pub struct ContractEventRecord {
     pub tx_hash: String,
 }
 
+/// v9.1.0: Compute Power Layer — network-wide hashpower announcements via gossipsub.
+/// Each node periodically broadcasts its aggregate mining hashrate so peers can
+/// build a real-time picture of total network compute power.  This feeds into:
+///   - Gravity-assist peer routing (Phase 3: high-hashpower peers get sync priority)
+///   - Live security bits (Phase 5: security = f(cumulative work, live hashrate))
+///   - PoW relay stamps (Phase 4: anti-spam requires proof of compute capability)
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ComputePowerAnnouncement {
+    /// Peer ID of the announcing node
+    pub peer_id: String,
+    /// Total hashrate in hashes/second aggregated across all connected miners
+    pub total_hashrate_hs: f64,
+    /// Number of active mining connections
+    pub active_miners: u32,
+    /// SIMD tier: "avx512", "avx2", "neon", "sse2", "scalar"
+    pub simd_tier: String,
+    /// Cumulative security bits from block work
+    pub security_bits: f64,
+    /// Unix timestamp (seconds) when this announcement was created
+    pub timestamp: u64,
+    /// Ed25519 signature over (peer_id || hashrate || timestamp) for authenticity
+    pub signature: String,
+}
+
 pub mod config;
 pub mod console_viz; // Beautiful animated console visualization
                      // v0.9.1-beta: DEX modules commented out (q_dex/q_oracle crates not yet implemented)
@@ -379,20 +403,21 @@ pub async fn bootstrap_bridge_pools(
     qug_price: f64,
     oracle: Option<&q_quillon_bank::oracle_integration::BankingOracleIntegration>,
 ) {
-    // v8.2.7: Fetch LIVE prices from oracle (CoinGecko → Binance fallback)
+    // v9.0.4: Fetch LIVE prices from oracle (CoinGecko → Binance fallback)
+    // Fallback prices updated 2026-03-04 to reflect current market
     use q_quillon_bank::AssetType;
     let btc_price = if let Some(orc) = oracle {
         let p = orc.get_price_f64(&AssetType::BTC).await;
-        if p > 0.0 { p } else { 97_000.0 }
-    } else { 97_000.0 };
+        if p > 0.0 { p } else { 73_000.0 }
+    } else { 73_000.0 };
     let eth_price = if let Some(orc) = oracle {
         let p = orc.get_price_f64(&AssetType::ETH).await;
-        if p > 0.0 { p } else { 3_400.0 }
-    } else { 3_400.0 };
+        if p > 0.0 { p } else { 2_100.0 }
+    } else { 2_100.0 };
     let zec_price = if let Some(orc) = oracle {
         let p = orc.get_price_f64(&AssetType::ZEC).await;
-        if p > 0.0 { p } else { 55.0 }
-    } else { 55.0 };
+        if p > 0.0 { p } else { 237.0 }
+    } else { 237.0 };
     let iron_price = 0.008; // Iron Fish not on major exchanges
 
     tracing::info!("💹 [ORACLE] Bridge pool prices: BTC=${:.0}, ETH=${:.0}, ZEC=${:.2}, IRON=${:.4}",
@@ -1012,6 +1037,9 @@ pub struct AppState {
 
     // Atomic peer count for fast lock-free access
     pub libp2p_peer_count: Option<Arc<std::sync::atomic::AtomicUsize>>,
+
+    // v9.0.6: EMA-smoothed Decentralization Index (f64 bits stored as AtomicU64)
+    pub di_ema: Arc<std::sync::atomic::AtomicU64>,
 
     // 💱 v0.6.1-beta: DEX DECENTRALIZATION PHASE 3 - Pool Announcement Signing
     // Node signing key for signing pool announcements broadcast to P2P network
@@ -2552,6 +2580,7 @@ impl AppState {
             libp2p_command_tx: None, // Disabled in test mode
             libp2p_peer_info: Arc::new(RwLock::new((String::new(), vec![]))), // Empty initially
             libp2p_peer_count: None, // Disabled in test mode
+            di_ema: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v9.0.6: DI EMA smoothing
             node_signing_key: Arc::new(ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng)), // 💱 v0.6.1-beta: DEX pool signing key
             node_cypher: Arc::new(q_eternal_cypher::NodeCypher::from_ed25519_key(ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng))), // v7.2.12: test dummy
             admin_wallet: crate::aegis_auth_middleware::FOUNDER_WALLET.to_string(),
@@ -3883,6 +3912,7 @@ impl AppState {
 
             // Atomic peer count (will be populated from network manager)
             libp2p_peer_count: None, // Will be initialized in main.rs after network manager creation
+            di_ema: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v9.0.6: DI EMA smoothing
             node_signing_key: Arc::new(ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng)), // 💱 v0.6.1-beta: DEX pool signing key (will be replaced in main.rs)
             node_cypher: Arc::new(q_eternal_cypher::NodeCypher::from_ed25519_key(ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng))), // v7.2.12: placeholder, replaced in main.rs
             admin_wallet: crate::aegis_auth_middleware::FOUNDER_WALLET.to_string(),

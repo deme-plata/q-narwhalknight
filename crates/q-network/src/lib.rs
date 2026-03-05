@@ -119,7 +119,9 @@ pub mod signature_cache; // v1.0.3-beta: Signature verification cache with TOCTO
 pub mod security_metrics; // v1.0.3-beta: Prometheus metrics for signature verification (Week 2, Day 1-2)
 pub mod circuit_breaker; // v1.0.3-beta: Circuit breaker for attack protection (Week 2, Day 3-4)
 pub mod address_filter; // v1.2.2-beta: Docker/container address filtering for P2P sync optimization
-pub mod gossipsub_queue; // v3.4.13-beta: Priority queue with rate limiting for gossipsub
+pub mod gossipsub_queue;
+pub mod pow_stamp; // v9.1.0: PoW relay stamps — anti-spam proof-of-work on P2P messages
+// v3.4.13-beta: Priority queue with rate limiting for gossipsub
 pub mod peer_latency;        // v4.3.0-beta: Peer latency tracking for gossipsub mesh scoring
 pub mod pq_handshake;        // v4.3.0-beta: Post-quantum hybrid Noise handshake (Kyber1024)
 pub mod set_reconciliation;  // v4.3.0-beta: Set-reconciliation sync for bandwidth reduction

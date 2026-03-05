@@ -1,10 +1,11 @@
-// v7.3.1: Node Settings Modal — Admin-only modal for node configuration, OAuth2, fees, and updates
+// v9.0.3: Node Settings Modal — Admin modal with OAuth2-aware auth + slider-based parameter adjustment
 // Listens for 'open-node-settings' custom event from TopBar gear icon
+// Works after OAuth2 login by checking both wallet auth AND OAuth2 access tokens
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Settings, Shield, Globe, Key, Trash2, RefreshCw, Clock, Server, Wifi, DollarSign, Download, ArrowUpCircle, CheckCircle, AlertTriangle, Loader2 } from 'lucide-react';
+import { X, Settings, Shield, Globe, Key, Trash2, RefreshCw, Clock, Server, Wifi, DollarSign, Download, ArrowUpCircle, CheckCircle, AlertTriangle, Loader2, Sliders, Zap, Activity } from 'lucide-react';
 
 const MASTER_WALLET = 'efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723';
 
@@ -84,7 +85,7 @@ type NodeUpdateStateData =
   | { state: 'Error'; version: string; message: string; retry_count: number }
   | { state: 'RollingBack'; version: string; reason: string };
 
-type TabId = 'overview' | 'oauth2' | 'node' | 'updates' | 'fees';
+type TabId = 'overview' | 'parameters' | 'oauth2' | 'node' | 'updates';
 
 function formatUptime(secs: number): string {
   const days = Math.floor(secs / 86400);
@@ -95,13 +96,21 @@ function formatUptime(secs: number): string {
   return `${mins}m`;
 }
 
+// v9.0.3: Smart auth headers — uses OAuth2 token when available, falls back to wallet address
 function getAuthHeaders(): Record<string, string> {
   const wallet = localStorage.getItem('walletAddress') || '';
-  return {
+  const authToken = localStorage.getItem('authToken') || '';
+  const headers: Record<string, string> = {
     'X-Wallet-Auth': wallet,
-    'Authorization': `Bearer ${wallet}`,
     'Content-Type': 'application/json',
   };
+  // Prefer OAuth2 access token over raw wallet address for Bearer
+  if (authToken && authToken.length > 0) {
+    headers['Authorization'] = `Bearer ${authToken}`;
+  } else {
+    headers['Authorization'] = `Bearer ${wallet}`;
+  }
+  return headers;
 }
 
 function checkIsMasterWallet(): boolean {
@@ -123,6 +132,7 @@ export default function NodeSettingsModal() {
   const [loading, setLoading] = useState(false);
   const [revoking, setRevoking] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [saveStatus, setSaveStatus] = useState<string | null>(null);
   const isMaster = checkIsMasterWallet();
 
   // Listen for open event
@@ -160,7 +170,6 @@ export default function NodeSettingsModal() {
   }, []);
 
   const fetchOperatorFees = useCallback(async () => {
-    if (!checkIsMasterWallet()) return;
     try {
       const res = await fetch('/api/v1/admin/operator-fees', { headers: getAuthHeaders() });
       if (res.ok) setOperatorFees(await res.json());
@@ -221,21 +230,20 @@ export default function NodeSettingsModal() {
 
   const handleRefresh = () => {
     setLoading(true);
+    setSaveStatus(null);
     Promise.all([fetchSettings(), fetchConsents(), fetchNodeInfo(), fetchOperatorFees(), fetchUpdateInfo(), fetchAutoUpdateStatus(), fetchFeeEarnings()])
       .finally(() => setLoading(false));
   };
 
   if (!isOpen) return null;
 
-  const tabs: { id: TabId; label: string; icon: React.ReactNode; masterOnly?: boolean }[] = [
+  const tabs: { id: TabId; label: string; icon: React.ReactNode }[] = [
     { id: 'overview', label: 'Overview', icon: <Settings className="w-4 h-4" /> },
+    { id: 'parameters', label: 'Parameters', icon: <Sliders className="w-4 h-4" /> },
     { id: 'oauth2', label: 'OAuth2', icon: <Key className="w-4 h-4" /> },
     { id: 'node', label: 'Node', icon: <Server className="w-4 h-4" /> },
     { id: 'updates', label: 'Updates', icon: <ArrowUpCircle className="w-4 h-4" /> },
-    { id: 'fees', label: 'Fees', icon: <DollarSign className="w-4 h-4" />, masterOnly: true },
   ];
-
-  const visibleTabs = tabs.filter(t => !t.masterOnly || isMaster);
 
   const syncPct = settings && settings.network_height > 0
     ? Math.min(100, (settings.height / settings.network_height) * 100)
@@ -271,10 +279,21 @@ export default function NodeSettingsModal() {
                 </div>
                 <div>
                   <h2 className="text-lg font-bold text-white">Node Settings</h2>
-                  <p className="text-xs text-slate-400">Admin configuration panel</p>
+                  <p className="text-xs text-slate-400">
+                    {isMaster ? 'Master admin' : 'Node operator'} configuration
+                  </p>
                 </div>
               </div>
               <div className="flex items-center gap-2">
+                {saveStatus && (
+                  <span className={`px-2 py-0.5 text-[10px] font-bold rounded-full animate-pulse ${
+                    saveStatus === 'saved' ? 'bg-green-500/20 text-green-400 border border-green-500/30'
+                    : saveStatus === 'error' ? 'bg-red-500/20 text-red-400 border border-red-500/30'
+                    : 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
+                  }`}>
+                    {saveStatus === 'saved' ? 'SAVED' : saveStatus === 'error' ? 'ERROR' : 'SAVING...'}
+                  </span>
+                )}
                 {updateInfo?.update_available && (
                   <span className="px-2 py-0.5 text-[10px] font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30 rounded-full animate-pulse">
                     UPDATE
@@ -297,12 +316,12 @@ export default function NodeSettingsModal() {
             </div>
 
             {/* Tabs */}
-            <div className="flex border-b border-slate-700/50">
-              {visibleTabs.map(tab => (
+            <div className="flex border-b border-slate-700/50 overflow-x-auto">
+              {tabs.map(tab => (
                 <button
                   key={tab.id}
                   onClick={() => setActiveTab(tab.id)}
-                  className={`flex items-center gap-2 px-5 py-3 text-sm font-medium transition-colors ${
+                  className={`flex items-center gap-2 px-5 py-3 text-sm font-medium transition-colors whitespace-nowrap ${
                     activeTab === tab.id
                       ? 'text-blue-400 border-b-2 border-blue-400 bg-blue-500/5'
                       : 'text-slate-400 hover:text-slate-300 hover:bg-slate-700/20'
@@ -334,6 +353,13 @@ export default function NodeSettingsModal() {
                 </div>
               ) : activeTab === 'overview' ? (
                 <OverviewTab settings={settings} syncPct={syncPct} feeEarnings={feeEarnings} />
+              ) : activeTab === 'parameters' ? (
+                <ParametersTab
+                  fees={operatorFees}
+                  isMaster={isMaster}
+                  onSaveStatus={setSaveStatus}
+                  onRefreshFees={fetchOperatorFees}
+                />
               ) : activeTab === 'oauth2' ? (
                 <OAuth2Tab
                   settings={settings}
@@ -366,23 +392,6 @@ export default function NodeSettingsModal() {
                     }
                   } catch { /* ignore */ }
                 }} />
-              ) : activeTab === 'fees' ? (
-                <FeesTab
-                  fees={operatorFees}
-                  onUpdate={async (promille, bps) => {
-                    try {
-                      const body: Record<string, number> = {};
-                      if (promille !== undefined) body.node_operator_fee_promille = promille;
-                      if (bps !== undefined) body.dex_protocol_fee_bps = bps;
-                      const res = await fetch('/api/v1/admin/operator-fees', {
-                        method: 'POST',
-                        headers: getAuthHeaders(),
-                        body: JSON.stringify(body),
-                      });
-                      if (res.ok) setOperatorFees(await res.json());
-                    } catch { /* ignore */ }
-                  }}
-                />
               ) : (
                 <NodeTab nodeInfo={nodeInfo} updateInfo={updateInfo} onCheckUpdate={fetchUpdateInfo} />
               )}
@@ -395,7 +404,7 @@ export default function NodeSettingsModal() {
   );
 }
 
-// -- Overview Tab --
+// -- Reusable Components --
 
 function StatCard({ icon, label, value, sub }: { icon: React.ReactNode; label: string; value: string; sub?: string }) {
   return (
@@ -404,11 +413,85 @@ function StatCard({ icon, label, value, sub }: { icon: React.ReactNode; label: s
         {icon}
         <span className="text-xs text-slate-400 uppercase tracking-wide">{label}</span>
       </div>
-      <div className="text-xl font-bold text-white">{value}</div>
-      {sub && <div className="text-xs text-slate-500 mt-1">{sub}</div>}
+      <div className="text-xl font-bold text-white truncate">{value}</div>
+      {sub && <div className="text-xs text-slate-500 mt-1 truncate">{sub}</div>}
     </div>
   );
 }
+
+// v9.0.3: Slider component with label, value display, and color coding
+function ParamSlider({
+  label,
+  description,
+  value,
+  min,
+  max,
+  step,
+  displayValue,
+  displaySuffix,
+  color,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  description: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  displayValue: string;
+  displaySuffix?: string;
+  color: 'blue' | 'amber' | 'cyan' | 'emerald' | 'purple';
+  disabled?: boolean;
+  onChange: (val: number) => void;
+}) {
+  const colorMap = {
+    blue: { track: 'from-blue-500 to-blue-400', text: 'text-blue-400', bg: 'bg-blue-500/20', border: 'border-blue-500/30' },
+    amber: { track: 'from-amber-500 to-amber-400', text: 'text-amber-400', bg: 'bg-amber-500/20', border: 'border-amber-500/30' },
+    cyan: { track: 'from-cyan-500 to-cyan-400', text: 'text-cyan-400', bg: 'bg-cyan-500/20', border: 'border-cyan-500/30' },
+    emerald: { track: 'from-emerald-500 to-emerald-400', text: 'text-emerald-400', bg: 'bg-emerald-500/20', border: 'border-emerald-500/30' },
+    purple: { track: 'from-purple-500 to-purple-400', text: 'text-purple-400', bg: 'bg-purple-500/20', border: 'border-purple-500/30' },
+  };
+  const c = colorMap[color];
+  const pct = max > min ? ((value - min) / (max - min)) * 100 : 0;
+
+  return (
+    <div className={`${c.bg} border ${c.border} rounded-xl p-4 ${disabled ? 'opacity-50' : ''}`}>
+      <div className="flex items-center justify-between mb-1">
+        <span className="text-sm font-medium text-slate-200">{label}</span>
+        <span className={`text-lg font-bold font-mono ${c.text}`}>
+          {displayValue}{displaySuffix && <span className="text-xs text-slate-400 ml-1">{displaySuffix}</span>}
+        </span>
+      </div>
+      <p className="text-xs text-slate-500 mb-3">{description}</p>
+      <div className="relative">
+        <div className="w-full h-2 bg-slate-700 rounded-full overflow-hidden">
+          <div
+            className={`h-full bg-gradient-to-r ${c.track} rounded-full transition-all duration-150`}
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+        <input
+          type="range"
+          min={min}
+          max={max}
+          step={step}
+          value={value}
+          disabled={disabled}
+          onChange={e => onChange(Number(e.target.value))}
+          className="absolute inset-0 w-full h-2 opacity-0 cursor-pointer disabled:cursor-not-allowed"
+          style={{ top: '0px' }}
+        />
+      </div>
+      <div className="flex justify-between mt-1">
+        <span className="text-[10px] text-slate-600">{min}</span>
+        <span className="text-[10px] text-slate-600">{max}</span>
+      </div>
+    </div>
+  );
+}
+
+// -- Overview Tab --
 
 function OverviewTab({ settings, syncPct, feeEarnings }: { settings: AdminSettings | null; syncPct: number; feeEarnings: FeeEarnings | null }) {
   if (!settings) return <p className="text-slate-400">No data available</p>;
@@ -419,7 +502,8 @@ function OverviewTab({ settings, syncPct, feeEarnings }: { settings: AdminSettin
         <StatCard
           icon={<Shield className="w-4 h-4 text-emerald-400" />}
           label="Admin Wallet"
-          value={settings.admin_wallet}
+          value={`${settings.admin_wallet.slice(0, 8)}...${settings.admin_wallet.slice(-8)}`}
+          sub={settings.admin_wallet}
         />
         <StatCard
           icon={<Globe className="w-4 h-4 text-blue-400" />}
@@ -477,7 +561,11 @@ function OverviewTab({ settings, syncPct, feeEarnings }: { settings: AdminSettin
       <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-4">
         <div className="flex items-center justify-between mb-2">
           <span className="text-sm text-slate-400">Sync Progress</span>
-          <span className="text-sm font-mono text-white">{syncPct.toFixed(1)}%</span>
+          <span className={`text-xs px-2 py-0.5 rounded-full ${
+            syncPct >= 99.5 ? 'bg-green-500/20 text-green-400' : 'bg-amber-500/20 text-amber-400'
+          }`}>
+            {syncPct >= 99.5 ? 'Synced' : `${syncPct.toFixed(1)}%`}
+          </span>
         </div>
         <div className="w-full h-2 bg-slate-700 rounded-full overflow-hidden">
           <div
@@ -511,6 +599,238 @@ function OverviewTab({ settings, syncPct, feeEarnings }: { settings: AdminSettin
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+// -- Parameters Tab (v9.0.3: Slider-based parameter adjustment) --
+
+function ParametersTab({
+  fees,
+  isMaster,
+  onSaveStatus,
+  onRefreshFees,
+}: {
+  fees: OperatorFees | null;
+  isMaster: boolean;
+  onSaveStatus: (status: string | null) => void;
+  onRefreshFees: () => Promise<void>;
+}) {
+  const [operatorFee, setOperatorFee] = useState(0); // promille 0-500
+  const [dexFee, setDexFee] = useState(0); // bps 0-10
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Sync slider values from fetched data
+  useEffect(() => {
+    if (fees) {
+      setOperatorFee(fees.node_operator_fee_promille);
+      setDexFee(fees.dex_protocol_fee_bps);
+      setDirty(false);
+    }
+  }, [fees]);
+
+  const handleOperatorFeeChange = (val: number) => {
+    setOperatorFee(val);
+    setDirty(true);
+  };
+
+  const handleDexFeeChange = (val: number) => {
+    setDexFee(val);
+    setDirty(true);
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    onSaveStatus('saving');
+    try {
+      const body: Record<string, number> = {};
+      if (fees && operatorFee !== fees.node_operator_fee_promille) body.node_operator_fee_promille = operatorFee;
+      if (fees && dexFee !== fees.dex_protocol_fee_bps) body.dex_protocol_fee_bps = dexFee;
+
+      if (Object.keys(body).length === 0) {
+        onSaveStatus('saved');
+        setSaving(false);
+        setDirty(false);
+        return;
+      }
+
+      const res = await fetch('/api/v1/admin/operator-fees', {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify(body),
+      });
+      if (res.ok) {
+        onSaveStatus('saved');
+        setDirty(false);
+        await onRefreshFees();
+      } else {
+        const text = await res.text().catch(() => 'Unknown error');
+        onSaveStatus('error');
+        console.error('Failed to save fees:', res.status, text);
+      }
+    } catch (err) {
+      onSaveStatus('error');
+      console.error('Save error:', err);
+    }
+    setSaving(false);
+    // Clear status after 3s
+    if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+    saveTimeoutRef.current = setTimeout(() => onSaveStatus(null), 3000);
+  };
+
+  const handleReset = () => {
+    if (fees) {
+      setOperatorFee(fees.node_operator_fee_promille);
+      setDexFee(fees.dex_protocol_fee_bps);
+      setDirty(false);
+      onSaveStatus(null);
+    }
+  };
+
+  if (!fees) {
+    return (
+      <div className="flex flex-col items-center justify-center py-12 text-center">
+        <Sliders className="w-10 h-10 text-slate-600 mb-4" />
+        <p className="text-slate-300 font-medium mb-2">Fee parameters not available</p>
+        <p className="text-sm text-slate-500">Requires master wallet or node admin access</p>
+      </div>
+    );
+  }
+
+  const operatorFeePct = (operatorFee / 10).toFixed(1);
+  const dexFeePct = (dexFee / 100).toFixed(2);
+  const treasuryPct = (100 - operatorFee / 10).toFixed(1);
+
+  return (
+    <div className="space-y-4">
+      {/* Section Header */}
+      <div className="flex items-center gap-2 mb-2">
+        <Sliders className="w-5 h-5 text-blue-400" />
+        <h3 className="text-sm font-semibold text-slate-200">Fee & Revenue Parameters</h3>
+        {!isMaster && (
+          <span className="ml-auto px-2 py-0.5 text-[10px] font-medium bg-amber-500/20 text-amber-400 border border-amber-500/30 rounded-full">
+            READ ONLY
+          </span>
+        )}
+      </div>
+
+      {/* Wallet balances */}
+      <div className="grid grid-cols-2 gap-3">
+        <StatCard
+          icon={<Shield className="w-4 h-4 text-emerald-400" />}
+          label="Founder Balance"
+          value={`${fees.founder_wallet_balance_qug.toFixed(4)} QUG`}
+        />
+        <StatCard
+          icon={<DollarSign className="w-4 h-4 text-amber-400" />}
+          label="Operator Balance"
+          value={`${fees.admin_wallet_balance_qug.toFixed(4)} QUG`}
+          sub={`${fees.admin_wallet.slice(0, 8)}...${fees.admin_wallet.slice(-6)}`}
+        />
+      </div>
+
+      {/* Operator Fee Slider */}
+      <ParamSlider
+        label="Node Operator Fee"
+        description={`Your share of transaction fees. Treasury gets ${treasuryPct}%.`}
+        value={operatorFee}
+        min={0}
+        max={500}
+        step={10}
+        displayValue={`${operatorFeePct}%`}
+        color="amber"
+        disabled={!isMaster}
+        onChange={handleOperatorFeeChange}
+      />
+
+      {/* DEX Protocol Fee Slider */}
+      <ParamSlider
+        label="DEX Protocol Fee"
+        description="Extracted from each DEX swap. Split between treasury and operator based on fee share above."
+        value={dexFee}
+        min={0}
+        max={10}
+        step={1}
+        displayValue={`${dexFeePct}%`}
+        displaySuffix={`(${dexFee} bps)`}
+        color="cyan"
+        disabled={!isMaster}
+        onChange={handleDexFeeChange}
+      />
+
+      {/* Fee Distribution Preview */}
+      <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-4">
+        <h4 className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-3 flex items-center gap-2">
+          <Activity className="w-3.5 h-3.5" /> Fee Distribution Preview
+        </h4>
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-slate-400">Treasury Share</span>
+            <span className="text-xs font-mono text-white">{treasuryPct}%</span>
+          </div>
+          <div className="w-full h-3 bg-slate-700 rounded-full overflow-hidden flex">
+            <div
+              className="h-full bg-gradient-to-r from-blue-500 to-blue-400 transition-all duration-150"
+              style={{ width: `${100 - operatorFee / 5}%` }}
+            />
+            <div
+              className="h-full bg-gradient-to-r from-amber-500 to-amber-400 transition-all duration-150"
+              style={{ width: `${operatorFee / 5}%` }}
+            />
+          </div>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <div className="w-2 h-2 rounded-full bg-blue-400" />
+              <span className="text-[10px] text-slate-500">Treasury ({treasuryPct}%)</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-slate-500">Operator ({operatorFeePct}%)</span>
+              <div className="w-2 h-2 rounded-full bg-amber-400" />
+            </div>
+          </div>
+        </div>
+        <div className="mt-3 pt-3 border-t border-slate-700/30 space-y-1">
+          <div className="flex justify-between text-xs">
+            <span className="text-slate-500">DEX Protocol Fee</span>
+            <span className="text-slate-400">{dexFeePct}% per swap</span>
+          </div>
+          <div className="flex justify-between text-xs">
+            <span className="text-slate-500">LP Fee (fixed)</span>
+            <span className="text-slate-400">0.30% (stays in pool)</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Save / Reset buttons */}
+      {isMaster && dirty && (
+        <div className="flex gap-3">
+          <button
+            onClick={handleSave}
+            disabled={saving}
+            className="flex-1 flex items-center justify-center gap-2 px-4 py-3 text-sm font-medium text-white bg-gradient-to-r from-blue-600 to-cyan-600 rounded-xl hover:from-blue-500 hover:to-cyan-500 disabled:opacity-50 transition-all"
+          >
+            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
+            Save Changes
+          </button>
+          <button
+            onClick={handleReset}
+            className="px-4 py-3 text-sm font-medium text-slate-400 bg-slate-700/50 border border-slate-600/50 rounded-xl hover:bg-slate-600/50 transition-colors"
+          >
+            Reset
+          </button>
+        </div>
+      )}
+
+      {!isMaster && (
+        <div className="bg-slate-800/30 border border-slate-700/30 rounded-lg p-3 text-center">
+          <p className="text-xs text-slate-500">
+            Only the master wallet can modify parameters.
+            You are viewing current settings as a node operator.
+          </p>
+        </div>
+      )}
     </div>
   );
 }
@@ -812,6 +1132,7 @@ function UpdatesTab({ autoUpdateStatus, updateInfo, onToggle, onSetEmail }: {
     setEmailSaving(false);
     setEmailDirty(false);
   };
+
   if (!autoUpdateStatus) {
     return (
       <div className="text-center py-8">
@@ -1070,163 +1391,6 @@ function UpdatesTab({ autoUpdateStatus, updateInfo, onToggle, onSetEmail }: {
           <div className="flex justify-between">
             <span>Safety gates:</span>
             <span className="text-slate-400">Min peers, sync check, preflight, rollback watchdog</span>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// -- Fees Tab (Master Wallet Only) --
-
-function FeesTab({ fees, onUpdate }: {
-  fees: OperatorFees | null;
-  onUpdate: (promille?: number, bps?: number) => Promise<void>;
-}) {
-  const [editPromille, setEditPromille] = useState('');
-  const [editBps, setEditBps] = useState('');
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    if (fees) {
-      setEditPromille(String(fees.node_operator_fee_promille));
-      setEditBps(String(fees.dex_protocol_fee_bps));
-    }
-  }, [fees]);
-
-  if (!fees) return <p className="text-slate-400">Fee data not available (master wallet only)</p>;
-
-  const handleSave = async () => {
-    setSaving(true);
-    const promille = parseInt(editPromille);
-    const bps = parseInt(editBps);
-    const updates: { promille?: number; bps?: number } = {};
-    if (!isNaN(promille) && promille !== fees.node_operator_fee_promille) updates.promille = promille;
-    if (!isNaN(bps) && bps !== fees.dex_protocol_fee_bps) updates.bps = bps;
-    if (updates.promille !== undefined || updates.bps !== undefined) {
-      await onUpdate(updates.promille, updates.bps);
-    }
-    setSaving(false);
-  };
-
-  const promilleNum = parseInt(editPromille);
-  const bpsNum = parseInt(editBps);
-  const hasChanges = (
-    (!isNaN(promilleNum) && promilleNum !== fees.node_operator_fee_promille) ||
-    (!isNaN(bpsNum) && bpsNum !== fees.dex_protocol_fee_bps)
-  );
-  const promilleValid = !isNaN(promilleNum) && promilleNum >= 0 && promilleNum <= 500;
-  const bpsValid = !isNaN(bpsNum) && bpsNum >= 0 && bpsNum <= 10;
-
-  return (
-    <div className="space-y-4">
-      {/* Wallet balances */}
-      <div className="grid grid-cols-2 gap-3">
-        <StatCard
-          icon={<Shield className="w-4 h-4 text-emerald-400" />}
-          label="Founder Balance"
-          value={`${fees.founder_wallet_balance_qug.toFixed(4)} QUG`}
-        />
-        <StatCard
-          icon={<DollarSign className="w-4 h-4 text-amber-400" />}
-          label="Operator Balance"
-          value={`${fees.admin_wallet_balance_qug.toFixed(4)} QUG`}
-          sub={fees.admin_wallet}
-        />
-      </div>
-
-      {/* Node Operator Fee */}
-      <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-4">
-        <h3 className="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
-          <DollarSign className="w-4 h-4 text-amber-400" /> Node Operator Fee Share
-        </h3>
-        <p className="text-xs text-slate-500 mb-3">
-          Percentage of collected transaction fees routed to the node operator wallet.
-          The rest goes to the protocol treasury.
-        </p>
-        <div className="flex items-center gap-3">
-          <div className="flex-1">
-            <label className="text-xs text-slate-400 mb-1 block">Promille (0-500)</label>
-            <div className="flex items-center gap-2">
-              <input
-                type="number"
-                min={0}
-                max={500}
-                value={editPromille}
-                onChange={e => setEditPromille(e.target.value)}
-                className={`w-24 px-3 py-2 bg-slate-700/50 border rounded-lg text-sm text-white font-mono focus:outline-none focus:ring-1 ${
-                  promilleValid ? 'border-slate-600/50 focus:ring-blue-500' : 'border-red-500/50 focus:ring-red-500'
-                }`}
-              />
-              <span className="text-sm text-slate-400">
-                = {promilleValid ? (promilleNum / 10).toFixed(1) : '?'}%
-              </span>
-            </div>
-            {!promilleValid && <p className="text-xs text-red-400 mt-1">Must be 0-500 (0%-50%)</p>}
-          </div>
-        </div>
-      </div>
-
-      {/* DEX Protocol Fee */}
-      <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-4">
-        <h3 className="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
-          <DollarSign className="w-4 h-4 text-cyan-400" /> DEX Protocol Fee
-        </h3>
-        <p className="text-xs text-slate-500 mb-3">
-          Protocol fee extracted from each DEX swap (in basis points).
-          Split between treasury and operator based on the operator fee share above.
-        </p>
-        <div className="flex items-center gap-3">
-          <div className="flex-1">
-            <label className="text-xs text-slate-400 mb-1 block">Basis Points (0-10)</label>
-            <div className="flex items-center gap-2">
-              <input
-                type="number"
-                min={0}
-                max={10}
-                value={editBps}
-                onChange={e => setEditBps(e.target.value)}
-                className={`w-24 px-3 py-2 bg-slate-700/50 border rounded-lg text-sm text-white font-mono focus:outline-none focus:ring-1 ${
-                  bpsValid ? 'border-slate-600/50 focus:ring-blue-500' : 'border-red-500/50 focus:ring-red-500'
-                }`}
-              />
-              <span className="text-sm text-slate-400">
-                = {bpsValid ? (bpsNum / 100).toFixed(2) : '?'}%
-              </span>
-            </div>
-            {!bpsValid && <p className="text-xs text-red-400 mt-1">Must be 0-10 (0%-0.1%)</p>}
-          </div>
-        </div>
-      </div>
-
-      {/* Save button */}
-      {hasChanges && promilleValid && bpsValid && (
-        <button
-          onClick={handleSave}
-          disabled={saving}
-          className="w-full flex items-center justify-center gap-2 px-4 py-3 text-sm font-medium text-white bg-gradient-to-r from-blue-600 to-cyan-600 rounded-xl hover:from-blue-500 hover:to-cyan-500 disabled:opacity-50 transition-all"
-        >
-          {saving ? <RefreshCw className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
-          Save Fee Settings
-        </button>
-      )}
-
-      {/* Current summary */}
-      <div className="bg-slate-800/30 border border-slate-700/30 rounded-lg p-3">
-        <div className="text-xs text-slate-500 space-y-1">
-          <div className="flex justify-between">
-            <span>Transaction Fee Split:</span>
-            <span className="text-slate-400">
-              {100 - (fees.node_operator_fee_promille / 10)}% treasury / {(fees.node_operator_fee_promille / 10)}% operator
-            </span>
-          </div>
-          <div className="flex justify-between">
-            <span>DEX Protocol Fee:</span>
-            <span className="text-slate-400">{fees.dex_protocol_fee_percent} per swap</span>
-          </div>
-          <div className="flex justify-between">
-            <span>LP Fee (unchanged):</span>
-            <span className="text-slate-400">0.30% (stays in pool)</span>
           </div>
         </div>
       </div>

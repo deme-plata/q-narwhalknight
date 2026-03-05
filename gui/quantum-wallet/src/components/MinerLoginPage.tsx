@@ -81,6 +81,7 @@ const MinerLoginPage: React.FC<MinerLoginPageProps> = ({ deviceCode }) => {
           return;
         } else {
           setError((data as any).message || (data as any).error || 'Authorization failed. Code may have expired.');
+          setLoading(false);
           return;
         }
       } catch (err: any) {
@@ -89,6 +90,7 @@ const MinerLoginPage: React.FC<MinerLoginPageProps> = ({ deviceCode }) => {
           continue;
         }
         setError(err.message || 'Network error. Please try again.');
+        setLoading(false);
         return;
       }
     }
@@ -146,6 +148,7 @@ const MinerLoginPage: React.FC<MinerLoginPageProps> = ({ deviceCode }) => {
             return;
           } else {
             setError((data as any).message || (data as any).error || 'Authorization failed. Code may have expired.');
+            setLoading(false);
             return;
           }
         } catch (err: any) {
@@ -154,6 +157,7 @@ const MinerLoginPage: React.FC<MinerLoginPageProps> = ({ deviceCode }) => {
             continue;
           }
           setError(err.message || 'Network error. Please try again.');
+          setLoading(false);
           return;
         }
       }

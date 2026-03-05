@@ -47,6 +47,11 @@ lazy_static::lazy_static! {
     /// Read by turbo_sync gravity-assist to seed initial bandwidth estimates
     pub static ref PEER_BANDWIDTH_TIERS: DashMap<String, u32> = DashMap::new();
 
+    /// v9.1.0: Global peer compute power map — updated by gossipsub announcements.
+    /// Maps peer_id string → (total_hashrate_hs, active_miners, timestamp).
+    /// Used by gravity-assist for hashpower-weighted peer routing.
+    pub static ref PEER_COMPUTE_POWER: DashMap<String, (f64, u32, u64)> = DashMap::new();
+
     /// v8.6.2: Supernode peer ID prefixes from Q_SUPERNODE_PEERS env var
     /// Other servers set this to Epsilon's peer ID prefix so gravity-assist
     /// gives it a 10x boost over standard 3x preferred peers.
@@ -56,6 +61,15 @@ lazy_static::lazy_static! {
             .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
             .unwrap_or_default()
     };
+}
+
+/// v9.1.0: Check if PoW relay stamps are enabled (opt-in via Q_POW_STAMPS=1).
+/// Cached on first call — env var is only read once.
+fn pow_stamps_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("Q_POW_STAMPS").map(|v| v == "1").unwrap_or(false)
+    })
 }
 
 /// v8.6.2: Bandwidth tier classification for peer selection
@@ -91,6 +105,34 @@ impl BandwidthTier {
             BandwidthTier::Fallback => 1.0,
             BandwidthTier::Standard => 3.0,
             BandwidthTier::Supernode => 10.0,
+        }
+    }
+
+    /// v9.1.0: Compute power boost for gravity-assist peer selection.
+    /// Returns a multiplier based on a peer's announced hashrate.
+    /// Log-scale: 1x at 0, 2x at 1 MH/s, 3x at 1 GH/s, 5x at 1 TH/s.
+    /// This boost is multiplied with the bandwidth-based sync_boost_multiplier
+    /// to form the combined "gravity-assist" score.
+    pub fn compute_power_boost(peer_id_str: &str) -> f64 {
+        if let Some(entry) = PEER_COMPUTE_POWER.get(peer_id_str) {
+            let (hashrate_hs, _, timestamp) = *entry;
+            // Expire announcements older than 120s (missed 4 cycles)
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            if now.saturating_sub(timestamp) > 120 {
+                return 1.0;
+            }
+            if hashrate_hs <= 0.0 {
+                return 1.0;
+            }
+            // log-scale boost: 1 + log10(hashrate_hs / 1000)
+            // At 1 kH/s → 1.0, 1 MH/s → 2.0, 1 GH/s → 3.0, 1 TH/s → 4.0
+            let boost = 1.0 + (hashrate_hs / 1_000.0).max(1.0).log10();
+            boost.min(5.0) // Cap at 5x to prevent any single peer from dominating
+        } else {
+            1.0
         }
     }
 
@@ -1720,6 +1762,8 @@ impl UnifiedNetworkManager {
             IdentTopic::new(network_config.network_id.state_sync_responses_topic()),
             // v7.3.1: Bridge attestation requests/responses for multi-sig bridge validation
             IdentTopic::new(network_config.network_id.bridge_attestations_topic()),
+            // v9.1.0: Compute power announcements — aggregate hashrate from peers
+            IdentTopic::new(network_config.network_id.compute_power_topic()),
         ];
 
         // UN-DEPRECATED v3.9.5-beta: Balance gossipsub is now enabled by default
@@ -2322,8 +2366,15 @@ impl UnifiedNetworkManager {
                     for msg in batch {
                         let ident_topic = IdentTopic::new(&msg.topic);
                         let topic_str = msg.topic.clone();
-                        let data_len = msg.data.len();
-                        match self.swarm.behaviour_mut().gossipsub.publish(ident_topic.clone(), msg.data) {
+                        // v9.1.0: PoW stamp outgoing messages (opt-in via Q_POW_STAMPS=1)
+                        let publish_data = if pow_stamps_enabled() {
+                            let stamped = crate::pow_stamp::stamp_and_prepend(&msg.data);
+                            stamped
+                        } else {
+                            msg.data
+                        };
+                        let data_len = publish_data.len();
+                        match self.swarm.behaviour_mut().gossipsub.publish(ident_topic.clone(), publish_data) {
                             Ok(msg_id) => {
                                 // Log blocks topic publishes at info level for diagnostics
                                 if topic_str.contains("/blocks") && !topic_str.contains("peer-heights") {
@@ -3007,9 +3058,19 @@ impl UnifiedNetworkManager {
                 let topic_str = message.topic.to_string();
                 let msg_size = message.data.len();
 
+                // v9.1.0: PoW stamp dual-mode receive — try strip stamp, fall back to raw
+                let (msg_data, pow_stamped) = if let Some(stripped) = crate::pow_stamp::verify_and_strip(&message.data) {
+                    (stripped.to_vec(), true)
+                } else {
+                    (message.data.clone(), false)
+                };
+                if pow_stamped {
+                    trace!("[POW-STAMP] Verified stamp on {} ({} bytes)", topic_str, msg_size);
+                }
+
                 // Extract block height if this is a block message
                 let block_height = if topic_str.contains("/blocks") {
-                    postcard::from_bytes::<QBlock>(&message.data)
+                    postcard::from_bytes::<QBlock>(&msg_data)
                         .ok()
                         .map(|block| block.header.height)
                 } else {
@@ -3076,7 +3137,7 @@ impl UnifiedNetworkManager {
                 if topic_str.contains("/blocks") {
                     // Attempt to decode block information for better sync visibility
                     // 🔧 v2.1.7: Server uses rmp_serde::to_vec(&VersionedBlock), so we must match
-                    match rmp_serde::from_slice::<q_types::VersionedBlock>(&message.data) {
+                    match rmp_serde::from_slice::<q_types::VersionedBlock>(&msg_data) {
                         Ok(versioned_block) => {
                             let block = &versioned_block.block;  // Access .block field, not .inner()
                             debug!(
@@ -3091,7 +3152,7 @@ impl UnifiedNetworkManager {
                         }
                         Err(e) => {
                             // Fallback: try postcard for backward compatibility
-                            match postcard::from_bytes::<QBlock>(&message.data) {
+                            match postcard::from_bytes::<QBlock>(&msg_data) {
                                 Ok(block) => {
                                     debug!(
                                         "📨 Gossipsub BLOCK (postcard) from {}: height={}, txs={}, size={} bytes",
@@ -3122,8 +3183,9 @@ impl UnifiedNetworkManager {
                 }
 
                 // Forward to gossipsub message channel if available
+                // v9.1.0: Forward stamp-stripped payload (msg_data), not raw message.data
                 if let Some(ref tx) = self.gossipsub_message_tx {
-                    let data = message.data.clone();
+                    let data = msg_data;
 
                     // v6.0.10: Use try_send() on bounded channel - drop message if buffer full
                     // This prevents unbounded memory growth that caused OOM on 8GB servers
@@ -3137,7 +3199,7 @@ impl UnifiedNetworkManager {
                         // 🔇 v0.6.9-beta: Changed to DEBUG to prevent log spam
                         // v0.9.7-beta: Enhanced with block height information
                         if topic_str.contains("/blocks") {
-                            if let Ok(block) = postcard::from_bytes::<QBlock>(&message.data) {
+                            if let Ok(block) = postcard::from_bytes::<QBlock>(&data) {
                                 info!("✅ Forwarded BLOCK on topic: {} (height={}, size={} bytes)",
                                      topic_str, block.header.height, msg_size);
                             } else {
@@ -3276,7 +3338,15 @@ impl UnifiedNetworkManager {
                                 // peer_height in its block-pack response while returning 0 blocks.
                                 if response.peer_height > 0 {
                                     let current = self.known_network_height.load(std::sync::atomic::Ordering::Relaxed);
-                                    let max_reasonable = (current * 5).max(current + 50_000);
+                                    // v9.1.0: When node is freshly syncing (low height), allow
+                                    // much larger jumps. A node at height 7K rejecting peers at
+                                    // 7.4M would never catch up. Use 10M minimum headroom for
+                                    // fresh nodes, then tighten to 5x/+50K for synced nodes.
+                                    let max_reasonable = if current < 100_000 {
+                                        10_000_000_u64 // Fresh node: accept any height up to 10M
+                                    } else {
+                                        (current * 5).max(current + 50_000)
+                                    };
                                     if response.peer_height > max_reasonable {
                                         warn!("🚫 [BLOCK-PACK] Rejecting suspicious peer_height {} from {} (known: {}, max: {})",
                                               response.peer_height, peer, current, max_reasonable);
@@ -3737,9 +3807,15 @@ impl UnifiedNetworkManager {
     /// Publish a message to a gossipsub topic
     pub fn publish_topic(&mut self, topic: &str, data: Vec<u8>) -> anyhow::Result<()> {
         let ident_topic = IdentTopic::new(topic);
-        info!("📤 Publishing {} bytes to gossipsub topic: {}", data.len(), topic);
+        // v9.1.0: PoW stamp outgoing messages (opt-in via Q_POW_STAMPS=1)
+        let publish_data = if pow_stamps_enabled() {
+            crate::pow_stamp::stamp_and_prepend(&data)
+        } else {
+            data
+        };
+        info!("📤 Publishing {} bytes to gossipsub topic: {}", publish_data.len(), topic);
         self.swarm.behaviour_mut().gossipsub
-            .publish(ident_topic, data)
+            .publish(ident_topic, publish_data)
             .map_err(|e| anyhow::anyhow!("Failed to publish to topic {}: {}", topic, e))?;
         info!("✅ Successfully published message to gossipsub topic: {}", topic);
         Ok(())
@@ -4505,8 +4581,14 @@ impl UnifiedNetworkManager {
             for msg in batch {
                 let ident_topic = IdentTopic::new(&msg.topic);
                 let topic_str = msg.topic.clone();
-                let data_len = msg.data.len();
-                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic.clone(), msg.data) {
+                // v9.1.0: PoW stamp outgoing messages (opt-in via Q_POW_STAMPS=1)
+                let publish_data = if pow_stamps_enabled() {
+                    crate::pow_stamp::stamp_and_prepend(&msg.data)
+                } else {
+                    msg.data
+                };
+                let data_len = publish_data.len();
+                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic.clone(), publish_data) {
                     Ok(_msg_id) => {
                         if topic_str.contains("/blocks") && !topic_str.contains("peer-heights") {
                             let topic_hash = ident_topic.hash();

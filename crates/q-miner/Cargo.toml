@@ -61,12 +61,14 @@ memmap2 = "0.9"
 tikv-jemallocator = { version = "0.6", optional = true }
 
 # Networking for pool mining
-# Override reqwest to use native-tls for cross-compilation compatibility
-reqwest = { version = "0.12", features = ["json", "socks", "stream", "native-tls", "gzip", "brotli", "deflate"], default-features = false }
+# v9.0.2: Use rustls with bundled Mozilla CA roots — works in Docker/minimal installs
+# without requiring system ca-certificates package
+reqwest = { version = "0.12", features = ["json", "socks", "stream", "rustls-tls-webpki-roots", "gzip", "brotli", "deflate"], default-features = false }
 
 # LZ4 compression for bandwidth optimization
 lz4_flex = { workspace = true }
-openssl = { version = "0.10", features = ["vendored"], optional = true }
+# openssl no longer needed — switched to rustls-tls-webpki-roots (v9.0.2)
+# openssl = { version = "0.10", features = ["vendored"], optional = true }
 url = "2.5"
 # rustls = { workspace = true } # Not needed for miner, using native-tls
 tokio-socks = "0.5"
@@ -75,10 +77,12 @@ tower-http = { workspace = true }
 
 # SSE client for real-time mining rewards
 eventsource-client = "0.12"
+# v9.0.2: Check for TLS certs before SSE/MinerLink (hyper-rustls panics without them)
+rustls-native-certs = "0.6"
 futures = { workspace = true }
 
 # WebSocket for miner-link relay connection
-tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 
 # JSON-RPC for Stratum protocol
@@ -108,6 +112,10 @@ unicode-width = "0.1"
 # Terminal detection
 atty = "0.2"
 
+# Embedded Tor (arti) for --tor flag without system Tor daemon
+arti-client = { version = "0.37.0", features = ["static-sqlite"], optional = true }
+tor-rtcompat = { version = "0.37.0", optional = true }
+
 # QR code for wallet TUI
 qrcode = "0.14"
 
@@ -135,8 +143,8 @@ tempfile = { workspace = true }
 tokio-test = "0.4"
 
 [features]
-default = ["cpu-mining", "network", "cli", "jemalloc", "tui"]
-vendored-openssl = ["openssl"]
+default = ["cpu-mining", "network", "cli", "jemalloc", "tui", "tor-support"]
+vendored-openssl = []  # No longer needed — using rustls (v9.0.2)
 
 # Mining backends
 cpu-mining = []
@@ -152,7 +160,7 @@ cli = []
 # Network features
 network = ["q-network"]
 pool-mining = []
-tor-support = []
+tor-support = ["arti-client", "tor-rtcompat"]
 
 # Performance features
 jemalloc = ["tikv-jemallocator"]

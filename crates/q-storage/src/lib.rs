@@ -23,6 +23,38 @@ extern crate blake3;
 // 🚀 v1.0.93-beta: Parallel sync optimization
 use rayon::prelude::*;
 
+// ⚡ v9.1.0: Compute Power Layer — global peer hashrate map
+// Written by q-network (gossipsub handler), read by turbo_sync (gravity-assist)
+lazy_static::lazy_static! {
+    /// Global map of peer compute power announcements.
+    /// Key: peer_id string, Value: (hashrate_hs, active_miners, timestamp_secs)
+    pub static ref PEER_COMPUTE_POWER: dashmap::DashMap<String, (f64, u32, u64)> = dashmap::DashMap::new();
+}
+
+/// v9.1.0: Compute power boost for gravity-assist peer selection.
+/// Returns a multiplier based on a peer's announced hashrate (log-scale).
+/// 1x at 0 H/s, 2x at 1 MH/s, 3x at 1 GH/s, capped at 5x.
+pub fn compute_power_boost(peer_id: &str) -> f64 {
+    if let Some(entry) = PEER_COMPUTE_POWER.get(peer_id) {
+        let (hashrate_hs, _, timestamp) = *entry;
+        // Expire announcements older than 120s
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if now.saturating_sub(timestamp) > 120 {
+            return 1.0;
+        }
+        if hashrate_hs <= 0.0 {
+            return 1.0;
+        }
+        let boost = 1.0 + (hashrate_hs / 1_000.0).max(1.0).log10();
+        boost.min(5.0)
+    } else {
+        1.0
+    }
+}
+
 // ============ v2.4.2: TOKEN STAKING TYPES ============
 // Defined here to avoid circular dependency with q-api-server
 

@@ -32,6 +32,7 @@ pub fn draw_dashboard(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(5),                    // Hashrate sparkline
+            Constraint::Length(5),                    // Compute Power Layer cards
             Constraint::Length(5),                    // Physics metrics row
             Constraint::Length(thread_panel_height),  // Thread dots + block info (dynamic)
             Constraint::Length(3),                    // Connection status bar
@@ -40,10 +41,11 @@ pub fn draw_dashboard(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
         .split(area);
 
     draw_hashrate_sparkline(f, chunks[0], app);
-    draw_physics_metrics(f, chunks[1], app);
-    draw_thread_and_block_info(f, chunks[2], app);
-    draw_connection_bar(f, chunks[3], app);
-    draw_mini_log(f, chunks[4], app);
+    draw_compute_power_cards(f, chunks[1], app);
+    draw_physics_metrics(f, chunks[2], app);
+    draw_thread_and_block_info(f, chunks[3], app);
+    draw_connection_bar(f, chunks[4], app);
+    draw_mini_log(f, chunks[5], app);
 }
 
 /// v9.0.4: Full-screen Starship sync dashboard — shows when node is catching up
@@ -316,6 +318,116 @@ fn draw_hashrate_sparkline(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
         .max(max_val);
 
     f.render_widget(sparkline, area);
+}
+
+/// v9.1.0: Compute Power Network Layer — 4 cards showing SIMD, network hashrate, security, peers
+#[cfg(feature = "tui")]
+fn draw_compute_power_cards(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+        ])
+        .split(area);
+
+    let current_khs = app.current_hashrate_khs();
+
+    // ── Card 1: SIMD Tier & Batch Size ──
+    let batch_str = format!("{}x batch", app.simd_batch_size);
+    let card1 = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled(" \u{2301} ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)), // ⌁
+            Span::styled("SIMD", Style::default().fg(Color::Gray)),
+        ]),
+        Line::from(vec![
+            Span::styled(format!("  {}", app.simd_tier), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(vec![
+            Span::styled(format!("  {}", batch_str), Style::default().fg(Color::DarkGray)),
+        ]),
+    ]).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan)));
+    f.render_widget(card1, cols[0]);
+
+    // ── Card 2: Network Compute Power (from P2P announcements) ──
+    let net_hr = app.network_total_hashrate_hs;
+    let hr_str = if net_hr >= 1e9 { format!("{:.2} GH/s", net_hr / 1e9) }
+        else if net_hr >= 1e6 { format!("{:.2} MH/s", net_hr / 1e6) }
+        else if net_hr >= 1e3 { format!("{:.1} kH/s", net_hr / 1e3) }
+        else if net_hr > 0.0 { format!("{:.0} H/s", net_hr) }
+        else { "--".to_string() };
+
+    let card2 = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled(" \u{26A1} ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)), // ⚡
+            Span::styled("Network", Style::default().fg(Color::Gray)),
+        ]),
+        Line::from(vec![
+            Span::styled(format!("  {}", hr_str), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                format!("  {} peers", app.network_compute_peers),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+    ]).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray)));
+    f.render_widget(card2, cols[1]);
+
+    // ── Card 3: Live Security Bits ──
+    let sec_bits = app.live_security_bits;
+    let sec_color = if sec_bits >= 128.0 { Color::Green }
+        else if sec_bits >= 80.0 { Color::Yellow }
+        else if sec_bits > 0.0 { Color::Red }
+        else { Color::DarkGray };
+    let tier = if sec_bits >= 256.0 { "FORTRESS" }
+        else if sec_bits >= 192.0 { "FORTIFIED" }
+        else if sec_bits >= 128.0 { "STRONG" }
+        else if sec_bits >= 80.0 { "MODERATE" }
+        else if sec_bits > 0.0 { "EMERGING" }
+        else { "--" };
+
+    let card3 = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled(" \u{1F6E1} ", Style::default().fg(sec_color).add_modifier(Modifier::BOLD)), // 🛡
+            Span::styled("Security", Style::default().fg(Color::Gray)),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                if sec_bits > 0.0 { format!("  {:.0}-bit", sec_bits) } else { "  --".to_string() },
+                Style::default().fg(sec_color).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(format!("  {}", tier), Style::default().fg(Color::DarkGray)),
+        ]),
+    ]).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray)));
+    f.render_widget(card3, cols[2]);
+
+    // ── Card 4: Compute Tunnel (local contribution vs network) ──
+    let local_hs = current_khs * 1000.0; // kH/s → H/s
+    let contribution_pct = if net_hr > 0.0 { (local_hs / net_hr * 100.0).min(100.0) } else { 0.0 };
+    let contribution_bar = mini_bar(contribution_pct, 8);
+
+    let card4 = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled(" \u{1F310} ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)), // 🌐
+            Span::styled("Tunnel", Style::default().fg(Color::Gray)),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                if contribution_pct > 0.0 { format!("  {:.1}%", contribution_pct) } else { "  --".to_string() },
+                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(&contribution_bar, Style::default().fg(Color::Magenta)),
+        ]),
+    ]).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray)));
+    f.render_widget(card4, cols[3]);
 }
 
 /// v8.5.5: Physics-inspired performance metrics row

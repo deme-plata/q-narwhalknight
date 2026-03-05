@@ -1,7 +1,9 @@
 /// Quillon Mail: Mail Transport Agent (MTA)
-/// v7.3.2: Outbound SMTP delivery with retry logic and MX resolution
+/// v8.9.5: Outbound SMTP delivery with relay support and MX resolution
 ///
-/// Ported from /opt/orobit/shared/axum-mail-server/backend/src/services/mta.rs
+/// If Q_SMTP_RELAY is set (e.g., "89.149.241.126"), all outbound mail is
+/// forwarded to that host on port 25 instead of connecting to MX directly.
+/// This works around Contabo blocking outbound port 25.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,16 +17,23 @@ use q_types::*;
 /// Mail Transport Agent for outbound SMTP delivery
 pub struct MailTransportAgent {
     state: Arc<AppState>,
+    /// Optional SMTP relay host (from Q_SMTP_RELAY env var)
+    relay_host: Option<String>,
 }
 
 impl MailTransportAgent {
     pub fn new(state: Arc<AppState>) -> Self {
-        Self { state }
+        let relay_host = std::env::var("Q_SMTP_RELAY").ok().filter(|s| !s.is_empty());
+        if let Some(ref relay) = relay_host {
+            info!("📤 [MTA] Using SMTP relay: {}", relay);
+        }
+        Self { state, relay_host }
     }
 
     /// Start the MTA delivery loop (runs every 30 seconds)
     pub async fn start(&self) {
-        info!("📤 [MTA] Mail Transport Agent started");
+        info!("📤 [MTA] Mail Transport Agent started (relay: {})",
+            self.relay_host.as_deref().unwrap_or("direct MX"));
 
         loop {
             tokio::time::sleep(Duration::from_secs(30)).await;
@@ -50,6 +59,7 @@ impl MailTransportAgent {
             return Ok(0);
         }
 
+        info!("📤 [MTA] Processing {} outbound emails", messages.len());
         let mut delivered = 0;
         for msg in &messages {
             match self.deliver_message(msg).await {
@@ -79,20 +89,25 @@ impl MailTransportAgent {
 
     /// Deliver a single message via SMTP
     async fn deliver_message(&self, msg: &OutboundEmail) -> anyhow::Result<()> {
+        // If relay is configured, use it directly instead of MX lookup
+        if let Some(ref relay) = self.relay_host {
+            info!("📤 [MTA] Relaying email {} to {} via relay {}", msg.id, msg.to_email, relay);
+            return self.attempt_smtp_delivery(msg, relay).await;
+        }
+
+        // Direct MX delivery (only works if port 25 outbound is open)
         let domain = msg
             .to_email
             .split('@')
             .nth(1)
             .ok_or_else(|| anyhow::anyhow!("Invalid recipient email: {}", msg.to_email))?;
 
-        // Resolve MX records for domain
         let mx_hosts = self.resolve_mx(domain).await?;
 
         if mx_hosts.is_empty() {
             return Err(anyhow::anyhow!("No MX records found for domain: {}", domain));
         }
 
-        // Try each MX host in priority order
         let mut last_error = String::new();
         for (priority, host) in &mx_hosts {
             debug!(
@@ -138,18 +153,15 @@ impl MailTransportAgent {
                     .iter()
                     .map(|mx| {
                         let host = mx.exchange().to_string();
-                        // Remove trailing dot from DNS name
                         let host = host.trim_end_matches('.').to_string();
                         (mx.preference(), host)
                     })
                     .collect();
 
-                // Sort by priority (lower = higher priority)
                 records.sort_by_key(|(priority, _)| *priority);
                 Ok(records)
             }
             Err(e) => {
-                // Fallback: try the domain itself as mail server
                 warn!(
                     "📤 [MTA] MX lookup failed for {}: {}. Trying domain directly.",
                     domain, e
@@ -159,14 +171,20 @@ impl MailTransportAgent {
         }
     }
 
-    /// Attempt SMTP delivery to a specific MX host
+    /// Attempt SMTP delivery to a specific host (MX server or relay)
     async fn attempt_smtp_delivery(
         &self,
         msg: &OutboundEmail,
-        mx_host: &str,
+        smtp_host: &str,
     ) -> anyhow::Result<()> {
-        // Connect with timeout
-        let addr = format!("{}:25", mx_host);
+        let port = std::env::var("Q_SMTP_RELAY_PORT")
+            .ok()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(25);
+        let addr = format!("{}:{}", smtp_host, port);
+
+        info!("📤 [MTA] Connecting to {} for {}", addr, msg.to_email);
+
         let stream = tokio::time::timeout(
             Duration::from_secs(30),
             TcpStream::connect(&addr),
@@ -181,7 +199,7 @@ impl MailTransportAgent {
         // Read greeting
         let greeting = read_smtp_response(&mut reader).await?;
         if !greeting.starts_with("220") {
-            return Err(anyhow::anyhow!("Bad greeting from {}: {}", mx_host, greeting));
+            return Err(anyhow::anyhow!("Bad greeting from {}: {}", smtp_host, greeting));
         }
 
         // EHLO
@@ -242,7 +260,7 @@ impl MailTransportAgent {
              Message-ID: {}\r\n\
              MIME-Version: 1.0\r\n\
              Content-Type: text/plain; charset=UTF-8\r\n\
-             X-Mailer: Quillon Mail v7.3.2\r\n\
+             X-Mailer: Quillon Mail v8.9.5\r\n\
              X-Blockchain: Q-NarwhalKnight\r\n\
              \r\n",
             msg.from_email, msg.to_email, msg.subject, date, message_id
@@ -271,6 +289,7 @@ impl MailTransportAgent {
         // QUIT
         let _ = write_smtp_command(&mut writer, "QUIT\r\n").await;
 
+        info!("✅ [MTA] Email {} delivered to {} via {}", msg.id, msg.to_email, smtp_host);
         Ok(())
     }
 }

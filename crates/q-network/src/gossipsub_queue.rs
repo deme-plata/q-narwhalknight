@@ -55,6 +55,9 @@ impl MessagePriority {
             // v7.3.1: Bridge attestation messages - Critical priority
             // Multi-sig bridge validation must be processed immediately
             MessagePriority::Critical
+        } else if topic.contains("/compute-power") {
+            // v9.1.0: Compute power announcements — Low priority (informational)
+            MessagePriority::Low
         } else if topic.contains("/mining-solutions") {
             MessagePriority::Low
         } else {

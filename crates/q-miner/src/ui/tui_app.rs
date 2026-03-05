@@ -223,6 +223,13 @@ pub struct MinerTuiApp {
     // v9.0.4: Starship sync telemetry for TUI
     pub sync_info: Option<StarshipSyncInfo>,
 
+    // v9.1.0: Compute Power Layer stats for TUI cards
+    pub simd_tier: String,
+    pub simd_batch_size: usize,
+    pub network_compute_peers: u32,
+    pub network_total_hashrate_hs: f64,
+    pub live_security_bits: f64,
+
     // UI state
     pub running: bool,
     pub show_help: bool,
@@ -266,6 +273,22 @@ impl MinerTuiApp {
             total_api_requests: 0,
             total_api_failures: 0,
             sync_info: None,
+            simd_tier: {
+                #[cfg(target_arch = "x86_64")]
+                {
+                    if is_x86_feature_detected!("avx512f") { "AVX-512".to_string() }
+                    else if is_x86_feature_detected!("avx2") { "AVX2".to_string() }
+                    else { "SSE2".to_string() }
+                }
+                #[cfg(target_arch = "aarch64")]
+                { "NEON".to_string() }
+                #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+                { "Scalar".to_string() }
+            },
+            simd_batch_size: crate::cpu::optimal_mining_batch_size(),
+            network_compute_peers: 0,
+            network_total_hashrate_hs: 0.0,
+            live_security_bits: 0.0,
             running: true,
             show_help: false,
             start_time: Instant::now(),
@@ -510,6 +533,11 @@ impl MinerTuiApp {
                     level: LogLevel::Info,
                     message: format!("Throttle changed to: {}", mode.label()),
                 });
+            }
+            DiagnosticEvent::ComputePowerUpdate { network_hashrate_hs, connected_miners, live_security_bits } => {
+                self.network_total_hashrate_hs = network_hashrate_hs;
+                self.network_compute_peers = connected_miners;
+                self.live_security_bits = live_security_bits;
             }
         }
     }

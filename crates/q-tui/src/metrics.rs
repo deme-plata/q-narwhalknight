@@ -196,6 +196,13 @@ pub struct Metrics {
     pub physics_block_rate: f64,
     pub physics_byzantine_fraction: f64,
 
+    // v9.1.0: Compute Power Layer metrics
+    pub compute_network_hashrate_hs: f64,   // Total network hashrate (H/s) from P2P announcements
+    pub compute_connected_peers: u32,       // Number of peers reporting hashrate
+    pub compute_live_security_bits: f64,    // Live security bits (boosted by real-time hashpower)
+    pub compute_local_hashrate_hs: f64,     // This node's hashrate contribution
+    pub compute_simd_tier: String,          // AVX-512 / AVX2 / SSE2 / NEON / Scalar
+
     // Node operator wallet & fee metrics (v8.6.1)
     pub admin_wallet_address: String,
     pub admin_wallet_balance: f64,
@@ -315,6 +322,12 @@ impl Default for Metrics {
             physics_p_deanon: 0.0,
             physics_block_rate: 0.0,
             physics_byzantine_fraction: 0.0,
+            // Compute Power Layer defaults
+            compute_network_hashrate_hs: 0.0,
+            compute_connected_peers: 0,
+            compute_live_security_bits: 0.0,
+            compute_local_hashrate_hs: 0.0,
+            compute_simd_tier: String::new(),
             // Operator wallet defaults
             admin_wallet_address: String::new(),
             admin_wallet_balance: 0.0,

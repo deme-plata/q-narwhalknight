@@ -4087,6 +4087,13 @@ impl NetworkId {
         format!("{}/mining-challenges", self.gossipsub_topic_prefix())
     }
 
+    /// v9.1.0: Compute power announcements gossipsub topic
+    /// Nodes broadcast aggregate hashrate for network-wide compute power awareness
+    /// Topic: /qnk/{network}/compute-power
+    pub fn compute_power_topic(&self) -> String {
+        format!("{}/compute-power", self.gossipsub_topic_prefix())
+    }
+
     // ========== v3.3.0-beta: P2P Mempool Transaction Propagation ==========
 
     /// Get the mempool transactions gossipsub topic for this network
