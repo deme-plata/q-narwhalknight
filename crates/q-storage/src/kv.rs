@@ -148,10 +148,11 @@ impl RocksDBKV {
         // Auto-scale block cache: 2-25% of RAM depending on tier
         // v6.1.0: Reduced small tier to 128MB fixed to prevent OOM on Gamma (7.8GB)
         // v8.6.0: Doubled large/xlarge/xxlarge tiers for better read throughput
+        // v9.0.7: Reduced medium tier from 15%→10% to fix OOM on 16GB nodes during sync
         let auto_cache_mb = match ram_tier {
             "micro"  => 64,                                               // 64 MB fixed
             "small"  => 128,                                              // 128 MB fixed (was 256, OOM fix)
-            "medium" => (total_ram_mb * 15 / 100).clamp(512, 2048),     // 15% of RAM, 512 MB-2 GB
+            "medium" => (total_ram_mb * 10 / 100).clamp(512, 1024),     // v9.0.7: 10% of RAM, 512 MB-1 GB (was 15%, 2 GB)
             "large"  => (total_ram_mb * 25 / 100).clamp(2048, 8192),    // v8.6.0: 25% of RAM, 2-8 GB (was 1-4 GB)
             "xlarge" => (total_ram_mb * 30 / 100).clamp(4096, 16384),   // v8.6.0: 30% of RAM, 4-16 GB (was 2-16 GB)
             _        => (total_ram_mb * 35 / 100).clamp(8192, 24576),   // v8.6.0: 35% of RAM, 8-24 GB (64GB+ tier)
@@ -159,10 +160,11 @@ impl RocksDBKV {
 
         // Auto-scale write buffer size (DB-level default CF)
         // v6.1.0: Reduced small tier from 32→16MB (47 CFs × write_buf = too much)
+        // v9.0.7: Reduced medium tier from 64→32MB to fix OOM on 16GB nodes during sync
         let auto_write_buffer_mb = match ram_tier {
             "micro"  => 8,
             "small"  => 16,
-            "medium" => 64,
+            "medium" => 32,   // v9.0.7: was 64, OOM on 16GB during sync
             _        => 128,
         };
 
@@ -320,20 +322,23 @@ impl RocksDBKV {
         //   - Writes go directly to disk (no page cache doubling)
         //   - Memory savings: ~2-3GB on a 10GB database
         // Trade-off: Reads not in block cache are slower (disk I/O), but Gamma is a backup node.
-        if ram_tier == "micro" || ram_tier == "small" {
+        // v9.0.7: Enable direct I/O for medium tier too — page cache was consuming
+        // 3-5 GB on 16GB nodes during turbo sync, causing OOM kills
+        if ram_tier == "micro" || ram_tier == "small" || ram_tier == "medium" {
             opts.set_use_direct_reads(true);
             opts.set_use_direct_io_for_flush_and_compaction(true);
-            info!("🔧 Direct I/O enabled for reads+compaction (eliminates page cache bloat on small nodes)");
+            info!("🔧 Direct I/O enabled for reads+compaction (eliminates page cache bloat on ≤16GB nodes)");
         }
 
         // ========== MEMORY BUDGET (FORCE FLUSHES) ==========
         // v6.1.0: RAM-aware memtable budget — TOTAL across all 47 CFs
         // When total memtable usage exceeds this, RocksDB triggers flushes.
         // Must be low enough to prevent OOM during burst writes (block catchup).
+        // v9.0.7: Reduced medium tier memtable budget from 256→128MB for OOM safety on 16GB
         let memtable_budget_mb = match ram_tier {
             "micro"  => 32,   // 32MB — very tight
             "small"  => 64,   // 64MB — forces aggressive flushing (was 128, OOM)
-            "medium" => 256,  // 256MB
+            "medium" => 128,  // v9.0.7: 128MB (was 256, OOM on 16GB during sync)
             _        => 512,  // v8.6.0: 512MB — higher memtable budget for write throughput (was 384MB)
         };
         opts.set_db_write_buffer_size(memtable_budget_mb * 1024 * 1024);
