@@ -180,7 +180,7 @@ static DUNE_QUERY_CACHE: Lazy<DashMap<String, (Instant, String)>> =
     Lazy::new(DashMap::new);
 const DUNE_CACHE_TTL_SECS: u64 = 300; // 5 minutes
 
-/// Map chart names to Dune query IDs (v4 — correct demetri.qnk_* table names)
+/// Map chart names to Dune query IDs (v5 — 13 charts)
 fn dune_query_id_for(chart: &str) -> Option<u64> {
     match chart {
         "daily_block_production" => Some(6783916),
@@ -191,6 +191,12 @@ fn dune_query_id_for(chart: &str) -> Option<u64> {
         "network_health"         => Some(6783921),
         "dex_volume"             => Some(6783922),
         "emission_schedule"      => Some(6783923),
+        // v9.1.3: 5 new killer charts
+        "top_holders"            => Some(6784656),
+        "block_time_analysis"    => Some(6784658),
+        "miner_revenue"          => Some(6784659),
+        "cumulative_emission"    => Some(6784661),
+        "tx_activity"            => Some(6784662),
         _ => None,
     }
 }
@@ -1387,8 +1393,11 @@ std::thread_local! {
     static TUI_LOG_BUFFER: std::cell::RefCell<Option<std::sync::Arc<std::sync::RwLock<ringbuf::HeapRb<q_tui::LogEntry>>>>> = std::cell::RefCell::new(None);
 }
 
-// v7.1.6: Explicit 19 worker threads for 19 vCPU (was default = num_cpus)
-#[tokio::main(flavor = "multi_thread", worker_threads = 19)]
+// v9.1.6: Worker threads configurable via TOKIO_WORKER_THREADS env var.
+// Without it, Tokio defaults to num_cpus (48 on Epsilon).
+// Set TOKIO_WORKER_THREADS=44 in systemd to reserve 4 cores for Caddy/OS.
+// Previously hardcoded to 19 (v7.1.6) which underutilized 48-core Epsilon.
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
     // v6.2.1: Disable Transparent Huge Pages for this process to prevent jemalloc OOM.
     // THP=always/madvise causes jemalloc to use 2MB pages that fragment under high
@@ -1401,6 +1410,18 @@ async fn main() -> anyhow::Result<()> {
             libc::prctl(41, 1, 0, 0, 0);
         }
         eprintln!("🛡️ [OOM PROTECTION] THP disabled via prctl, using jemalloc allocator");
+    }
+
+    // v9.1.6: Log effective Tokio worker thread count
+    {
+        let worker_count = std::env::var("TOKIO_WORKER_THREADS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or_else(num_cpus::get);
+        let total_cpus = num_cpus::get();
+        eprintln!("⚡ [TOKIO] {} worker threads on {} logical cores ({}% utilization)",
+            worker_count, total_cpus,
+            (worker_count as f64 / total_cpus as f64 * 100.0) as u32);
     }
 
     // v8.8.1: Install rustls CryptoProvider FIRST — before any tokio worker can use rustls.

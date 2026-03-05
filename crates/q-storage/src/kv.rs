@@ -186,9 +186,11 @@ impl RocksDBKV {
         // With 47 CFs, need enough flush threads to drain memtables during burst writes.
         // Minimum 4 bg_jobs / 2 flushes even on 2-core systems to prevent memtable pile-up.
         let num_cores = num_cpus::get();
-        let auto_bg_jobs = (num_cores / 8).clamp(4, 16) as i32;
-        let auto_compactions = (num_cores / 16).clamp(2, 8) as i32;
-        let auto_flushes = (num_cores / 32).clamp(2, 4) as i32;
+        // v9.1.6: Raised ceilings for high-core-count machines (e.g. Epsilon 48-core).
+        // 48 cores → bg_jobs=6, compactions=3, flushes=2 (auto) — override via env vars for more.
+        let auto_bg_jobs = (num_cores / 8).clamp(4, 24) as i32;
+        let auto_compactions = (num_cores / 16).clamp(2, 12) as i32;
+        let auto_flushes = (num_cores / 32).clamp(2, 6) as i32;
 
         let bg_jobs = std::env::var("ROCKSDB_MAX_BACKGROUND_JOBS")
             .ok()
