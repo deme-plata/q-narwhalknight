@@ -124,6 +124,9 @@ pub struct PayoutHistoryQuery {
 }
 
 /// Get pool statistics
+/// v9.1.6: Merges Stratum pool stats with HTTP API mining stats.
+/// All miners use HTTP API (/api/v1/mining/submit), not Stratum (port 3333),
+/// so pool dashboard showed 0 workers/hashrate. Now reflects actual PPLNS miners.
 pub async fn get_pool_stats(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<PoolStatsResponse>, StatusCode> {
@@ -132,26 +135,45 @@ pub async fn get_pool_stats(
         StatusCode::SERVICE_UNAVAILABLE
     })?;
 
-    let stats = pool.stats();
+    let stratum_stats = pool.stats();
     let config = pool.config();
+
+    // v9.1.6: Read HTTP API mining stats (the actual active miners)
+    let (http_miners, http_hashrate, http_blocks) =
+        if let Some(ref mining_stats_arc) = state.mining_statistics {
+            let stats = mining_stats_arc.read().await;
+            let hashrate_sum: f64 = stats.active_miners.values().map(|m| m.last_hashrate).sum();
+            (stats.active_miners.len(), hashrate_sum, stats.total_solutions_accepted)
+        } else {
+            (0, 0.0, 0)
+        };
+
+    // Merge: use whichever source has more data (HTTP API dominates in practice)
+    let total_workers = stratum_stats.workers + http_miners;
+    let total_hashrate = stratum_stats.hashrate + http_hashrate;
+    let total_blocks = stratum_stats.blocks_found.max(http_blocks);
+
+    // Current block height for round tracking
+    let current_height = state.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
 
     Ok(Json(PoolStatsResponse {
         name: config.name.clone(),
         version: "v2.2.1-beta".to_string(),
-        hashrate: stats.hashrate,
-        workers: stats.workers,
-        blocks_found: stats.blocks_found,
-        current_round: pool.current_round_id(),
-        difficulty: stats.network_difficulty,
+        hashrate: total_hashrate,
+        workers: total_workers,
+        blocks_found: total_blocks,
+        current_round: if pool.current_round_id() > 0 { pool.current_round_id() } else { current_height },
+        difficulty: stratum_stats.network_difficulty,
         fee_bps: config.fees.effective_fee_bps(),
         min_payout: config.payout.min_payout,
-        shares_this_round: stats.total_shares,
-        uptime_seconds: stats.uptime_seconds,
+        shares_this_round: stratum_stats.total_shares,
+        uptime_seconds: stratum_stats.uptime_seconds,
         stratum_port: config.stratum.port,
     }))
 }
 
 /// Get worker statistics
+/// v9.1.6: Includes HTTP API miners (from MiningStatistics) alongside Stratum workers.
 pub async fn get_workers(
     State(state): State<Arc<AppState>>,
     Query(query): Query<WorkerListQuery>,
@@ -161,11 +183,12 @@ pub async fn get_workers(
         StatusCode::SERVICE_UNAVAILABLE
     })?;
 
-    let workers = pool.worker_manager().get_all_workers();
     let limit = query.limit.unwrap_or(100);
     let offset = query.offset.unwrap_or(0);
 
-    let mut responses: Vec<WorkerStatsResponse> = workers
+    // Stratum workers
+    let stratum_workers = pool.worker_manager().get_all_workers();
+    let mut responses: Vec<WorkerStatsResponse> = stratum_workers
         .into_iter()
         .filter(|w| {
             if let Some(ref wallet) = query.wallet {
@@ -174,8 +197,6 @@ pub async fn get_workers(
                 true
             }
         })
-        .skip(offset)
-        .take(limit)
         .map(|w| {
             WorkerStatsResponse {
                 worker_id: w.id.to_string(),
@@ -193,8 +214,42 @@ pub async fn get_workers(
         })
         .collect();
 
-    // Sort by hashrate descending
+    // v9.1.6: Add HTTP API miners from MiningStatistics
+    if let Some(ref mining_stats_arc) = state.mining_statistics {
+        let stats = mining_stats_arc.read().await;
+        for (key, miner) in &stats.active_miners {
+            // key format is "wallet_address:worker_id"
+            let parts: Vec<&str> = key.splitn(2, ':').collect();
+            let wallet_addr = parts.first().copied().unwrap_or(key.as_str());
+            let worker_id = parts.get(1).copied().unwrap_or("http");
+
+            // Filter by wallet if requested
+            if let Some(ref wallet_filter) = query.wallet {
+                if wallet_addr != wallet_filter.as_str() {
+                    continue;
+                }
+            }
+
+            let now_ts = chrono::Utc::now().timestamp();
+            responses.push(WorkerStatsResponse {
+                worker_id: format!("http-{}", worker_id),
+                wallet_address: wallet_addr.to_string(),
+                hashrate: miner.last_hashrate, // Already H/s (v3.5.6+)
+                difficulty: 0.0,
+                shares_submitted: miner.total_solutions,
+                shares_stale: 0,
+                shares_invalid: 0,
+                blocks_found: 0,
+                last_share_time: now_ts, // Active miners are recent
+                connected_since: now_ts - 300, // Approximate
+                is_connected: true,
+            });
+        }
+    }
+
+    // Sort by hashrate descending, then paginate
     responses.sort_by(|a, b| b.hashrate.partial_cmp(&a.hashrate).unwrap_or(std::cmp::Ordering::Equal));
+    let responses: Vec<_> = responses.into_iter().skip(offset).take(limit).collect();
 
     Ok(Json(responses))
 }
