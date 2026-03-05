@@ -153,7 +153,7 @@ pub async fn run_sync_loop(
 
                 // Extract and push blocks (critical — skip batch on failure)
                 let blocks_ok = match extractors::blocks::extract_blocks(&storage, cursor, batch_end).await {
-                    Ok(csv) => {
+                    Ok(csv) if csv.lines().count() > 1 => {
                         match client.insert_csv("qnk_blocks", &csv).await {
                             Ok(rows) => {
                                 progress.write().await.total_rows_pushed += rows;
@@ -165,6 +165,11 @@ pub async fn run_sync_loop(
                                 false
                             }
                         }
+                    }
+                    Ok(_) => {
+                        // v9.1.2: Empty batch (header only) — skip without stalling
+                        warn!("[Dune] blocks batch {}-{} has no data rows, advancing cursor", cursor, batch_end);
+                        true
                     }
                     Err(e) => {
                         warn!("[Dune] blocks extraction failed: {}", e);

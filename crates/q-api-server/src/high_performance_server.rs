@@ -7,11 +7,21 @@
 /// - v1.0.53: Automatic port detection if requested port is in use
 /// - v8.9.8: Reduced TCP buffers (4MB→256KB) to prevent 17GB kernel memory
 ///           usage with 75K+ connections. Added connection-aware backlog.
+/// - v9.1.2: Manual accept loop with hyper HTTP/1.1 header_read_timeout (30s)
+///           to auto-close idle kept-alive connections. Prevents connection
+///           pileup from reverse proxies (Caddy/nginx).
 ///
 /// Target Performance: 1,000,000+ TPS with binary protocol
 use axum::Router;
+use axum::extract::connect_info::ConnectInfo;
+use hyper::body::Incoming;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto::Builder as AutoBuilder;
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::net::TcpListener;
+use tower::Service;
 use tracing::{error, info, warn};
 
 /// High-performance HTTP server configuration
@@ -25,6 +35,8 @@ pub struct HighPerformanceServer {
     auto_port_detection: bool,
     /// Maximum number of ports to try when auto-detecting
     max_port_attempts: u16,
+    /// v9.1.2: HTTP/1.1 keepalive idle timeout (seconds)
+    http_keepalive_timeout_secs: u64,
 }
 
 impl HighPerformanceServer {
@@ -41,6 +53,7 @@ impl HighPerformanceServer {
             tcp_backlog: 4096,                 // v8.9.8: 4096 pending connections (was 1024)
             auto_port_detection: true,         // v1.0.53: Enable by default
             max_port_attempts: 10,             // Try up to 10 ports
+            http_keepalive_timeout_secs: 30,   // v9.1.2: Close idle connections after 30s
         }
     }
 
@@ -81,6 +94,7 @@ impl HighPerformanceServer {
             self.tcp_send_buffer_size / 1024
         );
         info!("   TCP backlog: {} pending connections", self.tcp_backlog);
+        info!("   HTTP/1.1 keepalive timeout: {}s (idle connections auto-close)", self.http_keepalive_timeout_secs);
         info!("   Target throughput: 1,000,000+ TPS");
         if self.auto_port_detection {
             info!("   Auto port detection: ENABLED (will try up to {} ports)", self.max_port_attempts);
@@ -92,10 +106,21 @@ impl HighPerformanceServer {
         info!("✅ TCP listener configured and ready");
         info!("🌟 High-Performance Server READY - accepting connections...");
         info!("   Listening on: http://{}", actual_addr);
-        info!("   HTTP/2 will be negotiated automatically per connection");
 
-        // Create shutdown signal handler for SIGTERM, CTRL+C, SIGUSR1 (graceful restart), SIGUSR2 (rollback)
-        let shutdown_signal = async {
+        // v9.1.2: Manual accept loop with hyper HTTP/1.1 header_read_timeout
+        // This prevents idle connection accumulation from reverse proxies.
+        // axum::serve() doesn't expose this setting, so we use hyper-util directly.
+        let keepalive_timeout = std::time::Duration::from_secs(self.http_keepalive_timeout_secs);
+
+        let app = self.app;
+        let active_connections = Arc::new(AtomicUsize::new(0));
+
+        // Create shutdown signal
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let shutdown_trigger = shutdown.clone();
+
+        // Spawn signal handler
+        tokio::spawn(async move {
             let ctrl_c = async {
                 tokio::signal::ctrl_c()
                     .await
@@ -113,7 +138,6 @@ impl HighPerformanceServer {
             #[cfg(not(unix))]
             let terminate = std::future::pending::<()>();
 
-            // v8.5.0: SIGUSR1 — graceful restart (used by auto-updater after binary swap)
             #[cfg(unix)]
             let usr1 = async {
                 tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
@@ -125,7 +149,6 @@ impl HighPerformanceServer {
             #[cfg(not(unix))]
             let usr1 = std::future::pending::<()>();
 
-            // v8.5.0: SIGUSR2 — rollback signal (restores previous binary and restarts)
             #[cfg(unix)]
             let usr2 = async {
                 tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined2())
@@ -151,15 +174,92 @@ impl HighPerformanceServer {
                     warn!("⏪ Received SIGUSR2 signal - initiating rollback restart");
                 },
             }
-        };
 
-        // Use Axum's optimized serve function with graceful shutdown
-        axum::serve(
-            listener,
-            self.app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(shutdown_signal)
-        .await?;
+            shutdown_trigger.notify_waiters();
+        });
+
+        // Log connection count periodically
+        let active_conns_log = active_connections.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                let count = active_conns_log.load(Ordering::Relaxed);
+                if count > 1000 {
+                    warn!("⚠️  Active HTTP connections: {} (high)", count);
+                } else {
+                    info!("📊 Active HTTP connections: {}", count);
+                }
+            }
+        });
+
+        // Accept loop
+        loop {
+            tokio::select! {
+                result = listener.accept() => {
+                    let (stream, remote_addr) = match result {
+                        Ok(conn) => conn,
+                        Err(e) => {
+                            // Accept errors are usually transient (too many FDs, etc.)
+                            warn!("Failed to accept connection: {}", e);
+                            continue;
+                        }
+                    };
+
+                    let io = TokioIo::new(stream);
+                    let app = app.clone();
+                    let conns = active_connections.clone();
+                    conns.fetch_add(1, Ordering::Relaxed);
+
+                    tokio::spawn(async move {
+                        // Build hyper HTTP server with keepalive timeout
+                        let mut builder = AutoBuilder::new(TokioExecutor::new());
+                        builder.http1()
+                            .keep_alive(true)
+                            .header_read_timeout(keepalive_timeout);
+
+                        // Convert axum Router to hyper service, injecting ConnectInfo
+                        let tower_service = app;
+                        let hyper_service = hyper::service::service_fn(move |mut req: hyper::Request<Incoming>| {
+                            // Inject ConnectInfo so extractors like ConnectInfo<SocketAddr> work
+                            req.extensions_mut().insert(ConnectInfo(remote_addr));
+                            tower_service.clone().call(req)
+                        });
+
+                        if let Err(e) = builder
+                            .serve_connection_with_upgrades(io, hyper_service)
+                            .await
+                        {
+                            // Don't log normal connection closes
+                            let msg = e.to_string();
+                            if !msg.contains("connection closed")
+                                && !msg.contains("broken pipe")
+                                && !msg.contains("reset by peer")
+                                && !msg.contains("timed out")
+                            {
+                                warn!("Connection error from {}: {}", remote_addr, msg);
+                            }
+                        }
+
+                        conns.fetch_sub(1, Ordering::Relaxed);
+                    });
+                }
+                _ = shutdown.notified() => {
+                    info!("🛑 Stopping accept loop...");
+                    break;
+                }
+            }
+        }
+
+        // Wait briefly for in-flight connections to finish
+        let remaining = active_connections.load(Ordering::Relaxed);
+        if remaining > 0 {
+            info!("⏳ Waiting for {} active connections to drain...", remaining);
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let still_remaining = active_connections.load(Ordering::Relaxed);
+            if still_remaining > 0 {
+                warn!("⚠️  {} connections still active after 5s drain, shutting down anyway", still_remaining);
+            }
+        }
 
         info!("✅ Server shutdown completed");
         Ok(())

@@ -11,6 +11,7 @@ import AIChatScreen from './components/AIChatScreen';
 import SettingsScreen from './components/SettingsScreen';
 import RwaMarketplaceScreen from './components/RwaMarketplaceScreen';
 import EmailScreen from './components/EmailScreen';
+import AnalyticsScreen from './components/AnalyticsScreen';
 import Navigation from './components/Navigation';
 import TopBar from './components/TopBar';
 import TokenBar from './components/TokenBar';
@@ -55,7 +56,7 @@ function safeCacheBalance(balance: number): void {
   }
 }
 
-type Screen = 'dashboard' | 'transactions' | 'explorer' | 'dex' | 'mining' | 'vm' | 'rwamarket' | 'download' | 'aichat' | 'email' | 'settings';
+type Screen = 'dashboard' | 'transactions' | 'explorer' | 'dex' | 'mining' | 'vm' | 'rwamarket' | 'download' | 'aichat' | 'email' | 'analytics' | 'settings';
 
 function App() {
   console.log('🚀 App function executing - TOP OF FUNCTION');
@@ -816,6 +817,7 @@ function App() {
                 <AIChatScreen />
               </div>
               {currentScreen === 'email' && <EmailScreen />}
+              {currentScreen === 'analytics' && <AnalyticsScreen />}
               {currentScreen === 'download' && <DownloadNodeScreen />}
               {currentScreen === 'settings' && <SettingsScreen onLogout={handleLogout} />}
             </main>

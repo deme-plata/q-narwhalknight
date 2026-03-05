@@ -1037,7 +1037,7 @@ export default function DeployControlPanel() {
       // v8.9.9: Fetch nginx stats (admin only)
       if (isMaster) {
         try {
-          const caddyResp = await fetch(`${connInfo.apiBaseUrl}/api/v1/admin/caddy/stats`, {
+          const caddyResp = await fetch('/api/v1/admin/caddy/stats', {
             headers: { 'X-Wallet-Auth': walletAddress || '' },
           });
           if (caddyResp.ok) {
@@ -1616,143 +1616,6 @@ export default function DeployControlPanel() {
                 </div>
               </div>
 
-              {/* v9.0.6: Caddy Reverse Proxy Metrics */}
-              {isMasterWallet && caddyStats?.epsilon && (
-                <div className="rounded-xl border border-cyan-500/30 bg-cyan-500/5 p-3">
-                  <div className="flex items-center justify-between mb-3">
-                    <div className="flex items-center gap-2">
-                      <Globe className="w-4 h-4 text-cyan-400" />
-                      <span className="text-xs font-semibold text-cyan-200">Caddy Reverse Proxy</span>
-                      <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">Epsilon</span>
-                    </div>
-                    {caddyStats.epsilon.online && (
-                      <div className="flex items-center gap-1">
-                        <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                        <span className="text-[9px] text-emerald-300/70">Live</span>
-                      </div>
-                    )}
-                  </div>
-
-                  {caddyStats.epsilon.online ? (() => {
-                    const s = caddyStats.epsilon!;
-                    const totalByStatus = s.requests_by_status.ok_2xx + s.requests_by_status.client_err_4xx + s.requests_by_status.server_err_5xx + s.requests_by_status.redirect_3xx + s.requests_by_status.websocket_101;
-                    const errRate = totalByStatus > 0 ? ((s.requests_by_status.server_err_5xx / totalByStatus) * 100) : 0;
-                    return (
-                      <>
-                        {/* Top row: key gauges */}
-                        <div className="grid grid-cols-5 gap-2 mb-3">
-                          <div className="bg-slate-800/40 rounded-lg p-2 text-center">
-                            <div className={`text-base font-bold ${
-                              s.requests_per_second > 500 ? 'text-amber-300' : 'text-cyan-300'
-                            }`}>
-                              {s.requests_per_second > 0 ? s.requests_per_second.toFixed(0) : '0'}
-                            </div>
-                            <div className="text-[9px] text-cyan-300/50">req/s</div>
-                          </div>
-                          <div className="bg-slate-800/40 rounded-lg p-2 text-center">
-                            <div className={`text-base font-bold ${
-                              s.avg_response_ms > 500 ? 'text-red-400' :
-                              s.avg_response_ms > 100 ? 'text-amber-300' : 'text-emerald-300'
-                            }`}>
-                              {s.avg_response_ms < 1 ? '<1' : s.avg_response_ms.toFixed(0)}
-                            </div>
-                            <div className="text-[9px] text-cyan-300/50">avg ms</div>
-                          </div>
-                          <div className="bg-slate-800/40 rounded-lg p-2 text-center">
-                            <div className={`text-base font-bold ${
-                              s.p99_response_ms > 2000 ? 'text-red-400' :
-                              s.p99_response_ms > 500 ? 'text-amber-300' : 'text-emerald-300'
-                            }`}>
-                              {s.p99_response_ms < 1 ? '<1' : s.p99_response_ms >= 1000 ? `${(s.p99_response_ms / 1000).toFixed(1)}s` : `${s.p99_response_ms.toFixed(0)}`}
-                            </div>
-                            <div className="text-[9px] text-cyan-300/50">p99 ms</div>
-                          </div>
-                          <div className="bg-slate-800/40 rounded-lg p-2 text-center">
-                            <div className={`text-base font-bold ${
-                              errRate > 5 ? 'text-red-400' :
-                              errRate > 1 ? 'text-amber-300' : 'text-emerald-300'
-                            }`}>
-                              {errRate > 0 ? errRate.toFixed(1) : '0'}%
-                            </div>
-                            <div className="text-[9px] text-cyan-300/50">5xx err</div>
-                          </div>
-                          <div className="bg-slate-800/40 rounded-lg p-2 text-center">
-                            <div className="text-base font-bold text-blue-300">
-                              {s.goroutines > 1000 ? `${(s.goroutines / 1000).toFixed(1)}K` : s.goroutines}
-                            </div>
-                            <div className="text-[9px] text-cyan-300/50">goroutines</div>
-                          </div>
-                        </div>
-
-                        {/* Status code breakdown bar */}
-                        <div className="mb-3">
-                          <div className="flex items-center justify-between mb-1">
-                            <span className="text-[9px] text-cyan-300/50 uppercase tracking-wider">Response Codes</span>
-                            <span className="text-[9px] text-cyan-300/40">
-                              {s.total_requests > 1000000 ? `${(s.total_requests / 1000000).toFixed(1)}M` :
-                               s.total_requests > 1000 ? `${(s.total_requests / 1000).toFixed(1)}K` :
-                               s.total_requests} total
-                            </span>
-                          </div>
-                          {totalByStatus > 0 && (
-                            <div className="h-2 rounded-full overflow-hidden flex bg-slate-800/60">
-                              {s.requests_by_status.ok_2xx > 0 && (
-                                <div className="bg-emerald-500 h-full" style={{ width: `${(s.requests_by_status.ok_2xx / totalByStatus) * 100}%` }}
-                                  title={`2xx: ${s.requests_by_status.ok_2xx.toLocaleString()}`} />
-                              )}
-                              {s.requests_by_status.redirect_3xx > 0 && (
-                                <div className="bg-blue-500 h-full" style={{ width: `${(s.requests_by_status.redirect_3xx / totalByStatus) * 100}%` }}
-                                  title={`3xx: ${s.requests_by_status.redirect_3xx.toLocaleString()}`} />
-                              )}
-                              {s.requests_by_status.client_err_4xx > 0 && (
-                                <div className="bg-amber-500 h-full" style={{ width: `${(s.requests_by_status.client_err_4xx / totalByStatus) * 100}%` }}
-                                  title={`4xx: ${s.requests_by_status.client_err_4xx.toLocaleString()}`} />
-                              )}
-                              {s.requests_by_status.server_err_5xx > 0 && (
-                                <div className="bg-red-500 h-full" style={{ width: `${(s.requests_by_status.server_err_5xx / totalByStatus) * 100}%` }}
-                                  title={`5xx: ${s.requests_by_status.server_err_5xx.toLocaleString()}`} />
-                              )}
-                              {s.requests_by_status.websocket_101 > 0 && (
-                                <div className="bg-purple-500 h-full" style={{ width: `${(s.requests_by_status.websocket_101 / totalByStatus) * 100}%` }}
-                                  title={`101 WS: ${s.requests_by_status.websocket_101.toLocaleString()}`} />
-                              )}
-                            </div>
-                          )}
-                          <div className="flex gap-3 mt-1">
-                            {[
-                              { label: '2xx', count: s.requests_by_status.ok_2xx, color: 'text-emerald-400' },
-                              { label: '3xx', count: s.requests_by_status.redirect_3xx, color: 'text-blue-400' },
-                              { label: '4xx', count: s.requests_by_status.client_err_4xx, color: 'text-amber-400' },
-                              { label: '5xx', count: s.requests_by_status.server_err_5xx, color: 'text-red-400' },
-                              { label: 'WS', count: s.requests_by_status.websocket_101, color: 'text-purple-400' },
-                            ].filter(x => x.count > 0).map(x => (
-                              <span key={x.label} className={`text-[9px] ${x.color}`}>
-                                {x.label}: {x.count > 1000 ? `${(x.count / 1000).toFixed(1)}K` : x.count}
-                              </span>
-                            ))}
-                          </div>
-                        </div>
-
-                        {/* Bottom row: memory + upstreams */}
-                        <div className="flex items-center justify-between text-[9px] text-cyan-300/40">
-                          <span>Heap: {s.memory_mb.toFixed(0)} MB</span>
-                          <div className="flex gap-2">
-                            {s.upstreams.map(u => (
-                              <span key={u.address} className="flex items-center gap-1">
-                                <div className={`w-1.5 h-1.5 rounded-full ${u.healthy ? 'bg-emerald-400' : 'bg-red-400'}`} />
-                                <span className={u.healthy ? 'text-emerald-300/70' : 'text-red-300/70'}>{u.address}</span>
-                              </span>
-                            ))}
-                          </div>
-                        </div>
-                      </>
-                    );
-                  })() : (
-                    <div className="text-[10px] text-red-400/60">Caddy metrics offline</div>
-                  )}
-                </div>
-              )}
-
               {/* Error */}
               {error && (
                 <div className="flex items-center gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/30">
@@ -1801,6 +1664,166 @@ export default function DeployControlPanel() {
                       miningCap={miningCapacity?.alpha}
                     />
                   </div>
+
+                  {/* v9.0.6: Caddy Reverse Proxy Metrics */}
+                  {isMasterWallet && caddyStats?.epsilon && (
+                    <div className="rounded-xl border border-cyan-500/30 bg-cyan-500/5 p-3">
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-2">
+                          <Globe className="w-4 h-4 text-cyan-400" />
+                          <span className="text-xs font-semibold text-cyan-200"
+                            title="Caddy is the reverse proxy (load balancer) that sits between users and the blockchain node. It handles TLS encryption, routes requests to the right backend service, and protects against overload. Think of it as the front door bouncer for the server.">
+                            Caddy Reverse Proxy
+                          </span>
+                          <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                            title="Epsilon is the 10Gbit supernode (89.149.241.126) that serves quillon.xyz. It has the fastest connection and handles all public traffic.">
+                            Epsilon
+                          </span>
+                        </div>
+                        {caddyStats.epsilon.online && (
+                          <div className="flex items-center gap-1"
+                            title="The green pulse means Caddy's metrics endpoint (localhost:2019/metrics) is responding. If this goes dark, Caddy may have crashed or been misconfigured.">
+                            <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                            <span className="text-[9px] text-emerald-300/70">Live</span>
+                          </div>
+                        )}
+                      </div>
+
+                      {caddyStats.epsilon.online ? (() => {
+                        const s = caddyStats.epsilon!;
+                        const totalByStatus = s.requests_by_status.ok_2xx + s.requests_by_status.client_err_4xx + s.requests_by_status.server_err_5xx + s.requests_by_status.redirect_3xx + s.requests_by_status.websocket_101;
+                        const errRate = totalByStatus > 0 ? ((s.requests_by_status.server_err_5xx / totalByStatus) * 100) : 0;
+                        return (
+                          <>
+                            {/* Top row: key gauges */}
+                            <div className="grid grid-cols-5 gap-2 mb-3">
+                              <div className="bg-slate-800/40 rounded-lg p-2 text-center cursor-help"
+                                title={"Requests per second (req/s)\n\nHow many HTTP requests Caddy handles every second, like a cashier counting customers. This includes miners submitting work, wallets checking balances, and SSE streams.\n\nGreen = healthy load\nAmber (>500) = heavy traffic, watch for bottlenecks\n\nCurrent: " + (s.requests_per_second > 0 ? s.requests_per_second.toFixed(1) : '0') + " req/s"}>
+                                <div className={`text-base font-bold ${
+                                  s.requests_per_second > 500 ? 'text-amber-300' : 'text-cyan-300'
+                                }`}>
+                                  {s.requests_per_second > 0 ? s.requests_per_second.toFixed(0) : '0'}
+                                </div>
+                                <div className="text-[9px] text-cyan-300/50">req/s</div>
+                              </div>
+                              <div className="bg-slate-800/40 rounded-lg p-2 text-center cursor-help"
+                                title={"Average Response Time (ms)\n\nHow long it takes Caddy to respond to a request, measured in milliseconds (1000ms = 1 second). This is the mean across ALL requests.\n\nGreen (<100ms) = snappy, users won't notice any delay\nAmber (100-500ms) = acceptable, some slowness\nRed (>500ms) = slow, users will feel lag\n\nLike measuring how fast a waiter brings your food. Lower is better.\n\nCurrent: " + s.avg_response_ms.toFixed(1) + "ms"}>
+                                <div className={`text-base font-bold ${
+                                  s.avg_response_ms > 500 ? 'text-red-400' :
+                                  s.avg_response_ms > 100 ? 'text-amber-300' : 'text-emerald-300'
+                                }`}>
+                                  {s.avg_response_ms < 1 ? '<1' : s.avg_response_ms.toFixed(0)}
+                                </div>
+                                <div className="text-[9px] text-cyan-300/50">avg ms</div>
+                              </div>
+                              <div className="bg-slate-800/40 rounded-lg p-2 text-center cursor-help"
+                                title={"99th Percentile Response Time (p99)\n\nThe slowest 1% of requests take at least this long. If p99 = 500ms, then 99 out of 100 requests finish faster than 500ms. Only 1 in 100 is slower.\n\nThis catches worst-case performance that the average hides. A good average with a bad p99 means most users are happy but some are getting terrible performance.\n\nGreen (<500ms) = even the slowest requests are fast\nAmber (500ms-2s) = some users hitting delays\nRed (>2s) = tail latency problem, investigate\n\nCurrent: " + s.p99_response_ms.toFixed(1) + "ms"}>
+                                <div className={`text-base font-bold ${
+                                  s.p99_response_ms > 2000 ? 'text-red-400' :
+                                  s.p99_response_ms > 500 ? 'text-amber-300' : 'text-emerald-300'
+                                }`}>
+                                  {s.p99_response_ms < 1 ? '<1' : s.p99_response_ms >= 1000 ? `${(s.p99_response_ms / 1000).toFixed(1)}s` : `${s.p99_response_ms.toFixed(0)}`}
+                                </div>
+                                <div className="text-[9px] text-cyan-300/50">p99 ms</div>
+                              </div>
+                              <div className="bg-slate-800/40 rounded-lg p-2 text-center cursor-help"
+                                title={"Server Error Rate (5xx)\n\nPercentage of requests that failed with a server error (HTTP 500-599). These are OUR fault, not the user's.\n\n5xx errors mean the backend couldn't handle the request: overloaded, crashed, timed out, or hit a bug.\n\nGreen (<1%) = healthy, rare errors\nAmber (1-5%) = concerning, some users affected\nRed (>5%) = critical, many requests failing\n\nCommon causes: mining semaphore full (503), node syncing, backend restart.\n\nCurrent: " + errRate.toFixed(2) + "% (" + s.requests_by_status.server_err_5xx.toLocaleString() + " of " + totalByStatus.toLocaleString() + " total)"}>
+                                <div className={`text-base font-bold ${
+                                  errRate > 5 ? 'text-red-400' :
+                                  errRate > 1 ? 'text-amber-300' : 'text-emerald-300'
+                                }`}>
+                                  {errRate > 0 ? errRate.toFixed(1) : '0'}%
+                                </div>
+                                <div className="text-[9px] text-cyan-300/50">5xx err</div>
+                              </div>
+                              <div className="bg-slate-800/40 rounded-lg p-2 text-center cursor-help"
+                                title={"Goroutines (concurrent tasks)\n\nGoroutines are lightweight threads inside Caddy (written in Go). Each active connection, request, or background task uses one or more goroutines.\n\nThink of them like workers in a factory. More workers = more concurrent activity.\n\n1-5K = normal idle\n10-50K = moderate load (hundreds of miners)\n50K+ = heavy load, check if connections are leaking\n\nUnlike OS threads, Go can handle millions of goroutines. High numbers aren't necessarily bad, but a steadily rising count without more traffic suggests a connection leak.\n\nCurrent: " + s.goroutines.toLocaleString()}>
+                                <div className="text-base font-bold text-blue-300">
+                                  {s.goroutines > 1000 ? `${(s.goroutines / 1000).toFixed(1)}K` : s.goroutines}
+                                </div>
+                                <div className="text-[9px] text-cyan-300/50">goroutines</div>
+                              </div>
+                            </div>
+
+                            {/* Status code breakdown bar */}
+                            <div className="mb-3">
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="text-[9px] text-cyan-300/50 uppercase tracking-wider cursor-help"
+                                  title={"HTTP Response Code Breakdown\n\nEvery HTTP response has a status code. This bar shows the distribution:\n\n2xx (green) = Success. The request worked perfectly.\n3xx (blue) = Redirect. The client was sent to a different URL.\n4xx (amber) = Client error. Bad request, not found, unauthorized. The user did something wrong.\n5xx (red) = Server error. The server failed. Our problem to fix.\n101 WS (purple) = WebSocket upgrade. A persistent two-way connection was established (used for SSE mining streams).\n\nA healthy server has mostly green (2xx). Some 5xx is normal under heavy mining load (503 = semaphore full, miner retries automatically)."}>
+                                  Response Codes
+                                </span>
+                                <span className="text-[9px] text-cyan-300/40 cursor-help"
+                                  title={"Total requests handled by Caddy since it was last started or reloaded. This counter resets on Caddy restart.\n\nTotal: " + s.total_requests.toLocaleString()}>
+                                  {s.total_requests > 1000000 ? `${(s.total_requests / 1000000).toFixed(1)}M` :
+                                   s.total_requests > 1000 ? `${(s.total_requests / 1000).toFixed(1)}K` :
+                                   s.total_requests} total
+                                </span>
+                              </div>
+                              {totalByStatus > 0 && (
+                                <div className="h-2 rounded-full overflow-hidden flex bg-slate-800/60">
+                                  {s.requests_by_status.ok_2xx > 0 && (
+                                    <div className="bg-emerald-500 h-full cursor-help" style={{ width: `${(s.requests_by_status.ok_2xx / totalByStatus) * 100}%` }}
+                                      title={`2xx Success: ${s.requests_by_status.ok_2xx.toLocaleString()} requests (${((s.requests_by_status.ok_2xx / totalByStatus) * 100).toFixed(1)}%)\n\nThese requests completed successfully. The server understood the request and returned the expected data. This is the ideal outcome for every request.`} />
+                                  )}
+                                  {s.requests_by_status.redirect_3xx > 0 && (
+                                    <div className="bg-blue-500 h-full cursor-help" style={{ width: `${(s.requests_by_status.redirect_3xx / totalByStatus) * 100}%` }}
+                                      title={`3xx Redirect: ${s.requests_by_status.redirect_3xx.toLocaleString()} requests (${((s.requests_by_status.redirect_3xx / totalByStatus) * 100).toFixed(1)}%)\n\nThe client was told to go to a different URL. Common for HTTP->HTTPS upgrades (301) or temporary redirects (302). Normal and expected.`} />
+                                  )}
+                                  {s.requests_by_status.client_err_4xx > 0 && (
+                                    <div className="bg-amber-500 h-full cursor-help" style={{ width: `${(s.requests_by_status.client_err_4xx / totalByStatus) * 100}%` }}
+                                      title={`4xx Client Error: ${s.requests_by_status.client_err_4xx.toLocaleString()} requests (${((s.requests_by_status.client_err_4xx / totalByStatus) * 100).toFixed(1)}%)\n\nThe client sent a bad request. Examples:\n- 400 Bad Request (malformed data)\n- 401 Unauthorized (no login)\n- 403 Forbidden (wrong wallet)\n- 404 Not Found (wrong URL)\n\nSmall numbers are normal (bots, typos). A spike could mean a broken client update.`} />
+                                  )}
+                                  {s.requests_by_status.server_err_5xx > 0 && (
+                                    <div className="bg-red-500 h-full cursor-help" style={{ width: `${(s.requests_by_status.server_err_5xx / totalByStatus) * 100}%` }}
+                                      title={`5xx Server Error: ${s.requests_by_status.server_err_5xx.toLocaleString()} requests (${((s.requests_by_status.server_err_5xx / totalByStatus) * 100).toFixed(1)}%)\n\nThe server failed to handle the request. Common causes:\n- 502 Bad Gateway (backend crashed or unreachable)\n- 503 Service Unavailable (mining semaphore full, too many concurrent submissions)\n- 504 Gateway Timeout (backend took too long)\n\nSome 503s during heavy mining are expected. The miner retries automatically. A sudden spike in 502s means the backend process may have crashed.`} />
+                                  )}
+                                  {s.requests_by_status.websocket_101 > 0 && (
+                                    <div className="bg-purple-500 h-full cursor-help" style={{ width: `${(s.requests_by_status.websocket_101 / totalByStatus) * 100}%` }}
+                                      title={`101 WebSocket Upgrade: ${s.requests_by_status.websocket_101.toLocaleString()} connections\n\nWebSocket upgrades create a persistent two-way connection. Used for:\n- SSE (Server-Sent Events) mining reward streams\n- Real-time balance updates\n- Live block notifications\n\nEach connected wallet/miner holds one WebSocket. Low numbers are normal since these are long-lived connections, not individual requests.`} />
+                                  )}
+                                </div>
+                              )}
+                              <div className="flex gap-3 mt-1">
+                                {[
+                                  { label: '2xx', count: s.requests_by_status.ok_2xx, color: 'text-emerald-400', tip: 'Successful responses' },
+                                  { label: '3xx', count: s.requests_by_status.redirect_3xx, color: 'text-blue-400', tip: 'Redirects (HTTP->HTTPS etc.)' },
+                                  { label: '4xx', count: s.requests_by_status.client_err_4xx, color: 'text-amber-400', tip: 'Client errors (bad request, not found)' },
+                                  { label: '5xx', count: s.requests_by_status.server_err_5xx, color: 'text-red-400', tip: 'Server errors (overload, crash, timeout)' },
+                                  { label: 'WS', count: s.requests_by_status.websocket_101, color: 'text-purple-400', tip: 'WebSocket upgrades (live connections)' },
+                                ].filter(x => x.count > 0).map(x => (
+                                  <span key={x.label} className={`text-[9px] ${x.color} cursor-help`} title={`${x.tip}: ${x.count.toLocaleString()}`}>
+                                    {x.label}: {x.count > 1000000 ? `${(x.count / 1000000).toFixed(1)}M` : x.count > 1000 ? `${(x.count / 1000).toFixed(1)}K` : x.count}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+
+                            {/* Bottom row: memory + upstreams */}
+                            <div className="flex items-center justify-between text-[9px] text-cyan-300/40">
+                              <span className="cursor-help"
+                                title={"Caddy Heap Memory: " + s.memory_mb.toFixed(1) + " MB\n\nHow much RAM Caddy's Go runtime is using for its heap (dynamic allocations). This includes connection buffers, TLS session caches, and request/response data.\n\nNormal: 100-500 MB\nHigh: 500-2000 MB (lots of concurrent connections)\nCritical: >2000 MB (possible memory leak or connection pileup)\n\nCaddy's Go garbage collector reclaims unused memory automatically, but under heavy load memory stays high because connections are actively using it."}>
+                                Heap: {s.memory_mb.toFixed(0)} MB
+                              </span>
+                              <div className="flex gap-2">
+                                {s.upstreams.map(u => (
+                                  <span key={u.address} className="flex items-center gap-1 cursor-help"
+                                    title={`Upstream: ${u.address}\nStatus: ${u.healthy ? 'Healthy' : 'DOWN'}\n\nUpstreams are the backend services Caddy forwards requests to. Each one runs a different part of the system:\n- localhost:8080 = blockchain node (API, mining, P2P)\n- localhost:3080 = bounty server\n- localhost:9002 = additional service\n\nGreen dot = Caddy can reach this backend and it responds to health checks.\nRed dot = Backend is unreachable or failing health checks. Caddy will stop routing traffic to it until it recovers.`}>
+                                    <div className={`w-1.5 h-1.5 rounded-full ${u.healthy ? 'bg-emerald-400' : 'bg-red-400'}`} />
+                                    <span className={u.healthy ? 'text-emerald-300/70' : 'text-red-300/70'}>{u.address}</span>
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          </>
+                        );
+                      })() : (
+                        <div className="text-[10px] text-red-400/60"
+                          title="Caddy's Prometheus metrics endpoint (http://localhost:2019/metrics) is not responding. This could mean Caddy is not running, crashed, or the admin API port (2019) is blocked. Check: systemctl status caddy">
+                          Caddy metrics offline
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {/* Decentralization Index Gauge */}
                   {decentral && (

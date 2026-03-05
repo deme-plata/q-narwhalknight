@@ -175,10 +175,25 @@ static BALANCE_AMOUNT_LIMITS: Lazy<DashMap<String, (u128, Instant)>> =
     Lazy::new(DashMap::new);
 
 /// v9.1.2: Dune Analytics query result cache — (timestamp, json_body)
-/// Caches GET /api/v1/dune/query/:id results for 5 minutes to avoid rate-limiting
-static DUNE_QUERY_CACHE: Lazy<DashMap<u64, (Instant, String)>> =
+/// Caches GET /api/v1/dune/query/:name results for 5 minutes to avoid rate-limiting
+static DUNE_QUERY_CACHE: Lazy<DashMap<String, (Instant, String)>> =
     Lazy::new(DashMap::new);
 const DUNE_CACHE_TTL_SECS: u64 = 300; // 5 minutes
+
+/// Map chart names to Dune query IDs (v3 — correct demetri namespace)
+fn dune_query_id_for(chart: &str) -> Option<u64> {
+    match chart {
+        "daily_block_production" => Some(6783778),
+        "mining_rewards"         => Some(6783779),
+        "miner_dominance"        => Some(6783780),
+        "token_supply"           => Some(6783781),
+        "wealth_distribution"    => Some(6783782),
+        "network_health"         => Some(6783783),
+        "dex_volume"             => Some(6783784),
+        "emission_schedule"      => Some(6783776),
+        _ => None,
+    }
+}
 
 /// v5.1.0: Maximum QUG that can be credited per node per minute via P2P updates
 /// 100 QUG = 100 * 10^24 base units
@@ -19868,10 +19883,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 }
             })
         }) // v8.6.5: Dune Analytics sync status
-        .route("/api/v1/dune/query/:query_id", get(|axum::extract::Path(query_id): axum::extract::Path<u64>| async move {
-            // v9.1.2: Dune Analytics query proxy — caches results for 5 minutes
-            // Check cache first
-            if let Some(entry) = DUNE_QUERY_CACHE.get(&query_id) {
+        .route("/api/v1/dune/query/:chart_name", get(|axum::extract::Path(chart_name): axum::extract::Path<String>| async move {
+            // v9.1.2: Dune Analytics chart proxy — resolve name → query ID, execute, cache 5min
+            // Step 1: Check cache
+            if let Some(entry) = DUNE_QUERY_CACHE.get(&chart_name) {
                 let (cached_at, ref body) = *entry;
                 if cached_at.elapsed().as_secs() < DUNE_CACHE_TTL_SECS {
                     return axum::response::Response::builder()
@@ -19882,7 +19897,18 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         .unwrap();
                 }
             }
-            // Fetch from Dune API
+            // Step 2: Resolve chart name to query ID
+            let query_id = match dune_query_id_for(&chart_name) {
+                Some(id) => id,
+                None => return axum::response::Response::builder()
+                    .status(404)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(format!(
+                        r#"{{"error":"Unknown chart: {}","available":["daily_block_production","mining_rewards","miner_dominance","token_supply","wealth_distribution","network_health","dex_volume","emission_schedule"]}}"#,
+                        chart_name
+                    ))).unwrap(),
+            };
+            // Step 3: Fetch from Dune API
             let api_key = std::env::var("DUNE_API_KEY").unwrap_or_default();
             if api_key.is_empty() {
                 return axum::response::Response::builder()
@@ -19891,47 +19917,77 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     .body(axum::body::Body::from(r#"{"error":"DUNE_API_KEY not configured"}"#))
                     .unwrap();
             }
-            let url = format!("https://api.dune.com/api/v1/query/{}/results/latest", query_id);
             let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(15))
+                .timeout(std::time::Duration::from_secs(60))
                 .connect_timeout(std::time::Duration::from_secs(5))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new());
-            match client.get(&url).header("X-DUNE-API-KEY", &api_key).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    match resp.text().await {
-                        Ok(body) => {
-                            DUNE_QUERY_CACHE.insert(query_id, (Instant::now(), body.clone()));
-                            axum::response::Response::builder()
+            // Try latest results first (free, no credits)
+            let latest_url = format!("https://api.dune.com/api/v1/query/{}/results/latest", query_id);
+            if let Ok(resp) = client.get(&latest_url).header("X-DUNE-API-KEY", &api_key).send().await {
+                if resp.status().is_success() {
+                    if let Ok(body) = resp.text().await {
+                        if body.contains("\"rows\"") {
+                            DUNE_QUERY_CACHE.insert(chart_name, (Instant::now(), body.clone()));
+                            return axum::response::Response::builder()
                                 .status(200)
                                 .header("content-type", "application/json")
-                                .header("x-dune-cache", "miss")
+                                .header("x-dune-cache", "latest")
                                 .body(axum::body::Body::from(body))
-                                .unwrap()
+                                .unwrap();
                         }
-                        Err(e) => axum::response::Response::builder()
-                            .status(502)
-                            .header("content-type", "application/json")
-                            .body(axum::body::Body::from(format!(r#"{{"error":"Failed to read Dune response: {}"}}"#, e)))
-                            .unwrap(),
                     }
                 }
-                Ok(resp) => {
-                    let status = resp.status().as_u16();
-                    let body = resp.text().await.unwrap_or_default();
-                    axum::response::Response::builder()
-                        .status(status)
-                        .header("content-type", "application/json")
-                        .body(axum::body::Body::from(body))
-                        .unwrap()
+            }
+            // Execute query and poll for results
+            let exec_url = format!("https://api.dune.com/api/v1/query/{}/execute", query_id);
+            let exec_resp = client.post(&exec_url)
+                .header("X-DUNE-API-KEY", &api_key)
+                .header("Content-Type", "application/json")
+                .body("{}").send().await;
+            let execution_id = match exec_resp {
+                Ok(r) if r.status().is_success() => {
+                    let body: serde_json::Value = r.json().await.unwrap_or_default();
+                    body.get("execution_id").and_then(|v| v.as_str()).unwrap_or("").to_string()
                 }
-                Err(e) => axum::response::Response::builder()
+                _ => return axum::response::Response::builder()
                     .status(502)
                     .header("content-type", "application/json")
-                    .body(axum::body::Body::from(format!(r#"{{"error":"Dune API request failed: {}"}}"#, e)))
+                    .body(axum::body::Body::from(r#"{"error":"Failed to trigger Dune execution"}"#))
                     .unwrap(),
+            };
+            if execution_id.is_empty() {
+                return axum::response::Response::builder()
+                    .status(502).header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{"error":"No execution_id"}"#)).unwrap();
             }
-        })) // v9.1.2: Dune Analytics query proxy with 5min cache
+            // Poll for up to 60s
+            for _ in 0..30 {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let result_url = format!("https://api.dune.com/api/v1/execution/{}/results", execution_id);
+                if let Ok(r) = client.get(&result_url).header("X-DUNE-API-KEY", &api_key).send().await {
+                    if r.status().is_success() {
+                        if let Ok(body) = r.text().await {
+                            if !body.contains("QUERY_STATE_PENDING") && !body.contains("QUERY_STATE_EXECUTING") {
+                                DUNE_QUERY_CACHE.insert(chart_name, (Instant::now(), body.clone()));
+                                return axum::response::Response::builder()
+                                    .status(200)
+                                    .header("content-type", "application/json")
+                                    .header("x-dune-cache", "executed")
+                                    .body(axum::body::Body::from(body))
+                                    .unwrap();
+                            }
+                        }
+                    }
+                }
+            }
+            axum::response::Response::builder()
+                .status(202).header("content-type", "application/json")
+                .body(axum::body::Body::from(format!(
+                    r#"{{"status":"executing","execution_id":"{}","message":"Query still running, retry shortly"}}"#,
+                    execution_id
+                ))).unwrap()
+        })) // v9.1.2: Dune Analytics chart proxy — query ID + execute + poll + 5min cache
         .route("/api/v1/peer-id", get(handlers::get_peer_id)) // libp2p peer ID for dynamic bootstrap discovery
         // v3.9.5-beta: Validator registry endpoints for P2P decentralization
         .route("/api/v1/validators", get(handlers::list_validators)) // List registered validators

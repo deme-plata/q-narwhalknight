@@ -55,7 +55,7 @@ axum = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
 hyper = { workspace = true }
-hyper-util = { version = "0.1", features = ["tokio", "server", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto", "http1", "http2"] }
 socket2 = "0.5"  # Advanced socket configuration for 1M+ TPS
 
 # PaaS production-grade middleware
