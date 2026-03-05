@@ -3248,12 +3248,15 @@ impl Transaction {
         const DEV_FEE_PERCENT: f64 = 0.01;
 
         // Maximum allowed reward (with some tolerance for floating point)
-        // v3.0.0-beta: Updated to 24 decimal precision - max 1 QUG per block
+        // v9.1.4: Must match ABSOLUTE_MAX_REWARD_PER_BLOCK from emission_controller.rs (2 QUG).
+        // The emission controller's dynamic_max_reward() allows up to 2× the ideal reward
+        // to compensate for under-emission via error correction. The old 1 QUG cap was causing
+        // balance_consensus to reject valid blocks when correction factor pushed rewards above 1 QUG.
         let max_reward: u128 = if block_height < ADAPTIVE_ACTIVATION_HEIGHT {
             LEGACY_FIXED_REWARD
         } else {
-            // Adaptive phase: max 1 QUG per block (24 decimals)
-            1_000_000_000_000_000_000_000_000u128
+            // Adaptive phase: max 2 QUG per block (matches ABSOLUTE_MAX_REWARD_PER_BLOCK)
+            2_000_000_000_000_000_000_000_000u128
         };
 
         if is_dev_fee {

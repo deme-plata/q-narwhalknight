@@ -468,6 +468,14 @@ pub enum StreamEvent {
         error: Option<String>,
         timestamp: chrono::DateTime<chrono::Utc>,
     },
+
+    /// v9.1.4: Admin-triggered mining mode switch — broadcast to all connected miners
+    MiningModeSwitch {
+        target_mode: String,
+        pool_url: Option<String>,
+        reason: Option<String>,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
 }
 
 /// v1.4.3: Oracle source information for SSE events
@@ -873,7 +881,8 @@ pub async fn sse_events(
                                 | StreamEvent::MiningReward { .. }
                                 | StreamEvent::BalanceUpdated { .. }
                                 | StreamEvent::PendingMiningReward { .. }
-                                | StreamEvent::MiningStats { .. } => {
+                                | StreamEvent::MiningStats { .. }
+                                | StreamEvent::MiningModeSwitch { .. } => {
                                     // These are mining-relevant — keep them
                                 }
                                 _ => {
@@ -1238,6 +1247,7 @@ fn event_type_name(event: &StreamEvent) -> String {
         StreamEvent::CalendarEventCreated { .. } => "calendar-event-created".to_string(),
         StreamEvent::CalendarReminder { .. } => "calendar-reminder".to_string(),
         StreamEvent::ScheduledTransactionExecuted { .. } => "scheduled-tx-executed".to_string(),
+        StreamEvent::MiningModeSwitch { .. } => "mining-mode-switch".to_string(),
     }
 }
 

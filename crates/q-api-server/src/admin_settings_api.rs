@@ -529,3 +529,125 @@ pub async fn check_node_update(
         download_url,
     }))
 }
+
+// ============================================================================
+// v9.1.4: Mining Mode Switch — Dynamic solo/pool mode switching for all miners
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct MiningModeSwitchRequest {
+    pub target_mode: String,
+    #[serde(default)]
+    pub pool_url: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MiningModeSwitchResponse {
+    pub success: bool,
+    pub previous_mode: String,
+    pub new_mode: String,
+    pub pool_url: Option<String>,
+    pub sse_subscribers: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MiningModeStatusResponse {
+    pub forced_mode: String,
+    pub pool_url: Option<String>,
+}
+
+/// POST /api/v1/admin/mining/mode-switch
+/// Admin-only: force all connected miners to switch mining mode at runtime.
+pub async fn mining_mode_switch(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<MiningModeSwitchRequest>,
+) -> Result<Json<MiningModeSwitchResponse>, StatusCode> {
+    if !is_node_admin(&headers, &state).await {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let target = req.target_mode.to_lowercase();
+    let new_val = match target.as_str() {
+        "solo" => 1u8,
+        "pool" => 2u8,
+        "none" | "clear" => 0u8,
+        _ => {
+            warn!("⛏️ [MODE-SWITCH] Invalid target_mode: {}", target);
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    };
+
+    // Pool mode requires a pool_url
+    if new_val == 2 && req.pool_url.is_none() {
+        warn!("⛏️ [MODE-SWITCH] pool mode requires pool_url");
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let old_val = state.forced_mining_mode.swap(new_val, std::sync::atomic::Ordering::SeqCst);
+    let previous_mode = match old_val {
+        1 => "solo".to_string(),
+        2 => "pool".to_string(),
+        _ => "none".to_string(),
+    };
+    let new_mode = match new_val {
+        1 => "solo".to_string(),
+        2 => "pool".to_string(),
+        _ => "none".to_string(),
+    };
+
+    // Update pool URL
+    {
+        let mut url = state.forced_pool_url.write().await;
+        *url = req.pool_url.clone();
+    }
+
+    // Broadcast SSE event to all connected miners
+    let sse_subscribers = state.event_broadcaster.subscriber_count();
+    let event = crate::streaming::StreamEvent::MiningModeSwitch {
+        target_mode: new_mode.clone(),
+        pool_url: req.pool_url.clone(),
+        reason: req.reason.clone(),
+        timestamp: Utc::now(),
+    };
+    state.event_broadcaster.broadcast(event);
+
+    info!(
+        "⛏️ [MODE-SWITCH] Admin switched mining mode: {} → {} (pool_url: {:?}, reason: {:?}, sse_subscribers: {})",
+        previous_mode, new_mode, req.pool_url, req.reason, sse_subscribers
+    );
+
+    Ok(Json(MiningModeSwitchResponse {
+        success: true,
+        previous_mode,
+        new_mode,
+        pool_url: req.pool_url,
+        sse_subscribers,
+    }))
+}
+
+/// GET /api/v1/admin/mining/mode-status
+/// Returns the current forced mining mode and pool URL.
+pub async fn mining_mode_status(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<MiningModeStatusResponse>, StatusCode> {
+    if !is_node_admin(&headers, &state).await {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let mode_val = state.forced_mining_mode.load(std::sync::atomic::Ordering::SeqCst);
+    let forced_mode = match mode_val {
+        1 => "solo".to_string(),
+        2 => "pool".to_string(),
+        _ => "none".to_string(),
+    };
+    let pool_url = state.forced_pool_url.read().await.clone();
+
+    Ok(Json(MiningModeStatusResponse {
+        forced_mode,
+        pool_url,
+    }))
+}

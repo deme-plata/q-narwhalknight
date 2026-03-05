@@ -15,7 +15,7 @@
 use axum::Router;
 use axum::extract::connect_info::ConnectInfo;
 use hyper::body::Incoming;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder as AutoBuilder;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -215,6 +215,7 @@ impl HighPerformanceServer {
                         let mut builder = AutoBuilder::new(TokioExecutor::new());
                         builder.http1()
                             .keep_alive(true)
+                            .timer(TokioTimer::new())
                             .header_read_timeout(keepalive_timeout);
 
                         // Convert axum Router to hyper service, injecting ConnectInfo

@@ -539,6 +539,13 @@ impl MinerTuiApp {
                 self.network_compute_peers = connected_miners;
                 self.live_security_bits = live_security_bits;
             }
+            DiagnosticEvent::MiningModeSwitch { target_mode, pool_url, reason } => {
+                self.add_log(LogEntry {
+                    timestamp: now,
+                    level: LogLevel::Warn,
+                    message: format!("Mode switch → {} ({})", target_mode, reason.unwrap_or_default()),
+                });
+            }
         }
     }
 

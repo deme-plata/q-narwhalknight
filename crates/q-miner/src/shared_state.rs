@@ -113,6 +113,13 @@ pub enum DiagnosticEvent {
         connected_miners: u32,
         live_security_bits: f64,
     },
+
+    // v9.1.4: Mining mode switch from admin
+    MiningModeSwitch {
+        target_mode: String,
+        pool_url: Option<String>,
+        reason: Option<String>,
+    },
 }
 
 /// v9.0.4: Starship sync telemetry — rich sync progress for TUI
@@ -244,6 +251,11 @@ pub struct SharedMinerState {
     pub mining_mode: String,
     pub num_threads: usize,
     pub proxy_url: Option<String>,
+
+    // v9.1.4: Dynamic mining mode switch — admin can force mode change at runtime
+    // 0 = no switch pending, 1 = switch to solo, 2 = switch to pool
+    pub mode_switch_signal: Arc<AtomicU8>,
+    pub mode_switch_pool_url: Arc<parking_lot::RwLock<Option<String>>>,
 }
 
 impl SharedMinerState {
@@ -300,6 +312,8 @@ impl SharedMinerState {
             mining_mode,
             num_threads,
             proxy_url,
+            mode_switch_signal: Arc::new(AtomicU8::new(0)),
+            mode_switch_pool_url: Arc::new(parking_lot::RwLock::new(None)),
         });
 
         (state, event_rx)

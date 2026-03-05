@@ -294,6 +294,12 @@ pub struct MiningChallenge {
     /// v9.1.0: Live security bits (boosted by real-time network hashpower)
     #[serde(default)]
     pub live_security_bits: Option<f64>,
+    /// v9.1.4: Admin-forced mining mode override ("solo" or "pool", absent = no override)
+    #[serde(default)]
+    pub forced_mining_mode: Option<String>,
+    /// v9.1.4: Pool URL when forced_mining_mode is "pool"
+    #[serde(default)]
+    pub forced_pool_url: Option<String>,
 }
 
 // API response wrapper
@@ -418,6 +424,15 @@ fn track_upload(bytes: usize) {
 fn track_api_failure() {
     GLOBAL_API_FAILURES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     GLOBAL_API_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+// v9.1.4: Dynamic mining mode switch — admin can force all miners to switch mode at runtime.
+// 0 = no switch, 1 = switch to solo, 2 = switch to pool
+static MODE_SWITCH_TARGET: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+static MODE_SWITCH_POOL_URL: std::sync::OnceLock<parking_lot::Mutex<Option<String>>> = std::sync::OnceLock::new();
+
+fn get_mode_switch_pool_url() -> &'static parking_lot::Mutex<Option<String>> {
+    MODE_SWITCH_POOL_URL.get_or_init(|| parking_lot::Mutex::new(None))
 }
 
 /// Try an HTTP GET request against the primary server, falling back to bootstrap1.quillon.xyz
@@ -858,76 +873,123 @@ async fn main() -> Result<()> {
             std::process::exit(1);
         }
 
-        if args.mode == "pool" {
-            // Pool mining mode - connect via Stratum protocol
-            // v8.1.6: Accept --server if it looks like a stratum URL (user convenience)
-            let pool_url = if args.server.contains("stratum") || args.server.contains(":3333") {
-                info!("ℹ️  Using --server value as pool URL (detected stratum URL)");
-                args.server.clone()
+        // v9.1.4: Outer loop enables runtime mode switching via admin SSE command.
+        // When MODE_SWITCH_TARGET is set (by SSE handler or challenge response),
+        // the inner run_*_mining() returns (is_running=false), we read the new mode,
+        // and restart in the new mode without process restart.
+        let mut current_mode = args.mode.clone();
+        let mut current_pool_url = args.pool_url.clone();
+        // TUI log receiver is consumed on first use; subsequent iterations run without TUI
+        #[cfg(feature = "tui")]
+        let mut tui_log_rx_opt = Some(tui_log_rx);
+
+        loop {
+            // Reset the switch target before entering a mining function
+            MODE_SWITCH_TARGET.store(0, std::sync::atomic::Ordering::SeqCst);
+
+            if current_mode == "pool" {
+                // Pool mining mode - connect via Stratum protocol
+                let pool_url = if args.server.contains("stratum") || args.server.contains(":3333") {
+                    info!("ℹ️  Using --server value as pool URL (detected stratum URL)");
+                    args.server.clone()
+                } else {
+                    current_pool_url.clone()
+                };
+                let worker_name = args.worker_name.clone().unwrap_or_else(|| {
+                    format!("worker_{:08x}", rand::random::<u32>())
+                });
+                info!("⛏️  Starting Q-NarwhalKnight POOL mining...");
+                info!("💰 Mining to wallet: {}", wallet);
+                info!("🏊 Pool URL: {}", pool_url);
+                info!("👷 Worker name: {}", worker_name);
+                let _ = run_pool_mining(cpu_threads, args.intensity, &wallet, &worker_name, &pool_url).await;
+            } else if current_mode == "decentralized" {
+                // Decentralized P2P pool mining mode
+                let worker_name = args.worker_name.clone().unwrap_or_else(|| {
+                    format!("worker_{:08x}", rand::random::<u32>())
+                });
+                info!("🌐 Starting Q-NarwhalKnight DECENTRALIZED POOL mining...");
+                info!("💰 Mining to wallet: {}", wallet);
+                info!("👷 Worker name: {}", worker_name);
+                info!("📡 Bootstrap nodes: {}", args.bootstrap_nodes);
+                info!("🗺️  Region: {}", args.region);
+                info!("");
+                info!("📊 Features:");
+                info!("   ✅ CRDT-based PPLNS - No central pool needed");
+                info!("   ✅ P2P share propagation via gossipsub");
+                info!("   ✅ VDF anti-grinding proofs");
+                info!("   ✅ Threshold signature payouts");
+                info!("");
+                let _ = run_decentralized_pool_mining(
+                    cpu_threads,
+                    args.intensity,
+                    &wallet,
+                    &worker_name,
+                    &args.bootstrap_nodes,
+                    &args.region,
+                ).await;
             } else {
-                args.pool_url.clone()
+                // Solo mining mode
+                if args.server.contains("stratum") || args.server.ends_with(":3333") {
+                    eprintln!("❌ Stratum URL detected in --server but mode is 'solo'.");
+                    eprintln!("   For pool mining, use: --mode pool --server {}", args.server);
+                    eprintln!("   For solo mining, use: --server https://quillon.xyz");
+                    std::process::exit(1);
+                }
+                info!("⛏️  Starting Q-NarwhalKnight SOLO mining...");
+                info!("💰 Mining to wallet: {}", wallet);
+                info!("🌐 Primary server: {}", args.server);
+                info!("🔄 Fallback server: {}", FALLBACK_BOOTSTRAP_URL);
+                if let Some(ref name) = args.miner_name {
+                    info!("🏷️  Miner name: {}", name);
+                }
+                if let Some(ref p) = proxy_url {
+                    info!("🧅 Proxy: {}", p);
+                }
+                #[cfg(feature = "tui")]
+                {
+                    // TUI log receiver is only available on the first iteration
+                    let tui_rx = tui_log_rx_opt.take().flatten();
+                    let enable_tui = use_tui && tui_rx.is_some();
+                    let _ = run_mining(cpu_threads, args.intensity, args.gpu, &wallet, &args.server, args.miner_name.as_deref(), enable_tui, args.bandwidth_limit, proxy_url.clone(), tui_rx).await;
+                }
+                #[cfg(not(feature = "tui"))]
+                {
+                    let _ = run_mining(cpu_threads, args.intensity, args.gpu, &wallet, &args.server, args.miner_name.as_deref(), false, args.bandwidth_limit, proxy_url.clone(), ()).await;
+                }
+            }
+
+            // Check if a mode switch was requested
+            let switch_target = MODE_SWITCH_TARGET.load(std::sync::atomic::Ordering::SeqCst);
+            if switch_target == 0 {
+                // Normal shutdown (no mode switch) — exit the loop
+                break;
+            }
+
+            let new_mode = match switch_target {
+                1 => "solo".to_string(),
+                2 => "pool".to_string(),
+                _ => break,
             };
-            let worker_name = args.worker_name.unwrap_or_else(|| {
-                format!("worker_{:08x}", rand::random::<u32>())
-            });
-            info!("⛏️  Starting Q-NarwhalKnight POOL mining...");
-            info!("💰 Mining to wallet: {}", wallet);
-            info!("🏊 Pool URL: {}", pool_url);
-            info!("👷 Worker name: {}", worker_name);
-            run_pool_mining(cpu_threads, args.intensity, &wallet, &worker_name, &pool_url).await?;
-        } else if args.mode == "decentralized" {
-            // Decentralized P2P pool mining mode - v2.3.0+
-            // Uses CRDT-based PPLNS with gossipsub coordination
-            let worker_name = args.worker_name.unwrap_or_else(|| {
-                format!("worker_{:08x}", rand::random::<u32>())
-            });
-            info!("🌐 Starting Q-NarwhalKnight DECENTRALIZED POOL mining...");
-            info!("💰 Mining to wallet: {}", wallet);
-            info!("👷 Worker name: {}", worker_name);
-            info!("📡 Bootstrap nodes: {}", args.bootstrap_nodes);
-            info!("🗺️  Region: {}", args.region);
+
+            // Read the pool URL for pool mode
+            if new_mode == "pool" {
+                if let Some(url) = get_mode_switch_pool_url().lock().take() {
+                    current_pool_url = url;
+                }
+            }
+
             info!("");
-            info!("📊 Features:");
-            info!("   ✅ CRDT-based PPLNS - No central pool needed");
-            info!("   ✅ P2P share propagation via gossipsub");
-            info!("   ✅ VDF anti-grinding proofs");
-            info!("   ✅ Threshold signature payouts");
+            info!("⚡⚡⚡ MODE SWITCH: {} → {} ⚡⚡⚡", current_mode, new_mode);
+            if new_mode == "pool" {
+                info!("🏊 New pool URL: {}", current_pool_url);
+            }
             info!("");
-            run_decentralized_pool_mining(
-                cpu_threads,
-                args.intensity,
-                &wallet,
-                &worker_name,
-                &args.bootstrap_nodes,
-                &args.region,
-            ).await?;
-        } else {
-            // Solo mining mode - connect directly to API server
-            // v8.1.6: Detect stratum URL passed to solo mode and redirect to pool mode
-            if args.server.contains("stratum") || args.server.ends_with(":3333") {
-                eprintln!("❌ Stratum URL detected in --server but mode is 'solo'.");
-                eprintln!("   For pool mining, use: --mode pool --server {}", args.server);
-                eprintln!("   For solo mining, use: --server https://quillon.xyz");
-                std::process::exit(1);
-            }
-            info!("⛏️  Starting Q-NarwhalKnight SOLO mining...");
-            info!("💰 Mining to wallet: {}", wallet);
-            info!("🌐 Primary server: {}", args.server);
-            info!("🔄 Fallback server: {}", FALLBACK_BOOTSTRAP_URL);
-            if let Some(ref name) = args.miner_name {
-                info!("🏷️  Miner name: {}", name);
-            }
-            if let Some(ref p) = proxy_url {
-                info!("🧅 Proxy: {}", p);
-            }
-            #[cfg(feature = "tui")]
-            {
-                run_mining(cpu_threads, args.intensity, args.gpu, &wallet, &args.server, args.miner_name.as_deref(), use_tui, args.bandwidth_limit, proxy_url.clone(), tui_log_rx).await?;
-            }
-            #[cfg(not(feature = "tui"))]
-            {
-                run_mining(cpu_threads, args.intensity, args.gpu, &wallet, &args.server, args.miner_name.as_deref(), false, args.bandwidth_limit, proxy_url.clone(), ()).await?;
-            }
+
+            current_mode = new_mode;
+
+            // Brief pause to let mining threads fully stop
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
     }
 
@@ -2026,6 +2088,29 @@ fn mining_thread(
                         live_security_bits: challenge.live_security_bits.unwrap_or(0.0),
                     });
                 }
+
+                // v9.1.4: Check forced_mining_mode from challenge response (piggyback channel)
+                if let Some(ref forced_mode) = challenge.forced_mining_mode {
+                    let current_switch = MODE_SWITCH_TARGET.load(std::sync::atomic::Ordering::Relaxed);
+                    let forced_val = match forced_mode.as_str() {
+                        "solo" => 1u8,
+                        "pool" => 2u8,
+                        _ => 0u8,
+                    };
+                    // Only trigger if we haven't already set this switch target
+                    if forced_val > 0 && current_switch != forced_val {
+                        info!("⚡ [MODE-SWITCH] Server forcing mode change to '{}' via challenge response", forced_mode);
+                        *get_mode_switch_pool_url().lock() = challenge.forced_pool_url.clone();
+                        MODE_SWITCH_TARGET.store(forced_val, std::sync::atomic::Ordering::SeqCst);
+                        is_running.store(false, std::sync::atomic::Ordering::SeqCst);
+                        let _ = event_tx.send(DiagnosticEvent::MiningModeSwitch {
+                            target_mode: forced_mode.clone(),
+                            pool_url: challenge.forced_pool_url.clone(),
+                            reason: Some("server challenge override".to_string()),
+                        });
+                    }
+                }
+
                 break challenge;
             }
             Err(e) => {
@@ -2576,6 +2661,57 @@ async fn start_sse_listener(
                             }
                             Err(e) => {
                                 warn!("Failed to parse mining_reward event: {}", e);
+                            }
+                        }
+                    }
+
+                    // v9.1.4: Handle mining-mode-switch events from admin
+                    if ev.event_type == "mining-mode-switch" {
+                        match serde_json::from_str::<serde_json::Value>(&ev.data) {
+                            Ok(data) => {
+                                // Handle nested {"type":"MiningModeSwitch","data":{...}} format
+                                let switch_data = if data.get("type").and_then(|v| v.as_str()) == Some("MiningModeSwitch") {
+                                    data.get("data").cloned().unwrap_or(data.clone())
+                                } else {
+                                    data.clone()
+                                };
+                                let target_mode = switch_data.get("target_mode")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let pool_url = switch_data.get("pool_url")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string());
+                                let reason = switch_data.get("reason")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("admin request");
+
+                                info!("");
+                                info!("\x1b[1;33m   ⚡ MODE SWITCH\x1b[0m  \x1b[1;37m→ {}\x1b[0m  \x1b[2m│\x1b[0m  Reason: \x1b[36m{}\x1b[0m", target_mode, reason);
+                                if let Some(ref url) = pool_url {
+                                    info!("   \x1b[2mPool URL:\x1b[0m {}", url);
+                                }
+                                info!("");
+
+                                let switch_val = match target_mode {
+                                    "solo" => 1u8,
+                                    "pool" => 2u8,
+                                    _ => 0u8,
+                                };
+                                if switch_val > 0 {
+                                    *get_mode_switch_pool_url().lock() = pool_url.clone();
+                                    MODE_SWITCH_TARGET.store(switch_val, std::sync::atomic::Ordering::SeqCst);
+                                    // Signal mining threads to stop gracefully
+                                    is_running.store(false, Ordering::SeqCst);
+                                }
+
+                                let _ = sse_event_tx.send(DiagnosticEvent::MiningModeSwitch {
+                                    target_mode: target_mode.to_string(),
+                                    pool_url,
+                                    reason: Some(reason.to_string()),
+                                });
+                            }
+                            Err(e) => {
+                                warn!("Failed to parse mining-mode-switch event: {}", e);
                             }
                         }
                     }

@@ -180,17 +180,17 @@ static DUNE_QUERY_CACHE: Lazy<DashMap<String, (Instant, String)>> =
     Lazy::new(DashMap::new);
 const DUNE_CACHE_TTL_SECS: u64 = 300; // 5 minutes
 
-/// Map chart names to Dune query IDs (v3 — correct demetri namespace)
+/// Map chart names to Dune query IDs (v4 — correct demetri.qnk_* table names)
 fn dune_query_id_for(chart: &str) -> Option<u64> {
     match chart {
-        "daily_block_production" => Some(6783778),
-        "mining_rewards"         => Some(6783779),
-        "miner_dominance"        => Some(6783780),
-        "token_supply"           => Some(6783781),
-        "wealth_distribution"    => Some(6783782),
-        "network_health"         => Some(6783783),
-        "dex_volume"             => Some(6783784),
-        "emission_schedule"      => Some(6783776),
+        "daily_block_production" => Some(6783916),
+        "mining_rewards"         => Some(6783917),
+        "miner_dominance"        => Some(6783918),
+        "token_supply"           => Some(6783919),
+        "wealth_distribution"    => Some(6783920),
+        "network_health"         => Some(6783921),
+        "dex_volume"             => Some(6783922),
+        "emission_schedule"      => Some(6783923),
         _ => None,
     }
 }
@@ -8974,6 +8974,19 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                                 let incoming_difficulty =
                                                     block.header.total_difficulty;
 
+                                                // v9.1.2: Reject blocks with absurd total_difficulty
+                                                // A real fork may have 2-3x the difficulty, but 10x+ is clearly forged.
+                                                // This prevents bogus peers from triggering DEEP FORK spam that
+                                                // fills all mining shards and causes 100% 503 errors.
+                                                if existing_difficulty > 0
+                                                    && incoming_difficulty > existing_difficulty.saturating_mul(10)
+                                                {
+                                                    warn!("🚫 [FORK] Rejecting block at height {} with absurd total_difficulty {} (existing: {}, ratio: {}x)",
+                                                          block_height, incoming_difficulty, existing_difficulty,
+                                                          incoming_difficulty / existing_difficulty.max(1));
+                                                    return;
+                                                }
+
                                                 if incoming_difficulty <= existing_difficulty {
                                                     // 🌐 v2.7.2-beta: DAG-KNIGHT PARALLEL BLOCK ACCEPTANCE
                                                     // In DAG-Knight, we DON'T reject blocks - we include them ALL in the DAG.
@@ -9158,7 +9171,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                                         local_height
                                                     );
                                                     warn!(
-                                                        "   Network height: {} blocks",
+                                                        "   Incoming total_difficulty: {}",
                                                         incoming_difficulty
                                                     );
                                                     warn!("   Incoming chain heavier - executing multi-block reorganization");
@@ -11204,6 +11217,24 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                         let our_height_now = app_state_gossip
                                             .current_height_atomic
                                             .load(std::sync::atomic::Ordering::Relaxed);
+
+                                        // v9.1.2: Height sanity check — reject absurd peer heights
+                                        // Peers announcing 12.8 TRILLION height poison highest_network_height,
+                                        // triggering DEEP FORK detection on every block and filling all mining shards.
+                                        // Allow generous growth: 3x our height (or 50M during initial sync).
+                                        let max_reasonable_height = if our_height_now < 100_000 {
+                                            50_000_000 // Initial sync: trust up to 50M
+                                        } else {
+                                            our_height_now.saturating_mul(3).max(our_height_now + 100_000)
+                                        };
+
+                                        if announcement.highest_block > max_reasonable_height {
+                                            warn!("🚫 [HEIGHT] Rejecting absurd peer height {} from {} (our: {}, max reasonable: {})",
+                                                announcement.highest_block,
+                                                &announcement.peer_id[..20.min(announcement.peer_id.len())],
+                                                our_height_now, max_reasonable_height);
+                                            return;
+                                        }
 
                                         // Log large gaps for monitoring
                                         if announcement.highest_block > our_height_now + 5_000 {
@@ -20612,6 +20643,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/admin/fee-earnings", get(q_api_server::admin_settings_api::get_fee_earnings))
         // v7.3.1: Node update check (admin-only)
         .route("/api/v1/admin/node/update-check", get(q_api_server::admin_settings_api::check_node_update))
+        // v9.1.4: Mining mode switch — dynamic solo/pool switching for all miners
+        .route("/api/v1/admin/mining/mode-switch", post(q_api_server::admin_settings_api::mining_mode_switch))
+        .route("/api/v1/admin/mining/mode-status", get(q_api_server::admin_settings_api::mining_mode_status))
         // User-level OAuth2 consent management (any authenticated wallet)
         .route("/api/v1/oauth2/my-consents", get(q_api_server::admin_settings_api::my_oauth2_consents))
         .route("/api/v1/oauth2/my-consents/revoke", post(q_api_server::admin_settings_api::my_revoke_consent))

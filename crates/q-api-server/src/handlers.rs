@@ -9025,6 +9025,16 @@ pub async fn get_mining_challenge(
 
     // 🔧 v1.0.5-beta: Check if we have a cached challenge for current height (with grace period)
     // v8.9.9: Use try_read() instead of read().await — same fix as submit handler.
+    // v9.1.4: Read forced mining mode from AppState for challenge response piggyback
+    let forced_mode_val = state.forced_mining_mode.load(std::sync::atomic::Ordering::Relaxed);
+    let (challenge_forced_mode, challenge_forced_pool_url) = if forced_mode_val == 0 {
+        (None, None)
+    } else {
+        let mode_str = if forced_mode_val == 1 { "solo" } else { "pool" };
+        let pool_url = state.forced_pool_url.read().await.clone();
+        (Some(mode_str.to_string()), pool_url)
+    };
+
     // When write-locked (challenge refresh/fork), skip cache and regenerate below.
     // Prevents 2800+ challenge requests from blocking on RwLock under heavy sync.
     {
@@ -9047,6 +9057,8 @@ pub async fn get_mining_challenge(
                         server_notice: MINING_SERVER_NOTICE.to_string(),
                         server_version: VERSION.to_string(),
                         min_miner_version: Some(MIN_MINER_VERSION.to_string()),
+                        forced_mining_mode: challenge_forced_mode.clone(),
+                        forced_pool_url: challenge_forced_pool_url.clone(),
                     })));
                 } else if age_seconds < 150 {
                     // Grace period (120-150s): Warn but still return cached challenge
@@ -9065,6 +9077,8 @@ pub async fn get_mining_challenge(
                         server_notice: MINING_SERVER_NOTICE.to_string(),
                         server_version: VERSION.to_string(),
                         min_miner_version: Some(MIN_MINER_VERSION.to_string()),
+                        forced_mining_mode: challenge_forced_mode.clone(),
+                        forced_pool_url: challenge_forced_pool_url.clone(),
                     })));
                 } else {
                     // Challenge is too old (>150s) - force regeneration
@@ -9154,6 +9168,8 @@ pub async fn get_mining_challenge(
         server_notice: MINING_SERVER_NOTICE.to_string(),
         server_version: VERSION.to_string(),
         min_miner_version: Some(MIN_MINER_VERSION.to_string()),
+        forced_mining_mode: challenge_forced_mode,
+        forced_pool_url: challenge_forced_pool_url,
     })))
 }
 
@@ -9273,6 +9289,12 @@ pub struct MiningChallengeResponse {
     /// v8.5.9: Minimum miner version required — miner compares its own version against this
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_miner_version: Option<String>,
+    /// v9.1.4: Admin-forced mining mode override ("solo", "pool", or absent = no override)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forced_mining_mode: Option<String>,
+    /// v9.1.4: Pool URL when forced_mining_mode is "pool"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forced_pool_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -10886,29 +10908,34 @@ pub async fn execute_swap(
 
         // Deduct input token from user
         if from_is_qug {
-            // v9.0.5: CRITICAL FIX — Update in-memory wallet_balances for instant UI feedback,
-            // but do NOT persist to RocksDB. The RocksDB balance will be updated by
-            // balance_consensus when the swap TX is confirmed in a block.
+            // v9.1.4: CRITICAL FIX — Persist QUG debit immediately via subtract_balance().
             //
-            // Previously (v3.6.9), execute_swap called set_balance() to persist immediately.
-            // This caused DOUBLE DEDUCTION: execute_swap sets RocksDB to (balance - amount_in),
-            // then balance_consensus subtracts amount_in again → user loses 2x the swap amount.
+            // History:
+            // - v3.6.9: Used set_balance() to persist immediately → double deduction
+            // - v9.0.5: Deferred to balance_consensus → NEVER persisted (DEX swaps don't
+            //   create block transactions, so balance_consensus never processes them)
+            //   → balance reverts on restart or 75s RocksDB sync overwrites it
             //
-            // In-memory update provides instant UI feedback (balance shows deducted immediately).
-            // When balance_consensus processes the block, it subtracts from the non-persisted
-            // RocksDB value and persists the correct final balance. On next API call,
-            // wallet_balances is synced from storage (line ~9781).
+            // v9.1.4 FIX: Use subtract_balance() which does atomic read-modify-write from
+            // RocksDB (reads CURRENT value, subtracts delta, writes back). This is safe
+            // because balance_consensus does NOT process DEX swap transactions — there is
+            // no double-deduction risk. The old v3.6.9 bug was caused by set_balance()
+            // (absolute write) racing with add_balance() (incremental write), NOT by
+            // balance_consensus processing swap TXs.
             drop(token_balances);
             let mut wallet_balances = state.wallet_balances.write().await;
             let old_qug_balance = wallet_balances.get(&wallet_addr).copied().unwrap_or(0);
             let new_qug_balance = old_qug_balance.saturating_sub(request.amount_in as u128);
             wallet_balances.insert(wallet_addr, new_qug_balance);
-            info!("💸 [SWAP v9.0.5] Deducted {} QUG from user in-memory (was: {}, now: {}). RocksDB update deferred to block confirmation.",
+            info!("💸 [SWAP v9.1.4] Deducted {} QUG from user (was: {}, now: {})",
                 request.amount_in as f64 / 1e24, old_qug_balance as f64 / 1e24, new_qug_balance as f64 / 1e24);
             drop(wallet_balances);
 
-            // v9.0.5: DO NOT persist to RocksDB here — balance_consensus will handle it
-            // when the swap TX is confirmed in a block. Persisting here caused double deduction.
+            // Persist QUG debit to RocksDB via subtract_balance (atomic read-modify-write)
+            let wallet_hex = hex::encode(wallet_addr);
+            if let Err(e) = state.storage_engine.subtract_balance(&wallet_hex, request.amount_in as u128).await {
+                warn!("⚠️ [SWAP v9.1.4] Failed to persist QUG debit: {} — in-memory still updated", e);
+            }
             token_balances = state.token_balances.write().await;
         } else if from_is_qugusd {
             // v4.0.3: Deduct QUGUSD from token_balances using standard QUGUSD_TOKEN_ADDRESS
@@ -10991,13 +11018,19 @@ pub async fn execute_swap(
             let old_qug_balance = wallet_balances.get(&wallet_addr).copied().unwrap_or(0);
             let new_qug_balance = old_qug_balance.saturating_add(final_amount_out as u128);
             wallet_balances.insert(wallet_addr, new_qug_balance);
-            info!("💰 [SWAP v3.6.8] Credited {} QUG to user (was: {}, now: {})",
+            info!("💰 [SWAP v9.1.4] Credited {} QUG to user (was: {}, now: {})",
                 final_amount_out as f64 / 1e24, old_qug_balance as f64 / 1e24, new_qug_balance as f64 / 1e24);
             drop(wallet_balances);
 
-            // Persist QUG balance to storage
-            if let Err(e) = state.storage_engine.set_balance(&hex::encode(wallet_addr), new_qug_balance).await {
-                warn!("⚠️ [SWAP v3.6.8] Failed to persist QUG balance: {}", e);
+            // v9.1.4: CRITICAL FIX — Use add_balance() (atomic read-modify-write) instead
+            // of set_balance() (absolute write). set_balance() races with balance_consensus's
+            // add_balance(): if balance_consensus reads RocksDB BEFORE set_balance writes but
+            // writes AFTER, the swap credit is overwritten by the stale mining reward calculation.
+            // add_balance() reads the CURRENT RocksDB value at write time, so concurrent mining
+            // rewards are preserved.
+            let wallet_hex = hex::encode(wallet_addr);
+            if let Err(e) = state.storage_engine.add_balance(&wallet_hex, final_amount_out as u128).await {
+                warn!("⚠️ [SWAP v9.1.4] Failed to persist QUG credit: {}", e);
             }
         } else if to_is_qugusd {
             // v4.0.3: Credit QUGUSD to token_balances using standard QUGUSD_TOKEN_ADDRESS

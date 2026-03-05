@@ -1502,6 +1502,11 @@ pub struct AppState {
     pub emergency_pause_reason: Arc<RwLock<Option<String>>>,
     pub emergency_pause_timestamp: Arc<std::sync::atomic::AtomicU64>,
 
+    // ⛏️ v9.1.4: Dynamic mining mode switch — admin can force all miners to solo/pool at runtime
+    // 0 = no override (miners use their own --mode), 1 = force solo, 2 = force pool
+    pub forced_mining_mode: Arc<std::sync::atomic::AtomicU8>,
+    pub forced_pool_url: Arc<RwLock<Option<String>>>,
+
     // 📬 v3.9.1-beta: BANK MESSAGING SYSTEM - User-Bank Communication
     // Enables bidirectional messaging between loan holders and Quillon Bank
     // Messages are stored in-memory with RocksDB persistence via CF_MANIFEST
@@ -2986,6 +2991,9 @@ impl AppState {
             emergency_paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             emergency_pause_reason: Arc::new(RwLock::new(None)),
             emergency_pause_timestamp: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            // ⛏️ v9.1.4: Dynamic mining mode switch
+            forced_mining_mode: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            forced_pool_url: Arc::new(RwLock::new(None)),
             // 📬 v3.9.1-beta: Bank messaging and identity systems (loaded from RocksDB)
             bank_messages: {
                 let mut loaded_messages = Vec::new();
@@ -4418,6 +4426,9 @@ impl AppState {
             emergency_paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             emergency_pause_reason: Arc::new(RwLock::new(None)),
             emergency_pause_timestamp: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            // ⛏️ v9.1.4: Dynamic mining mode switch
+            forced_mining_mode: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            forced_pool_url: Arc::new(RwLock::new(None)),
             // 📬 v3.9.1-beta: Bank messaging and identity systems (loaded from RocksDB)
             bank_messages: {
                 let mut loaded_messages = Vec::new();
