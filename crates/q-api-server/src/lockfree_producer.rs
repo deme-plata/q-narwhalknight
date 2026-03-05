@@ -191,6 +191,11 @@ pub enum ProducerCommand {
         operators: Vec<crate::block_producer::OperatorRewardEntry>,
     },
 
+    /// 🏊 v9.1.2: Set mining pool for PPLNS reward distribution
+    SetMiningPool {
+        pool: Arc<q_mining_pool::MiningPool>,
+    },
+
     /// Shutdown the producer task gracefully
     Shutdown,
 }
@@ -422,6 +427,11 @@ impl LockFreeProducer {
                     let count = operators.len();
                     producer.set_distributed_operators(operators);
                     trace!("💰 Producer #{}: Distributed operators updated ({} entries)", producer_id, count);
+                }
+
+                ProducerCommand::SetMiningPool { pool } => {
+                    producer.set_mining_pool(pool);
+                    info!("🏊 Producer #{}: Mining pool set for PPLNS reward distribution", producer_id);
                 }
 
                 ProducerCommand::Shutdown => {
@@ -693,6 +703,11 @@ impl LockFreeProducer {
                     let count = operators.len();
                     producer.set_distributed_operators(operators);
                     trace!("💰 Producer #{}: Distributed operators updated ({} entries, storage loop)", producer_id, count);
+                }
+
+                ProducerCommand::SetMiningPool { pool } => {
+                    producer.set_mining_pool(pool);
+                    info!("🏊 Producer #{}: Mining pool set for PPLNS (storage loop)", producer_id);
                 }
 
                 ProducerCommand::Shutdown => {
@@ -1169,6 +1184,11 @@ impl LockFreeProducer {
     /// 💰 v8.7.0: Set distributed operators for fee splitting
     pub fn set_distributed_operators(&self, operators: Vec<crate::block_producer::OperatorRewardEntry>) {
         let _ = self.command_tx.try_send(ProducerCommand::SetDistributedOperators { operators });
+    }
+
+    /// 🏊 v9.1.2: Set mining pool for PPLNS reward distribution
+    pub fn set_mining_pool(&self, pool: Arc<q_mining_pool::MiningPool>) {
+        let _ = self.command_tx.try_send(ProducerCommand::SetMiningPool { pool });
     }
 
     /// Shutdown producer gracefully
@@ -2219,6 +2239,14 @@ impl LockFreeProducerPool {
         for producer in &self.producers {
             producer.set_distributed_operators(operators.clone());
         }
+    }
+
+    /// 🏊 v9.1.2: Set mining pool for PPLNS reward distribution across all producers
+    pub fn set_mining_pool(&self, pool: Arc<q_mining_pool::MiningPool>) {
+        for producer in &self.producers {
+            producer.set_mining_pool(pool.clone());
+        }
+        info!("🏊 Mining pool set for PPLNS distribution across all {} producers", self.num_producers);
     }
 
     /// Shutdown all producers gracefully

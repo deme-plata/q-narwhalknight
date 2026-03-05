@@ -672,6 +672,26 @@ impl MiningPool {
     pub fn current_difficulty(&self) -> f64 {
         self.stats.read().network_difficulty
     }
+
+    /// Record an HTTP mining share in the PPLNS window (bypasses Stratum).
+    /// Called by the batch mining processor when a valid solution is accepted.
+    pub fn record_http_share(&self, share: Share) {
+        self.pplns.add_share(share);
+        let mut stats = self.stats.write();
+        stats.valid_shares += 1;
+        stats.total_shares += 1;
+    }
+
+    /// Get PPLNS share proportions for coinbase distribution.
+    /// Returns Vec<(wallet_hex, proportion)> or None if no shares in window.
+    /// Proportions are fee-free — block producer handles dev fee separately.
+    pub fn get_pplns_proportions(&self) -> Option<Vec<(String, f64)>> {
+        if self.pplns.share_count() == 0 {
+            return None;
+        }
+        let proportions = self.pplns.get_share_proportions(|wid| wid.wallet().to_string());
+        if proportions.is_empty() { None } else { Some(proportions) }
+    }
 }
 
 #[cfg(test)]

@@ -3199,9 +3199,10 @@ impl UnifiedNetworkManager {
                         // 🔇 v0.6.9-beta: Changed to DEBUG to prevent log spam
                         // v0.9.7-beta: Enhanced with block height information
                         if topic_str.contains("/blocks") {
-                            if let Ok(block) = postcard::from_bytes::<QBlock>(&data) {
+                            // v9.1.0: Use pre-extracted block_height (data moved into try_send)
+                            if let Some(height) = block_height {
                                 info!("✅ Forwarded BLOCK on topic: {} (height={}, size={} bytes)",
-                                     topic_str, block.header.height, msg_size);
+                                     topic_str, height, msg_size);
                             } else {
                                 trace!("✅ Forwarded gossipsub message on topic: {} (size={} bytes)", topic_str, msg_size);
                             }

@@ -266,6 +266,33 @@ impl PPLNSCalculator {
         tracing::info!("New PPLNS round started, window size preserved");
     }
 
+    /// Get share proportions for current window (no fee deduction).
+    /// Returns Vec<(wallet_address, proportion)> where proportions sum to ~1.0.
+    /// Used by block producer for PPLNS coinbase distribution — block producer
+    /// handles dev fee separately, so this method must NOT deduct any fees.
+    pub fn get_share_proportions(
+        &self,
+        wallet_lookup: impl Fn(&WorkerId) -> String,
+    ) -> Vec<(String, f64)> {
+        let shares = self.shares.read();
+        let total_diff = *self.total_difficulty.read();
+        if total_diff <= 0.0 || shares.is_empty() {
+            return Vec::new();
+        }
+        // Aggregate difficulty per worker
+        let mut worker_difficulty: IndexMap<WorkerId, f64> = IndexMap::new();
+        for share in shares.iter() {
+            *worker_difficulty.entry(share.worker_id.clone()).or_insert(0.0) += share.difficulty;
+        }
+        // Convert to wallet proportions (merge workers with same wallet)
+        let mut wallet_proportions: IndexMap<String, f64> = IndexMap::new();
+        for (worker_id, difficulty) in &worker_difficulty {
+            let wallet = wallet_lookup(worker_id);
+            *wallet_proportions.entry(wallet).or_insert(0.0) += difficulty / total_diff;
+        }
+        wallet_proportions.into_iter().collect()
+    }
+
     /// Get current share count
     pub fn share_count(&self) -> usize {
         self.shares.read().len()

@@ -174,6 +174,12 @@ static CONNECTED_PEERS: Lazy<std::sync::RwLock<std::collections::HashSet<String>
 static BALANCE_AMOUNT_LIMITS: Lazy<DashMap<String, (u128, Instant)>> =
     Lazy::new(DashMap::new);
 
+/// v9.1.2: Dune Analytics query result cache — (timestamp, json_body)
+/// Caches GET /api/v1/dune/query/:id results for 5 minutes to avoid rate-limiting
+static DUNE_QUERY_CACHE: Lazy<DashMap<u64, (Instant, String)>> =
+    Lazy::new(DashMap::new);
+const DUNE_CACHE_TTL_SECS: u64 = 300; // 5 minutes
+
 /// v5.1.0: Maximum QUG that can be credited per node per minute via P2P updates
 /// 100 QUG = 100 * 10^24 base units
 const MAX_QUG_PER_NODE_PER_MINUTE: u128 = 100_000_000_000_000_000_000_000_000; // 100 QUG
@@ -3432,6 +3438,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         }
 
         state.mining_pool = Some(Arc::clone(&mining_pool));
+
+        // v9.1.2: Wire mining pool into block producer for PPLNS coinbase distribution
+        state.block_producer_pool.set_mining_pool(Arc::clone(&mining_pool));
+        info!("🏊 Mining pool wired into block producer — PPLNS rewards active");
 
         // Start the Stratum server in background
         let pool_clone = Arc::clone(&mining_pool);
@@ -14082,6 +14092,40 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         continue; // Skip to next batch cycle
                     }
 
+                    // v9.1.2: Track accepted solutions in PPLNS window
+                    if let Some(ref pool) = app_state_mining.mining_pool {
+                        for submission in &batch_buffer {
+                            let wallet_hex = hex::encode(&submission.miner_address);
+                            let worker_name = submission.worker_name.clone().unwrap_or_else(|| "default".to_string());
+                            let worker_id = q_mining_pool::WorkerId::new(&wallet_hex, &worker_name);
+
+                            // Compute difficulty from hash (leading zeros = higher difficulty)
+                            let difficulty = {
+                                let mut leading_zeros = 0u32;
+                                for &b in submission.hash.iter() {
+                                    if b == 0 { leading_zeros += 1; } else { break; }
+                                }
+                                let base = 256.0_f64.powi(leading_zeros as i32);
+                                if leading_zeros < 32 {
+                                    let first = submission.hash[leading_zeros as usize] as f64;
+                                    if first > 0.0 { base * (255.0 / first) } else { base }
+                                } else {
+                                    f64::MAX
+                                }
+                            };
+
+                            let share = q_mining_pool::Share::new(
+                                worker_id,
+                                format!("http_{}", submission.nonce),
+                                difficulty,
+                                submission.hash,
+                                submission.nonce,
+                                false,
+                            );
+                            pool.record_http_share(share);
+                        }
+                    }
+
                     // PHASE 4: Batch queue solutions to BlockProducer
                     debug!(
                         "⚡ PHASE 4: Queueing {} mining solutions to BlockProducer pool",
@@ -19824,6 +19868,70 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 }
             })
         }) // v8.6.5: Dune Analytics sync status
+        .route("/api/v1/dune/query/:query_id", get(|axum::extract::Path(query_id): axum::extract::Path<u64>| async move {
+            // v9.1.2: Dune Analytics query proxy — caches results for 5 minutes
+            // Check cache first
+            if let Some(entry) = DUNE_QUERY_CACHE.get(&query_id) {
+                let (cached_at, ref body) = *entry;
+                if cached_at.elapsed().as_secs() < DUNE_CACHE_TTL_SECS {
+                    return axum::response::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .header("x-dune-cache", "hit")
+                        .body(axum::body::Body::from(body.clone()))
+                        .unwrap();
+                }
+            }
+            // Fetch from Dune API
+            let api_key = std::env::var("DUNE_API_KEY").unwrap_or_default();
+            if api_key.is_empty() {
+                return axum::response::Response::builder()
+                    .status(503)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{"error":"DUNE_API_KEY not configured"}"#))
+                    .unwrap();
+            }
+            let url = format!("https://api.dune.com/api/v1/query/{}/results/latest", query_id);
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new());
+            match client.get(&url).header("X-DUNE-API-KEY", &api_key).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    match resp.text().await {
+                        Ok(body) => {
+                            DUNE_QUERY_CACHE.insert(query_id, (Instant::now(), body.clone()));
+                            axum::response::Response::builder()
+                                .status(200)
+                                .header("content-type", "application/json")
+                                .header("x-dune-cache", "miss")
+                                .body(axum::body::Body::from(body))
+                                .unwrap()
+                        }
+                        Err(e) => axum::response::Response::builder()
+                            .status(502)
+                            .header("content-type", "application/json")
+                            .body(axum::body::Body::from(format!(r#"{{"error":"Failed to read Dune response: {}"}}"#, e)))
+                            .unwrap(),
+                    }
+                }
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    let body = resp.text().await.unwrap_or_default();
+                    axum::response::Response::builder()
+                        .status(status)
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(body))
+                        .unwrap()
+                }
+                Err(e) => axum::response::Response::builder()
+                    .status(502)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(format!(r#"{{"error":"Dune API request failed: {}"}}"#, e)))
+                    .unwrap(),
+            }
+        })) // v9.1.2: Dune Analytics query proxy with 5min cache
         .route("/api/v1/peer-id", get(handlers::get_peer_id)) // libp2p peer ID for dynamic bootstrap discovery
         // v3.9.5-beta: Validator registry endpoints for P2P decentralization
         .route("/api/v1/validators", get(handlers::list_validators)) // List registered validators

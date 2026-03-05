@@ -168,6 +168,11 @@ pub struct BlockProducer {
     /// 💰 v8.7.0: Distributed operator fee — qualified operators from gossipsub
     /// Pre-computed by main.rs mining loop, sent via SetDistributedOperators command
     distributed_operators: Arc<std::sync::RwLock<Vec<OperatorRewardEntry>>>,
+
+    /// 🏊 v9.1.2: Mining pool for PPLNS reward distribution
+    /// When present, coinbase miner rewards are split proportionally across all
+    /// miners in the PPLNS window instead of per-solution.
+    mining_pool: Option<Arc<q_mining_pool::MiningPool>>,
 }
 
 /// 💰 v8.7.0: Entry for distributed operator fee splitting
@@ -235,6 +240,7 @@ impl BlockProducer {
             node_operator_fee_promille: Arc::new(std::sync::atomic::AtomicU64::new(50)), // v8.6.2: 5% of dev fee = 0.1% of reward to operator
             admin_wallet_hex: Arc::new(std::sync::RwLock::new(String::new())), // v8.6.1: empty = use founder
             distributed_operators: Arc::new(std::sync::RwLock::new(Vec::new())), // v8.7.0: distributed fee
+            mining_pool: None, // v9.1.2: PPLNS pool (use set_mining_pool to enable)
         }
     }
 
@@ -270,6 +276,7 @@ impl BlockProducer {
             node_operator_fee_promille: Arc::new(std::sync::atomic::AtomicU64::new(50)), // v8.6.2: 5% of dev fee = 0.1% of reward to operator
             admin_wallet_hex: Arc::new(std::sync::RwLock::new(String::new())), // v8.6.1: empty = use founder
             distributed_operators: Arc::new(std::sync::RwLock::new(Vec::new())), // v8.7.0: distributed fee
+            mining_pool: None, // v9.1.2: PPLNS pool (use set_mining_pool to enable)
         }
     }
 
@@ -316,6 +323,7 @@ impl BlockProducer {
             node_operator_fee_promille: Arc::new(std::sync::atomic::AtomicU64::new(50)), // v8.6.2: 5% of dev fee = 0.1% of reward to operator
             admin_wallet_hex: Arc::new(std::sync::RwLock::new(String::new())), // v8.6.1: empty = use founder
             distributed_operators: Arc::new(std::sync::RwLock::new(Vec::new())), // v8.7.0: distributed fee
+            mining_pool: None, // v9.1.2: PPLNS pool (use set_mining_pool to enable)
         })
     }
 
@@ -330,6 +338,11 @@ impl BlockProducer {
         if let Ok(mut w) = self.admin_wallet_hex.write() {
             *w = admin_wallet;
         }
+    }
+
+    /// 🏊 v9.1.2: Set mining pool for PPLNS reward distribution
+    pub fn set_mining_pool(&mut self, pool: Arc<q_mining_pool::MiningPool>) {
+        self.mining_pool = Some(pool);
     }
 
     /// 💰 v8.7.0: Set distributed operators for fee splitting
@@ -1469,83 +1482,164 @@ impl BlockProducer {
             }
         }
 
-        // Transaction 3-N: Miner rewards (99% split among all miners)
-        for (idx, solution) in solutions.iter().enumerate() {
-            let miner_tx_id = {
-                let mut hasher = Sha256::new();
-                hasher.update(b"MINER_REWARD");
-                hasher.update(&solution.nonce.to_le_bytes());
-                hasher.update(&solution.miner_address);
-                hasher.update(&(idx as u64).to_le_bytes());
-                let hash = hasher.finalize();
-                let mut tx_id = [0u8; 32];
-                tx_id.copy_from_slice(&hash);
-                tx_id
-            };
+        // Transaction 3-N: Miner rewards
+        let miner_total = total_reward.saturating_sub(dev_fee_amount);
 
-            transactions.push(Transaction {
-                id: miner_tx_id,
-                from: coinbase_from,
-                to: solution.miner_address,
-                amount: miner_reward_per_solution,
-                fee: 0,
-                nonce: idx as u64,
-                signature: vec![0xC0, 0x1B, 0xA5, 0xE], // "COINBASE" marker
-                timestamp,
-                data: format!("Mining reward for solution #{}", solution.nonce).into_bytes(),
-                token_type: TokenType::QUG,
-                fee_token_type: TokenType::QUGUSD,
-                tx_type: TransactionType::Coinbase,
-                pqc_signature: None,
-                signature_phase: TxSignaturePhase::Phase0Ed25519,
-                pqc_public_key: None,
-                // v3.4.2-beta: ZK privacy fields (transparent by default)
-                zk_proof_bundle: None,
-                privacy_level: TransactionPrivacyLevel::Transparent,
-                bulletproof: None,
-                nullifier: None,
-                memo: None,
-            });
+        // v9.1.2: PPLNS pool mode — distribute miner rewards proportionally
+        let used_pplns = if let Some(ref pool) = self.mining_pool {
+            if let Some(proportions) = pool.get_pplns_proportions() {
+                let pplns_miner_count = proportions.len();
+                for (idx, (wallet_hex, proportion)) in proportions.iter().enumerate() {
+                    let amount = (miner_total as f64 * proportion) as u128;
+                    if amount == 0 { continue; }
 
-            // ✨ v1.0.17-beta: Emit SSE event for mining reward
-            if let Some(ref emitter) = self.event_emitter {
-                let miner_address_hex = hex::encode(solution.miner_address);
-                let reward_qnk = miner_reward_per_solution as f64 / 1e24;
+                    let mut wallet_bytes = [0u8; 32];
+                    if let Ok(bytes) = hex::decode(wallet_hex) {
+                        if bytes.len() == 32 {
+                            wallet_bytes.copy_from_slice(&bytes);
+                        } else { continue; }
+                    } else { continue; }
 
-                // Use the emit_mining_reward helper method from HighPerformanceEmitter
-                // v2.3.5-beta: Include origin node info for P2P mining attribution
-                let origin_node_id = self.local_peer_id.clone();
-                let origin_node_name = self.node_name.clone();
+                    let miner_tx_id = {
+                        let mut hasher = Sha256::new();
+                        hasher.update(b"PPLNS_REWARD");
+                        hasher.update(&wallet_bytes);
+                        hasher.update(&(idx as u64).to_le_bytes());
+                        hasher.update(&block_height.to_le_bytes());
+                        let hash = hasher.finalize();
+                        let mut tx_id = [0u8; 32];
+                        tx_id.copy_from_slice(&hash);
+                        tx_id
+                    };
 
-                if let Err(e) = emitter
-                    .emit_mining_reward(
-                        miner_address_hex,
-                        reward_qnk,
-                        solution.nonce,
-                        block_height,
-                        hex::encode(solution.difficulty_target),
-                        solution.hash_rate_hs as f64,
-                        solution.miner_id.clone(), // v3.3.3-beta: Unique miner instance ID
-                        solution.worker_name.clone(), // v3.3.3-beta: Human-readable miner name
-                        origin_node_id, // v2.3.5-beta: Which node mined this
-                        origin_node_name, // v2.3.5-beta: Human-friendly node name
-                    )
-                    .await
-                {
-                    warn!("Failed to emit mining reward SSE event: {}", e);
-                    // Don't fail block production if SSE fails - it's non-critical
+                    transactions.push(Transaction {
+                        id: miner_tx_id,
+                        from: coinbase_from,
+                        to: wallet_bytes,
+                        amount,
+                        fee: 0,
+                        nonce: idx as u64,
+                        signature: vec![0xC0, 0x1B, 0xA5, 0xE],
+                        timestamp,
+                        data: format!("PPLNS mining reward ({:.1}%)", proportion * 100.0).into_bytes(),
+                        token_type: TokenType::QUG,
+                        fee_token_type: TokenType::QUGUSD,
+                        tx_type: TransactionType::Coinbase,
+                        pqc_signature: None,
+                        signature_phase: TxSignaturePhase::Phase0Ed25519,
+                        pqc_public_key: None,
+                        zk_proof_bundle: None,
+                        privacy_level: TransactionPrivacyLevel::Transparent,
+                        bulletproof: None,
+                        nullifier: None,
+                        memo: None,
+                    });
+
+                    // Emit SSE event for PPLNS reward
+                    if let Some(ref emitter) = self.event_emitter {
+                        let reward_qnk = amount as f64 / 1e24;
+                        let origin_node_id = self.local_peer_id.clone();
+                        let origin_node_name = self.node_name.clone();
+                        if let Err(e) = emitter
+                            .emit_mining_reward(
+                                wallet_hex.clone(),
+                                reward_qnk,
+                                idx as u64,
+                                block_height,
+                                format!("pplns_{:.1}pct", proportion * 100.0),
+                                0.0, // aggregated — no single hash rate
+                                None,
+                                Some(format!("PPLNS-{:.1}%", proportion * 100.0)),
+                                origin_node_id,
+                                origin_node_name,
+                            )
+                            .await
+                        {
+                            warn!("Failed to emit PPLNS mining reward SSE event: {}", e);
+                        }
+                    }
+                }
+
+                info!("🏊 Block #{}: PPLNS distributed {:.6} QUG among {} miners",
+                    block_height, miner_total as f64 / 1e24, pplns_miner_count);
+                true
+            } else { false }
+        } else { false };
+
+        if !used_pplns {
+            // Fallback: per-solution rewards (existing behavior when no PPLNS shares)
+            for (idx, solution) in solutions.iter().enumerate() {
+                let miner_tx_id = {
+                    let mut hasher = Sha256::new();
+                    hasher.update(b"MINER_REWARD");
+                    hasher.update(&solution.nonce.to_le_bytes());
+                    hasher.update(&solution.miner_address);
+                    hasher.update(&(idx as u64).to_le_bytes());
+                    let hash = hasher.finalize();
+                    let mut tx_id = [0u8; 32];
+                    tx_id.copy_from_slice(&hash);
+                    tx_id
+                };
+
+                transactions.push(Transaction {
+                    id: miner_tx_id,
+                    from: coinbase_from,
+                    to: solution.miner_address,
+                    amount: miner_reward_per_solution,
+                    fee: 0,
+                    nonce: idx as u64,
+                    signature: vec![0xC0, 0x1B, 0xA5, 0xE], // "COINBASE" marker
+                    timestamp,
+                    data: format!("Mining reward for solution #{}", solution.nonce).into_bytes(),
+                    token_type: TokenType::QUG,
+                    fee_token_type: TokenType::QUGUSD,
+                    tx_type: TransactionType::Coinbase,
+                    pqc_signature: None,
+                    signature_phase: TxSignaturePhase::Phase0Ed25519,
+                    pqc_public_key: None,
+                    zk_proof_bundle: None,
+                    privacy_level: TransactionPrivacyLevel::Transparent,
+                    bulletproof: None,
+                    nullifier: None,
+                    memo: None,
+                });
+
+                if let Some(ref emitter) = self.event_emitter {
+                    let miner_address_hex = hex::encode(solution.miner_address);
+                    let reward_qnk = miner_reward_per_solution as f64 / 1e24;
+                    let origin_node_id = self.local_peer_id.clone();
+                    let origin_node_name = self.node_name.clone();
+
+                    if let Err(e) = emitter
+                        .emit_mining_reward(
+                            miner_address_hex,
+                            reward_qnk,
+                            solution.nonce,
+                            block_height,
+                            hex::encode(solution.difficulty_target),
+                            solution.hash_rate_hs as f64,
+                            solution.miner_id.clone(),
+                            solution.worker_name.clone(),
+                            origin_node_id,
+                            origin_node_name,
+                        )
+                        .await
+                    {
+                        warn!("Failed to emit mining reward SSE event: {}", e);
+                    }
                 }
             }
         }
 
         // ✅ v0.9.99-beta: Enhanced logging for adaptive rewards
-        let qug_total = total_reward as f64 / 1e24; // Convert to QUG (8 decimals)
+        let qug_total = total_reward as f64 / 1e24;
         let qug_dev_fee = dev_fee_amount as f64 / 1e24;
         let qug_per_miner = miner_reward_per_solution as f64 / 1e24;
 
         info!(
-            "💎 [v7.1.2 ADAPTIVE] Created {} coinbase transactions:",
-            transactions.len()
+            "💎 [v7.1.2 ADAPTIVE] Created {} coinbase transactions{}:",
+            transactions.len(),
+            if used_pplns { " (PPLNS mode)" } else { "" }
         );
         debug!(
             "   📊 Block #{}: {} solutions, {:.9} QUG total, {:.9} dev fee, {:.9} per miner",
