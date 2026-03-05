@@ -1,0 +1,36 @@
+# Dockerfile for ARM64 (aarch64) cross-compilation of q-api-server
+# Usage: docker build -f docker/Dockerfile.cross-arm64 -t qnk-arm64-builder .
+#        docker run --rm -v $(pwd)/target-arm64:/output qnk-arm64-builder
+FROM rust:bookworm
+
+# Install ARM64 cross-compilation toolchain
+RUN dpkg --add-architecture arm64 && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        gcc-aarch64-linux-gnu \
+        g++-aarch64-linux-gnu \
+        libc6-dev-arm64-cross \
+        pkg-config \
+        libssl-dev \
+        cmake \
+        clang \
+        llvm \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add ARM64 Rust target
+RUN rustup target add aarch64-unknown-linux-gnu
+
+# Configure cargo for cross-compilation
+RUN mkdir -p /root/.cargo && \
+    echo '[target.aarch64-unknown-linux-gnu]' >> /root/.cargo/config.toml && \
+    echo 'linker = "aarch64-linux-gnu-gcc"' >> /root/.cargo/config.toml && \
+    echo '' >> /root/.cargo/config.toml && \
+    echo '[env]' >> /root/.cargo/config.toml && \
+    echo 'OPENSSL_DIR = { value = "/usr", force = true }' >> /root/.cargo/config.toml && \
+    echo 'OPENSSL_INCLUDE_DIR = { value = "/usr/include", force = true }' >> /root/.cargo/config.toml
+
+# Set working directory
+WORKDIR /src
+
+# Build command (source mounted at /src, output at /output)
+CMD ["sh", "-c", "cargo build --release --package q-api-server --target aarch64-unknown-linux-gnu --no-default-features --features tui,vendored-openssl && cp target/aarch64-unknown-linux-gnu/release/q-api-server /output/q-api-server-arm64-v$(grep '^version' Cargo.toml | head -1 | sed 's/.*\"\\(.*\\)\".*/\\1/') 2>/dev/null; cp target/aarch64-unknown-linux-gnu/release/q-api-server /output/q-api-server-linux-arm64"]

@@ -1,0 +1,61 @@
+# Q-NarwhalKnight Cross-Compilation Build Environment
+# Base: rust:bookworm (Debian 12 Bookworm 64-bit + Rust pre-installed)
+# Targets: ARM64 (aarch64-unknown-linux-gnu), Windows (x86_64-pc-windows-gnu)
+#
+# Usage on Epsilon:
+#   docker build -f docker/Dockerfile.build-debian12 -t qnk-builder .
+#   docker run --rm -v /home/orobit/qnk-builds:/output \
+#     -v /home/orobit/cargo-cache:/root/.cargo/registry \
+#     -v /home/orobit/target-cache:/src/target \
+#     qnk-builder arm64
+#   docker run --rm -v /home/orobit/qnk-builds:/output qnk-builder windows
+#   docker run --rm -v /home/orobit/qnk-builds:/output qnk-builder all
+
+FROM rust:bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install cross-compilation toolchains + system libraries
+RUN dpkg --add-architecture arm64 && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    cmake \
+    clang \
+    llvm \
+    pkg-config \
+    # ARM64 cross-compilation
+    gcc-aarch64-linux-gnu \
+    g++-aarch64-linux-gnu \
+    libc6-dev-arm64-cross \
+    # Windows cross-compilation (MinGW-w64)
+    gcc-mingw-w64-x86-64 \
+    g++-mingw-w64-x86-64 \
+    # System libs needed by crates (native arch)
+    libudev-dev \
+    # Perl (needed by openssl-sys vendored build)
+    perl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set PKG_CONFIG to allow cross-compilation without libudev for arm64
+ENV PKG_CONFIG_ALLOW_CROSS=1
+ENV PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig
+
+# Add cross-compilation targets
+RUN rustup target add aarch64-unknown-linux-gnu x86_64-pc-windows-gnu
+
+# Configure cargo for cross-compilation
+RUN cat >> /usr/local/cargo/config.toml <<'TOML'
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+TOML
+
+WORKDIR /src
+
+# Build script
+COPY docker/build.sh /build.sh
+RUN chmod +x /build.sh
+
+ENTRYPOINT ["/build.sh"]
+CMD ["all"]
