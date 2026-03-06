@@ -4270,6 +4270,126 @@ export default function ExplorerScreen() {
         </div>
       </motion.section>
 
+      {/* v9.1.7: Compute Power Layer Stats Card */}
+      <motion.section
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.25 }}
+        className="bg-gradient-to-br from-cyan-900/20 via-quantum-dark/40 to-purple-900/20 backdrop-blur-xl rounded-2xl border border-cyan-500/20 p-6"
+      >
+        <div className="flex items-center gap-3 mb-5">
+          <div className="p-2 rounded-lg bg-cyan-500/10 border border-cyan-500/30">
+            <Cpu className="w-5 h-5 text-cyan-400" />
+          </div>
+          <div>
+            <h2 className="text-lg font-semibold text-white">Compute Power Layer</h2>
+            <p className="text-xs text-gray-400">Real-time network hashpower &amp; security metrics</p>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          {/* Network Hashrate */}
+          <div className="bg-quantum-dark/40 rounded-xl border border-cyan-500/20 p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <Zap className="w-4 h-4 text-cyan-400" />
+              <span className="text-xs text-gray-400 uppercase tracking-wider">Network Hashrate</span>
+            </div>
+            <div className="text-2xl font-bold font-mono text-cyan-300">
+              {networkSupply.networkHashrateFormatted || '0 H/s'}
+            </div>
+            <div className="text-xs text-gray-500 mt-1">
+              {networkSupply.networkHashrate > 0
+                ? `${(networkSupply.networkHashrate).toLocaleString(undefined, { maximumFractionDigits: 0 })} H/s raw`
+                : 'No miners active'}
+            </div>
+          </div>
+
+          {/* Connected Miners */}
+          <div className="bg-quantum-dark/40 rounded-xl border border-green-500/20 p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <Pickaxe className="w-4 h-4 text-green-400" />
+              <span className="text-xs text-gray-400 uppercase tracking-wider">Active Miners</span>
+            </div>
+            <div className="text-2xl font-bold font-mono text-green-300">
+              {(() => {
+                const m = networkSupply.connectedMiners > 0
+                  ? networkSupply.connectedMiners
+                  : (networkSupply.networkHashrate > 0 ? 1 : 0);
+                return m.toLocaleString();
+              })()}
+            </div>
+            <div className="text-xs text-gray-500 mt-1">
+              {networkSupply.connectedMiners > 0 ? 'Pool + P2P peers' : networkSupply.networkHashrate > 0 ? 'Estimated from hashrate' : 'Waiting for miners'}
+            </div>
+          </div>
+
+          {/* Security Bits */}
+          <div className="bg-quantum-dark/40 rounded-xl border border-purple-500/20 p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <Shield className="w-4 h-4 text-purple-400" />
+              <span className="text-xs text-gray-400 uppercase tracking-wider">Security Bits</span>
+            </div>
+            <div className="text-2xl font-bold font-mono text-purple-300">
+              {hashpowerSecurity?.metrics?.security_bits != null
+                ? hashpowerSecurity.metrics.security_bits.toFixed(1)
+                : '—'}
+            </div>
+            <div className="text-xs mt-1">
+              {hashpowerSecurity?.metrics?.security_tier
+                ? <span className={`font-semibold ${
+                    hashpowerSecurity.metrics.security_tier === 'STRONG' || hashpowerSecurity.metrics.security_tier === 'EXCELLENT' ? 'text-green-400'
+                    : hashpowerSecurity.metrics.security_tier === 'MODERATE' ? 'text-yellow-400'
+                    : 'text-gray-400'
+                  }`}>{hashpowerSecurity.metrics.security_tier}</span>
+                : <span className="text-gray-500">—</span>}
+            </div>
+          </div>
+
+          {/* Difficulty */}
+          <div className="bg-quantum-dark/40 rounded-xl border border-orange-500/20 p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <Activity className="w-4 h-4 text-orange-400" />
+              <span className="text-xs text-gray-400 uppercase tracking-wider">Difficulty</span>
+            </div>
+            <div className="text-2xl font-bold font-mono text-orange-300">
+              2^{hashpowerSecurity?.metrics?.effective_difficulty ?? 20}
+            </div>
+            <div className="text-xs text-gray-500 mt-1">
+              {hashpowerSecurity?.metrics?.blocks_processed != null
+                ? `${hashpowerSecurity.metrics.blocks_processed.toLocaleString()} blocks processed`
+                : 'Adaptive algorithm'}
+            </div>
+          </div>
+        </div>
+
+        {/* Attack cost bar */}
+        {hashpowerSecurity?.security_guarantees && (
+          <div className="mt-4 p-3 bg-quantum-dark/30 rounded-xl border border-gray-700/30">
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-xs">
+              <div className="flex items-center gap-2">
+                <span className="text-gray-400">Double-spend cost:</span>
+                <span className="font-mono font-semibold text-red-300">{hashpowerSecurity.security_guarantees.double_spend_cost_usd}</span>
+              </div>
+              {hashpowerSecurity.security_guarantees['51_percent_attack_capital'] && (
+                <div className="flex items-center gap-2">
+                  <span className="text-gray-400">51% attack capital:</span>
+                  <span className="font-mono font-semibold text-red-300">{hashpowerSecurity.security_guarantees['51_percent_attack_capital']}</span>
+                </div>
+              )}
+              {hashpowerSecurity.security_guarantees.gpus_required_for_attack != null && (
+                <div className="flex items-center gap-2">
+                  <span className="text-gray-400">GPUs required:</span>
+                  <span className="font-mono font-semibold text-orange-300">{hashpowerSecurity.security_guarantees.gpus_required_for_attack.toLocaleString()}</span>
+                </div>
+              )}
+              <div className="flex items-center gap-2">
+                <span className="text-gray-400">Cumulative work:</span>
+                <span className="font-mono font-semibold text-cyan-300">{hashpowerSecurity.metrics.cumulative_work}</span>
+              </div>
+            </div>
+          </div>
+        )}
+      </motion.section>
+
       {/* Network Health Dashboard */}
       <motion.section
         initial={{ opacity: 0, y: 20 }}

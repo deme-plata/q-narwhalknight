@@ -38,13 +38,16 @@ impl RocksDBKV {
         info!("💾 Opening sled database (Windows) at {:?} for {:?}", path, phase);
 
         // Limit Sled's memory usage to prevent OOM on Windows:
-        // - cache_capacity: page cache limit (default 256MB, configurable via SLED_CACHE_MB)
+        // - cache_capacity: page cache limit (configurable via SLED_CACHE_MB)
         // - mode(LowSpace): prioritize disk usage over memory
         // NOTE: segment_size CANNOT be changed on existing databases (Sled rejects it)
+        // v9.1.7: Reduced default from 256→128 MB. At height 5M+ the old default caused
+        // OOM on 8-16GB Windows machines (sled overshoots cache_capacity under burst writes).
+        // Users with >=32GB RAM can set SLED_CACHE_MB=256 for better read performance.
         let cache_mb: u64 = std::env::var("SLED_CACHE_MB")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(256);
+            .unwrap_or(128);
         info!("💾 Sled page cache limit: {} MB (mode: LowSpace)", cache_mb);
         let db = sled::Config::new()
             .path(path)

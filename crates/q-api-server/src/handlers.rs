@@ -9035,6 +9035,24 @@ pub async fn get_mining_challenge(
         (Some(mode_str.to_string()), pool_url)
     };
 
+    // v9.1.7: Compute power layer metrics for miner TUI
+    let (cp_hashrate, cp_miners, cp_security) = {
+        let (hr, miners) = if let Some(ref ms) = state.mining_statistics {
+            if let Ok(mut stats) = ms.try_write() {
+                (stats.calculate_network_hashrate(), stats.active_miner_count() as u32)
+            } else { (0.0, 0) }
+        } else { (0.0, 0) };
+        let peer_hr: f64 = q_storage::PEER_COMPUTE_POWER.iter().map(|e| e.value().0).sum();
+        let total = hr + peer_hr;
+        let peers = miners + q_storage::PEER_COMPUTE_POWER.len() as u32;
+        let bits = if total > 0.0 {
+            Some(q_mining::hashpower_security::HashpowerSecurityManager::live_security_bits(0.0, total))
+        } else { None };
+        (if total > 0.0 { Some(total) } else { None },
+         if peers > 0 { Some(peers) } else { None },
+         bits)
+    };
+
     // When write-locked (challenge refresh/fork), skip cache and regenerate below.
     // Prevents 2800+ challenge requests from blocking on RwLock under heavy sync.
     {
@@ -9059,6 +9077,9 @@ pub async fn get_mining_challenge(
                         min_miner_version: Some(MIN_MINER_VERSION.to_string()),
                         forced_mining_mode: challenge_forced_mode.clone(),
                         forced_pool_url: challenge_forced_pool_url.clone(),
+                        network_hashrate_hs: cp_hashrate,
+                        connected_miners: cp_miners,
+                        live_security_bits: cp_security,
                     })));
                 } else if age_seconds < 150 {
                     // Grace period (120-150s): Warn but still return cached challenge
@@ -9079,6 +9100,9 @@ pub async fn get_mining_challenge(
                         min_miner_version: Some(MIN_MINER_VERSION.to_string()),
                         forced_mining_mode: challenge_forced_mode.clone(),
                         forced_pool_url: challenge_forced_pool_url.clone(),
+                        network_hashrate_hs: cp_hashrate,
+                        connected_miners: cp_miners,
+                        live_security_bits: cp_security,
                     })));
                 } else {
                     // Challenge is too old (>150s) - force regeneration
@@ -9170,6 +9194,9 @@ pub async fn get_mining_challenge(
         min_miner_version: Some(MIN_MINER_VERSION.to_string()),
         forced_mining_mode: challenge_forced_mode,
         forced_pool_url: challenge_forced_pool_url,
+        network_hashrate_hs: cp_hashrate,
+        connected_miners: cp_miners,
+        live_security_bits: cp_security,
     })))
 }
 
@@ -9295,6 +9322,15 @@ pub struct MiningChallengeResponse {
     /// v9.1.4: Pool URL when forced_mining_mode is "pool"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub forced_pool_url: Option<String>,
+    /// v9.1.7: Network hashrate in H/s (local pool + P2P peers)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network_hashrate_hs: Option<f64>,
+    /// v9.1.7: Total connected miners (local pool + P2P peers)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connected_miners: Option<u32>,
+    /// v9.1.7: Live security bits derived from network hashrate
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_security_bits: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]

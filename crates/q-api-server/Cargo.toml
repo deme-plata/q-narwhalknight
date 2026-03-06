@@ -235,6 +235,11 @@ q-benchmarks = { path = "../q-benchmarks" }
 [target.'cfg(unix)'.dependencies]
 tikv-jemallocator = "0.6"
 
+# v9.1.7: mimalloc on Windows — 30-50% faster than HeapAlloc, prevents
+# catastrophic heap fragmentation that causes OOM after hours of sync
+[target.'cfg(windows)'.dependencies]
+mimalloc = { version = "0.1", default-features = false }
+
 [features]
 # v1.0.60-beta: Post-quantum mining-vrf enabled via q-mining dependency
 # 🔐 v1.3.12-beta: q-crypto-advanced is now REQUIRED for SQIsign consensus

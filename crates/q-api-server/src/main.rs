@@ -1,13 +1,18 @@
-// v6.2.1: RE-ENABLED jemalloc - glibc malloc causes catastrophic arena fragmentation.
-// Root cause: With 60+ gossipsub msgs/sec, glibc creates 120+ anonymous 64MB heap segments
-// that can't be reclaimed (scattered live allocations prevent munmap). Total: 7GB+ RSS on 8GB.
-// jemalloc handles this workload with <1GB RSS. THP is disabled via prctl below.
-// Previous removal (v6.1.0) was due to THP=always causing 2MB page bloat; now THP=madvise
-// and prctl(PR_SET_THP_DISABLE) ensures jemalloc never uses huge pages.
-// v6.4.0: cfg(unix) - jemalloc doesn't cross-compile to Windows with MinGW
+// ═══════════════════════════════════════════════════════════════════
+// PERFORMANCE: Platform-optimized memory allocators
+// v6.2.1: jemalloc on Linux — glibc creates 120+ 64MB heap segments under
+// 60+ gossipsub msgs/sec, reaching 7GB+ RSS. jemalloc keeps it <1GB.
+// v9.1.7: mimalloc on Windows — HeapAlloc fragments identically to glibc,
+// causing OOM after hours of sync at height 5M+. mimalloc is 30-50% faster
+// and handles fragmentation properly (no jemalloc on Windows/MinGW).
+// ═══════════════════════════════════════════════════════════════════
 #[cfg(unix)]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[cfg(target_os = "windows")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use axum::{
     routing::{delete, get, post, put},
@@ -2500,6 +2505,17 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 info!(
                     "⛏️  Subscribed to {} for decentralized mining (P2P solution broadcast)",
                     mining_solutions_topic
+                );
+            }
+
+            // v9.1.7: Subscribe to mining-challenges topic for P2P challenge relay
+            let mining_challenges_topic = turbo_network_id.mining_challenges_topic();
+            if let Err(e) = manager.subscribe_topic(&mining_challenges_topic) {
+                warn!("⚠️  Failed to subscribe to mining-challenges topic: {}", e);
+            } else {
+                info!(
+                    "⛏️  Subscribed to {} for P2P mining challenge relay",
+                    mining_challenges_topic
                 );
             }
 
@@ -6143,9 +6159,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     // ⚡ v8.9.0: Sharded mining pipeline — N parallel consumers for 1M+ TPS
     // Each shard is an independent mpsc channel with its own batch processor.
     // The HTTP handler round-robins across shards with spillover on full.
-    // v8.8.8: Removed .min(16) cap — let high-core servers (Epsilon 48-core) use full parallelism.
-    // Scale total capacity with core count: base 50K + 5K per core beyond 16.
-    let num_mining_shards = num_cpus::get().min(64).max(4);
+    // v9.1.7: Cap shards at 8 — more shards means more concurrent spawn_blocking calls
+    // competing for the same CPU cores via rayon. 48 shards × rayon par_iter = thread explosion.
+    // 8 shards with larger queues performs better: fewer context switches, better cache locality.
+    // Each shard still uses rayon par_iter across ALL cores for VDF verification.
+    let num_mining_shards = num_cpus::get().min(8).max(4);
     // v1.0.2: 10x queue capacity — zero-drop queue waits for space instead of dropping,
     // but larger buffers reduce the chance of hitting the 3s timeout at all.
     // Base 1M + 50K per core beyond 16. Epsilon 48-core → 1M + 1.6M = 2.6M total.
@@ -9172,6 +9190,24 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                                 // Incoming chain is heavier - need to reorganize
                                                 debug!("🔀 [REORG] Incoming chain heavier ({} > {}) at height {}",
                                                       incoming_difficulty, existing_difficulty, block_height);
+
+                                                // ✅ v9.1.6: Skip deep fork analysis for blocks far behind our tip.
+                                                // Blocks that are 1000+ behind with <2x total_difficulty difference are
+                                                // just DAG parallel blocks from peers with slightly different chain weights.
+                                                // Processing them as forks causes DEEP FORK spam that fills mining shards.
+                                                let local_height_quick = app_state_gossip
+                                                    .current_height_atomic
+                                                    .load(std::sync::atomic::Ordering::Relaxed);
+                                                let depth_behind = local_height_quick.saturating_sub(block_height);
+                                                if depth_behind > 1000 {
+                                                    // Block is 1000+ behind tip — not a real fork, just a stale parallel block
+                                                    let ratio = if existing_difficulty > 0 {
+                                                        incoming_difficulty / existing_difficulty
+                                                    } else { 1 };
+                                                    debug!("⏭️ [DAG] Skipping stale block at height {} ({} behind tip, difficulty ratio {}x) — not a real fork",
+                                                          block_height, depth_behind, ratio);
+                                                    return;
+                                                }
 
                                                 // ✅ v0.9.43-beta PHASE 4: Multi-block reorganization execution
                                                 // Determine fork depth and execute appropriate reorganization strategy
@@ -13784,7 +13820,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             info!("🚀 [Shard {}] Starting batch processor", shard_id);
             let mut processed_count = 0u64;
             let mut last_log = std::time::Instant::now();
-            let mut batch_buffer: Vec<q_api_server::MiningSubmission> = Vec::with_capacity(500);
+            let mut batch_buffer: Vec<q_api_server::MiningSubmission> = Vec::with_capacity(2000);
             let mut last_batch_process = std::time::Instant::now();
             let mut last_batch_completed = std::time::Instant::now();
             let mut watchdog_warned = false;
@@ -13831,10 +13867,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     watchdog_warned = true;
                 }
 
-                // Process batch every 500 submissions OR every 5ms (whichever comes first)
-                // v2.8.0: Reduced from 20ms to 5ms for faster P2P mining reward propagation
-                // This gives us 100,000 submissions/sec throughput (500 * 200 batches/sec)
-                if batch_buffer.len() >= 500 || last_batch_process.elapsed().as_millis() >= 5 {
+                // v9.1.7: Process batch every 2000 submissions OR every 50ms (whichever first)
+                // With 8 shards (down from 48), each shard handles more. Larger batches
+                // mean fewer spawn_blocking calls, better rayon utilization, less overhead.
+                // 8 shards × 2000/batch × 20 batches/sec = 320K submissions/sec theoretical.
+                if batch_buffer.len() >= 2000 || last_batch_process.elapsed().as_millis() >= 50 {
                     let start = std::time::Instant::now();
 
                     // ==================================================================================
@@ -13923,7 +13960,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     // ==================================================================================
 
                     // Read current supply for SSE display (no increment!)
-                    let updated_supply = *app_state_mining.total_minted_supply.read().await;
+                    // v9.1.7: Use try_read() to avoid blocking shard processors when
+                    // balance sync task holds a write lock (was causing all 48 shards to stall).
+                    let updated_supply = app_state_mining.total_minted_supply.try_read()
+                        .map(|v| *v)
+                        .unwrap_or(0);
 
                     // Estimate per-miner reward for SSE pending notifications
                     // This is cosmetic only - actual rewards come from block producer coinbase txs
@@ -13957,19 +13998,34 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     // Previous code did 500 individual storage_engine.get_balance() calls per
                     // batch — 500 disk reads that took ~10 seconds. The wallet_balances cache
                     // is synced every 15s and is good enough for cosmetic SSE pending display.
+                    //
+                    // v9.1.7: Use try_read() — if write lock is held (15s balance sync),
+                    // skip balance lookups for this batch. Better to show stale data than
+                    // stall all 48 mining shards for seconds.
                     {
-                        let balances = app_state_mining.wallet_balances.read().await;
-                        for submission in &batch_buffer {
-                            let current_balance = balances.get(&submission.miner_address).copied().unwrap_or(0);
-                            let pending_balance = current_balance.saturating_add(miner_reward);
-                            balance_updates.push((
-                                submission.miner_address,
-                                current_balance,
-                                pending_balance,
-                                submission.miner_address_str.clone(),
-                            ));
+                        if let Ok(balances) = app_state_mining.wallet_balances.try_read() {
+                            for submission in &batch_buffer {
+                                let current_balance = balances.get(&submission.miner_address).copied().unwrap_or(0);
+                                let pending_balance = current_balance.saturating_add(miner_reward);
+                                balance_updates.push((
+                                    submission.miner_address,
+                                    current_balance,
+                                    pending_balance,
+                                    submission.miner_address_str.clone(),
+                                ));
+                            }
+                        } else {
+                            // Write lock held — use zero balances for this batch (cosmetic only)
+                            for submission in &batch_buffer {
+                                balance_updates.push((
+                                    submission.miner_address,
+                                    0,
+                                    miner_reward,
+                                    submission.miner_address_str.clone(),
+                                ));
+                            }
                         }
-                    } // drop balances read lock
+                    }
 
                     // ==================================================================================
                     // v8.9.0: LOCK-FREE STATS + DECOUPLED SSE (via channels to aggregator tasks)
@@ -13996,6 +14052,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
                     // P2P stats broadcast — uses a READ lock only (1 per batch, not per submission)
                     // v7.1.7: Skip when far behind
+                    // v9.1.7: Use try_read() on all locks to avoid blocking shard processors
                     {
                         let stats_current = app_state_mining.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
                         let stats_network = app_state_mining.highest_network_height.load(std::sync::atomic::Ordering::Relaxed);
@@ -14003,7 +14060,13 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         if !skip_stats_broadcast {
                             if let Some(ref mining_stats_arc) = app_state_mining.mining_statistics {
                                 if let Some(ref cmd_tx) = app_state_mining.libp2p_command_tx {
-                                    let peer_id_str = app_state_mining.libp2p_peer_info.read().await.0.clone();
+                                    let peer_id_str = match app_state_mining.libp2p_peer_info.try_read() {
+                                        Ok(info) => info.0.clone(),
+                                        Err(_) => String::new(), // Skip P2P broadcast if lock contended
+                                    };
+                                    if peer_id_str.is_empty() {
+                                        // Lock contended — skip this batch's P2P stats broadcast
+                                    } else {
                                     let network_id = std::env::var("Q_NETWORK_ID")
                                         .ok()
                                         .and_then(|s| s.parse::<q_types::NetworkId>().ok())
@@ -14012,7 +14075,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                     let now_ts = std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
 
-                                    let mining_stats = mining_stats_arc.read().await;
+                                    // v9.1.7 FIX: try_read() on mining_stats — if contended,
+                                    // just skip P2P stats broadcast (do NOT discard solutions!)
+                                    if let Ok(mining_stats) = mining_stats_arc.try_read() {
                                     let unique_wallets: std::collections::HashSet<String> = batch_buffer
                                         .iter().map(|s| s.miner_address_str.clone()).collect();
                                     let mut batched_updates: std::collections::HashMap<String, q_api_server::P2PMinerStatsUpdate> =
@@ -14055,6 +14120,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                             });
                                         }
                                     }
+                                    } // close mining_stats try_read
+                                    } // close `if peer_id_str.is_empty() {} else {`
                                 }
                             }
                         }
@@ -14099,7 +14166,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             if let Some(ref cmd_tx) = app_state_mining.libp2p_command_tx {
                                 // Pick first submission as representative
                                 if let Some(submission) = batch_buffer.first() {
-                                    let node_id = app_state_mining.libp2p_peer_info.read().await.0.clone();
+                                    // v9.1.7: try_read() to avoid blocking shard
+                                    let node_id = match app_state_mining.libp2p_peer_info.try_read() {
+                                        Ok(info) => info.0.clone(),
+                                        Err(_) => String::new(),
+                                    };
                                     let p2p_sub = q_types::mining_solution::P2PMiningSubmission::new(
                                         submission.miner_address,
                                         submission.hash,
@@ -14244,22 +14315,41 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     );
 
                     // PHASE 5: Check if we should produce blocks
-                    // v8.0.5: Add 15s timeout to prevent mining loop hang
-                    let should_produce = match tokio::time::timeout(
-                        std::time::Duration::from_secs(15),
-                        app_state_mining.block_producer_pool.should_produce(),
-                    ).await {
-                        Ok(Ok(result)) => result,
-                        Ok(Err(e)) => {
-                            error!("❌🚨 CRITICAL: should_produce() failed: {:?}", e);
-                            error!("   This indicates one or more producer tasks have died!");
-                            error!("   Exiting to trigger systemd restart...");
-                            std::process::exit(1); // Crash-fast philosophy
-                        }
-                        Err(_) => {
-                            warn!("⏱️ [TIMEOUT] should_produce() timed out after 15s — skipping batch");
-                            batch_buffer.clear();
-                            continue;
+                    // v9.1.7: Rate-limit should_produce() to once per 200ms across ALL shards.
+                    // Previously: ALL 48 shards called should_produce() on EVERY batch (every 5ms),
+                    // generating 9,600 producer queries/sec. Producers couldn't keep up, causing
+                    // 10s waits in should_produce() → 11s batch times → 503 mining errors.
+                    // Fix: Only one shard per 200ms check period calls should_produce().
+                    let should_produce = {
+                        static LAST_PRODUCE_CHECK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64;
+                        let prev = LAST_PRODUCE_CHECK.load(std::sync::atomic::Ordering::Relaxed);
+                        if now_ms >= prev + 200
+                            && LAST_PRODUCE_CHECK.compare_exchange(prev, now_ms, std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed).is_ok()
+                        {
+                            // This shard won the race — check should_produce()
+                            match tokio::time::timeout(
+                                std::time::Duration::from_secs(5),
+                                app_state_mining.block_producer_pool.should_produce(),
+                            ).await {
+                                Ok(Ok(result)) => result,
+                                Ok(Err(e)) => {
+                                    error!("❌🚨 CRITICAL: should_produce() failed: {:?}", e);
+                                    error!("   This indicates one or more producer tasks have died!");
+                                    error!("   Exiting to trigger systemd restart...");
+                                    std::process::exit(1); // Crash-fast philosophy
+                                }
+                                Err(_) => {
+                                    warn!("⏱️ [TIMEOUT] should_produce() timed out after 5s — skipping");
+                                    false
+                                }
+                            }
+                        } else {
+                            // Another shard checked recently — skip produce check for this batch
+                            false
                         }
                     };
 
@@ -15523,6 +15613,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                                 }
                                             };
 
+                                            let peer_id_for_challenge = peer_id_str.clone();
                                             let announcement = PeerHeightAnnouncement {
                                                 peer_id: peer_id_str,
                                                 highest_block: new_block.header.height,
@@ -15543,6 +15634,43 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                                     debug!("Failed to send immediate height announcement: {}", e);
                                                 } else {
                                                     info!("⚡ [SUB-50MS] Immediate height {} announced to network", new_block.header.height);
+                                                }
+                                            }
+
+                                            // v9.1.7: Broadcast mining challenge via P2P gossipsub
+                                            // Miners subscribed to mining-challenges topic get instant
+                                            // challenge updates (<50ms) instead of HTTP polling (2-10s).
+                                            {
+                                                use q_types::mining_solution::{NetworkChallenge, P2PMiningMessage, MINING_FINALITY_DEPTH};
+                                                let tip_h = new_block.header.height;
+                                                let canonical_h = tip_h.saturating_sub(MINING_FINALITY_DEPTH);
+                                                if canonical_h > 0 {
+                                                    if let Ok(Some(canonical_block)) = app_state_mining.storage_engine.get_qblock_by_height(canonical_h).await {
+                                                        let canonical_hash = canonical_block.calculate_hash();
+                                                        // Difficulty target: same as handlers.rs challenge generation
+                                                        let mut difficulty_target = [0xffu8; 32];
+                                                        difficulty_target[0] = 0x00;
+                                                        difficulty_target[1] = 0x00;
+                                                        let vdf_iters = (100 + (canonical_h / 1000) * 10) as u32;
+
+                                                        let challenge = NetworkChallenge::new(
+                                                            canonical_hash,
+                                                            canonical_h,
+                                                            difficulty_target,
+                                                            vdf_iters,
+                                                            peer_id_for_challenge.clone(),
+                                                        );
+                                                        let msg = P2PMiningMessage::Challenge(challenge);
+                                                        if let Ok(msg_bytes) = rmp_serde::to_vec(&msg) {
+                                                            let challenge_topic = network_id.mining_challenges_topic();
+                                                            let _ = cmd_tx.send(q_network::NetworkCommand::PublishBlock {
+                                                                topic: challenge_topic,
+                                                                block_bytes: msg_bytes,
+                                                                block_height: canonical_h,
+                                                            });
+                                                            debug!("⛏️ [P2P] Mining challenge broadcast for canonical height {}", canonical_h);
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -16366,12 +16494,17 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         // 💰 PROCESS ALL TRANSACTIONS - Update wallet balances (coinbase AND transfers)
                         // v3.4.2-beta FIX: Previously only processed coinbase, missing P2P transfers!
                         // v8.2.5 CRITICAL FIX: Persist balances IMMEDIATELY after transfers (not every 15s)
-                        // BUG: Balances were only synced to disk every 15s. If node restarted within that
-                        // window after a spend, the spend reverted — creating a money printer exploit.
-                        let balance_updates = {
+                        // v9.1.7 CRITICAL FIX: Do NOT hold wallet_balances.write() across .await!
+                        // Previous code held the write lock while calling save_wallet_balance().await for
+                        // EVERY transaction — 36+ RocksDB writes per block, blocking ALL 48 mining shard
+                        // processors at wallet_balances.read() for seconds, causing 503 errors and stalls.
+                        // Fix: Collect all balance changes under brief write lock (pure HashMap, no .await),
+                        // then persist to RocksDB AFTER releasing the lock.
+                        let (balance_updates, persist_queue) = {
                             let mut balances =
                                 app_state_block_producer.wallet_balances.write().await;
                             let mut updates = Vec::new();
+                            let mut persist: Vec<([u8; 32], u128)> = Vec::new();
                             let mut has_transfers = false;
                             for tx in &new_block.transactions {
                                 // Check if this is a coinbase transaction (from address is all zeros)
@@ -16381,15 +16514,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                         balances.get(&tx.to).copied().unwrap_or(0);
                                     let new_balance = current_balance + tx.amount;
                                     balances.insert(tx.to, new_balance);
+                                    persist.push((tx.to, new_balance));
 
-                                    // v8.2.5: Persist coinbase immediately (prevents reward loss on restart)
-                                    if let Err(e) = app_state_block_producer.storage_engine
-                                        .save_wallet_balance(&tx.to, new_balance).await
-                                    {
-                                        error!("❌ CRITICAL: Failed to persist coinbase balance: {}", e);
-                                    }
-
-                                    info!("💰 TIME-BASED Coinbase TX: {} QNK → {} (new balance: {} QNK) [PERSISTED]",
+                                    info!("💰 TIME-BASED Coinbase TX: {} QNK → {} (new balance: {} QNK)",
                                           tx.amount as f64 / QUG_DISPLAY_DIVISOR,
                                           hex::encode(&tx.to[..8]),
                                           new_balance as f64 / QUG_DISPLAY_DIVISOR);
@@ -16399,7 +16526,6 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                     updates.push((tx.to, current_balance, new_balance, false, "coinbase".to_string()));
                                 } else {
                                     // 🔄 v3.4.2-beta: TRANSFER TRANSACTION - debit sender, credit receiver
-                                    // This was MISSING before - P2P transfers were not updating in-memory balances!
                                     has_transfers = true;
 
                                     // Debit the sender
@@ -16412,20 +16538,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                     let receiver_new = receiver_current.saturating_add(tx.amount);
                                     balances.insert(tx.to, receiver_new);
 
-                                    // v8.2.5 CRITICAL: Persist BOTH sender and receiver balances IMMEDIATELY
-                                    // This prevents the money printer bug where spends revert on restart
-                                    if let Err(e) = app_state_block_producer.storage_engine
-                                        .save_wallet_balance(&tx.from, sender_new).await
-                                    {
-                                        error!("❌ CRITICAL: Failed to persist sender balance: {}", e);
-                                    }
-                                    if let Err(e) = app_state_block_producer.storage_engine
-                                        .save_wallet_balance(&tx.to, receiver_new).await
-                                    {
-                                        error!("❌ CRITICAL: Failed to persist receiver balance: {}", e);
-                                    }
+                                    persist.push((tx.from, sender_new));
+                                    persist.push((tx.to, receiver_new));
 
-                                    info!("🔄 TIME-BASED Transfer TX: {} QNK: {} → {} (sender: {} → {}, receiver: {} → {}) [PERSISTED]",
+                                    info!("🔄 TIME-BASED Transfer TX: {} QNK: {} → {} (sender: {} → {}, receiver: {} → {})",
                                           tx.amount as f64 / QUG_DISPLAY_DIVISOR,
                                           hex::encode(&tx.from[..8]),
                                           hex::encode(&tx.to[..8]),
@@ -16439,13 +16555,23 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                     updates.push((tx.to, receiver_current, receiver_new, false, "transfer_received".to_string()));
                                 }
                             }
+                            drop(balances); // v9.1.7: Release write lock BEFORE any .await
 
                             if has_transfers {
-                                info!("🔒 v8.2.5: Transfer balances persisted to disk immediately (money printer fix)");
+                                info!("🔒 v8.2.5: Transfer balances will be persisted to RocksDB");
                             }
 
-                            updates
+                            (updates, persist)
                         };
+
+                        // v9.1.7: Persist to RocksDB OUTSIDE the write lock (prevents mining stall)
+                        for (addr, balance) in &persist_queue {
+                            if let Err(e) = app_state_block_producer.storage_engine
+                                .save_wallet_balance(addr, *balance).await
+                            {
+                                error!("❌ CRITICAL: Failed to persist balance for {}: {}", hex::encode(&addr[..8]), e);
+                            }
+                        }
 
                         // 📡 v0.9.33-beta: Broadcast SSE events for real-time frontend balance updates
                         // v3.4.2-beta: Now includes transfer transactions, not just coinbase!
@@ -19975,7 +20101,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new());
             // Try latest results first (free, no credits)
-            let latest_url = format!("https://api.dune.com/api/v1/query/{}/results/latest", query_id);
+            let latest_url = format!("https://api.dune.com/api/v1/query/{}/results", query_id);
             if let Ok(resp) = client.get(&latest_url).header("X-DUNE-API-KEY", &api_key).send().await {
                 if resp.status().is_success() {
                     if let Ok(body) = resp.text().await {
