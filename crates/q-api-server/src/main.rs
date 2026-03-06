@@ -15,6 +15,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use axum::{
+    extract::State,
     routing::{delete, get, post, put},
     Router,
 };
@@ -322,21 +323,23 @@ async fn local_chart_data(chart: &str, state: &AppState) -> Option<serde_json::V
             Some(json!({ "result": { "rows": rows } }))
         }
         "token_supply" | "cumulative_emission" => {
-            // Current supply from emission stats
-            let stats = state.balance_consensus_engine.get_emission_stats().await.unwrap_or_else(|_| {
-                q_storage::emission_controller::EmissionStats {
-                    current_era: 0, era_progress_pct: 0.0, annual_emission: 0.0,
-                    daily_target: 0.0, actual_daily: 0.0, total_minted: 0.0,
-                    max_supply: 21_000_000.0, blocks_until_halving: 0,
-                    daily_emission_history: Vec::new(),
-                }
-            });
+            // Current supply from emission summary
+            let summary = state.balance_consensus_engine.get_emission_summary().await.ok();
             let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-            let pct = if stats.max_supply > 0.0 { (stats.total_minted / stats.max_supply) * 100.0 } else { 0.0 };
-            let inflation = if stats.total_minted > 0.0 { (stats.annual_emission / stats.total_minted) * 100.0 } else { 0.0 };
+            let (total_supply, max_supply, pct, annual_target) = if let Some(ref s) = summary {
+                let total = s.total_supply as f64 / 1e24; // base units → QUG
+                let max = s.max_supply as f64 / 1e24;
+                let pct = s.pct_mined;
+                let annual = s.annual_target as f64 / 1e24;
+                (total, max, pct, annual)
+            } else {
+                (0.0, 21_000_000.0, 0.0, 2_625_000.0)
+            };
+            let inflation = if total_supply > 0.0 { (annual_target / total_supply) * 100.0 } else { 0.0 };
             let rows = vec![json!({
                 "timestamp": now,
-                "total_supply_qug": stats.total_minted,
+                "total_supply_qug": total_supply,
+                "max_supply_qug": max_supply,
                 "pct_mined": pct,
                 "inflation_rate_pct": inflation,
             })];
