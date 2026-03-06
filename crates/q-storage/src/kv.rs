@@ -152,7 +152,7 @@ impl RocksDBKV {
         let auto_cache_mb = match ram_tier {
             "micro"  => 64,                                               // 64 MB fixed
             "small"  => 128,                                              // 128 MB fixed (was 256, OOM fix)
-            "medium" => (total_ram_mb * 10 / 100).clamp(512, 1024),     // v9.0.7: 10% of RAM, 512 MB-1 GB (was 15%, 2 GB)
+            "medium" => (total_ram_mb * 5 / 100).clamp(256, 512),        // v9.2.0: 5% of RAM, 256-512 MB (was 10%, 1 GB — OOM on 16GB during sync)
             "large"  => (total_ram_mb * 25 / 100).clamp(2048, 8192),    // v8.6.0: 25% of RAM, 2-8 GB (was 1-4 GB)
             "xlarge" => (total_ram_mb * 30 / 100).clamp(4096, 16384),   // v8.6.0: 30% of RAM, 4-16 GB (was 2-16 GB)
             _        => (total_ram_mb * 35 / 100).clamp(8192, 24576),   // v8.6.0: 35% of RAM, 8-24 GB (64GB+ tier)

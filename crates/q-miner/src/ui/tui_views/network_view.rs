@@ -25,7 +25,7 @@ pub fn draw_network(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
         .constraints([
             Constraint::Length(5),   // Latency sparkline
             Constraint::Length(5),   // Bandwidth sparkline
-            Constraint::Length(7),   // Server status
+            Constraint::Length(8),   // Server status (SSE + MinerLink + P2P + optional proxy)
             Constraint::Length(5),   // Throttle control
             Constraint::Length(5),   // Bandwidth stats
             Constraint::Min(8),     // Monte Carlo simulation
@@ -110,16 +110,20 @@ fn draw_bandwidth_sparkline(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
 // ─────────────────────────────────────────────────────────────
 #[cfg(feature = "tui")]
 fn draw_server_status(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
-    let (primary_url, sse, ml, fallback, proxy) = if let Some(ref state) = app.state {
+    let (primary_url, sse, ml, fallback, proxy, p2p_on, p2p_peers, p2p_challenges, p2p_solutions) = if let Some(ref state) = app.state {
         (
             state.server_url.clone(),
             state.sse_connected.load(Ordering::Relaxed),
             state.miner_link_connected.load(Ordering::Relaxed),
             state.using_fallback.load(Ordering::Relaxed),
             state.proxy_url.clone(),
+            state.p2p_connected.load(Ordering::Relaxed),
+            state.p2p_peer_count.load(Ordering::Relaxed),
+            state.p2p_challenges_received.load(Ordering::Relaxed),
+            state.p2p_solutions_broadcast.load(Ordering::Relaxed),
         )
     } else {
-        ("...".to_string(), false, false, false, None)
+        ("...".to_string(), false, false, false, None, false, 0, 0, 0)
     };
 
     let primary_display = primary_url.replace("https://", "").replace("http://", "");
@@ -148,6 +152,18 @@ fn draw_server_status(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
             } else {
                 Span::styled("○ Not connected", Style::default().fg(Color::DarkGray))
             },
+        ]),
+        Line::from(vec![
+            Span::raw("  P2P Mesh:    "),
+            if p2p_on {
+                Span::styled(format!("● {} peers", p2p_peers), Style::default().fg(Color::Green))
+            } else {
+                Span::styled("○ Disconnected", Style::default().fg(Color::DarkGray))
+            },
+            Span::raw("    "),
+            Span::styled(format!("↓{} chal", p2p_challenges), Style::default().fg(Color::Cyan)),
+            Span::raw("  "),
+            Span::styled(format!("↑{} sol", p2p_solutions), Style::default().fg(Color::Yellow)),
         ]),
     ];
 

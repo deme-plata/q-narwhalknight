@@ -71,18 +71,22 @@ impl Default for MemoryLimiterConfig {
             sys.refresh_memory();
             (sys.total_memory() / (1024 * 1024)) as usize
         };
+        // v9.2.0: Reduced medium tier batch sizes to prevent OOM on 16GB nodes
+        // During sync, each block is ~50-200KB in memory (with Vecs, signatures, etc.)
+        // 3000 blocks × 100KB = 300MB per batch — too much for 16GB with other overhead
         let (min_batch, max_batch) = match ram_mb {
             0..=3999     => (100, 500),     // micro: very conservative
             4000..=7999  => (200, 1000),    // small (Gamma 7.8GB): reduced from 5000
-            8000..=15999 => (500, 3000),    // medium
+            8000..=15999 => (200, 1000),    // v9.2.0: was 500/3000 → OOM on 16GB nodes during sync
             _            => (500, 5000),    // large: original defaults
         };
         // v6.0.6: RAM-aware thresholds — lower for small nodes to trigger backpressure
-        // before cgroup MemoryMax (6G) kills the process
+        // before OOM kills the process
+        // v9.2.0: Lowered medium tier thresholds (was 55/72/85 → OOM at 14.4/15.6GB)
         let (low_t, med_t, high_t) = match ram_mb {
             0..=3999     => (0.40, 0.55, 0.70),  // micro: aggressive backpressure
             4000..=7999  => (0.45, 0.60, 0.72),  // small (Gamma): trigger well before 6G cgroup limit
-            8000..=15999 => (0.55, 0.72, 0.85),  // medium: moderate
+            8000..=15999 => (0.45, 0.60, 0.75),  // v9.2.0: was 55/72/85, too late for 16GB nodes
             _            => (0.60, 0.80, 0.90),  // large: original thresholds
         };
         Self {

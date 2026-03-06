@@ -356,18 +356,6 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend, liveBalance }: Das
     return () => clearTimeout(timer);
   }, [showMainnetWelcome]);
 
-  // v8.5.7: Show supply correction notice once (after welcome modal is dismissed)
-  useEffect(() => {
-    const scKey = 'supply_correction_v857_seen';
-    if (localStorage.getItem(scKey)) return;
-    const timer = setTimeout(() => {
-      if (!showMainnetWelcome && !showBountyModal) {
-        window.dispatchEvent(new CustomEvent('open-supply-correction'));
-      }
-    }, 1500);
-    return () => clearTimeout(timer);
-  }, [showMainnetWelcome, showBountyModal]);
-
   // v8.5.5: Fetch unread email count on mount + listen for events
   useEffect(() => {
     const fetchUnread = async () => {

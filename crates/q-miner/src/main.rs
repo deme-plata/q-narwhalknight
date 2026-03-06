@@ -112,6 +112,17 @@ struct Args {
     /// Disabled by default. Use --tor to enable (requires Tor daemon running).
     #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
     tor: bool,
+
+    /// Disable P2P networking (use HTTP-only challenge fetch and solution submit).
+    /// P2P is enabled by default for faster challenge propagation (<50ms vs 2-10s HTTP).
+    #[cfg(feature = "p2p")]
+    #[arg(long)]
+    no_p2p: bool,
+
+    /// P2P listen port (0 = random OS-assigned port, default).
+    #[cfg(feature = "p2p")]
+    #[arg(long, default_value = "0")]
+    p2p_port: u16,
 }
 
 // Hardware info structure with CPU optimization details
@@ -951,11 +962,19 @@ async fn main() -> Result<()> {
                     // TUI log receiver is only available on the first iteration
                     let tui_rx = tui_log_rx_opt.take().flatten();
                     let enable_tui = use_tui && tui_rx.is_some();
-                    let _ = run_mining(cpu_threads, args.intensity, args.gpu, &wallet, &args.server, args.miner_name.as_deref(), enable_tui, args.bandwidth_limit, proxy_url.clone(), tui_rx).await;
+                    #[cfg(feature = "p2p")]
+                    let (no_p2p_flag, p2p_port_val) = (args.no_p2p, args.p2p_port);
+                    #[cfg(not(feature = "p2p"))]
+                    let (no_p2p_flag, p2p_port_val) = (true, 0u16);
+                    let _ = run_mining(cpu_threads, args.intensity, args.gpu, &wallet, &args.server, args.miner_name.as_deref(), enable_tui, args.bandwidth_limit, proxy_url.clone(), no_p2p_flag, p2p_port_val, tui_rx).await;
                 }
                 #[cfg(not(feature = "tui"))]
                 {
-                    let _ = run_mining(cpu_threads, args.intensity, args.gpu, &wallet, &args.server, args.miner_name.as_deref(), false, args.bandwidth_limit, proxy_url.clone(), ()).await;
+                    #[cfg(feature = "p2p")]
+                    let (no_p2p_flag, p2p_port_val) = (args.no_p2p, args.p2p_port);
+                    #[cfg(not(feature = "p2p"))]
+                    let (no_p2p_flag, p2p_port_val) = (true, 0u16);
+                    let _ = run_mining(cpu_threads, args.intensity, args.gpu, &wallet, &args.server, args.miner_name.as_deref(), false, args.bandwidth_limit, proxy_url.clone(), no_p2p_flag, p2p_port_val, ()).await;
                 }
             }
 
@@ -1094,6 +1113,8 @@ async fn run_mining(
     use_tui: bool,
     bandwidth_limit: u32,
     proxy_url: Option<String>,
+    no_p2p: bool,
+    p2p_port: u16,
     #[cfg(feature = "tui")]
     tui_log_rx: Option<tokio::sync::mpsc::UnboundedReceiver<q_miner::ui::tui_app::LogEntry>>,
     #[cfg(not(feature = "tui"))]
@@ -1162,6 +1183,50 @@ async fn run_mining(
         });
     }
 
+    // v9.1.7: P2P mining network — gossipsub challenge relay + solution broadcast
+    // Spawned before mining threads so channels are ready when threads start
+    #[cfg(feature = "p2p")]
+    let (p2p_challenge_rx, p2p_solution_tx, _p2p_handle) = if !no_p2p {
+        match q_miner::p2p_network::MinerP2PNetwork::new(
+            q_miner::p2p_network::MinerP2PConfig {
+                listen_port: p2p_port,
+                network_id: std::env::var("Q_NETWORK_ID")
+                    .unwrap_or_else(|_| "mainnet-genesis".to_string()),
+                bootstrap_peers: Vec::new(),
+            },
+            shared_state.p2p_connected.clone(),
+            shared_state.p2p_peer_count.clone(),
+            shared_state.p2p_challenges_received.clone(),
+            shared_state.p2p_solutions_broadcast.clone(),
+        ).await {
+            Ok(p2p) => {
+                let crx = p2p.challenge_receiver();
+                let stx = p2p.solution_sender();
+                // Forward P2P block signals → new_block_signal AtomicU64 (same as SSE)
+                let p2p_block_rx = p2p.block_signal_receiver();
+                let p2p_nbs = new_block_signal.clone();
+                tokio::spawn(async move {
+                    let mut rx = p2p_block_rx;
+                    while let Ok(_height) = rx.recv().await {
+                        p2p_nbs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                });
+                let handle = tokio::spawn(p2p.run());
+                info!("P2P mining network started (port {})", p2p_port);
+                (Some(crx), Some(stx), Some(handle))
+            }
+            Err(e) => {
+                warn!("P2P mining network failed to start: {} — using HTTP only", e);
+                (None, None, None)
+            }
+        }
+    } else {
+        info!("P2P disabled (--no-p2p) — using HTTP only");
+        (None, None, None)
+    };
+    #[cfg(not(feature = "p2p"))]
+    let (p2p_challenge_rx, p2p_solution_tx): (Option<tokio::sync::broadcast::Receiver<q_types::mining_solution::NetworkChallenge>>, Option<tokio::sync::mpsc::UnboundedSender<q_types::mining_solution::P2PMiningSubmission>>) = (None, None);
+
     info!("🔥 Starting {} CPU mining threads (dedicated OS threads)", threads);
     if bandwidth_limit > 0 {
         info!("📡 Network bandwidth limit: {} KB/s (challenge refresh slowed, submit throttled)", bandwidth_limit);
@@ -1177,6 +1242,10 @@ async fn run_mining(
     // Format: (challenge, timestamp_of_fetch)
     let shared_challenge: Arc<parking_lot::RwLock<Option<(MiningChallenge, std::time::Instant)>>> =
         Arc::new(parking_lot::RwLock::new(None));
+
+    // Wrap P2P channel in Arc for sharing across mining threads
+    let p2p_challenge_rx = p2p_challenge_rx.map(|rx| Arc::new(parking_lot::Mutex::new(rx)));
+    let p2p_solution_tx = p2p_solution_tx.map(Arc::new);
 
     // PERF: Use std::thread::spawn instead of tokio::spawn for mining threads.
     // Mining is 100% CPU-bound — tokio's work-stealing scheduler adds overhead
@@ -1201,6 +1270,10 @@ async fn run_mining(
             let shared_state_blocks = blocks_mined.clone();
             let shared_challenge = shared_challenge.clone();
 
+            // v9.1.7: P2P channels — only thread 0 gets the challenge receiver
+            let thread_p2p_challenge_rx = if thread_id == 0 { p2p_challenge_rx.clone() } else { None };
+            let thread_p2p_solution_tx = p2p_solution_tx.clone();
+
             let bw_limit = bandwidth_limit;
             let thread_proxy_url = proxy_url.clone();
             std::thread::Builder::new()
@@ -1223,6 +1296,7 @@ async fn run_mining(
                         thread_state, event_tx, throttle_mode, challenge_latency, using_fallback,
                         bw_limit, shared_state_solutions, shared_state_blocks,
                         thread_proxy_url, shared_challenge,
+                        thread_p2p_challenge_rx, thread_p2p_solution_tx,
                     )
                 })
                 .expect("Failed to spawn mining thread")
@@ -1972,6 +2046,9 @@ fn mining_thread(
     shared_state_blocks: Arc<AtomicU64>,
     proxy_url: Option<String>,
     shared_challenge: Arc<parking_lot::RwLock<Option<(MiningChallenge, std::time::Instant)>>>,
+    // v9.1.7: P2P channels — challenge receiver (thread 0 only), solution sender (all threads)
+    p2p_challenge_rx: Option<Arc<parking_lot::Mutex<tokio::sync::broadcast::Receiver<q_types::mining_solution::NetworkChallenge>>>>,
+    p2p_solution_tx: Option<Arc<tokio::sync::mpsc::UnboundedSender<q_types::mining_solution::P2PMiningSubmission>>>,
 ) {
     let _ = event_tx.send(DiagnosticEvent::ThreadStarted { thread_id });
     // OPTIMIZATION: Pin thread to specific CPU core for cache locality on multi-socket systems
@@ -2205,6 +2282,60 @@ fn mining_thread(
 
         if thread_id == 0 {
             // === THREAD 0: The sole API fetcher ===
+
+            // v9.1.7: P2P-first challenge check (non-blocking) BEFORE HTTP
+            // If we get a valid P2P challenge at a higher height, use it and skip HTTP.
+            if let Some(ref p2p_rx) = p2p_challenge_rx {
+                let mut got_p2p = false;
+                let mut rx = p2p_rx.lock();
+                while let Ok(p2p_chal) = rx.try_recv() {
+                    // P2P challenges use canonical_height (= tip - FINALITY_DEPTH)
+                    // HTTP challenges use block_height (= tip height)
+                    // Compare: P2P canonical_height roughly maps to HTTP block_height
+                    if p2p_chal.canonical_height > current_challenge.block_height.saturating_sub(q_types::mining_solution::MINING_FINALITY_DEPTH) {
+                        info!("P2P challenge at height {} (skipping HTTP)", p2p_chal.canonical_height);
+                        // Convert NetworkChallenge → MiningChallenge for the shared cache
+                        let p2p_mining_challenge = MiningChallenge {
+                            challenge_hash: hex::encode(p2p_chal.challenge_hash),
+                            difficulty_target: hex::encode(p2p_chal.difficulty_target),
+                            block_height: p2p_chal.canonical_height + q_types::mining_solution::MINING_FINALITY_DEPTH,
+                            vdf_iterations: p2p_chal.vdf_iterations,
+                            block_reward: current_challenge.block_reward, // Keep last known reward
+                            expires_at: chrono::Utc::now() + chrono::Duration::seconds(90),
+                            server_notice: None,
+                            server_version: None,
+                            min_miner_version: None,
+                            network_hashrate_hs: current_challenge.network_hashrate_hs,
+                            connected_miners: current_challenge.connected_miners,
+                            live_security_bits: current_challenge.live_security_bits,
+                            forced_mining_mode: None,
+                            forced_pool_url: None,
+                        };
+                        thread_state.set_status(ThreadStatus::Mining { block_height: p2p_mining_challenge.block_height });
+                        // Update shared cache
+                        {
+                            let mut cache = shared_challenge.write();
+                            *cache = Some((p2p_mining_challenge.clone(), std::time::Instant::now()));
+                        }
+                        current_challenge = p2p_mining_challenge;
+                        if let Ok(hash) = hex_to_bytes(&current_challenge.challenge_hash) {
+                            challenge_hash = hash;
+                        }
+                        if let Ok(t) = hex_to_bytes(&current_challenge.difficulty_target) {
+                            target = t;
+                        }
+                        last_challenge_refresh = std::time::Instant::now();
+                        last_known_block_signal = current_block_signal;
+                        got_p2p = true;
+                    }
+                }
+                drop(rx);
+                // If P2P delivered a challenge, skip HTTP fetch this round
+                if got_p2p {
+                    // Fall through to mining loop
+                }
+            }
+
             // Fetch from API on block signal (debounced) or periodic interval
             let debounced = should_refresh_immediately && last_challenge_refresh.elapsed() >= fetch_debounce;
             let periodic = last_challenge_refresh.elapsed() >= challenge_refresh_interval;
@@ -2376,6 +2507,26 @@ fn mining_thread(
                     "worker_name": miner_name,
                     "miner_version": env!("CARGO_PKG_VERSION")
                 });
+
+                // v9.1.7: P2P solution broadcast (non-blocking, parallel with HTTP)
+                if let Some(ref p2p_tx) = p2p_solution_tx {
+                    let mut wallet_bytes = [0u8; 32];
+                    if let Ok(decoded) = hex::decode(wallet.trim_start_matches("qnk")) {
+                        let len = decoded.len().min(32);
+                        wallet_bytes[..len].copy_from_slice(&decoded[..len]);
+                    }
+                    let p2p_sub = q_types::mining_solution::P2PMiningSubmission::new(
+                        wallet_bytes,
+                        hash,
+                        target,
+                        current_challenge.block_height,
+                        challenge_hash,
+                        nonce,
+                        current_challenge.vdf_iterations,
+                        miner_id.clone(),
+                    );
+                    let _ = p2p_tx.send(p2p_sub);
+                }
 
                 // Submit solution via tokio (non-blocking — spawns onto tokio runtime)
                 let normalized_url = normalize_server_url(api_url);

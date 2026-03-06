@@ -1809,7 +1809,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
               <div className="space-y-3">
                 {/* Linux x64 */}
                 <a
-                  href="https://quillon.xyz/downloads/q-api-server-v8.9.0"
+                  href="https://quillon.xyz/downloads/q-api-server-v9.1.6"
                   download="q-api-server"
                   className="w-full p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-cyan-500/20 hover:border-cyan-500/40 rounded-xl transition-all flex items-center gap-4 group block"
                 >
@@ -1825,8 +1825,8 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
 
                 {/* Windows x64 */}
                 <a
-                  href="https://quillon.xyz/downloads/q-api-server-v8.9.0-windows-x64.exe"
-                  download="q-api-server-v8.9.0-windows-x64.exe"
+                  href="https://quillon.xyz/downloads/q-api-server-v9.1.6-windows-x64.exe"
+                  download="q-api-server-v9.1.6-windows-x64.exe"
                   className="w-full p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-cyan-500/20 hover:border-cyan-500/40 rounded-xl transition-all flex items-center gap-4 group block"
                 >
                   <div className="w-10 h-10 rounded-lg bg-blue-500/20 flex items-center justify-center shrink-0">
@@ -1834,7 +1834,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
                   </div>
                   <div className="text-left flex-1">
                     <div className="font-bold text-cyan-100">Windows x64</div>
-                    <div className="text-xs text-cyan-300/50">Windows 10/11 — Single EXE with TUI (v8.9.0)</div>
+                    <div className="text-xs text-cyan-300/50">Windows 10/11 — Single EXE with TUI (v9.1.6)</div>
                   </div>
                   <Download className="w-5 h-5 text-cyan-400/60 group-hover:text-cyan-400 transition-colors" />
                 </a>
@@ -1872,9 +1872,9 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
               <div className="mt-3 p-3 bg-slate-800/40 rounded-xl border border-cyan-500/10">
                 <h3 className="text-sm font-bold text-cyan-300 mb-2">Quick Start (Linux)</h3>
                 <code className="text-[11px] text-cyan-100/70 block whitespace-pre-wrap break-all font-mono leading-relaxed">
-{`wget https://quillon.xyz/downloads/q-api-server-v8.6.4
-chmod +x q-api-server-v8.6.4
-./q-api-server-v8.6.4 --port 8080`}
+{`wget https://quillon.xyz/downloads/q-api-server-v9.1.6
+chmod +x q-api-server-v9.1.6
+./q-api-server-v9.1.6 --port 8080`}
                 </code>
                 <div className="text-[10px] text-emerald-400/70 mt-2">WarpSync auto-discovers peers & syncs 900K+ blocks in minutes</div>
               </div>
@@ -2037,9 +2037,9 @@ cargo build --release --package q-api-server
               <div className="mt-5 p-4 bg-slate-800/40 rounded-xl border border-amber-500/10">
                 <h3 className="text-sm font-bold text-amber-300 mb-2">Quick Start (Linux)</h3>
                 <code className="text-xs text-amber-100/70 block whitespace-pre-wrap break-all font-mono">
-{`wget https://quillon.xyz/downloads/q-miner-v8.6.4
-chmod +x q-miner-v8.6.4
-./q-miner-v8.6.4 --mode solo --wallet YOUR_WALLET --threads 4 --server https://quillon.xyz`}
+{`wget https://quillon.xyz/downloads/q-miner-v9.1.6
+chmod +x q-miner-v9.1.6
+./q-miner-v9.1.6 --mode solo --wallet YOUR_WALLET --threads 4 --server https://quillon.xyz`}
                 </code>
               </div>
 

@@ -131,13 +131,14 @@ pub async fn run_sync_loop(
         }
 
         // --- Block-based tables: backfill + incremental ---
-        // On free plan (100MB limit), only sync last 50K blocks to avoid exceeding quota.
+        // v9.1.7: Reduced from 50K→10K blocks to stay well under 100MB free plan quota.
+        // At ~100 bytes/block CSV row × 10K blocks × 4 tables ≈ 4MB per full resync.
         // Set DUNE_FULL_BACKFILL=1 to sync from genesis (requires paid plan).
         if last_pushed < chain_tip {
             let full_backfill = std::env::var("DUNE_FULL_BACKFILL").unwrap_or_default() == "1";
             let start_from = if last_pushed == 0 && !full_backfill {
                 // Skip to recent blocks to stay under storage quota
-                chain_tip.saturating_sub(50_000).max(1)
+                chain_tip.saturating_sub(10_000).max(1)
             } else if last_pushed == 0 {
                 1
             } else {

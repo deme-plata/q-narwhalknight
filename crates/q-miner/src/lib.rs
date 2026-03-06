@@ -3,6 +3,8 @@ pub mod cpu;
 pub mod gpu;
 pub mod miner_link;
 pub mod network;
+#[cfg(feature = "p2p")]
+pub mod p2p_network;
 pub mod shared_state;
 pub mod diagnostics;
 pub mod ui;

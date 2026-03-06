@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Trophy, TrendingUp, Zap, Clock, Award, Sparkles, DollarSign, HelpCircle, Shield } from 'lucide-react';
 import { qnkAPI, type MiningRewardEvent, type BalanceUpdateEvent, type MiningStatsEvent, type WalletMiningStats } from '../services/api';
 import SecurityBitsVisualization from './SecurityBitsVisualization';
+import SecurityFrontierChart from './charts/SecurityFrontierChart';
 
 interface MiningStats {
   totalRewards: number;
@@ -1306,6 +1307,15 @@ export default function MiningDashboard() {
           </AnimatePresence>
       </motion.div>
 
+      {/* Security Frontier — Progression Chart */}
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.3 }}
+      >
+        <SecurityFrontierChart />
+      </motion.div>
+
       {/* Network Stats Row */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {/* Daily Earnings Card */}
@@ -1544,10 +1554,10 @@ export default function MiningDashboard() {
       >
         <h4 className="text-lg font-bold text-quantum-green mb-3 flex items-center gap-2">
           <Zap className="w-5 h-5" />
-          Download Optimized Miner v8.3.0
+          Download Optimized Miner v9.1.6
         </h4>
         <p className="text-gray-300 text-sm mb-4">
-          v8.3.0: Better networking + Miner identification + Lock-free multi-threading + P2P propagation
+          v9.1.6: OAuth2 login + Tor by default + Lock-free multi-threading + P2P propagation
         </p>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <a

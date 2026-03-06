@@ -3,7 +3,7 @@
 // ═══════════════════════════════════════════════════════════════════
 
 use parking_lot::RwLock;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -256,6 +256,12 @@ pub struct SharedMinerState {
     // 0 = no switch pending, 1 = switch to solo, 2 = switch to pool
     pub mode_switch_signal: Arc<AtomicU8>,
     pub mode_switch_pool_url: Arc<parking_lot::RwLock<Option<String>>>,
+
+    // v9.1.7: P2P networking status (gossipsub challenge relay + solution broadcast)
+    pub p2p_connected: Arc<AtomicBool>,
+    pub p2p_peer_count: Arc<AtomicU32>,
+    pub p2p_challenges_received: Arc<AtomicU64>,
+    pub p2p_solutions_broadcast: Arc<AtomicU64>,
 }
 
 impl SharedMinerState {
@@ -314,6 +320,10 @@ impl SharedMinerState {
             proxy_url,
             mode_switch_signal: Arc::new(AtomicU8::new(0)),
             mode_switch_pool_url: Arc::new(parking_lot::RwLock::new(None)),
+            p2p_connected: Arc::new(AtomicBool::new(false)),
+            p2p_peer_count: Arc::new(AtomicU32::new(0)),
+            p2p_challenges_received: Arc::new(AtomicU64::new(0)),
+            p2p_solutions_broadcast: Arc::new(AtomicU64::new(0)),
         });
 
         (state, event_rx)

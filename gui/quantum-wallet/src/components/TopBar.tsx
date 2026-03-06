@@ -142,6 +142,7 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
   const [livePeers, setLivePeers] = useState(peers);
   const [personalHashrate, setPersonalHashrate] = useState<number>(0);
   const [isTorConnected, setIsTorConnected] = useState(false);
+  const [torOnionUrl, setTorOnionUrl] = useState("http://ca3jpub2haxboxjw4ws6run36ekdh3pv7pneqg2tbac5rxzvxhd2i5id.onion");
   const [minerLinkCount, setMinerLinkCount] = useState(0);
   // v8.6.2: sseRef removed — TopBar now uses shared sseManager instead of its own EventSource
 
@@ -471,6 +472,26 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
         console.log('🧅 [TopBar] Tor hidden service detected');
       }
     }
+  }, []);
+
+  // v9.1.4: Fetch Tor onion address from backend
+  useEffect(() => {
+    const fetchTorStatus = async () => {
+      try {
+        const res = await fetch('/api/v1/tor/status');
+        if (res.ok) {
+          const data = await res.json();
+          const addr = data?.data?.onion_address;
+          if (addr && typeof addr === 'string' && addr.length > 10) {
+            const cleanAddr = addr.endsWith('.onion') ? addr : `${addr}.onion`;
+            setTorOnionUrl(`http://${cleanAddr}`);
+          }
+        }
+      } catch {
+        // Keep hardcoded default onion URL
+      }
+    };
+    fetchTorStatus();
   }, []);
 
   // v8.6.2: SSE subscription via shared sseManager (no duplicate EventSource)
@@ -1658,6 +1679,16 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
                 >
                   <BookOpen className="w-4 h-4 text-emerald-400/60" />
                   <span>Technical Deep Dive</span>
+                  <ExternalLink className="w-3 h-3 ml-auto opacity-40" />
+                </a>
+                <a
+                  href={torOnionUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="w-full flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-slate-700/50 text-slate-400 hover:text-purple-300 transition-colors text-sm"
+                >
+                  <span className="w-4 h-4 text-purple-400/60 flex items-center justify-center text-base">🧅</span>
+                  <span>Tor Hidden Service</span>
                   <ExternalLink className="w-3 h-3 ml-auto opacity-40" />
                 </a>
               </div>

@@ -1158,6 +1158,8 @@ pub struct UnifiedNetworkManager {
     pending_response_channels: Arc<std::sync::Mutex<HashMap<u64, libp2p::request_response::ResponseChannel<q_types::BlockPackResponse>>>>,
     /// v1.2.7-beta: Counter for generating unique request IDs for async response tracking
     next_async_request_id: Arc<std::sync::atomic::AtomicU64>,
+    /// v9.1.8: Semaphore to limit concurrent block-pack responses (prevents OOM from simultaneous large serializations)
+    block_pack_semaphore: Arc<tokio::sync::Semaphore>,
     /// v1.3.3-beta: Tor-enabled flag for adaptive timeouts and batch sizes
     /// Set during initialization based on Q_TOR_ENABLED, Q_TOR_PROXY, or SOCKS5 proxy detection
     tor_enabled: bool,
@@ -2242,6 +2244,7 @@ impl UnifiedNetworkManager {
             block_pack_response_rx: block_pack_response_rx,
             pending_response_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             next_async_request_id: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            block_pack_semaphore: Arc::new(tokio::sync::Semaphore::new(4)), // v9.1.8: max 4 concurrent block-pack responses
             // v1.3.3-beta: Tor-aware adaptive batch sizes and retry logic
             tor_enabled,
             // v1.3.3-beta: Exponential backoff retry queue for failed sync requests
@@ -3294,15 +3297,31 @@ impl UnifiedNetworkManager {
                                 let end_height = request.end_height;
                                 let max_blocks = request.max_blocks;
                                 let peer_clone = peer;
+                                let sem = self.block_pack_semaphore.clone();
 
                                 // Spawn task to do the slow DB work
+                                // v9.1.8: Semaphore limits concurrent block-pack responses to prevent OOM
+                                // (each response can be 50-150MB; unbounded spawns caused 10GB+ RSS → crash)
                                 tokio::spawn(async move {
+                                    let _permit = match sem.try_acquire_owned() {
+                                        Ok(permit) => permit,
+                                        Err(_) => {
+                                            warn!("⚠️ [BLOCK-PACK] Semaphore full — dropping request for heights {}-{} from {} (OOM protection)",
+                                                  start_height, end_height, peer_clone);
+                                            // Send empty response so peer retries later
+                                            let empty = q_types::BlockPackResponse::from_blocks(vec![], end_height, 0);
+                                            let _ = response_tx.send((async_req_id, empty));
+                                            return;
+                                        }
+                                    };
                                     let response = if let Some(storage) = storage_clone {
                                         // Get our height (uses cached value internally, very fast)
                                         let our_height = storage.get_highest_contiguous_block().await.unwrap_or(0);
 
                                         let block_count = (end_height - start_height + 1) as usize;
-                                        let limit = block_count.min(max_blocks);
+                                        // v9.1.8: Hard cap at 200 blocks per response (~50MB max)
+                                        // Prevents 500+ block responses that serialize to 150MB+
+                                        let limit = block_count.min(max_blocks).min(200);
 
                                         match storage.get_qblocks_range(start_height, limit).await {
                                             Ok(blocks) => {

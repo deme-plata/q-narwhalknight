@@ -64,7 +64,7 @@ members = [
 , "sdk/rust", "crates/q-ai-inference", "crates/q-crypto-advanced", "crates/q-index-fund", "crates/q-mining-pool", "crates/q-temporal-shield", "crates/q-bitnet-ffi", "crates/q-consensus-guard", "crates/q-bio-dsl", "crates/q-eternal-cypher", "crates/q-dune"]
 
 [workspace.package]
-version = "9.1.6"  # v9.1.6: Epsilon perf — configurable Tokio workers + RocksDB auto-scale ceiling
+version = "9.2.1"  # v9.2.1: Local-first analytics — compute charts from blockchain DB, no Dune credits needed
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"

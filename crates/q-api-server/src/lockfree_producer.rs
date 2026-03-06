@@ -1715,6 +1715,7 @@ impl LockFreeProducerPool {
                     error!("🚨 FATAL: Producer #{} timed out on get_height()!", id);
                     error!("   Producer task may be DEADLOCKED!");
                     error!("   Exiting to trigger systemd restart...");
+                    eprintln!("[CRASH] enforce_height_invariant: Producer #{} timed out on get_height() — DEADLOCKED", id);
                     std::process::exit(1);
                 }
             }
@@ -1739,6 +1740,7 @@ impl LockFreeProducerPool {
             );
             error!("   Producers are OUT OF SYNC - this will cause deadlock!");
             error!("   Exiting to trigger restart and resync...");
+            eprintln!("[CRASH] enforce_height_invariant: Producer spread={} (min={}, max={}, storage={})", spread, min_height, max_height, storage_height);
             std::process::exit(1);
         }
 

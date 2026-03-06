@@ -41,6 +41,47 @@ const ZcashWalletModal: React.FC<ZcashWalletModalProps> = ({ isOpen, onClose, wa
   const [swapQnkAmount, setSwapQnkAmount] = useState('');
   const [receiveZAddress, setReceiveZAddress] = useState('');
 
+  // Exchange rates — fetch dynamically
+  const [zecUsdRate, setZecUsdRate] = useState(25);
+  const [qugUsdRate, setQugUsdRate] = useState(3000);
+
+  useEffect(() => {
+    const fetchRates = async () => {
+      try {
+        const res = await fetch('/api/v1/defi/oracle/price/QUG/USD');
+        const data = await res.json();
+        if (data?.price && data.price > 0) {
+          setQugUsdRate(data.price);
+        }
+      } catch (e) {
+        console.warn('Failed to fetch QUG price, using default');
+      }
+      try {
+        const res = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=zcash&vs_currencies=usd');
+        const data = await res.json();
+        if (data?.zcash?.usd) {
+          setZecUsdRate(data.zcash.usd);
+        }
+      } catch (e) {
+        console.warn('Failed to fetch ZEC price, using default');
+      }
+    };
+    if (isOpen) fetchRates();
+  }, [isOpen]);
+
+  const ZEC_QNK_RATE = qugUsdRate > 0 ? zecUsdRate / qugUsdRate : 0.008; // 1 ZEC ≈ 0.008 QNK at $25/$3000
+
+  const handleSwapAmountChange = (value: string, field: 'zec' | 'qnk') => {
+    const numVal = parseFloat(value) || 0;
+    if (field === 'zec') {
+      setSwapZecAmount(value);
+      setSwapQnkAmount(numVal > 0 ? (numVal * ZEC_QNK_RATE).toFixed(4) : '');
+    } else {
+      setSwapQnkAmount(value);
+      setSwapZecAmount(numVal > 0 && ZEC_QNK_RATE > 0 ? (numVal / ZEC_QNK_RATE).toFixed(8) : '');
+    }
+  };
+
   const fetchData = useCallback(async () => {
     try {
       const [balRes, addrRes, bridgeRes, swapsRes] = await Promise.allSettled([
@@ -335,27 +376,49 @@ const ZcashWalletModal: React.FC<ZcashWalletModalProps> = ({ isOpen, onClose, wa
                 </button>
               </div>
 
+              {/* Exchange rate display */}
+              <div className="bg-gray-800/30 rounded-lg p-3 border border-gray-700/20 flex items-center justify-between">
+                <span className="text-gray-400 text-xs">Exchange Rate</span>
+                <span className="text-purple-300 text-sm font-medium">
+                  1 ZEC ≈ {ZEC_QNK_RATE.toFixed(6)} QNK
+                  <span className="text-gray-500 ml-2">(${zecUsdRate.toFixed(2)})</span>
+                </span>
+              </div>
+
               <div>
                 <label className="text-gray-400 text-sm mb-1 block">ZEC Amount</label>
                 <input
                   type="number"
                   step="0.00000001"
                   value={swapZecAmount}
-                  onChange={(e) => setSwapZecAmount(e.target.value)}
+                  onChange={(e) => handleSwapAmountChange(e.target.value, 'zec')}
                   placeholder="0.00000000"
                   className="w-full bg-gray-800/50 border border-gray-700/50 rounded-lg px-4 py-3 text-white placeholder-gray-500 text-sm focus:border-purple-500/50 focus:outline-none"
                 />
+                {swapZecAmount && parseFloat(swapZecAmount) > 0 && (
+                  <p className="text-gray-500 text-xs mt-1">≈ ${(parseFloat(swapZecAmount) * zecUsdRate).toFixed(2)} USD</p>
+                )}
+              </div>
+
+              <div className="flex items-center justify-center">
+                <div className="w-8 h-8 rounded-full bg-purple-500/20 flex items-center justify-center">
+                  <svg className="w-4 h-4 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" /></svg>
+                </div>
               </div>
 
               <div>
                 <label className="text-gray-400 text-sm mb-1 block">QNK Amount (QUG)</label>
                 <input
-                  type="text"
+                  type="number"
+                  step="0.0001"
                   value={swapQnkAmount}
-                  onChange={(e) => setSwapQnkAmount(e.target.value)}
-                  placeholder="0.00"
+                  onChange={(e) => handleSwapAmountChange(e.target.value, 'qnk')}
+                  placeholder="0.0000"
                   className="w-full bg-gray-800/50 border border-gray-700/50 rounded-lg px-4 py-3 text-white placeholder-gray-500 text-sm focus:border-purple-500/50 focus:outline-none"
                 />
+                {swapQnkAmount && parseFloat(swapQnkAmount) > 0 && (
+                  <p className="text-gray-500 text-xs mt-1">≈ ${(parseFloat(swapQnkAmount) * qugUsdRate).toFixed(2)} USD</p>
+                )}
               </div>
 
               {swapDirection === 'buy_zec' && (

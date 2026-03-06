@@ -19,7 +19,6 @@ import QuantumBackground from './components/QuantumBackground';
 import AnimatedBorder from './components/AnimatedBorder';
 import DeployControlPanel from './components/DeployControlPanel';
 import NodeSettingsModal from './components/NodeSettingsModal';
-import SupplyCorrectionModal from './components/SupplyCorrectionModal';
 import AIWheelButton from './components/AIWheelButton';
 import OAuthConsentPage from './components/OAuthConsentPage';
 import MinerLoginPage from './components/MinerLoginPage';
@@ -783,9 +782,6 @@ function App() {
           <DeployControlPanel />
           {/* v7.3.0: Node Settings Modal - admin wallet OAuth2 + node info */}
           <NodeSettingsModal />
-          {/* v8.5.7: Supply Correction Notice — one-time transparency modal */}
-          <SupplyCorrectionModal />
-
           {/* Token Bar - Below TopBar */}
           <TokenBar onTokenClick={handleTokenClick} />
 

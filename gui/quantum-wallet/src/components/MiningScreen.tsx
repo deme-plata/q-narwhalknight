@@ -273,7 +273,7 @@ export default function MiningScreen() {
     ? `${window.location.protocol}//${window.location.host}`
     : 'http://localhost:8080';
 
-  const miningCommand = `./q-miner-v8.3.0 --mode solo --wallet ${walletAddress} --threads 4 --intensity 7 --server ${currentServerUrl}`;
+  const miningCommand = `./q-miner-v9.1.6 --mode solo --wallet ${walletAddress} --threads 4 --intensity 7 --server ${currentServerUrl}`;
 
   const tabs = [
     { id: 'pool' as MiningTab, label: 'Pool Mining', icon: Users, color: 'quantum-purple' },
@@ -905,14 +905,14 @@ export default function MiningScreen() {
                     <div className="bg-quantum-dark/50 rounded-lg p-4 border border-quantum-cyan/20 relative">
                       <p className="text-quantum-cyan text-sm font-bold mb-3">Linux x86_64</p>
                       <div className="space-y-1 font-mono text-xs text-gray-300 overflow-x-auto">
-                        <code className="block">wget https://quillon.xyz/downloads/q-miner-v8.3.0</code>
-                        <code className="block">chmod +x q-miner-v8.3.0</code>
-                        <code className="block text-quantum-green mt-2">./q-miner-v8.3.0 --mode solo \</code>
+                        <code className="block">wget https://quillon.xyz/downloads/q-miner-v9.1.6</code>
+                        <code className="block">chmod +x q-miner-v9.1.6</code>
+                        <code className="block text-quantum-green mt-2">./q-miner-v9.1.6 --mode solo \</code>
                         <code className="block text-quantum-green pl-2">--wallet {walletAddress || 'YOUR_WALLET'} \</code>
                         <code className="block text-quantum-green pl-2">--server {currentServerUrl}</code>
                       </div>
                       <button
-                        onClick={() => copyCommand(`wget https://quillon.xyz/downloads/q-miner-v8.3.0 && chmod +x q-miner-v8.3.0 && ./q-miner-v8.3.0 --mode solo --wallet ${walletAddress || 'YOUR_WALLET'} --server ${currentServerUrl}`)}
+                        onClick={() => copyCommand(`wget https://quillon.xyz/downloads/q-miner-v9.1.6 && chmod +x q-miner-v9.1.6 && ./q-miner-v9.1.6 --mode solo --wallet ${walletAddress || 'YOUR_WALLET'} --server ${currentServerUrl}`)}
                         className="absolute top-3 right-3 bg-quantum-cyan/20 hover:bg-quantum-cyan/30 text-quantum-cyan px-2 py-1 rounded text-xs transition-colors"
                       >
                         Copy
@@ -1107,7 +1107,7 @@ export default function MiningScreen() {
               <h3 className="text-lg font-bold text-white mb-2 flex items-center gap-2">
                 <Download className="w-5 h-5 text-quantum-cyan" />
                 Miner Downloads
-                <span className="text-xs font-medium px-2 py-0.5 bg-quantum-green/20 text-quantum-green rounded-full">v8.3.0</span>
+                <span className="text-xs font-medium px-2 py-0.5 bg-quantum-green/20 text-quantum-green rounded-full">v9.1.6</span>
               </h3>
               <p className="text-sm text-gray-400 mb-4">Native threads, jemalloc/mimalloc allocator, batched atomic counters</p>
 
@@ -1157,8 +1157,8 @@ export default function MiningScreen() {
                 <h4 className="text-sm font-bold text-quantum-cyan mb-3">Quick Start (wget)</h4>
                 <div className="space-y-2">
                   <div className="bg-quantum-dark/80 rounded-lg p-2 font-mono text-xs text-gray-300 flex items-center justify-between">
-                    <code>wget https://quillon.xyz/downloads/q-miner-v8.3.0 && chmod +x q-miner-v8.3.0</code>
-                    <button onClick={() => copyCommand('wget https://quillon.xyz/downloads/q-miner-v8.3.0 && chmod +x q-miner-v8.3.0')} className="text-quantum-cyan hover:text-white ml-2 flex-shrink-0 text-xs px-2">Copy</button>
+                    <code>wget https://quillon.xyz/downloads/q-miner-v9.1.6 && chmod +x q-miner-v9.1.6</code>
+                    <button onClick={() => copyCommand('wget https://quillon.xyz/downloads/q-miner-v9.1.6 && chmod +x q-miner-v9.1.6')} className="text-quantum-cyan hover:text-white ml-2 flex-shrink-0 text-xs px-2">Copy</button>
                   </div>
                   <div className="bg-quantum-dark/80 rounded-lg p-2 font-mono text-xs text-gray-300 flex items-center justify-between">
                     <code>wget https://quillon.xyz/downloads/q-miner-linux-arm64 && chmod +x q-miner-linux-arm64</code>

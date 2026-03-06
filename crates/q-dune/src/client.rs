@@ -66,9 +66,32 @@ impl DuneClient {
             if text.contains("already exists") {
                 debug!("[Dune] Table {}.{} already exists", self.namespace, table.name);
                 Ok(())
+            } else if status.as_u16() == 402 || text.contains("storage quota") {
+                // v9.1.7: 402 = storage quota exceeded. The table already exists on Dune
+                // (we just can't CREATE new ones). Treat as success so sync loop continues.
+                warn!("[Dune] Storage quota exceeded for {} — table likely exists, continuing", table.name);
+                Ok(())
             } else {
                 Err(anyhow!("[Dune] create_table {} failed ({}): {}", table.name, status, text))
             }
+        }
+    }
+
+    /// v9.1.7: Clear all data from a Dune table (preserves schema).
+    /// Used to free storage quota when the free plan limit is reached.
+    pub async fn clear_table(&self, table_name: &str) -> Result<()> {
+        let url = format!("{}/uploads/{}/{}/clear", DUNE_BASE_URL, self.namespace, table_name);
+        let resp = self.http.post(&url)
+            .header("X-DUNE-API-KEY", &self.api_key)
+            .send()
+            .await?;
+        let status = resp.status();
+        if status.is_success() {
+            info!("[Dune] Cleared table {}.{}", self.namespace, table_name);
+            Ok(())
+        } else {
+            let text = resp.text().await.unwrap_or_default();
+            Err(anyhow!("[Dune] clear_table {} failed ({}): {}", table_name, status, text))
         }
     }
 
@@ -107,6 +130,18 @@ impl DuneClient {
 
                     let status_code = status.as_u16();
                     let text = r.text().await.unwrap_or_default();
+
+                    // v9.1.7: Handle 402 storage quota exceeded — auto-clear and retry
+                    if status_code == 402 && text.contains("storage quota") && retries < 1 {
+                        warn!("[Dune] Storage quota exceeded inserting into {} — clearing heavy tables", table_name);
+                        // Clear the heaviest per-block/per-tx tables to free space
+                        for t in &["qnk_blocks", "qnk_transactions", "qnk_mining_rewards"] {
+                            let _ = self.clear_table(t).await;
+                        }
+                        retries += 1;
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        continue;
+                    }
 
                     if (status_code == 429 || status_code >= 500) && retries < MAX_RETRIES {
                         retries += 1;

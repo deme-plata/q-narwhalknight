@@ -802,7 +802,13 @@ export default function DeployControlPanel() {
   const eventSourceRef = useRef<EventSource | null>(null);
 
   // Tab state
-  const [activeTab, setActiveTab] = useState<'overview' | 'bank' | 'bridge' | 'settings' | 'bounty' | 'dex'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'bank' | 'bridge' | 'settings' | 'bounty' | 'dex' | 'mining'>('overview');
+
+  // v9.1.4: Mining mode switch state
+  const [miningModeStatus, setMiningModeStatus] = useState<{ forced_mode: string; pool_url: string | null } | null>(null);
+  const [miningModeLoading, setMiningModeLoading] = useState(false);
+  const [miningPoolUrlInput, setMiningPoolUrlInput] = useState('stratum+tcp://quillon.xyz:3333');
+  const [miningModeMsg, setMiningModeMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // Bounty admin state
   const [bountyStats, setBountyStats] = useState<any>(null);
@@ -1122,6 +1128,51 @@ export default function DeployControlPanel() {
     } catch {}
     setDexLoading(false);
   }, [isMaster, walletAddress]);
+
+  // v9.1.4: Mining mode switch
+  const fetchMiningModeStatus = useCallback(async () => {
+    try {
+      const resp = await fetch('/api/v1/admin/mining/mode-status', {
+        headers: { 'X-Wallet-Auth': walletAddress, 'Authorization': `Bearer ${walletAddress}` },
+      });
+      if (resp.ok) {
+        const json = await resp.json();
+        setMiningModeStatus(json);
+      }
+    } catch {}
+  }, [walletAddress]);
+
+  const triggerMiningModeSwitch = useCallback(async (targetMode: string) => {
+    setMiningModeLoading(true);
+    setMiningModeMsg(null);
+    try {
+      const body: any = { target_mode: targetMode };
+      if (targetMode === 'pool') {
+        body.pool_url = miningPoolUrlInput;
+      }
+      body.reason = 'Admin panel switch';
+
+      const resp = await fetch('/api/v1/admin/mining/mode-switch', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Wallet-Auth': walletAddress,
+          'Authorization': `Bearer ${walletAddress}`,
+        },
+        body: JSON.stringify(body),
+      });
+      if (resp.ok) {
+        const json = await resp.json();
+        setMiningModeMsg({ type: 'success', text: `Switched to ${json.new_mode} mode (${json.sse_subscribers} SSE subscribers notified)` });
+        fetchMiningModeStatus();
+      } else {
+        setMiningModeMsg({ type: 'error', text: `Failed: HTTP ${resp.status}` });
+      }
+    } catch (e: any) {
+      setMiningModeMsg({ type: 'error', text: e.message || 'Unknown error' });
+    }
+    setMiningModeLoading(false);
+  }, [walletAddress, miningPoolUrlInput, fetchMiningModeStatus]);
 
   // Bank admin actions
   const bankAction = useCallback(async (cmd: string, method: string, path: string, body?: any) => {
@@ -1504,7 +1555,7 @@ export default function DeployControlPanel() {
                 <div>
                   <h2 className="text-lg font-bold text-emerald-50">Node Admin</h2>
                   <p className="text-xs text-emerald-300/60">
-                    {activeTab === 'overview' ? 'Deploy Control Panel' : activeTab === 'settings' ? 'Node Settings' : activeTab === 'bridge' ? 'Bridge Pairs' : activeTab === 'bounty' ? 'Bounty Campaign Admin' : activeTab === 'dex' ? 'DEX Analytics' : 'Quillon Bank CLI'}
+                    {activeTab === 'overview' ? 'Deploy Control Panel' : activeTab === 'settings' ? 'Node Settings' : activeTab === 'bridge' ? 'Bridge Pairs' : activeTab === 'bounty' ? 'Bounty Campaign Admin' : activeTab === 'dex' ? 'DEX Analytics' : activeTab === 'mining' ? 'Mining Mode Control' : 'Quillon Bank CLI'}
                   </p>
                 </div>
               </div>
@@ -1529,6 +1580,7 @@ export default function DeployControlPanel() {
                 ] : []),
                 ...(isNodeAdmin ? [
                   { id: 'settings' as const, icon: Settings, label: 'Node Settings' },
+                  { id: 'mining' as const, icon: Zap, label: 'Mining Mode' },
                 ] : []),
               ]).map(tab => (
                 <button
@@ -1539,6 +1591,7 @@ export default function DeployControlPanel() {
                     if (tab.id === 'settings') fetchSettingsData();
                     if (tab.id === 'bounty') fetchBountyData();
                     if (tab.id === 'dex') fetchDexData();
+                    if (tab.id === 'mining') fetchMiningModeStatus();
                   }}
                   className={`flex items-center gap-1.5 px-3 py-1.5 rounded-t-lg text-xs font-medium transition-all ${
                     activeTab === tab.id
@@ -3914,6 +3967,105 @@ export default function DeployControlPanel() {
                     Could not load settings. Make sure your wallet matches --admin-wallet.
                   </div>
                 )}
+              </>)}
+
+              {/* v9.1.4: Mining Mode Control Tab */}
+              {activeTab === 'mining' && (<>
+                <div className="space-y-4">
+                  {/* Current Status */}
+                  <div className="rounded-xl p-4" style={{ background: 'rgba(15, 23, 42, 0.6)', border: '1px solid rgba(148, 163, 184, 0.1)' }}>
+                    <div className="flex items-center gap-2 mb-3">
+                      <Zap className="w-4 h-4 text-amber-400" />
+                      <span className="text-sm font-medium text-emerald-200">Current Forced Mode</span>
+                      <button onClick={fetchMiningModeStatus} className="ml-auto p-1 rounded hover:bg-white/10">
+                        <RefreshCw className="w-3 h-3 text-emerald-300/50" />
+                      </button>
+                    </div>
+                    {miningModeStatus ? (
+                      <div className="flex items-center gap-3">
+                        <span className={`px-3 py-1 rounded-full text-xs font-bold ${
+                          miningModeStatus.forced_mode === 'solo' ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30' :
+                          miningModeStatus.forced_mode === 'pool' ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30' :
+                          'bg-slate-500/20 text-slate-300 border border-slate-500/30'
+                        }`}>
+                          {miningModeStatus.forced_mode === 'none' ? 'No Override' : miningModeStatus.forced_mode.toUpperCase()}
+                        </span>
+                        {miningModeStatus.pool_url && (
+                          <span className="text-xs text-amber-200/50 truncate max-w-[200px]">{miningModeStatus.pool_url}</span>
+                        )}
+                      </div>
+                    ) : (
+                      <span className="text-xs text-amber-200/30">Click refresh to load status</span>
+                    )}
+                  </div>
+
+                  {/* Pool URL Input */}
+                  <div className="rounded-xl p-4" style={{ background: 'rgba(15, 23, 42, 0.6)', border: '1px solid rgba(148, 163, 184, 0.1)' }}>
+                    <label className="text-xs text-amber-200/60 mb-1 block">Pool URL (for pool mode)</label>
+                    <input
+                      type="text"
+                      value={miningPoolUrlInput}
+                      onChange={e => setMiningPoolUrlInput(e.target.value)}
+                      placeholder="stratum+tcp://quillon.xyz:3333"
+                      className="w-full px-3 py-2 rounded-lg text-xs bg-slate-900/60 border border-slate-600/30 text-emerald-100 placeholder-slate-500 focus:outline-none focus:border-emerald-500/50"
+                    />
+                  </div>
+
+                  {/* Action Buttons */}
+                  <div className="grid grid-cols-3 gap-2">
+                    <motion.button
+                      onClick={() => triggerMiningModeSwitch('solo')}
+                      disabled={miningModeLoading}
+                      className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl text-xs font-medium transition-all disabled:opacity-50"
+                      style={{ background: 'rgba(59, 130, 246, 0.15)', border: '1px solid rgba(59, 130, 246, 0.3)', color: 'rgb(147, 197, 253)' }}
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                    >
+                      <Cpu className="w-3.5 h-3.5" />
+                      Switch to Solo
+                    </motion.button>
+
+                    <motion.button
+                      onClick={() => triggerMiningModeSwitch('pool')}
+                      disabled={miningModeLoading}
+                      className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl text-xs font-medium transition-all disabled:opacity-50"
+                      style={{ background: 'rgba(168, 85, 247, 0.15)', border: '1px solid rgba(168, 85, 247, 0.3)', color: 'rgb(196, 181, 253)' }}
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                    >
+                      <Users className="w-3.5 h-3.5" />
+                      Switch to Pool
+                    </motion.button>
+
+                    <motion.button
+                      onClick={() => triggerMiningModeSwitch('clear')}
+                      disabled={miningModeLoading}
+                      className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl text-xs font-medium transition-all disabled:opacity-50"
+                      style={{ background: 'rgba(100, 116, 139, 0.15)', border: '1px solid rgba(100, 116, 139, 0.3)', color: 'rgb(203, 213, 225)' }}
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                    >
+                      <X className="w-3.5 h-3.5" />
+                      Clear Override
+                    </motion.button>
+                  </div>
+
+                  {/* Status Message */}
+                  {miningModeMsg && (
+                    <div className={`rounded-lg p-3 text-xs ${
+                      miningModeMsg.type === 'success' ? 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/20' : 'bg-red-500/10 text-red-300 border border-red-500/20'
+                    }`}>
+                      {miningModeMsg.type === 'success' ? <CheckCircle className="w-3.5 h-3.5 inline mr-1.5" /> : <XCircle className="w-3.5 h-3.5 inline mr-1.5" />}
+                      {miningModeMsg.text}
+                    </div>
+                  )}
+
+                  {/* Info */}
+                  <div className="rounded-xl p-3 text-xs text-amber-200/40" style={{ background: 'rgba(15, 23, 42, 0.4)', border: '1px solid rgba(148, 163, 184, 0.05)' }}>
+                    <p className="mb-1"><strong>How it works:</strong></p>
+                    <p>Broadcasts an SSE event to all connected miners and piggybacks on the next challenge response. Miners gracefully stop current batch and restart in the new mode. Old miners (pre-v9.1.4) ignore unknown fields.</p>
+                  </div>
+                </div>
               </>)}
             </div>
           </motion.div>

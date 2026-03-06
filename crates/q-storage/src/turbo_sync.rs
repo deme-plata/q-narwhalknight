@@ -1015,13 +1015,16 @@ impl Default for TurboSyncConfig {
                     };
                     // v1.0.2: Increased parallel streams for faster sync throughput
                     // RSS backpressure (with reduced max wait) still prevents OOM
+                    // v9.2.0: Reduced medium tier from 16→6 streams — was causing 14.4GB RSS on 16GB nodes
+                    // Each stream: ~1000 blocks × 75KB = 75MB in-flight + deserialization overhead
+                    // 16 streams = 1.2GB in-flight — too much on 16GB with RocksDB cache + memtables
                     match ram_mb {
-                        0..=3999     => 4,    // micro: 4 streams
-                        4000..=7999  => 8,    // small: 8 streams
-                        8000..=15999 => 16,   // medium: 16 streams
-                        16000..=31999 => 32,  // large: 32 streams (was 24)
-                        32000..=63999 => 48,  // xlarge: 48 streams (was 32)
-                        _            => 64,   // xxlarge 64GB+: 64 streams (was 48)
+                        0..=3999     => 2,    // micro: 2 streams (was 4)
+                        4000..=7999  => 4,    // small: 4 streams (was 8)
+                        8000..=15999 => 6,    // v9.2.0: 6 streams (was 16 — OOM on 16GB)
+                        16000..=31999 => 16,  // large: 16 streams (was 32)
+                        32000..=63999 => 32,  // xlarge: 32 streams (was 48)
+                        _            => 48,   // xxlarge 64GB+: 48 streams (was 64)
                     }
                 }),
             // v8.0.7: P2P-aware chunk size — capped at 500 regardless of local RAM
