@@ -722,3 +722,164 @@ Implement OCSP stapling to avoid clients making separate OCSP lookups during TLS
 
 - `x509-parser` for extracting OCSP responder URL from cert
 - `reqwest` (or raw HTTP) for fetching OCSP response from CA
+
+---
+
+## Issue #15: `q-flux` — HTTP/2 Upstream Multiplexing
+
+**Priority**: Medium
+**Status**: Open — scaffold in `h2_proxy.rs`
+**Assignee**: Server Beta
+**Branch**: `feature/q-flux-h2`
+**Crate**: `crates/q-flux/`
+
+### Summary
+
+Wire the existing `h2_proxy.rs` scaffold into production. HTTP/2 multiplexing allows many requests over a single TCP connection, eliminating head-of-line blocking for browser-based wallet users.
+
+### Implementation
+
+1. ALPN negotiation: detect `h2` in TLS handshake, route to `h2_proxy::handle_h2_connection()`
+2. Stream-level proxying: map each H2 stream → HTTP/1.1 upstream request
+3. Server push: preload `/assets/index.js` on wallet page load
+4. Flow control: per-stream + connection-level window management
+5. GOAWAY handling: graceful shutdown of H2 connections during rolling deploy
+
+### Acceptance Criteria
+
+- `curl --http2 https://quillon.xyz/api/v1/status` returns valid response
+- Wallet loads in Chrome DevTools showing H2 protocol
+- Benchmark: ≥2× RPS improvement for browser clients vs HTTP/1.1
+
+---
+
+## Issue #16: `q-flux` — QUIC Transport (HTTP/3)
+
+**Priority**: Low
+**Status**: Open — scaffold in `quic_proxy.rs`
+**Assignee**: Server Beta
+**Branch**: `feature/q-flux-quic`
+**Crate**: `crates/q-flux/`
+
+### Summary
+
+Add QUIC/HTTP/3 support via the `quinn` crate. QUIC eliminates TCP head-of-line blocking and enables 0-RTT connection resumption — ideal for miners that reconnect frequently.
+
+### Implementation
+
+1. Bind UDP socket on port 443 alongside TCP (QUIC runs over UDP)
+2. QUIC listener in each worker using `quinn::Endpoint`
+3. 0-RTT session resumption for miners (skip full handshake on reconnect)
+4. Alt-Svc header: advertise QUIC availability to HTTP/1.1 clients
+5. Stream multiplexing: map QUIC streams to upstream HTTP/1.1 requests
+
+### Dependencies
+
+- `quinn` crate (QUIC implementation)
+- Feature-gated: `#[cfg(feature = "quic")]` — optional, not required for base build
+
+---
+
+## Issue #17: `q-flux` — Prometheus Grafana Dashboard Template
+
+**Priority**: Low
+**Status**: Open
+**Assignee**: Server Beta
+**Branch**: `feature/q-flux-grafana`
+
+### Summary
+
+Create a Grafana dashboard JSON template that visualizes all q-flux Prometheus metrics from `GET /metrics`. Ship as `crates/q-flux/grafana/q-flux-dashboard.json`.
+
+### Panels
+
+1. **Connections**: active connections (gauge), connections/sec (rate of total)
+2. **Requests**: RPS by status code (2xx/4xx/5xx stacked), total requests counter
+3. **Latency**: p50/p95/p99 from histogram, heatmap of request durations
+4. **TLS**: handshake success/fail rate, session resumption ratio
+5. **Upstream**: active upstream connections, connect failures, timeouts
+6. **Rate Limiting**: rate-limited requests/sec, active IPs in rate limiter
+7. **Bandwidth**: bytes received/sent per second
+8. **WebSocket**: active WebSocket connections, upgrade rate
+
+---
+
+## Issue #18: `q-flux` — Connection Draining During TLS Reload
+
+**Priority**: Medium
+**Status**: Open
+**Assignee**: Server Beta
+**Branch**: `feature/q-flux-tls-drain`
+**Crate**: `crates/q-flux/`
+
+### Summary
+
+Current `POST /tls-reload` swaps certs instantly. Existing connections continue using the old cert until they close. Add an option to gracefully drain connections using the old cert within a configurable timeout.
+
+### Implementation
+
+1. `POST /tls-reload?drain=30s` — reload certs and drain old connections within 30s
+2. Track which `Arc<ServerConfig>` generation each connection is using
+3. After reload, stop accepting new connections on old config
+4. Wait up to drain timeout for existing connections to complete
+5. Force-close remaining old-cert connections after timeout
+6. Return JSON: `{"reloaded": true, "drained": 142, "forced_closed": 3}`
+
+---
+
+## Issue #19: `q-queue` — Phase 3 Distributed Queue
+
+**Priority**: Low
+**Status**: Open
+**Assignee**: Unassigned
+**Branch**: `feature/q-queue-distributed`
+**Crate**: `crates/q-queue/`
+
+### Summary
+
+Add distributed queue mode to q-queue for cross-node message passing. Uses TCP (with optional RDMA) for transport, consistent hashing for partitioning, and erasure coding for replication.
+
+### Files to Create
+
+- `crates/q-queue/src/distributed.rs` — cluster coordination + partition assignment
+- `crates/q-queue/src/transport.rs` — TCP with io_uring, optional RDMA
+- `crates/q-queue/src/partition.rs` — consistent hashing ring
+- `crates/q-queue/src/replication.rs` — erasure-coded replication (Reed-Solomon)
+
+### Target
+
+- >2 GB/s per node throughput
+- <1ms cross-node latency on 10GbE
+
+---
+
+## Issue #20: `q-flux` — Per-Peer Bandwidth Enforcement
+
+**Priority**: Medium
+**Status**: Open — scaffold in `libp2p_aware.rs`
+**Assignee**: Server Beta
+**Branch**: `feature/q-flux-peer-bw`
+**Crate**: `crates/q-flux/`
+
+### Summary
+
+Wire `libp2p_aware.rs` PeerTracker into the proxy layer. Enforce per-peer bandwidth tiers at the reverse proxy level so abusive peers can't starve legitimate miners.
+
+### Implementation
+
+1. Detect libp2p multistream-select handshake in first bytes of WebSocket upgrade
+2. Extract peer ID from Noise handshake or X-Peer-ID header
+3. Classify peer into tier (Bootstrap/Validator/Miner/Light/Unknown)
+4. Enforce bandwidth limits per tier using token bucket at proxy layer
+5. Circuit breaker: auto-block peers that exceed limits 3× in 5 minutes
+6. Metrics: per-peer connection count, bandwidth usage, circuit breaker state
+
+### Tiers
+
+| Tier | Bandwidth | Max Connections |
+|------|-----------|-----------------|
+| Bootstrap | Unlimited | 1000 |
+| Validator | 100 MB/s | 100 |
+| Miner | 10 MB/s | 10 |
+| Light | 1 MB/s | 5 |
+| Unknown | 512 KB/s | 2 |
