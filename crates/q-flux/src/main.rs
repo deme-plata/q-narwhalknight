@@ -171,7 +171,12 @@ fn main() -> anyhow::Result<()> {
 
     // Create shared health map and spawn the background health checker.
     // The health map is shared between the checker (writer) and all workers (readers).
-    let health_map = health::new_health_map(&config.upstream.backends);
+    // Super-cluster: also register cluster peers in the health map so the upstream
+    // pool can check their health status during failover decisions.
+    let mut all_backends = config.upstream.backends.clone();
+    all_backends.extend(config.cluster.peers.clone());
+    let health_map = health::new_health_map(&all_backends);
+
     let health_config = health::HealthCheckConfig {
         interval: config.upstream.health_check_interval,
         timeout: config.upstream.health_check_timeout,
@@ -195,6 +200,38 @@ fn main() -> anyhow::Result<()> {
             });
         })
         .expect("Failed to spawn health-checker thread");
+
+    // Super-cluster: spawn a separate health checker for cluster peers (slower interval)
+    if !config.cluster.peers.is_empty() {
+        let cluster_peers = config.cluster.peers.clone();
+        let cluster_health_map = health_map.clone();
+        let cluster_health_config = health::HealthCheckConfig {
+            interval: config.cluster.health_check_interval,
+            timeout: config.upstream.health_check_timeout,
+            path: config.cluster.health_check_path
+                .clone()
+                .unwrap_or_else(|| config.upstream.health_check_path.clone()),
+            failure_threshold: 3,
+        };
+        tracing::info!(
+            peers = cluster_peers.len(),
+            interval_secs = cluster_health_config.interval.as_secs(),
+            "Super-cluster: health-checking {} remote peer(s)",
+            cluster_peers.len(),
+        );
+        std::thread::Builder::new()
+            .name("q-flux-cluster-health".into())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Failed to build cluster health-checker runtime");
+                rt.block_on(async move {
+                    health::spawn_health_checker(cluster_peers, cluster_health_map, cluster_health_config).await.ok();
+                });
+            })
+            .expect("Failed to spawn cluster health-checker thread");
+    }
 
     // Spawn workers with shutdown receivers
     let handles = worker::spawn_workers(

@@ -17,18 +17,35 @@ use crate::metrics::Metrics;
 
 /// Per-worker upstream connection pool.
 /// Each worker gets its own pool to avoid cross-thread contention.
+///
+/// Super-cluster mode: when `cluster_peers` is non-empty, the pool tries local
+/// backends first. If ALL local backends are unhealthy, it fails over to cluster
+/// peers (remote q-api-server instances on other servers). Local always wins.
 pub struct UpstreamPool {
     client: Client<HttpConnector, Full<Bytes>>,
     pub backends: Arc<Vec<String>>,
+    /// Super-cluster: remote peer backends for cross-node failover.
+    cluster_peers: Arc<Vec<String>>,
     response_timeout: Duration,
     metrics: Metrics,
     health_map: HealthMap,
-    /// Round-robin index
+    /// Round-robin index for local backends
     rr_index: AtomicUsize,
+    /// Round-robin index for cluster peers
+    cluster_rr_index: AtomicUsize,
 }
 
 impl UpstreamPool {
     pub fn new(config: &UpstreamConfig, metrics: Metrics, health_map: HealthMap) -> Self {
+        Self::new_with_cluster(config, metrics, health_map, vec![])
+    }
+
+    pub fn new_with_cluster(
+        config: &UpstreamConfig,
+        metrics: Metrics,
+        health_map: HealthMap,
+        cluster_peers: Vec<String>,
+    ) -> Self {
         let mut connector = HttpConnector::new();
         connector.set_nodelay(true);
         connector.set_keepalive(Some(config.keepalive_timeout));
@@ -45,25 +62,40 @@ impl UpstreamPool {
             .set_host(true)
             .build(connector);
 
+        if !cluster_peers.is_empty() {
+            tracing::info!(
+                local_backends = config.backends.len(),
+                cluster_peers = cluster_peers.len(),
+                "Super-cluster enabled: local-first, {} remote peer(s) as failover",
+                cluster_peers.len(),
+            );
+        }
+
         Self {
             client,
             backends: Arc::new(config.backends.clone()),
+            cluster_peers: Arc::new(cluster_peers),
             response_timeout: config.response_timeout,
             metrics,
             health_map,
             rr_index: AtomicUsize::new(0),
+            cluster_rr_index: AtomicUsize::new(0),
         }
     }
 
     /// Pick the next healthy backend (round-robin, skipping unhealthy ones).
     ///
-    /// If ALL backends are unhealthy, falls back to the first backend in
-    /// round-robin order -- a degraded attempt is better than an immediate 503.
+    /// Strategy (super-cluster aware):
+    ///   1. Try local backends first (round-robin, skip unhealthy)
+    ///   2. If ALL local backends are unhealthy AND cluster peers exist,
+    ///      try cluster peers (round-robin, skip unhealthy)
+    ///   3. If everything is unhealthy, fall back to first local backend
+    ///      (degraded attempt is better than immediate 503)
     fn next_backend(&self) -> &str {
         let len = self.backends.len();
         let start = self.rr_index.fetch_add(1, Ordering::Relaxed);
 
-        // First pass: look for a healthy backend starting at the RR index
+        // First pass: look for a healthy LOCAL backend starting at the RR index
         for i in 0..len {
             let idx = (start + i) % len;
             let backend = &self.backends[idx];
@@ -77,12 +109,38 @@ impl UpstreamPool {
             }
         }
 
-        // All backends unhealthy: fall through to the original RR pick so we
-        // at least attempt something rather than returning a guaranteed 503.
+        // All local backends unhealthy — try cluster peers if available
+        if !self.cluster_peers.is_empty() {
+            let clen = self.cluster_peers.len();
+            let cstart = self.cluster_rr_index.fetch_add(1, Ordering::Relaxed);
+
+            for i in 0..clen {
+                let idx = (cstart + i) % clen;
+                let peer = &self.cluster_peers[idx];
+                if let Some(entry) = self.health_map.get(peer.as_str()) {
+                    if entry.is_healthy {
+                        warn!(
+                            peer = peer.as_str(),
+                            "Super-cluster failover: all local backends unhealthy, routing to cluster peer"
+                        );
+                        return peer;
+                    }
+                } else {
+                    // No health entry — assume healthy (optimistic)
+                    warn!(
+                        peer = peer.as_str(),
+                        "Super-cluster failover: routing to cluster peer (not yet health-checked)"
+                    );
+                    return peer;
+                }
+            }
+        }
+
+        // Everything unhealthy: fall through to the original local RR pick
         let fallback = &self.backends[start % len];
         warn!(
             backend = fallback.as_str(),
-            "All backends unhealthy, attempting degraded fallback"
+            "All backends unhealthy (local + cluster), attempting degraded fallback"
         );
         fallback
     }

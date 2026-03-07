@@ -13,6 +13,29 @@ pub struct FluxConfig {
     pub logging: LoggingConfig,
     #[serde(default)]
     pub static_files: StaticConfig,
+    /// Super-cluster: cross-node failover backends.
+    /// When all local upstream backends are unhealthy, q-flux routes to cluster
+    /// peers instead of returning 503. Local backends always have priority.
+    #[serde(default)]
+    pub cluster: ClusterConfig,
+}
+
+/// Super-cluster configuration for cross-node failover.
+///
+/// Cluster peers are remote q-api-server backends on other servers.
+/// They are only used when ALL local backends (in `[upstream].backends`) are
+/// unhealthy. This gives automatic failover without manual Nginx weight changes.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ClusterConfig {
+    /// Remote backend addresses (e.g. ["89.149.241.126:8080", "185.182.185.227:8080"]).
+    #[serde(default)]
+    pub peers: Vec<String>,
+    /// Health check path for cluster peers (default: same as upstream).
+    #[serde(default)]
+    pub health_check_path: Option<String>,
+    /// Health check interval for cluster peers (default: 10s, slower than local).
+    #[serde(default = "default_cluster_health_interval", deserialize_with = "deserialize_duration")]
+    pub health_check_interval: std::time::Duration,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -125,6 +148,7 @@ fn default_log_level() -> String { "info".into() }
 fn default_rate_limit_per_ip() -> usize { 100 }
 fn default_rate_limit_burst() -> usize { 200 }
 fn default_rate_limit_global_rps() -> usize { 100_000 }
+fn default_cluster_health_interval() -> std::time::Duration { std::time::Duration::from_secs(10) }
 
 impl Default for LimitsConfig {
     fn default() -> Self {

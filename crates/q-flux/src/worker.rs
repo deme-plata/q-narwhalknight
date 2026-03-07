@@ -167,7 +167,13 @@ async fn worker_loop(
     // hyper Client each time. This defeated connection pooling — every request
     // opened a fresh TCP connection to upstream (same failure mode as keepalive=off).
     // Now: one hyper Client per worker with pooled keepalive connections to upstream.
-    let upstream = Arc::new(UpstreamPool::new(&config.upstream, metrics.clone(), health_map.clone()));
+    // Super-cluster: cluster peers are passed as failover backends (local-first).
+    let upstream = Arc::new(UpstreamPool::new_with_cluster(
+        &config.upstream,
+        metrics.clone(),
+        health_map.clone(),
+        config.cluster.peers.clone(),
+    ));
 
     // PeerTracker: per-peer connection limits and circuit breakers for libp2p peers.
     // Shared across all connections on this worker. Pre-seeded with known infrastructure.

@@ -25,6 +25,14 @@ max_connections = 200000
 max_conns_per_ip = 100
 request_body_limit = 26214400  # 25MB
 
+# Super-cluster: if local q-api-server goes down, route to Beta or Delta
+[cluster]
+peers = [
+    "185.182.185.227:8080",  # Beta (bootstrap node)
+    "5.79.79.158:8080",      # Delta (secondary node)
+]
+health_check_interval = "10s"
+
 [logging]
 level = "info"
 
