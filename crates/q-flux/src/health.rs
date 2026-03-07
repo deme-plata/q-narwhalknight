@@ -5,6 +5,10 @@ use tokio::net::TcpStream;
 use tokio::time::{interval, timeout};
 use tracing::{debug, error, info, warn};
 
+/// Maximum time a backend can stay unhealthy before auto-reset.
+/// Prevents permanent unhealthy state when health checker is starved.
+const MAX_UNHEALTHY_SECS: u64 = 30;
+
 /// Health status of a single backend.
 #[derive(Debug, Clone)]
 pub struct BackendHealth {
@@ -16,6 +20,8 @@ pub struct BackendHealth {
     pub last_success: Option<Instant>,
     /// Number of consecutive failures (resets to 0 on success).
     pub consecutive_failures: u32,
+    /// When the backend was first marked unhealthy (for auto-recovery).
+    pub unhealthy_since: Option<Instant>,
 }
 
 impl BackendHealth {
@@ -25,6 +31,7 @@ impl BackendHealth {
             last_check: Instant::now(),
             last_success: None,
             consecutive_failures: 0,
+            unhealthy_since: None,
         }
     }
 }
@@ -94,9 +101,50 @@ pub fn spawn_health_checker(
         loop {
             ticker.tick().await;
 
+            // Auto-recovery: if ALL backends are unhealthy for >MAX_UNHEALTHY_SECS,
+            // force-reset them all to healthy. This breaks the deadlock where memory
+            // pressure starves the health checker, keeping backends permanently down.
+            let all_unhealthy = backends.iter().all(|b| {
+                health_map.get(b.as_str()).map(|e| !e.is_healthy).unwrap_or(false)
+            });
+            if all_unhealthy {
+                let any_stale = backends.iter().any(|b| {
+                    health_map.get(b.as_str()).map(|e| {
+                        e.unhealthy_since
+                            .map(|t| t.elapsed() > Duration::from_secs(MAX_UNHEALTHY_SECS))
+                            .unwrap_or(false)
+                    }).unwrap_or(false)
+                });
+                if any_stale {
+                    warn!(
+                        "All backends unhealthy for >{MAX_UNHEALTHY_SECS}s — auto-resetting to healthy"
+                    );
+                    for backend in &backends {
+                        if let Some(mut entry) = health_map.get_mut(backend.as_str()) {
+                            entry.is_healthy = true;
+                            entry.consecutive_failures = 0;
+                            entry.unhealthy_since = None;
+                            info!(backend = backend.as_str(), "Auto-recovered backend to healthy");
+                        }
+                    }
+                }
+            }
+
+            // Probe all backends concurrently (one slow probe can't block others)
+            let mut probes = Vec::with_capacity(backends.len());
             for backend in &backends {
-                let healthy = probe_backend(backend, &config).await;
-                update_health(&health_map, backend, healthy, config.failure_threshold);
+                let b = backend.clone();
+                let cfg = config.clone();
+                probes.push(tokio::spawn(async move {
+                    let healthy = probe_backend(&b, &cfg).await;
+                    (b, healthy)
+                }));
+            }
+
+            for handle in probes {
+                if let Ok((backend, healthy)) = handle.await {
+                    update_health(&health_map, &backend, healthy, config.failure_threshold);
+                }
             }
         }
     })
@@ -213,6 +261,7 @@ fn update_health(
     if probe_ok {
         health.consecutive_failures = 0;
         health.last_success = Some(now);
+        health.unhealthy_since = None;
 
         if !was_healthy {
             health.is_healthy = true;
@@ -226,6 +275,7 @@ fn update_health(
 
         if was_healthy && health.consecutive_failures >= failure_threshold {
             health.is_healthy = false;
+            health.unhealthy_since = Some(now);
             error!(
                 backend,
                 consecutive_failures = health.consecutive_failures,

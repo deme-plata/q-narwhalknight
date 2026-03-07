@@ -181,7 +181,25 @@ impl UpstreamPool {
         self.metrics.upstream_released();
 
         match result {
-            Ok(Ok(resp)) => Ok((resp, backend_addr)),
+            Ok(Ok(resp)) => {
+                // Inline health recovery: if a request to this backend succeeded,
+                // mark it healthy immediately. This is critical for recovery when
+                // the health checker is starved by memory pressure — actual traffic
+                // proves the backend is alive.
+                if let Some(mut entry) = self.health_map.get_mut(backend_addr.as_str()) {
+                    if !entry.is_healthy {
+                        entry.is_healthy = true;
+                        entry.consecutive_failures = 0;
+                        entry.unhealthy_since = None;
+                        entry.last_success = Some(std::time::Instant::now());
+                        tracing::info!(
+                            backend = backend_addr.as_str(),
+                            "Backend auto-recovered via successful request (inline health)"
+                        );
+                    }
+                }
+                Ok((resp, backend_addr))
+            }
             Ok(Err(e)) => {
                 self.metrics.upstream_connect_fail();
                 Err(anyhow::anyhow!("Upstream error: {}", e))
