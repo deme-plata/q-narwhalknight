@@ -1,38 +1,39 @@
-//! HTTP/2 multiplexed proxy (Phase 3).
+//! HTTP/2 multiplexed proxy.
 //!
 //! Provides HTTP/2 frontend handling for browser clients. When ALPN negotiates
 //! "h2", connections are handled by this module instead of the HTTP/1.1 proxy.
 //!
 //! Architecture:
-//! - Frontend: HTTP/2 via `h2` crate (browser <-> q-flux)
+//! - Frontend: HTTP/2 via hyper (browser <-> q-flux)
 //! - Backend: HTTP/1.1 via hyper (q-flux <-> upstream) -- backend doesn't need H2
 //! - Multiplexing: multiple streams over one TLS connection
 //! - Flow control: per-stream and connection-level flow control
 //! - Server push: disabled (not useful for API/mining traffic)
-//!
-//! # Integration
-//!
-//! In the TLS acceptor, after ALPN negotiation:
-//! ```ignore
-//! match tls_stream.get_ref().1.alpn_protocol() {
-//!     Some(b"h2") => h2_proxy::handle_h2_connection(tls_stream, addr, upstream, metrics, body_limit, static_cfg).await,
-//!     _           => proxy::handle_connection(tls_stream, addr, upstream, metrics, body_limit, static_cfg).await,
-//! }
-//! ```
 
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Result;
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Either, Full};
 use hyper::body::Incoming;
+use hyper::service::service_fn;
+use hyper::{Request, Response};
+use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, info, warn};
 
+use crate::access_log::{AccessEntry, AccessLogger};
 use crate::config::StaticConfig;
 use crate::metrics::Metrics;
+use crate::static_serve;
 use crate::upstream::UpstreamPool;
+
+/// Global H2-specific metrics instance (module-level, shared across connections).
+static H2_METRICS: std::sync::LazyLock<H2Metrics> = std::sync::LazyLock::new(H2Metrics::new);
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -184,6 +185,12 @@ impl Default for H2Metrics {
     }
 }
 
+/// Export H2 metrics in Prometheus text format.
+/// Called by the admin server's /metrics endpoint.
+pub fn h2_prometheus_export() -> String {
+    H2_METRICS.prometheus_export()
+}
+
 // ---------------------------------------------------------------------------
 // Header conversion helpers
 // ---------------------------------------------------------------------------
@@ -273,188 +280,372 @@ pub fn http1_response_to_h2_headers(
 }
 
 // ---------------------------------------------------------------------------
+// Response body type
+// ---------------------------------------------------------------------------
+
+/// Response body for H2 handler: either a fully-buffered response (errors,
+/// static files) or a pass-through upstream body (zero-copy streaming for SSE).
+type H2Body = Either<Full<Bytes>, Incoming>;
+
+// ---------------------------------------------------------------------------
 // Main H2 connection handler
 // ---------------------------------------------------------------------------
 
 /// Handle an HTTP/2 connection accepted after ALPN negotiation.
 ///
-/// This function performs the HTTP/2 server handshake, then loops over
-/// incoming streams. Each stream is spawned as an independent task that:
-///   1. Reads the request headers and body from the H2 stream.
-///   2. Converts to an HTTP/1.1 request and forwards to the upstream pool.
-///   3. Sends the upstream response back over the H2 stream.
+/// Uses `hyper::server::conn::http2` to serve HTTP/2 on the TLS stream.
+/// Each H2 stream/request is handled concurrently by hyper's built-in
+/// multiplexing. Requests are forwarded to the upstream HTTP/1.1 pool.
 ///
-/// SSE (Server-Sent Events) responses are detected and streamed
-/// frame-by-frame without buffering, preserving real-time semantics.
-///
-/// The function returns when the client sends GOAWAY or the connection
-/// errors out.
+/// SSE responses are streamed via `Incoming` body pass-through (zero-copy).
 pub async fn handle_h2_connection<S>(
     io: S,
     client_addr: SocketAddr,
-    upstream: &UpstreamPool,
-    metrics: &Metrics,
+    upstream: Arc<UpstreamPool>,
+    metrics: Metrics,
     body_limit: usize,
-    _static_config: &StaticConfig,
+    static_config: Arc<StaticConfig>,
+    access_logger: Option<AccessLogger>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    // NOTE: The actual `h2` crate is not yet in our Cargo.toml dependencies.
-    // When the h2 dependency is added, this function body would use:
-    //
-    //   let mut connection = h2::server::handshake(io).await?;
-    //
-    // For now, we provide the complete logic as a reference implementation
-    // that compiles against our existing types. The h2-specific calls are
-    // behind illustrative comments showing exactly what API calls are needed.
-
+    let h2_metrics = &*H2_METRICS;
+    h2_metrics.h2_connection();
     info!(client = %client_addr, "H2 connection accepted");
-    metrics.conn_opened();
 
-    // --- H2 handshake (requires `h2` crate) ---
-    // let mut connection = match h2::server::Builder::new()
-    //     .max_concurrent_streams(config.max_concurrent_streams)
-    //     .initial_window_size(config.initial_window_size)
-    //     .max_frame_size(config.max_frame_size)
-    //     .max_header_list_size(config.max_header_list_size)
-    //     .enable_connect_protocol(config.enable_connect_protocol)
-    //     .handshake(io)
-    //     .await
-    // {
-    //     Ok(conn) => conn,
-    //     Err(e) => {
-    //         warn!(client = %client_addr, "H2 handshake failed: {}", e);
-    //         metrics.conn_closed();
-    //         return;
-    //     }
-    // };
+    let io = TokioIo::new(io);
 
-    // --- Stream accept loop ---
-    // while let Some(result) = connection.accept().await {
-    //     let (request, mut respond) = match result {
-    //         Ok(pair) => pair,
-    //         Err(e) => {
-    //             debug!(client = %client_addr, "H2 accept error: {}", e);
-    //             break;
-    //         }
-    //     };
-    //
-    //     metrics.request();
-    //     // h2_metrics.h2_stream_opened();
-    //
-    //     let upstream = upstream.clone_for_task();
-    //     let metrics = metrics.clone();
-    //     let addr = client_addr;
-    //
-    //     tokio::spawn(async move {
-    //         if let Err(e) = handle_h2_stream(request, respond, &upstream, &metrics, addr, body_limit).await {
-    //             debug!(client = %addr, "H2 stream error: {}", e);
-    //         }
-    //         // h2_metrics.h2_stream_closed();
-    //     });
-    // }
+    let service = service_fn(move |req: Request<Incoming>| {
+        let upstream = upstream.clone();
+        let metrics = metrics.clone();
+        let static_config = static_config.clone();
+        let access_logger = access_logger.clone();
 
-    // Placeholder: read until EOF so the connection type-checks.
-    // This will be replaced by the h2 accept loop above.
-    let mut io = io;
-    let mut discard = [0u8; 4096];
-    loop {
-        use tokio::io::AsyncReadExt;
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(300),
-            io.read(&mut discard),
-        )
-        .await
+        async move {
+            let resp = handle_h2_request(
+                req,
+                client_addr,
+                &upstream,
+                &metrics,
+                body_limit,
+                &static_config,
+                access_logger.as_ref(),
+            )
+            .await;
+            Ok::<_, Infallible>(resp)
+        }
+    });
+
+    let mut builder = hyper::server::conn::http2::Builder::new(
+        hyper_util::rt::TokioExecutor::new(),
+    );
+    builder
+        .max_concurrent_streams(256)
+        .initial_stream_window_size(2 * 1024 * 1024) // 2 MiB
+        .max_frame_size(16_384);               // 16 KiB
+
+    if let Err(e) = builder.serve_connection(io, service).await {
+        let msg = e.to_string();
+        if !msg.contains("connection closed")
+            && !msg.contains("broken pipe")
+            && !msg.contains("reset by peer")
+            && !msg.contains("stream error")
+            && !msg.contains("GOAWAY")
         {
-            Ok(Ok(0)) | Err(_) => break,
-            Ok(Ok(_n)) => {
-                // In the real implementation, the h2 crate handles framing.
-                // This placeholder just drains the socket.
-                metrics.request();
-            }
-            Ok(Err(e)) => {
-                debug!(client = %client_addr, "H2 placeholder read error: {}", e);
-                break;
-            }
+            debug!(client = %client_addr, "H2 connection error: {}", msg);
         }
     }
 
     debug!(client = %client_addr, "H2 connection closed");
-    metrics.conn_closed();
 }
 
 // ---------------------------------------------------------------------------
-// Individual H2 stream handler (reference implementation)
+// Per-request handler
 // ---------------------------------------------------------------------------
 
-/// Handle a single HTTP/2 stream: read request, forward to upstream, write
-/// response.
-///
-/// This is the per-stream logic spawned by `handle_h2_connection`. It:
-///   1. Collects the request body (up to `body_limit` bytes).
-///   2. Converts the H2 request to an HTTP/1.1 request.
-///   3. Forwards to the upstream pool.
-///   4. Detects SSE responses and streams them frame-by-frame.
-///   5. Sends the response body back over the H2 stream.
-///
-/// When the `h2` crate is added, the `send_stream` parameter would be
-/// `h2::server::SendResponse<bytes::Bytes>`.
-async fn _handle_h2_stream(
-    _h2_request: http::Request<()>,
-    _upstream: &UpstreamPool,
-    _metrics: &Metrics,
-    _client_addr: SocketAddr,
-    _body_limit: usize,
-    _body_bytes: Bytes,
-) -> Result<()> {
-    // 1. Convert H2 request to HTTP/1.1
-    // let upstream_req = h2_request_to_http1(&h2_request, body_bytes, client_addr)?;
+/// Handle a single HTTP/2 request: static files, CORS, or proxy to upstream.
+async fn handle_h2_request(
+    req: Request<Incoming>,
+    client_addr: SocketAddr,
+    upstream: &UpstreamPool,
+    metrics: &Metrics,
+    body_limit: usize,
+    static_config: &StaticConfig,
+    access_logger: Option<&AccessLogger>,
+) -> Response<H2Body> {
+    let req_start = Instant::now();
+    let h2_metrics = &*H2_METRICS;
+    h2_metrics.h2_stream_opened();
+    metrics.request();
 
-    // 2. Forward to upstream
-    // let resp = upstream.forward(upstream_req).await?;
-    // let (parts, body) = resp.into_parts();
-    // let status = parts.status.as_u16();
-    // metrics.response_status(status);
+    // Destructure request early so we own parts and body separately.
+    let (parts, body) = req.into_parts();
+    let req_path = parts.uri.path().to_string();
+    let req_method = parts.method.clone();
+    let user_agent = parts
+        .headers
+        .get(hyper::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
 
-    // 3. Build H2 response headers
-    // let h2_resp = http1_response_to_h2_headers(&parts)?;
+    // 1. Static file routing
+    if let static_serve::RouteResult::ServeFile(file_resp) =
+        static_serve::route(&req_path, static_config)
+    {
+        if req_method == hyper::Method::OPTIONS {
+            let resp = cors_preflight();
+            let latency = req_start.elapsed();
+            metrics.response_status(204);
+            metrics.record_latency(latency);
+            log_access(access_logger, client_addr, "OPTIONS", &req_path, 204, 0, 0, latency, user_agent.as_deref());
+            h2_metrics.h2_stream_closed();
+            return resp;
+        }
 
-    // 4. Detect streaming responses (SSE)
-    // let is_streaming = parts.headers.get("content-type")
-    //     .and_then(|v| v.to_str().ok())
-    //     .map(|v| v.contains("text/event-stream"))
-    //     .unwrap_or(false);
+        let resp = serve_static_h2(&file_resp, &req_method, &parts.headers, metrics).await;
+        let status = resp.status().as_u16();
+        let latency = req_start.elapsed();
+        metrics.response_status(status);
+        metrics.record_latency(latency);
+        log_access(access_logger, client_addr, req_method.as_str(), &req_path, status, 0, 0, latency, user_agent.as_deref());
+        h2_metrics.h2_stream_closed();
+        return resp;
+    }
 
-    // 5. Send response headers, then body
-    // let mut send_stream = respond.send_response(h2_resp, false)?;
-    //
-    // if is_streaming {
-    //     // Stream each frame individually for real-time SSE
-    //     let mut body = body;
-    //     loop {
-    //         match body.frame().await {
-    //             Some(Ok(frame)) => {
-    //                 if let Some(data) = frame.data_ref() {
-    //                     send_stream.send_data(data.clone(), false)?;
-    //                     metrics.bytes_tx(data.len() as u64);
-    //                 }
-    //             }
-    //             Some(Err(e)) => {
-    //                 debug!("H2 SSE body error: {}", e);
-    //                 break;
-    //             }
-    //             None => break,
-    //         }
-    //     }
-    //     send_stream.send_data(Bytes::new(), true)?; // END_STREAM
-    // } else {
-    //     // Buffered: collect full body and send
-    //     let body_bytes = body.collect().await?.to_bytes();
-    //     metrics.bytes_tx(body_bytes.len() as u64);
-    //     send_stream.send_data(body_bytes, true)?;
-    // }
+    // 2. CORS preflight
+    if req_method == hyper::Method::OPTIONS {
+        let resp = cors_preflight();
+        let latency = req_start.elapsed();
+        metrics.response_status(204);
+        metrics.record_latency(latency);
+        log_access(access_logger, client_addr, "OPTIONS", &req_path, 204, 0, 0, latency, user_agent.as_deref());
+        h2_metrics.h2_stream_closed();
+        return resp;
+    }
 
-    Ok(())
+    // 3. Collect request body (up to body_limit)
+    let body_bytes = match collect_body(body, body_limit).await {
+        Ok(b) => b,
+        Err(_) => {
+            let latency = req_start.elapsed();
+            metrics.response_status(413);
+            metrics.record_latency(latency);
+            log_access(access_logger, client_addr, req_method.as_str(), &req_path, 413, 0, 0, latency, user_agent.as_deref());
+            h2_metrics.h2_stream_closed();
+            return error_response(413, "Request body too large");
+        }
+    };
+
+    let content_length = body_bytes.len() as u64;
+    metrics.bytes_rx(content_length);
+
+    // 4. Build upstream request (HTTP/1.1 to backend)
+    let upstream_req = {
+        let mut builder = hyper::Request::builder()
+            .method(&req_method)
+            .uri(&req_path);
+        for (k, v) in &parts.headers {
+            let name = k.as_str();
+            match name {
+                "connection" | "transfer-encoding" | "keep-alive" | "proxy-connection" | "te" => {
+                    continue;
+                }
+                _ => {
+                    builder = builder.header(k, v);
+                }
+            }
+        }
+        builder = builder.header("x-forwarded-for", client_addr.ip().to_string());
+        builder = builder.header("x-real-ip", client_addr.ip().to_string());
+        builder = builder.header("x-forwarded-proto", "https");
+        builder.body(Full::new(body_bytes)).unwrap()
+    };
+
+    // 5. Forward to upstream
+    match upstream.forward(upstream_req).await {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let latency = req_start.elapsed();
+            metrics.response_status(status);
+            metrics.record_latency(latency);
+            log_access(access_logger, client_addr, req_method.as_str(), &req_path, status, content_length, 0, latency, user_agent.as_deref());
+            h2_metrics.h2_stream_closed();
+
+            // Pass upstream response through with Incoming body (zero-copy).
+            // hyper's HTTP/2 server handles framing + flow control automatically.
+            let (resp_parts, resp_body) = resp.into_parts();
+            let mut builder = Response::builder().status(resp_parts.status);
+            for (k, v) in &resp_parts.headers {
+                let name = k.as_str();
+                match name {
+                    "connection" | "transfer-encoding" | "keep-alive"
+                    | "proxy-connection" | "upgrade" => continue,
+                    _ => {
+                        builder = builder.header(k, v);
+                    }
+                }
+            }
+            builder
+                .body(Either::Right(resp_body))
+                .unwrap_or_else(|_| error_response(500, "Internal proxy error"))
+        }
+        Err(e) => {
+            warn!(client = %client_addr, "H2 upstream error: {}", e);
+            let latency = req_start.elapsed();
+            metrics.response_status(502);
+            metrics.record_latency(latency);
+            log_access(access_logger, client_addr, req_method.as_str(), &req_path, 502, content_length, 0, latency, user_agent.as_deref());
+            h2_metrics.h2_stream_closed();
+            error_response(502, "Bad Gateway")
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Collect request body up to `limit` bytes.
+async fn collect_body(body: Incoming, limit: usize) -> Result<Bytes> {
+    let collected = body
+        .collect()
+        .await
+        .map_err(|e| anyhow::anyhow!("Body read error: {}", e))?;
+    let bytes = collected.to_bytes();
+    if bytes.len() > limit {
+        anyhow::bail!("Body exceeds limit");
+    }
+    Ok(bytes)
+}
+
+/// Build an error response with a JSON body.
+fn error_response(status: u16, msg: &str) -> Response<H2Body> {
+    let body = format!("{{\"error\":\"{}\"}}", msg);
+    Response::builder()
+        .status(status)
+        .header("content-type", "application/json")
+        .body(Either::Left(Full::new(Bytes::from(body))))
+        .unwrap()
+}
+
+/// Build a 204 CORS preflight response.
+fn cors_preflight() -> Response<H2Body> {
+    Response::builder()
+        .status(204)
+        .header("access-control-allow-origin", "*")
+        .header("access-control-allow-methods", "GET, POST, PUT, DELETE, OPTIONS")
+        .header("access-control-allow-headers", "Content-Type, Authorization, X-Wallet-Address, X-Wallet-Signature, X-Wallet-Auth")
+        .header("content-length", "0")
+        .body(Either::Left(Full::new(Bytes::new())))
+        .unwrap()
+}
+
+/// Serve a static file as an H2 response.
+async fn serve_static_h2(
+    file_resp: &static_serve::FileResponse,
+    method: &hyper::Method,
+    req_headers: &hyper::HeaderMap,
+    metrics: &Metrics,
+) -> Response<H2Body> {
+    let metadata = match tokio::fs::metadata(&file_resp.path).await {
+        Ok(m) => m,
+        Err(_) => return error_response(404, "Not Found"),
+    };
+    let size = metadata.len();
+
+    // ETag
+    let etag = if let Ok(modified) = metadata.modified() {
+        let dur = modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        format!("\"{:x}-{:x}\"", size, dur.as_secs())
+    } else {
+        format!("\"{:x}\"", size)
+    };
+
+    // 304 Not Modified
+    if let Some(inm) = req_headers
+        .get("if-none-match")
+        .and_then(|v| v.to_str().ok())
+    {
+        if inm.trim() == etag || inm.contains(&etag) {
+            return Response::builder()
+                .status(304)
+                .header("etag", &etag)
+                .header("cache-control", file_resp.cache_control)
+                .body(Either::Left(Full::new(Bytes::new())))
+                .unwrap();
+        }
+    }
+
+    // HEAD
+    if *method == hyper::Method::HEAD {
+        let mut builder = Response::builder()
+            .status(200)
+            .header("content-type", file_resp.mime)
+            .header("content-length", size)
+            .header("cache-control", file_resp.cache_control)
+            .header("etag", &etag);
+        if file_resp.is_download {
+            let fname = file_resp.path.file_name().and_then(|n| n.to_str()).unwrap_or("download");
+            builder = builder.header("content-disposition", format!("attachment; filename=\"{}\"", fname));
+        }
+        return builder.body(Either::Left(Full::new(Bytes::new()))).unwrap();
+    }
+
+    // Read file
+    let body = match tokio::fs::read(&file_resp.path).await {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(path = %file_resp.path.display(), "Static file read error: {}", e);
+            return error_response(500, "Internal Server Error");
+        }
+    };
+    metrics.bytes_tx(body.len() as u64);
+
+    let mut builder = Response::builder()
+        .status(200)
+        .header("content-type", file_resp.mime)
+        .header("content-length", body.len())
+        .header("cache-control", file_resp.cache_control)
+        .header("etag", &etag);
+    if file_resp.is_download {
+        let fname = file_resp.path.file_name().and_then(|n| n.to_str()).unwrap_or("download");
+        builder = builder.header("content-disposition", format!("attachment; filename=\"{}\"", fname));
+    }
+    builder.body(Either::Left(Full::new(Bytes::from(body)))).unwrap()
+}
+
+/// Emit an access log entry if a logger is configured.
+#[inline]
+fn log_access(
+    logger: Option<&AccessLogger>,
+    client_addr: SocketAddr,
+    method: &str,
+    path: &str,
+    status: u16,
+    request_bytes: u64,
+    response_bytes: u64,
+    latency: std::time::Duration,
+    user_agent: Option<&str>,
+) {
+    if let Some(logger) = logger {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        logger.log(AccessEntry {
+            timestamp: format!("{}.{:03}", now.as_secs(), now.subsec_millis()),
+            client_addr,
+            method: method.to_string(),
+            path: path.to_string(),
+            status,
+            request_bytes,
+            response_bytes,
+            latency,
+            tls_version: None,
+            user_agent: user_agent.map(|s| s.to_string()),
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -617,7 +808,7 @@ mod tests {
 
     #[test]
     fn test_http1_response_to_h2_strips_connection_headers() {
-        let mut resp = http::Response::builder()
+        let resp = http::Response::builder()
             .status(200)
             .header("content-type", "text/event-stream")
             .header("connection", "keep-alive")

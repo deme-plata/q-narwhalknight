@@ -636,7 +636,7 @@ impl BandwidthLimiter {
         let elapsed_us = now_us.saturating_sub(last);
         if elapsed_us > 1000 {
             // Refill every 1ms minimum
-            let new_tokens = (elapsed_us * bucket.rate_bytes_per_sec) / 1_000_000;
+            let new_tokens = (elapsed_us as u128 * bucket.rate_bytes_per_sec as u128 / 1_000_000) as u64;
             if new_tokens > 0
                 && bucket
                     .last_refill_us

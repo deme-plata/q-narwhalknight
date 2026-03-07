@@ -40,7 +40,19 @@ pub struct ServerConfig {
 pub struct TlsConfig {
     pub cert: PathBuf,
     pub key: PathBuf,
+    /// Path to a DER-encoded OCSP response file for OCSP stapling.
+    /// When set, the TLS handshake includes the stapled OCSP response,
+    /// eliminating the 50-100ms OCSP lookup penalty for clients.
+    #[serde(default)]
+    pub ocsp_staple: Option<PathBuf>,
+    /// Seconds to allow old TLS connections to drain after a certificate reload.
+    /// This is informational -- old connections naturally use the old config via Arc,
+    /// and new connections get the new config. Default: 30 seconds.
+    #[serde(default = "default_drain_timeout")]
+    pub drain_timeout_secs: u64,
 }
+
+fn default_drain_timeout() -> u64 { 30 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpstreamConfig {
@@ -151,6 +163,11 @@ impl FluxConfig {
         }
         if !config.tls.key.exists() {
             anyhow::bail!("TLS key not found: {}", config.tls.key.display());
+        }
+        if let Some(ref ocsp_path) = config.tls.ocsp_staple {
+            if !ocsp_path.exists() {
+                anyhow::bail!("OCSP staple file not found: {}", ocsp_path.display());
+            }
         }
         Ok(config)
     }

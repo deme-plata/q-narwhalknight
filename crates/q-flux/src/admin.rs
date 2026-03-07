@@ -276,8 +276,19 @@ fn handle_metrics(state: &AdminState) -> Response<Full<Bytes>> {
         state.worker_count as u64,
     );
 
+    // -- TLS reload counter ---------------------------------------------------
+    prom_counter(
+        &mut buf,
+        "q_flux_tls_reloads_total",
+        "Total TLS certificate reloads since start",
+        state.shared_tls.reload_count(),
+    );
+
     // -- latency histogram (Issue #11) ----------------------------------------
     buf.push_str(&state.metrics.prometheus_export_histogram());
+
+    // -- HTTP/2 metrics (Issue #15) -------------------------------------------
+    buf.push_str(&crate::h2_proxy::h2_prometheus_export());
 
     Response::builder()
         .status(StatusCode::OK)
@@ -319,7 +330,8 @@ fn handle_status(state: &AdminState) -> Response<Full<Bytes>> {
             r#""active_websockets":{},"#,
             r#""websocket_upgrades":{},"#,
             r#""bytes_received":{},"#,
-            r#""bytes_sent":{}"#,
+            r#""bytes_sent":{},"#,
+            r#""tls_reload_count":{}"#,
             "}}",
         ),
         env!("CARGO_PKG_VERSION"),
@@ -341,6 +353,7 @@ fn handle_status(state: &AdminState) -> Response<Full<Bytes>> {
         snap.websocket_upgrades,
         snap.bytes_received,
         snap.bytes_sent,
+        state.shared_tls.reload_count(),
     );
 
     Response::builder()

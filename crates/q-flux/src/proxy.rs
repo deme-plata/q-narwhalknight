@@ -3,11 +3,13 @@ use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt};
 
 use crate::access_log::{AccessEntry, AccessLogger};
 use crate::config::StaticConfig;
+use crate::libp2p_aware::{self, PeerTracker};
 use crate::metrics::Metrics;
 use crate::simd_parse;
 use crate::static_serve;
@@ -25,10 +27,11 @@ pub async fn handle_connection<S>(
     metrics: &Metrics,
     body_limit: usize,
     static_config: &StaticConfig,
+    peer_tracker: &Arc<PeerTracker>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    handle_connection_inner(stream, client_addr, upstream, metrics, body_limit, static_config, None).await;
+    handle_connection_inner(stream, client_addr, upstream, metrics, body_limit, static_config, None, peer_tracker).await;
 }
 
 /// Handle a single HTTP connection with optional access logging.
@@ -40,10 +43,11 @@ pub async fn handle_connection_logged<S>(
     body_limit: usize,
     static_config: &StaticConfig,
     access_logger: &AccessLogger,
+    peer_tracker: &Arc<PeerTracker>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    handle_connection_inner(stream, client_addr, upstream, metrics, body_limit, static_config, Some(access_logger)).await;
+    handle_connection_inner(stream, client_addr, upstream, metrics, body_limit, static_config, Some(access_logger), peer_tracker).await;
 }
 
 async fn handle_connection_inner<S>(
@@ -54,6 +58,7 @@ async fn handle_connection_inner<S>(
     body_limit: usize,
     static_config: &StaticConfig,
     access_logger: Option<&AccessLogger>,
+    peer_tracker: &Arc<PeerTracker>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -133,7 +138,7 @@ async fn handle_connection_inner<S>(
                 .unwrap_or(false);
 
         if is_upgrade {
-            handle_websocket_upgrade(stream, header_end, &buf[..buf_len], client_addr, upstream, metrics).await;
+            handle_websocket_upgrade(stream, header_end, &buf[..buf_len], client_addr, upstream, metrics, peer_tracker).await;
             let latency = req_start.elapsed();
             metrics.record_latency(latency);
             log_access(access_logger, client_addr, &req_method, &req_path, 101, 0, 0, latency, user_agent.as_deref());
@@ -519,6 +524,9 @@ fn chrono_timestamp() -> String {
 
 /// Handle WebSocket upgrade: forward the raw upgrade request to upstream,
 /// then bidirectional splice both directions.
+///
+/// If the connection is a libp2p peer, check PeerTracker for connection
+/// limits and circuit breaker state before allowing the upgrade.
 async fn handle_websocket_upgrade<S>(
     mut client_stream: S,
     header_end: usize,
@@ -526,10 +534,39 @@ async fn handle_websocket_upgrade<S>(
     client_addr: SocketAddr,
     upstream: &UpstreamPool,
     metrics: &Metrics,
+    peer_tracker: &Arc<PeerTracker>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     metrics.ws_upgrade();
+
+    // Check for libp2p handshake in the bytes past the HTTP headers.
+    // If this is a libp2p connection, enforce per-peer connection limits.
+    let extra = &buf[header_end..];
+    let peer_key = if libp2p_aware::is_libp2p_handshake(extra) {
+        let info = libp2p_aware::LibP2pDetector::detect(extra);
+        let key = info
+            .as_ref()
+            .filter(|i| !i.peer_id.is_empty())
+            .map(|i| i.peer_id.clone())
+            .unwrap_or_else(|| format!("ip-{}", client_addr.ip()));
+
+        if !libp2p_aware::should_allow_peer(peer_tracker, &key) {
+            tracing::debug!(client = %client_addr, peer = %key, "libp2p peer denied by PeerTracker");
+            let _ = write_error_response(&mut client_stream, 503, "Service Unavailable").await;
+            metrics.ws_closed();
+            return;
+        }
+        Some(key)
+    } else {
+        None
+    };
+
+    // Track connection open for libp2p peers
+    if let Some(ref key) = peer_key {
+        let peer = peer_tracker.get_or_create(key);
+        peer.conn_opened();
+    }
 
     // Use round-robin backend selection (not hardcoded backend[0])
     let backend = upstream.next_backend_addr();
@@ -538,6 +575,10 @@ async fn handle_websocket_upgrade<S>(
         Err(e) => {
             tracing::warn!(client = %client_addr, "WS upstream connect failed: {}", e);
             let _ = write_error_response(&mut client_stream, 502, "Bad Gateway").await;
+            if let Some(ref key) = peer_key {
+                let peer = peer_tracker.get_or_create(key);
+                peer.conn_closed();
+            }
             metrics.ws_closed();
             return;
         }
@@ -564,6 +605,12 @@ async fn handle_websocket_upgrade<S>(
         r = u2c => {
             if let Ok(n) = r { metrics.bytes_tx(n); }
         }
+    }
+
+    // Track connection close for libp2p peers
+    if let Some(ref key) = peer_key {
+        let peer = peer_tracker.get_or_create(key);
+        peer.conn_closed();
     }
 
     metrics.ws_closed();

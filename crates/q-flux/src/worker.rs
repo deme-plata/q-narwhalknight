@@ -13,7 +13,7 @@ use crate::acceptor::SharedTlsConfig;
 use crate::config::FluxConfig;
 use crate::h2_proxy;
 use crate::health::HealthMap;
-use crate::libp2p_aware;
+use crate::libp2p_aware::PeerTracker;
 use crate::metrics::{Metrics, RateLimiter};
 use crate::proxy;
 use crate::upstream::UpstreamPool;
@@ -165,6 +165,32 @@ async fn worker_loop(
     // Now: one hyper Client per worker with pooled keepalive connections to upstream.
     let upstream = Arc::new(UpstreamPool::new(&config.upstream, metrics.clone(), health_map.clone()));
 
+    // PeerTracker: per-peer connection limits and circuit breakers for libp2p peers.
+    // Shared across all connections on this worker. Pre-seeded with known infrastructure.
+    let peer_tracker = Arc::new(PeerTracker::new(
+        vec![
+            "12D3KooWSBxw".to_string(),   // Beta bootstrap
+            "12D3KooWFfZK".to_string(),   // Gamma bootstrap
+            "12D3KooWPwin".to_string(),   // Alpha bootstrap
+            "12D3KooWLJJR".to_string(),   // Delta bootstrap
+        ],
+        vec![
+            "12D3KooWFpbX".to_string(),   // Epsilon 10Gbit supernode
+        ],
+    ));
+
+    // Periodic PeerTracker stale-peer cleanup (every 60s, evict idle >5min)
+    {
+        let tracker = peer_tracker.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                tracker.cleanup_stale(std::time::Duration::from_secs(300));
+            }
+        });
+    }
+
     // Spawn periodic IP tracker garbage collection to prevent unbounded DashMap growth.
     // With billions of miners cycling through, stale IPs must be evicted.
     let gc_ip_tracker = ip_tracker.clone();
@@ -189,6 +215,30 @@ async fn worker_loop(
             loop {
                 interval.tick().await;
                 rl.cleanup();
+            }
+        });
+    }
+
+    // Spawn TLS drain watcher: logs when a TLS reload occurs so operators
+    // can observe that old connections are draining to the previous config.
+    // This is informational only -- old connections naturally use their captured
+    // Arc<ServerConfig> and are not forcefully terminated.
+    {
+        let drain_tls = shared_tls.clone();
+        let drain_timeout = config.tls.drain_timeout_secs;
+        tokio::spawn(async move {
+            loop {
+                drain_tls.drain_notified().await;
+                let count = drain_tls.reload_count();
+                tracing::info!(
+                    worker = worker_id,
+                    reload_count = count,
+                    drain_timeout_secs = drain_timeout,
+                    "TLS config reloaded (reload #{}), new connections use updated certs. \
+                     Old connections drain naturally (timeout hint: {}s).",
+                    count,
+                    drain_timeout,
+                );
             }
         });
     }
@@ -264,6 +314,7 @@ async fn worker_loop(
         let ip_tracker = ip_tracker.clone();
         let active_conns = active_conns.clone();
         let upstream = upstream.clone();
+        let peer_tracker = peer_tracker.clone();
         let semaphore = handler_semaphore.clone();
         let static_config = static_config.clone();
         let access_logger = access_logger.clone();
@@ -301,8 +352,9 @@ async fn worker_loop(
 
                         if is_h2 {
                             h2_proxy::handle_h2_connection(
-                                tls_stream, client_addr, &*upstream, &metrics,
-                                body_limit, &static_config,
+                                tls_stream, client_addr, upstream.clone(),
+                                metrics.clone(), body_limit, static_config.clone(),
+                                access_logger.clone(),
                             ).await;
                         } else {
                             // HTTP/1.1 path — use logged variant if access logger configured
@@ -311,12 +363,14 @@ async fn worker_loop(
                                     proxy::handle_connection_logged(
                                         tls_stream, client_addr, &*upstream, &metrics,
                                         body_limit, &static_config, logger,
+                                        &peer_tracker,
                                     ).await;
                                 }
                                 None => {
                                     proxy::handle_connection(
                                         tls_stream, client_addr, &*upstream, &metrics,
                                         body_limit, &static_config,
+                                        &peer_tracker,
                                     ).await;
                                 }
                             }
