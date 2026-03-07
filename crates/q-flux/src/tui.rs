@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -19,8 +20,8 @@ const TICK: Duration = Duration::from_millis(500);
 
 pub struct TuiApp {
     metrics: Metrics,
-    rate_history: Vec<u64>,
-    conn_history: Vec<u64>,
+    rate_history: VecDeque<u64>,
+    conn_history: VecDeque<u64>,
     prev_requests: u64,
     prev_bytes_rx: u64,
     prev_bytes_tx: u64,
@@ -38,8 +39,8 @@ impl TuiApp {
     pub fn new(metrics: Metrics, worker_count: usize) -> Self {
         Self {
             metrics,
-            rate_history: Vec::with_capacity(SPARKLINE_LEN),
-            conn_history: Vec::with_capacity(SPARKLINE_LEN),
+            rate_history: VecDeque::with_capacity(SPARKLINE_LEN),
+            conn_history: VecDeque::with_capacity(SPARKLINE_LEN),
             prev_requests: 0,
             prev_bytes_rx: 0,
             prev_bytes_tx: 0,
@@ -356,7 +357,12 @@ impl TuiApp {
     }
 
     fn draw_rate_chart(&self, f: &mut Frame, area: Rect) {
-        let data: &[u64] = if self.rate_history.is_empty() { &[0] } else { &self.rate_history };
+        let data_vec: Vec<u64> = if self.rate_history.is_empty() {
+            vec![0]
+        } else {
+            self.rate_history.iter().copied().collect()
+        };
+        let data: &[u64] = &data_vec;
 
         let min_r = data.iter().copied().min().unwrap_or(0);
         let max_r = data.iter().copied().max().unwrap_or(0);
@@ -394,7 +400,12 @@ impl TuiApp {
     }
 
     fn draw_conn_chart(&self, f: &mut Frame, area: Rect) {
-        let data: &[u64] = if self.conn_history.is_empty() { &[0] } else { &self.conn_history };
+        let data_vec: Vec<u64> = if self.conn_history.is_empty() {
+            vec![0]
+        } else {
+            self.conn_history.iter().copied().collect()
+        };
+        let data: &[u64] = &data_vec;
 
         let snap = self.metrics.snapshot();
         let min_c = data.iter().copied().min().unwrap_or(0);
@@ -478,10 +489,10 @@ fn rate_to_color(rate: f64) -> Color {
     else { Color::DarkGray }
 }
 
-fn push_bounded(buf: &mut Vec<u64>, val: u64, max: usize) {
-    buf.push(val);
+fn push_bounded(buf: &mut VecDeque<u64>, val: u64, max: usize) {
+    buf.push_back(val);
     if buf.len() > max {
-        buf.remove(0);
+        buf.pop_front();
     }
 }
 

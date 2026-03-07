@@ -77,7 +77,7 @@ async fn handle_connection_inner<S>(
 
         // Static file routing: check before proxying
         let req_path = req.uri().path().to_string();
-        let req_method = req.method().as_str().to_string();
+        let req_method = req.method().as_str();
         let user_agent = req.headers().get(hyper::header::USER_AGENT)
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
