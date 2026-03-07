@@ -60,6 +60,8 @@
 pub mod slot;
 pub mod ring;
 pub mod notify;
+pub mod persistent;
 
 pub use ring::{SpscQueue, MpscQueue};
 pub use notify::Notifier;
+pub use persistent::PersistentQueue;
