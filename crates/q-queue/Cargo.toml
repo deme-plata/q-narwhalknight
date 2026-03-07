@@ -6,6 +6,7 @@ description = "High-performance lock-free queue — sub-microsecond IPC, million
 license.workspace = true
 
 [dependencies]
+crc32fast = "1"
 crossbeam-utils = "0.8"
 tracing = "0.1"
 

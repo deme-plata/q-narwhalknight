@@ -13,20 +13,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// CRC32 checksum for data integrity.
+/// CRC32 checksum for data integrity (hardware-accelerated via crc32fast).
 fn crc32(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
-    for &byte in data {
-        crc ^= byte as u32;
-        for _ in 0..8 {
-            if crc & 1 == 1 {
-                crc = (crc >> 1) ^ 0x82F6_3B78;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-    !crc
+    crc32fast::hash(data)
 }
 
 /// On-disk message header (16 bytes).
