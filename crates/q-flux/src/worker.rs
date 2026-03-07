@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use dashmap::DashMap;
 use rustls::ServerConfig;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
 use tokio_rustls::TlsAcceptor;
 use tokio::io::AsyncWriteExt;
 
@@ -20,10 +21,16 @@ pub type IpConnTracker = Arc<DashMap<std::net::IpAddr, u64>>;
 /// Total active connections (shared).
 pub type ActiveConnCount = Arc<AtomicU64>;
 
+/// Max concurrent connection handlers per worker.
+/// 48 workers × 1024 = 49,152 total concurrent handlers max.
+/// Prevents OOM under load (each handler holds upstream conn + buffers).
+const MAX_HANDLERS_PER_WORKER: usize = 1024;
+
 /// Spawn worker threads. Each worker:
 /// - Has its own TcpListener (SO_REUSEPORT gives it a fair share of connections)
 /// - Has its own upstream connection pool (no cross-thread contention)
 /// - Runs on a dedicated tokio single-threaded runtime pinned to a core
+/// - Has a semaphore limiting concurrent connection handlers (prevents OOM)
 pub fn spawn_workers(
     config: &FluxConfig,
     tls_config: Arc<ServerConfig>,
@@ -86,6 +93,10 @@ async fn worker_loop(
 ) {
     let tls_acceptor = TlsAcceptor::from(tls_config);
 
+    // Backpressure: limit concurrent connection handlers to prevent OOM.
+    // If all permits taken, accept() still runs but spawn waits for a permit.
+    let handler_semaphore = Arc::new(Semaphore::new(MAX_HANDLERS_PER_WORKER));
+
     // Create listeners — each worker binds to the same ports via SO_REUSEPORT
     let mut listeners: Vec<TcpListener> = Vec::new();
     for addr in &config.server.listen {
@@ -119,7 +130,6 @@ async fn worker_loop(
 
     // Accept loop
     loop {
-        // Accept from the first ready listener using tokio::select!
         let accept_result = accept_any(&listeners).await;
         let (tcp_stream, client_addr) = match accept_result {
             Ok(v) => v,
@@ -136,15 +146,17 @@ async fn worker_loop(
             continue;
         }
 
-        // Per-IP limit
+        // Per-IP limit — FIX: do NOT increment before checking the limit
         let client_ip = client_addr.ip();
         {
             let mut count = ip_tracker.entry(client_ip).or_insert(0);
             if *count >= max_per_ip {
                 metrics.rate_limited();
-                tracing::debug!(worker = worker_id, ip = %client_ip, "Per-IP limit exceeded");
+                tracing::debug!(worker = worker_id, ip = %client_ip, "Per-IP limit exceeded ({}/{})", *count, max_per_ip);
+                drop(count); // Release entry lock before dropping stream
                 drop(tcp_stream);
                 continue;
+                // count was NOT incremented, so no decrement needed
             }
             *count += 1;
         }
@@ -161,8 +173,21 @@ async fn worker_loop(
         let ip_tracker = ip_tracker.clone();
         let active_conns = active_conns.clone();
         let upstream_config = upstream_config.clone();
+        let semaphore = handler_semaphore.clone();
 
         tokio::spawn(async move {
+            // Acquire semaphore permit — backpressure if too many concurrent handlers.
+            // try_acquire: if no permits, drop connection immediately with 503.
+            let _permit = match semaphore.try_acquire() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    tracing::warn!(client = %client_addr, "Worker at capacity, dropping connection");
+                    // Still need to clean up IP tracker and active count
+                    cleanup_conn(&ip_tracker, client_ip, &active_conns, &metrics);
+                    return;
+                }
+            };
+
             let upstream = UpstreamPool::new(&upstream_config, metrics.clone());
 
             if is_tls {
@@ -188,34 +213,69 @@ async fn worker_loop(
                     }
                 }
             } else {
-                // Plain HTTP — redirect to HTTPS
+                // Plain HTTP — read first line to get Host header, then redirect
+                let mut tcp_stream = tcp_stream;
+                let mut peek_buf = [0u8; 1024];
+                let host = match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    tokio::io::AsyncReadExt::read(&mut tcp_stream, &mut peek_buf),
+                ).await {
+                    Ok(Ok(n)) if n > 0 => {
+                        extract_host_header(&peek_buf[..n])
+                            .unwrap_or_else(|| client_addr.ip().to_string())
+                    }
+                    _ => client_addr.ip().to_string(),
+                };
+
                 let redirect = format!(
                     "HTTP/1.1 301 Moved Permanently\r\nlocation: https://{}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
-                    client_addr.ip()
+                    host
                 );
-                let mut tcp_stream = tcp_stream;
                 let _ = tcp_stream.write_all(redirect.as_bytes()).await;
             }
 
-            // Cleanup
-            {
-                let mut count = ip_tracker.entry(client_ip).or_insert(0);
-                if *count > 0 {
-                    *count -= 1;
-                }
-                if *count == 0 {
-                    drop(count);
-                    ip_tracker.remove(&client_ip);
-                }
-            }
-            active_conns.fetch_sub(1, Ordering::Relaxed);
-            metrics.conn_closed();
+            // Cleanup — semaphore permit auto-drops when _permit goes out of scope
+            cleanup_conn(&ip_tracker, client_ip, &active_conns, &metrics);
         });
     }
 }
 
+/// Decrement IP counter and global active count on connection close.
+fn cleanup_conn(
+    ip_tracker: &IpConnTracker,
+    client_ip: std::net::IpAddr,
+    active_conns: &ActiveConnCount,
+    metrics: &Metrics,
+) {
+    {
+        let mut count = ip_tracker.entry(client_ip).or_insert(0);
+        if *count > 0 {
+            *count -= 1;
+        }
+        if *count == 0 {
+            drop(count);
+            ip_tracker.remove(&client_ip);
+        }
+    }
+    active_conns.fetch_sub(1, Ordering::Relaxed);
+    metrics.conn_closed();
+}
+
+/// Extract Host header value from raw HTTP request bytes.
+fn extract_host_header(data: &[u8]) -> Option<String> {
+    let mut headers = [httparse::EMPTY_HEADER; 32];
+    let mut req = httparse::Request::new(&mut headers);
+    if req.parse(data).is_ok() {
+        for h in req.headers.iter() {
+            if h.name.eq_ignore_ascii_case("host") {
+                return std::str::from_utf8(h.value).ok().map(|s| s.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Accept a connection from any of the provided listeners.
-/// Uses a macro-based approach to avoid the Unpin problem with async borrows.
 async fn accept_any(listeners: &[TcpListener]) -> std::io::Result<(TcpStream, SocketAddr)> {
     match listeners.len() {
         0 => Err(std::io::Error::new(std::io::ErrorKind::Other, "No listeners")),
@@ -234,7 +294,6 @@ async fn accept_any(listeners: &[TcpListener]) -> std::io::Result<(TcpStream, So
             }
         }
         _ => {
-            // For 4+ listeners, just use the first two (rare case)
             tokio::select! {
                 r = listeners[0].accept() => r,
                 r = listeners[1].accept() => r,

@@ -9,6 +9,8 @@ use crate::metrics::Metrics;
 use crate::upstream::UpstreamPool;
 
 const MAX_HEADER_SIZE: usize = 8192;
+/// Client-side read timeout — prevents slowloris attacks.
+const CLIENT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Handle a single HTTP connection (potentially multiple requests via keepalive).
 pub async fn handle_connection<S>(
@@ -25,7 +27,7 @@ pub async fn handle_connection<S>(
 
     // HTTP/1.1 keepalive loop — handle multiple requests per connection
     loop {
-        // Read headers
+        // Read headers (with timeout to prevent slowloris)
         let (req, header_end) = match read_request_headers(&mut stream, &mut buf, &mut buf_len).await {
             Ok(Some(v)) => v,
             Ok(None) => break, // Clean close
@@ -44,8 +46,7 @@ pub async fn handle_connection<S>(
             .unwrap_or(false);
 
         if is_upgrade {
-            // WebSocket: forward the upgrade request, then splice
-            handle_websocket_upgrade(stream, req, header_end, &buf[..buf_len], client_addr, upstream, metrics).await;
+            handle_websocket_upgrade(stream, header_end, &buf[..buf_len], client_addr, upstream, metrics).await;
             return; // Connection consumed by WebSocket
         }
 
@@ -66,22 +67,26 @@ pub async fn handle_connection<S>(
             let already_read = buf_len.saturating_sub(header_end);
             let mut body_buf = Vec::with_capacity(content_length);
 
-            // Copy any body bytes already in our header buffer
             let to_copy = already_read.min(content_length);
             body_buf.extend_from_slice(&buf[header_end..header_end + to_copy]);
 
-            // Read remaining body
+            // Read remaining body with timeout
             while body_buf.len() < content_length {
                 let remaining = content_length - body_buf.len();
                 let mut chunk = vec![0u8; remaining.min(65536)];
-                match stream.read(&mut chunk).await {
-                    Ok(0) => break,
-                    Ok(n) => {
+                match tokio::time::timeout(CLIENT_READ_TIMEOUT, stream.read(&mut chunk)).await {
+                    Ok(Ok(0)) => break,
+                    Ok(Ok(n)) => {
                         metrics.bytes_rx(n as u64);
                         body_buf.extend_from_slice(&chunk[..n]);
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         tracing::debug!(client = %client_addr, "Body read error: {}", e);
+                        return;
+                    }
+                    Err(_) => {
+                        tracing::debug!(client = %client_addr, "Body read timeout");
+                        let _ = write_error_response(&mut stream, 408, "Request timeout").await;
                         return;
                     }
                 }
@@ -99,13 +104,11 @@ pub async fn handle_connection<S>(
             for (k, v) in req.headers() {
                 builder = builder.header(k, v);
             }
-            // Add X-Forwarded-For
             builder = builder.header("X-Forwarded-For", client_addr.ip().to_string());
             builder = builder.header("X-Real-IP", client_addr.ip().to_string());
             builder.body(Full::new(body)).unwrap()
         };
 
-        // Forward to upstream
         let keep_alive = should_keep_alive(&req);
 
         match upstream.forward(upstream_req).await {
@@ -113,7 +116,6 @@ pub async fn handle_connection<S>(
                 let status = resp.status().as_u16();
                 metrics.response_status(status);
 
-                // Write response back to client
                 if let Err(e) = write_response(&mut stream, resp, metrics).await {
                     tracing::debug!(client = %client_addr, "Response write error: {}", e);
                     break;
@@ -132,9 +134,8 @@ pub async fn handle_connection<S>(
             break;
         }
 
-        // Reset buffer for next request
-        // Move any leftover bytes (past header+body) to front
-        let consumed = header_end + content_length;
+        // Reset buffer for next request — safe arithmetic
+        let consumed = header_end.saturating_add(content_length);
         if consumed < buf_len {
             let remaining = buf_len - consumed;
             buf.copy_within(consumed..buf_len, 0);
@@ -145,8 +146,7 @@ pub async fn handle_connection<S>(
     }
 }
 
-/// Read request headers from the stream into the buffer.
-/// Returns the parsed request and the byte offset where headers end.
+/// Read request headers from the stream with timeout protection.
 async fn read_request_headers<S>(
     stream: &mut S,
     buf: &mut Vec<u8>,
@@ -156,13 +156,11 @@ where
     S: AsyncRead + Unpin,
 {
     loop {
-        // Try to parse what we have
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut parsed_req = httparse::Request::new(&mut headers);
 
         match parsed_req.parse(&buf[..*buf_len]) {
             Ok(httparse::Status::Complete(header_end)) => {
-                // Build hyper Request from parsed headers
                 let method = parsed_req.method.unwrap_or("GET");
                 let path = parsed_req.path.unwrap_or("/");
 
@@ -175,16 +173,13 @@ where
                     builder = builder.header(h.name, h.value);
                 }
 
-                // Detect Host header to reconstruct full URI if needed
                 let req = builder.body(())
                     .map_err(|e| anyhow::anyhow!("Failed to build request: {}", e))?;
 
                 return Ok(Some((req, header_end)));
             }
             Ok(httparse::Status::Partial) => {
-                // Need more data
                 if *buf_len >= buf.len() {
-                    // Headers too large
                     return Err(anyhow::anyhow!("Request headers exceed {}B limit", buf.len()));
                 }
             }
@@ -193,30 +188,38 @@ where
             }
         }
 
-        // Read more data
-        let n = stream.read(&mut buf[*buf_len..]).await?;
-        if n == 0 {
-            if *buf_len == 0 {
-                return Ok(None); // Clean EOF
+        // Read more data with timeout (prevents slowloris)
+        match tokio::time::timeout(CLIENT_READ_TIMEOUT, stream.read(&mut buf[*buf_len..])).await {
+            Ok(Ok(0)) => {
+                if *buf_len == 0 {
+                    return Ok(None); // Clean EOF
+                }
+                return Err(anyhow::anyhow!("Connection closed mid-headers"));
             }
-            return Err(anyhow::anyhow!("Connection closed mid-headers"));
+            Ok(Ok(n)) => {
+                *buf_len += n;
+            }
+            Ok(Err(e)) => {
+                return Err(anyhow::anyhow!("Read error: {}", e));
+            }
+            Err(_) => {
+                return Err(anyhow::anyhow!("Header read timeout (slowloris protection)"));
+            }
         }
-        *buf_len += n;
     }
 }
 
 fn should_keep_alive(req: &hyper::Request<()>) -> bool {
-    // HTTP/1.1 defaults to keepalive; HTTP/1.0 requires explicit
     if let Some(conn) = req.headers().get(hyper::header::CONNECTION) {
         if let Ok(s) = conn.to_str() {
             return !s.eq_ignore_ascii_case("close");
         }
     }
-    // Default: keepalive for 1.1, close for 1.0
     req.version() != hyper::Version::HTTP_10
 }
 
-/// Write an HTTP response from Incoming body back to the client.
+/// Write an HTTP response back to the client.
+/// Detects SSE/streaming responses and streams them without buffering.
 async fn write_response<S>(
     stream: &mut S,
     resp: hyper::Response<Incoming>,
@@ -227,7 +230,91 @@ where
 {
     let (parts, body) = resp.into_parts();
 
-    // Write status line
+    // Detect streaming responses: SSE or chunked transfer
+    let is_streaming = parts.headers.get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("text/event-stream") || v.contains("application/x-ndjson"))
+        .unwrap_or(false)
+        || parts.headers.get(hyper::header::TRANSFER_ENCODING)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.contains("chunked"))
+            .unwrap_or(false);
+
+    if is_streaming {
+        // STREAMING MODE: write headers immediately, then forward chunks as they arrive.
+        // Critical for SSE — miners need real-time block/balance updates.
+        write_response_headers_streaming(stream, &parts).await?;
+
+        let mut body = body;
+        loop {
+            match body.frame().await {
+                Some(Ok(frame)) => {
+                    if let Some(data) = frame.data_ref() {
+                        stream.write_all(data).await?;
+                        stream.flush().await?; // Flush each SSE event immediately
+                        metrics.bytes_tx(data.len() as u64);
+                    }
+                }
+                Some(Err(e)) => {
+                    tracing::debug!("Streaming body error: {}", e);
+                    break;
+                }
+                None => break, // Stream ended
+            }
+        }
+    } else {
+        // BUFFERED MODE: collect full body, set Content-Length, send.
+        let body_bytes = body.collect().await
+            .map_err(|e| anyhow::anyhow!("Body collect error: {}", e))?
+            .to_bytes();
+
+        // Write status line
+        let status_line = format!(
+            "HTTP/1.1 {} {}\r\n",
+            parts.status.as_u16(),
+            parts.status.canonical_reason().unwrap_or("OK")
+        );
+        stream.write_all(status_line.as_bytes()).await?;
+
+        // Write headers
+        let mut wrote_content_length = false;
+        for (key, value) in &parts.headers {
+            if key == hyper::header::TRANSFER_ENCODING || key == "keep-alive" {
+                continue;
+            }
+            if key == hyper::header::CONTENT_LENGTH {
+                wrote_content_length = true;
+            }
+            let header_line = format!("{}: {}\r\n", key, value.to_str().unwrap_or(""));
+            stream.write_all(header_line.as_bytes()).await?;
+        }
+
+        if !wrote_content_length {
+            let cl = format!("content-length: {}\r\n", body_bytes.len());
+            stream.write_all(cl.as_bytes()).await?;
+        }
+
+        stream.write_all(b"\r\n").await?;
+
+        if !body_bytes.is_empty() {
+            stream.write_all(&body_bytes).await?;
+            metrics.bytes_tx(body_bytes.len() as u64);
+        }
+
+        stream.flush().await?;
+    }
+
+    Ok(())
+}
+
+/// Write response headers for a streaming response (no Content-Length).
+async fn write_response_headers_streaming<S>(
+    stream: &mut S,
+    parts: &http::response::Parts,
+) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
     let status_line = format!(
         "HTTP/1.1 {} {}\r\n",
         parts.status.as_u16(),
@@ -235,39 +322,19 @@ where
     );
     stream.write_all(status_line.as_bytes()).await?;
 
-    // Collect body to know content-length (for non-streaming responses)
-    let body_bytes = body.collect().await
-        .map_err(|e| anyhow::anyhow!("Body collect error: {}", e))?
-        .to_bytes();
-
-    // Write headers
-    let mut wrote_content_length = false;
     for (key, value) in &parts.headers {
-        // Skip hop-by-hop
-        if key == hyper::header::TRANSFER_ENCODING || key == "keep-alive" {
+        // Skip content-length for streaming (we don't know the total size)
+        if key == hyper::header::CONTENT_LENGTH {
             continue;
         }
-        if key == hyper::header::CONTENT_LENGTH {
-            wrote_content_length = true;
+        if key == "keep-alive" {
+            continue;
         }
         let header_line = format!("{}: {}\r\n", key, value.to_str().unwrap_or(""));
         stream.write_all(header_line.as_bytes()).await?;
     }
 
-    if !wrote_content_length {
-        let cl = format!("content-length: {}\r\n", body_bytes.len());
-        stream.write_all(cl.as_bytes()).await?;
-    }
-
-    // End headers
     stream.write_all(b"\r\n").await?;
-
-    // Write body
-    if !body_bytes.is_empty() {
-        stream.write_all(&body_bytes).await?;
-        metrics.bytes_tx(body_bytes.len() as u64);
-    }
-
     stream.flush().await?;
     Ok(())
 }
@@ -276,7 +343,9 @@ async fn write_error_response<S>(stream: &mut S, status: u16, msg: &str) -> Resu
 where
     S: AsyncWrite + Unpin,
 {
-    let body = format!("{{\"error\":\"{}\"}}", msg);
+    // Escape message for JSON safety
+    let escaped_msg = msg.replace('\\', "\\\\").replace('"', "\\\"");
+    let body = format!("{{\"error\":\"{}\"}}", escaped_msg);
     let response = format!(
         "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
         status,
@@ -292,6 +361,7 @@ where
 fn reason_phrase(status: u16) -> &'static str {
     match status {
         400 => "Bad Request",
+        408 => "Request Timeout",
         413 => "Payload Too Large",
         429 => "Too Many Requests",
         502 => "Bad Gateway",
@@ -300,11 +370,10 @@ fn reason_phrase(status: u16) -> &'static str {
     }
 }
 
-/// Handle WebSocket upgrade: forward the upgrade request to upstream,
-/// then splice both directions.
+/// Handle WebSocket upgrade: forward the raw upgrade request to upstream,
+/// then bidirectional splice both directions.
 async fn handle_websocket_upgrade<S>(
     mut client_stream: S,
-    _req: hyper::Request<()>,
     header_end: usize,
     buf: &[u8],
     client_addr: SocketAddr,
@@ -315,8 +384,8 @@ async fn handle_websocket_upgrade<S>(
 {
     metrics.ws_upgrade();
 
-    // Connect raw TCP to upstream for WebSocket
-    let backend = &upstream.backends[0]; // TODO: round-robin
+    // Use round-robin backend selection (not hardcoded backend[0])
+    let backend = upstream.next_backend_addr();
     let upstream_conn = match tokio::net::TcpStream::connect(backend).await {
         Ok(c) => c,
         Err(e) => {
@@ -331,7 +400,6 @@ async fn handle_websocket_upgrade<S>(
 
     // Forward the raw HTTP upgrade request bytes to upstream
     upstream_write.write_all(&buf[..header_end]).await.ok();
-    // Forward any remaining bytes past headers
     if buf.len() > header_end {
         upstream_write.write_all(&buf[header_end..]).await.ok();
     }

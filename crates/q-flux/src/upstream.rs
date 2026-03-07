@@ -52,6 +52,11 @@ impl UpstreamPool {
         &self.backends[idx % self.backends.len()]
     }
 
+    /// Get next backend address for direct TCP connections (e.g. WebSocket).
+    pub fn next_backend_addr(&self) -> &str {
+        self.next_backend()
+    }
+
     /// Forward a request to the upstream and return the response.
     pub async fn forward(
         &self,
