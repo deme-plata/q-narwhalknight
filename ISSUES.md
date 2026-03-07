@@ -7,7 +7,7 @@ Issues are assigned to Claude Code agents. Pick an unassigned issue, create a fe
 ## Issue #1: `q-queue` — High-Performance Universal Queue System
 
 **Priority**: High
-**Status**: Phase 1 DONE (SPSC + MPSC ring buffers, 11 tests passing)
+**Status**: Phase 1+2 DONE (SPSC + MPSC ring buffers, persistent WAL with CRC32, 19 tests passing, 1,065 LOC)
 **Assignee**: Server Beta
 **Branch**: `feature/q-queue`
 **Crate**: `crates/q-queue/`
@@ -247,7 +247,7 @@ Replace tokio I/O in q-flux with raw io_uring event loops and add SIMD HTTP head
 ## Issue #3: `q-flux` Phase 3 — HTTP/2, HTTP/3 (QUIC), kTLS
 
 **Priority**: Medium
-**Status**: Open — scaffold modules created (h2_proxy.rs, quic_proxy.rs)
+**Status**: PARTIAL — HTTP/2 DONE (hyper-based, 878 LOC, 24 tests); QUIC scaffolded behind `quic` feature flag; kTLS deferred
 **Assignee**: Server Beta
 **Branch**: `feature/q-flux-phase3`
 
@@ -264,7 +264,7 @@ Add protocol expansion to q-flux:
 ## Issue #4: `q-flux` Phase 4 — libp2p Compatibility Booster
 
 **Priority**: Low
-**Status**: Open — scaffold module created (libp2p_aware.rs)
+**Status**: DONE — PeerTracker wired into WebSocket upgrade path with libp2p handshake detection, peer scoring, circuit breakers, bandwidth limits (1,186 LOC, 52 tests)
 **Assignee**: Server Beta
 **Branch**: `feature/q-flux-phase4`
 
@@ -701,7 +701,7 @@ Add structured access logging in JSON format for production observability. Each 
 ## Issue #14: `q-flux` — OCSP Stapling
 
 **Priority**: Low
-**Status**: Open
+**Status**: DONE — `with_single_cert_with_ocsp()` in acceptor.rs, `ocsp_staple` config field, DER file validation at startup
 **Assignee**: Server Beta
 **Branch**: `feature/q-flux-ocsp`
 **Crate**: `crates/q-flux/`
@@ -728,7 +728,7 @@ Implement OCSP stapling to avoid clients making separate OCSP lookups during TLS
 ## Issue #15: `q-flux` — HTTP/2 Upstream Multiplexing
 
 **Priority**: Medium
-**Status**: Open — scaffold in `h2_proxy.rs`
+**Status**: DONE — hyper-based HTTP/2 server via `service_fn`, ALPN dispatch, H2Metrics, static file routing, Prometheus export (878 LOC, 24 tests)
 **Assignee**: Server Beta
 **Branch**: `feature/q-flux-h2`
 **Crate**: `crates/q-flux/`
@@ -783,7 +783,7 @@ Add QUIC/HTTP/3 support via the `quinn` crate. QUIC eliminates TCP head-of-line 
 ## Issue #17: `q-flux` — Prometheus Grafana Dashboard Template
 
 **Priority**: Low
-**Status**: Open
+**Status**: DONE — `crates/q-flux/grafana/q-flux-dashboard.json` (691 lines, 9 panel sections)
 **Assignee**: Server Beta
 **Branch**: `feature/q-flux-grafana`
 
@@ -807,7 +807,7 @@ Create a Grafana dashboard JSON template that visualizes all q-flux Prometheus m
 ## Issue #18: `q-flux` — Connection Draining During TLS Reload
 
 **Priority**: Medium
-**Status**: Open
+**Status**: DONE — SharedTlsConfig with drain_notify (tokio::sync::Notify), reload_count (AtomicU64), `drain_timeout_secs` config field, worker drain watcher task
 **Assignee**: Server Beta
 **Branch**: `feature/q-flux-tls-drain`
 **Crate**: `crates/q-flux/`
@@ -856,7 +856,7 @@ Add distributed queue mode to q-queue for cross-node message passing. Uses TCP (
 ## Issue #20: `q-flux` — Per-Peer Bandwidth Enforcement
 
 **Priority**: Medium
-**Status**: Open — scaffold in `libp2p_aware.rs`
+**Status**: DONE — PeerTracker with DashMap per-peer state, TokenBucket per-tier bandwidth limits, BandwidthLimiter enforcing Bootstrap/Validator/Miner/Light tiers, wired into WebSocket upgrade path
 **Assignee**: Server Beta
 **Branch**: `feature/q-flux-peer-bw`
 **Crate**: `crates/q-flux/`

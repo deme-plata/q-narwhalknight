@@ -22,6 +22,7 @@ pub struct AccessEntry {
     pub latency: Duration,
     pub tls_version: Option<String>,
     pub user_agent: Option<String>,
+    pub upstream_backend: Option<String>,
 }
 
 impl AccessEntry {
@@ -35,12 +36,16 @@ impl AccessEntry {
         out.push_str("\",\"method\":\"");
         out.push_str(&self.method);
         out.push_str("\",\"path\":\"");
-        // Escape quotes in path
+        // Escape quotes and control characters in path
         for c in self.path.chars() {
             match c {
                 '"' => out.push_str("\\\""),
                 '\\' => out.push_str("\\\\"),
-                _ => out.push(c),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                c if c.is_control() => { /* skip control chars */ }
+                c => out.push(c),
             }
         }
         out.push_str("\",\"status\":");
@@ -62,9 +67,18 @@ impl AccessEntry {
                 match c {
                     '"' => out.push_str("\\\""),
                     '\\' => out.push_str("\\\\"),
-                    _ => out.push(c),
+                    '\n' => out.push_str("\\n"),
+                    '\r' => out.push_str("\\r"),
+                    '\t' => out.push_str("\\t"),
+                    c if c.is_control() => { /* skip control chars */ }
+                    c => out.push(c),
                 }
             }
+            out.push('"');
+        }
+        if let Some(ref backend) = self.upstream_backend {
+            out.push_str(",\"upstream\":\"");
+            out.push_str(backend);
             out.push('"');
         }
         out.push('}');
@@ -138,6 +152,48 @@ impl Clone for AccessLogger {
     }
 }
 
+/// Epoch-millisecond timestamp without external dependencies.
+fn epoch_timestamp() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}.{:03}", now.as_secs(), now.subsec_millis())
+}
+
+/// Emit an access log entry if a logger is configured.
+///
+/// Shared by both the HTTP/1.1 and HTTP/2 proxy paths.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn log_access(
+    logger: Option<&AccessLogger>,
+    client_addr: SocketAddr,
+    method: &str,
+    path: &str,
+    status: u16,
+    request_bytes: u64,
+    response_bytes: u64,
+    latency: Duration,
+    user_agent: Option<&str>,
+    upstream_backend: Option<&str>,
+) {
+    if let Some(logger) = logger {
+        logger.log(AccessEntry {
+            timestamp: epoch_timestamp(),
+            client_addr,
+            method: method.to_string(),
+            path: path.to_string(),
+            status,
+            request_bytes,
+            response_bytes,
+            latency,
+            tls_version: None,
+            user_agent: user_agent.map(|s| s.to_string()),
+            upstream_backend: upstream_backend.map(|s| s.to_string()),
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,6 +212,7 @@ mod tests {
             latency: Duration::from_micros(4200),
             tls_version: Some("TLS1.3".to_string()),
             user_agent: Some("q-miner/9.2.4".to_string()),
+            upstream_backend: Some("127.0.0.1:8080".to_string()),
         };
 
         let json = entry.to_json();
@@ -167,6 +224,7 @@ mod tests {
         assert!(json.contains("\"latency_ms\":4.20"));
         assert!(json.contains("\"tls\":\"TLS1.3\""));
         assert!(json.contains("\"ua\":\"q-miner/9.2.4\""));
+        assert!(json.contains("\"upstream\":\"127.0.0.1:8080\""));
     }
 
     #[test]
@@ -175,16 +233,28 @@ mod tests {
             timestamp: "2026-01-01T00:00:00Z".to_string(),
             client_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234),
             method: "GET".to_string(),
-            path: "/path?q=\"test\"".to_string(),
+            path: "/path?q=\"test\"\nnewline\ttab".to_string(),
             status: 200,
             request_bytes: 0,
             response_bytes: 0,
             latency: Duration::from_millis(1),
             tls_version: None,
-            user_agent: None,
+            user_agent: Some("agent\r\ninjection".to_string()),
+            upstream_backend: None,
         };
 
         let json = entry.to_json();
+        // Quotes escaped
         assert!(json.contains("\\\"test\\\""));
+        // Newline escaped in path
+        assert!(json.contains("\\n"));
+        // Tab escaped in path
+        assert!(json.contains("\\t"));
+        // Carriage return escaped in user_agent
+        assert!(json.contains("\\r"));
+        // No raw control characters in output
+        assert!(!json.contains('\n'));
+        assert!(!json.contains('\r'));
+        assert!(!json.contains('\t'));
     }
 }

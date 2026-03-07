@@ -92,12 +92,14 @@ impl UpstreamPool {
         self.next_backend()
     }
 
-    /// Forward a request to the upstream and return the response.
+    /// Forward a request to the upstream and return the response along with
+    /// the backend address that served it (for access logging).
     pub async fn forward(
         &self,
         mut req: hyper::Request<Full<Bytes>>,
-    ) -> Result<hyper::Response<Incoming>> {
+    ) -> Result<(hyper::Response<Incoming>, String)> {
         let backend = self.next_backend();
+        let backend_addr = backend.to_string();
 
         // Rewrite the URI to point at the backend
         let path_and_query = req.uri().path_and_query()
@@ -121,7 +123,7 @@ impl UpstreamPool {
         self.metrics.upstream_released();
 
         match result {
-            Ok(Ok(resp)) => Ok(resp),
+            Ok(Ok(resp)) => Ok((resp, backend_addr)),
             Ok(Err(e)) => {
                 self.metrics.upstream_connect_fail();
                 Err(anyhow::anyhow!("Upstream error: {}", e))

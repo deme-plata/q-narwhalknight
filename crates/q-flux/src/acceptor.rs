@@ -79,6 +79,7 @@ impl SharedTlsConfig {
     /// Callers can `notified().await` in a select! to log when a reload occurs.
     /// Old connections are NOT forcefully closed -- they naturally drain as the old
     /// `Arc<ServerConfig>` reference count drops to zero.
+    #[allow(dead_code)] // Public API for future worker drain integration
     pub fn subscribe_drain(&self) -> Arc<tokio::sync::Notify> {
         Arc::clone(&self.inner.drain_notify)
     }

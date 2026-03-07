@@ -331,7 +331,10 @@ fn handle_status(state: &AdminState) -> Response<Full<Bytes>> {
             r#""websocket_upgrades":{},"#,
             r#""bytes_received":{},"#,
             r#""bytes_sent":{},"#,
-            r#""tls_reload_count":{}"#,
+            r#""tls_reload_count":{},"#,
+            r#""h2_connections":{},"#,
+            r#""h2_streams_opened":{},"#,
+            r#""h2_streams_closed":{}"#,
             "}}",
         ),
         env!("CARGO_PKG_VERSION"),
@@ -354,6 +357,9 @@ fn handle_status(state: &AdminState) -> Response<Full<Bytes>> {
         snap.bytes_received,
         snap.bytes_sent,
         state.shared_tls.reload_count(),
+        crate::h2_proxy::H2_METRICS.connections.load(std::sync::atomic::Ordering::Relaxed),
+        crate::h2_proxy::H2_METRICS.streams_opened.load(std::sync::atomic::Ordering::Relaxed),
+        crate::h2_proxy::H2_METRICS.streams_closed.load(std::sync::atomic::Ordering::Relaxed),
     );
 
     Response::builder()

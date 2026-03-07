@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt};
 
-use crate::access_log::{AccessEntry, AccessLogger};
+use crate::access_log::{AccessLogger, log_access};
 use crate::config::StaticConfig;
 use crate::libp2p_aware::{self, PeerTracker};
 use crate::metrics::Metrics;
@@ -35,6 +35,7 @@ pub async fn handle_connection<S>(
 }
 
 /// Handle a single HTTP connection with optional access logging.
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_connection_logged<S>(
     stream: S,
     client_addr: SocketAddr,
@@ -50,6 +51,7 @@ pub async fn handle_connection_logged<S>(
     handle_connection_inner(stream, client_addr, upstream, metrics, body_limit, static_config, Some(access_logger), peer_tracker).await;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_connection_inner<S>(
     mut stream: S,
     client_addr: SocketAddr,
@@ -98,7 +100,7 @@ async fn handle_connection_inner<S>(
                 let _ = stream.flush().await;
                 status = 204;
             } else {
-                if let Err(e) = static_serve::serve_file(&mut stream, &file_resp, &req_method, if_none_match.as_deref(), metrics).await {
+                if let Err(e) = static_serve::serve_file(&mut stream, &file_resp, req_method, if_none_match.as_deref(), metrics).await {
                     tracing::debug!(client = %client_addr, "Static serve error: {}", e);
                     break;
                 }
@@ -107,7 +109,7 @@ async fn handle_connection_inner<S>(
             let latency = req_start.elapsed();
             metrics.response_status(status);
             metrics.record_latency(latency);
-            log_access(access_logger, client_addr, &req_method, &req_path, status, 0, 0, latency, user_agent.as_deref());
+            log_access(access_logger, client_addr, req_method, &req_path, status, 0, 0, latency, user_agent.as_deref(), None);
             if !should_keep_alive(&req) { break; }
             let consumed = header_end;
             if consumed < buf_len { buf.copy_within(consumed..buf_len, 0); buf_len -= consumed; } else { buf_len = 0; }
@@ -122,7 +124,7 @@ async fn handle_connection_inner<S>(
             let latency = req_start.elapsed();
             metrics.response_status(204);
             metrics.record_latency(latency);
-            log_access(access_logger, client_addr, &req_method, &req_path, 204, 0, 0, latency, user_agent.as_deref());
+            log_access(access_logger, client_addr, req_method, &req_path, 204, 0, 0, latency, user_agent.as_deref(), None);
             if !should_keep_alive(&req) { break; }
             buf_len = 0;
             continue;
@@ -141,7 +143,7 @@ async fn handle_connection_inner<S>(
             handle_websocket_upgrade(stream, header_end, &buf[..buf_len], client_addr, upstream, metrics, peer_tracker).await;
             let latency = req_start.elapsed();
             metrics.record_latency(latency);
-            log_access(access_logger, client_addr, &req_method, &req_path, 101, 0, 0, latency, user_agent.as_deref());
+            log_access(access_logger, client_addr, req_method, &req_path, 101, 0, 0, latency, user_agent.as_deref(), None);
             return; // Connection consumed by WebSocket
         }
 
@@ -155,7 +157,7 @@ async fn handle_connection_inner<S>(
         if content_length > body_limit {
             let latency = req_start.elapsed();
             metrics.record_latency(latency);
-            log_access(access_logger, client_addr, &req_method, &req_path, 413, 0, 0, latency, user_agent.as_deref());
+            log_access(access_logger, client_addr, req_method, &req_path, 413, 0, 0, latency, user_agent.as_deref(), None);
             let _ = write_error_response(&mut stream, 413, "Request body too large").await;
             break;
         }
@@ -210,12 +212,12 @@ async fn handle_connection_inner<S>(
         let keep_alive = should_keep_alive(&req);
 
         match upstream.forward(upstream_req).await {
-            Ok(resp) => {
+            Ok((resp, backend_addr)) => {
                 let status = resp.status().as_u16();
                 let latency = req_start.elapsed();
                 metrics.response_status(status);
                 metrics.record_latency(latency);
-                log_access(access_logger, client_addr, &req_method, &req_path, status, content_length as u64, 0, latency, user_agent.as_deref());
+                log_access(access_logger, client_addr, req_method, &req_path, status, content_length as u64, 0, latency, user_agent.as_deref(), Some(&backend_addr));
 
                 if let Err(e) = write_response(&mut stream, resp, metrics).await {
                     tracing::debug!(client = %client_addr, "Response write error: {}", e);
@@ -227,7 +229,7 @@ async fn handle_connection_inner<S>(
                 tracing::warn!(client = %client_addr, "Upstream error: {}", e);
                 metrics.response_status(502);
                 metrics.record_latency(latency);
-                log_access(access_logger, client_addr, &req_method, &req_path, 502, content_length as u64, 0, latency, user_agent.as_deref());
+                log_access(access_logger, client_addr, req_method, &req_path, 502, content_length as u64, 0, latency, user_agent.as_deref(), None);
                 if write_error_response(&mut stream, 502, "Bad Gateway").await.is_err() {
                     break;
                 }
@@ -257,7 +259,7 @@ async fn handle_connection_inner<S>(
 /// this saves ~2 cycles/byte on the boundary detection.
 async fn read_request_headers<S>(
     stream: &mut S,
-    buf: &mut Vec<u8>,
+    buf: &mut [u8],
     buf_len: &mut usize,
 ) -> Result<Option<(hyper::Request<()>, usize)>>
 where
@@ -381,13 +383,15 @@ where
             .map_err(|e| anyhow::anyhow!("Body collect error: {}", e))?
             .to_bytes();
 
+        // Pre-allocate response buffer to reduce per-header allocations
+        let mut resp_buf = Vec::with_capacity(512);
+        use std::io::Write as IoWrite;
+
         // Write status line
-        let status_line = format!(
-            "HTTP/1.1 {} {}\r\n",
+        write!(resp_buf, "HTTP/1.1 {} {}\r\n",
             parts.status.as_u16(),
             parts.status.canonical_reason().unwrap_or("OK")
-        );
-        stream.write_all(status_line.as_bytes()).await?;
+        ).ok();
 
         // Write headers
         let mut wrote_content_length = false;
@@ -398,16 +402,15 @@ where
             if key == hyper::header::CONTENT_LENGTH {
                 wrote_content_length = true;
             }
-            let header_line = format!("{}: {}\r\n", key, value.to_str().unwrap_or(""));
-            stream.write_all(header_line.as_bytes()).await?;
+            write!(resp_buf, "{}: {}\r\n", key, value.to_str().unwrap_or("")).ok();
         }
 
         if !wrote_content_length {
-            let cl = format!("content-length: {}\r\n", body_bytes.len());
-            stream.write_all(cl.as_bytes()).await?;
+            write!(resp_buf, "content-length: {}\r\n", body_bytes.len()).ok();
         }
+        resp_buf.extend_from_slice(b"\r\n");
 
-        stream.write_all(b"\r\n").await?;
+        stream.write_all(&resp_buf).await?;
 
         if !body_bytes.is_empty() {
             stream.write_all(&body_bytes).await?;
@@ -428,12 +431,14 @@ async fn write_response_headers_streaming<S>(
 where
     S: AsyncWrite + Unpin,
 {
-    let status_line = format!(
-        "HTTP/1.1 {} {}\r\n",
+    // Pre-allocate header buffer to reduce per-header allocations
+    let mut resp_buf = Vec::with_capacity(512);
+    use std::io::Write as IoWrite;
+
+    write!(resp_buf, "HTTP/1.1 {} {}\r\n",
         parts.status.as_u16(),
         parts.status.canonical_reason().unwrap_or("OK")
-    );
-    stream.write_all(status_line.as_bytes()).await?;
+    ).ok();
 
     for (key, value) in &parts.headers {
         // Skip content-length for streaming (we don't know the total size)
@@ -443,11 +448,12 @@ where
         if key == "keep-alive" {
             continue;
         }
-        let header_line = format!("{}: {}\r\n", key, value.to_str().unwrap_or(""));
-        stream.write_all(header_line.as_bytes()).await?;
+        write!(resp_buf, "{}: {}\r\n", key, value.to_str().unwrap_or("")).ok();
     }
 
-    stream.write_all(b"\r\n").await?;
+    resp_buf.extend_from_slice(b"\r\n");
+
+    stream.write_all(&resp_buf).await?;
     stream.flush().await?;
     Ok(())
 }
@@ -483,44 +489,7 @@ fn reason_phrase(status: u16) -> &'static str {
     }
 }
 
-/// Emit an access log entry if a logger is configured.
-#[inline]
-fn log_access(
-    logger: Option<&AccessLogger>,
-    client_addr: SocketAddr,
-    method: &str,
-    path: &str,
-    status: u16,
-    request_bytes: u64,
-    response_bytes: u64,
-    latency: std::time::Duration,
-    user_agent: Option<&str>,
-) {
-    if let Some(logger) = logger {
-        logger.log(AccessEntry {
-            timestamp: chrono_timestamp(),
-            client_addr,
-            method: method.to_string(),
-            path: path.to_string(),
-            status,
-            request_bytes,
-            response_bytes,
-            latency,
-            tls_version: None,
-            user_agent: user_agent.map(|s| s.to_string()),
-        });
-    }
-}
-
-/// RFC 3339 timestamp without pulling in chrono.
-fn chrono_timestamp() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = now.as_secs();
-    // Simple epoch-seconds timestamp (ISO format would need a full date library)
-    format!("{}.{:03}", secs, now.subsec_millis())
-}
+// log_access is imported from access_log module (shared with h2_proxy)
 
 /// Handle WebSocket upgrade: forward the raw upgrade request to upstream,
 /// then bidirectional splice both directions.

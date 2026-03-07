@@ -20,10 +20,10 @@
 compile_error!("io_uring_loop is only available on Linux — gate this module with #[cfg(target_os = \"linux\")]");
 
 use std::collections::VecDeque;
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::io::RawFd;
 
 use anyhow::{Context, Result, bail};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -884,10 +884,7 @@ pub fn probe_io_uring_features() -> IoUringFeatures {
     }
 
     // Try SQPOLL
-    match io_uring::IoUring::<io_uring::squeue::Entry>::builder().setup_sqpoll(1000).build(8) {
-        Ok(_) => features.sqpoll = true,
-        Err(_) => {}
-    }
+    if io_uring::IoUring::<io_uring::squeue::Entry>::builder().setup_sqpoll(1000).build(8).is_ok() { features.sqpoll = true }
 
     // Multishot accept and provided buffers are detected via the probe
     // mechanism, which we've already attempted above.

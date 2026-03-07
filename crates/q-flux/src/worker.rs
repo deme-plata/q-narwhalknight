@@ -8,6 +8,8 @@ use tokio::sync::{broadcast, Semaphore};
 use tokio_rustls::TlsAcceptor;
 use tokio::io::AsyncWriteExt;
 
+use futures::future::select_all;
+
 use crate::access_log::AccessLogger;
 use crate::acceptor::SharedTlsConfig;
 use crate::config::FluxConfig;
@@ -43,6 +45,7 @@ const RATE_LIMITER_GC_INTERVAL_SECS: u64 = 300;
 /// - Has its own upstream connection pool (no cross-thread contention)
 /// - Runs on a dedicated tokio single-threaded runtime pinned to a core
 /// - Has a semaphore limiting concurrent connection handlers (prevents OOM)
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_workers(
     config: &FluxConfig,
     shared_tls: SharedTlsConfig,
@@ -110,6 +113,7 @@ pub fn spawn_workers(
     handles
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn worker_loop(
     worker_id: usize,
     config: &FluxConfig,
@@ -361,14 +365,14 @@ async fn worker_loop(
                             match access_logger {
                                 Some(ref logger) => {
                                     proxy::handle_connection_logged(
-                                        tls_stream, client_addr, &*upstream, &metrics,
+                                        tls_stream, client_addr, &upstream, &metrics,
                                         body_limit, &static_config, logger,
                                         &peer_tracker,
                                     ).await;
                                 }
                                 None => {
                                     proxy::handle_connection(
-                                        tls_stream, client_addr, &*upstream, &metrics,
+                                        tls_stream, client_addr, &upstream, &metrics,
                                         body_limit, &static_config,
                                         &peer_tracker,
                                     ).await;
@@ -429,20 +433,23 @@ async fn worker_loop(
 }
 
 /// Decrement IP counter and global active count on connection close.
+///
+/// Uses the DashMap entry API to atomically decrement-and-remove.
+/// The `entry()` call holds the shard lock for the entire scope,
+/// preventing the TOCTOU race where another thread could insert a
+/// new entry between `drop(count)` and `remove(&client_ip)`.
 fn cleanup_conn(
     ip_tracker: &IpConnTracker,
     client_ip: std::net::IpAddr,
     active_conns: &ActiveConnCount,
     metrics: &Metrics,
 ) {
-    {
-        let mut count = ip_tracker.entry(client_ip).or_insert(0);
-        if *count > 0 {
+    if let dashmap::mapref::entry::Entry::Occupied(mut entry) = ip_tracker.entry(client_ip) {
+        let count = entry.get_mut();
+        if *count > 1 {
             *count -= 1;
-        }
-        if *count == 0 {
-            drop(count);
-            ip_tracker.remove(&client_ip);
+        } else {
+            entry.remove();
         }
     }
     active_conns.fetch_sub(1, Ordering::Relaxed);
@@ -464,35 +471,15 @@ fn extract_host_header(data: &[u8]) -> Option<String> {
 }
 
 /// Accept a connection from any of the provided listeners.
-/// Uses select! for low listener counts (common case: 2 = port 443 + 80).
-/// For 4+ listeners, uses a FuturesUnordered approach.
+/// Uses `select_all` to race all listeners concurrently, supporting any count.
 async fn accept_any(listeners: &[TcpListener]) -> std::io::Result<(TcpStream, SocketAddr)> {
-    match listeners.len() {
-        0 => Err(std::io::Error::new(std::io::ErrorKind::Other, "No listeners")),
-        1 => listeners[0].accept().await,
-        2 => {
-            tokio::select! {
-                r = listeners[0].accept() => r,
-                r = listeners[1].accept() => r,
-            }
-        }
-        3 => {
-            tokio::select! {
-                r = listeners[0].accept() => r,
-                r = listeners[1].accept() => r,
-                r = listeners[2].accept() => r,
-            }
-        }
-        _ => {
-            // 4+ listeners: poll all of them
-            tokio::select! {
-                r = listeners[0].accept() => r,
-                r = listeners[1].accept() => r,
-                r = listeners[2].accept() => r,
-                r = listeners[3].accept() => r,
-            }
-        }
+    if listeners.is_empty() {
+        return Err(std::io::Error::other("No listeners"));
     }
+    // Build a vec of pinned accept futures — one per listener.
+    let futs: Vec<_> = listeners.iter().map(|l| Box::pin(l.accept())).collect();
+    let (result, _index, _remaining) = select_all(futs).await;
+    result
 }
 
 /// Pin thread to a specific CPU core.

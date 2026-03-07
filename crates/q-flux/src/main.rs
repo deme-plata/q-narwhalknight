@@ -19,11 +19,16 @@ mod tui;
 
 // Phase 2+ modules (compiled but wired in incrementally)
 #[cfg(target_os = "linux")]
+#[allow(dead_code)]
 mod io_uring_loop;
+#[allow(dead_code)]
 mod simd_parse;
+#[allow(dead_code)]
 mod h2_proxy;
 #[cfg(feature = "quic")]
+#[allow(dead_code)]
 mod quic_proxy;
+#[allow(dead_code)]
 mod libp2p_aware;
 
 #[derive(Parser)]
@@ -51,6 +56,13 @@ struct Cli {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Install rustls crypto provider before any TLS operations.
+    // The workspace has both ring and aws-lc-rs as transitive deps,
+    // so we must explicitly select one.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls CryptoProvider");
+
     let cli = Cli::parse();
 
     // Load config

@@ -30,6 +30,7 @@ fn bench_access_entry_json(c: &mut Criterion) {
             latency: Duration::from_micros(4200),
             tls_version: Some("TLS1.3".to_string()),
             user_agent: Some("q-miner/9.1.9 (Linux x86_64)".to_string()),
+            upstream_backend: Some("127.0.0.1:8080".to_string()),
         };
         b.iter(|| entry.to_json());
     });
@@ -50,6 +51,7 @@ fn bench_access_entry_json(c: &mut Criterion) {
             latency: Duration::from_micros(50),
             tls_version: None,
             user_agent: None,
+            upstream_backend: None,
         };
         b.iter(|| entry.to_json());
     });
@@ -70,6 +72,7 @@ fn bench_access_entry_json(c: &mut Criterion) {
             latency: Duration::from_millis(15),
             tls_version: Some("TLS1.2".to_string()),
             user_agent: Some("Mozilla/5.0 \"quoted\" agent".to_string()),
+            upstream_backend: None,
         };
         b.iter(|| entry.to_json());
     });
@@ -91,6 +94,7 @@ fn bench_access_entry_json(c: &mut Criterion) {
             latency: Duration::from_millis(3),
             tls_version: Some("TLS1.3".to_string()),
             user_agent: Some("q-node/9.1.9".to_string()),
+            upstream_backend: Some("10.0.0.1:8080".to_string()),
         };
         b.iter(|| {
             for _ in 0..1000 {

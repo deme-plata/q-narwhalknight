@@ -13,6 +13,12 @@ pub struct Notifier {
     parked: AtomicBool,
 }
 
+impl Default for Notifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Notifier {
     /// Create a notifier for the current thread (call from consumer thread).
     pub fn new() -> Self {

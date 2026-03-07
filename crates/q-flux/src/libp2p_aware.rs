@@ -121,12 +121,11 @@ impl LibP2pDetector {
         }
 
         // Find the offset
-        let header_offset = if first_bytes.len() >= MULTISTREAM_DETECT_LEN
+        let header_offset = if (first_bytes.len() >= MULTISTREAM_DETECT_LEN
             && first_bytes[0] == 0x14
-            && &first_bytes[1..MULTISTREAM_DETECT_LEN] == MULTISTREAM_PREFIX
+            && &first_bytes[1..MULTISTREAM_DETECT_LEN] == MULTISTREAM_PREFIX)
+            || first_bytes.starts_with(MULTISTREAM_PREFIX)
         {
-            0
-        } else if first_bytes.starts_with(MULTISTREAM_PREFIX) {
             0
         } else {
             let search_len = first_bytes.len().min(128);
@@ -731,7 +730,7 @@ impl GossipsubDedup {
     /// `num_bits` is rounded up to the next multiple of 64. For 10K messages,
     /// 65536 bits (8KB) gives ~0.8% false positive rate with k=3.
     pub fn new(num_bits: usize, max_entries: u64) -> Self {
-        let num_words = (num_bits + 63) / 64;
+        let num_words = num_bits.div_ceil(64);
         let actual_bits = num_words * 64;
         Self {
             bits: (0..num_words).map(|_| AtomicU64::new(0)).collect(),

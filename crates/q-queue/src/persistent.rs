@@ -43,7 +43,7 @@ impl Segment {
     pub fn create(dir: &Path, base_sequence: u64, capacity: usize) -> io::Result<Self> {
         let filename = format!("segment-{:016x}.qlog", base_sequence);
         let path = dir.join(filename);
-        let file = OpenOptions::new().create(true).write(true).read(true).open(&path)?;
+        let file = OpenOptions::new().create(true).truncate(false).write(true).read(true).open(&path)?;
         file.set_len(capacity as u64)?;
         Ok(Self { path, file, write_pos: 0, capacity, _base_sequence: base_sequence, _message_count: 0 })
     }
@@ -87,7 +87,7 @@ impl SegmentReader {
         Ok(Self { data, read_pos: 0, len })
     }
 
-    pub fn next(&mut self) -> Option<(u64, Vec<u8>)> {
+    pub fn next_entry(&mut self) -> Option<(u64, Vec<u8>)> {
         if self.read_pos + HEADER_SIZE > self.len { return None; }
         let header: MessageHeader = unsafe {
             std::ptr::read_unaligned(self.data[self.read_pos..].as_ptr() as *const MessageHeader)
@@ -128,12 +128,11 @@ impl PersistentQueue {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
-                if name.starts_with("segment-") && name.ends_with(".qlog") {
-                    if u64::from_str_radix(&name["segment-".len()..name.len() - ".qlog".len()], 16).is_ok() {
+                if name.starts_with("segment-") && name.ends_with(".qlog")
+                    && u64::from_str_radix(&name["segment-".len()..name.len() - ".qlog".len()], 16).is_ok() {
                         let mut reader = SegmentReader::open(&entry.path())?;
-                        while let Some((s, _)) = reader.next() { max_seq = max_seq.max(s + 1); }
+                        while let Some((s, _)) = reader.next_entry() { max_seq = max_seq.max(s + 1); }
                     }
-                }
             }
         }
         Ok(Self { dir, active_segment: None, segment_size, next_sequence: AtomicU64::new(max_seq) })
@@ -176,7 +175,7 @@ impl PersistentQueue {
             if u64::from_str_radix(&name["segment-".len()..name.len() - ".qlog".len()], 16).is_ok() {
                 let mut reader = SegmentReader::open(&path)?;
                 let mut max_in_seg = 0u64;
-                while let Some((s, _)) = reader.next() { max_in_seg = s; }
+                while let Some((s, _)) = reader.next_entry() { max_in_seg = s; }
                 if max_in_seg < below_sequence { fs::remove_file(&path)?; deleted += 1; }
             }
         }
@@ -216,13 +215,13 @@ mod tests {
         seg.sync().unwrap();
         let path = dir.join("segment-0000000000000000.qlog");
         let mut reader = SegmentReader::open(&path).unwrap();
-        let (seq, data) = reader.next().unwrap();
+        let (seq, data) = reader.next_entry().unwrap();
         assert_eq!(seq, 0); assert_eq!(data, b"message one");
-        let (seq, data) = reader.next().unwrap();
+        let (seq, data) = reader.next_entry().unwrap();
         assert_eq!(seq, 1); assert_eq!(data, b"message two");
-        let (seq, data) = reader.next().unwrap();
+        let (seq, data) = reader.next_entry().unwrap();
         assert_eq!(seq, 2); assert_eq!(data, b"message three");
-        assert!(reader.next().is_none());
+        assert!(reader.next_entry().is_none());
         fs::remove_dir_all(&dir).unwrap();
     }
 

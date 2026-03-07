@@ -189,7 +189,7 @@ unsafe fn find_header_value_avx2(buf: &[u8], name: &[u8]) -> Option<(usize, usiz
     // We scan for '\n' bytes (which precede each header line after the first).
     // The first header line is the request line, so we skip it.
     let lf = _mm256_set1_epi8(b'\n' as i8);
-    let to_lower_mask = _mm256_set1_epi8(0x20);
+    let _to_lower_mask = _mm256_set1_epi8(0x20);
     let ptr = buf.as_ptr();
 
     // Find the first '\n' to skip the request line
@@ -338,7 +338,7 @@ fn find_header_end_scalar_from(buf: &[u8], start: usize) -> Option<usize> {
 
     // We can start searching from `start`, but need to back up slightly
     // because the \r\n\r\n sequence might straddle the SIMD/scalar boundary.
-    let search_start = if start >= 3 { start - 3 } else { 0 };
+    let search_start = start.saturating_sub(3);
 
     for i in search_start..len.saturating_sub(3) {
         if buf[i] == b'\r' && buf[i + 1] == b'\n' && buf[i + 2] == b'\r' && buf[i + 3] == b'\n' {
@@ -349,6 +349,7 @@ fn find_header_end_scalar_from(buf: &[u8], start: usize) -> Option<usize> {
 }
 
 /// Scalar implementation of find_header_value.
+#[allow(clippy::needless_range_loop, clippy::mut_range_bound)]
 fn find_header_value_scalar(buf: &[u8], name: &[u8]) -> Option<(usize, usize)> {
     let len = buf.len();
     let name_len = name.len();
@@ -422,7 +423,7 @@ fn eq_ignore_ascii_case(a: &[u8], b: &[u8]) -> bool {
         return false;
     }
     for i in 0..a.len() {
-        if a[i].to_ascii_lowercase() != b[i].to_ascii_lowercase() {
+        if !a[i].eq_ignore_ascii_case(&b[i]) {
             return false;
         }
     }
@@ -502,7 +503,7 @@ fn parse_usize_fast(buf: &[u8]) -> Option<usize> {
 
     let mut result: usize = 0;
     for &b in buf {
-        if b < b'0' || b > b'9' {
+        if !b.is_ascii_digit() {
             return None;
         }
         result = result.checked_mul(10)?;

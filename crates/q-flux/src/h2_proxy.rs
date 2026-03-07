@@ -26,14 +26,14 @@ use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, info, warn};
 
-use crate::access_log::{AccessEntry, AccessLogger};
+use crate::access_log::{AccessLogger, log_access};
 use crate::config::StaticConfig;
 use crate::metrics::Metrics;
 use crate::static_serve;
 use crate::upstream::UpstreamPool;
 
 /// Global H2-specific metrics instance (module-level, shared across connections).
-static H2_METRICS: std::sync::LazyLock<H2Metrics> = std::sync::LazyLock::new(H2Metrics::new);
+pub static H2_METRICS: std::sync::LazyLock<H2Metrics> = std::sync::LazyLock::new(H2Metrics::new);
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -397,7 +397,7 @@ async fn handle_h2_request(
             let latency = req_start.elapsed();
             metrics.response_status(204);
             metrics.record_latency(latency);
-            log_access(access_logger, client_addr, "OPTIONS", &req_path, 204, 0, 0, latency, user_agent.as_deref());
+            log_access(access_logger, client_addr, "OPTIONS", &req_path, 204, 0, 0, latency, user_agent.as_deref(), None);
             h2_metrics.h2_stream_closed();
             return resp;
         }
@@ -407,7 +407,7 @@ async fn handle_h2_request(
         let latency = req_start.elapsed();
         metrics.response_status(status);
         metrics.record_latency(latency);
-        log_access(access_logger, client_addr, req_method.as_str(), &req_path, status, 0, 0, latency, user_agent.as_deref());
+        log_access(access_logger, client_addr, req_method.as_str(), &req_path, status, 0, 0, latency, user_agent.as_deref(), None);
         h2_metrics.h2_stream_closed();
         return resp;
     }
@@ -418,7 +418,7 @@ async fn handle_h2_request(
         let latency = req_start.elapsed();
         metrics.response_status(204);
         metrics.record_latency(latency);
-        log_access(access_logger, client_addr, "OPTIONS", &req_path, 204, 0, 0, latency, user_agent.as_deref());
+        log_access(access_logger, client_addr, "OPTIONS", &req_path, 204, 0, 0, latency, user_agent.as_deref(), None);
         h2_metrics.h2_stream_closed();
         return resp;
     }
@@ -430,7 +430,7 @@ async fn handle_h2_request(
             let latency = req_start.elapsed();
             metrics.response_status(413);
             metrics.record_latency(latency);
-            log_access(access_logger, client_addr, req_method.as_str(), &req_path, 413, 0, 0, latency, user_agent.as_deref());
+            log_access(access_logger, client_addr, req_method.as_str(), &req_path, 413, 0, 0, latency, user_agent.as_deref(), None);
             h2_metrics.h2_stream_closed();
             return error_response(413, "Request body too large");
         }
@@ -463,27 +463,35 @@ async fn handle_h2_request(
 
     // 5. Forward to upstream
     match upstream.forward(upstream_req).await {
-        Ok(resp) => {
+        Ok((resp, backend_addr)) => {
             let status = resp.status().as_u16();
             let latency = req_start.elapsed();
             metrics.response_status(status);
             metrics.record_latency(latency);
-            log_access(access_logger, client_addr, req_method.as_str(), &req_path, status, content_length, 0, latency, user_agent.as_deref());
+            log_access(access_logger, client_addr, req_method.as_str(), &req_path, status, content_length, 0, latency, user_agent.as_deref(), Some(&backend_addr));
             h2_metrics.h2_stream_closed();
 
             // Pass upstream response through with Incoming body (zero-copy).
             // hyper's HTTP/2 server handles framing + flow control automatically.
             let (resp_parts, resp_body) = resp.into_parts();
             let mut builder = Response::builder().status(resp_parts.status);
+            let mut has_cors = false;
             for (k, v) in &resp_parts.headers {
                 let name = k.as_str();
                 match name {
                     "connection" | "transfer-encoding" | "keep-alive"
                     | "proxy-connection" | "upgrade" => continue,
                     _ => {
+                        if name == "access-control-allow-origin" {
+                            has_cors = true;
+                        }
                         builder = builder.header(k, v);
                     }
                 }
+            }
+            // Ensure CORS origin is always present for browser clients
+            if !has_cors {
+                builder = builder.header("access-control-allow-origin", "*");
             }
             builder
                 .body(Either::Right(resp_body))
@@ -494,7 +502,7 @@ async fn handle_h2_request(
             let latency = req_start.elapsed();
             metrics.response_status(502);
             metrics.record_latency(latency);
-            log_access(access_logger, client_addr, req_method.as_str(), &req_path, 502, content_length, 0, latency, user_agent.as_deref());
+            log_access(access_logger, client_addr, req_method.as_str(), &req_path, 502, content_length, 0, latency, user_agent.as_deref(), None);
             h2_metrics.h2_stream_closed();
             error_response(502, "Bad Gateway")
         }
@@ -518,12 +526,13 @@ async fn collect_body(body: Incoming, limit: usize) -> Result<Bytes> {
     Ok(bytes)
 }
 
-/// Build an error response with a JSON body.
+/// Build an error response with a JSON body and CORS headers.
 fn error_response(status: u16, msg: &str) -> Response<H2Body> {
     let body = format!("{{\"error\":\"{}\"}}", msg);
     Response::builder()
         .status(status)
         .header("content-type", "application/json")
+        .header("access-control-allow-origin", "*")
         .body(Either::Left(Full::new(Bytes::from(body))))
         .unwrap()
 }
@@ -616,37 +625,7 @@ async fn serve_static_h2(
     builder.body(Either::Left(Full::new(Bytes::from(body)))).unwrap()
 }
 
-/// Emit an access log entry if a logger is configured.
-#[inline]
-fn log_access(
-    logger: Option<&AccessLogger>,
-    client_addr: SocketAddr,
-    method: &str,
-    path: &str,
-    status: u16,
-    request_bytes: u64,
-    response_bytes: u64,
-    latency: std::time::Duration,
-    user_agent: Option<&str>,
-) {
-    if let Some(logger) = logger {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        logger.log(AccessEntry {
-            timestamp: format!("{}.{:03}", now.as_secs(), now.subsec_millis()),
-            client_addr,
-            method: method.to_string(),
-            path: path.to_string(),
-            status,
-            request_bytes,
-            response_bytes,
-            latency,
-            tls_version: None,
-            user_agent: user_agent.map(|s| s.to_string()),
-        });
-    }
-}
+// log_access is imported from access_log module (shared with proxy)
 
 // ---------------------------------------------------------------------------
 // Tests

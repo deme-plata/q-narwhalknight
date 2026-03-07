@@ -12,6 +12,7 @@ pub mod tui;
 
 // Phase 2: io_uring + SIMD
 #[cfg(target_os = "linux")]
+#[allow(dead_code)] // Phase 2 — compiled but not yet wired into accept loop
 pub mod io_uring_loop;
 pub mod simd_parse;
 

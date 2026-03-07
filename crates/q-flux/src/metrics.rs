@@ -18,6 +18,12 @@ pub struct LatencyHistogram {
     pub sum_us: AtomicU64,
 }
 
+impl Default for LatencyHistogram {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LatencyHistogram {
     pub fn new() -> Self {
         Self {
@@ -99,15 +105,23 @@ impl TokenBucket {
         let elapsed_us = now_us.saturating_sub(last);
         if elapsed_us > 1000 {
             // More than 1ms elapsed — refill
-            let new_tokens = (elapsed_us * self.rate_milli) / 1_000_000;
+            let new_tokens = (elapsed_us as u128 * self.rate_milli as u128 / 1_000_000) as u64;
             if new_tokens > 0 {
                 // CAS the timestamp to claim this refill window
                 if self.last_refill_us.compare_exchange_weak(
                     last, now_us, Ordering::AcqRel, Ordering::Relaxed
                 ).is_ok() {
-                    let current = self.tokens.load(Ordering::Relaxed);
-                    let refilled = (current + new_tokens).min(self.capacity_milli);
-                    self.tokens.store(refilled, Ordering::Release);
+                    // Atomically add tokens with CAS loop to avoid overwriting
+                    // concurrent consumption
+                    loop {
+                        let current = self.tokens.load(Ordering::Relaxed);
+                        let refilled = (current + new_tokens).min(self.capacity_milli);
+                        if self.tokens.compare_exchange_weak(
+                            current, refilled, Ordering::AcqRel, Ordering::Relaxed
+                        ).is_ok() {
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -177,6 +191,7 @@ impl RateLimiter {
         });
     }
 
+    #[allow(dead_code)] // Public API for admin/monitoring
     pub fn active_ips(&self) -> usize {
         self.buckets.len()
     }
@@ -221,6 +236,12 @@ struct MetricsInner {
     pub latency: LatencyHistogram,
 }
 
+impl Default for Metrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Metrics {
     pub fn new() -> Self {
         Self {
@@ -261,6 +282,7 @@ impl Metrics {
     }
 
     /// Export all metrics in Prometheus text format.
+    #[allow(dead_code)] // Standalone export; admin.rs builds its own for richer output
     pub fn prometheus_export(&self) -> String {
         let s = self.snapshot();
         let mut out = String::with_capacity(2048);
@@ -455,5 +477,92 @@ impl std::fmt::Display for MetricsSnapshot {
             self.bytes_received,
             self.bytes_sent,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_token_bucket_basic() {
+        let bucket = TokenBucket::new(100, 10); // 100/s, burst 10
+        // Bucket starts full (10 tokens = 10000 milli-tokens)
+        let now = 1_000_000; // 1 second in microseconds
+        // Should be able to consume 10 tokens
+        for _ in 0..10 {
+            assert!(bucket.try_acquire(now));
+        }
+        // 11th should be rate-limited
+        assert!(!bucket.try_acquire(now));
+    }
+
+    #[test]
+    fn test_token_bucket_refill() {
+        let bucket = TokenBucket::new(100, 10);
+        let t0 = 1_000_000;
+        // Consume all tokens
+        for _ in 0..10 {
+            assert!(bucket.try_acquire(t0));
+        }
+        assert!(!bucket.try_acquire(t0));
+        // Advance 100ms — should refill 10 tokens (100/s * 0.1s = 10)
+        let t1 = t0 + 100_000;
+        for _ in 0..10 {
+            assert!(bucket.try_acquire(t1));
+        }
+        assert!(!bucket.try_acquire(t1));
+    }
+
+    #[test]
+    fn test_token_bucket_concurrent_safety() {
+        use std::sync::Arc;
+        use std::thread;
+        let bucket = Arc::new(TokenBucket::new(10_000, 1000));
+        let acquired = Arc::new(AtomicU64::new(0));
+
+        let mut handles = vec![];
+        for _ in 0..4 {
+            let b = Arc::clone(&bucket);
+            let a = Arc::clone(&acquired);
+            handles.push(thread::spawn(move || {
+                let now = 1_000_000u64;
+                for _ in 0..500 {
+                    if b.try_acquire(now) {
+                        a.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        // Total acquired should equal burst capacity (1000)
+        let total = acquired.load(Ordering::Relaxed);
+        assert_eq!(total, 1000, "concurrent consumers should acquire exactly burst capacity, got {}", total);
+    }
+
+    #[test]
+    fn test_rate_limiter_per_ip() {
+        let limiter = RateLimiter::new(5, 5, 1_000_000);
+        let ip: std::net::IpAddr = "1.2.3.4".parse().unwrap();
+        // Should allow burst of 5
+        for _ in 0..5 {
+            assert!(limiter.check(ip));
+        }
+        // 6th should be rate-limited (within same millisecond, no refill)
+        assert!(!limiter.check(ip));
+        assert_eq!(limiter.active_ips(), 1);
+    }
+
+    #[test]
+    fn test_latency_histogram_observe() {
+        let hist = LatencyHistogram::new();
+        hist.observe(std::time::Duration::from_millis(1));
+        hist.observe(std::time::Duration::from_millis(50));
+        hist.observe(std::time::Duration::from_millis(500));
+        let prom = hist.prometheus("test_latency");
+        assert!(prom.contains("test_latency_bucket"));
+        assert!(prom.contains("test_latency_count 3"));
     }
 }
