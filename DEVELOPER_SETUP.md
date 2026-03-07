@@ -97,4 +97,22 @@ q-narwhalknight/
 
 ## Current Open Tasks
 
-Check `ISSUES.md` in the repo root for open tasks that need work.
+**IMPORTANT: Issues are NOT on GitHub!** Issues are tracked in `ISSUES.md` in the repo root.
+Do NOT use `gh` CLI or GitHub API. Read `ISSUES.md` for open tasks.
+
+```bash
+cat ISSUES.md   # See all open issues
+```
+
+### Quick Issue Summary:
+- **Issue #1** (`feature/q-queue`): Build `q-queue` — lock-free universal queue system with io_uring, SIMD, <500ns IPC latency
+- **Issue #2** (`feature/q-flux-phase2`): q-flux Phase 2 — io_uring + SIMD HTTP parsing
+- **Issue #3** (`feature/q-flux-phase3`): q-flux Phase 3 — HTTP/2, QUIC, kTLS
+- **Issue #4** (`feature/q-flux-phase4`): q-flux Phase 4 — libp2p compatibility
+
+### Workflow:
+1. Read `ISSUES.md` for full specs
+2. Pick an unassigned issue
+3. Create the feature branch listed in the issue
+4. Implement, test with `cargo check`
+5. Push: `git push origin feature/your-branch`
