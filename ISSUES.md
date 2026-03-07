@@ -276,3 +276,275 @@ Proxy-layer awareness of libp2p traffic:
 - Circuit breaking for slow/abusive peers
 - Gossipsub message dedup at proxy layer (reduce backend load)
 - Metrics: per-peer connection count, bandwidth, latency
+
+---
+
+## Issue #5: `q-flux` — SSE/Streaming Response Support
+
+**Priority**: Critical (blocks mining deployment)
+**Status**: Open
+**Assignee**: Unassigned
+**Branch**: `feature/q-flux-sse`
+**Crate**: `crates/q-flux/`
+
+### Summary
+
+The current q-flux `proxy.rs` collects the entire upstream response body into memory before sending to the client. This breaks **Server-Sent Events (SSE)** which are infinite streams — the proxy will hang forever waiting for the body to finish.
+
+Mining clients use SSE on `/api/v1/sse` for real-time block updates, balance changes, and mining stats. This MUST work for production.
+
+### What to Fix
+
+In `crates/q-flux/src/proxy.rs`, the `write_response()` function calls `body.collect().await` which waits for the complete body. For SSE responses (`content-type: text/event-stream`), we need to stream chunks as they arrive.
+
+### Implementation
+
+1. Detect SSE responses by checking `content-type: text/event-stream` header
+2. For SSE: write headers immediately, then loop reading chunks from upstream and writing to client
+3. For normal responses: keep the current collect-then-write approach (simpler, allows Content-Length)
+4. Also handle `Transfer-Encoding: chunked` responses by streaming chunks
+
+```rust
+async fn write_response<S>(stream: &mut S, resp: hyper::Response<Incoming>, metrics: &Metrics) -> Result<()> {
+    let (parts, body) = resp.into_parts();
+    let is_sse = parts.headers.get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("text/event-stream"))
+        .unwrap_or(false);
+
+    // Write status + headers
+    write_response_headers(stream, &parts).await?;
+
+    if is_sse {
+        // Stream mode: forward chunks as they arrive
+        use http_body_util::BodyExt;
+        let mut body = body;
+        while let Some(frame) = body.frame().await {
+            match frame {
+                Ok(frame) => {
+                    if let Some(data) = frame.data_ref() {
+                        stream.write_all(data).await?;
+                        stream.flush().await?; // Critical for SSE — flush each event!
+                        metrics.bytes_tx(data.len() as u64);
+                    }
+                }
+                Err(e) => break,
+            }
+        }
+    } else {
+        // Buffered mode: collect full body
+        let body_bytes = body.collect().await?.to_bytes();
+        // ... write content-length + body ...
+    }
+}
+```
+
+### Test
+
+```bash
+curl -N https://localhost:443/api/v1/sse
+# Should see streaming events, not hang
+```
+
+---
+
+## Issue #6: `q-flux` — Graceful Shutdown + Signal Handling
+
+**Priority**: High
+**Status**: Open
+**Assignee**: Unassigned
+**Branch**: `feature/q-flux-shutdown`
+**Crate**: `crates/q-flux/`
+
+### Summary
+
+q-flux has no graceful shutdown. When killed (SIGTERM from systemd), all in-flight connections are dropped immediately. Need:
+
+1. Catch SIGTERM/SIGINT on main thread
+2. Signal all workers to stop accepting new connections
+3. Wait up to N seconds for in-flight requests to complete
+4. Force-close remaining connections after timeout
+5. Log final metrics snapshot before exit
+
+### Implementation
+
+In `main.rs`:
+```rust
+// Create a shutdown signal shared across workers
+let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
+
+// ... spawn workers with shutdown_rx ...
+
+// Wait for signal on main thread
+let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+rt.block_on(async {
+    tokio::signal::ctrl_c().await.ok();
+    tracing::info!("Shutdown signal received, draining connections...");
+    shutdown_tx.send(()).ok();
+    tokio::time::sleep(Duration::from_secs(30)).await; // drain timeout
+});
+```
+
+In `worker.rs`, each worker checks `shutdown_rx` in the accept loop and stops accepting when signaled, but finishes in-flight requests.
+
+---
+
+## Issue #7: `q-flux` — Admin API + Prometheus Metrics Endpoint
+
+**Priority**: Medium
+**Status**: Open
+**Assignee**: Unassigned
+**Branch**: `feature/q-flux-admin`
+**Crate**: `crates/q-flux/`
+
+### Summary
+
+Add an internal admin listener (e.g. `127.0.0.1:9090`) that exposes:
+
+1. **`GET /metrics`** — Prometheus-formatted metrics for Grafana dashboards
+2. **`GET /health`** — Health check (200 OK if upstream reachable, 503 if not)
+3. **`GET /status`** — JSON status: active connections, RPS, upstream health, worker info, uptime
+4. **`POST /reload`** — Hot-reload TLS certificates (for Let's Encrypt renewal)
+
+### Metrics to Export (Prometheus format)
+
+```
+# HELP q_flux_connections_active Current active connections
+# TYPE q_flux_connections_active gauge
+q_flux_connections_active 1234
+
+# HELP q_flux_requests_total Total requests processed
+# TYPE q_flux_requests_total counter
+q_flux_requests_total{status="2xx"} 5678901
+q_flux_requests_total{status="4xx"} 123
+q_flux_requests_total{status="5xx"} 7
+
+# HELP q_flux_tls_handshakes_total Total TLS handshakes
+# TYPE q_flux_tls_handshakes_total counter
+q_flux_tls_handshakes_total{result="ok"} 456789
+q_flux_tls_handshakes_total{result="fail"} 23
+
+# HELP q_flux_upstream_latency_seconds Upstream response latency
+# TYPE q_flux_upstream_latency_seconds histogram
+q_flux_upstream_latency_seconds_bucket{le="0.001"} 400000
+q_flux_upstream_latency_seconds_bucket{le="0.005"} 450000
+q_flux_upstream_latency_seconds_bucket{le="0.01"} 460000
+```
+
+### Implementation
+
+- Spawn a separate tokio task on the metrics reporter thread
+- Use `hyper` to serve the admin endpoints on a different port
+- Read from the existing `Metrics` struct (already has atomic counters)
+- Add histogram tracking for latency (new field in Metrics)
+
+---
+
+## Issue #8: `q-flux` — Connection Draining + Upstream Health Checks
+
+**Priority**: High
+**Status**: Open
+**Assignee**: Unassigned
+**Branch**: `feature/q-flux-health`
+**Crate**: `crates/q-flux/`
+
+### Summary
+
+Two related features needed for production reliability:
+
+#### A. Active Upstream Health Checks
+
+Currently q-flux only detects upstream failures on actual requests. Add background health checks:
+
+```rust
+// Every 5 seconds, probe each backend
+async fn health_check_loop(backends: &[String], status: Arc<DashMap<String, bool>>) {
+    loop {
+        for backend in backends {
+            let healthy = tokio::net::TcpStream::connect(backend)
+                .await.is_ok();
+            status.insert(backend.clone(), healthy);
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
+```
+
+- Skip unhealthy backends in round-robin
+- Log when backends go up/down
+- Configurable health check interval and path (e.g. `GET /api/v1/status`)
+
+#### B. Connection Draining for Backend Rotation
+
+When deploying new backend versions (via `ha-deploy.sh`), the backend restarts. q-flux needs to:
+
+1. Detect backend going down (health check fails)
+2. Stop sending new requests to that backend
+3. Wait for in-flight requests to complete (or timeout)
+4. Resume sending when health check passes again
+
+### Config Addition
+
+```toml
+[upstream]
+health_check_interval = "5s"
+health_check_path = "/api/v1/status"
+health_check_timeout = "3s"
+drain_timeout = "30s"
+```
+
+---
+
+## Issue #9: `q-flux` — TLS Session Resumption + OCSP Stapling
+
+**Priority**: Medium
+**Status**: Open
+**Assignee**: Unassigned
+**Branch**: `feature/q-flux-tls-perf`
+**Crate**: `crates/q-flux/`
+
+### Summary
+
+Optimize TLS performance for miners who reconnect frequently:
+
+#### A. TLS Session Resumption (Tickets)
+
+Miners disconnect and reconnect every few minutes. Without session resumption, each reconnect does a full TLS handshake (~2ms). With tickets, the resumed handshake is ~0.5ms.
+
+```rust
+// In acceptor.rs, enable session tickets:
+let mut config = ServerConfig::builder()
+    .with_no_client_auth()
+    .with_single_cert(certs, key)?;
+
+// Ticketer rotates keys automatically
+config.ticketer = rustls::crypto::ring::Ticketer::new()?;
+// Or for cross-worker session sharing:
+config.session_storage = rustls::server::ServerSessionMemoryCache::new(65536);
+```
+
+#### B. OCSP Stapling
+
+Staple the OCSP response to avoid clients doing separate OCSP lookups:
+
+```rust
+// Load OCSP response (refresh periodically via background task)
+let ocsp = std::fs::read("/etc/letsencrypt/live/quillon.xyz/ocsp.der").ok();
+config.cert_resolver = Arc::new(OcspCertResolver { cert_chain, key, ocsp });
+```
+
+#### C. TLS 1.3 Only (Optional)
+
+Consider restricting to TLS 1.3 only (faster handshake, simpler, more secure). All modern mining clients support it.
+
+```rust
+config.versions = &[&rustls::version::TLS13];
+```
+
+### Performance Impact
+
+| Metric | Without | With Session Resumption |
+|--------|---------|------------------------|
+| Full TLS handshake | ~2ms | ~2ms (first time) |
+| Resumed handshake | ~2ms | ~0.5ms (75% faster) |
+| Handshakes/sec (48 cores) | ~24K | ~96K |
