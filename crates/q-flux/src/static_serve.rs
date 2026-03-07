@@ -9,10 +9,14 @@
 //! - `/downloads/` directory listing disabled, files served with Content-Disposition
 
 use std::path::{Path, PathBuf};
-use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 use crate::config::StaticConfig;
 use crate::metrics::Metrics;
+
+/// Size of the buffer used for streaming file content.
+/// 64 KiB balances syscall overhead vs memory footprint per connection.
+const STREAM_BUF_SIZE: usize = 64 * 1024;
 
 /// Result of routing a request path.
 pub enum RouteResult {
@@ -190,15 +194,31 @@ pub async fn serve_file<S: AsyncWrite + Unpin>(
         return Ok(());
     }
 
-    // Read full file (for files up to ~50MB; larger files would need streaming)
-    let body = match tokio::fs::read(&resp.path).await {
-        Ok(b) => b,
+    // Build Content-Disposition header for downloads
+    let disposition = if resp.is_download {
+        format!(
+            "content-disposition: attachment; filename=\"{}\"\r\n",
+            resp.path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("download"),
+        )
+    } else {
+        String::new()
+    };
+
+    // Open the file for streaming — never buffer the full body in memory.
+    // Binary downloads (q-api-server, q-miner) are 50-100 MB each;
+    // 10 concurrent downloads would spike 1 GB with tokio::fs::read().
+    let file = match tokio::fs::File::open(&resp.path).await {
+        Ok(f) => f,
         Err(e) => {
-            tracing::warn!(path = %resp.path.display(), "File read error: {}", e);
+            tracing::warn!(path = %resp.path.display(), "File open error: {}", e);
             return write_raw(stream, 500, "text/plain", b"Internal Server Error").await;
         }
     };
 
+    // Write HTTP response headers first (Content-Length from metadata).
     let headers = format!(
         "HTTP/1.1 200 OK\r\n\
          content-type: {}\r\n\
@@ -207,22 +227,25 @@ pub async fn serve_file<S: AsyncWrite + Unpin>(
          etag: {}\r\n\
          {}\
          \r\n",
-        resp.mime,
-        body.len(),
-        resp.cache_control,
-        etag,
-        if resp.is_download {
-            format!("content-disposition: attachment; filename=\"{}\"\r\n",
-                resp.path.file_name().and_then(|n| n.to_str()).unwrap_or("download"))
-        } else {
-            String::new()
-        },
+        resp.mime, size, resp.cache_control, etag, disposition,
     );
-
     stream.write_all(headers.as_bytes()).await?;
-    stream.write_all(&body).await?;
+
+    // Stream file body in 64 KiB chunks via BufReader.
+    // Memory per connection is capped at ~64 KiB regardless of file size.
+    let mut reader = BufReader::with_capacity(STREAM_BUF_SIZE, file);
+    let mut bytes_sent: u64 = 0;
+    let mut buf = [0u8; STREAM_BUF_SIZE];
+    loop {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        stream.write_all(&buf[..n]).await?;
+        bytes_sent += n as u64;
+    }
     stream.flush().await?;
-    metrics.bytes_tx(body.len() as u64);
+    metrics.bytes_tx(bytes_sent);
     Ok(())
 }
 
