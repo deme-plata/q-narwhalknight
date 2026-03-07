@@ -361,12 +361,12 @@ function QuantumFieldBackground() {
 
   return (
     <>
-      {/* Background image layer - space nebula/lightning over city lights */}
+      {/* Background image layer - coastal sunset with rugged cliffs */}
       <div
         className="fixed inset-0 w-full h-full"
         style={{
           zIndex: 0,
-          backgroundImage: 'url(/login-bg.webp)',
+          backgroundImage: 'url(/login-bg.png)',
           backgroundSize: 'cover',
           backgroundPosition: 'center',
           backgroundRepeat: 'no-repeat',
