@@ -20327,6 +20327,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/mining/capacity-local", get(q_api_server::deploy_admin_api::mining_capacity_local)) // v1.0.2: Mining capacity metrics (no auth)
         .route("/api/v1/admin/nginx/stats-local", get(q_api_server::deploy_admin_api::nginx_stats_local)) // v8.9.9: deprecated, returns caddy stats
         .route("/api/v1/admin/caddy/stats-local", get(q_api_server::deploy_admin_api::caddy_stats_local)) // v9.0.6: Local Caddy metrics (no auth)
+        .route("/api/v1/admin/flux/stats-local", get(q_api_server::deploy_admin_api::flux_stats_local)) // v9.2.0: Local q-flux metrics (no auth)
         .route("/api/v1/mining/stats/:wallet", get(handlers::get_wallet_mining_stats)) // v3.5.0-beta: Wallet mining stats
         // v0.0.22-beta Quick Win #1: Manual trigger endpoint REMOVED from default routes
         // Added conditionally below based on config.allow_manual_trigger
@@ -20956,6 +20957,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/admin/nginx/stats", get(q_api_server::deploy_admin_api::nginx_stats))
         // v9.0.6: Caddy reverse proxy metrics (admin)
         .route("/api/v1/admin/caddy/stats", get(q_api_server::deploy_admin_api::caddy_stats))
+        // v9.2.0: q-flux reverse proxy metrics (admin)
+        .route("/api/v1/admin/flux/stats", get(q_api_server::deploy_admin_api::flux_stats))
         // v8.2.0: Admin-only balance rebuild from chain (deterministic balance consensus)
         .route("/api/v1/admin/rebuild-balances", post(handlers::admin_rebuild_balances))
         .route("/api/v1/admin/purge-phase-data", post(admin_purge_phase_data))

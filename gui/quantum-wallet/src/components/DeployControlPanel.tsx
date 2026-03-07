@@ -157,6 +157,36 @@ interface CaddyStatsAll {
   epsilon: CaddyStats | null;
 }
 
+// v9.2.0: q-flux reverse proxy stats (worker-per-core TLS proxy)
+interface FluxStats {
+  version: string;
+  worker_count: number;
+  uptime_secs: number;
+  active_connections: number;
+  total_connections: number;
+  tls_handshakes: number;
+  tls_handshake_failures: number;
+  total_requests: number;
+  requests_2xx: number;
+  requests_4xx: number;
+  requests_5xx: number;
+  upstream_active: number;
+  upstream_connect_failures: number;
+  upstream_timeouts: number;
+  rate_limited: number;
+  active_websockets: number;
+  websocket_upgrades: number;
+  bytes_received: number;
+  bytes_sent: number;
+  tls_reload_count: number;
+  h2_connections: number;
+  h2_streams_opened: number;
+  h2_streams_closed: number;
+  online: boolean;
+  requests_per_second: number;
+  error_rate_pct: number;
+}
+
 // v9.0.6: Decentralization Index metrics — sqrt scaling, EMA smoothing, wealth Gini, Shannon entropy
 interface DecentralizationMetrics {
   unique_wallets: number;
@@ -795,6 +825,7 @@ export default function DeployControlPanel() {
   const [syncMetricsMap, setSyncMetricsMap] = useState<Record<string, SyncMetrics>>({});
   const [miningCapacity, setMiningCapacity] = useState<MiningCapacityAll | null>(null);
   const [caddyStats, setCaddyStats] = useState<CaddyStatsAll | null>(null);
+  const [fluxStats, setFluxStats] = useState<FluxStats | null>(null);
   const [decentral, setDecentral] = useState<DecentralizationMetrics | null>(null);
   const prevHeightsRef = useRef<Record<string, { height: number; ts: number }>>({});
   // v8.2.9: Peak height tracking — never show a height decrease (prevents "rollback" scare)
@@ -1050,6 +1081,18 @@ export default function DeployControlPanel() {
             const caddyJson = await caddyResp.json();
             if (caddyJson.data) {
               setCaddyStats(caddyJson.data);
+            }
+          }
+        } catch {}
+        // v9.2.0: Fetch q-flux stats
+        try {
+          const fluxResp = await fetch('/api/v1/admin/flux/stats', {
+            headers: { 'X-Wallet-Auth': walletAddress || '' },
+          });
+          if (fluxResp.ok) {
+            const fluxJson = await fluxResp.json();
+            if (fluxJson.data) {
+              setFluxStats(fluxJson.data);
             }
           }
         } catch {}
@@ -1875,6 +1918,182 @@ export default function DeployControlPanel() {
                           Caddy metrics offline
                         </div>
                       )}
+                    </div>
+                  )}
+
+                  {/* v9.2.0: q-flux Reverse Proxy Metrics */}
+                  {isMasterWallet && fluxStats?.online && (
+                    <div className="rounded-xl border border-cyan-500/30 bg-cyan-500/5 p-3">
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-2">
+                          <Zap className="w-4 h-4 text-cyan-400" />
+                          <span className="text-xs font-semibold text-cyan-200"
+                            title="q-flux is a worker-per-core TLS reverse proxy written in Rust. It handles TLS termination, HTTP/2 multiplexing, WebSocket upgrades, and upstream load balancing with minimal latency. Each CPU core runs its own event loop for zero-contention request handling.">
+                            q-flux Reverse Proxy
+                          </span>
+                          {fluxStats.version && (
+                            <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
+                              title="q-flux binary version">
+                              v{fluxStats.version}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1"
+                          title="The green pulse means q-flux admin (127.0.0.1:9090/status) is responding. If this goes dark, q-flux may have crashed.">
+                          <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                          <span className="text-[9px] text-emerald-300/70">Live</span>
+                        </div>
+                      </div>
+
+                      {(() => {
+                        const f = fluxStats;
+                        const totalByStatus = f.requests_2xx + f.requests_4xx + f.requests_5xx;
+                        const h2Active = f.h2_streams_opened - f.h2_streams_closed;
+                        return (
+                          <>
+                            {/* Row 1: 6 stat gauges */}
+                            <div className="grid grid-cols-6 gap-2 mb-3">
+                              <div className="bg-slate-800/40 rounded-lg p-2 text-center cursor-help"
+                                title={"Requests per second (req/s)\n\nHow many HTTP requests q-flux handles every second. Computed from delta between poll intervals.\n\nCyan = normal\nAmber (>500) = heavy traffic\n\nCurrent: " + (f.requests_per_second > 0 ? f.requests_per_second.toFixed(1) : '0') + " req/s"}>
+                                <div className={`text-base font-bold ${f.requests_per_second > 500 ? 'text-amber-300' : 'text-cyan-300'}`}>
+                                  {f.requests_per_second > 0 ? f.requests_per_second.toFixed(0) : '0'}
+                                </div>
+                                <div className="text-[9px] text-cyan-300/50">req/s</div>
+                              </div>
+                              <div className="bg-slate-800/40 rounded-lg p-2 text-center cursor-help"
+                                title={"Active Connections\n\nCurrently open TCP connections to q-flux. Each miner, wallet, or SSE stream holds one connection.\n\nCurrent: " + f.active_connections.toLocaleString()}>
+                                <div className="text-base font-bold text-cyan-300">
+                                  {f.active_connections > 1000 ? `${(f.active_connections / 1000).toFixed(1)}K` : f.active_connections}
+                                </div>
+                                <div className="text-[9px] text-cyan-300/50">Conns</div>
+                              </div>
+                              <div className="bg-slate-800/40 rounded-lg p-2 text-center cursor-help"
+                                title={"Worker Threads\n\nq-flux runs one worker per CPU core. Each worker has its own event loop for zero-contention request handling. More workers = more parallel capacity.\n\nCurrent: " + f.worker_count}>
+                                <div className="text-base font-bold text-blue-300">{f.worker_count}</div>
+                                <div className="text-[9px] text-cyan-300/50">Workers</div>
+                              </div>
+                              <div className="bg-slate-800/40 rounded-lg p-2 text-center cursor-help"
+                                title={"Active WebSocket Connections\n\nLive WebSocket/SSE streams. Each connected wallet or miner may hold one persistent WebSocket for real-time updates.\n\nTotal upgrades since start: " + f.websocket_upgrades.toLocaleString() + "\nCurrent active: " + f.active_websockets.toLocaleString()}>
+                                <div className="text-base font-bold text-purple-300">{f.active_websockets}</div>
+                                <div className="text-[9px] text-cyan-300/50">WS</div>
+                              </div>
+                              <div className="bg-slate-800/40 rounded-lg p-2 text-center cursor-help"
+                                title={"Active HTTP/2 Streams\n\nConcurrent HTTP/2 streams (opened minus closed). HTTP/2 multiplexes many requests over a single TCP connection, reducing overhead.\n\nOpened: " + f.h2_streams_opened.toLocaleString() + "\nClosed: " + f.h2_streams_closed.toLocaleString() + "\nActive: " + h2Active.toLocaleString()}>
+                                <div className="text-base font-bold text-emerald-300">
+                                  {h2Active > 1000 ? `${(h2Active / 1000).toFixed(1)}K` : h2Active}
+                                </div>
+                                <div className="text-[9px] text-cyan-300/50">H2 Streams</div>
+                              </div>
+                              <div className="bg-slate-800/40 rounded-lg p-2 text-center cursor-help"
+                                title={"Server Error Rate (5xx%)\n\nPercentage of responses that were server errors (500-599). These indicate backend failures.\n\nGreen (<1%) = healthy\nAmber (1-5%) = concerning\nRed (>5%) = critical\n\nCurrent: " + f.error_rate_pct.toFixed(2) + "% (" + f.requests_5xx.toLocaleString() + " of " + totalByStatus.toLocaleString() + " total)"}>
+                                <div className={`text-base font-bold ${
+                                  f.error_rate_pct > 5 ? 'text-red-400' :
+                                  f.error_rate_pct > 1 ? 'text-amber-300' : 'text-emerald-300'
+                                }`}>
+                                  {f.error_rate_pct > 0 ? f.error_rate_pct.toFixed(1) : '0'}%
+                                </div>
+                                <div className="text-[9px] text-cyan-300/50">5xx err</div>
+                              </div>
+                            </div>
+
+                            {/* Row 2: Response code breakdown bar */}
+                            <div className="mb-3">
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="text-[9px] text-cyan-300/50 uppercase tracking-wider cursor-help"
+                                  title="HTTP response code breakdown from q-flux. Green = success (2xx), Amber = client error (4xx), Red = server error (5xx).">
+                                  Response Codes
+                                </span>
+                                <span className="text-[9px] text-cyan-300/40 cursor-help"
+                                  title={"Total requests handled by q-flux since start.\n\nTotal: " + f.total_requests.toLocaleString()}>
+                                  {f.total_requests > 1000000 ? `${(f.total_requests / 1000000).toFixed(1)}M` :
+                                   f.total_requests > 1000 ? `${(f.total_requests / 1000).toFixed(1)}K` :
+                                   f.total_requests} total
+                                </span>
+                              </div>
+                              {totalByStatus > 0 && (
+                                <div className="h-2 rounded-full overflow-hidden flex bg-slate-800/60">
+                                  {f.requests_2xx > 0 && (
+                                    <div className="bg-emerald-500 h-full cursor-help" style={{ width: `${(f.requests_2xx / totalByStatus) * 100}%` }}
+                                      title={`2xx Success: ${f.requests_2xx.toLocaleString()} (${((f.requests_2xx / totalByStatus) * 100).toFixed(1)}%)`} />
+                                  )}
+                                  {f.requests_4xx > 0 && (
+                                    <div className="bg-amber-500 h-full cursor-help" style={{ width: `${(f.requests_4xx / totalByStatus) * 100}%` }}
+                                      title={`4xx Client Error: ${f.requests_4xx.toLocaleString()} (${((f.requests_4xx / totalByStatus) * 100).toFixed(1)}%)`} />
+                                  )}
+                                  {f.requests_5xx > 0 && (
+                                    <div className="bg-red-500 h-full cursor-help" style={{ width: `${(f.requests_5xx / totalByStatus) * 100}%` }}
+                                      title={`5xx Server Error: ${f.requests_5xx.toLocaleString()} (${((f.requests_5xx / totalByStatus) * 100).toFixed(1)}%)`} />
+                                  )}
+                                </div>
+                              )}
+                              <div className="flex gap-3 mt-1">
+                                {[
+                                  { label: '2xx', count: f.requests_2xx, color: 'text-emerald-400' },
+                                  { label: '4xx', count: f.requests_4xx, color: 'text-amber-400' },
+                                  { label: '5xx', count: f.requests_5xx, color: 'text-red-400' },
+                                ].filter(x => x.count > 0).map(x => (
+                                  <span key={x.label} className={`text-[9px] ${x.color}`}>
+                                    {x.label}: {x.count > 1000000 ? `${(x.count / 1000000).toFixed(1)}M` : x.count > 1000 ? `${(x.count / 1000).toFixed(1)}K` : x.count}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+
+                            {/* Row 3: TLS / Upstream / Bandwidth info cards */}
+                            <div className="grid grid-cols-3 gap-2 mb-3">
+                              <div className="bg-slate-800/40 rounded-lg p-2 cursor-help"
+                                title={"TLS Statistics\n\nHandshakes OK: " + f.tls_handshakes.toLocaleString() + "\nHandshake Failures: " + f.tls_handshake_failures.toLocaleString() + "\nCert Reloads: " + f.tls_reload_count + "\nFailure Rate: " + (f.tls_handshakes > 0 ? ((f.tls_handshake_failures / (f.tls_handshakes + f.tls_handshake_failures)) * 100).toFixed(2) : '0') + "%\n\nTLS handshake failures can indicate:\n- Expired certificates\n- Incompatible cipher suites\n- Client-side issues (old browsers, bots)"}>
+                                <div className="text-[9px] text-cyan-300/50 mb-1">TLS</div>
+                                <div className="text-[10px] text-cyan-200">
+                                  <span className="text-emerald-300">{f.tls_handshakes > 1000 ? `${(f.tls_handshakes / 1000).toFixed(1)}K` : f.tls_handshakes}</span>
+                                  {f.tls_handshake_failures > 0 && <span className="text-red-300"> / {f.tls_handshake_failures} fail</span>}
+                                </div>
+                                {f.tls_reload_count > 0 && <div className="text-[9px] text-cyan-300/40">{f.tls_reload_count} reload{f.tls_reload_count !== 1 ? 's' : ''}</div>}
+                              </div>
+                              <div className="bg-slate-800/40 rounded-lg p-2 cursor-help"
+                                title={"Upstream Backend\n\nActive connections to backend: " + f.upstream_active + "\nConnect failures: " + f.upstream_connect_failures.toLocaleString() + "\nTimeouts: " + f.upstream_timeouts.toLocaleString() + "\n\nConnect failures mean q-flux couldn't reach the backend (port 8080). Timeouts mean the backend took too long to respond."}>
+                                <div className="text-[9px] text-cyan-300/50 mb-1">Upstream</div>
+                                <div className="text-[10px] text-cyan-200">
+                                  <span className="text-emerald-300">{f.upstream_active}</span> active
+                                </div>
+                                {(f.upstream_connect_failures > 0 || f.upstream_timeouts > 0) && (
+                                  <div className="text-[9px] text-amber-300/70">
+                                    {f.upstream_connect_failures > 0 && <span>{f.upstream_connect_failures} fail </span>}
+                                    {f.upstream_timeouts > 0 && <span>{f.upstream_timeouts} timeout</span>}
+                                  </div>
+                                )}
+                              </div>
+                              <div className="bg-slate-800/40 rounded-lg p-2 cursor-help"
+                                title={"Bandwidth\n\nBytes received (from clients): " + f.bytes_received.toLocaleString() + "\nBytes sent (to clients): " + f.bytes_sent.toLocaleString() + "\n\nTotal data transferred through q-flux since start."}>
+                                <div className="text-[9px] text-cyan-300/50 mb-1">Bandwidth</div>
+                                <div className="text-[10px] text-cyan-200">
+                                  <span className="text-blue-300">↓{f.bytes_received > 1073741824 ? `${(f.bytes_received / 1073741824).toFixed(1)}GB` : f.bytes_received > 1048576 ? `${(f.bytes_received / 1048576).toFixed(0)}MB` : `${(f.bytes_received / 1024).toFixed(0)}KB`}</span>
+                                  {' '}
+                                  <span className="text-emerald-300">↑{f.bytes_sent > 1073741824 ? `${(f.bytes_sent / 1073741824).toFixed(1)}GB` : f.bytes_sent > 1048576 ? `${(f.bytes_sent / 1048576).toFixed(0)}MB` : `${(f.bytes_sent / 1024).toFixed(0)}KB`}</span>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Row 4: Bottom metadata row */}
+                            <div className="flex items-center justify-between text-[9px] text-cyan-300/40">
+                              <span className="cursor-help"
+                                title={"q-flux uptime since last start.\n\nUptime: " + f.uptime_secs + " seconds"}>
+                                Up: {f.uptime_secs >= 86400 ? `${Math.floor(f.uptime_secs / 86400)}d ${Math.floor((f.uptime_secs % 86400) / 3600)}h` : f.uptime_secs >= 3600 ? `${Math.floor(f.uptime_secs / 3600)}h ${Math.floor((f.uptime_secs % 3600) / 60)}m` : `${Math.floor(f.uptime_secs / 60)}m`}
+                              </span>
+                              <span className="cursor-help"
+                                title={"Total connections accepted since start: " + f.total_connections.toLocaleString()}>
+                                Total conns: {f.total_connections > 1000000 ? `${(f.total_connections / 1000000).toFixed(1)}M` : f.total_connections > 1000 ? `${(f.total_connections / 1000).toFixed(1)}K` : f.total_connections}
+                              </span>
+                              {f.rate_limited > 0 && (
+                                <span className="cursor-help text-amber-300/70"
+                                  title={"Requests rejected by rate limiter: " + f.rate_limited.toLocaleString() + "\n\nThese requests were blocked because a client exceeded the allowed request rate. This protects the backend from DDoS or runaway clients."}>
+                                  Rate limited: {f.rate_limited > 1000 ? `${(f.rate_limited / 1000).toFixed(1)}K` : f.rate_limited}
+                                </span>
+                              )}
+                            </div>
+                          </>
+                        );
+                      })()}
                     </div>
                   )}
 

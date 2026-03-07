@@ -2293,6 +2293,166 @@ pub async fn nginx_stats(
     caddy_stats(headers, State(state)).await
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// q-flux reverse proxy stats (admin server on 127.0.0.1:9090)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// JSON shape returned by q-flux `GET /status`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FluxStats {
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub worker_count: u64,
+    #[serde(default)]
+    pub uptime_secs: u64,
+    #[serde(default)]
+    pub active_connections: u64,
+    #[serde(default)]
+    pub total_connections: u64,
+    #[serde(default)]
+    pub tls_handshakes: u64,
+    #[serde(default)]
+    pub tls_handshake_failures: u64,
+    #[serde(default)]
+    pub total_requests: u64,
+    #[serde(default)]
+    pub requests_2xx: u64,
+    #[serde(default)]
+    pub requests_4xx: u64,
+    #[serde(default)]
+    pub requests_5xx: u64,
+    #[serde(default)]
+    pub upstream_active: u64,
+    #[serde(default)]
+    pub upstream_connect_failures: u64,
+    #[serde(default)]
+    pub upstream_timeouts: u64,
+    #[serde(default)]
+    pub rate_limited: u64,
+    #[serde(default)]
+    pub active_websockets: u64,
+    #[serde(default)]
+    pub websocket_upgrades: u64,
+    #[serde(default)]
+    pub bytes_received: u64,
+    #[serde(default)]
+    pub bytes_sent: u64,
+    #[serde(default)]
+    pub tls_reload_count: u64,
+    #[serde(default)]
+    pub h2_connections: u64,
+    #[serde(default)]
+    pub h2_streams_opened: u64,
+    #[serde(default)]
+    pub h2_streams_closed: u64,
+    // Computed fields (not from q-flux, added by us)
+    #[serde(default)]
+    pub online: bool,
+    #[serde(default)]
+    pub requests_per_second: f64,
+    #[serde(default)]
+    pub error_rate_pct: f64,
+}
+
+/// Compute flux requests/sec from two snapshots (delta-based)
+fn compute_flux_rps(current_requests: u64) -> f64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static PREV_REQUESTS: AtomicU64 = AtomicU64::new(0);
+    static PREV_TIME_MS: AtomicU64 = AtomicU64::new(0);
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let prev_req = PREV_REQUESTS.swap(current_requests, Ordering::Relaxed);
+    let prev_time = PREV_TIME_MS.swap(now_ms, Ordering::Relaxed);
+
+    if prev_time == 0 || now_ms <= prev_time { return 0.0; }
+
+    let dt_secs = (now_ms - prev_time) as f64 / 1000.0;
+    let dreqs = current_requests.saturating_sub(prev_req) as f64;
+    dreqs / dt_secs
+}
+
+/// GET /api/v1/admin/flux/stats-local — local q-flux metrics (no auth, for cross-server aggregation)
+pub async fn flux_stats_local() -> Json<ApiResponse<FluxStats>> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .unwrap_or_default();
+
+    let stats = match client.get("http://127.0.0.1:9090/status").send().await {
+        Ok(resp) if resp.status().is_success() => {
+            match resp.json::<FluxStats>().await {
+                Ok(mut s) => {
+                    s.online = true;
+                    s.requests_per_second = compute_flux_rps(s.total_requests);
+                    let total_by_status = s.requests_2xx + s.requests_4xx + s.requests_5xx;
+                    s.error_rate_pct = if total_by_status > 0 {
+                        (s.requests_5xx as f64 / total_by_status as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+                    s
+                }
+                Err(_) => FluxStats::offline(),
+            }
+        }
+        _ => FluxStats::offline(),
+    };
+
+    Json(ApiResponse::success(stats))
+}
+
+/// GET /api/v1/admin/flux/stats — q-flux metrics (admin auth)
+pub async fn flux_stats(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<FluxStats>>, StatusCode> {
+    if !is_master_wallet(&headers, &state) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // q-flux runs on the same machine, just proxy local
+    let resp = flux_stats_local().await;
+    Ok(resp)
+}
+
+impl FluxStats {
+    fn offline() -> Self {
+        Self {
+            version: String::new(),
+            worker_count: 0,
+            uptime_secs: 0,
+            active_connections: 0,
+            total_connections: 0,
+            tls_handshakes: 0,
+            tls_handshake_failures: 0,
+            total_requests: 0,
+            requests_2xx: 0,
+            requests_4xx: 0,
+            requests_5xx: 0,
+            upstream_active: 0,
+            upstream_connect_failures: 0,
+            upstream_timeouts: 0,
+            rate_limited: 0,
+            active_websockets: 0,
+            websocket_upgrades: 0,
+            bytes_received: 0,
+            bytes_sent: 0,
+            tls_reload_count: 0,
+            h2_connections: 0,
+            h2_streams_opened: 0,
+            h2_streams_closed: 0,
+            online: false,
+            requests_per_second: 0.0,
+            error_rate_pct: 0.0,
+        }
+    }
+}
+
 /// GET /api/v1/admin/decentralization
 /// Returns decentralization index and sub-metrics computed from active mining data.
 pub async fn decentralization_metrics(
