@@ -10,6 +10,8 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use tokio::net::TcpListener;
 
+use crate::acceptor::SharedTlsConfig;
+use crate::config::TlsConfig;
 use crate::metrics::Metrics;
 
 /// Shared state for the admin HTTP server.
@@ -17,14 +19,17 @@ struct AdminState {
     metrics: Metrics,
     worker_count: usize,
     start_time: Instant,
+    shared_tls: SharedTlsConfig,
+    tls_config_paths: TlsConfig,
 }
 
 /// Start the admin HTTP server on its own OS thread.
 ///
 /// The server binds to `listen_addr` (default `127.0.0.1:9090`) and serves:
-///   - `GET /health`   -> JSON health check with uptime
-///   - `GET /metrics`  -> Prometheus text exposition format
-///   - `GET /status`   -> JSON snapshot of all metrics + metadata
+///   - `GET /health`      -> JSON health check with uptime
+///   - `GET /metrics`     -> Prometheus text exposition format
+///   - `GET /status`      -> JSON snapshot of all metrics + metadata
+///   - `POST /tls-reload` -> Hot-reload TLS certificates from disk
 ///
 /// Runs a single-threaded tokio runtime so it never contends with the
 /// worker runtimes on the hot path.
@@ -32,6 +37,8 @@ pub fn spawn_admin_server(
     listen_addr: SocketAddr,
     metrics: Metrics,
     worker_count: usize,
+    shared_tls: SharedTlsConfig,
+    tls_config_paths: TlsConfig,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("q-flux-admin".into())
@@ -42,13 +49,19 @@ pub fn spawn_admin_server(
                 .expect("failed to build admin tokio runtime");
 
             rt.block_on(async move {
-                run_admin_server(listen_addr, metrics, worker_count).await;
+                run_admin_server(listen_addr, metrics, worker_count, shared_tls, tls_config_paths).await;
             });
         })
         .expect("failed to spawn admin thread")
 }
 
-async fn run_admin_server(listen_addr: SocketAddr, metrics: Metrics, worker_count: usize) {
+async fn run_admin_server(
+    listen_addr: SocketAddr,
+    metrics: Metrics,
+    worker_count: usize,
+    shared_tls: SharedTlsConfig,
+    tls_config_paths: TlsConfig,
+) {
     let listener = match TcpListener::bind(listen_addr).await {
         Ok(l) => l,
         Err(e) => {
@@ -63,6 +76,8 @@ async fn run_admin_server(listen_addr: SocketAddr, metrics: Metrics, worker_coun
         metrics,
         worker_count,
         start_time: Instant::now(),
+        shared_tls,
+        tls_config_paths,
     });
 
     loop {
@@ -113,6 +128,7 @@ async fn handle_admin_request(
         (&hyper::Method::GET, "/health") => handle_health(state),
         (&hyper::Method::GET, "/metrics") => handle_metrics(state),
         (&hyper::Method::GET, "/status") => handle_status(state),
+        (&hyper::Method::POST, "/tls-reload") => handle_tls_reload(state),
         _ => not_found(),
     };
     Ok(resp)
@@ -260,6 +276,9 @@ fn handle_metrics(state: &AdminState) -> Response<Full<Bytes>> {
         state.worker_count as u64,
     );
 
+    // -- latency histogram (Issue #11) ----------------------------------------
+    buf.push_str(&state.metrics.prometheus_export_histogram());
+
     Response::builder()
         .status(StatusCode::OK)
         .header(
@@ -332,6 +351,32 @@ fn handle_status(state: &AdminState) -> Response<Full<Bytes>> {
 }
 
 // ---------------------------------------------------------------------------
+// POST /tls-reload  (Issue #10 — TLS hot-reload)
+// ---------------------------------------------------------------------------
+
+fn handle_tls_reload(state: &AdminState) -> Response<Full<Bytes>> {
+    match state.shared_tls.reload(&state.tls_config_paths) {
+        Ok(msg) => {
+            let body = format!(r#"{{"status":"ok","message":"{}"}}"#, msg);
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/json")
+                .body(Full::new(Bytes::from(body)))
+                .unwrap()
+        }
+        Err(e) => {
+            tracing::error!("TLS reload failed: {}", e);
+            let body = format!(r#"{{"status":"error","message":"{}"}}"#, e);
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .header("Content-Type", "application/json")
+                .body(Full::new(Bytes::from(body)))
+                .unwrap()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 404
 // ---------------------------------------------------------------------------
 
@@ -340,7 +385,7 @@ fn not_found() -> Response<Full<Bytes>> {
         .status(StatusCode::NOT_FOUND)
         .header("Content-Type", "application/json")
         .body(Full::new(Bytes::from(
-            r#"{"error":"not_found","endpoints":["/health","/metrics","/status"]}"#,
+            r#"{"error":"not_found","endpoints":["/health","/metrics","/status","/tls-reload"]}"#,
         )))
         .unwrap()
 }

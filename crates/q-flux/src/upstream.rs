@@ -35,9 +35,14 @@ impl UpstreamPool {
         connector.set_connect_timeout(Some(config.connect_timeout));
         connector.enforce_http(false);
 
+        // Pool is per-worker. With 128 idle conns × 48 workers = 6144 upstream conns max.
+        // This is the key to high throughput: reuse TCP connections to upstream instead of
+        // creating a new one per request (which was the bug that killed performance).
         let client = Client::builder(TokioExecutor::new())
             .pool_idle_timeout(config.keepalive_timeout)
             .pool_max_idle_per_host(config.max_conns_per_worker)
+            .retry_canceled_requests(true)
+            .set_host(true)
             .build(connector);
 
         Self {

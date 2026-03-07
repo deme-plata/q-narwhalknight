@@ -76,8 +76,11 @@ pub fn build_tls_config(tls: &TlsConfig) -> Result<Arc<ServerConfig>> {
     config.ticketer = rustls::crypto::ring::Ticketer::new()
         .map_err(|e| anyhow::anyhow!("Failed to create TLS ticketer: {}", e))?;
 
-    // Shared session cache — 65536 sessions across all workers
-    config.session_storage = rustls::server::ServerSessionMemoryCache::new(65536);
+    // Shared session cache — 1M sessions across all workers.
+    // Each entry ~256 bytes → ~256MB at full capacity.
+    // With billions of miners cycling, a large cache means more TLS resumptions
+    // (0.5ms resumed vs 2ms full handshake = 4× faster).
+    config.session_storage = rustls::server::ServerSessionMemoryCache::new(1_048_576);
 
     // ALPN: advertise HTTP/1.1 (HTTP/2 in Phase 3)
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
@@ -104,27 +107,44 @@ pub fn create_listener(addr: &str) -> Result<socket2::Socket> {
 
     let socket = socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
 
-    // Socket options for high-performance
+    // Socket options for billion-miner scale
     socket.set_reuse_address(true)?;
     #[cfg(target_os = "linux")]
     {
-        // SO_REUSEPORT: kernel distributes connections across workers
         unsafe {
-            let optval: libc::c_int = 1;
-            libc::setsockopt(
-                socket.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_REUSEPORT,
-                &optval as *const _ as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            );
+            let fd = socket.as_raw_fd();
+            let one: libc::c_int = 1;
+            let optlen = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+
+            // SO_REUSEPORT: kernel distributes connections across workers (no thundering herd)
+            libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_REUSEPORT,
+                &one as *const _ as *const libc::c_void, optlen);
+
+            // TCP_FASTOPEN: allow data in SYN packet (saves 1 RTT for repeat clients).
+            // Queue length 256 = pending TFO connections before falling back to normal 3WHS.
+            let tfo_qlen: libc::c_int = 256;
+            libc::setsockopt(fd, libc::IPPROTO_TCP, libc::TCP_FASTOPEN,
+                &tfo_qlen as *const _ as *const libc::c_void, optlen);
+
+            // TCP_DEFER_ACCEPT: don't wake worker until client sends data (reduces accept() overhead).
+            // Timeout in seconds — kernel drops connections that send nothing within this window.
+            let defer_secs: libc::c_int = 10;
+            libc::setsockopt(fd, libc::IPPROTO_TCP, libc::TCP_DEFER_ACCEPT,
+                &defer_secs as *const _ as *const libc::c_void, optlen);
+
+            // Increase socket receive buffer (256KB for high-throughput mining submissions)
+            let rcvbuf: libc::c_int = 262144;
+            libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_RCVBUF,
+                &rcvbuf as *const _ as *const libc::c_void, optlen);
         }
     }
     socket.set_nonblocking(true)?;
     socket.set_nodelay(true)?;
 
     socket.bind(&sock_addr.into())?;
-    socket.listen(4096)?;
+    // Listen backlog 65535: max pending connections in the kernel queue.
+    // At burst rates of 100K+ connections/sec, a small backlog drops connections.
+    socket.listen(65535)?;
 
     tracing::info!(addr = %sock_addr, "Listener created with SO_REUSEPORT");
     Ok(socket)

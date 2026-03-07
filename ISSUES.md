@@ -220,8 +220,8 @@ mkdir -p crates/q-queue/src
 ## Issue #2: `q-flux` Phase 2 — io_uring + SIMD HTTP Parsing
 
 **Priority**: Medium
-**Status**: Open (blocked by Phase 1 production testing)
-**Assignee**: Unassigned
+**Status**: SKIPPED (user deferred — Phase 1 pipeline sufficient for current scale)
+**Assignee**: Server Beta
 **Branch**: `feature/q-flux-phase2`
 **Crate**: `crates/q-flux/`
 
@@ -246,9 +246,9 @@ Replace tokio I/O in q-flux with raw io_uring event loops and add SIMD HTTP head
 
 ## Issue #3: `q-flux` Phase 3 — HTTP/2, HTTP/3 (QUIC), kTLS
 
-**Priority**: Low
-**Status**: Open
-**Assignee**: Unassigned
+**Priority**: Medium
+**Status**: Open — scaffold modules created (h2_proxy.rs, quic_proxy.rs)
+**Assignee**: Server Beta
 **Branch**: `feature/q-flux-phase3`
 
 ### Summary
@@ -264,8 +264,8 @@ Add protocol expansion to q-flux:
 ## Issue #4: `q-flux` Phase 4 — libp2p Compatibility Booster
 
 **Priority**: Low
-**Status**: Open
-**Assignee**: Unassigned
+**Status**: Open — scaffold module created (libp2p_aware.rs)
+**Assignee**: Server Beta
 **Branch**: `feature/q-flux-phase4`
 
 ### Summary
@@ -553,7 +553,7 @@ config.versions = &[&rustls::version::TLS13];
 ## Issue #10: `q-flux` — TLS Certificate Hot-Reload
 
 **Priority**: Medium
-**Status**: DONE (SharedTlsConfig with RwLock swap)
+**Status**: DONE (SharedTlsConfig with RwLock swap, wired into workers + POST /tls-reload admin endpoint)
 **Assignee**: Server Beta
 **Branch**: `feature/q-flux-tls-reload`
 **Crate**: `crates/q-flux/`
@@ -591,7 +591,7 @@ pub fn reload_tls(shared: &SharedTlsConfig, tls: &TlsConfig) -> Result<()> {
 ## Issue #11: `q-flux` — Request Latency Histogram
 
 **Priority**: Medium
-**Status**: DONE (LatencyHistogram + Prometheus export)
+**Status**: DONE (LatencyHistogram + Prometheus export, wired into proxy.rs at all response paths)
 **Assignee**: Server Beta
 **Branch**: `feature/q-flux-latency`
 **Crate**: `crates/q-flux/`
@@ -628,7 +628,7 @@ metrics.record_latency(start.elapsed());
 ## Issue #12: `q-flux` — Token Bucket Rate Limiter
 
 **Priority**: Medium
-**Status**: DONE (TokenBucket + per-IP RateLimiter with DashMap)
+**Status**: DONE (TokenBucket + per-IP RateLimiter, wired into worker accept loop + config)
 **Assignee**: Server Beta
 **Branch**: `feature/q-flux-ratelimit`
 **Crate**: `crates/q-flux/`
@@ -667,8 +667,8 @@ struct TokenBucket {
 ## Issue #13: `q-flux` — Structured Access Logging
 
 **Priority**: Low
-**Status**: Open
-**Assignee**: Unassigned
+**Status**: DONE (AccessLogger + JSON serialization, wired into worker→proxy pipeline)
+**Assignee**: Server Beta
 **Branch**: `feature/q-flux-access-log`
 **Crate**: `crates/q-flux/`
 
@@ -702,7 +702,7 @@ Add structured access logging in JSON format for production observability. Each 
 
 **Priority**: Low
 **Status**: Open
-**Assignee**: Unassigned
+**Assignee**: Server Beta
 **Branch**: `feature/q-flux-ocsp`
 **Crate**: `crates/q-flux/`
 

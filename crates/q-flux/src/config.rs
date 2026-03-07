@@ -73,6 +73,15 @@ pub struct LimitsConfig {
     pub max_conns_per_ip: usize,
     #[serde(default = "default_request_body_limit")]
     pub request_body_limit: usize,
+    /// Token-bucket rate limit per IP (requests/sec). 0 = disabled.
+    #[serde(default = "default_rate_limit_per_ip")]
+    pub rate_limit_per_ip: usize,
+    /// Token-bucket burst capacity per IP.
+    #[serde(default = "default_rate_limit_burst")]
+    pub rate_limit_burst: usize,
+    /// Global token-bucket rate limit (requests/sec across all IPs).
+    #[serde(default = "default_rate_limit_global_rps")]
+    pub rate_limit_global_rps: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -89,17 +98,21 @@ fn default_admin_listen() -> SocketAddr {
 fn default_listen() -> Vec<String> {
     vec!["0.0.0.0:443".into(), "0.0.0.0:80".into()]
 }
-fn default_max_conns_per_worker() -> usize { 16 }
+fn default_max_conns_per_worker() -> usize { 128 }
 fn default_keepalive_timeout() -> std::time::Duration { std::time::Duration::from_secs(30) }
 fn default_connect_timeout() -> std::time::Duration { std::time::Duration::from_secs(5) }
 fn default_response_timeout() -> std::time::Duration { std::time::Duration::from_secs(30) }
 fn default_health_check_interval() -> std::time::Duration { std::time::Duration::from_secs(5) }
 fn default_health_check_path() -> String { "/api/v1/status".to_string() }
 fn default_health_check_timeout() -> std::time::Duration { std::time::Duration::from_secs(3) }
-fn default_max_connections() -> usize { 100_000 }
-fn default_max_conns_per_ip() -> usize { 50 }
+fn default_max_connections() -> usize { 10_000_000 }
+fn default_max_conns_per_ip() -> usize { 500 }
 fn default_request_body_limit() -> usize { 25 * 1024 * 1024 } // 25MB
 fn default_log_level() -> String { "info".into() }
+
+fn default_rate_limit_per_ip() -> usize { 100 }
+fn default_rate_limit_burst() -> usize { 200 }
+fn default_rate_limit_global_rps() -> usize { 100_000 }
 
 impl Default for LimitsConfig {
     fn default() -> Self {
@@ -107,6 +120,9 @@ impl Default for LimitsConfig {
             max_connections: default_max_connections(),
             max_conns_per_ip: default_max_conns_per_ip(),
             request_body_limit: default_request_body_limit(),
+            rate_limit_per_ip: default_rate_limit_per_ip(),
+            rate_limit_burst: default_rate_limit_burst(),
+            rate_limit_global_rps: default_rate_limit_global_rps(),
         }
     }
 }

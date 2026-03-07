@@ -3,15 +3,18 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use dashmap::DashMap;
-use rustls::ServerConfig;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, Semaphore};
 use tokio_rustls::TlsAcceptor;
 use tokio::io::AsyncWriteExt;
 
+use crate::access_log::AccessLogger;
+use crate::acceptor::SharedTlsConfig;
 use crate::config::FluxConfig;
+use crate::h2_proxy;
 use crate::health::HealthMap;
-use crate::metrics::Metrics;
+use crate::libp2p_aware;
+use crate::metrics::{Metrics, RateLimiter};
 use crate::proxy;
 use crate::upstream::UpstreamPool;
 use crate::acceptor;
@@ -32,6 +35,9 @@ const MAX_HANDLERS_PER_WORKER: usize = 8192;
 /// IPs with 0 active connections are removed to prevent unbounded growth.
 const IP_TRACKER_GC_INTERVAL_SECS: u64 = 60;
 
+/// How often to clean up stale rate limiter buckets (seconds).
+const RATE_LIMITER_GC_INTERVAL_SECS: u64 = 300;
+
 /// Spawn worker threads. Each worker:
 /// - Has its own TcpListener (SO_REUSEPORT gives it a fair share of connections)
 /// - Has its own upstream connection pool (no cross-thread contention)
@@ -39,11 +45,13 @@ const IP_TRACKER_GC_INTERVAL_SECS: u64 = 60;
 /// - Has a semaphore limiting concurrent connection handlers (prevents OOM)
 pub fn spawn_workers(
     config: &FluxConfig,
-    tls_config: Arc<ServerConfig>,
+    shared_tls: SharedTlsConfig,
     metrics: Metrics,
     shutdown_tx: &tokio::sync::broadcast::Sender<()>,
     shutdown_flag: Arc<AtomicBool>,
     health_map: HealthMap,
+    access_logger: Option<AccessLogger>,
+    rate_limiter: Option<Arc<RateLimiter>>,
 ) -> Vec<std::thread::JoinHandle<()>> {
     let worker_count = config.worker_count();
     let ip_tracker: IpConnTracker = Arc::new(DashMap::new());
@@ -52,13 +60,15 @@ pub fn spawn_workers(
 
     for worker_id in 0..worker_count {
         let config = config.clone();
-        let tls_config = tls_config.clone();
+        let shared_tls = shared_tls.clone();
         let metrics = metrics.clone();
         let ip_tracker = ip_tracker.clone();
         let active_conns = active_conns.clone();
         let shutdown_rx = shutdown_tx.subscribe();
         let shutdown_flag = shutdown_flag.clone();
         let health_map = health_map.clone();
+        let access_logger = access_logger.clone();
+        let rate_limiter = rate_limiter.clone();
 
         let handle = std::thread::Builder::new()
             .name(format!("q-flux-w{}", worker_id))
@@ -71,7 +81,11 @@ pub fn spawn_workers(
                     .expect("Failed to build tokio runtime for worker");
 
                 rt.block_on(async move {
-                    worker_loop(worker_id, &config, tls_config, metrics, ip_tracker, active_conns, shutdown_rx, shutdown_flag, health_map).await;
+                    worker_loop(
+                        worker_id, &config, shared_tls, metrics, ip_tracker,
+                        active_conns, shutdown_rx, shutdown_flag, health_map,
+                        access_logger, rate_limiter,
+                    ).await;
                 });
             })
             .expect("Failed to spawn worker thread");
@@ -99,16 +113,16 @@ pub fn spawn_workers(
 async fn worker_loop(
     worker_id: usize,
     config: &FluxConfig,
-    tls_config: Arc<ServerConfig>,
+    shared_tls: SharedTlsConfig,
     metrics: Metrics,
     ip_tracker: IpConnTracker,
     active_conns: ActiveConnCount,
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
     shutdown_flag: Arc<AtomicBool>,
     health_map: HealthMap,
+    access_logger: Option<AccessLogger>,
+    rate_limiter: Option<Arc<RateLimiter>>,
 ) {
-    let tls_acceptor = TlsAcceptor::from(tls_config);
-
     // Backpressure: limit concurrent connection handlers to prevent OOM.
     // If all permits taken, accept() still runs but spawn waits for a permit.
     let handler_semaphore = Arc::new(Semaphore::new(MAX_HANDLERS_PER_WORKER));
@@ -167,6 +181,18 @@ async fn worker_loop(
         }
     });
 
+    // Spawn periodic rate limiter cleanup (evict stale per-IP token buckets)
+    if let Some(ref rl) = rate_limiter {
+        let rl = rl.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(RATE_LIMITER_GC_INTERVAL_SECS));
+            loop {
+                interval.tick().await;
+                rl.cleanup();
+            }
+        });
+    }
+
     // Accept loop — exits on shutdown signal
     loop {
         // Fast-path shutdown check (no channel overhead)
@@ -197,7 +223,7 @@ async fn worker_loop(
             continue;
         }
 
-        // Per-IP limit — FIX: do NOT increment before checking the limit
+        // Per-IP connection limit (concurrent connection cap)
         let client_ip = client_addr.ip();
         {
             let mut count = ip_tracker.entry(client_ip).or_insert(0);
@@ -212,6 +238,18 @@ async fn worker_loop(
             *count += 1;
         }
 
+        // Token-bucket rate limiting (per-IP request rate cap)
+        if let Some(ref rl) = rate_limiter {
+            if !rl.check(client_ip) {
+                metrics.rate_limited();
+                tracing::debug!(worker = worker_id, ip = %client_ip, "Token-bucket rate limited");
+                // Decrement the connection counter we just incremented
+                cleanup_conn(&ip_tracker, client_ip, &active_conns, &metrics);
+                drop(tcp_stream);
+                continue;
+            }
+        }
+
         active_conns.fetch_add(1, Ordering::Relaxed);
         metrics.conn_opened();
 
@@ -219,13 +257,16 @@ async fn worker_loop(
         let local_port = tcp_stream.local_addr().map(|a| a.port()).unwrap_or(443);
         let is_tls = local_port == 443;
 
-        let tls_acceptor = tls_acceptor.clone();
+        // Hot-reload: load current TLS config per connection (read lock, ~10ns).
+        // If certs were reloaded via admin API, new connections get the new config.
+        let tls_acceptor = TlsAcceptor::from(shared_tls.load());
         let metrics = metrics.clone();
         let ip_tracker = ip_tracker.clone();
         let active_conns = active_conns.clone();
         let upstream = upstream.clone();
         let semaphore = handler_semaphore.clone();
         let static_config = static_config.clone();
+        let access_logger = access_logger.clone();
 
         tokio::spawn(async move {
             // Acquire semaphore permit — backpressure if too many concurrent handlers.
@@ -249,9 +290,37 @@ async fn worker_loop(
                 match tls_result {
                     Ok(Ok(tls_stream)) => {
                         metrics.tls_handshake_ok();
-                        proxy::handle_connection(
-                            tls_stream, client_addr, &*upstream, &metrics, body_limit, &static_config,
-                        ).await;
+
+                        // ALPN-based protocol routing (Phase 3):
+                        // If client negotiated "h2", handle via HTTP/2 multiplexed proxy.
+                        // Otherwise, fall through to HTTP/1.1 proxy.
+                        let is_h2 = tls_stream.get_ref().1
+                            .alpn_protocol()
+                            .map(|p| p == b"h2")
+                            .unwrap_or(false);
+
+                        if is_h2 {
+                            h2_proxy::handle_h2_connection(
+                                tls_stream, client_addr, &*upstream, &metrics,
+                                body_limit, &static_config,
+                            ).await;
+                        } else {
+                            // HTTP/1.1 path — use logged variant if access logger configured
+                            match access_logger {
+                                Some(ref logger) => {
+                                    proxy::handle_connection_logged(
+                                        tls_stream, client_addr, &*upstream, &metrics,
+                                        body_limit, &static_config, logger,
+                                    ).await;
+                                }
+                                None => {
+                                    proxy::handle_connection(
+                                        tls_stream, client_addr, &*upstream, &metrics,
+                                        body_limit, &static_config,
+                                    ).await;
+                                }
+                            }
+                        }
                     }
                     Ok(Err(e)) => {
                         metrics.tls_handshake_fail();
@@ -341,6 +410,8 @@ fn extract_host_header(data: &[u8]) -> Option<String> {
 }
 
 /// Accept a connection from any of the provided listeners.
+/// Uses select! for low listener counts (common case: 2 = port 443 + 80).
+/// For 4+ listeners, uses a FuturesUnordered approach.
 async fn accept_any(listeners: &[TcpListener]) -> std::io::Result<(TcpStream, SocketAddr)> {
     match listeners.len() {
         0 => Err(std::io::Error::new(std::io::ErrorKind::Other, "No listeners")),
@@ -359,9 +430,12 @@ async fn accept_any(listeners: &[TcpListener]) -> std::io::Result<(TcpStream, So
             }
         }
         _ => {
+            // 4+ listeners: poll all of them
             tokio::select! {
                 r = listeners[0].accept() => r,
                 r = listeners[1].accept() => r,
+                r = listeners[2].accept() => r,
+                r = listeners[3].accept() => r,
             }
         }
     }

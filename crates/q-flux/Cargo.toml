@@ -14,8 +14,8 @@ tokio = { workspace = true, features = ["full", "signal", "sync", "time", "io-ut
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
-hyper = { workspace = true, features = ["server", "http1"] }
-hyper-util = { workspace = true, features = ["tokio"] }
+hyper = { workspace = true, features = ["server", "http1", "http2"] }
+hyper-util = { workspace = true, features = ["tokio", "http2"] }
 http-body-util = { workspace = true }
 http = { workspace = true }
 bytes = { workspace = true }
@@ -33,3 +33,14 @@ clap = { workspace = true }
 libc = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
+
+# Phase 2: io_uring (Linux only)
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = "0.7"
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "flux_bench"
+harness = false

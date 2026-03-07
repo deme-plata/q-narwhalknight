@@ -17,6 +17,15 @@ mod health;
 mod static_serve;
 mod tui;
 
+// Phase 2+ modules (compiled but wired in incrementally)
+#[cfg(target_os = "linux")]
+mod io_uring_loop;
+mod simd_parse;
+mod h2_proxy;
+#[cfg(feature = "quic")]
+mod quic_proxy;
+mod libp2p_aware;
+
 #[derive(Parser)]
 #[command(name = "q-flux", about = "High-performance reverse proxy for Q-NarwhalKnight")]
 struct Cli {
@@ -84,12 +93,55 @@ fn main() -> anyhow::Result<()> {
         config.upstream.backends.len(),
     );
 
-    // Build TLS config (shared across all workers)
+    // Build TLS config (shared across all workers, hot-reloadable)
     let tls_config = acceptor::build_tls_config(&config.tls)?;
+    let shared_tls = acceptor::SharedTlsConfig::new(tls_config);
     tracing::info!("TLS config loaded from {} / {}", config.tls.cert.display(), config.tls.key.display());
 
     // Initialize metrics
     let metrics = metrics::Metrics::new();
+
+    // Access logger (Issue #13): optional structured JSON access log
+    let access_logger: Option<access_log::AccessLogger> = match &config.logging.access_log {
+        Some(path) => {
+            let path_str = path.to_string_lossy();
+            if path_str == "-" || path_str == "stdout" {
+                tracing::info!("Access logging to stdout");
+                Some(access_log::AccessLogger::new_stdout(8192))
+            } else {
+                match access_log::AccessLogger::new_file(&path_str, 8192) {
+                    Ok(logger) => {
+                        tracing::info!("Access logging to {}", path_str);
+                        Some(logger)
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to open access log {}: {} — continuing without", path_str, e);
+                        None
+                    }
+                }
+            }
+        }
+        None => None,
+    };
+
+    // Rate limiter (Issue #12): token-bucket per-IP + global rate limiting
+    let rate_limiter = if config.limits.rate_limit_per_ip > 0 {
+        let rl = Arc::new(metrics::RateLimiter::new(
+            config.limits.rate_limit_per_ip as u64,
+            config.limits.rate_limit_burst as u64,
+            config.limits.rate_limit_global_rps as u64,
+        ));
+        tracing::info!(
+            "Rate limiter: {} req/s/IP, burst {}, global {} req/s",
+            config.limits.rate_limit_per_ip,
+            config.limits.rate_limit_burst,
+            config.limits.rate_limit_global_rps,
+        );
+        Some(rl)
+    } else {
+        tracing::info!("Rate limiter disabled (rate_limit_per_ip = 0)");
+        None
+    };
 
     // Log listen addresses
     for addr in &config.server.listen {
@@ -135,20 +187,24 @@ fn main() -> anyhow::Result<()> {
     // Spawn workers with shutdown receivers
     let handles = worker::spawn_workers(
         &config,
-        tls_config,
+        shared_tls.clone(),
         metrics.clone(),
         &shutdown_tx,
         shutdown_flag.clone(),
         health_map,
+        access_logger,
+        rate_limiter,
     );
 
     tracing::info!("All {} workers started -- q-flux is ready", worker_count);
 
-    // Spawn admin HTTP server on its own thread (health, metrics, status endpoints)
+    // Spawn admin HTTP server on its own thread (health, metrics, status, TLS reload)
     let _admin_handle = admin::spawn_admin_server(
         config.server.admin_listen,
         metrics.clone(),
         worker_count,
+        shared_tls,
+        config.tls.clone(),
     );
 
     if tui_mode {

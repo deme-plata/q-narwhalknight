@@ -255,6 +255,11 @@ impl Metrics {
         self.inner.latency.observe(duration);
     }
 
+    /// Export just the latency histogram in Prometheus text format.
+    pub fn prometheus_export_histogram(&self) -> String {
+        self.inner.latency.prometheus("q_flux_request_duration_seconds")
+    }
+
     /// Export all metrics in Prometheus text format.
     pub fn prometheus_export(&self) -> String {
         let s = self.snapshot();
