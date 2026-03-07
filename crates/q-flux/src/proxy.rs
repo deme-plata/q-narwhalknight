@@ -5,7 +5,9 @@ use hyper::body::Incoming;
 use std::net::SocketAddr;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt};
 
+use crate::config::StaticConfig;
 use crate::metrics::Metrics;
+use crate::static_serve;
 use crate::upstream::UpstreamPool;
 
 const MAX_HEADER_SIZE: usize = 8192;
@@ -19,6 +21,7 @@ pub async fn handle_connection<S>(
     upstream: &UpstreamPool,
     metrics: &Metrics,
     body_limit: usize,
+    static_config: &StaticConfig,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -38,6 +41,43 @@ pub async fn handle_connection<S>(
         };
 
         metrics.request();
+
+        // Static file routing: check before proxying
+        let req_path = req.uri().path().to_string();
+        let req_method = req.method().as_str().to_string();
+        if let static_serve::RouteResult::ServeFile(file_resp) = static_serve::route(&req_path, static_config) {
+            let if_none_match = req.headers().get("if-none-match")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+
+            if req_method == "OPTIONS" {
+                let cors = format!("HTTP/1.1 204 No Content\r\n{}\r\ncontent-length: 0\r\n\r\n", static_serve::CORS_HEADERS);
+                let _ = stream.write_all(cors.as_bytes()).await;
+                let _ = stream.flush().await;
+                metrics.response_status(204);
+            } else {
+                if let Err(e) = static_serve::serve_file(&mut stream, &file_resp, &req_method, if_none_match.as_deref(), metrics).await {
+                    tracing::debug!(client = %client_addr, "Static serve error: {}", e);
+                    break;
+                }
+                metrics.response_status(200);
+            }
+            if !should_keep_alive(&req) { break; }
+            let consumed = header_end;
+            if consumed < buf_len { buf.copy_within(consumed..buf_len, 0); buf_len -= consumed; } else { buf_len = 0; }
+            continue;
+        }
+
+        // CORS preflight
+        if req_method == "OPTIONS" {
+            let cors = format!("HTTP/1.1 204 No Content\r\n{}\r\ncontent-length: 0\r\n\r\n", static_serve::CORS_HEADERS);
+            let _ = stream.write_all(cors.as_bytes()).await;
+            let _ = stream.flush().await;
+            metrics.response_status(204);
+            if !should_keep_alive(&req) { break; }
+            buf_len = 0;
+            continue;
+        }
 
         // Check for WebSocket upgrade
         let is_upgrade = req.headers().get(hyper::header::UPGRADE)

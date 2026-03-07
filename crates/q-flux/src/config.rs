@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -10,7 +11,18 @@ pub struct FluxConfig {
     pub limits: LimitsConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
+    #[serde(default)]
+    pub static_files: StaticConfig,
 }
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct StaticConfig {
+    pub root: Option<PathBuf>,
+    #[serde(default = "default_spa_fallback")]
+    pub spa_fallback: bool,
+}
+
+fn default_spa_fallback() -> bool { true }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
@@ -18,6 +30,10 @@ pub struct ServerConfig {
     pub listen: Vec<String>,
     #[serde(default)]
     pub workers: usize, // 0 = auto-detect
+    /// Admin HTTP server listen address (default: 127.0.0.1:9090).
+    /// Set to "0.0.0.0:9090" to expose externally (not recommended).
+    #[serde(default = "default_admin_listen")]
+    pub admin_listen: SocketAddr,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -37,6 +53,16 @@ pub struct UpstreamConfig {
     pub connect_timeout: std::time::Duration,
     #[serde(default = "default_response_timeout", deserialize_with = "deserialize_duration")]
     pub response_timeout: std::time::Duration,
+    /// How often to probe each backend for health (default: 5s).
+    #[serde(default = "default_health_check_interval", deserialize_with = "deserialize_duration")]
+    pub health_check_interval: std::time::Duration,
+    /// HTTP path to GET for health checks (default: "/api/v1/status").
+    /// Set to "" for TCP-only checks.
+    #[serde(default = "default_health_check_path")]
+    pub health_check_path: String,
+    /// Timeout for a single health probe including TCP connect + HTTP GET (default: 3s).
+    #[serde(default = "default_health_check_timeout", deserialize_with = "deserialize_duration")]
+    pub health_check_timeout: std::time::Duration,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -57,6 +83,9 @@ pub struct LoggingConfig {
 }
 
 // Defaults
+fn default_admin_listen() -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], 9090))
+}
 fn default_listen() -> Vec<String> {
     vec!["0.0.0.0:443".into(), "0.0.0.0:80".into()]
 }
@@ -64,6 +93,9 @@ fn default_max_conns_per_worker() -> usize { 16 }
 fn default_keepalive_timeout() -> std::time::Duration { std::time::Duration::from_secs(30) }
 fn default_connect_timeout() -> std::time::Duration { std::time::Duration::from_secs(5) }
 fn default_response_timeout() -> std::time::Duration { std::time::Duration::from_secs(30) }
+fn default_health_check_interval() -> std::time::Duration { std::time::Duration::from_secs(5) }
+fn default_health_check_path() -> String { "/api/v1/status".to_string() }
+fn default_health_check_timeout() -> std::time::Duration { std::time::Duration::from_secs(3) }
 fn default_max_connections() -> usize { 100_000 }
 fn default_max_conns_per_ip() -> usize { 50 }
 fn default_request_body_limit() -> usize { 25 * 1024 * 1024 } // 25MB

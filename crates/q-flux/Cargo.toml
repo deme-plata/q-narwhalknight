@@ -14,8 +14,8 @@ tokio = { workspace = true, features = ["full", "signal", "sync", "time", "io-ut
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
-hyper = { workspace = true }
-hyper-util = { workspace = true }
+hyper = { workspace = true, features = ["server", "http1"] }
+hyper-util = { workspace = true, features = ["tokio"] }
 http-body-util = { workspace = true }
 http = { workspace = true }
 bytes = { workspace = true }
@@ -31,3 +31,5 @@ socket2 = { workspace = true }
 num_cpus = { workspace = true }
 clap = { workspace = true }
 libc = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }

@@ -1,15 +1,16 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use dashmap::DashMap;
 use rustls::ServerConfig;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Semaphore;
+use tokio::sync::{broadcast, Semaphore};
 use tokio_rustls::TlsAcceptor;
 use tokio::io::AsyncWriteExt;
 
 use crate::config::FluxConfig;
+use crate::health::HealthMap;
 use crate::metrics::Metrics;
 use crate::proxy;
 use crate::upstream::UpstreamPool;
@@ -22,9 +23,14 @@ pub type IpConnTracker = Arc<DashMap<std::net::IpAddr, u64>>;
 pub type ActiveConnCount = Arc<AtomicU64>;
 
 /// Max concurrent connection handlers per worker.
-/// 48 workers × 1024 = 49,152 total concurrent handlers max.
-/// Prevents OOM under load (each handler holds upstream conn + buffers).
-const MAX_HANDLERS_PER_WORKER: usize = 1024;
+/// 48 workers × 8192 = 393,216 total concurrent handlers.
+/// Each handler holds a reference to the shared upstream pool + ~8KB buffer.
+/// At 393K concurrent × ~10KB = ~4GB. Scale further via config.
+const MAX_HANDLERS_PER_WORKER: usize = 8192;
+
+/// How often to garbage-collect the per-IP connection tracker (seconds).
+/// IPs with 0 active connections are removed to prevent unbounded growth.
+const IP_TRACKER_GC_INTERVAL_SECS: u64 = 60;
 
 /// Spawn worker threads. Each worker:
 /// - Has its own TcpListener (SO_REUSEPORT gives it a fair share of connections)
@@ -35,6 +41,9 @@ pub fn spawn_workers(
     config: &FluxConfig,
     tls_config: Arc<ServerConfig>,
     metrics: Metrics,
+    shutdown_tx: &tokio::sync::broadcast::Sender<()>,
+    shutdown_flag: Arc<AtomicBool>,
+    health_map: HealthMap,
 ) -> Vec<std::thread::JoinHandle<()>> {
     let worker_count = config.worker_count();
     let ip_tracker: IpConnTracker = Arc::new(DashMap::new());
@@ -47,6 +56,9 @@ pub fn spawn_workers(
         let metrics = metrics.clone();
         let ip_tracker = ip_tracker.clone();
         let active_conns = active_conns.clone();
+        let shutdown_rx = shutdown_tx.subscribe();
+        let shutdown_flag = shutdown_flag.clone();
+        let health_map = health_map.clone();
 
         let handle = std::thread::Builder::new()
             .name(format!("q-flux-w{}", worker_id))
@@ -59,7 +71,7 @@ pub fn spawn_workers(
                     .expect("Failed to build tokio runtime for worker");
 
                 rt.block_on(async move {
-                    worker_loop(worker_id, &config, tls_config, metrics, ip_tracker, active_conns).await;
+                    worker_loop(worker_id, &config, tls_config, metrics, ip_tracker, active_conns, shutdown_rx, shutdown_flag, health_map).await;
                 });
             })
             .expect("Failed to spawn worker thread");
@@ -67,8 +79,9 @@ pub fn spawn_workers(
         handles.push(handle);
     }
 
-    // Spawn metrics reporter
+    // Spawn metrics reporter with shutdown awareness
     let metrics_clone = metrics.clone();
+    let metrics_shutdown_rx = shutdown_tx.subscribe();
     std::thread::Builder::new()
         .name("q-flux-metrics".into())
         .spawn(move || {
@@ -76,7 +89,7 @@ pub fn spawn_workers(
                 .enable_all()
                 .build()
                 .unwrap();
-            rt.block_on(metrics_reporter(metrics_clone));
+            rt.block_on(metrics_reporter(metrics_clone, metrics_shutdown_rx));
         })
         .ok();
 
@@ -90,6 +103,9 @@ async fn worker_loop(
     metrics: Metrics,
     ip_tracker: IpConnTracker,
     active_conns: ActiveConnCount,
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+    shutdown_flag: Arc<AtomicBool>,
+    health_map: HealthMap,
 ) {
     let tls_acceptor = TlsAcceptor::from(tls_config);
 
@@ -126,11 +142,46 @@ async fn worker_loop(
     let max_conns = config.limits.max_connections as u64;
     let max_per_ip = config.limits.max_conns_per_ip as u64;
     let body_limit = config.limits.request_body_limit;
-    let upstream_config = config.upstream.clone();
+    let static_config = Arc::new(config.static_files.clone());
 
-    // Accept loop
+    // CRITICAL: Create ONE UpstreamPool per worker, shared across all connections.
+    // Previous bug: UpstreamPool::new() was called per-connection, creating a NEW
+    // hyper Client each time. This defeated connection pooling — every request
+    // opened a fresh TCP connection to upstream (same failure mode as keepalive=off).
+    // Now: one hyper Client per worker with pooled keepalive connections to upstream.
+    let upstream = Arc::new(UpstreamPool::new(&config.upstream, metrics.clone(), health_map.clone()));
+
+    // Spawn periodic IP tracker garbage collection to prevent unbounded DashMap growth.
+    // With billions of miners cycling through, stale IPs must be evicted.
+    let gc_ip_tracker = ip_tracker.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(IP_TRACKER_GC_INTERVAL_SECS));
+        loop {
+            interval.tick().await;
+            let before = gc_ip_tracker.len();
+            gc_ip_tracker.retain(|_, count| *count > 0);
+            let removed = before.saturating_sub(gc_ip_tracker.len());
+            if removed > 0 {
+                tracing::debug!(worker = worker_id, removed, remaining = gc_ip_tracker.len(), "IP tracker GC");
+            }
+        }
+    });
+
+    // Accept loop — exits on shutdown signal
     loop {
-        let accept_result = accept_any(&listeners).await;
+        // Fast-path shutdown check (no channel overhead)
+        if shutdown_flag.load(Ordering::Relaxed) {
+            tracing::info!(worker = worker_id, "Shutdown flag set — stopping accept loop");
+            break;
+        }
+
+        let accept_result = tokio::select! {
+            r = accept_any(&listeners) => r,
+            _ = shutdown_rx.recv() => {
+                tracing::info!(worker = worker_id, "Shutdown signal received — stopping accept loop");
+                break;
+            }
+        };
         let (tcp_stream, client_addr) = match accept_result {
             Ok(v) => v,
             Err(e) => {
@@ -172,8 +223,9 @@ async fn worker_loop(
         let metrics = metrics.clone();
         let ip_tracker = ip_tracker.clone();
         let active_conns = active_conns.clone();
-        let upstream_config = upstream_config.clone();
+        let upstream = upstream.clone();
         let semaphore = handler_semaphore.clone();
+        let static_config = static_config.clone();
 
         tokio::spawn(async move {
             // Acquire semaphore permit — backpressure if too many concurrent handlers.
@@ -188,8 +240,6 @@ async fn worker_loop(
                 }
             };
 
-            let upstream = UpstreamPool::new(&upstream_config, metrics.clone());
-
             if is_tls {
                 let tls_result = tokio::time::timeout(
                     std::time::Duration::from_secs(10),
@@ -200,7 +250,7 @@ async fn worker_loop(
                     Ok(Ok(tls_stream)) => {
                         metrics.tls_handshake_ok();
                         proxy::handle_connection(
-                            tls_stream, client_addr, &upstream, &metrics, body_limit,
+                            tls_stream, client_addr, &*upstream, &metrics, body_limit, &static_config,
                         ).await;
                     }
                     Ok(Err(e)) => {
@@ -238,6 +288,21 @@ async fn worker_loop(
             cleanup_conn(&ip_tracker, client_ip, &active_conns, &metrics);
         });
     }
+
+    // Accept loop exited. In-flight request tasks are still running on this
+    // worker's runtime. We wait here so that block_on() does not return and
+    // drop the runtime (which would cancel all spawned tasks). The main
+    // thread's drain timeout controls how long we actually wait — when it
+    // fires, process exit kills this thread regardless.
+    tracing::info!(
+        worker = worker_id,
+        "Accept loop stopped, waiting for in-flight requests to drain"
+    );
+
+    // Sleep longer than the main thread's drain timeout (default 30s).
+    // The main thread will exit the process when its timer fires, which
+    // terminates this sleep and all spawned tasks.
+    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
 }
 
 /// Decrement IP counter and global active count on connection close.
@@ -325,12 +390,22 @@ fn pin_to_core(core_id: usize) {
     }
 }
 
-/// Periodically log metrics.
-async fn metrics_reporter(metrics: Metrics) {
+/// Periodically log metrics. Stops cleanly when shutdown signal is received.
+async fn metrics_reporter(metrics: Metrics, mut shutdown_rx: broadcast::Receiver<()>) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
     loop {
-        interval.tick().await;
-        let snap = metrics.snapshot();
-        tracing::info!("METRICS: {}", snap);
+        tokio::select! {
+            biased;
+
+            _ = shutdown_rx.recv() => {
+                tracing::debug!("Metrics reporter received shutdown signal");
+                break;
+            }
+
+            _ = interval.tick() => {
+                let snap = metrics.snapshot();
+                tracing::info!("METRICS: {}", snap);
+            }
+        }
     }
 }

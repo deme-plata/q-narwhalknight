@@ -9,8 +9,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::time::timeout;
+use tracing::warn;
 
 use crate::config::UpstreamConfig;
+use crate::health::HealthMap;
 use crate::metrics::Metrics;
 
 /// Per-worker upstream connection pool.
@@ -20,12 +22,13 @@ pub struct UpstreamPool {
     pub backends: Arc<Vec<String>>,
     response_timeout: Duration,
     metrics: Metrics,
+    health_map: HealthMap,
     /// Round-robin index
     rr_index: AtomicUsize,
 }
 
 impl UpstreamPool {
-    pub fn new(config: &UpstreamConfig, metrics: Metrics) -> Self {
+    pub fn new(config: &UpstreamConfig, metrics: Metrics, health_map: HealthMap) -> Self {
         let mut connector = HttpConnector::new();
         connector.set_nodelay(true);
         connector.set_keepalive(Some(config.keepalive_timeout));
@@ -42,14 +45,41 @@ impl UpstreamPool {
             backends: Arc::new(config.backends.clone()),
             response_timeout: config.response_timeout,
             metrics,
+            health_map,
             rr_index: AtomicUsize::new(0),
         }
     }
 
-    /// Pick the next backend (round-robin).
+    /// Pick the next healthy backend (round-robin, skipping unhealthy ones).
+    ///
+    /// If ALL backends are unhealthy, falls back to the first backend in
+    /// round-robin order -- a degraded attempt is better than an immediate 503.
     fn next_backend(&self) -> &str {
-        let idx = self.rr_index.fetch_add(1, Ordering::Relaxed);
-        &self.backends[idx % self.backends.len()]
+        let len = self.backends.len();
+        let start = self.rr_index.fetch_add(1, Ordering::Relaxed);
+
+        // First pass: look for a healthy backend starting at the RR index
+        for i in 0..len {
+            let idx = (start + i) % len;
+            let backend = &self.backends[idx];
+            if let Some(entry) = self.health_map.get(backend.as_str()) {
+                if entry.is_healthy {
+                    return backend;
+                }
+            } else {
+                // No health entry means we haven't checked yet -- assume healthy
+                return backend;
+            }
+        }
+
+        // All backends unhealthy: fall through to the original RR pick so we
+        // at least attempt something rather than returning a guaranteed 503.
+        let fallback = &self.backends[start % len];
+        warn!(
+            backend = fallback.as_str(),
+            "All backends unhealthy, attempting degraded fallback"
+        );
+        fallback
     }
 
     /// Get next backend address for direct TCP connections (e.g. WebSocket).
