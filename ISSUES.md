@@ -7,8 +7,8 @@ Issues are assigned to Claude Code agents. Pick an unassigned issue, create a fe
 ## Issue #1: `q-queue` — High-Performance Universal Queue System
 
 **Priority**: High
-**Status**: Open
-**Assignee**: Unassigned
+**Status**: Phase 1 DONE (SPSC + MPSC ring buffers, 11 tests passing)
+**Assignee**: Server Beta
 **Branch**: `feature/q-queue`
 **Crate**: `crates/q-queue/`
 
@@ -282,8 +282,8 @@ Proxy-layer awareness of libp2p traffic:
 ## Issue #5: `q-flux` — SSE/Streaming Response Support
 
 **Priority**: Critical (blocks mining deployment)
-**Status**: Open
-**Assignee**: Unassigned
+**Status**: DONE
+**Assignee**: Server Beta
 **Branch**: `feature/q-flux-sse`
 **Crate**: `crates/q-flux/`
 
@@ -351,8 +351,8 @@ curl -N https://localhost:443/api/v1/sse
 ## Issue #6: `q-flux` — Graceful Shutdown + Signal Handling
 
 **Priority**: High
-**Status**: Open
-**Assignee**: Unassigned
+**Status**: DONE
+**Assignee**: Server Beta
 **Branch**: `feature/q-flux-shutdown`
 **Crate**: `crates/q-flux/`
 
@@ -392,8 +392,8 @@ In `worker.rs`, each worker checks `shutdown_rx` in the accept loop and stops ac
 ## Issue #7: `q-flux` — Admin API + Prometheus Metrics Endpoint
 
 **Priority**: Medium
-**Status**: Open
-**Assignee**: Unassigned
+**Status**: DONE
+**Assignee**: Server Beta
 **Branch**: `feature/q-flux-admin`
 **Crate**: `crates/q-flux/`
 
@@ -443,8 +443,8 @@ q_flux_upstream_latency_seconds_bucket{le="0.01"} 460000
 ## Issue #8: `q-flux` — Connection Draining + Upstream Health Checks
 
 **Priority**: High
-**Status**: Open
-**Assignee**: Unassigned
+**Status**: DONE
+**Assignee**: Server Beta
 **Branch**: `feature/q-flux-health`
 **Crate**: `crates/q-flux/`
 
@@ -498,8 +498,7 @@ drain_timeout = "30s"
 ## Issue #9: `q-flux` — TLS Session Resumption + OCSP Stapling
 
 **Priority**: Medium
-**Status**: Open
-**Assignee**: Unassigned
+**Status**: DONE (Session resumption + tickets implemented; OCSP stapling deferred)
 **Branch**: `feature/q-flux-tls-perf`
 **Crate**: `crates/q-flux/`
 
@@ -548,3 +547,178 @@ config.versions = &[&rustls::version::TLS13];
 | Full TLS handshake | ~2ms | ~2ms (first time) |
 | Resumed handshake | ~2ms | ~0.5ms (75% faster) |
 | Handshakes/sec (48 cores) | ~24K | ~96K |
+
+---
+
+## Issue #10: `q-flux` — TLS Certificate Hot-Reload
+
+**Priority**: Medium
+**Status**: DONE (SharedTlsConfig with RwLock swap)
+**Assignee**: Server Beta
+**Branch**: `feature/q-flux-tls-reload`
+**Crate**: `crates/q-flux/`
+
+### Summary
+
+Add `POST /reload` to the admin API that hot-reloads TLS certificates without restarting q-flux. Essential for Let's Encrypt auto-renewal (certificates rotate every 90 days).
+
+### Implementation
+
+1. Wrap `Arc<ServerConfig>` in an `ArcSwap` so workers can atomically see the new config
+2. On `POST /reload`, re-read cert+key files, build new `ServerConfig`, swap it in
+3. Workers pick up the new config on the next TLS handshake (zero connection disruption)
+4. Return JSON response with old/new certificate serial numbers and expiry dates
+
+### Dependencies
+
+- Add `arc-swap` crate to workspace
+
+```rust
+// In acceptor.rs
+use arc_swap::ArcSwap;
+
+pub type SharedTlsConfig = Arc<ArcSwap<ServerConfig>>;
+
+pub fn reload_tls(shared: &SharedTlsConfig, tls: &TlsConfig) -> Result<()> {
+    let new_config = build_tls_config(tls)?;
+    shared.store(new_config);
+    Ok(())
+}
+```
+
+---
+
+## Issue #11: `q-flux` — Request Latency Histogram
+
+**Priority**: Medium
+**Status**: DONE (LatencyHistogram + Prometheus export)
+**Assignee**: Server Beta
+**Branch**: `feature/q-flux-latency`
+**Crate**: `crates/q-flux/`
+
+### Summary
+
+Add latency tracking to the metrics system. Currently we track counts but not timing. Need:
+
+1. Per-request latency measurement (time from header parse to last response byte)
+2. Histogram with configurable buckets (1ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 5s)
+3. Expose as Prometheus histogram on `GET /metrics`
+
+### Implementation
+
+Add an atomic histogram to `MetricsInner`:
+
+```rust
+struct LatencyHistogram {
+    buckets: [(f64, AtomicU64); 10], // (upper_bound_ms, count)
+    sum: AtomicU64,                   // total microseconds
+    count: AtomicU64,                 // total observations
+}
+```
+
+In `proxy.rs`, wrap `handle_connection` request processing with:
+```rust
+let start = Instant::now();
+// ... process request ...
+metrics.record_latency(start.elapsed());
+```
+
+---
+
+## Issue #12: `q-flux` — Token Bucket Rate Limiter
+
+**Priority**: Medium
+**Status**: DONE (TokenBucket + per-IP RateLimiter with DashMap)
+**Assignee**: Server Beta
+**Branch**: `feature/q-flux-ratelimit`
+**Crate**: `crates/q-flux/`
+
+### Summary
+
+The current per-IP rate limiting only counts concurrent connections. Add a token bucket rate limiter for requests-per-second control:
+
+1. Per-IP token bucket: configurable rate (e.g. 100 req/s) and burst (e.g. 200)
+2. Global rate limit: total RPS across all clients
+3. Return `429 Too Many Requests` with `Retry-After` header
+4. DashMap-based storage with periodic cleanup of stale entries
+
+### Config
+
+```toml
+[limits]
+rps_per_ip = 100        # sustained rate per IP
+burst_per_ip = 200      # burst capacity per IP
+global_rps = 50000      # global limit across all IPs
+```
+
+### Implementation
+
+```rust
+struct TokenBucket {
+    tokens: AtomicU64,      // available tokens × 1000 (fixed-point)
+    last_refill: AtomicU64, // timestamp in microseconds
+    rate: u64,              // tokens per second × 1000
+    capacity: u64,          // max tokens × 1000
+}
+```
+
+---
+
+## Issue #13: `q-flux` — Structured Access Logging
+
+**Priority**: Low
+**Status**: Open
+**Assignee**: Unassigned
+**Branch**: `feature/q-flux-access-log`
+**Crate**: `crates/q-flux/`
+
+### Summary
+
+Add structured access logging in JSON format for production observability. Each request produces one log line with:
+
+- Timestamp (ISO 8601)
+- Client IP + port
+- Method, path, HTTP version
+- Response status code
+- Upstream backend used
+- Request/response size (bytes)
+- Total latency (ms)
+- TLS version + cipher
+- User-Agent header
+
+### Implementation
+
+- Use a dedicated log writer thread with a bounded channel (no I/O in hot path)
+- Write to configurable file (from `config.logging.access_log`)
+- Rotate logs via external tool (logrotate) — write to stdout/file, not manage rotation
+
+```json
+{"ts":"2026-03-07T12:00:00Z","ip":"1.2.3.4","method":"POST","path":"/api/v1/mining/submit","status":200,"upstream":"127.0.0.1:8080","rx":256,"tx":128,"latency_ms":4.2,"tls":"TLS1.3","ua":"q-miner/9.2.4"}
+```
+
+---
+
+## Issue #14: `q-flux` — OCSP Stapling
+
+**Priority**: Low
+**Status**: Open
+**Assignee**: Unassigned
+**Branch**: `feature/q-flux-ocsp`
+**Crate**: `crates/q-flux/`
+
+### Summary
+
+Implement OCSP stapling to avoid clients making separate OCSP lookups during TLS handshake. This saves ~50-100ms per new connection.
+
+### Implementation
+
+1. Custom `rustls::server::ResolvesServerCert` that includes the OCSP response
+2. Background task that fetches OCSP response from the CA every 6 hours
+3. Parse OCSP responder URL from the certificate's Authority Information Access extension
+4. Cache the DER-encoded OCSP response in memory
+5. Include in the TLS handshake via `CertifiedKey::new(certs, key).with_ocsp(ocsp_der)`
+
+### Dependencies
+
+- `x509-parser` for extracting OCSP responder URL from cert
+- `reqwest` (or raw HTTP) for fetching OCSP response from CA

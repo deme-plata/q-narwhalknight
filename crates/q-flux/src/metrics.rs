@@ -1,6 +1,188 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+// ─── Latency Histogram (Issue #11) ────────────────────────────────────────
+
+/// Lock-free latency histogram with fixed buckets.
+/// All operations are atomic — safe to call from any thread.
+#[derive(Debug)]
+pub struct LatencyHistogram {
+    /// Upper bounds in microseconds. The last bucket is +Inf.
+    bounds_us: [u64; 10],
+    /// Counts per bucket (cumulative — each bucket includes all smaller).
+    buckets: [AtomicU64; 10],
+    /// Total observations.
+    pub count: AtomicU64,
+    /// Sum of all observed latencies in microseconds.
+    pub sum_us: AtomicU64,
+}
+
+impl LatencyHistogram {
+    pub fn new() -> Self {
+        Self {
+            // 1ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 5s
+            bounds_us: [1_000, 5_000, 10_000, 25_000, 50_000, 100_000, 250_000, 500_000, 1_000_000, 5_000_000],
+            buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+            count: AtomicU64::new(0),
+            sum_us: AtomicU64::new(0),
+        }
+    }
+
+    /// Record a latency observation.
+    #[inline]
+    pub fn observe(&self, duration: Duration) {
+        let us = duration.as_micros() as u64;
+        self.sum_us.fetch_add(us, Ordering::Relaxed);
+        self.count.fetch_add(1, Ordering::Relaxed);
+        for (i, &bound) in self.bounds_us.iter().enumerate() {
+            if us <= bound {
+                self.buckets[i].fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+        }
+        // Exceeds all buckets — falls into +Inf (last bucket)
+        self.buckets[9].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Format as Prometheus histogram lines.
+    pub fn prometheus(&self, name: &str) -> String {
+        let mut out = format!(
+            "# HELP {name} Request latency in seconds\n# TYPE {name} histogram\n"
+        );
+        let mut cumulative = 0u64;
+        let labels = ["0.001", "0.005", "0.01", "0.025", "0.05", "0.1", "0.25", "0.5", "1", "5"];
+        for (i, label) in labels.iter().enumerate() {
+            cumulative += self.buckets[i].load(Ordering::Relaxed);
+            out.push_str(&format!("{name}_bucket{{le=\"{label}\"}} {cumulative}\n"));
+        }
+        let total = self.count.load(Ordering::Relaxed);
+        out.push_str(&format!("{name}_bucket{{le=\"+Inf\"}} {total}\n"));
+        let sum_s = self.sum_us.load(Ordering::Relaxed) as f64 / 1_000_000.0;
+        out.push_str(&format!("{name}_sum {sum_s:.6}\n"));
+        out.push_str(&format!("{name}_count {total}\n"));
+        out
+    }
+}
+
+// ─── Token Bucket Rate Limiter (Issue #12) ─────────────────────────────────
+
+/// Per-IP token bucket rate limiter.
+/// Lock-free: uses atomic CAS for token consumption.
+#[derive(Debug)]
+pub struct TokenBucket {
+    /// Available tokens × 1000 (fixed-point for sub-token precision).
+    tokens: AtomicU64,
+    /// Last refill timestamp in microseconds.
+    last_refill_us: AtomicU64,
+    /// Tokens per second × 1000.
+    rate_milli: u64,
+    /// Max tokens × 1000.
+    capacity_milli: u64,
+}
+
+impl TokenBucket {
+    pub fn new(rate_per_sec: u64, burst: u64) -> Self {
+        Self {
+            tokens: AtomicU64::new(burst * 1000),
+            last_refill_us: AtomicU64::new(0),
+            rate_milli: rate_per_sec * 1000,
+            capacity_milli: burst * 1000,
+        }
+    }
+
+    /// Try to consume one token. Returns true if allowed, false if rate-limited.
+    #[inline]
+    pub fn try_acquire(&self, now_us: u64) -> bool {
+        // Refill tokens based on elapsed time
+        let last = self.last_refill_us.load(Ordering::Relaxed);
+        let elapsed_us = now_us.saturating_sub(last);
+        if elapsed_us > 1000 {
+            // More than 1ms elapsed — refill
+            let new_tokens = (elapsed_us * self.rate_milli) / 1_000_000;
+            if new_tokens > 0 {
+                // CAS the timestamp to claim this refill window
+                if self.last_refill_us.compare_exchange_weak(
+                    last, now_us, Ordering::AcqRel, Ordering::Relaxed
+                ).is_ok() {
+                    let current = self.tokens.load(Ordering::Relaxed);
+                    let refilled = (current + new_tokens).min(self.capacity_milli);
+                    self.tokens.store(refilled, Ordering::Release);
+                }
+            }
+        }
+
+        // Try to consume one token (1000 milli-tokens)
+        loop {
+            let current = self.tokens.load(Ordering::Relaxed);
+            if current < 1000 {
+                return false; // Rate limited
+            }
+            if self.tokens.compare_exchange_weak(
+                current, current - 1000, Ordering::AcqRel, Ordering::Relaxed
+            ).is_ok() {
+                return true;
+            }
+        }
+    }
+}
+
+/// Per-IP rate limiter using DashMap of token buckets.
+pub struct RateLimiter {
+    buckets: dashmap::DashMap<std::net::IpAddr, TokenBucket>,
+    rate_per_sec: u64,
+    burst: u64,
+    global: TokenBucket,
+}
+
+impl RateLimiter {
+    pub fn new(rate_per_ip: u64, burst_per_ip: u64, global_rps: u64) -> Self {
+        Self {
+            buckets: dashmap::DashMap::with_capacity(1024),
+            rate_per_sec: rate_per_ip,
+            burst: burst_per_ip,
+            global: TokenBucket::new(global_rps, global_rps * 2),
+        }
+    }
+
+    /// Check if a request from this IP is allowed.
+    pub fn check(&self, ip: std::net::IpAddr) -> bool {
+        let now_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros() as u64;
+
+        // Global limit first
+        if !self.global.try_acquire(now_us) {
+            return false;
+        }
+
+        // Per-IP limit
+        let bucket = self.buckets.entry(ip).or_insert_with(|| {
+            TokenBucket::new(self.rate_per_sec, self.burst)
+        });
+        bucket.try_acquire(now_us)
+    }
+
+    /// Remove stale entries (IPs not seen recently). Call periodically.
+    pub fn cleanup(&self) {
+        let now_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros() as u64;
+        // Remove entries idle for >5 minutes
+        let stale_threshold = 5 * 60 * 1_000_000u64;
+        self.buckets.retain(|_, bucket| {
+            now_us.saturating_sub(bucket.last_refill_us.load(Ordering::Relaxed)) < stale_threshold
+        });
+    }
+
+    pub fn active_ips(&self) -> usize {
+        self.buckets.len()
+    }
+}
+
+// ─── Core Metrics ──────────────────────────────────────────────────────────
 
 /// Global metrics shared across all workers.
 #[derive(Debug, Clone)]
@@ -35,6 +217,8 @@ struct MetricsInner {
     // Bytes
     pub bytes_received: AtomicU64,
     pub bytes_sent: AtomicU64,
+    // Latency histogram (Issue #11)
+    pub latency: LatencyHistogram,
 }
 
 impl Metrics {
@@ -60,8 +244,65 @@ impl Metrics {
                 active_websockets: AtomicU64::new(0),
                 bytes_received: AtomicU64::new(0),
                 bytes_sent: AtomicU64::new(0),
+                latency: LatencyHistogram::new(),
             }),
         }
+    }
+
+    /// Record a request latency observation (Issue #11).
+    #[inline]
+    pub fn record_latency(&self, duration: Duration) {
+        self.inner.latency.observe(duration);
+    }
+
+    /// Export all metrics in Prometheus text format.
+    pub fn prometheus_export(&self) -> String {
+        let s = self.snapshot();
+        let mut out = String::with_capacity(2048);
+
+        out.push_str("# HELP q_flux_connections_active Current active connections\n");
+        out.push_str("# TYPE q_flux_connections_active gauge\n");
+        out.push_str(&format!("q_flux_connections_active {}\n", s.active_connections));
+
+        out.push_str("# HELP q_flux_connections_total Total connections\n");
+        out.push_str("# TYPE q_flux_connections_total counter\n");
+        out.push_str(&format!("q_flux_connections_total {}\n", s.total_connections));
+
+        out.push_str("# HELP q_flux_requests_total Total requests by status\n");
+        out.push_str("# TYPE q_flux_requests_total counter\n");
+        out.push_str(&format!("q_flux_requests_total{{status=\"2xx\"}} {}\n", s.requests_2xx));
+        out.push_str(&format!("q_flux_requests_total{{status=\"4xx\"}} {}\n", s.requests_4xx));
+        out.push_str(&format!("q_flux_requests_total{{status=\"5xx\"}} {}\n", s.requests_5xx));
+
+        out.push_str("# HELP q_flux_tls_handshakes_total TLS handshakes\n");
+        out.push_str("# TYPE q_flux_tls_handshakes_total counter\n");
+        out.push_str(&format!("q_flux_tls_handshakes_total{{result=\"ok\"}} {}\n", s.tls_handshakes));
+        out.push_str(&format!("q_flux_tls_handshakes_total{{result=\"fail\"}} {}\n", s.tls_handshake_failures));
+
+        out.push_str("# HELP q_flux_bytes_received_total Bytes received\n");
+        out.push_str("# TYPE q_flux_bytes_received_total counter\n");
+        out.push_str(&format!("q_flux_bytes_received_total {}\n", s.bytes_received));
+
+        out.push_str("# HELP q_flux_bytes_sent_total Bytes sent\n");
+        out.push_str("# TYPE q_flux_bytes_sent_total counter\n");
+        out.push_str(&format!("q_flux_bytes_sent_total {}\n", s.bytes_sent));
+
+        out.push_str("# HELP q_flux_rate_limited_total Rate-limited requests\n");
+        out.push_str("# TYPE q_flux_rate_limited_total counter\n");
+        out.push_str(&format!("q_flux_rate_limited_total {}\n", s.rate_limited));
+
+        out.push_str("# HELP q_flux_upstream_active Active upstream connections\n");
+        out.push_str("# TYPE q_flux_upstream_active gauge\n");
+        out.push_str(&format!("q_flux_upstream_active {}\n", s.upstream_active));
+
+        out.push_str("# HELP q_flux_uptime_seconds Uptime\n");
+        out.push_str("# TYPE q_flux_uptime_seconds gauge\n");
+        out.push_str(&format!("q_flux_uptime_seconds {}\n", s.uptime_secs));
+
+        // Latency histogram
+        out.push_str(&self.inner.latency.prometheus("q_flux_request_duration_seconds"));
+
+        out
     }
 
     // Connection tracking
@@ -155,6 +396,7 @@ impl Metrics {
             upstream_timeouts: self.inner.upstream_timeouts.load(Ordering::Relaxed),
             upstream_active: self.inner.upstream_active.load(Ordering::Relaxed),
             rate_limited: self.inner.rate_limited.load(Ordering::Relaxed),
+            websocket_upgrades: self.inner.websocket_upgrades.load(Ordering::Relaxed),
             active_websockets: self.inner.active_websockets.load(Ordering::Relaxed),
             bytes_received: self.inner.bytes_received.load(Ordering::Relaxed),
             bytes_sent: self.inner.bytes_sent.load(Ordering::Relaxed),
@@ -177,6 +419,7 @@ pub struct MetricsSnapshot {
     pub upstream_timeouts: u64,
     pub upstream_active: u64,
     pub rate_limited: u64,
+    pub websocket_upgrades: u64,
     pub active_websockets: u64,
     pub bytes_received: u64,
     pub bytes_sent: u64,
@@ -188,7 +431,7 @@ impl std::fmt::Display for MetricsSnapshot {
             f,
             "uptime={}s conns={}/{} tls_ok={} tls_fail={} reqs={} 2xx={} 4xx={} 5xx={} \
              upstream_fail={} upstream_timeout={} upstream_active={} rate_limited={} \
-             ws={} rx={}B tx={}B",
+             ws={}/{} rx={}B tx={}B",
             self.uptime_secs,
             self.active_connections,
             self.total_connections,
@@ -203,6 +446,7 @@ impl std::fmt::Display for MetricsSnapshot {
             self.upstream_active,
             self.rate_limited,
             self.active_websockets,
+            self.websocket_upgrades,
             self.bytes_received,
             self.bytes_sent,
         )

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use parking_lot::RwLock;
 use rustls::ServerConfig;
 use std::io::BufReader;
 use std::net::SocketAddr;
@@ -7,6 +8,38 @@ use std::sync::Arc;
 use std::os::unix::io::AsRawFd;
 
 use crate::config::TlsConfig;
+
+// ─── TLS Hot-Reload (Issue #10) ───────────────────────────────────────────
+
+/// Shared TLS config that can be atomically swapped for hot-reload.
+/// Workers read the current config on each new TLS handshake.
+#[derive(Clone)]
+pub struct SharedTlsConfig {
+    inner: Arc<RwLock<Arc<ServerConfig>>>,
+}
+
+impl SharedTlsConfig {
+    pub fn new(config: Arc<ServerConfig>) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(config)),
+        }
+    }
+
+    /// Get the current TLS config (fast read lock).
+    #[inline]
+    pub fn load(&self) -> Arc<ServerConfig> {
+        self.inner.read().clone()
+    }
+
+    /// Hot-reload TLS certificates from disk. Returns Ok with info string on success.
+    pub fn reload(&self, tls: &TlsConfig) -> Result<String> {
+        let new_config = build_tls_config(tls)?;
+        let mut guard = self.inner.write();
+        *guard = new_config;
+        tracing::info!("TLS certificates hot-reloaded from {:?}", tls.cert);
+        Ok(format!("TLS reloaded from {}", tls.cert.display()))
+    }
+}
 
 /// Build a rustls ServerConfig from cert/key files.
 /// The Arc<ServerConfig> is shared across all workers (rustls is thread-safe).
@@ -31,11 +64,27 @@ pub fn build_tls_config(tls: &TlsConfig) -> Result<Arc<ServerConfig>> {
         .map_err(|e| anyhow::anyhow!("Failed to parse key: {}", e))?
         .ok_or_else(|| anyhow::anyhow!("No private key found in {}", tls.key.display()))?;
 
-    // Build server config
-    let config = ServerConfig::builder()
+    // Build server config with session resumption for fast miner reconnects.
+    // Session tickets: resumed handshake ~0.5ms vs ~2ms full handshake (75% faster).
+    // Session cache: 65536 entries shared across all workers via Arc<ServerConfig>.
+    let mut config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|e| anyhow::anyhow!("TLS config error: {}", e))?;
+
+    // Enable TLS session tickets (key rotation is automatic)
+    config.ticketer = rustls::crypto::ring::Ticketer::new()
+        .map_err(|e| anyhow::anyhow!("Failed to create TLS ticketer: {}", e))?;
+
+    // Shared session cache — 65536 sessions across all workers
+    config.session_storage = rustls::server::ServerSessionMemoryCache::new(65536);
+
+    // ALPN: advertise HTTP/1.1 (HTTP/2 in Phase 3)
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+
+    tracing::info!(
+        "TLS config: session tickets enabled, session cache 65536, ALPN [http/1.1]"
+    );
 
     Ok(Arc::new(config))
 }
