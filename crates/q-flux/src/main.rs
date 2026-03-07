@@ -233,6 +233,9 @@ fn main() -> anyhow::Result<()> {
             .expect("Failed to spawn cluster health-checker thread");
     }
 
+    // Clone health_map for admin server (Arc<DashMap> is cheap to clone)
+    let admin_health_map = health_map.clone();
+
     // Spawn workers with shutdown receivers
     let handles = worker::spawn_workers(
         &config,
@@ -254,6 +257,9 @@ fn main() -> anyhow::Result<()> {
         worker_count,
         shared_tls,
         config.tls.clone(),
+        Some(admin_health_map),
+        config.upstream.backends.clone(),
+        config.cluster.peers.clone(),
     );
 
     if tui_mode {

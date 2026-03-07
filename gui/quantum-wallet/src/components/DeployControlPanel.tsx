@@ -158,6 +158,19 @@ interface CaddyStatsAll {
 }
 
 // v9.2.0: q-flux reverse proxy stats (worker-per-core TLS proxy)
+interface FluxBackendHealth {
+  addr: string;
+  healthy: boolean;
+  failures: number;
+  last_check_ms_ago: number;
+}
+
+interface FluxClusterInfo {
+  enabled: boolean;
+  local_backends: FluxBackendHealth[];
+  cluster_peers: FluxBackendHealth[];
+}
+
 interface FluxStats {
   version: string;
   worker_count: number;
@@ -182,6 +195,7 @@ interface FluxStats {
   h2_connections: number;
   h2_streams_opened: number;
   h2_streams_closed: number;
+  cluster?: FluxClusterInfo;
   online: boolean;
   requests_per_second: number;
   error_rate_pct: number;
@@ -2074,7 +2088,108 @@ export default function DeployControlPanel() {
                               </div>
                             </div>
 
-                            {/* Row 4: Bottom metadata row */}
+                            {/* Row 4: Super-Cluster Topology */}
+                            {f.cluster?.enabled && (
+                              <div className="mb-3 rounded-lg bg-slate-800/40 p-2.5 border border-cyan-500/20">
+                                <div className="flex items-center gap-1.5 mb-2">
+                                  <svg className="w-3.5 h-3.5 text-cyan-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                    <circle cx="12" cy="12" r="3" /><circle cx="4" cy="6" r="2" /><circle cx="20" cy="6" r="2" /><circle cx="4" cy="18" r="2" /><circle cx="20" cy="18" r="2" />
+                                    <line x1="6" y1="7" x2="10" y2="10" /><line x1="18" y1="7" x2="14" y2="10" /><line x1="6" y1="17" x2="10" y2="14" /><line x1="18" y1="17" x2="14" y2="14" />
+                                  </svg>
+                                  <span className="text-[10px] font-semibold text-cyan-300 cursor-help"
+                                    title="Super-Cluster: Cross-node failover mesh. q-flux routes requests to local backends first. If ALL local backends are down, traffic automatically fails over to cluster peers (remote servers). This provides zero-downtime resilience across the entire server fleet.">
+                                    Super-Cluster Topology
+                                  </span>
+                                  <span className="text-[9px] px-1 py-0.5 rounded bg-cyan-500/15 text-cyan-400/80 border border-cyan-500/20 cursor-help"
+                                    title={`${f.cluster.local_backends.length} local backend(s) + ${f.cluster.cluster_peers.length} cluster peer(s) in the mesh`}>
+                                    {f.cluster.local_backends.length + f.cluster.cluster_peers.length} nodes
+                                  </span>
+                                </div>
+
+                                {/* Visual topology: Local → this node → Cluster peers */}
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  {/* Local backends */}
+                                  {f.cluster.local_backends.map((b, i) => {
+                                    const label = b.addr.replace('127.0.0.1:', 'localhost:');
+                                    return (
+                                      <div key={`local-${i}`} className={`flex items-center gap-1 px-2 py-1 rounded-md text-[9px] font-mono border cursor-help ${
+                                        b.healthy
+                                          ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                                          : 'bg-red-500/10 border-red-500/30 text-red-300'
+                                      }`}
+                                        title={`Local Backend: ${b.addr}\nStatus: ${b.healthy ? 'HEALTHY' : 'UNHEALTHY'}\nConsecutive Failures: ${b.failures}\nLast Health Check: ${b.last_check_ms_ago < 1000 ? '<1s' : Math.floor(b.last_check_ms_ago / 1000) + 's'} ago\n\nLocal backends are the q-api-server instances on this machine. q-flux always prefers local backends for lowest latency.`}>
+                                        <div className={`w-1.5 h-1.5 rounded-full ${b.healthy ? 'bg-emerald-400 animate-pulse' : 'bg-red-400'}`} />
+                                        <span>{label}</span>
+                                        <span className="text-[8px] opacity-50">LOCAL</span>
+                                      </div>
+                                    );
+                                  })}
+
+                                  {/* Arrow connector */}
+                                  {f.cluster.cluster_peers.length > 0 && (
+                                    <div className="flex items-center gap-0.5 text-cyan-500/40 cursor-help"
+                                      title="Failover direction: if all local backends are unhealthy, q-flux routes to cluster peers. Traffic always prefers local first for lowest latency.">
+                                      <div className="w-4 h-px bg-cyan-500/30" />
+                                      <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                        <path d="M5 12h14m-7-7l7 7-7 7" />
+                                      </svg>
+                                      <span className="text-[8px]">failover</span>
+                                      <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                        <path d="M5 12h14m-7-7l7 7-7 7" />
+                                      </svg>
+                                      <div className="w-4 h-px bg-cyan-500/30" />
+                                    </div>
+                                  )}
+
+                                  {/* Cluster peers */}
+                                  {f.cluster.cluster_peers.map((p, i) => {
+                                    // Try to resolve addr to server name
+                                    const serverName = p.addr.includes('89.149.241.126') ? 'Epsilon'
+                                      : p.addr.includes('185.182.185.227') ? 'Beta'
+                                      : p.addr.includes('109.205.176.60') ? 'Gamma'
+                                      : p.addr.includes('5.79.79.158') ? 'Delta'
+                                      : p.addr.split(':')[0];
+                                    return (
+                                      <div key={`cluster-${i}`} className={`flex items-center gap-1 px-2 py-1 rounded-md text-[9px] font-mono border cursor-help ${
+                                        p.healthy
+                                          ? 'bg-blue-500/10 border-blue-500/30 text-blue-300'
+                                          : 'bg-red-500/10 border-red-500/30 text-red-300'
+                                      }`}
+                                        title={`Cluster Peer: ${p.addr}\nServer: ${serverName}\nStatus: ${p.healthy ? 'HEALTHY' : 'UNHEALTHY'}\nConsecutive Failures: ${p.failures}\nLast Health Check: ${p.last_check_ms_ago < 1000 ? '<1s' : Math.floor(p.last_check_ms_ago / 1000) + 's'} ago\n\nCluster peers are remote q-api-server instances on other physical servers. q-flux only routes to them when ALL local backends are unhealthy (failover mode).`}>
+                                        <div className={`w-1.5 h-1.5 rounded-full ${p.healthy ? 'bg-blue-400 animate-pulse' : 'bg-red-400'}`} />
+                                        <span>{serverName}</span>
+                                        <span className="text-[8px] opacity-50">PEER</span>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+
+                                {/* Status summary */}
+                                {(() => {
+                                  const allLocal = f.cluster!.local_backends;
+                                  const allPeers = f.cluster!.cluster_peers;
+                                  const localHealthy = allLocal.filter(b => b.healthy).length;
+                                  const peersHealthy = allPeers.filter(p => p.healthy).length;
+                                  const allLocalDown = localHealthy === 0 && allLocal.length > 0;
+                                  return (
+                                    <div className={`mt-1.5 text-[9px] flex items-center gap-1.5 ${allLocalDown ? 'text-amber-300' : 'text-cyan-300/50'}`}>
+                                      {allLocalDown ? (
+                                        <>
+                                          <svg className="w-3 h-3 text-amber-400 animate-pulse" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                            <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0zM12 9v4m0 4h.01" />
+                                          </svg>
+                                          <span>FAILOVER ACTIVE — routing to cluster peers ({peersHealthy}/{allPeers.length} healthy)</span>
+                                        </>
+                                      ) : (
+                                        <span>Local: {localHealthy}/{allLocal.length} healthy | Peers: {peersHealthy}/{allPeers.length} healthy</span>
+                                      )}
+                                    </div>
+                                  );
+                                })()}
+                              </div>
+                            )}
+
+                            {/* Row 5: Bottom metadata row */}
                             <div className="flex items-center justify-between text-[9px] text-cyan-300/40">
                               <span className="cursor-help"
                                 title={"q-flux uptime since last start.\n\nUptime: " + f.uptime_secs + " seconds"}>

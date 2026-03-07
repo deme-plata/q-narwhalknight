@@ -12,6 +12,7 @@ use tokio::net::TcpListener;
 
 use crate::acceptor::SharedTlsConfig;
 use crate::config::TlsConfig;
+use crate::health::HealthMap;
 use crate::metrics::Metrics;
 
 /// Shared state for the admin HTTP server.
@@ -21,6 +22,12 @@ struct AdminState {
     start_time: Instant,
     shared_tls: SharedTlsConfig,
     tls_config_paths: TlsConfig,
+    /// Health map for backend + cluster peer health status
+    health_map: Option<HealthMap>,
+    /// Local upstream backends
+    local_backends: Vec<String>,
+    /// Super-cluster remote peers
+    cluster_peers: Vec<String>,
 }
 
 /// Start the admin HTTP server on its own OS thread.
@@ -39,6 +46,9 @@ pub fn spawn_admin_server(
     worker_count: usize,
     shared_tls: SharedTlsConfig,
     tls_config_paths: TlsConfig,
+    health_map: Option<HealthMap>,
+    local_backends: Vec<String>,
+    cluster_peers: Vec<String>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("q-flux-admin".into())
@@ -49,7 +59,7 @@ pub fn spawn_admin_server(
                 .expect("failed to build admin tokio runtime");
 
             rt.block_on(async move {
-                run_admin_server(listen_addr, metrics, worker_count, shared_tls, tls_config_paths).await;
+                run_admin_server(listen_addr, metrics, worker_count, shared_tls, tls_config_paths, health_map, local_backends, cluster_peers).await;
             });
         })
         .expect("failed to spawn admin thread")
@@ -61,6 +71,9 @@ async fn run_admin_server(
     worker_count: usize,
     shared_tls: SharedTlsConfig,
     tls_config_paths: TlsConfig,
+    health_map: Option<HealthMap>,
+    local_backends: Vec<String>,
+    cluster_peers: Vec<String>,
 ) {
     let listener = match TcpListener::bind(listen_addr).await {
         Ok(l) => l,
@@ -78,6 +91,9 @@ async fn run_admin_server(
         start_time: Instant::now(),
         shared_tls,
         tls_config_paths,
+        health_map,
+        local_backends,
+        cluster_peers,
     });
 
     loop {
@@ -307,6 +323,46 @@ fn handle_metrics(state: &AdminState) -> Response<Full<Bytes>> {
 fn handle_status(state: &AdminState) -> Response<Full<Bytes>> {
     let snap = state.metrics.snapshot();
 
+    // Build cluster health JSON
+    let cluster_json = if let Some(ref hm) = state.health_map {
+        let mut local_entries = Vec::new();
+        for backend in &state.local_backends {
+            let (healthy, failures, last_check_ago_ms) = if let Some(entry) = hm.get(backend.as_str()) {
+                let ago = entry.last_check.elapsed().as_millis() as u64;
+                (entry.is_healthy, entry.consecutive_failures, ago)
+            } else {
+                (true, 0, 0) // no entry = assume healthy
+            };
+            local_entries.push(format!(
+                r#"{{"addr":"{}","healthy":{},"failures":{},"last_check_ms_ago":{}}}"#,
+                backend, healthy, failures, last_check_ago_ms,
+            ));
+        }
+
+        let mut peer_entries = Vec::new();
+        for peer in &state.cluster_peers {
+            let (healthy, failures, last_check_ago_ms) = if let Some(entry) = hm.get(peer.as_str()) {
+                let ago = entry.last_check.elapsed().as_millis() as u64;
+                (entry.is_healthy, entry.consecutive_failures, ago)
+            } else {
+                (true, 0, 0)
+            };
+            peer_entries.push(format!(
+                r#"{{"addr":"{}","healthy":{},"failures":{},"last_check_ms_ago":{}}}"#,
+                peer, healthy, failures, last_check_ago_ms,
+            ));
+        }
+
+        format!(
+            r#","cluster":{{"enabled":{},"local_backends":[{}],"cluster_peers":[{}]}}"#,
+            !state.cluster_peers.is_empty(),
+            local_entries.join(","),
+            peer_entries.join(","),
+        )
+    } else {
+        r#","cluster":{"enabled":false,"local_backends":[],"cluster_peers":[]}"#.to_string()
+    };
+
     // Build JSON manually to avoid pulling in serde Serialize on MetricsSnapshot.
     // This keeps the metrics module free of serde dependencies.
     let body = format!(
@@ -335,6 +391,7 @@ fn handle_status(state: &AdminState) -> Response<Full<Bytes>> {
             r#""h2_connections":{},"#,
             r#""h2_streams_opened":{},"#,
             r#""h2_streams_closed":{}"#,
+            "{}",
             "}}",
         ),
         env!("CARGO_PKG_VERSION"),
@@ -360,6 +417,7 @@ fn handle_status(state: &AdminState) -> Response<Full<Bytes>> {
         crate::h2_proxy::H2_METRICS.connections.load(std::sync::atomic::Ordering::Relaxed),
         crate::h2_proxy::H2_METRICS.streams_opened.load(std::sync::atomic::Ordering::Relaxed),
         crate::h2_proxy::H2_METRICS.streams_closed.load(std::sync::atomic::Ordering::Relaxed),
+        cluster_json,
     );
 
     Response::builder()

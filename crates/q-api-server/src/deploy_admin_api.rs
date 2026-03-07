@@ -2346,6 +2346,9 @@ pub struct FluxStats {
     pub h2_streams_opened: u64,
     #[serde(default)]
     pub h2_streams_closed: u64,
+    // Cluster health info (from q-flux admin /status)
+    #[serde(default)]
+    pub cluster: Option<FluxClusterInfo>,
     // Computed fields (not from q-flux, added by us)
     #[serde(default)]
     pub online: bool,
@@ -2353,6 +2356,30 @@ pub struct FluxStats {
     pub requests_per_second: f64,
     #[serde(default)]
     pub error_rate_pct: f64,
+}
+
+/// Super-cluster health information from q-flux
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FluxClusterInfo {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub local_backends: Vec<FluxBackendHealth>,
+    #[serde(default)]
+    pub cluster_peers: Vec<FluxBackendHealth>,
+}
+
+/// Health status of a single backend/peer
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FluxBackendHealth {
+    #[serde(default)]
+    pub addr: String,
+    #[serde(default)]
+    pub healthy: bool,
+    #[serde(default)]
+    pub failures: u32,
+    #[serde(default)]
+    pub last_check_ms_ago: u64,
 }
 
 /// Compute flux requests/sec from two snapshots (delta-based)
@@ -2446,6 +2473,7 @@ impl FluxStats {
             h2_connections: 0,
             h2_streams_opened: 0,
             h2_streams_closed: 0,
+            cluster: None,
             online: false,
             requests_per_second: 0.0,
             error_rate_pct: 0.0,

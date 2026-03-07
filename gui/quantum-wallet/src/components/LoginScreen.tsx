@@ -452,6 +452,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
 
   // Explorer dropdown state - live data from API + SSE
   const [showExplorerDropdown, setShowExplorerDropdown] = useState(false);
+  const [menuHovered, setMenuHovered] = useState(false);
   const [explorerData, setExplorerData] = useState<{
     blocks: any[];
     transactions: any[];
@@ -950,7 +951,11 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
       <div className="relative" style={{ zIndex: 3 }}>
 
         {/* Help, Mining & Tor Icons - Top Right */}
-        <div className="absolute top-4 right-4 flex items-center gap-2 z-50">
+        <div
+          className="absolute top-4 right-4 flex items-center gap-2 z-50"
+          onMouseEnter={() => setMenuHovered(true)}
+          onMouseLeave={() => setMenuHovered(false)}
+        >
           {/* Slint Native Wallet Icon */}
           <motion.button
             className="relative p-2 bg-emerald-600/30 hover:bg-emerald-600/50 border border-emerald-400/50 rounded-full transition-all cursor-pointer group backdrop-blur-sm overflow-hidden"
@@ -1083,12 +1088,19 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
           </motion.button>
         </div>
 
+        {/* Fade out main UI when hovering top-right menu */}
+        <motion.div
+          animate={{ opacity: menuHovered ? 0.15 : 1 }}
+          transition={{ duration: 0.3 }}
+          style={{ pointerEvents: menuHovered ? 'none' as const : 'auto' as const }}
+        >
+
         {/* Explorer Search Bar + Live Data Dropdown */}
         <motion.div
           className="pt-6 pb-4"
           initial={{ opacity: 0, y: -20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5 }}
+          animate={{ opacity: menuHovered ? 0 : 1, y: 0 }}
+          transition={{ duration: 0.3 }}
           onMouseEnter={handleExplorerEnter}
           onMouseLeave={handleExplorerLeave}
         >
@@ -1612,6 +1624,8 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
             </motion.p>
           </motion.div>
         </div>
+
+        </motion.div>{/* end menu-hover fade wrapper */}
       </div>
 
       {/* Info Modal - What is Quillon Graph? */}
