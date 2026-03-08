@@ -319,6 +319,7 @@ pub mod transaction_utils; // ✅ v1.0.91-beta: Proper transaction handling with
 pub mod contracts_api; // ✅ v2.4.8-beta - Smart contract deployment and social media profiles (AFTER transaction_utils!)
 pub mod listing_api; // ✅ v6.5.0: Exchange Listing RWA packages (Gold/Silver/Bronze)
 pub mod game_items_api; // ✅ v9.3.0: CS:GO2-style game items RWA (cases, skins, trade-up)
+pub mod web_search_api; // ✅ v9.3.2: GLM-4-Flash web search with AI summaries + citations
 pub mod k_parameter_gauge; // ✅ v9.3.1: Lightweight K-parameter network health gauge (no q-resonance dep)
 pub mod bitcoin_bridge_api; // ✅ v7.2.0: Bitcoin atomic swap bridge (QNK ↔ BTC)
 pub mod zcash_bridge_api; // ✅ v7.2.2: Zcash shielded atomic swap bridge (QNK ↔ ZEC)

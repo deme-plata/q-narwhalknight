@@ -647,7 +647,7 @@ fn cors_preflight() -> Response<H2Body> {
         .unwrap()
 }
 
-/// Serve a static file as an H2 response.
+/// Serve a static file as an H2 response with gzip compression.
 async fn serve_static_h2(
     file_resp: &static_serve::FileResponse,
     method: &hyper::Method,
@@ -692,7 +692,8 @@ async fn serve_static_h2(
             .header("content-type", file_resp.mime)
             .header("content-length", size)
             .header("cache-control", file_resp.cache_control)
-            .header("etag", &etag);
+            .header("etag", &etag)
+            .header("vary", "Accept-Encoding");
         if file_resp.is_download {
             let fname = file_resp.path.file_name().and_then(|n| n.to_str()).unwrap_or("download");
             builder = builder.header("content-disposition", format!("attachment; filename=\"{}\"", fname));
@@ -708,14 +709,55 @@ async fn serve_static_h2(
             return error_response(500, "Internal Server Error");
         }
     };
-    metrics.bytes_tx(body.len() as u64);
 
+    // Check if client accepts gzip and if this is a compressible type
+    let accepts_gzip = req_headers.get("accept-encoding")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("gzip"))
+        .unwrap_or(false);
+
+    let is_compressible = file_resp.mime.starts_with("text/")
+        || file_resp.mime.starts_with("application/javascript")
+        || file_resp.mime.starts_with("application/json")
+        || file_resp.mime.starts_with("application/xml")
+        || file_resp.mime.starts_with("application/wasm")
+        || file_resp.mime.starts_with("image/svg");
+
+    // Gzip compress text assets
+    if accepts_gzip && is_compressible && body.len() > 256 && !file_resp.is_download {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let mut encoder = GzEncoder::new(Vec::with_capacity(body.len() / 2), Compression::fast());
+        if encoder.write_all(&body).is_ok() {
+            if let Ok(compressed) = encoder.finish() {
+                if compressed.len() < body.len() {
+                    metrics.bytes_tx(compressed.len() as u64);
+                    return Response::builder()
+                        .status(200)
+                        .header("content-type", file_resp.mime)
+                        .header("content-length", compressed.len())
+                        .header("content-encoding", "gzip")
+                        .header("cache-control", file_resp.cache_control)
+                        .header("etag", &etag)
+                        .header("vary", "Accept-Encoding")
+                        .body(Either::Left(Full::new(Bytes::from(compressed))))
+                        .unwrap();
+                }
+            }
+        }
+    }
+
+    // Uncompressed fallback
+    metrics.bytes_tx(body.len() as u64);
     let mut builder = Response::builder()
         .status(200)
         .header("content-type", file_resp.mime)
         .header("content-length", body.len())
         .header("cache-control", file_resp.cache_control)
-        .header("etag", &etag);
+        .header("etag", &etag)
+        .header("vary", "Accept-Encoding");
     if file_resp.is_download {
         let fname = file_resp.path.file_name().and_then(|n| n.to_str()).unwrap_or("download");
         builder = builder.header("content-disposition", format!("attachment; filename=\"{}\"", fname));

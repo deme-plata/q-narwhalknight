@@ -18,6 +18,7 @@ use crate::health::HealthMap;
 use crate::libp2p_aware::{BandwidthLimiter, PeerTracker};
 use crate::metrics::{Metrics, RateLimiter};
 use crate::proxy::{self, DrainReceiver};
+use crate::static_serve::FileCache;
 use crate::upstream::UpstreamPool;
 use crate::acceptor;
 
@@ -195,6 +196,24 @@ async fn worker_loop(
     let body_limit = config.limits.request_body_limit;
     let static_config = Arc::new(config.static_files.clone());
 
+    // In-memory file cache with pre-compressed gzip variants.
+    // Shared across all connections on this worker. Each worker gets its own
+    // cache instance (no cross-thread contention), populated on first access.
+    let file_cache = FileCache::new(&config.static_files);
+    if let Some(ref cache) = file_cache {
+        tracing::info!(
+            worker = worker_id,
+            max_file = config.static_files.cache_max_file_size / 1024,
+            max_total = config.static_files.cache_max_total / (1024 * 1024),
+            gzip = config.static_files.gzip,
+            "File cache enabled (max {}KB/file, {}MB total, gzip={})",
+            config.static_files.cache_max_file_size / 1024,
+            config.static_files.cache_max_total / (1024 * 1024),
+            config.static_files.gzip,
+        );
+        let _ = cache; // suppress unused
+    }
+
     // CRITICAL: Create ONE UpstreamPool per worker, shared across all connections.
     // Previous bug: UpstreamPool::new() was called per-connection, creating a NEW
     // hyper Client each time. This defeated connection pooling — every request
@@ -369,6 +388,7 @@ async fn worker_loop(
         let static_config = static_config.clone();
         let access_logger = access_logger.clone();
         let drain_rx = drain_rx.clone();
+        let file_cache = file_cache.clone();
 
         tokio::spawn(async move {
             // Acquire semaphore permit — backpressure if too many concurrent handlers.
@@ -415,13 +435,14 @@ async fn worker_loop(
                             ).await;
                         } else {
                             // HTTP/1.1 path — use logged variant if access logger configured
+                            let cache_ref = file_cache.as_deref();
                             match access_logger {
                                 Some(ref logger) => {
                                     proxy::handle_connection_logged(
                                         tls_stream, client_addr, &upstream, &metrics,
                                         body_limit, &static_config, logger,
                                         &peer_tracker, &bandwidth_limiter,
-                                        drain_rx.clone(),
+                                        drain_rx.clone(), cache_ref,
                                     ).await;
                                 }
                                 None => {
@@ -429,7 +450,7 @@ async fn worker_loop(
                                         tls_stream, client_addr, &upstream, &metrics,
                                         body_limit, &static_config,
                                         &peer_tracker, &bandwidth_limiter,
-                                        drain_rx.clone(),
+                                        drain_rx.clone(), cache_ref,
                                     ).await;
                                 }
                             }

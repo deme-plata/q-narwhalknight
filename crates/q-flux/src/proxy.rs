@@ -55,10 +55,11 @@ pub async fn handle_connection<S>(
     peer_tracker: &Arc<PeerTracker>,
     bandwidth_limiter: &Arc<BandwidthLimiter>,
     drain_rx: DrainReceiver,
+    file_cache: Option<&static_serve::FileCache>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    handle_connection_inner(stream, client_addr, upstream, metrics, body_limit, static_config, None, peer_tracker, bandwidth_limiter, drain_rx).await;
+    handle_connection_inner(stream, client_addr, upstream, metrics, body_limit, static_config, None, peer_tracker, bandwidth_limiter, drain_rx, file_cache).await;
 }
 
 /// Handle a single HTTP connection with optional access logging.
@@ -74,10 +75,11 @@ pub async fn handle_connection_logged<S>(
     peer_tracker: &Arc<PeerTracker>,
     bandwidth_limiter: &Arc<BandwidthLimiter>,
     drain_rx: DrainReceiver,
+    file_cache: Option<&static_serve::FileCache>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    handle_connection_inner(stream, client_addr, upstream, metrics, body_limit, static_config, Some(access_logger), peer_tracker, bandwidth_limiter, drain_rx).await;
+    handle_connection_inner(stream, client_addr, upstream, metrics, body_limit, static_config, Some(access_logger), peer_tracker, bandwidth_limiter, drain_rx, file_cache).await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -92,6 +94,7 @@ async fn handle_connection_inner<S>(
     peer_tracker: &Arc<PeerTracker>,
     bandwidth_limiter: &Arc<BandwidthLimiter>,
     drain_rx: DrainReceiver,
+    file_cache: Option<&static_serve::FileCache>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -137,7 +140,8 @@ async fn handle_connection_inner<S>(
                 let _ = stream.flush().await;
                 status = 204;
             } else {
-                if let Err(e) = static_serve::serve_file(&mut stream, &file_resp, req_method, if_none_match.as_deref(), metrics).await {
+                let client_accepts_gzip = static_serve::accepts_gzip(&buf[..buf_len]);
+                if let Err(e) = static_serve::serve_file(&mut stream, &file_resp, req_method, if_none_match.as_deref(), client_accepts_gzip, metrics, file_cache).await {
                     tracing::debug!(client = %client_addr, "Static serve error: {}", e);
                     break;
                 }

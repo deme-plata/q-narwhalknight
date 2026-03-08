@@ -962,7 +962,7 @@ export default function DeployControlPanel() {
   const [metricsHistory, setMetricsHistory] = useState<MetricsSnapshot[]>([]);
 
   // Tab state
-  const [activeTab, setActiveTab] = useState<'overview' | 'analytics' | 'bank' | 'bridge' | 'settings' | 'bounty' | 'dex' | 'mining'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'analytics' | 'bank' | 'bridge' | 'settings' | 'bounty' | 'dex' | 'mining' | 'kparam'>('overview');
 
   // v9.1.4: Mining mode switch state
   const [miningModeStatus, setMiningModeStatus] = useState<{ forced_mode: string; pool_url: string | null } | null>(null);
@@ -1009,6 +1009,12 @@ export default function DeployControlPanel() {
   const [dexFeeStats, setDexFeeStats] = useState<any>(null);
   const [dexLoading, setDexLoading] = useState(false);
   const [dexSection, setDexSection] = useState<'analytics' | 'pools' | 'fees'>('analytics');
+
+  // v9.3.1: K-Parameter Gauge state
+  const [kParamData, setKParamData] = useState<any>(null);
+  const [kParamLoading, setKParamLoading] = useState(false);
+  const [kParamError, setKParamError] = useState<string | null>(null);
+  const [kParamHistory, setKParamHistory] = useState<Array<{ k: number; phase: string; ts: number }>>([]);
 
   // Check if current wallet is master
   const walletAddress = localStorage.getItem('walletAddress') || '';
@@ -1358,6 +1364,31 @@ export default function DeployControlPanel() {
     } catch {}
   }, [walletAddress]);
 
+  // v9.3.1: Fetch K-parameter gauge data
+  const fetchKParamData = useCallback(async () => {
+    setKParamLoading(true);
+    setKParamError(null);
+    try {
+      const resp = await fetch('/api/v1/k-parameter');
+      if (resp.ok) {
+        const json = await resp.json();
+        const d = json.data || json;
+        setKParamData(d);
+        setKParamError(null);
+        // Append to history (keep last 30 data points = 30 minutes)
+        setKParamHistory(prev => {
+          const next = [...prev, { k: d.k_value ?? 0, phase: d.phase ?? 'stable', ts: Date.now() }];
+          return next.slice(-30);
+        });
+      } else {
+        setKParamError(`Server returned ${resp.status} — endpoint may not be deployed yet`);
+      }
+    } catch (e: any) {
+      setKParamError(e?.message || 'Failed to reach server');
+    }
+    setKParamLoading(false);
+  }, []);
+
   const triggerMiningModeSwitch = useCallback(async (targetMode: string) => {
     setMiningModeLoading(true);
     setMiningModeMsg(null);
@@ -1423,6 +1454,7 @@ export default function DeployControlPanel() {
       if (isMaster && activeTab === 'bridge') {
         fetch('/api/v1/bridge/status').then(r => r.json()).then(d => { if (d.success) setBridgeData(d.data); }).catch(() => {});
       }
+      if (activeTab === 'kparam') fetchKParamData();
       const interval = setInterval(() => {
         fetchStatus();
         setConnInfo(getConnectionInfo());
@@ -1430,10 +1462,11 @@ export default function DeployControlPanel() {
         if (isMaster && activeTab === 'bridge') {
           fetch('/api/v1/bridge/status').then(r => r.json()).then(d => { if (d.success) setBridgeData(d.data); }).catch(() => {});
         }
+        if (activeTab === 'kparam') fetchKParamData();
       }, 15000);
       return () => clearInterval(interval);
     }
-  }, [isOpen, isLoggedIn, isMaster, fetchStatus, activeTab, fetchBankData]);
+  }, [isOpen, isLoggedIn, isMaster, fetchStatus, activeTab, fetchBankData, fetchKParamData]);
 
   // v7.3.0: Fetch node settings data when settings tab is active
   const fetchSettingsData = useCallback(async () => {
@@ -1771,7 +1804,7 @@ export default function DeployControlPanel() {
                 <div>
                   <h2 className="text-lg font-bold text-emerald-50">Node Admin</h2>
                   <p className="text-xs text-emerald-300/60">
-                    {activeTab === 'overview' ? 'Deploy Control Panel' : activeTab === 'analytics' ? 'Live Analytics' : activeTab === 'settings' ? 'Node Settings' : activeTab === 'bridge' ? 'Bridge Pairs' : activeTab === 'bounty' ? 'Bounty Campaign Admin' : activeTab === 'dex' ? 'DEX Analytics' : activeTab === 'mining' ? 'Mining Mode Control' : 'Quillon Bank CLI'}
+                    {activeTab === 'overview' ? 'Deploy Control Panel' : activeTab === 'analytics' ? 'Live Analytics' : activeTab === 'settings' ? 'Node Settings' : activeTab === 'bridge' ? 'Bridge Pairs' : activeTab === 'bounty' ? 'Bounty Campaign Admin' : activeTab === 'dex' ? 'DEX Analytics' : activeTab === 'mining' ? 'Mining Mode Control' : activeTab === 'kparam' ? 'K-Parameter Health Gauge' : 'Quillon Bank CLI'}
                   </p>
                 </div>
               </div>
@@ -1788,6 +1821,7 @@ export default function DeployControlPanel() {
               {([
                 // v8.6.4: Servers tab visible for all logged-in users
                 { id: 'overview' as const, icon: Server, label: 'Servers' },
+                { id: 'kparam' as const, icon: Activity, label: 'K-Param' },
                 ...(isMasterWallet ? [
                   { id: 'analytics' as const, icon: BarChart3, label: 'Analytics' },
                   { id: 'bank' as const, icon: Landmark, label: 'Bank CLI' },
@@ -1809,6 +1843,7 @@ export default function DeployControlPanel() {
                     if (tab.id === 'bounty') fetchBountyData();
                     if (tab.id === 'dex') fetchDexData();
                     if (tab.id === 'mining') fetchMiningModeStatus();
+                    if (tab.id === 'kparam') fetchKParamData();
                   }}
                   className={`flex items-center gap-1.5 px-3 py-1.5 rounded-t-lg text-xs font-medium transition-all ${
                     activeTab === tab.id
@@ -4642,6 +4677,226 @@ export default function DeployControlPanel() {
               </>)}
 
               {/* v9.1.4: Mining Mode Control Tab */}
+              {/* v9.3.1: K-Parameter Health Gauge Tab */}
+              {activeTab === 'kparam' && (<>
+                <div className="space-y-4">
+                  {/* Header with refresh */}
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Activity className="w-4 h-4 text-cyan-400" />
+                      <span className="text-sm font-semibold text-cyan-200">Network Health Gauge</span>
+                      <span className="text-[10px] text-amber-200/30 font-mono">K = 2π √(ΔH · Δs · ℏ) / τ</span>
+                    </div>
+                    <button onClick={fetchKParamData} disabled={kParamLoading} className="p-1.5 rounded-lg hover:bg-white/10 transition-colors">
+                      <RefreshCw className={`w-3.5 h-3.5 text-emerald-300/50 ${kParamLoading ? 'animate-spin' : ''}`} />
+                    </button>
+                  </div>
+
+                  {!kParamData ? (
+                    <div className="text-center py-8">
+                      {kParamLoading ? (
+                        <div className="flex items-center justify-center gap-2 text-amber-200/40 text-xs">
+                          <RefreshCw className="w-4 h-4 animate-spin" />
+                          Loading K-parameter data...
+                        </div>
+                      ) : kParamError ? (
+                        <div className="space-y-3">
+                          <div className="flex items-center justify-center gap-2 text-red-400/70 text-xs">
+                            <AlertTriangle className="w-4 h-4" />
+                            {kParamError}
+                          </div>
+                          <button onClick={fetchKParamData} className="px-4 py-1.5 rounded-lg text-xs bg-slate-700/50 text-emerald-300/70 hover:bg-slate-700/80 border border-slate-600/30 transition-colors">
+                            Retry
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="space-y-3">
+                          <div className="text-amber-200/30 text-xs">No data yet — gauge starts reporting after 60 seconds</div>
+                          <button onClick={fetchKParamData} className="px-4 py-1.5 rounded-lg text-xs bg-slate-700/50 text-emerald-300/70 hover:bg-slate-700/80 border border-slate-600/30 transition-colors">
+                            Fetch Now
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  ) : (<>
+                    {/* Main K-Value Display */}
+                    <div className="rounded-xl p-4" style={{ background: 'rgba(15, 23, 42, 0.6)', border: `1px solid ${kParamData.phase === 'critical' ? 'rgba(239, 68, 68, 0.4)' : kParamData.phase === 'approaching' ? 'rgba(245, 158, 11, 0.4)' : 'rgba(16, 185, 129, 0.4)'}` }}>
+                      <div className="flex items-center justify-between mb-3">
+                        <div>
+                          <div className="text-3xl font-bold font-mono" style={{ color: kParamData.phase === 'critical' ? '#ef4444' : kParamData.phase === 'approaching' ? '#f59e0b' : '#10b981' }}>
+                            {(kParamData.k_value ?? 0).toFixed(4)}
+                          </div>
+                          <div className="text-[10px] text-amber-200/40 mt-1">Current K-Value</div>
+                        </div>
+                        <div className="text-right">
+                          <span className={`inline-block px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-wider ${
+                            kParamData.phase === 'critical' ? 'bg-red-500/20 text-red-300 border border-red-500/30' :
+                            kParamData.phase === 'approaching' ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' :
+                            'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                          }`}>
+                            {kParamData.phase || 'stable'}
+                          </span>
+                          <div className="text-[10px] text-amber-200/30 mt-1.5">
+                            Round #{kParamData.rounds_computed ?? 0}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Phase Scale Bar */}
+                      <div className="relative h-2 rounded-full bg-slate-700/50 overflow-hidden mt-2">
+                        <div className="absolute inset-y-0 left-0 rounded-full transition-all duration-500" style={{
+                          width: `${Math.min(100, ((kParamData.k_value ?? 0) / 15) * 100)}%`,
+                          background: kParamData.phase === 'critical' ? 'linear-gradient(90deg, #10b981, #f59e0b, #ef4444)' :
+                            kParamData.phase === 'approaching' ? 'linear-gradient(90deg, #10b981, #f59e0b)' :
+                            '#10b981',
+                        }} />
+                        {/* Phase markers */}
+                        <div className="absolute inset-y-0 left-[33.3%] w-px bg-amber-500/50" title="K=5 (Approaching)" />
+                        <div className="absolute inset-y-0 left-[66.6%] w-px bg-red-500/50" title="K=10 (Critical)" />
+                      </div>
+                      <div className="flex justify-between text-[9px] text-amber-200/20 mt-1 px-1">
+                        <span>0 (Stable)</span>
+                        <span>5 (Approaching)</span>
+                        <span>10 (Critical)</span>
+                        <span>15+</span>
+                      </div>
+                    </div>
+
+                    {/* Tuned Parameters Grid */}
+                    <div className="grid grid-cols-3 gap-3">
+                      <div className="rounded-xl p-3" style={{ background: 'rgba(15, 23, 42, 0.6)', border: '1px solid rgba(148, 163, 184, 0.1)' }}>
+                        <div className="text-[10px] text-amber-200/40 mb-1">Max Solutions/Block</div>
+                        <div className="text-lg font-bold font-mono text-cyan-300">{kParamData.max_solutions_per_block ?? 250}</div>
+                        <div className="text-[9px] text-amber-200/20 mt-0.5">Default: 250</div>
+                      </div>
+                      <div className="rounded-xl p-3" style={{ background: 'rgba(15, 23, 42, 0.6)', border: '1px solid rgba(148, 163, 184, 0.1)' }}>
+                        <div className="text-[10px] text-amber-200/40 mb-1">VDF Multiplier</div>
+                        <div className="text-lg font-bold font-mono text-cyan-300">{(kParamData.vdf_multiplier ?? 1.0).toFixed(2)}x</div>
+                        <div className="text-[9px] text-amber-200/20 mt-0.5">Default: 1.00x</div>
+                      </div>
+                      <div className="rounded-xl p-3" style={{ background: 'rgba(15, 23, 42, 0.6)', border: '1px solid rgba(148, 163, 184, 0.1)' }}>
+                        <div className="text-[10px] text-amber-200/40 mb-1">Challenge Expiry</div>
+                        <div className="text-lg font-bold font-mono text-cyan-300">{kParamData.challenge_expiry_secs ?? 120}s</div>
+                        <div className="text-[9px] text-amber-200/20 mt-0.5">Default: 120s</div>
+                      </div>
+                    </div>
+
+                    {/* Phase Tuning Reference Table */}
+                    <div className="rounded-xl overflow-hidden" style={{ border: '1px solid rgba(148, 163, 184, 0.1)' }}>
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr style={{ background: 'rgba(15, 23, 42, 0.8)' }}>
+                            <th className="text-left px-3 py-2 text-amber-200/50 font-medium">Parameter</th>
+                            <th className="text-center px-3 py-2 text-emerald-400/70 font-medium">Stable (K&lt;5)</th>
+                            <th className="text-center px-3 py-2 text-amber-400/70 font-medium">Approaching (5-10)</th>
+                            <th className="text-center px-3 py-2 text-red-400/70 font-medium">Critical (K&gt;10)</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {[
+                            { param: 'max_solutions', stable: '250', approaching: '150', critical: '50' },
+                            { param: 'VDF multiplier', stable: '1.0x', approaching: '1.25x', critical: '1.5x' },
+                            { param: 'Challenge expiry', stable: '120s', approaching: '90s', critical: '60s' },
+                          ].map((row, i) => (
+                            <tr key={row.param} style={{ background: i % 2 === 0 ? 'rgba(15, 23, 42, 0.4)' : 'rgba(15, 23, 42, 0.6)' }}>
+                              <td className="px-3 py-1.5 text-amber-200/60 font-mono">{row.param}</td>
+                              <td className={`px-3 py-1.5 text-center font-mono ${kParamData.phase === 'stable' ? 'text-emerald-300 font-bold' : 'text-emerald-300/40'}`}>{row.stable}</td>
+                              <td className={`px-3 py-1.5 text-center font-mono ${kParamData.phase === 'approaching' ? 'text-amber-300 font-bold' : 'text-amber-300/40'}`}>{row.approaching}</td>
+                              <td className={`px-3 py-1.5 text-center font-mono ${kParamData.phase === 'critical' ? 'text-red-300 font-bold' : 'text-red-300/40'}`}>{row.critical}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* K-Value History (sparkline-like) */}
+                    {kParamHistory.length > 1 && (
+                      <div className="rounded-xl p-3" style={{ background: 'rgba(15, 23, 42, 0.6)', border: '1px solid rgba(148, 163, 184, 0.1)' }}>
+                        <div className="text-[10px] text-amber-200/40 mb-2">K-Value History (last {kParamHistory.length} readings)</div>
+                        <div className="flex items-end gap-px h-12">
+                          {kParamHistory.map((point, i) => {
+                            const maxK = Math.max(...kParamHistory.map(p => p.k), 1);
+                            const heightPct = Math.max(2, (point.k / maxK) * 100);
+                            return (
+                              <div
+                                key={i}
+                                className="flex-1 rounded-t-sm transition-all duration-300"
+                                style={{
+                                  height: `${heightPct}%`,
+                                  background: point.phase === 'critical' ? '#ef4444' : point.phase === 'approaching' ? '#f59e0b' : '#10b981',
+                                  opacity: 0.4 + (i / kParamHistory.length) * 0.6,
+                                }}
+                                title={`K=${point.k.toFixed(4)} (${point.phase})`}
+                              />
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* zk-STARK Proof Section */}
+                    {kParamData.zk_commitment && (
+                      <div className="rounded-xl p-3" style={{ background: 'rgba(15, 23, 42, 0.6)', border: '1px solid rgba(148, 163, 184, 0.1)' }}>
+                        <div className="flex items-center gap-2 mb-2">
+                          <Lock className="w-3.5 h-3.5 text-purple-400" />
+                          <span className="text-[10px] font-medium text-purple-200">zk-STARK Phase Proof</span>
+                          {kParamData.zk_phase_proof?.verified && (
+                            <span className="ml-auto flex items-center gap-1 text-[9px] text-emerald-400">
+                              <CheckCircle className="w-3 h-3" /> Verified
+                            </span>
+                          )}
+                        </div>
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2">
+                            <span className="text-[9px] text-amber-200/30 w-20 shrink-0">Commitment</span>
+                            <span className="text-[9px] font-mono text-purple-300/60 truncate">{kParamData.zk_commitment}</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-[9px] text-amber-200/30 w-20 shrink-0">Challenge</span>
+                            <span className="text-[9px] font-mono text-purple-300/60 truncate">{kParamData.zk_phase_proof?.challenge || '—'}</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-[9px] text-amber-200/30 w-20 shrink-0">Response</span>
+                            <span className="text-[9px] font-mono text-purple-300/60 truncate">{kParamData.zk_phase_proof?.response || '—'}</span>
+                          </div>
+                        </div>
+                        <div className="text-[8px] text-amber-200/20 mt-2">
+                          Fiat-Shamir non-interactive proof: phase membership verified without revealing exact K
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Metric Inputs Explanation */}
+                    <div className="rounded-xl p-3" style={{ background: 'rgba(15, 23, 42, 0.4)', border: '1px solid rgba(148, 163, 184, 0.05)' }}>
+                      <div className="text-[10px] text-amber-200/40 mb-2 font-medium">How K is Computed</div>
+                      <div className="grid grid-cols-2 gap-3 text-[10px]">
+                        <div>
+                          <div className="text-cyan-300/70 font-medium mb-1">Energy Variance (ΔH)</div>
+                          <ul className="space-y-0.5 text-amber-200/30">
+                            <li>Mining rejection ratio</li>
+                            <li>Traffic asymmetry (in/out)</li>
+                            <li>Peer churn rate</li>
+                          </ul>
+                        </div>
+                        <div>
+                          <div className="text-cyan-300/70 font-medium mb-1">Entropy Variance (Δs)</div>
+                          <ul className="space-y-0.5 text-amber-200/30">
+                            <li>Sync divergence (local vs network)</li>
+                            <li>Block rate deviation</li>
+                          </ul>
+                        </div>
+                      </div>
+                      <div className="text-[9px] text-amber-200/20 mt-2 pt-2 border-t border-white/5">
+                        τ = 60s rolling window · ℏ = 1.0 · Updated every 60 seconds
+                        {kParamData.last_computed_at > 0 && (
+                          <span className="ml-2">· Last: {new Date(kParamData.last_computed_at * 1000).toLocaleTimeString()}</span>
+                        )}
+                      </div>
+                    </div>
+                  </>)}
+                </div>
+              </>)}
+
               {activeTab === 'mining' && (<>
                 <div className="space-y-4">
                   {/* Current Status */}

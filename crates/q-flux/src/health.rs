@@ -157,7 +157,7 @@ pub fn spawn_health_checker(
 ///    that the response status line starts with "HTTP/1.1 2" (any 2xx).
 async fn probe_backend(backend: &str, config: &HealthCheckConfig) -> bool {
     // --- Step 1: TCP connect ---
-    let stream = match timeout(config.timeout, TcpStream::connect(backend)).await {
+    let mut stream = match timeout(config.timeout, TcpStream::connect(backend)).await {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
             debug!(backend, error = %e, "Health check TCP connect failed");
@@ -178,8 +178,6 @@ async fn probe_backend(backend: &str, config: &HealthCheckConfig) -> bool {
     // We avoid pulling in a full HTTP client just for health checks. A raw
     // request on the already-connected stream keeps things lightweight and
     // avoids an extra connection-pool dependency.
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
     // Extract host (strip port for the Host header is optional but correct)
     let host = backend;
     let request = format!(
@@ -191,22 +189,21 @@ async fn probe_backend(backend: &str, config: &HealthCheckConfig) -> bool {
     let remaining = config.timeout.saturating_sub(Duration::from_millis(50));
 
     let result = timeout(remaining, async {
-        let (mut reader, mut writer) = stream.into_split();
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-        // Send request
-        if let Err(e) = writer.write_all(request.as_bytes()).await {
+        // Send request — do NOT call shutdown() after writing. Hyper/axum
+        // treats a TCP FIN (half-close) as connection abort and drops the
+        // response. The Connection: close header tells the server we're done
+        // after this request; we rely on the read timeout to clean up.
+        if let Err(e) = stream.write_all(request.as_bytes()).await {
             debug!(backend, error = %e, "Health check HTTP write failed");
-            return false;
-        }
-        if let Err(e) = writer.shutdown().await {
-            debug!(backend, error = %e, "Health check HTTP shutdown failed");
             return false;
         }
 
         // Read enough of the response to see the status line.
         // "HTTP/1.1 200 OK\r\n" is 17 bytes; read up to 64 to be safe.
         let mut buf = [0u8; 64];
-        let n = match reader.read(&mut buf).await {
+        let n = match stream.read(&mut buf).await {
             Ok(n) if n > 0 => n,
             Ok(_) => {
                 debug!(backend, "Health check got empty response");

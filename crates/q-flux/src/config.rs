@@ -70,6 +70,9 @@ pub struct ClusterConfig {
     /// Health check interval for cluster peers (default: 10s, slower than local).
     #[serde(default = "default_cluster_health_interval", deserialize_with = "deserialize_duration")]
     pub health_check_interval: std::time::Duration,
+    /// Health check timeout for cluster peers (default: 5s, longer than local 3s for cross-DC).
+    #[serde(default = "default_cluster_health_timeout", deserialize_with = "deserialize_duration")]
+    pub health_check_timeout: std::time::Duration,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -77,9 +80,23 @@ pub struct StaticConfig {
     pub root: Option<PathBuf>,
     #[serde(default = "default_spa_fallback")]
     pub spa_fallback: bool,
+    /// Enable gzip compression for text assets (JS, CSS, HTML, JSON, SVG).
+    /// Reduces ~2.1MB index.js to ~550KB. Default: true.
+    #[serde(default = "default_true")]
+    pub gzip: bool,
+    /// Max file size to cache in memory (bytes). Files larger than this are
+    /// streamed from disk. Default: 4MB (covers all JS/CSS bundles).
+    #[serde(default = "default_cache_max_file_size")]
+    pub cache_max_file_size: usize,
+    /// Max total memory for file cache (bytes). Default: 64MB.
+    #[serde(default = "default_cache_max_total")]
+    pub cache_max_total: usize,
 }
 
 fn default_spa_fallback() -> bool { true }
+fn default_true() -> bool { true }
+fn default_cache_max_file_size() -> usize { 4 * 1024 * 1024 } // 4MB
+fn default_cache_max_total() -> usize { 64 * 1024 * 1024 } // 64MB
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
@@ -203,6 +220,7 @@ fn default_rate_limit_global_rps() -> usize { 100_000 }
 fn default_max_inflight_per_worker() -> usize { 64 }
 fn default_max_upstream_global() -> usize { 512 }
 fn default_cluster_health_interval() -> std::time::Duration { std::time::Duration::from_secs(10) }
+fn default_cluster_health_timeout() -> std::time::Duration { std::time::Duration::from_secs(5) }
 
 #[cfg(target_os = "linux")]
 fn default_splice_enabled() -> bool { true }

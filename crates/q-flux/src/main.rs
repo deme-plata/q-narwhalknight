@@ -240,15 +240,16 @@ fn main() -> anyhow::Result<()> {
         let cluster_health_map = health_map.clone();
         let cluster_health_config = health::HealthCheckConfig {
             interval: config.cluster.health_check_interval,
-            timeout: config.upstream.health_check_timeout,
+            timeout: config.cluster.health_check_timeout,
             path: config.cluster.health_check_path
                 .clone()
                 .unwrap_or_else(|| config.upstream.health_check_path.clone()),
-            failure_threshold: 3,
+            failure_threshold: 5,
         };
         tracing::info!(
             peers = cluster_peers.len(),
             interval_secs = cluster_health_config.interval.as_secs(),
+            timeout_secs = cluster_health_config.timeout.as_secs(),
             "Super-cluster: health-checking {} remote peer(s)",
             cluster_peers.len(),
         );

@@ -38,6 +38,7 @@ quinn = { version = "0.11", optional = true }
 x509-parser = { workspace = true }
 sha2 = { workspace = true }
 reqwest = { workspace = true }
+flate2 = "1"
 
 # Phase 2: io_uring (Linux only)
 [target.'cfg(target_os = "linux")'.dependencies]
