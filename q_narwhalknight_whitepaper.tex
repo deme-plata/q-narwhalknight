@@ -40,18 +40,18 @@
 
 \lstset{style=mystyle}
 
-\title{\textbf{Q-NarwhalKnight: A Quantum-Enhanced DAG-BFT Consensus System}\\
-\large Whitepaper v1.0}
-\author{Q-NarwhalKnight Development Team\\
-\texttt{contact@q-narwhalknight.dev}}
-\date{December 2024}
+\title{\textbf{Quillon: Private Settlement Infrastructure\\for Sovereign Networks}\\
+\large Whitepaper v2.0}
+\author{Quillon Development Team\\
+\texttt{contact@quillon.xyz}}
+\date{March 2026}
 
 \begin{document}
 
 \maketitle
 
 \begin{abstract}
-Q-NarwhalKnight represents a revolutionary advancement in distributed consensus systems, combining the high-throughput capabilities of DAG-based Byzantine Fault Tolerant (BFT) consensus with quantum-enhanced security primitives and post-quantum cryptography. This whitepaper presents a comprehensive overview of the Q-NarwhalKnight architecture, which achieves unprecedented performance metrics including 100,000× gas optimization compared to existing blockchain platforms, sub-50ms consensus latency, and throughput exceeding 48,000 transactions per second. The system introduces novel concepts including DNS-Phantom steganographic networking, Bitcoin-Embedded Data Attestation (BEDA), and a phased approach to quantum resistance that ensures long-term security against both classical and quantum adversaries.
+Quillon is deployable private settlement infrastructure---a post-quantum secure, Tor-native consensus stack designed for institutions, operators, and sovereign networks that require verifiable asset transfer without dependence on third-party chains or custodians. Built on DAG-Knight consensus with Narwhal mempool integration, Quillon achieves sub-50ms finality at over 48,000 transactions per second while maintaining mandatory network-layer privacy through dedicated Tor circuits. The system implements a phased cryptographic agility model transitioning from classical Ed25519 signatures to lattice-based Dilithium5 post-quantum cryptography, ensuring long-term settlement integrity against both classical and quantum adversaries. This paper presents the architecture, security model, and deployment characteristics of Quillon as production-grade settlement rails.
 \end{abstract}
 
 \tableofcontents
@@ -59,29 +59,43 @@ Q-NarwhalKnight represents a revolutionary advancement in distributed consensus 
 
 \section{Introduction}
 
-\subsection{Background and Motivation}
+\subsection{The Settlement Problem}
 
-The blockchain industry faces a fundamental trilemma between scalability, security, and decentralization. Current generation blockchain systems struggle to achieve high throughput without compromising on either security guarantees or decentralization properties. Furthermore, the advent of quantum computing poses an existential threat to existing cryptographic primitives that underpin blockchain security.
+Digital asset settlement today depends on public, permissionless chains that were designed for transparency, not privacy. Institutions that require confidential settlement---central banks exploring CBDC rails, commodity exchanges settling physical delivery contracts, sovereign wealth funds managing reserve assets---face a structural gap: existing blockchain infrastructure either exposes transaction graphs to global surveillance, or relies on trusted intermediaries that reintroduce the counterparty risk distributed ledgers were meant to eliminate.
 
-Q-NarwhalKnight addresses these challenges through a novel architecture that combines:
-\begin{itemize}
-    \item \textbf{DAG-Knight Consensus}: A Directed Acyclic Graph based consensus mechanism that achieves zero-message complexity
-    \item \textbf{Narwhal Mempool}: High-throughput transaction dissemination with reliable broadcast guarantees
-    \item \textbf{Quantum Enhancement}: Integration of quantum random number generators and quantum-resistant cryptography
-    \item \textbf{Multi-Phase Security Model}: Progressive enhancement from classical to fully quantum-secure operations
-\end{itemize}
+Meanwhile, the approaching reality of cryptographically relevant quantum computers threatens the signature schemes that secure every major blockchain in production. No deployed settlement system offers a credible migration path from classical to post-quantum cryptography without requiring a full network reset.
 
-\subsection{Key Innovations}
-
-Q-NarwhalKnight introduces several groundbreaking innovations:
+Quillon addresses both problems simultaneously. It is private settlement infrastructure: a deployable, sovereign-grade consensus stack with three defining properties:
 
 \begin{enumerate}
-    \item \textbf{100,000× Gas Optimization}: Through precision arithmetic and quantum rounding techniques
-    \item \textbf{DNS-Phantom Network}: Steganographic communication through global DNS infrastructure
-    \item \textbf{Bitcoin-Embedded Data Attestation}: External immutability guarantees through Bitcoin blockchain
-    \item \textbf{Tor-Native Privacy}: Built-in privacy preservation through dedicated Tor circuits
-    \item \textbf{Crypto-Agile Framework}: Seamless migration between cryptographic primitives
+    \item \textbf{Privacy by architecture}: All peer-to-peer communication routes through dedicated Tor circuits. Transaction mixing, Dandelion++ propagation, and zero-knowledge proofs are not optional add-ons---they are mandatory protocol layers. The network does not leak metadata.
+    \item \textbf{Post-quantum security}: Cryptographic agility is built into the consensus layer. The system transitions from Ed25519 to Dilithium5 lattice-based signatures via height-gated upgrades, preserving historical block validity while hardening future settlement against quantum attack.
+    \item \textbf{Deployable sovereignty}: Quillon is not a token or a hosted service. It is infrastructure that operators deploy, configure, and control. A central bank, a commodity exchange, or a private institution runs its own Quillon network with its own genesis, its own validators, and its own governance---without permission from any external chain.
 \end{enumerate}
+
+\subsection{What Quillon Is}
+
+Quillon is a complete settlement stack. It includes:
+
+\begin{itemize}
+    \item \textbf{DAG-Knight Consensus}: A directed acyclic graph consensus mechanism achieving zero-message-complexity Byzantine fault tolerance, with VDF-based leader election and adaptive confirmation depth
+    \item \textbf{Narwhal Mempool}: High-throughput transaction dissemination with reliable broadcast (Bracha's protocol), achieving ordered, deduplicated transaction delivery at scale
+    \item \textbf{Tor-Native Networking}: Mandatory onion-routed peer communication with 4 dedicated circuits per validator, rotated each epoch, seeded by quantum-grade entropy
+    \item \textbf{Post-Quantum Cryptographic Agility}: Height-gated migration from Ed25519 to Dilithium5/Kyber1024, with hybrid signature verification during transition periods
+    \item \textbf{Integrated Settlement Services}: Native DEX with AMM liquidity pools, oracle network for external price feeds, and programmable settlement logic via WASM smart contracts
+    \item \textbf{Operational Tooling}: Zero-downtime rolling deployment, pre-flight database verification, automatic fork detection, and real-time consensus monitoring
+\end{itemize}
+
+\subsection{Who Quillon Serves}
+
+Quillon is designed for operators who need settlement infrastructure they control:
+
+\begin{itemize}
+    \item \textbf{Sovereign networks}: Central banks, monetary authorities, and state institutions deploying private digital currency rails
+    \item \textbf{Institutional settlement}: Commodity exchanges, clearinghouses, and trade finance platforms requiring confidential, auditable settlement
+    \item \textbf{Private asset networks}: Family offices, sovereign wealth funds, and private equity platforms managing tokenized assets without public chain exposure
+    \item \textbf{Infrastructure operators}: Node operators, mining pool operators, and network service providers building on sovereign-grade consensus
+\end{itemize}
 
 \section{System Architecture}
 

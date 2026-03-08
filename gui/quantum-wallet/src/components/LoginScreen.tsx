@@ -1412,7 +1412,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
                 animate={{ opacity: 1 }}
                 transition={{ delay: 0.65, duration: 0.6 }}
               >
-                Post-Quantum Secure &middot; Sovereign-Grade &middot; Tor-Native
+                Post-quantum settlement rails for operators and sovereign networks
               </motion.p>
             </div>
 

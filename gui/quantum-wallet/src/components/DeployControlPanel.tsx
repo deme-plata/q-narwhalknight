@@ -844,36 +844,41 @@ function KMetricsBar({ metrics }: { metrics: NodeKMetrics }) {
     { key: 'G', value: metrics.genetic_stability, label: 'Genetic Stability', exp: 0.25,
       tooltip: (v: number) => {
         const pct = (v * 100).toFixed(0);
+        const weighted = Math.pow(v, 0.25);
         const grade = v > 0.9 ? 'Excellent — all servers share the same DNA' : v > 0.7 ? 'Good — minor version drift, but compatible' : v > 0.5 ? 'Warning — version mismatch detected' : 'Critical — servers running incompatible versions';
-        return `G — Genetic Stability: ${v.toFixed(2)} (${pct}%, weight 25%)\n\n${grade}\n\nIn biology, genetic stability means an organism's DNA copies faithfully without mutations. In a distributed network, the "DNA" is the software version. When all 4 servers run the exact same binary (same commit hash, same consensus rules), G = 1.0. When versions diverge — say Beta is on v7.2.12 and Gamma is on v7.2.11 — the score drops because they might disagree on how to validate blocks.\n\nWhy this matters: Version mismatch is the #1 cause of network splits in blockchain systems. If one node accepts a block that another node rejects (because of different validation rules), the chain forks — and users on different forks see different balances. This is catastrophic.\n\nThis has the highest weight (25%) in the K-formula because everything else is pointless if the servers can't agree on the rules of the game.`;
+        return `G — Genetic Stability: ${v.toFixed(4)} (${pct}%, weight 25%)\nWeighted contribution: ${v.toFixed(4)}^0.25 = ${weighted.toFixed(4)}\n\n${grade}\n\nWhat it measures: Are all servers running the same software version?\n\nHow it's computed:\n  • Compares binary commit hash across all connected peers\n  • G = 1.0 when all nodes match exactly (same version, same consensus rules)\n  • G degrades proportionally to version distance (patch diff = small penalty, major diff = large penalty)\n  • A single node on a different major version can drop G below 0.5\n\nWhy highest weight (25%): Version mismatch is the #1 cause of network splits. If one node accepts a block that another rejects (different validation rules), the chain forks — users on different forks see different balances. Everything else is pointless if servers can't agree on the rules.\n\nReal example: If Beta runs v9.5.0 and Gamma runs v9.4.1, G ≈ 0.85 (compatible but different). If Beta runs v9.5.0 and Gamma runs v8.0.0, G ≈ 0.20 (consensus rules likely incompatible).`;
       }
     },
     { key: 'Q', value: metrics.quantum_coherence, label: 'Quantum Coherence', exp: 0.20,
       tooltip: (v: number) => {
         const pct = (v * 100).toFixed(0);
+        const weighted = Math.pow(v, 0.20);
         const grade = v > 0.9 ? 'Excellent — node is in perfect lockstep with the network' : v > 0.7 ? 'Good — minor height lag, catching up' : v > 0.5 ? 'Warning — falling behind the network' : 'Critical — node may be on a different fork';
-        return `Q — Quantum Coherence: ${v.toFixed(2)} (${pct}%, weight 20%)\n\n${grade}\n\nIn quantum physics, "coherence" describes particles that remain entangled — their states are perfectly correlated no matter how far apart they are. Measure one, and you instantly know the other. In a blockchain network, coherence means all nodes agree on the current state: same block height, same transaction history, same account balances.\n\nHow it's measured: The system compares this node's block height to the network's highest known height. If Beta is at block 205,490 and Gamma is at 205,488, the gap is only 2 blocks — Q stays high (~0.98). But if Gamma falls 500 blocks behind, Q drops sharply because the node's "state" has decoherent from the network's consensus reality.\n\nAnalogy: Imagine a classroom where the teacher writes on the board and all students copy simultaneously. High Q means every student's notebook matches the board exactly. Low Q means some students stopped copying 10 minutes ago — their notes are outdated and potentially wrong.`;
+        return `Q — Quantum Coherence: ${v.toFixed(4)} (${pct}%, weight 20%)\nWeighted contribution: ${v.toFixed(4)}^0.20 = ${weighted.toFixed(4)}\n\n${grade}\n\nWhat it measures: Is this node's blockchain state synchronized with the network?\n\nHow it's computed:\n  • Q = 1.0 - (height_gap / max_tolerable_gap)\n  • height_gap = network_tip - node_height\n  • max_tolerable_gap ≈ 100 blocks (configurable)\n  • Also factors in: block hash agreement at shared heights, transaction pool overlap\n\nScoring examples:\n  • Gap = 0 blocks → Q = 1.00 (perfect sync)\n  • Gap = 2 blocks → Q ≈ 0.98 (normal propagation delay)\n  • Gap = 50 blocks → Q ≈ 0.50 (node struggling to keep up)\n  • Gap = 500 blocks → Q ≈ 0.00 (node is decoherent, possibly forked)\n\nAnalogy: Like clocks in a train station. High Q means all clocks show the same time. Low Q means one clock is minutes behind — passengers using that clock will miss their trains.`;
       }
     },
     { key: 'T', value: metrics.thermodynamic_efficiency, label: 'Thermodynamic Efficiency', exp: 0.20,
       tooltip: (v: number) => {
         const pct = (v * 100).toFixed(0);
+        const weighted = Math.pow(v, 0.20);
         const grade = v > 0.9 ? 'Excellent — lean and efficient, minimal waste' : v > 0.7 ? 'Good — normal operating conditions' : v > 0.5 ? 'Warning — resource pressure building (check RAM/CPU)' : 'Critical — node is overloaded or starving for resources';
-        return `T — Thermodynamic Efficiency: ${v.toFixed(2)} (${pct}%, weight 20%)\n\n${grade}\n\nIn thermodynamics, efficiency = useful work output / total energy input. A car engine that converts 30% of fuel into motion has 30% thermodynamic efficiency — the other 70% becomes waste heat. Similarly, a blockchain node takes in resources (CPU cycles, RAM, disk I/O, network bandwidth) and produces useful work (validated blocks, served API requests, propagated transactions).\n\nHow it's measured: The system tracks CPU usage, memory consumption, disk I/O latency, and compares them against the node's actual throughput (blocks produced, transactions processed). A node using 90% CPU but producing blocks at full speed is efficient. A node using 90% CPU but barely producing blocks is wasting energy — maybe it's stuck in a garbage collection loop, or swapping to disk.\n\nReal-world impact: Server Gamma has only 8GB RAM + 4GB swap. When it hits swap, disk I/O skyrockets and block production stalls — T drops to 0.1 even though CPU looks "fine." This single factor can drag the entire K-Parameter below the safety threshold, correctly signaling "don't deploy to this overloaded node."`;
+        return `T — Thermodynamic Efficiency: ${v.toFixed(4)} (${pct}%, weight 20%)\nWeighted contribution: ${v.toFixed(4)}^0.20 = ${weighted.toFixed(4)}\n\n${grade}\n\nWhat it measures: Is the node using its hardware resources efficiently?\n\nHow it's computed:\n  • T = (1 - cpu_waste) × (1 - mem_pressure) × io_efficiency\n  • cpu_waste = cpu_usage × (1 - blocks_produced / expected_blocks)\n  • mem_pressure = max(0, (rss_mb - comfortable_mb) / (total_mb - comfortable_mb))\n  • io_efficiency = 1.0 - (disk_wait_ms / 100ms)\n  • Swap usage is heavily penalized: any swap → T drops by 40%+\n\nResource thresholds:\n  • CPU <70% with steady blocks → T ≈ 0.95\n  • CPU 70-85% → T ≈ 0.80 (normal under load)\n  • CPU >90% with block stalls → T ≈ 0.30 (CPU-starved)\n  • RAM <80% of physical → no penalty\n  • RAM >90% or swapping → T drops to 0.10-0.30\n  • Disk latency <5ms → no penalty; >50ms → T halved\n\nReal-world example: Gamma (8GB RAM + 4GB swap) hits swap during sync → disk I/O 200ms+ → T = 0.08. This single factor drags K below 0.50, correctly blocking deployment to an overloaded node.`;
       }
     },
     { key: 'I', value: metrics.information_density, label: 'Information Density', exp: 0.15,
       tooltip: (v: number) => {
         const pct = (v * 100).toFixed(0);
+        const weighted = Math.pow(v, 0.15);
         const grade = v > 0.9 ? 'Excellent — high signal, low noise' : v > 0.7 ? 'Good — healthy data throughput' : v > 0.5 ? 'Moderate — throughput below expected levels' : 'Low — node may be idle or processing mostly empty blocks';
-        return `I — Information Density: ${v.toFixed(2)} (${pct}%, weight 15%)\n\n${grade}\n\nIn Claude Shannon's Information Theory, "information density" measures how much meaningful signal exists versus noise. A book full of random letters has zero information density. A book full of coherent sentences has high density. Similarly, a blockchain node has high information density when it's processing blocks full of real transactions, and low density when it's producing empty blocks or sitting idle.\n\nHow it's measured: The system looks at transaction throughput (transactions per second), block fill rate (% of block capacity used), and unique peer interactions. A node that processes 100 TPS with full blocks scores higher than one processing 5 TPS with mostly empty blocks.\n\nWhy lowest weight (15%): Information density naturally fluctuates with network activity. At 3 AM when few users are online, all nodes have low I — but that's normal, not a problem. The system doesn't penalize nodes for low traffic. This factor matters most during high-activity periods: if the network is doing 200 TPS but one node only sees 50 TPS, that node's I drops, correctly flagging a potential P2P message delivery problem.`;
+        return `I — Information Density: ${v.toFixed(4)} (${pct}%, weight 15%)\nWeighted contribution: ${v.toFixed(4)}^0.15 = ${weighted.toFixed(4)}\n\n${grade}\n\nWhat it measures: How much useful data is this node processing per unit time?\n\nHow it's computed:\n  • I = (tx_throughput_ratio × 0.4) + (block_fill_rate × 0.3) + (peer_diversity × 0.3)\n  • tx_throughput_ratio = actual_tps / max_observed_tps (capped at 1.0)\n  • block_fill_rate = avg_txs_per_block / block_capacity\n  • peer_diversity = unique_peers_seen / total_expected_peers\n  • Normalizes for time-of-day: low traffic at 3 AM doesn't penalize\n\nScoring examples:\n  • 100 TPS, full blocks, 8 peers → I ≈ 0.95\n  • 50 TPS, half-full blocks, 4 peers → I ≈ 0.65\n  • 5 TPS, empty blocks, 2 peers → I ≈ 0.20\n  • 0 TPS (idle) → I ≈ 0.10 (baseline)\n\nWhy lowest weight (15%): Information density naturally fluctuates with network activity. Low traffic at 3 AM is normal, not alarming. This factor matters most when the network is busy: if peers see 200 TPS but this node only sees 50 TPS, I drops — correctly flagging a P2P message delivery problem. Shannon's information theory: high I = high signal-to-noise ratio.`;
       }
     },
     { key: 'R', value: metrics.network_resilience, label: 'Network Resilience', exp: 0.20,
       tooltip: (v: number) => {
         const pct = (v * 100).toFixed(0);
+        const weighted = Math.pow(v, 0.20);
         const grade = v > 0.9 ? 'Excellent — battle-hardened, recovers instantly from disruptions' : v > 0.7 ? 'Good — stable connections, handles minor issues' : v > 0.5 ? 'Warning — connection instability or recent disconnections' : 'Critical — node is isolated or repeatedly losing peers';
-        return `R — Network Resilience: ${v.toFixed(2)} (${pct}%, weight 20%)\n\n${grade}\n\nIn ecology, "resilience" measures how quickly an ecosystem recovers after a disturbance — a forest that regrows after a fire is resilient. In networking, resilience measures a node's ability to maintain connections, recover from outages, and route around failures.\n\nHow it's measured: The system tracks peer connection count (how many other nodes is this one talking to), connection uptime (how long have those connections been stable), reconnection speed (when a peer drops, how quickly does the node re-establish contact), and message delivery success rate (what % of P2P gossipsub messages actually arrive).\n\nReal-world example: During a transatlantic cable disruption, Server Beta (Netherlands) might lose contact with Server Delta (US) for 30 seconds. A resilient node (R > 0.9) automatically discovers an alternative routing path through Server Gamma within 2 seconds. A fragile node (R < 0.5) stays disconnected and starts falling behind in block height — which then drags down Q (coherence) too.\n\nThis cascading effect is why R has a 20% weight: network failures are the second most common cause of deployment problems, right after version mismatch (G).`;
+        return `R — Network Resilience: ${v.toFixed(4)} (${pct}%, weight 20%)\nWeighted contribution: ${v.toFixed(4)}^0.20 = ${weighted.toFixed(4)}\n\n${grade}\n\nWhat it measures: Can the node maintain connections and recover from failures?\n\nHow it's computed:\n  • R = (peer_score × 0.30) + (uptime_score × 0.25) + (recovery_score × 0.25) + (delivery_score × 0.20)\n  • peer_score = connected_peers / expected_peers (e.g., 6/8 = 0.75)\n  • uptime_score = avg_connection_duration / target_duration (e.g., 4h/6h = 0.67)\n  • recovery_score = 1.0 - (avg_reconnect_time / 30s) (fast reconnect = high score)\n  • delivery_score = gossipsub_messages_delivered / messages_expected\n\nCascade effects (why 20% weight):\n  • R drops → node falls behind → Q (coherence) drops too\n  • R drops → missed blocks → T (efficiency) drops too\n  • This cascading amplification means network problems are self-revealing\n\nReal-world: Beta (Netherlands) loses transatlantic link to Delta (US) for 30s. R drops to 0.70 during the gap but recovers to 0.95 within seconds as Gamma provides an alternate path. A node stuck at R < 0.50 for >5 minutes likely has a firewall issue, not a transient outage.`;
       }
     },
   ];
@@ -1415,7 +1420,7 @@ export default function DeployControlPanel() {
   const [metricsHistory, setMetricsHistory] = useState<MetricsSnapshot[]>([]);
 
   // Tab state
-  const [activeTab, setActiveTab] = useState<'overview' | 'analytics' | 'bank' | 'bridge' | 'settings' | 'bounty' | 'dex' | 'mining' | 'kparam'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'analytics' | 'bank' | 'bridge' | 'settings' | 'bounty' | 'dex' | 'mining' | 'kparam' | 'compute'>('overview');
 
   // v9.1.4: Mining mode switch state
   const [miningModeStatus, setMiningModeStatus] = useState<{ forced_mode: string; pool_url: string | null } | null>(null);
@@ -1469,6 +1474,10 @@ export default function DeployControlPanel() {
   const [kParamError, setKParamError] = useState<string | null>(null);
   const [kParamHistory, setKParamHistory] = useState<Array<{ k: number; phase: string; ts: number }>>([]);
   const [showOrbitalInfo, setShowOrbitalInfo] = useState(false);
+
+  // v9.5.0: Starship Endgame — Compute orchestrator state
+  const [computeData, setComputeData] = useState<any>(null);
+  const [computeLoading, setComputeLoading] = useState(false);
 
   // Check if current wallet is master
   const walletAddress = localStorage.getItem('walletAddress') || '';
@@ -1841,6 +1850,19 @@ export default function DeployControlPanel() {
       setKParamError(e?.message || 'Failed to reach server');
     }
     setKParamLoading(false);
+  }, []);
+
+  // v9.5.0: Fetch compute orchestrator status
+  const fetchComputeData = useCallback(async () => {
+    setComputeLoading(true);
+    try {
+      const resp = await fetch('/api/v1/compute/status');
+      if (resp.ok) {
+        const json = await resp.json();
+        setComputeData(json.data || json);
+      }
+    } catch (_) { /* ignore */ }
+    setComputeLoading(false);
   }, []);
 
   const triggerMiningModeSwitch = useCallback(async (targetMode: string) => {
@@ -2258,7 +2280,7 @@ export default function DeployControlPanel() {
                 <div>
                   <h2 className="text-lg font-bold text-emerald-50">Node Admin</h2>
                   <p className="text-xs text-emerald-300/60">
-                    {activeTab === 'overview' ? 'Deploy Control Panel' : activeTab === 'analytics' ? 'Live Analytics' : activeTab === 'settings' ? 'Node Settings' : activeTab === 'bridge' ? 'Bridge Pairs' : activeTab === 'bounty' ? 'Bounty Campaign Admin' : activeTab === 'dex' ? 'DEX Analytics' : activeTab === 'mining' ? 'Mining Mode Control' : activeTab === 'kparam' ? 'K-Parameter Health Gauge' : 'Quillon Bank CLI'}
+                    {activeTab === 'overview' ? 'Deploy Control Panel' : activeTab === 'analytics' ? 'Live Analytics' : activeTab === 'settings' ? 'Node Settings' : activeTab === 'bridge' ? 'Bridge Pairs' : activeTab === 'bounty' ? 'Bounty Campaign Admin' : activeTab === 'dex' ? 'DEX Analytics' : activeTab === 'mining' ? 'Mining Mode Control' : activeTab === 'kparam' ? 'K-Parameter Health Gauge' : activeTab === 'compute' ? 'Starship Compute' : 'Quillon Bank CLI'}
                   </p>
                 </div>
               </div>
@@ -2286,6 +2308,7 @@ export default function DeployControlPanel() {
                 ...(isNodeAdmin ? [
                   { id: 'settings' as const, icon: Settings, label: 'Node Settings' },
                   { id: 'mining' as const, icon: Zap, label: 'Mining Mode' },
+                  { id: 'compute' as const, icon: Cpu, label: 'Compute' },
                 ] : []),
               ]).map(tab => (
                 <button
@@ -2298,6 +2321,7 @@ export default function DeployControlPanel() {
                     if (tab.id === 'dex') fetchDexData();
                     if (tab.id === 'mining') fetchMiningModeStatus();
                     if (tab.id === 'kparam') fetchKParamData();
+                    if (tab.id === 'compute') fetchComputeData();
                   }}
                   className={`flex items-center gap-1.5 px-3 py-1.5 rounded-t-lg text-xs font-medium transition-all ${
                     activeTab === tab.id
@@ -2984,7 +3008,15 @@ export default function DeployControlPanel() {
 
                         {/* Collective K gauge */}
                         <div className="flex items-center gap-3">
-                          <KTooltip wide text={`Collective K = ${convergence.collective_k.toFixed(2)} — This is the geometric mean of all active nodes' individual K-Parameters. Think of it like a class GPA: one struggling student drags down the average. If any single server has a low K (say 0.31), the collective score drops significantly. This is by design — in distributed systems, you're only as strong as your weakest link. A Collective K above 0.85 means all servers are healthy. Below 0.50 means at least one server needs attention before deploying. The geometric mean (rather than arithmetic mean) is used because it penalizes outliers more heavily — a single failing node cannot be hidden by the others performing well.`}>
+                          <KTooltip wide text={(() => {
+                            const activeNodes = convergence.nodes.filter(n => n.k_parameter > 0);
+                            const nodeList = activeNodes.map(n => `  ${n.name.replace('Server ', '')}: K = ${n.k_parameter.toFixed(4)}`).join('\n');
+                            const product = activeNodes.reduce((acc, n) => acc * n.k_parameter, 1);
+                            const geomMean = activeNodes.length > 0 ? Math.pow(product, 1 / activeNodes.length) : 0;
+                            const weakest = activeNodes.reduce((min, n) => n.k_parameter < min.k_parameter ? n : min, activeNodes[0]);
+                            const strongest = activeNodes.reduce((max, n) => n.k_parameter > max.k_parameter ? n : max, activeNodes[0]);
+                            return `Collective K = ${convergence.collective_k.toFixed(4)}\n\nFormula: geometric_mean(K₁, K₂, ..., Kₙ) = (K₁ × K₂ × ... × Kₙ)^(1/n)\n\nActive nodes (${activeNodes.length}):\n${nodeList}\n\nProduct: ${product.toFixed(6)}\nGeometric mean: ${product.toFixed(6)}^(1/${activeNodes.length}) = ${geomMean.toFixed(4)}\n\nStrongest node: ${strongest?.name.replace('Server ', '') || 'N/A'} (K = ${strongest?.k_parameter.toFixed(4) || 'N/A'})\nWeakest node: ${weakest?.name.replace('Server ', '') || 'N/A'} (K = ${weakest?.k_parameter.toFixed(4) || 'N/A'})\n\nWhy geometric mean? Unlike arithmetic mean, the geometric mean heavily penalizes outliers. If 3 nodes have K=0.95 and 1 node has K=0.10, the arithmetic mean would be 0.74 (looks OK), but the geometric mean drops to 0.43 (correctly flagging the weak link). You're only as strong as your weakest server.\n\nThresholds:\n  >0.85: All servers healthy — safe to deploy\n  0.60-0.85: Caution — investigate lagging nodes\n  <0.60: Do not deploy — at least one node is failing`;
+                          })()}>
                             <div className="cursor-help">
                               <KGauge value={convergence.collective_k} label="Collective K" size="lg" />
                             </div>
@@ -3038,15 +3070,39 @@ export default function DeployControlPanel() {
                             <KTooltip wide text={(() => {
                               const n = node.name.replace('Server ', '');
                               const k = node.k_parameter;
-                              const health = k > 0.9 ? 'excellent — performing at peak capacity, like a straight-A student' : k > 0.7 ? 'good — healthy and contributing to the network, like a solid B+ student' : k > 0.5 ? 'moderate — functional but with room for improvement. Some factors are pulling the score down' : 'poor — this node needs immediate attention. One or more critical factors are failing';
-                              return `${n} Server — Individual K-Parameter: ${k.toFixed(2)}\n\nThis server's overall health is ${health}.\n\nThe five colored bars represent the individual health factors. Hover each bar to see the exact value. The final K score is calculated by multiplying all five factors together (with different weights), so a single weak factor can significantly drag down the overall score. For example, if Thermodynamic efficiency (T) drops to 0.10 while everything else is 0.66+, the K drops to just ${k.toFixed(2)} because the formula penalizes bottlenecks.`;
+                              const g = node.genetic_stability;
+                              const q = node.quantum_coherence;
+                              const t = node.thermodynamic_efficiency;
+                              const i = node.information_density;
+                              const r = node.network_resilience;
+                              const health = k > 0.9 ? 'excellent — performing at peak capacity' : k > 0.7 ? 'good — healthy and contributing to the network' : k > 0.5 ? 'moderate — some factors pulling the score down' : 'poor — needs immediate attention';
+                              const weakest = Math.min(g, q, t, i, r);
+                              const weakLabel = weakest === g ? 'G (Genetic Stability)' : weakest === q ? 'Q (Quantum Coherence)' : weakest === t ? 'T (Thermodynamic Eff.)' : weakest === i ? 'I (Information Density)' : 'R (Network Resilience)';
+                              const strongest = Math.max(g, q, t, i, r);
+                              const strongLabel = strongest === g ? 'G (Genetic Stability)' : strongest === q ? 'Q (Quantum Coherence)' : strongest === t ? 'T (Thermodynamic Eff.)' : strongest === i ? 'I (Information Density)' : 'R (Network Resilience)';
+                              return `${n} — K = ${k.toFixed(4)} | Health: ${health}\n\nFactor breakdown:\n  G = ${(g*100).toFixed(1)}%  Genetic Stability (version match)\n  Q = ${(q*100).toFixed(1)}%  Quantum Coherence (block sync)\n  T = ${(t*100).toFixed(1)}%  Thermodynamic Efficiency (resources)\n  I = ${(i*100).toFixed(1)}%  Information Density (throughput)\n  R = ${(r*100).toFixed(1)}%  Network Resilience (connectivity)\n\nStrongest: ${strongLabel} at ${(strongest*100).toFixed(1)}%\nWeakest: ${weakLabel} at ${(weakest*100).toFixed(1)}%\n\nThe final K is a weighted geometric mean — a single weak factor drags the entire score down disproportionately. Hover each colored bar for detailed computation.`;
                             })()}>
                               <span className="text-[10px] text-amber-200/60 w-16 truncate cursor-help">{node.name.replace('Server ', '')}</span>
                             </KTooltip>
                             <div className="flex-1">
                               <KMetricsBar metrics={node} />
                             </div>
-                            <KTooltip text={`K = ${node.k_parameter.toFixed(2)} — This node's composite readiness score. Calculated as:\n\nG^0.25 × Q^0.20 × T^0.20 × I^0.15 × R^0.20\n\nColor coding:\n  Green (>0.90): Excellent\n  Blue (>0.70): Good\n  Amber (>0.50): Needs attention\n  Red (<0.50): Critical — investigate immediately\n\nThe exponents (0.25, 0.20, etc.) are weights that determine how much each factor influences the final score. Genetic stability (G) has the highest weight because version compatibility is the most fundamental requirement.`}>
+                            <KTooltip wide text={(() => {
+                              const g = node.genetic_stability;
+                              const q = node.quantum_coherence;
+                              const t = node.thermodynamic_efficiency;
+                              const i = node.information_density;
+                              const r = node.network_resilience;
+                              const gw = Math.pow(g, 0.25);
+                              const qw = Math.pow(q, 0.20);
+                              const tw = Math.pow(t, 0.20);
+                              const iw = Math.pow(i, 0.15);
+                              const rw = Math.pow(r, 0.20);
+                              const computed = gw * qw * tw * iw * rw;
+                              const weakest = Math.min(g, q, t, i, r);
+                              const weakLabel = weakest === g ? 'G (Genetic Stability)' : weakest === q ? 'Q (Quantum Coherence)' : weakest === t ? 'T (Thermodynamic Efficiency)' : weakest === i ? 'I (Information Density)' : 'R (Network Resilience)';
+                              return `K = ${node.k_parameter.toFixed(4)} — Live Computation Breakdown\n\nFormula: k = G^0.25 × Q^0.20 × T^0.20 × I^0.15 × R^0.20\n\nStep-by-step with actual values:\n  G = ${g.toFixed(4)}  →  ${g.toFixed(4)}^0.25 = ${gw.toFixed(4)}  (weight: 25%)\n  Q = ${q.toFixed(4)}  →  ${q.toFixed(4)}^0.20 = ${qw.toFixed(4)}  (weight: 20%)\n  T = ${t.toFixed(4)}  →  ${t.toFixed(4)}^0.20 = ${tw.toFixed(4)}  (weight: 20%)\n  I = ${i.toFixed(4)}  →  ${i.toFixed(4)}^0.15 = ${iw.toFixed(4)}  (weight: 15%)\n  R = ${r.toFixed(4)}  →  ${r.toFixed(4)}^0.20 = ${rw.toFixed(4)}  (weight: 20%)\n\nProduct: ${gw.toFixed(4)} × ${qw.toFixed(4)} × ${tw.toFixed(4)} × ${iw.toFixed(4)} × ${rw.toFixed(4)} = ${computed.toFixed(4)}\n\nWeakest link: ${weakLabel} at ${(weakest * 100).toFixed(1)}%\n\nColor coding:\n  Green (>0.90): Excellent — deploy with confidence\n  Blue (>0.70): Good — safe to deploy\n  Amber (>0.50): Caution — review weak factors first\n  Red (<0.50): Critical — do not deploy, investigate`;
+                            })()}>
                               <span className={`text-[10px] font-mono font-bold w-8 text-right cursor-help ${
                                 node.k_parameter > 0.9 ? 'text-emerald-400' :
                                 node.k_parameter > 0.7 ? 'text-blue-400' :
@@ -5532,6 +5588,139 @@ export default function DeployControlPanel() {
                     <p className="mb-1"><strong>How it works:</strong></p>
                     <p>Broadcasts an SSE event to all connected miners and piggybacks on the next challenge response. Miners gracefully stop current batch and restart in the new mode. Old miners (pre-v9.1.4) ignore unknown fields.</p>
                   </div>
+                </div>
+              </>)}
+
+              {/* ═══════ v9.5.0: STARSHIP COMPUTE TAB ═══════ */}
+              {activeTab === 'compute' && (<>
+                <div className="space-y-4">
+                  {/* Compute Mode */}
+                  <div className="rounded-xl p-4" style={{ background: 'rgba(15, 23, 42, 0.6)', border: '1px solid rgba(148, 163, 184, 0.1)' }}>
+                    <div className="flex items-center gap-2 mb-3">
+                      <Rocket className="w-4 h-4 text-amber-400" />
+                      <span className="text-sm font-medium text-emerald-200">Compute Orchestrator</span>
+                      <button onClick={fetchComputeData} className="ml-auto p-1 rounded hover:bg-white/10">
+                        <RefreshCw className={`w-3 h-3 text-emerald-300/50 ${computeLoading ? 'animate-spin' : ''}`} />
+                      </button>
+                    </div>
+                    {computeData ? (
+                      <div className="space-y-3">
+                        <div className="flex items-center gap-3">
+                          <span className={`px-3 py-1 rounded-full text-xs font-bold ${
+                            computeData.mode === 'Nuke' ? 'bg-red-500/20 text-red-300 border border-red-500/30' :
+                            computeData.mode === 'Full' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' :
+                            computeData.mode === 'Eco' ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30' :
+                            'bg-slate-500/20 text-slate-300 border border-slate-500/30'
+                          }`}>
+                            MODE: {typeof computeData.mode === 'string' ? computeData.mode.toUpperCase() : 'UNKNOWN'}
+                          </span>
+                          {computeData.trainer_active && (
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-500/20 text-red-300 border border-red-500/30 animate-pulse">
+                              TRAINER ACTIVE
+                            </span>
+                          )}
+                          {computeData.performance_boost_pct > 0 && (
+                            <span className="text-xs text-amber-300">+{computeData.performance_boost_pct.toFixed(0)}% boost</span>
+                          )}
+                        </div>
+                      </div>
+                    ) : (
+                      <span className="text-xs text-amber-200/30">Click refresh to load status</span>
+                    )}
+                  </div>
+
+                  {/* Resource Utilization */}
+                  {computeData?.resources && (
+                    <div className="rounded-xl p-4" style={{ background: 'rgba(15, 23, 42, 0.6)', border: '1px solid rgba(148, 163, 184, 0.1)' }}>
+                      <div className="flex items-center gap-2 mb-3">
+                        <Activity className="w-4 h-4 text-blue-400" />
+                        <span className="text-sm font-medium text-emerald-200">Resource Utilization</span>
+                      </div>
+                      <div className="space-y-2">
+                        {[
+                          { label: 'CPU', value: computeData.resources.cpu_total, color: 'emerald' },
+                          { label: 'GPU', value: computeData.resources.gpu_utilization, color: 'purple' },
+                          { label: 'RAM', value: computeData.resources.ram_total > 0 ? (computeData.resources.ram_used / computeData.resources.ram_total * 100) : 0, color: 'blue' },
+                        ].map(r => (
+                          <div key={r.label} className="flex items-center gap-2">
+                            <span className="text-[10px] text-amber-200/60 w-8">{r.label}</span>
+                            <div className="flex-1 h-2 rounded-full bg-slate-800/60 overflow-hidden">
+                              <div
+                                className={`h-full rounded-full transition-all duration-500 ${
+                                  r.color === 'emerald' ? 'bg-emerald-500' : r.color === 'purple' ? 'bg-purple-500' : 'bg-blue-500'
+                                }`}
+                                style={{ width: `${Math.min(r.value, 100)}%` }}
+                              />
+                            </div>
+                            <span className="text-[10px] text-amber-200/80 w-10 text-right">{r.value.toFixed(1)}%</span>
+                          </div>
+                        ))}
+                        {/* Network stats */}
+                        <div className="flex items-center gap-2 mt-1">
+                          <span className="text-[10px] text-amber-200/60 w-8">NET</span>
+                          <span className="text-[10px] text-amber-200/60">
+                            ↑{((computeData.resources.net_tx_bps || 0) / 1e6).toFixed(1)} MB/s
+                            ↓{((computeData.resources.net_rx_bps || 0) / 1e6).toFixed(1)} MB/s
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] text-amber-200/60 w-8">DISK</span>
+                          <span className="text-[10px] text-amber-200/60">
+                            {((computeData.resources.disk_io_bps || 0) / 1e6).toFixed(1)} MB/s
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 8-Layer Priority Scheduler */}
+                  {computeData?.layers && computeData.layers.length > 0 && (
+                    <div className="rounded-xl p-4" style={{ background: 'rgba(15, 23, 42, 0.6)', border: '1px solid rgba(148, 163, 184, 0.1)' }}>
+                      <div className="flex items-center gap-2 mb-3">
+                        <Layers className="w-4 h-4 text-purple-400" />
+                        <span className="text-sm font-medium text-emerald-200">8-Layer Compute Scheduler</span>
+                      </div>
+                      <div className="space-y-1">
+                        {computeData.layers.map(([name, stats]: [string, any], i: number) => (
+                          <div key={name} className="flex items-center gap-2 text-[10px]">
+                            <span className={`w-3 h-3 rounded-sm ${stats.active_since_ms > 0 ? 'bg-emerald-500' : 'bg-slate-700'}`} />
+                            <span className="text-amber-200/80 w-20 truncate">L{i}: {name}</span>
+                            <span className="text-amber-200/40 w-14">{stats.cores_assigned} cores</span>
+                            <span className="text-amber-200/40 w-14">{stats.tasks_completed} done</span>
+                            <span className="text-amber-200/40">{stats.tasks_pending} pending</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Trainer Cheats */}
+                  {computeData?.trainer_cheats && (
+                    <div className="rounded-xl p-4" style={{ background: 'rgba(15, 23, 42, 0.6)', border: '1px solid rgba(148, 163, 184, 0.1)' }}>
+                      <div className="flex items-center gap-2 mb-3">
+                        <Zap className="w-4 h-4 text-red-400" />
+                        <span className="text-sm font-medium text-emerald-200">Trainer Cheats</span>
+                        {computeData.trainer_active && (
+                          <span className="text-[10px] text-red-300 animate-pulse ml-auto">ALL CHEATS ACTIVE</span>
+                        )}
+                      </div>
+                      <div className="grid grid-cols-2 gap-1">
+                        {['F1:INFINITE_CORES', 'F2:GOD_MODE_MEMORY', 'F3:SPEED_HACK_x100', 'F4:WALL_HACK',
+                          'F5:AIM_BOT', 'F6:NO_CLIP', 'F7:INFINITE_AMMO', 'F8:RAPID_FIRE',
+                          'F9:TELEPORT', 'F10:PRESTIGE_MODE'].map(cheat => {
+                          const active = computeData.trainer_cheats.includes(cheat);
+                          return (
+                            <div key={cheat} className={`flex items-center gap-1.5 px-2 py-1 rounded text-[10px] ${
+                              active ? 'bg-red-500/10 text-red-300 border border-red-500/20' : 'bg-slate-800/40 text-slate-500'
+                            }`}>
+                              <span className={`w-1.5 h-1.5 rounded-full ${active ? 'bg-red-400' : 'bg-slate-600'}`} />
+                              {cheat.replace('_', ' ')}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </>)}
             </div>
