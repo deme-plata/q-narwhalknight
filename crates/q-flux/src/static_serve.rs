@@ -383,4 +383,137 @@ mod tests {
         assert!(matches!(route("/", &config), RouteResult::Proxy));
         assert!(matches!(route("/app.js", &config), RouteResult::Proxy));
     }
+
+    // ── MIME type coverage ──────────────────────────────────────────
+
+    #[test]
+    fn test_mime_html() {
+        assert_eq!(mime_for_path(Path::new("page.html")), "text/html; charset=utf-8");
+        assert_eq!(mime_for_path(Path::new("page.htm")), "text/html; charset=utf-8");
+    }
+
+    #[test]
+    fn test_mime_images() {
+        assert_eq!(mime_for_path(Path::new("photo.jpg")), "image/jpeg");
+        assert_eq!(mime_for_path(Path::new("photo.jpeg")), "image/jpeg");
+        assert_eq!(mime_for_path(Path::new("icon.gif")), "image/gif");
+        assert_eq!(mime_for_path(Path::new("logo.svg")), "image/svg+xml");
+        assert_eq!(mime_for_path(Path::new("icon.ico")), "image/x-icon");
+        assert_eq!(mime_for_path(Path::new("photo.webp")), "image/webp");
+        assert_eq!(mime_for_path(Path::new("photo.avif")), "image/avif");
+    }
+
+    #[test]
+    fn test_mime_fonts() {
+        assert_eq!(mime_for_path(Path::new("f.woff")), "font/woff");
+        assert_eq!(mime_for_path(Path::new("f.woff2")), "font/woff2");
+        assert_eq!(mime_for_path(Path::new("f.ttf")), "font/ttf");
+        assert_eq!(mime_for_path(Path::new("f.eot")), "application/vnd.ms-fontobject");
+    }
+
+    #[test]
+    fn test_mime_video() {
+        assert_eq!(mime_for_path(Path::new("v.mp4")), "video/mp4");
+        assert_eq!(mime_for_path(Path::new("v.webm")), "video/webm");
+    }
+
+    #[test]
+    fn test_mime_misc() {
+        assert_eq!(mime_for_path(Path::new("data.json")), "application/json; charset=utf-8");
+        assert_eq!(mime_for_path(Path::new("data.xml")), "application/xml; charset=utf-8");
+        assert_eq!(mime_for_path(Path::new("readme.txt")), "text/plain; charset=utf-8");
+        assert_eq!(mime_for_path(Path::new("doc.pdf")), "application/pdf");
+        assert_eq!(mime_for_path(Path::new("bundle.map")), "application/json");
+    }
+
+    #[test]
+    fn test_mime_case_insensitive() {
+        assert_eq!(mime_for_path(Path::new("app.JS")), "application/javascript; charset=utf-8");
+        assert_eq!(mime_for_path(Path::new("style.CSS")), "text/css; charset=utf-8");
+        assert_eq!(mime_for_path(Path::new("IMAGE.PNG")), "image/png");
+    }
+
+    // ── has_static_extension ────────────────────────────────────────
+
+    #[test]
+    fn test_static_extensions_all() {
+        let exts = ["js", "css", "png", "jpg", "jpeg", "gif", "svg", "ico",
+                     "woff", "woff2", "ttf", "eot", "map", "json", "wasm",
+                     "webp", "avif", "mp4", "webm", "pdf", "txt", "xml",
+                     "html", "htm"];
+        for ext in exts {
+            assert!(has_static_extension(&format!("/file.{}", ext)),
+                    "extension .{} should be static", ext);
+        }
+    }
+
+    #[test]
+    fn test_non_static_extensions() {
+        assert!(!has_static_extension("/file.rs"));
+        assert!(!has_static_extension("/file.toml"));
+        assert!(!has_static_extension("/file.lock"));
+        assert!(!has_static_extension("/file.md"));
+    }
+
+    // ── is_hashed_asset ─────────────────────────────────────────────
+
+    #[test]
+    fn test_hashed_asset_variations() {
+        assert!(is_hashed_asset("/assets/vendor-ABCD1234.js"));
+        assert!(is_hashed_asset("/assets/chunk-a1b2c3d4e5f6.css"));
+        assert!(is_hashed_asset("/app-12345678.js"));
+    }
+
+    #[test]
+    fn test_not_hashed_asset() {
+        assert!(!is_hashed_asset("/index.html"));
+        assert!(!is_hashed_asset("/assets/app.js"));
+        assert!(!is_hashed_asset("/style.css"));
+        // Hash too short (< 8 chars)
+        assert!(!is_hashed_asset("/assets/app-abc.js"));
+    }
+
+    // ── route query string stripping ────────────────────────────────
+
+    #[test]
+    fn test_route_strips_query_string() {
+        let config = StaticConfig {
+            root: Some(PathBuf::from("/tmp")),
+            spa_fallback: false,
+        };
+        // /api paths still proxy even with query params
+        assert!(matches!(route("/api/v1/data?key=val", &config), RouteResult::Proxy));
+        assert!(matches!(route("/api?x=1", &config), RouteResult::Proxy));
+    }
+
+    #[test]
+    fn test_route_strips_fragment() {
+        let config = StaticConfig {
+            root: Some(PathBuf::from("/tmp")),
+            spa_fallback: false,
+        };
+        assert!(matches!(route("/api/v1/data#section", &config), RouteResult::Proxy));
+    }
+
+    // ── route websocket paths ───────────────────────────────────────
+
+    #[test]
+    fn test_ws_paths_always_proxy() {
+        let config = StaticConfig {
+            root: Some(PathBuf::from("/tmp")),
+            spa_fallback: true,
+        };
+        assert!(matches!(route("/ws", &config), RouteResult::Proxy));
+        assert!(matches!(route("/ws/connect", &config), RouteResult::Proxy));
+    }
+
+    // ── CORS headers ────────────────────────────────────────────────
+
+    #[test]
+    fn test_cors_headers_content() {
+        assert!(CORS_HEADERS.contains("access-control-allow-origin: *"));
+        assert!(CORS_HEADERS.contains("access-control-allow-methods:"));
+        assert!(CORS_HEADERS.contains("access-control-allow-headers:"));
+        assert!(CORS_HEADERS.contains("X-Wallet-Address"));
+    }
 }

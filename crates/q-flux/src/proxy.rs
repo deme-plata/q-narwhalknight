@@ -897,7 +897,7 @@ where
 /// These are routed via direct TCP to avoid consuming hyper's connection pool
 /// with long-lived streams that never return connections to the idle pool.
 #[inline]
-fn is_sse_path(path: &str) -> bool {
+pub(crate) fn is_sse_path(path: &str) -> bool {
     path == "/api/v1/sse"
         || path.starts_with("/api/v1/sse?")
         || path == "/sse"
@@ -999,5 +999,170 @@ async fn handle_sse_direct<S>(
                 metrics.drain_forced();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── generate_request_id ─────────────────────────────────────────
+
+    #[test]
+    fn test_request_id_format() {
+        let id = generate_request_id();
+        // Format: "XXXX-XXXXXX" (4 hex - 6 hex)
+        assert_eq!(id.len(), 11, "request ID should be 11 chars: {}", id);
+        assert_eq!(id.as_bytes()[4], b'-', "dash at position 4");
+        assert!(id[..4].chars().all(|c| c.is_ascii_hexdigit()), "first 4 chars hex");
+        assert!(id[5..].chars().all(|c| c.is_ascii_hexdigit()), "last 6 chars hex");
+    }
+
+    #[test]
+    fn test_request_id_uniqueness() {
+        let ids: Vec<String> = (0..100).map(|_| generate_request_id()).collect();
+        let unique: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(ids.len(), unique.len(), "all 100 request IDs should be unique");
+    }
+
+    #[test]
+    fn test_request_id_counter_increments() {
+        let id1 = generate_request_id();
+        let id2 = generate_request_id();
+        // The counter portion (after dash) should differ
+        let c1 = u32::from_str_radix(&id1[5..], 16).unwrap();
+        let c2 = u32::from_str_radix(&id2[5..], 16).unwrap();
+        assert_eq!(c2, c1 + 1, "counter should increment by 1");
+    }
+
+    // ── should_keep_alive ───────────────────────────────────────────
+
+    #[test]
+    fn test_keepalive_http11_default() {
+        let req = hyper::Request::builder()
+            .version(hyper::Version::HTTP_11)
+            .body(()).unwrap();
+        assert!(should_keep_alive(&req), "HTTP/1.1 default is keep-alive");
+    }
+
+    #[test]
+    fn test_keepalive_http10_default() {
+        let req = hyper::Request::builder()
+            .version(hyper::Version::HTTP_10)
+            .body(()).unwrap();
+        assert!(!should_keep_alive(&req), "HTTP/1.0 default is close");
+    }
+
+    #[test]
+    fn test_keepalive_connection_close() {
+        let req = hyper::Request::builder()
+            .version(hyper::Version::HTTP_11)
+            .header(hyper::header::CONNECTION, "close")
+            .body(()).unwrap();
+        assert!(!should_keep_alive(&req), "Connection: close should disable keepalive");
+    }
+
+    #[test]
+    fn test_keepalive_connection_close_case_insensitive() {
+        let req = hyper::Request::builder()
+            .version(hyper::Version::HTTP_11)
+            .header(hyper::header::CONNECTION, "Close")
+            .body(()).unwrap();
+        assert!(!should_keep_alive(&req), "Connection: Close (caps) should disable keepalive");
+    }
+
+    #[test]
+    fn test_keepalive_connection_keep_alive_header() {
+        let req = hyper::Request::builder()
+            .version(hyper::Version::HTTP_11)
+            .header(hyper::header::CONNECTION, "keep-alive")
+            .body(()).unwrap();
+        assert!(should_keep_alive(&req), "Connection: keep-alive should enable keepalive");
+    }
+
+    // ── is_sse_path ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_sse_path_exact() {
+        assert!(is_sse_path("/api/v1/sse"));
+        assert!(is_sse_path("/sse"));
+    }
+
+    #[test]
+    fn test_sse_path_with_query() {
+        assert!(is_sse_path("/api/v1/sse?token=abc"));
+        assert!(is_sse_path("/sse?token=abc"));
+    }
+
+    #[test]
+    fn test_sse_path_negative() {
+        assert!(!is_sse_path("/api/v1/status"));
+        assert!(!is_sse_path("/api/v1/sse-other"));
+        assert!(!is_sse_path("/"));
+        assert!(!is_sse_path("/sse/sub"));
+        assert!(!is_sse_path("/api/v1/events"));
+    }
+
+    // ── reason_phrase ───────────────────────────────────────────────
+
+    #[test]
+    fn test_reason_phrases() {
+        assert_eq!(reason_phrase(400), "Bad Request");
+        assert_eq!(reason_phrase(408), "Request Timeout");
+        assert_eq!(reason_phrase(413), "Payload Too Large");
+        assert_eq!(reason_phrase(429), "Too Many Requests");
+        assert_eq!(reason_phrase(502), "Bad Gateway");
+        assert_eq!(reason_phrase(503), "Service Unavailable");
+        assert_eq!(reason_phrase(500), "Error");
+        assert_eq!(reason_phrase(200), "Error");
+    }
+
+    // ── write_error_response ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_write_error_response_format() {
+        let mut buf = Vec::new();
+        write_error_response(&mut buf, 502, "Bad Gateway").await.unwrap();
+        let response = String::from_utf8(buf).unwrap();
+        assert!(response.starts_with("HTTP/1.1 502 Bad Gateway\r\n"));
+        assert!(response.contains("content-type: application/json"));
+        assert!(response.contains("connection: close"));
+        assert!(response.contains(r#"{"error":"Bad Gateway"}"#));
+    }
+
+    #[tokio::test]
+    async fn test_write_error_response_escapes_json() {
+        let mut buf = Vec::new();
+        write_error_response(&mut buf, 400, r#"bad "input" with \ slash"#).await.unwrap();
+        let response = String::from_utf8(buf).unwrap();
+        // Verify JSON escaping: quotes and backslashes escaped
+        assert!(response.contains(r#"bad \"input\" with \\ slash"#));
+    }
+
+    #[tokio::test]
+    async fn test_write_error_response_content_length() {
+        let mut buf = Vec::new();
+        write_error_response(&mut buf, 413, "Payload Too Large").await.unwrap();
+        let response = String::from_utf8(buf).unwrap();
+        let body = r#"{"error":"Payload Too Large"}"#;
+        let expected_cl = format!("content-length: {}", body.len());
+        assert!(response.contains(&expected_cl), "content-length should match body: {}", response);
+    }
+
+    // ── DrainReceiver type ──────────────────────────────────────────
+
+    #[test]
+    fn test_drain_receiver_initial_value() {
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let drain_rx: DrainReceiver = rx;
+        assert_eq!(*drain_rx.borrow(), false, "drain should start as false");
+    }
+
+    #[tokio::test]
+    async fn test_drain_receiver_signal() {
+        let (tx, mut rx) = tokio::sync::watch::channel(false);
+        let _ = tx.send(true);
+        rx.changed().await.unwrap();
+        assert_eq!(*rx.borrow(), true, "drain should be true after signal");
     }
 }

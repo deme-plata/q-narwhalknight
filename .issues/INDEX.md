@@ -24,6 +24,12 @@
 | 020 | Duration Parser Bug — "ms" Matched by "s" | Medium | Done | bug, config |
 | 021 | ACME Certificate Automation | Medium | Planned | tls, security, automation |
 | 022 | Upstream Round-Robin and Failover Tests | Medium | Done | testing, reliability |
+| 023 | HTTP/2 Server Push for Static Assets | Low | Planned | performance, h2 |
+| 024 | Request Body Streaming for Large Uploads | Medium | Planned | performance, proxy |
+| 025 | Response Compression (gzip + Brotli) | High | Planned | performance, proxy |
+| 026 | Upstream Connection Pool Metrics | Medium | Planned | observability, prometheus |
+| 027 | IP Allowlist / Blocklist with CIDR Support | Medium | Planned | security, config |
+| 028 | Graceful Upstream Health Checks | High | Planned | reliability, health |
 
 ## How to pick up an issue
 

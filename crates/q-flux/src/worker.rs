@@ -492,6 +492,121 @@ async fn worker_loop(
     tokio::time::sleep(std::time::Duration::from_secs(60)).await;
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── extract_host_header ─────────────────────────────────────────
+
+    #[test]
+    fn test_extract_host_basic() {
+        let data = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        assert_eq!(extract_host_header(data), Some("example.com".to_string()));
+    }
+
+    #[test]
+    fn test_extract_host_with_port() {
+        let data = b"GET / HTTP/1.1\r\nHost: example.com:8080\r\n\r\n";
+        assert_eq!(extract_host_header(data), Some("example.com:8080".to_string()));
+    }
+
+    #[test]
+    fn test_extract_host_case_insensitive() {
+        let data = b"GET / HTTP/1.1\r\nhost: quillon.xyz\r\n\r\n";
+        assert_eq!(extract_host_header(data), Some("quillon.xyz".to_string()));
+    }
+
+    #[test]
+    fn test_extract_host_missing() {
+        let data = b"GET / HTTP/1.1\r\nAccept: */*\r\n\r\n";
+        assert_eq!(extract_host_header(data), None);
+    }
+
+    #[test]
+    fn test_extract_host_empty_data() {
+        let data = b"";
+        assert_eq!(extract_host_header(data), None);
+    }
+
+    #[test]
+    fn test_extract_host_multiple_headers() {
+        let data = b"GET /path HTTP/1.1\r\nUser-Agent: curl/7.0\r\nHost: api.quillon.xyz\r\nAccept: */*\r\n\r\n";
+        assert_eq!(extract_host_header(data), Some("api.quillon.xyz".to_string()));
+    }
+
+    // ── cleanup_conn ────────────────────────────────────────────────
+
+    #[test]
+    fn test_cleanup_conn_decrements_ip_count() {
+        let ip_tracker: IpConnTracker = Arc::new(DashMap::new());
+        let active_conns: ActiveConnCount = Arc::new(AtomicU64::new(1));
+        let metrics = Metrics::new();
+        let ip: std::net::IpAddr = "192.168.1.1".parse().unwrap();
+
+        ip_tracker.insert(ip, 3);
+        cleanup_conn(&ip_tracker, ip, &active_conns, &metrics);
+        assert_eq!(*ip_tracker.get(&ip).unwrap(), 2);
+        assert_eq!(active_conns.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_cleanup_conn_removes_at_one() {
+        let ip_tracker: IpConnTracker = Arc::new(DashMap::new());
+        let active_conns: ActiveConnCount = Arc::new(AtomicU64::new(1));
+        let metrics = Metrics::new();
+        let ip: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+
+        ip_tracker.insert(ip, 1);
+        cleanup_conn(&ip_tracker, ip, &active_conns, &metrics);
+        assert!(ip_tracker.get(&ip).is_none(), "IP entry should be removed when count reaches 0");
+    }
+
+    #[test]
+    fn test_cleanup_conn_no_underflow() {
+        let ip_tracker: IpConnTracker = Arc::new(DashMap::new());
+        let active_conns: ActiveConnCount = Arc::new(AtomicU64::new(0));
+        let metrics = Metrics::new();
+        let ip: std::net::IpAddr = "10.0.0.2".parse().unwrap();
+
+        // No entry in ip_tracker, active_conns already 0 — should not panic or underflow
+        cleanup_conn(&ip_tracker, ip, &active_conns, &metrics);
+        assert_eq!(active_conns.load(Ordering::Relaxed), 0, "should not underflow past 0");
+    }
+
+    #[test]
+    fn test_cleanup_conn_concurrent_safety() {
+        let ip_tracker: IpConnTracker = Arc::new(DashMap::new());
+        let active_conns: ActiveConnCount = Arc::new(AtomicU64::new(100));
+        let metrics = Metrics::new();
+        let ip: std::net::IpAddr = "10.0.0.3".parse().unwrap();
+
+        ip_tracker.insert(ip, 100);
+
+        // Simulate 100 concurrent cleanups
+        let handles: Vec<_> = (0..100).map(|_| {
+            let ip_tracker = ip_tracker.clone();
+            let active_conns = active_conns.clone();
+            let metrics = metrics.clone();
+            std::thread::spawn(move || {
+                cleanup_conn(&ip_tracker, ip, &active_conns, &metrics);
+            })
+        }).collect();
+
+        for h in handles { h.join().unwrap(); }
+
+        assert!(ip_tracker.get(&ip).is_none(), "IP should be removed after all cleanups");
+        assert_eq!(active_conns.load(Ordering::Relaxed), 0, "active_conns should reach 0");
+    }
+
+    // ── constants ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_max_handlers_per_worker_reasonable() {
+        assert!(MAX_HANDLERS_PER_WORKER >= 64, "should allow at least 64 concurrent handlers");
+        assert!(MAX_HANDLERS_PER_WORKER <= 65536, "should not be unreasonably large");
+    }
+}
+
 /// Decrement IP counter and global active count on connection close.
 ///
 /// Uses the DashMap entry API to atomically decrement-and-remove.
@@ -539,6 +654,12 @@ fn extract_host_header(data: &[u8]) -> Option<String> {
     None
 }
 
+/// Extract Host header value from raw HTTP request bytes.
+/// Exposed for testing via pub(crate).
+pub(crate) fn extract_host_header_pub(data: &[u8]) -> Option<String> {
+    extract_host_header(data)
+}
+
 /// Accept a connection from any of the provided listeners.
 /// Uses `select_all` to race all listeners concurrently, supporting any count.
 async fn accept_any(listeners: &[TcpListener]) -> std::io::Result<(TcpStream, SocketAddr)> {
@@ -572,6 +693,16 @@ fn pin_to_core(core_id: usize) {
     {
         let _ = core_id;
     }
+}
+
+/// Cleanup connection tracking — exposed for testing.
+pub(crate) fn cleanup_conn_pub(
+    ip_tracker: &IpConnTracker,
+    client_ip: std::net::IpAddr,
+    active_conns: &ActiveConnCount,
+    metrics: &Metrics,
+) {
+    cleanup_conn(ip_tracker, client_ip, active_conns, metrics);
 }
 
 /// Periodically log metrics. Stops cleanly when shutdown signal is received.
