@@ -368,6 +368,7 @@ cli-table = "0.5.0"
 # They are already defined in lines 129-172 above
 paste = "1.0.15"
 byteorder = "1.5.0"
+x509-parser = "0.16"
 yoke = "0.7.5"
 pyo3-build-config = "0.25.0"
 ctrlc = "3.4.7"

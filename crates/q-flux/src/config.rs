@@ -18,6 +18,40 @@ pub struct FluxConfig {
     /// peers instead of returning 503. Local backends always have priority.
     #[serde(default)]
     pub cluster: ClusterConfig,
+    /// io_uring and splice(2) zero-copy configuration.
+    #[serde(default)]
+    pub io_uring: IoUringSection,
+}
+
+/// io_uring and splice(2) zero-copy configuration.
+///
+/// When `splice_enabled` is true, WebSocket and SSE passthrough connections
+/// use Linux splice(2) for zero-copy bidirectional data transfer. Data moves
+/// directly between sockets in the kernel via a pipe, never touching userspace.
+///
+/// Falls back to normal tokio::io::copy on non-Linux or when splice fails.
+#[derive(Debug, Clone, Deserialize)]
+pub struct IoUringSection {
+    /// Enable splice(2) zero-copy for WebSocket/SSE passthrough.
+    /// Requires Linux. Falls back gracefully if splice fails at runtime.
+    /// Default: true on Linux, false elsewhere.
+    #[serde(default = "default_splice_enabled")]
+    pub splice_enabled: bool,
+    /// Pipe buffer size for splice channels (bytes).
+    /// Larger pipes allow more data in-flight but consume kernel memory.
+    /// Kernel rounds up to nearest page size. Default: 65536 (64KB).
+    #[serde(default = "default_splice_pipe_size")]
+    pub splice_pipe_size: usize,
+    /// io_uring submission queue depth (power of two, >= 64).
+    /// Only used if full io_uring event loop is enabled. Default: 4096.
+    #[serde(default = "default_uring_queue_depth")]
+    pub queue_depth: u32,
+    /// Number of pre-allocated io_uring buffers. Default: 1024.
+    #[serde(default = "default_uring_buffer_count")]
+    pub buffer_count: u32,
+    /// Size of each io_uring buffer in bytes. Default: 16384 (16KB).
+    #[serde(default = "default_uring_buffer_size")]
+    pub buffer_size: u32,
 }
 
 /// Super-cluster configuration for cross-node failover.
@@ -163,6 +197,27 @@ fn default_max_inflight_per_worker() -> usize { 64 }
 fn default_max_upstream_global() -> usize { 512 }
 fn default_cluster_health_interval() -> std::time::Duration { std::time::Duration::from_secs(10) }
 
+#[cfg(target_os = "linux")]
+fn default_splice_enabled() -> bool { true }
+#[cfg(not(target_os = "linux"))]
+fn default_splice_enabled() -> bool { false }
+fn default_splice_pipe_size() -> usize { 65536 }
+fn default_uring_queue_depth() -> u32 { 4096 }
+fn default_uring_buffer_count() -> u32 { 1024 }
+fn default_uring_buffer_size() -> u32 { 16384 }
+
+impl Default for IoUringSection {
+    fn default() -> Self {
+        Self {
+            splice_enabled: default_splice_enabled(),
+            splice_pipe_size: default_splice_pipe_size(),
+            queue_depth: default_uring_queue_depth(),
+            buffer_count: default_uring_buffer_count(),
+            buffer_size: default_uring_buffer_size(),
+        }
+    }
+}
+
 impl Default for LimitsConfig {
     fn default() -> Self {
         Self {
@@ -294,13 +349,14 @@ where
 
 fn parse_duration(s: &str) -> Result<std::time::Duration, String> {
     let s = s.trim();
-    if let Some(secs) = s.strip_suffix('s') {
-        secs.trim().parse::<u64>()
-            .map(std::time::Duration::from_secs)
-            .map_err(|e| format!("Invalid duration '{}': {}", s, e))
-    } else if let Some(ms) = s.strip_suffix("ms") {
+    // Check "ms" before 's' — "100ms" would otherwise match the 's' suffix first.
+    if let Some(ms) = s.strip_suffix("ms") {
         ms.trim().parse::<u64>()
             .map(std::time::Duration::from_millis)
+            .map_err(|e| format!("Invalid duration '{}': {}", s, e))
+    } else if let Some(secs) = s.strip_suffix('s') {
+        secs.trim().parse::<u64>()
+            .map(std::time::Duration::from_secs)
             .map_err(|e| format!("Invalid duration '{}': {}", s, e))
     } else if let Some(mins) = s.strip_suffix('m') {
         mins.trim().parse::<u64>()
@@ -348,6 +404,7 @@ mod tests {
             logging: LoggingConfig::default(),
             static_files: StaticConfig::default(),
             cluster: ClusterConfig::default(),
+            io_uring: IoUringSection::default(),
         }
     }
 
