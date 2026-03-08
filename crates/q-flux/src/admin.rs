@@ -272,6 +272,12 @@ fn handle_metrics(state: &AdminState) -> Response<Full<Bytes>> {
         "Total upstream retries that succeeded",
         snap.upstream_retry_successes,
     );
+    prom_counter(
+        &mut buf,
+        "q_flux_upstream_queue_timeouts_total",
+        "Total requests that timed out waiting for upstream semaphore permit",
+        snap.upstream_queue_timeouts,
+    );
 
     // -- rate limiting --------------------------------------------------------
     prom_counter(
@@ -505,6 +511,7 @@ fn handle_status(state: &AdminState) -> Response<Full<Bytes>> {
             r#""upstream_timeouts":{},"#,
             r#""upstream_retries":{},"#,
             r#""upstream_retry_successes":{},"#,
+            r#""upstream_queue_timeouts":{},"#,
             r#""rate_limited":{},"#,
             r#""active_websockets":{},"#,
             r#""websocket_upgrades":{},"#,
@@ -534,6 +541,7 @@ fn handle_status(state: &AdminState) -> Response<Full<Bytes>> {
         snap.upstream_timeouts,
         snap.upstream_retries,
         snap.upstream_retry_successes,
+        snap.upstream_queue_timeouts,
         snap.rate_limited,
         snap.active_websockets,
         snap.websocket_upgrades,

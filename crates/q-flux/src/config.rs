@@ -160,13 +160,20 @@ pub struct UpstreamConfig {
     /// Only used as fallback if `max_upstream_global` is 0.
     #[serde(default = "default_max_inflight_per_worker")]
     pub max_inflight_per_worker: usize,
-    /// Global max concurrent upstream requests across ALL workers (default: 512).
+    /// Global max concurrent upstream requests across ALL workers (default: 2048).
     /// This is the preferred setting: a single shared semaphore prevents the death
     /// spiral where 48 workers × N permits each overwhelm a single backend.
     /// Set to 0 to fall back to per-worker limits (max_inflight_per_worker).
-    /// Recommended: 256-512 for single-backend, 512-1024 for multi-backend.
+    /// Recommended: 512-1024 for single-backend, 1024-2048 for multi-backend.
     #[serde(default = "default_max_upstream_global")]
     pub max_upstream_global: usize,
+    /// How long to wait for a semaphore permit before returning 502 (default: 500ms).
+    /// With the old `try_acquire()` approach, permits were instant-reject on exhaustion,
+    /// causing thousands of 502s/sec during brief backend stalls. Queued acquire with a
+    /// timeout lets requests wait for permits freed by completing responses, dramatically
+    /// reducing spurious 502s. Set to "0ms" to restore old instant-reject behavior.
+    #[serde(default = "default_acquire_timeout", deserialize_with = "deserialize_duration")]
+    pub acquire_timeout: std::time::Duration,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -218,7 +225,8 @@ fn default_rate_limit_per_ip() -> usize { 100 }
 fn default_rate_limit_burst() -> usize { 200 }
 fn default_rate_limit_global_rps() -> usize { 100_000 }
 fn default_max_inflight_per_worker() -> usize { 64 }
-fn default_max_upstream_global() -> usize { 512 }
+fn default_max_upstream_global() -> usize { 2048 }
+fn default_acquire_timeout() -> std::time::Duration { std::time::Duration::from_millis(500) }
 fn default_cluster_health_interval() -> std::time::Duration { std::time::Duration::from_secs(10) }
 fn default_cluster_health_timeout() -> std::time::Duration { std::time::Duration::from_secs(5) }
 
@@ -425,6 +433,7 @@ mod tests {
                 health_check_timeout: default_health_check_timeout(),
                 max_inflight_per_worker: default_max_inflight_per_worker(),
                 max_upstream_global: default_max_upstream_global(),
+                acquire_timeout: default_acquire_timeout(),
             },
             limits: LimitsConfig::default(),
             logging: LoggingConfig::default(),

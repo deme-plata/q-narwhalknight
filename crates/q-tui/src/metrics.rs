@@ -203,6 +203,14 @@ pub struct Metrics {
     pub compute_local_hashrate_hs: f64,     // This node's hashrate contribution
     pub compute_simd_tier: String,          // AVX-512 / AVX2 / SSE2 / NEON / Scalar
 
+    // v9.3.2: K-Parameter Network Health Gauge
+    pub kparam_k_value: f64,            // Current K value (0 = healthy, >10 = critical)
+    pub kparam_phase: String,           // "stable" / "approaching" / "critical"
+    pub kparam_max_solutions: u64,      // Tuned max_solutions_per_block
+    pub kparam_vdf_multiplier: f64,     // Tuned VDF difficulty multiplier
+    pub kparam_challenge_expiry: u64,   // Tuned challenge expiry (seconds)
+    pub kparam_rounds: u64,             // Computation rounds since startup
+
     // Node operator wallet & fee metrics (v8.6.1)
     pub admin_wallet_address: String,
     pub admin_wallet_balance: f64,
@@ -328,6 +336,13 @@ impl Default for Metrics {
             compute_live_security_bits: 0.0,
             compute_local_hashrate_hs: 0.0,
             compute_simd_tier: String::new(),
+            // K-Parameter Network Health Gauge defaults
+            kparam_k_value: 0.0,
+            kparam_phase: "stable".to_string(),
+            kparam_max_solutions: 0,
+            kparam_vdf_multiplier: 1.0,
+            kparam_challenge_expiry: 0,
+            kparam_rounds: 0,
             // Operator wallet defaults
             admin_wallet_address: String::new(),
             admin_wallet_balance: 0.0,

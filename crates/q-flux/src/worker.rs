@@ -229,6 +229,20 @@ async fn worker_loop(
         global_upstream_semaphore,
     ));
 
+    // Spawn adaptive concurrency adjuster (AIMD) — runs every 1s, adjusting
+    // the effective permit limit based on upstream response latency.
+    // Only worker 0 runs this to avoid redundant adjustments.
+    if worker_id == 0 {
+        let adaptive = upstream.adaptive.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+            loop {
+                interval.tick().await;
+                adaptive.adjust();
+            }
+        });
+    }
+
     // PeerTracker: per-peer connection limits and circuit breakers for libp2p peers.
     // Shared across all workers and the admin server. Pre-seeded with known infrastructure.
     // (Created in main.rs and passed in.)

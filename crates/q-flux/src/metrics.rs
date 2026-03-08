@@ -226,6 +226,8 @@ struct MetricsInner {
     pub upstream_active: AtomicU64,
     pub upstream_retries: AtomicU64,
     pub upstream_retry_successes: AtomicU64,
+    /// Requests that timed out waiting for a semaphore permit (queued acquire).
+    pub upstream_queue_timeouts: AtomicU64,
     // Rate limiting
     pub rate_limited: AtomicU64,
     // WebSocket
@@ -272,6 +274,7 @@ impl Metrics {
                 upstream_active: AtomicU64::new(0),
                 upstream_retries: AtomicU64::new(0),
                 upstream_retry_successes: AtomicU64::new(0),
+                upstream_queue_timeouts: AtomicU64::new(0),
                 rate_limited: AtomicU64::new(0),
                 websocket_upgrades: AtomicU64::new(0),
                 active_websockets: AtomicU64::new(0),
@@ -409,6 +412,10 @@ impl Metrics {
         self.inner.upstream_retry_successes.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn upstream_queue_timeout(&self) {
+        self.inner.upstream_queue_timeouts.fetch_add(1, Ordering::Relaxed);
+    }
+
     // Rate limiting
     pub fn rate_limited(&self) {
         self.inner.rate_limited.fetch_add(1, Ordering::Relaxed);
@@ -487,6 +494,7 @@ impl Metrics {
             upstream_active: self.inner.upstream_active.load(Ordering::Relaxed),
             upstream_retries: self.inner.upstream_retries.load(Ordering::Relaxed),
             upstream_retry_successes: self.inner.upstream_retry_successes.load(Ordering::Relaxed),
+            upstream_queue_timeouts: self.inner.upstream_queue_timeouts.load(Ordering::Relaxed),
             rate_limited: self.inner.rate_limited.load(Ordering::Relaxed),
             websocket_upgrades: self.inner.websocket_upgrades.load(Ordering::Relaxed),
             active_websockets: self.inner.active_websockets.load(Ordering::Relaxed),
@@ -518,6 +526,7 @@ pub struct MetricsSnapshot {
     pub upstream_active: u64,
     pub upstream_retries: u64,
     pub upstream_retry_successes: u64,
+    pub upstream_queue_timeouts: u64,
     pub rate_limited: u64,
     pub websocket_upgrades: u64,
     pub active_websockets: u64,
@@ -538,7 +547,7 @@ impl std::fmt::Display for MetricsSnapshot {
         write!(
             f,
             "uptime={}s conns={}/{} tls_ok={} tls_fail={} reqs={} 2xx={} 4xx={} 5xx={} \
-             upstream_fail={} upstream_timeout={} upstream_active={} retries={}/{} rate_limited={} \
+             upstream_fail={} upstream_timeout={} upstream_active={} upstream_queue_timeout={} retries={}/{} rate_limited={} \
              ws={}/{} rx={}B tx={}B",
             self.uptime_secs,
             self.active_connections,
@@ -552,6 +561,7 @@ impl std::fmt::Display for MetricsSnapshot {
             self.upstream_connect_failures,
             self.upstream_timeouts,
             self.upstream_active,
+            self.upstream_queue_timeouts,
             self.upstream_retries,
             self.upstream_retry_successes,
             self.rate_limited,

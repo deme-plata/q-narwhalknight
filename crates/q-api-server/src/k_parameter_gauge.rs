@@ -87,6 +87,15 @@ pub struct KParameterState {
     pub rounds_computed: AtomicU64,
     /// zk-STARK commitment and phase proof (updated each round, read on API calls)
     zk_proof: std::sync::Mutex<(String, ZkPhaseProof)>,
+
+    // v9.3.2: Component breakdown (f64 stored as u64 bits for lock-free reads)
+    pub delta_h_bits: AtomicU64,
+    pub delta_s_bits: AtomicU64,
+    pub rejection_ratio_bits: AtomicU64,
+    pub traffic_asymmetry_bits: AtomicU64,
+    pub peer_churn_bits: AtomicU64,
+    pub sync_divergence_bits: AtomicU64,
+    pub block_rate_deviation_bits: AtomicU64,
 }
 
 impl Default for KParameterState {
@@ -106,6 +115,13 @@ impl Default for KParameterState {
                 response: String::new(),
                 verified: true,
             })),
+            delta_h_bits: AtomicU64::new(0_f64.to_bits()),
+            delta_s_bits: AtomicU64::new(0_f64.to_bits()),
+            rejection_ratio_bits: AtomicU64::new(0_f64.to_bits()),
+            traffic_asymmetry_bits: AtomicU64::new(0_f64.to_bits()),
+            peer_churn_bits: AtomicU64::new(0_f64.to_bits()),
+            sync_divergence_bits: AtomicU64::new(0_f64.to_bits()),
+            block_rate_deviation_bits: AtomicU64::new(0_f64.to_bits()),
         }
     }
 }
@@ -159,6 +175,13 @@ impl KParameterState {
             formula: "K = 2π √(ΔH · Δs · ℏ) / τ".to_string(),
             zk_commitment,
             zk_phase_proof,
+            delta_h: f64::from_bits(self.delta_h_bits.load(Ordering::Relaxed)),
+            delta_s: f64::from_bits(self.delta_s_bits.load(Ordering::Relaxed)),
+            rejection_ratio: f64::from_bits(self.rejection_ratio_bits.load(Ordering::Relaxed)),
+            traffic_asymmetry: f64::from_bits(self.traffic_asymmetry_bits.load(Ordering::Relaxed)),
+            peer_churn: f64::from_bits(self.peer_churn_bits.load(Ordering::Relaxed)),
+            sync_divergence: f64::from_bits(self.sync_divergence_bits.load(Ordering::Relaxed)),
+            block_rate_deviation: f64::from_bits(self.block_rate_deviation_bits.load(Ordering::Relaxed)),
         }
     }
 }
@@ -179,6 +202,15 @@ pub struct KParameterSnapshot {
     pub zk_commitment: String,
     /// Public proof: phase boundary membership (K∈[0,5) or K∈[5,10) or K∈[10,∞))
     pub zk_phase_proof: ZkPhaseProof,
+
+    // v9.3.2: Component breakdown for UI display
+    pub delta_h: f64,
+    pub delta_s: f64,
+    pub rejection_ratio: f64,
+    pub traffic_asymmetry: f64,
+    pub peer_churn: f64,
+    pub sync_divergence: f64,
+    pub block_rate_deviation: f64,
 }
 
 /// zk-STARK-style phase membership proof
@@ -437,6 +469,14 @@ impl KParameterEngine {
         // Store results atomically
         state.k_value_bits.store(k.to_bits(), Ordering::Relaxed);
         state.phase.store(new_phase as u8, Ordering::Relaxed);
+        // v9.3.2: Store component breakdown for API
+        state.delta_h_bits.store(delta_h.to_bits(), Ordering::Relaxed);
+        state.delta_s_bits.store(delta_s.to_bits(), Ordering::Relaxed);
+        state.rejection_ratio_bits.store(rejection_ratio.to_bits(), Ordering::Relaxed);
+        state.traffic_asymmetry_bits.store(traffic_asymmetry.to_bits(), Ordering::Relaxed);
+        state.peer_churn_bits.store(peer_churn.to_bits(), Ordering::Relaxed);
+        state.sync_divergence_bits.store(sync_divergence.to_bits(), Ordering::Relaxed);
+        state.block_rate_deviation_bits.store(block_rate_deviation.to_bits(), Ordering::Relaxed);
         state.tuned_max_solutions.store(max_sol, Ordering::Relaxed);
         state
             .tuned_vdf_multiplier_bps

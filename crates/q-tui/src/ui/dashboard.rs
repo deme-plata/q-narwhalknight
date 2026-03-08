@@ -15,6 +15,7 @@ pub fn render(f: &mut Frame, app: &App) {
     let has_compute = metrics.compute_network_hashrate_hs > 0.0
         || metrics.compute_connected_peers > 0
         || !metrics.compute_simd_tier.is_empty();
+    let has_kparam = metrics.kparam_rounds > 0 || metrics.kparam_k_value > 0.0;
     let constraints = if metrics.is_syncing {
         let mut v = vec![
             Constraint::Length(3),   // Header
@@ -22,6 +23,7 @@ pub fn render(f: &mut Frame, app: &App) {
             Constraint::Length(9),   // Metrics cards
         ];
         if has_compute { v.push(Constraint::Length(5)); } // Compute Power cards
+        if has_kparam { v.push(Constraint::Length(5)); }  // K-Parameter Health Gauge
         v.push(Constraint::Length(9));  // APOLLO Control Systems
         v.push(Constraint::Min(4));    // Logs
         v.push(Constraint::Length(3)); // Footer
@@ -32,6 +34,7 @@ pub fn render(f: &mut Frame, app: &App) {
             Constraint::Length(9),   // Metrics cards
         ];
         if has_compute { v.push(Constraint::Length(5)); } // Compute Power cards
+        if has_kparam { v.push(Constraint::Length(5)); }  // K-Parameter Health Gauge
         v.push(Constraint::Length(7)); // TPS Chart or AI Metrics
         v.push(Constraint::Min(8));   // Logs
         v.push(Constraint::Length(3)); // Footer
@@ -48,6 +51,7 @@ pub fn render(f: &mut Frame, app: &App) {
     let has_compute_data = metrics.compute_network_hashrate_hs > 0.0
         || metrics.compute_connected_peers > 0
         || !metrics.compute_simd_tier.is_empty();
+    let has_kparam_data = metrics.kparam_rounds > 0 || metrics.kparam_k_value > 0.0;
     let mut idx = 0;
 
     render_header(f, chunks[idx], app);
@@ -67,6 +71,12 @@ pub fn render(f: &mut Frame, app: &App) {
     // v9.1.0: Compute Power Layer cards (shown when data available)
     if has_compute_data {
         render_compute_power_cards(f, chunks[idx], app);
+        idx += 1;
+    }
+
+    // v9.3.2: K-Parameter Network Health Gauge
+    if has_kparam_data {
+        render_kparam_health_gauge(f, chunks[idx], app);
         idx += 1;
     }
 
@@ -495,6 +505,170 @@ fn render_compute_power_cards(f: &mut Frame, area: Rect, app: &App) {
         .block(Block::default().borders(Borders::ALL)
             .title(Span::styled("\u{1F310} Tunnel", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))));
     f.render_widget(tunnel_widget, cols[3]);
+}
+
+/// v9.3.2: K-Parameter Network Health Gauge — 4-card row
+fn render_kparam_health_gauge(f: &mut Frame, area: Rect, app: &App) {
+    let metrics = app.metrics.read().unwrap();
+
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(28),
+            Constraint::Percentage(22),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+        ])
+        .split(area);
+
+    // ── Card 1: K-Value with visual gauge bar ──
+    let k = metrics.kparam_k_value;
+    let k_color = if k < 3.0 { Color::Green }
+        else if k < 5.0 { Color::Yellow }
+        else if k < 10.0 { Color::Magenta }
+        else { Color::Red };
+    // Bar: 0..20 mapped to 0..12 chars
+    let bar_filled = ((k.min(20.0) / 20.0 * 12.0).round() as usize).min(12);
+    let bar_empty = 12_usize.saturating_sub(bar_filled);
+    let k_items = vec![
+        ListItem::new(Line::from(vec![
+            Span::styled(" K = ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{:.2}", k),
+                Style::default().fg(k_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                if k < 3.0 { " HEALTHY" }
+                else if k < 5.0 { " ELEVATED" }
+                else if k < 10.0 { " WARNING" }
+                else { " CRITICAL" },
+                Style::default().fg(k_color),
+            ),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(
+                "\u{2588}".repeat(bar_filled),
+                Style::default().fg(k_color),
+            ),
+            Span::styled(
+                "\u{2591}".repeat(bar_empty),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                format!(" {:.0}/20", k),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ])),
+    ];
+    let k_widget = List::new(k_items)
+        .block(Block::default().borders(Borders::ALL)
+            .title(Span::styled(
+                "\u{03BA} K-Parameter",
+                Style::default().fg(k_color).add_modifier(Modifier::BOLD),
+            ))
+            .style(Style::default().fg(k_color)));
+    f.render_widget(k_widget, cols[0]);
+
+    // ── Card 2: Phase state ──
+    let phase = metrics.kparam_phase.as_str();
+    let phase_color = match phase {
+        "stable" => Color::Green,
+        "approaching" => Color::Yellow,
+        "critical" => Color::Red,
+        _ => Color::DarkGray,
+    };
+    let phase_icon = match phase {
+        "stable" => "\u{25CF}",      // ● solid circle
+        "approaching" => "\u{25CB}", // ○ hollow circle
+        "critical" => "\u{25C6}",    // ◆ diamond
+        _ => "\u{25CB}",
+    };
+    let phase_items = vec![
+        ListItem::new(Line::from(vec![
+            Span::styled(
+                format!(" {} {}", phase_icon, phase.to_uppercase()),
+                Style::default().fg(phase_color).add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled(
+                format!(" Rounds: {}", metrics.kparam_rounds),
+                Style::default().fg(Color::Cyan),
+            ),
+        ])),
+    ];
+    let phase_widget = List::new(phase_items)
+        .block(Block::default().borders(Borders::ALL)
+            .title(Span::styled(
+                "Phase",
+                Style::default().fg(phase_color).add_modifier(Modifier::BOLD),
+            ))
+            .style(Style::default().fg(phase_color)));
+    f.render_widget(phase_widget, cols[1]);
+
+    // ── Card 3: VDF Tuning ──
+    let vdf_m = metrics.kparam_vdf_multiplier;
+    let vdf_color = if vdf_m <= 1.0 { Color::Green }
+        else if vdf_m < 2.0 { Color::Yellow }
+        else { Color::Red };
+    let vdf_items = vec![
+        ListItem::new(Line::from(vec![
+            Span::styled(" VDF:  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{:.2}x", vdf_m),
+                Style::default().fg(vdf_color).add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled(" Sols: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{}", metrics.kparam_max_solutions),
+                Style::default().fg(Color::Cyan),
+            ),
+        ])),
+    ];
+    let vdf_widget = List::new(vdf_items)
+        .block(Block::default().borders(Borders::ALL)
+            .title(Span::styled(
+                "VDF Tuning",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ))
+            .style(Style::default().fg(Color::Cyan)));
+    f.render_widget(vdf_widget, cols[2]);
+
+    // ── Card 4: Challenge Expiry ──
+    let expiry = metrics.kparam_challenge_expiry;
+    let expiry_color = if expiry <= 30 { Color::Green }
+        else if expiry <= 120 { Color::Yellow }
+        else { Color::Red };
+    let expiry_items = vec![
+        ListItem::new(Line::from(vec![
+            Span::styled(" Expiry: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{}s", expiry),
+                Style::default().fg(expiry_color).add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled(" Status: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                if k < 3.0 { "Nominal" }
+                else if k < 5.0 { "Tuning" }
+                else if k < 10.0 { "Adapting" }
+                else { "MAX TUNE" },
+                Style::default().fg(k_color),
+            ),
+        ])),
+    ];
+    let expiry_widget = List::new(expiry_items)
+        .block(Block::default().borders(Borders::ALL)
+            .title(Span::styled(
+                "Challenge",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ))
+            .style(Style::default().fg(Color::Yellow)));
+    f.render_widget(expiry_widget, cols[3]);
 }
 
 fn render_tps_chart(f: &mut Frame, area: Rect, app: &App) {

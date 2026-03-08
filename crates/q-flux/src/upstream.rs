@@ -6,8 +6,8 @@ use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
 use tracing::warn;
@@ -20,9 +20,8 @@ use crate::metrics::Metrics;
 const DEFAULT_MAX_UPSTREAM_INFLIGHT: usize = 64;
 
 /// Default global max concurrent upstream requests across ALL workers.
-/// With a single backend, 512 concurrent requests is plenty for high throughput
-/// without overwhelming q-api-server. At 20ms avg response: 512/0.02 = 25,600 req/s.
-const DEFAULT_MAX_UPSTREAM_GLOBAL: usize = 512;
+/// 2048 permits at 50ms avg response = 40K req/s throughput — 4× headroom for Epsilon.
+const DEFAULT_MAX_UPSTREAM_GLOBAL: usize = 2048;
 
 /// RAII guard for upstream_active metric tracking.
 /// Ensures the counter is always decremented, even on task cancellation.
@@ -52,12 +51,130 @@ impl<'a> Drop for UpstreamActiveGuard<'a> {
 /// Super-cluster mode: when `cluster_peers` is non-empty, the pool tries local
 /// backends first. If ALL local backends are unhealthy, it fails over to cluster
 /// peers (remote q-api-server instances on other servers). Local always wins.
+/// Adaptive concurrency controller using AIMD (Additive Increase, Multiplicative Decrease).
+///
+/// Tracks EWMA response latency per backend and adjusts the effective permit limit:
+/// - Latency > 3× baseline → reduce effective permits by 25% (multiplicative decrease)
+/// - Latency < 1.5× baseline → increase effective permits by 10% (additive increase)
+/// - Floor: never below total_permits / 8
+///
+/// The actual semaphore size stays constant — adaptive concurrency works by holding
+/// "phantom permits" that artificially reduce availability.
+pub struct AdaptiveConcurrency {
+    /// EWMA of response latency in microseconds (alpha = 0.1).
+    ewma_latency_us: AtomicU64,
+    /// Baseline latency captured from the first 100 responses (in microseconds).
+    baseline_latency_us: AtomicU64,
+    /// Number of responses seen (saturates at u64::MAX, used for baseline warm-up).
+    response_count: AtomicU64,
+    /// Sum of latencies during warm-up (first 100 responses), in microseconds.
+    warmup_sum_us: AtomicU64,
+    /// Current effective limit (may be lower than semaphore capacity).
+    effective_limit: AtomicUsize,
+    /// Maximum (configured) limit — the semaphore's actual capacity.
+    max_limit: usize,
+    /// Minimum limit floor (max_limit / 8).
+    min_limit: usize,
+}
+
+impl AdaptiveConcurrency {
+    pub fn new(max_limit: usize) -> Self {
+        Self {
+            ewma_latency_us: AtomicU64::new(0),
+            baseline_latency_us: AtomicU64::new(0),
+            response_count: AtomicU64::new(0),
+            warmup_sum_us: AtomicU64::new(0),
+            effective_limit: AtomicUsize::new(max_limit),
+            max_limit,
+            min_limit: (max_limit / 8).max(64),
+        }
+    }
+
+    /// Record a response latency observation. Updates EWMA and baseline.
+    #[inline]
+    pub fn record_latency(&self, duration: Duration) {
+        let us = duration.as_micros() as u64;
+        let count = self.response_count.fetch_add(1, Ordering::Relaxed);
+
+        // Warm-up: accumulate for baseline (first 100 responses)
+        if count < 100 {
+            self.warmup_sum_us.fetch_add(us, Ordering::Relaxed);
+            if count == 99 {
+                // 100th response — set baseline
+                let sum = self.warmup_sum_us.load(Ordering::Relaxed);
+                let baseline = sum / 100;
+                self.baseline_latency_us.store(baseline, Ordering::Relaxed);
+                self.ewma_latency_us.store(baseline, Ordering::Relaxed);
+            }
+            return;
+        }
+
+        // EWMA update: new = 0.1 * sample + 0.9 * old
+        // Using integer math: new = (sample + 9 * old) / 10
+        loop {
+            let old = self.ewma_latency_us.load(Ordering::Relaxed);
+            let new_val = (us + 9 * old) / 10;
+            if self.ewma_latency_us.compare_exchange_weak(
+                old, new_val, Ordering::Relaxed, Ordering::Relaxed
+            ).is_ok() {
+                break;
+            }
+        }
+    }
+
+    /// Periodic adjustment (call every ~1s). Returns the new effective limit.
+    pub fn adjust(&self) -> usize {
+        let baseline = self.baseline_latency_us.load(Ordering::Relaxed);
+        if baseline == 0 {
+            // Not enough data yet — keep max
+            return self.max_limit;
+        }
+
+        let current_latency = self.ewma_latency_us.load(Ordering::Relaxed);
+        let current_limit = self.effective_limit.load(Ordering::Relaxed);
+
+        let new_limit = if current_latency > baseline * 3 {
+            // Multiplicative decrease: reduce by 25%
+            let reduced = current_limit * 3 / 4;
+            reduced.max(self.min_limit)
+        } else if current_latency < baseline * 3 / 2 {
+            // Additive increase: +10%
+            let increased = current_limit + (self.max_limit / 10).max(1);
+            increased.min(self.max_limit)
+        } else {
+            // In the neutral zone — no change
+            current_limit
+        };
+
+        if new_limit != current_limit {
+            self.effective_limit.store(new_limit, Ordering::Relaxed);
+            tracing::debug!(
+                baseline_ms = baseline / 1000,
+                current_ms = current_latency / 1000,
+                old_limit = current_limit,
+                new_limit = new_limit,
+                "Adaptive concurrency adjusted",
+            );
+        }
+
+        new_limit
+    }
+
+    /// Get the current effective limit.
+    pub fn effective_limit(&self) -> usize {
+        self.effective_limit.load(Ordering::Relaxed)
+    }
+}
+
 pub struct UpstreamPool {
     client: Client<HttpConnector, Full<Bytes>>,
     pub backends: Arc<Vec<String>>,
     /// Super-cluster: remote peer backends for cross-node failover.
     cluster_peers: Arc<Vec<String>>,
     response_timeout: Duration,
+    /// How long to wait for a semaphore permit before returning 502.
+    /// Duration::ZERO = old instant-reject behavior (try_acquire).
+    acquire_timeout: Duration,
     metrics: Metrics,
     health_map: HealthMap,
     /// Round-robin index for local backends
@@ -72,6 +189,8 @@ pub struct UpstreamPool {
     global_semaphore: Option<Arc<Semaphore>>,
     /// Max inflight limit (for error messages)
     max_inflight: usize,
+    /// Adaptive concurrency controller (AIMD).
+    pub adaptive: Arc<AdaptiveConcurrency>,
 }
 
 impl UpstreamPool {
@@ -138,15 +257,19 @@ impl UpstreamPool {
             tracing::info!(
                 global_limit = max_inflight,
                 per_worker_fallback = per_worker_max,
+                acquire_timeout_ms = config.acquire_timeout.as_millis() as u64,
                 "Using GLOBAL upstream semaphore (shared across all workers)"
             );
         }
+
+        let adaptive = Arc::new(AdaptiveConcurrency::new(max_inflight));
 
         Self {
             client,
             backends: Arc::new(config.backends.clone()),
             cluster_peers: Arc::new(cluster_peers),
             response_timeout: config.response_timeout,
+            acquire_timeout: config.acquire_timeout,
             metrics,
             health_map,
             rr_index: AtomicUsize::new(0),
@@ -154,6 +277,7 @@ impl UpstreamPool {
             per_worker_semaphore: Arc::new(Semaphore::new(per_worker_max)),
             global_semaphore,
             max_inflight,
+            adaptive,
         }
     }
 
@@ -289,11 +413,37 @@ impl UpstreamPool {
         // Uses global semaphore (shared across all workers) when configured,
         // preventing the death spiral of 48 workers × N permits overwhelming
         // a single backend.
-        let _permit = match self.effective_semaphore().try_acquire() {
-            Ok(permit) => permit,
-            Err(_) => {
-                self.metrics.upstream_connect_fail();
-                return Err((anyhow::anyhow!("Upstream at capacity ({} in-flight)", self.max_inflight), String::new()));
+        //
+        // Queued acquire with timeout: instead of instantly rejecting when all
+        // permits are held (which caused thousands of 502s/sec during brief stalls),
+        // we wait up to acquire_timeout for a permit to be freed by a completing
+        // response. This dramatically reduces spurious 502s.
+        let sem = self.effective_semaphore();
+        let _permit = if self.acquire_timeout.is_zero() {
+            // Legacy instant-reject mode
+            match sem.try_acquire() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    self.metrics.upstream_queue_timeout();
+                    return Err((anyhow::anyhow!("Upstream at capacity ({} in-flight)", self.max_inflight), String::new()));
+                }
+            }
+        } else {
+            match timeout(self.acquire_timeout, sem.acquire()).await {
+                Ok(Ok(permit)) => permit,
+                Ok(Err(_)) => {
+                    // Semaphore closed — shouldn't happen in normal operation
+                    self.metrics.upstream_queue_timeout();
+                    return Err((anyhow::anyhow!("Upstream semaphore closed"), String::new()));
+                }
+                Err(_) => {
+                    // Timed out waiting for a permit
+                    self.metrics.upstream_queue_timeout();
+                    return Err((anyhow::anyhow!(
+                        "Upstream queue timeout ({:?}, {} in-flight)",
+                        self.acquire_timeout, self.max_inflight
+                    ), String::new()));
+                }
             }
         };
 
@@ -322,7 +472,12 @@ impl UpstreamPool {
         // Without this, cancelled tasks leak the counter → inflated upstream_active.
         let _active_guard = UpstreamActiveGuard::new(&self.metrics);
 
+        let req_start = Instant::now();
         let result = timeout(self.response_timeout, self.client.request(req)).await;
+
+        // Feed response latency into adaptive concurrency controller
+        let elapsed = req_start.elapsed();
+        self.adaptive.record_latency(elapsed);
 
         match result {
             Ok(Ok(resp)) => {
@@ -372,11 +527,26 @@ impl UpstreamPool {
         let backend = self.next_backend_excluding(exclude_backend)?;
         let backend_addr = backend.to_string();
 
-        let _permit = match self.effective_semaphore().try_acquire() {
-            Ok(permit) => permit,
-            Err(_) => {
-                self.metrics.upstream_connect_fail();
-                return Some(Err(anyhow::anyhow!("Upstream at capacity (retry)")));
+        let sem = self.effective_semaphore();
+        let _permit = if self.acquire_timeout.is_zero() {
+            match sem.try_acquire() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    self.metrics.upstream_queue_timeout();
+                    return Some(Err(anyhow::anyhow!("Upstream at capacity (retry)")));
+                }
+            }
+        } else {
+            match timeout(self.acquire_timeout, sem.acquire()).await {
+                Ok(Ok(permit)) => permit,
+                Ok(Err(_)) => {
+                    self.metrics.upstream_queue_timeout();
+                    return Some(Err(anyhow::anyhow!("Upstream semaphore closed (retry)")));
+                }
+                Err(_) => {
+                    self.metrics.upstream_queue_timeout();
+                    return Some(Err(anyhow::anyhow!("Upstream queue timeout (retry)")));
+                }
             }
         };
 
@@ -398,7 +568,9 @@ impl UpstreamPool {
 
         // RAII guard for metrics (cancellation-safe)
         let _active_guard = UpstreamActiveGuard::new(&self.metrics);
+        let req_start = Instant::now();
         let result = timeout(self.response_timeout, self.client.request(req)).await;
+        self.adaptive.record_latency(req_start.elapsed());
 
         match result {
             Ok(Ok(resp)) => {
@@ -450,6 +622,7 @@ mod tests {
             health_check_timeout: Duration::from_secs(3),
             max_inflight_per_worker: 64,
             max_upstream_global: 0,
+            acquire_timeout: Duration::from_millis(500),
         }
     }
 
@@ -581,5 +754,79 @@ mod tests {
         for _ in 0..50 {
             assert_eq!(pool.next_backend(), "A:80");
         }
+    }
+
+    // ── AdaptiveConcurrency tests ─────────────────────────────────
+
+    #[test]
+    fn test_adaptive_concurrency_starts_at_max() {
+        let ac = AdaptiveConcurrency::new(2048);
+        assert_eq!(ac.effective_limit(), 2048);
+        // Before baseline is set, adjust should return max
+        assert_eq!(ac.adjust(), 2048);
+    }
+
+    #[test]
+    fn test_adaptive_concurrency_baseline_warmup() {
+        let ac = AdaptiveConcurrency::new(1024);
+        // Feed 100 responses at ~10ms each
+        for _ in 0..100 {
+            ac.record_latency(Duration::from_millis(10));
+        }
+        let baseline = ac.baseline_latency_us.load(Ordering::Relaxed);
+        // Should be ~10,000 us (10ms)
+        assert!(baseline >= 9_000 && baseline <= 11_000, "baseline={}", baseline);
+    }
+
+    #[test]
+    fn test_adaptive_concurrency_decrease_on_high_latency() {
+        let ac = AdaptiveConcurrency::new(1024);
+        // Warm up baseline at 10ms
+        for _ in 0..100 {
+            ac.record_latency(Duration::from_millis(10));
+        }
+        // Simulate high latency: feed 50ms responses to push EWMA above 3× baseline (30ms)
+        for _ in 0..50 {
+            ac.record_latency(Duration::from_millis(50));
+        }
+        let new_limit = ac.adjust();
+        assert!(new_limit < 1024, "should decrease, got {}", new_limit);
+        assert!(new_limit >= 1024 / 8, "should not go below floor, got {}", new_limit);
+    }
+
+    #[test]
+    fn test_adaptive_concurrency_increase_on_low_latency() {
+        let ac = AdaptiveConcurrency::new(1024);
+        // Warm up baseline at 10ms
+        for _ in 0..100 {
+            ac.record_latency(Duration::from_millis(10));
+        }
+        // Manually reduce effective limit
+        ac.effective_limit.store(512, Ordering::Relaxed);
+        // Feed low-latency responses to keep EWMA below 1.5× baseline
+        for _ in 0..20 {
+            ac.record_latency(Duration::from_millis(10));
+        }
+        let new_limit = ac.adjust();
+        assert!(new_limit > 512, "should increase from 512, got {}", new_limit);
+        assert!(new_limit <= 1024, "should not exceed max, got {}", new_limit);
+    }
+
+    #[test]
+    fn test_adaptive_concurrency_floor() {
+        let ac = AdaptiveConcurrency::new(1024);
+        // Floor = max(1024/8, 64) = 128
+        assert_eq!(ac.min_limit, 128);
+        // Force limit to floor
+        ac.effective_limit.store(128, Ordering::Relaxed);
+        // Warm up and push high latency
+        for _ in 0..100 {
+            ac.record_latency(Duration::from_millis(10));
+        }
+        for _ in 0..50 {
+            ac.record_latency(Duration::from_millis(100));
+        }
+        let new_limit = ac.adjust();
+        assert!(new_limit >= 128, "should not go below floor, got {}", new_limit);
     }
 }

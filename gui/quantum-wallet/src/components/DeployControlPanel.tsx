@@ -385,6 +385,459 @@ function KGauge({ value, label, size = 'sm' }: { value: number; label: string; s
   );
 }
 
+/**
+ * Educational info panel for the K-parameter orbital visualization.
+ * Two-tier explanation: formal (university) and intuitive (high school).
+ * Shown on hover / click over the orbital canvas.
+ */
+function KOrbitalInfoPanel({ phase, kValue, show, onClose }: {
+  phase: string; kValue: number; show: boolean; onClose: () => void;
+}) {
+  if (!show) return null;
+
+  const phaseLabel = phase === 'critical' ? 'Critical' : phase === 'approaching' ? 'Approaching' : 'Stable';
+  const phaseColor = phase === 'critical' ? '#ef4444' : phase === 'approaching' ? '#f59e0b' : '#10b981';
+  const phaseEmoji = phase === 'critical' ? '\u26A0' : phase === 'approaching' ? '\u26A1' : '\u2714';
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, x: 12 }}
+      animate={{ opacity: 1, x: 0 }}
+      exit={{ opacity: 0, x: 12 }}
+      transition={{ duration: 0.25, ease: 'easeOut' }}
+      className="absolute inset-0 z-20 overflow-y-auto rounded-xl"
+      style={{
+        background: 'rgba(2, 6, 23, 0.97)',
+        backdropFilter: 'blur(16px)',
+        border: `1px solid ${phaseColor}33`,
+      }}
+      onClick={onClose}
+    >
+      <div className="p-4 space-y-3" onClick={e => e.stopPropagation()}>
+        {/* Title bar */}
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="w-2 h-2 rounded-full animate-pulse" style={{ background: phaseColor }} />
+            <span className="text-[11px] font-bold tracking-widest uppercase" style={{ color: phaseColor }}>
+              K-Parameter Field Guide
+            </span>
+          </div>
+          <button onClick={onClose} className="p-1 rounded-md hover:bg-white/10 transition-colors">
+            <X className="w-3 h-3 text-slate-400" />
+          </button>
+        </div>
+
+        {/* Current reading */}
+        <div className="flex items-center gap-3 px-3 py-2 rounded-lg" style={{ background: `${phaseColor}0D`, border: `1px solid ${phaseColor}22` }}>
+          <span className="text-lg font-bold font-mono" style={{ color: phaseColor }}>{kValue.toFixed(2)}</span>
+          <span className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: phaseColor }}>
+            {phaseEmoji} {phaseLabel}
+          </span>
+          <span className="text-[9px] text-slate-500 ml-auto font-mono">K = 2\u03C0 \u221A(\u0394H\u00B7\u0394s\u00B7\u210F) / \u03C4</span>
+        </div>
+
+        {/* University explanation */}
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-1.5">
+            <div className="px-1.5 py-0.5 rounded text-[8px] font-bold tracking-wider bg-cyan-500/15 text-cyan-300 border border-cyan-500/20">
+              FORMAL
+            </div>
+            <span className="text-[9px] text-slate-500 italic">University / Graduate Level</span>
+          </div>
+          <div className="text-[10px] leading-[1.6] text-slate-300 px-2 py-2 rounded-lg bg-slate-800/40 border border-slate-700/30">
+            <p className="mb-2">
+              The <span className="font-semibold text-cyan-300">K-parameter</span> is a dimensionless
+              composite metric derived from five orthogonal health observables of a distributed
+              consensus network. Formally:
+            </p>
+            <p className="font-mono text-[9px] text-center text-cyan-400/80 py-1">
+              K = 2\u03C0 \u221A(\u0394H \u00B7 \u0394s \u00B7 \u210F) / \u03C4
+            </p>
+            <p className="mb-2">
+              where <span className="text-cyan-400">\u0394H</span> captures Hamiltonian energy divergence
+              in the DAG consensus,{' '}
+              <span className="text-cyan-400">\u0394s</span> is the entropy production rate across
+              the peer mesh, <span className="text-cyan-400">\u210F</span> represents the reduced
+              Planck-analog (minimum quantum of state agreement), and{' '}
+              <span className="text-cyan-400">\u03C4</span> is the gossip propagation time constant.
+            </p>
+            <p className="mb-1.5">
+              The five factor components \u2014{' '}
+              <span className="text-emerald-400 font-semibold">G</span> (Genetic Stability),{' '}
+              <span className="text-cyan-400 font-semibold">Q</span> (Quantum Coherence),{' '}
+              <span className="text-orange-400 font-semibold">T</span> (Thermodynamic Efficiency),{' '}
+              <span className="text-blue-400 font-semibold">I</span> (Information Density),{' '}
+              <span className="text-purple-400 font-semibold">R</span> (Network Resilience)
+              {' '}\u2014 are visualized as orbiting particles. Each traces an elliptical path whose
+              orbital velocity scales with system stress: higher K pushes faster orbits, mirroring
+              increased phase-space exploration under entropic pressure.
+            </p>
+            <p>
+              The <span className="font-semibold" style={{ color: phaseColor }}>phase regime</span> is
+              determined by critical thresholds: K &lt; 5 ={' '}
+              <span className="text-emerald-400">ordered (stable)</span>,
+              5 \u2264 K &lt; 10 ={' '}
+              <span className="text-amber-400">approaching (meta-stable)</span>,
+              K \u2265 10 ={' '}
+              <span className="text-red-400">critical (disordered)</span>.
+              These boundaries correspond to phase transitions in the consensus Hamiltonian landscape.
+            </p>
+          </div>
+        </div>
+
+        {/* High school explanation */}
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-1.5">
+            <div className="px-1.5 py-0.5 rounded text-[8px] font-bold tracking-wider bg-amber-500/15 text-amber-300 border border-amber-500/20">
+              INTUITIVE
+            </div>
+            <span className="text-[9px] text-slate-500 italic">Plain English / High School</span>
+          </div>
+          <div className="text-[10px] leading-[1.6] text-slate-300 px-2 py-2 rounded-lg bg-slate-800/40 border border-slate-700/30">
+            <p className="mb-2">
+              Think of K as the network's <span className="font-semibold text-amber-300">temperature reading</span>.
+              When you're healthy, your body temperature is ~37\u00B0C. Too high means fever. Too low means trouble.
+              The K-parameter works the same way for this blockchain network.
+            </p>
+            <p className="mb-2">
+              <span className="font-semibold text-emerald-400">K near 0 = perfectly healthy.</span>{' '}
+              All servers are running the same software, agree on the same block history, aren't overworked,
+              and can talk to each other easily. Like a well-rehearsed orchestra playing in sync.
+            </p>
+            <p className="mb-2">
+              <span className="font-semibold text-amber-400">K between 5\u201310 = getting stressed.</span>{' '}
+              Something is off. Maybe one server is lagging behind, or the network is getting congested.
+              Like a band where the drummer is slightly off-beat \u2014 still playable, but you notice it.
+            </p>
+            <p className="mb-2">
+              <span className="font-semibold text-red-400">K above 10 = something is wrong.</span>{' '}
+              Servers disagree, connections are dropping, or a node is overwhelmed. Like a traffic jam:
+              everyone's honking but nobody's moving. The system tunes itself harder to compensate.
+            </p>
+            <p className="mb-1.5">
+              The five orbiting dots represent the five things being measured:
+            </p>
+            <div className="grid grid-cols-1 gap-1 pl-1 mb-1.5">
+              <div><span className="font-bold text-emerald-400">G</span><span className="text-slate-400"> \u2014 Are all servers running the same version? (like everyone reading the same textbook)</span></div>
+              <div><span className="font-bold text-cyan-400">Q</span><span className="text-slate-400"> \u2014 Are they at the same block height? (like clocks being in sync)</span></div>
+              <div><span className="font-bold text-orange-400">T</span><span className="text-slate-400"> \u2014 Are they using resources efficiently? (CPU, RAM \u2014 like a car's fuel efficiency)</span></div>
+              <div><span className="font-bold text-blue-400">I</span><span className="text-slate-400"> \u2014 Is meaningful data flowing through? (like how much of a conversation is signal vs noise)</span></div>
+              <div><span className="font-bold text-purple-400">R</span><span className="text-slate-400"> \u2014 Can they handle failures gracefully? (like a power grid rerouting around a downed line)</span></div>
+            </div>
+            <p>
+              When K is low, the dots orbit slowly and calmly. When K rises, they speed up and the core
+              glows brighter \u2014 a visual alarm that the system is under pressure. The waveform at the bottom
+              shows K's history over time, so you can spot trends.
+            </p>
+          </div>
+        </div>
+
+        {/* Visual legend */}
+        <div className="px-2 py-1.5 rounded-lg bg-slate-800/30 border border-slate-700/20">
+          <div className="text-[8px] font-bold text-slate-500 uppercase tracking-wider mb-1">Visual Legend</div>
+          <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[9px] text-slate-400">
+            <div><span className="text-white/60">\u25CF Core glow</span> \u2014 size & color = current K severity</div>
+            <div><span className="text-white/60">\u25CB Orbit rings</span> \u2014 breathe with system stress</div>
+            <div><span className="text-white/60">\u2500 Dashed arcs</span> \u2014 K=5 and K=10 phase thresholds</div>
+            <div><span className="text-white/60">\u223F Waveform</span> \u2014 K history over recent rounds</div>
+            <div><span className="text-white/60">\u2022 Particles</span> \u2014 G Q T I R health factors</div>
+            <div><span className="text-white/60">\u2606 Trail sparks</span> \u2014 data emission from each factor</div>
+          </div>
+        </div>
+
+        <div className="text-center text-[8px] text-slate-600 pt-0.5">
+          Click anywhere to close
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
+/**
+ * Animated orbital K-parameter visualization.
+ * The K value drives a central pulsing core surrounded by orbiting factor particles.
+ * Phase transitions trigger dramatic visual shifts.
+ */
+function KOrbitalViz({ kValue, phase, history }: {
+  kValue: number;
+  phase: string;
+  history: Array<{ k: number; phase: string; ts: number }>;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const animRef = useRef<number>(0);
+  const prevKRef = useRef(kValue);
+  const transitionRef = useRef(0); // 0-1 for phase transition flash
+
+  // Smooth interpolation target
+  const targetK = useRef(kValue);
+  const currentK = useRef(kValue);
+
+  useEffect(() => {
+    targetK.current = kValue;
+    // Trigger transition flash when phase changes
+    if (kValue !== prevKRef.current) {
+      const oldPhase = prevKRef.current < 5 ? 'stable' : prevKRef.current < 10 ? 'approaching' : 'critical';
+      const newPhase = kValue < 5 ? 'stable' : kValue < 10 ? 'approaching' : 'critical';
+      if (oldPhase !== newPhase) transitionRef.current = 1.0;
+      prevKRef.current = kValue;
+    }
+  }, [kValue]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const maybeCtx = canvas.getContext('2d');
+    if (!maybeCtx) return;
+    const ctx: CanvasRenderingContext2D = maybeCtx;
+
+    // Hi-DPI support
+    const dpr = window.devicePixelRatio || 1;
+    const W = 320;
+    const H = 200;
+    canvas.width = W * dpr;
+    canvas.height = H * dpr;
+    canvas.style.width = `${W}px`;
+    canvas.style.height = `${H}px`;
+    ctx.scale(dpr, dpr);
+
+    const cx = W / 2;
+    const cy = H / 2;
+
+    // Factor particles
+    const factors = [
+      { letter: 'G', color: '#10b981', orbit: 55, speed: 0.8, offset: 0 },
+      { letter: 'Q', color: '#06b6d4', orbit: 55, speed: 1.1, offset: Math.PI * 0.4 },
+      { letter: 'T', color: '#f97316', orbit: 55, speed: 0.6, offset: Math.PI * 0.8 },
+      { letter: 'I', color: '#3b82f6', orbit: 55, speed: 0.9, offset: Math.PI * 1.2 },
+      { letter: 'R', color: '#a855f7', orbit: 55, speed: 0.7, offset: Math.PI * 1.6 },
+    ];
+
+    // History trail particles
+    const trails: Array<{ x: number; y: number; vx: number; vy: number; life: number; color: string }> = [];
+
+    let t = 0;
+
+    const phaseColor = (p: string) =>
+      p === 'critical' ? '#ef4444' : p === 'approaching' ? '#f59e0b' : '#10b981';
+    const phaseGlow = (p: string) =>
+      p === 'critical' ? 'rgba(239, 68, 68,' : p === 'approaching' ? 'rgba(245, 158, 11,' : 'rgba(16, 185, 129,';
+
+    function draw() {
+      t += 0.016;
+      // Smooth K interpolation
+      currentK.current += (targetK.current - currentK.current) * 0.05;
+      const k = currentK.current;
+      const p = k < 5 ? 'stable' : k < 10 ? 'approaching' : 'critical';
+      const kNorm = Math.min(k / 15, 1); // 0-1 normalized
+
+      // Decay transition flash
+      if (transitionRef.current > 0) transitionRef.current *= 0.95;
+
+      ctx.clearRect(0, 0, W, H);
+
+      // Background radial gradient (phase-colored)
+      const bgGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, 120);
+      bgGrad.addColorStop(0, `${phaseGlow(p)}0.08)`);
+      bgGrad.addColorStop(0.5, `${phaseGlow(p)}0.02)`);
+      bgGrad.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = bgGrad;
+      ctx.fillRect(0, 0, W, H);
+
+      // Phase transition flash
+      if (transitionRef.current > 0.01) {
+        const flashGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, 150);
+        flashGrad.addColorStop(0, `rgba(255,255,255,${transitionRef.current * 0.5})`);
+        flashGrad.addColorStop(1, 'rgba(255,255,255,0)');
+        ctx.fillStyle = flashGrad;
+        ctx.fillRect(0, 0, W, H);
+      }
+
+      // Orbit ring(s) — breathing effect based on K
+      const breathScale = 1 + Math.sin(t * 2) * 0.03 * (1 + kNorm);
+      const orbitR = 55 * breathScale;
+
+      // Outer orbit ring
+      ctx.beginPath();
+      ctx.arc(cx, cy, orbitR, 0, Math.PI * 2);
+      ctx.strokeStyle = `${phaseGlow(p)}${(0.15 + kNorm * 0.15).toFixed(2)})`;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 6]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Inner ring (secondary orbit at 35px)
+      ctx.beginPath();
+      ctx.arc(cx, cy, 35 * breathScale, 0, Math.PI * 2);
+      ctx.strokeStyle = `${phaseGlow(p)}0.08)`;
+      ctx.lineWidth = 0.5;
+      ctx.stroke();
+
+      // Phase threshold arcs (K=5 and K=10 as partial rings)
+      const drawThresholdArc = (threshold: number, color: string, label: string) => {
+        const angle = (threshold / 15) * Math.PI * 2 - Math.PI / 2;
+        const r = 80;
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, angle - 0.15, angle + 0.15);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        // Tiny label
+        const lx = cx + Math.cos(angle) * (r + 8);
+        const ly = cy + Math.sin(angle) * (r + 8);
+        ctx.font = '7px monospace';
+        ctx.fillStyle = color;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(label, lx, ly);
+      };
+      drawThresholdArc(5, 'rgba(245, 158, 11, 0.5)', 'K=5');
+      drawThresholdArc(10, 'rgba(239, 68, 68, 0.5)', 'K=10');
+
+      // Core glow (pulsing, size proportional to K)
+      const coreR = 16 + kNorm * 10 + Math.sin(t * 3) * 2;
+      const coreGlow = ctx.createRadialGradient(cx, cy, 0, cx, cy, coreR * 2);
+      coreGlow.addColorStop(0, `${phaseGlow(p)}0.6)`);
+      coreGlow.addColorStop(0.4, `${phaseGlow(p)}0.15)`);
+      coreGlow.addColorStop(1, `${phaseGlow(p)}0)`);
+      ctx.fillStyle = coreGlow;
+      ctx.beginPath();
+      ctx.arc(cx, cy, coreR * 2, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Core solid
+      ctx.beginPath();
+      ctx.arc(cx, cy, coreR, 0, Math.PI * 2);
+      const coreGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, coreR);
+      coreGrad.addColorStop(0, 'rgba(255,255,255,0.25)');
+      coreGrad.addColorStop(0.5, phaseColor(p));
+      coreGrad.addColorStop(1, `${phaseGlow(p)}0.3)`);
+      ctx.fillStyle = coreGrad;
+      ctx.fill();
+
+      // K value text in core
+      ctx.font = 'bold 14px monospace';
+      ctx.fillStyle = 'rgba(255,255,255,0.95)';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(k.toFixed(2), cx, cy - 2);
+      ctx.font = '7px monospace';
+      ctx.fillStyle = 'rgba(255,255,255,0.5)';
+      ctx.fillText('K-VALUE', cx, cy + 10);
+
+      // Orbiting factor particles
+      const speedMult = p === 'critical' ? 2.0 : p === 'approaching' ? 1.3 : 1.0;
+      factors.forEach((f, i) => {
+        const angle = t * f.speed * speedMult + f.offset;
+        // Elliptical orbit (wider horizontally)
+        const fx = cx + Math.cos(angle) * orbitR * 1.3;
+        const fy = cy + Math.sin(angle) * orbitR * 0.7;
+
+        // Trail spawn
+        if (Math.random() < 0.3) {
+          trails.push({
+            x: fx, y: fy,
+            vx: (Math.random() - 0.5) * 0.5,
+            vy: (Math.random() - 0.5) * 0.5,
+            life: 1.0,
+            color: f.color,
+          });
+        }
+
+        // Connection line to core
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(fx, fy);
+        ctx.strokeStyle = `${f.color}33`;
+        ctx.lineWidth = 0.5;
+        ctx.stroke();
+
+        // Particle glow
+        const pGlow = ctx.createRadialGradient(fx, fy, 0, fx, fy, 12);
+        pGlow.addColorStop(0, `${f.color}88`);
+        pGlow.addColorStop(1, `${f.color}00`);
+        ctx.fillStyle = pGlow;
+        ctx.beginPath();
+        ctx.arc(fx, fy, 12, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Particle solid
+        ctx.beginPath();
+        ctx.arc(fx, fy, 6, 0, Math.PI * 2);
+        ctx.fillStyle = f.color;
+        ctx.fill();
+
+        // Letter
+        ctx.font = 'bold 8px monospace';
+        ctx.fillStyle = 'rgba(255,255,255,0.9)';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(f.letter, fx, fy);
+      });
+
+      // Update and draw trail particles
+      for (let i = trails.length - 1; i >= 0; i--) {
+        const tr = trails[i];
+        tr.x += tr.vx;
+        tr.y += tr.vy;
+        tr.life -= 0.02;
+        if (tr.life <= 0) { trails.splice(i, 1); continue; }
+        ctx.beginPath();
+        ctx.arc(tr.x, tr.y, 1.5 * tr.life, 0, Math.PI * 2);
+        ctx.fillStyle = `${tr.color}${Math.floor(tr.life * 60).toString(16).padStart(2, '0')}`;
+        ctx.fill();
+      }
+      // Cap trail particles to prevent memory growth
+      if (trails.length > 200) trails.splice(0, trails.length - 200);
+
+      // History waveform at bottom
+      if (history.length > 1) {
+        const waveY = H - 18;
+        const waveH = 14;
+        const step = (W - 40) / Math.max(history.length - 1, 1);
+        ctx.beginPath();
+        ctx.moveTo(20, waveY);
+        history.forEach((pt, i) => {
+          const x = 20 + i * step;
+          const y = waveY - (pt.k / 15) * waveH;
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        ctx.strokeStyle = `${phaseGlow(p)}0.5)`;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        // Dot at current position
+        const lastPt = history[history.length - 1];
+        const lastX = 20 + (history.length - 1) * step;
+        const lastY = waveY - (lastPt.k / 15) * waveH;
+        ctx.beginPath();
+        ctx.arc(lastX, lastY, 3, 0, Math.PI * 2);
+        ctx.fillStyle = phaseColor(p);
+        ctx.fill();
+      }
+
+      // Formula watermark
+      ctx.font = '8px monospace';
+      ctx.fillStyle = 'rgba(255,255,255,0.08)';
+      ctx.textAlign = 'center';
+      ctx.fillText('K = 2\u03C0 \u221A(\u0394H \u00B7 \u0394s \u00B7 \u210F) / \u03C4', cx, H - 4);
+
+      animRef.current = requestAnimationFrame(draw);
+    }
+
+    animRef.current = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(animRef.current);
+  }, [history]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      style={{ width: 320, height: 200 }}
+      className="rounded-xl mx-auto block"
+    />
+  );
+}
+
 /** K-metrics breakdown bar for a single node */
 function KMetricsBar({ metrics }: { metrics: NodeKMetrics }) {
   const factors = [
@@ -1015,6 +1468,7 @@ export default function DeployControlPanel() {
   const [kParamLoading, setKParamLoading] = useState(false);
   const [kParamError, setKParamError] = useState<string | null>(null);
   const [kParamHistory, setKParamHistory] = useState<Array<{ k: number; phase: string; ts: number }>>([]);
+  const [showOrbitalInfo, setShowOrbitalInfo] = useState(false);
 
   // Check if current wallet is master
   const walletAddress = localStorage.getItem('walletAddress') || '';
@@ -4719,6 +5173,47 @@ export default function DeployControlPanel() {
                       )}
                     </div>
                   ) : (<>
+                    {/* v9.3.2: Orbital K-Value Visualization with educational info panel */}
+                    <div className="relative">
+                      <motion.div
+                        initial={{ opacity: 0, scale: 0.95 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        transition={{ duration: 0.5, ease: 'easeOut' }}
+                        className="rounded-xl overflow-hidden cursor-pointer group"
+                        style={{
+                          background: 'rgba(5, 10, 25, 0.85)',
+                          border: `1px solid ${kParamData.phase === 'critical' ? 'rgba(239, 68, 68, 0.4)' : kParamData.phase === 'approaching' ? 'rgba(245, 158, 11, 0.3)' : 'rgba(16, 185, 129, 0.25)'}`,
+                          boxShadow: kParamData.phase === 'critical'
+                            ? '0 0 30px rgba(239, 68, 68, 0.12), inset 0 0 60px rgba(239, 68, 68, 0.04)'
+                            : kParamData.phase === 'approaching'
+                            ? '0 0 25px rgba(245, 158, 11, 0.08), inset 0 0 50px rgba(245, 158, 11, 0.03)'
+                            : '0 0 20px rgba(16, 185, 129, 0.06), inset 0 0 40px rgba(16, 185, 129, 0.02)',
+                        }}
+                        onClick={() => setShowOrbitalInfo(true)}
+                      >
+                        <KOrbitalViz
+                          kValue={kParamData.k_value ?? 0}
+                          phase={kParamData.phase || 'stable'}
+                          history={kParamHistory}
+                        />
+                        {/* Hover hint */}
+                        <div className="absolute bottom-2 right-3 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-300 pointer-events-none">
+                          <Eye className="w-3 h-3 text-white/30" />
+                          <span className="text-[8px] text-white/30 tracking-wide uppercase">Click for field guide</span>
+                        </div>
+                      </motion.div>
+                      <AnimatePresence>
+                        {showOrbitalInfo && (
+                          <KOrbitalInfoPanel
+                            phase={kParamData.phase || 'stable'}
+                            kValue={kParamData.k_value ?? 0}
+                            show={showOrbitalInfo}
+                            onClose={() => setShowOrbitalInfo(false)}
+                          />
+                        )}
+                      </AnimatePresence>
+                    </div>
+
                     {/* Main K-Value Display */}
                     <div className="rounded-xl p-4" style={{ background: 'rgba(15, 23, 42, 0.6)', border: `1px solid ${kParamData.phase === 'critical' ? 'rgba(239, 68, 68, 0.4)' : kParamData.phase === 'approaching' ? 'rgba(245, 158, 11, 0.4)' : 'rgba(16, 185, 129, 0.4)'}` }}>
                       <div className="flex items-center justify-between mb-3">
@@ -4866,31 +5361,76 @@ export default function DeployControlPanel() {
                       </div>
                     )}
 
-                    {/* Metric Inputs Explanation */}
-                    <div className="rounded-xl p-3" style={{ background: 'rgba(15, 23, 42, 0.4)', border: '1px solid rgba(148, 163, 184, 0.05)' }}>
-                      <div className="text-[10px] text-amber-200/40 mb-2 font-medium">How K is Computed</div>
-                      <div className="grid grid-cols-2 gap-3 text-[10px]">
+                    {/* Metric Inputs — Live Breakdown */}
+                    <div className="rounded-xl p-3" style={{ background: 'rgba(15, 23, 42, 0.4)', border: '1px solid rgba(148, 163, 184, 0.08)' }}>
+                      <div className="text-[10px] text-amber-200/40 mb-2.5 font-medium">How K is Computed — Live Breakdown</div>
+                      <div className="grid grid-cols-2 gap-4 text-[10px]">
+                        {/* ΔH column */}
                         <div>
-                          <div className="text-cyan-300/70 font-medium mb-1">Energy Variance (ΔH)</div>
-                          <ul className="space-y-0.5 text-amber-200/30">
-                            <li>Mining rejection ratio</li>
-                            <li>Traffic asymmetry (in/out)</li>
-                            <li>Peer churn rate</li>
-                          </ul>
+                          <div className="flex items-center gap-2 mb-1.5">
+                            <span className="text-cyan-300/80 font-semibold">Energy Variance (ΔH)</span>
+                            <span className="text-xs font-mono font-bold text-cyan-400">{(kParamData.delta_h ?? 0).toFixed(4)}</span>
+                          </div>
+                          {[
+                            { label: 'Mining rejection ratio', key: 'rejection_ratio', color: '#f59e0b' },
+                            { label: 'Traffic asymmetry (in/out)', key: 'traffic_asymmetry', color: '#06b6d4' },
+                            { label: 'Peer churn rate', key: 'peer_churn', color: '#a855f7' },
+                          ].map(item => {
+                            const val = kParamData[item.key] ?? 0;
+                            const barW = Math.min(val * 100, 100);
+                            return (
+                              <div key={item.key} className="mb-1">
+                                <div className="flex items-center justify-between mb-0.5">
+                                  <span className="text-amber-200/40">{item.label}</span>
+                                  <span className="font-mono text-[9px]" style={{ color: item.color }}>{val.toFixed(4)}</span>
+                                </div>
+                                <div className="h-1 rounded-full bg-slate-700/50 overflow-hidden">
+                                  <div className="h-full rounded-full transition-all duration-700" style={{ width: `${Math.max(barW, 1)}%`, background: item.color }} />
+                                </div>
+                              </div>
+                            );
+                          })}
                         </div>
+                        {/* Δs column */}
                         <div>
-                          <div className="text-cyan-300/70 font-medium mb-1">Entropy Variance (Δs)</div>
-                          <ul className="space-y-0.5 text-amber-200/30">
-                            <li>Sync divergence (local vs network)</li>
-                            <li>Block rate deviation</li>
-                          </ul>
+                          <div className="flex items-center gap-2 mb-1.5">
+                            <span className="text-cyan-300/80 font-semibold">Entropy Variance (Δs)</span>
+                            <span className="text-xs font-mono font-bold text-cyan-400">{(kParamData.delta_s ?? 0).toFixed(4)}</span>
+                          </div>
+                          {[
+                            { label: 'Sync divergence (local vs network)', key: 'sync_divergence', color: '#3b82f6' },
+                            { label: 'Block rate deviation', key: 'block_rate_deviation', color: '#10b981' },
+                          ].map(item => {
+                            const val = kParamData[item.key] ?? 0;
+                            const barW = Math.min(val * 100, 100);
+                            return (
+                              <div key={item.key} className="mb-1">
+                                <div className="flex items-center justify-between mb-0.5">
+                                  <span className="text-amber-200/40">{item.label}</span>
+                                  <span className="font-mono text-[9px]" style={{ color: item.color }}>{val.toFixed(4)}</span>
+                                </div>
+                                <div className="h-1 rounded-full bg-slate-700/50 overflow-hidden">
+                                  <div className="h-full rounded-full transition-all duration-700" style={{ width: `${Math.max(barW, 1)}%`, background: item.color }} />
+                                </div>
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
-                      <div className="text-[9px] text-amber-200/20 mt-2 pt-2 border-t border-white/5">
-                        τ = 60s rolling window · ℏ = 1.0 · Updated every 60 seconds
-                        {kParamData.last_computed_at > 0 && (
-                          <span className="ml-2">· Last: {new Date(kParamData.last_computed_at * 1000).toLocaleTimeString()}</span>
-                        )}
+                      {/* Formula bar */}
+                      <div className="flex items-center justify-between mt-2.5 pt-2 border-t border-white/5 text-[9px]">
+                        <span className="text-amber-200/20 font-mono">K = 2π √(ΔH · Δs · ℏ) / τ</span>
+                        <div className="flex items-center gap-2 text-amber-200/20">
+                          <span>τ = 60s</span>
+                          <span>·</span>
+                          <span>ℏ = 1.0</span>
+                          <span>·</span>
+                          <span>Every 60s</span>
+                          {kParamData.last_computed_at > 0 && (<>
+                            <span>·</span>
+                            <span className="text-cyan-400/40">Last: {new Date(kParamData.last_computed_at * 1000).toLocaleTimeString()}</span>
+                          </>)}
+                        </div>
                       </div>
                     </div>
                   </>)}
