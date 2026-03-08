@@ -433,6 +433,7 @@ mod tests {
     use super::*;
     use crate::config::UpstreamConfig;
     use crate::health;
+    use dashmap::DashMap;
     use std::collections::HashMap;
     use std::time::Duration;
 
