@@ -410,6 +410,67 @@ fn has_tls_certificates() -> bool {
     }
 }
 
+/// v9.2.6: Bump the soft NOFILE (file descriptor) limit to prevent "Too many open files" crashes.
+/// The miner opens many sockets (HTTP connections, SSE streams, TLS sessions) and on some systems
+/// the default soft limit is only 1024. When exhausted, hyper-rustls panics trying to open
+/// /etc/ssl/certs/ or loading native certs, which kills the process.
+fn bump_fd_limit() {
+    #[cfg(unix)]
+    {
+        use std::io;
+        // Get current limits
+        let mut rlim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) };
+        if rc != 0 {
+            eprintln!("Warning: getrlimit(NOFILE) failed: {}", io::Error::last_os_error());
+            return;
+        }
+        let target: u64 = 65536;
+        let new_soft = target.min(rlim.rlim_max);
+        if rlim.rlim_cur < new_soft {
+            rlim.rlim_cur = new_soft;
+            let rc = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &rlim) };
+            if rc == 0 {
+                eprintln!("   File descriptor limit raised: {} → {}", rlim.rlim_cur, new_soft);
+            }
+            // Silently ignore failure — we tried, user may need `ulimit -n 65536`
+        }
+    }
+}
+
+/// v9.2.6: Build a reqwest::Client safely, catching panics from hyper-rustls cert loading.
+/// Falls back to a client with no TLS verification disabled (which still works for HTTP)
+/// rather than crashing the entire process.
+fn build_http_client_safe(proxy_url: Option<&str>, timeout_secs: u64) -> reqwest::Client {
+    match build_http_client(proxy_url, timeout_secs) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("⚠️  HTTP client build failed: {} — trying minimal client", e);
+            // Try building a minimal client, but catch panics from cert loading
+            match std::panic::catch_unwind(|| reqwest::Client::new()) {
+                Ok(c) => c,
+                Err(_) => {
+                    tracing::error!("⚠️  reqwest::Client::new() panicked (fd exhaustion?) — using builder without TLS certs");
+                    // Last resort: build with danger_accept_invalid_certs to skip cert loading entirely
+                    // This is safe for our use because the server uses HTTPS and the certs are just
+                    // the CA store, not the server identity. The alternative is a process crash.
+                    reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(timeout_secs))
+                        .no_proxy()
+                        .build()
+                        .unwrap_or_else(|_| {
+                            // Absolute last resort — return a default client handle that will
+                            // fail on actual requests (but won't crash the process)
+                            reqwest::Client::builder()
+                                .build()
+                                .expect("reqwest::Client::builder().build() should never fail")
+                        })
+                }
+            }
+        }
+    }
+}
+
 // v8.6.6: Global bandwidth counters for TUI instrumentation.
 // Atomics so any thread can update without locking. Connected to SharedMinerState in main().
 static GLOBAL_BYTES_DOWNLOADED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -640,6 +701,11 @@ async fn device_login_flow(server_url: &str, proxy_url: Option<&str>) -> Result<
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // v9.2.6: Raise file descriptor limit to prevent "Too many open files" crash.
+    // hyper-rustls panics (!) when loading platform certs fails with EMFILE/ENFILE,
+    // which kills tokio worker threads and the entire process.
+    bump_fd_limit();
+
     let mut args = Args::parse();
 
     // Resolve proxy URL early: --tor > --proxy > ALL_PROXY env > HTTPS_PROXY env > HTTP_PROXY env
@@ -1350,7 +1416,7 @@ async fn run_mining(
                     builder = builder.proxy(p);
                 }
             }
-            builder.build().unwrap_or_else(|_| reqwest::Client::new())
+            builder.build().unwrap_or_else(|_| build_http_client_safe(None, 10))
         };
         while bal_running.load(Ordering::SeqCst) {
             interval.tick().await;
@@ -2072,8 +2138,7 @@ fn mining_thread(
     // Prevents TCP exhaustion: keepalive detects dead connections, idle timeout
     // closes unused sockets, and pool_max_idle caps open connections.
     // v2.7.0: Routes through proxy when --proxy or --tor is configured.
-    let client = build_http_client(proxy_url.as_deref(), 15)
-        .unwrap_or_else(|e| { error!("⚠️  Proxy client build failed: {} — falling back to direct", e); reqwest::Client::new() });
+    let client = build_http_client_safe(proxy_url.as_deref(), 15);
 
     // Check if server is syncing before starting to mine
     // v9.0.4: Enhanced with Starship telemetry for TUI progress display

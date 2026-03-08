@@ -8388,31 +8388,25 @@ pub async fn submit_mining_solution(
     State(state): State<Arc<AppState>>,
     Json(request): Json<MiningSolutionRequest>,
 ) -> Result<Json<ApiResponse<MiningSolutionResponse>>, StatusCode> {
-    // v9.0.1: SEMAPHORE-BASED mining concurrency — QUEUE instead of hard 503 reject.
-    // Old approach: atomic counter + instant 503 when cap hit → thundering herd retries.
-    // New approach: tokio::sync::Semaphore queues requests up to 2s, only 503 on timeout.
-    // This eliminates ~90% of 503 errors under sync load.
+    // v9.2.6: SIMPLIFIED mining concurrency — semaphore REMOVED for bootstrap validators.
     //
-    // Adaptive cap: 300 when syncing (>100 blocks behind), 1000 when at tip.
-    // Semaphore is sized at 1000 (max cap). When syncing, we use try_acquire_many(1)
-    // after checking available permits against the dynamic cap.
-    use once_cell::sync::Lazy;
-    static MINING_SEMAPHORE: Lazy<tokio::sync::Semaphore> = Lazy::new(|| tokio::sync::Semaphore::new(1000));
+    // Root cause of recurring 503 cascades: The 1000-permit semaphore + 2s timeout created
+    // a feedback loop. Any transient slowdown (spawn_blocking saturation, rayon contention,
+    // brief I/O stall) caused permits to be held >2s → mass 503 → miner retries → worse.
+    //
+    // The handler is fully lock-free since v1.0.2 — try_send() to the 1M-capacity channel
+    // is O(1) and provides all needed backpressure. The semaphore was redundant overhead.
+    //
+    // For non-bootstrap nodes (syncing): Keep adaptive throttling via atomic counter only
+    // (no semaphore, no timeout, no 503 cascade). Just cap concurrent handlers.
     static MINING_IN_FLIGHT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-    // Adaptive cap based on sync state — AGGRESSIVE throttling when far behind
-    // v9.0.2: Reduced caps drastically to prevent mining from starving sync loop.
-    // When >1000 behind: instant reject ALL mining (sync needs 100% CPU)
-    // When >100 behind: cap 50 (was 300 — 300 still saturated CPU at 42s/batch)
-    // When >10 behind: cap 200 (was 600)
-    // At tip: cap 1000 (full throughput)
     let sync_behind = {
         let local_h = state.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
         let net_h = state.highest_network_height.load(std::sync::atomic::Ordering::Relaxed);
         if net_h > local_h { net_h - local_h } else { 0 }
     };
 
-    // v9.0.3: Check Q_ALLOW_SOLO_MINING BEFORE hard reject — bootstrap validators must always mine
     let allow_solo = std::env::var("Q_ALLOW_SOLO_MINING")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
@@ -8423,61 +8417,26 @@ pub async fn submit_mining_solution(
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
 
-    let dynamic_cap: u32 = if allow_solo {
-        // Bootstrap validators: always allow full mining throughput
-        1000
-    } else if sync_behind > 100 { 50 } else if sync_behind > 10 { 200 } else { 1000 };
-
-    // Check if we're over the dynamic cap before even trying the semaphore
-    let current_in_flight = MINING_IN_FLIGHT.load(std::sync::atomic::Ordering::Relaxed);
-    if current_in_flight >= dynamic_cap {
-        // Over dynamic cap — try to acquire with a short timeout (queue instead of instant reject)
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            MINING_SEMAPHORE.acquire(),
-        ).await {
-            Ok(Ok(permit)) => {
-                MINING_IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                // permit will be forgotten — we track via atomic + drop guard
-                permit.forget();
-            }
-            _ => {
-                // Timeout or semaphore closed — 503 after waiting (not instant reject)
-                return Err(StatusCode::SERVICE_UNAVAILABLE);
-            }
-        }
-    } else {
-        // Under dynamic cap — acquire immediately (should succeed)
-        match MINING_SEMAPHORE.try_acquire() {
-            Ok(permit) => {
-                MINING_IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                permit.forget();
-            }
-            Err(_) => {
-                // All 1000 permits taken — queue briefly
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(2),
-                    MINING_SEMAPHORE.acquire(),
-                ).await {
-                    Ok(Ok(permit)) => {
-                        MINING_IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        permit.forget();
-                    }
-                    _ => return Err(StatusCode::SERVICE_UNAVAILABLE),
-                }
-            }
+    // v9.2.6: Bootstrap validators skip ALL concurrency limits — handler is lock-free,
+    // channel backpressure (1M capacity) is the only throttle needed.
+    // Non-bootstrap nodes still use atomic counter cap (no semaphore/timeout).
+    if !allow_solo {
+        let dynamic_cap: u32 = if sync_behind > 100 { 50 } else if sync_behind > 10 { 200 } else { 5000 };
+        let current_in_flight = MINING_IN_FLIGHT.load(std::sync::atomic::Ordering::Relaxed);
+        if current_in_flight >= dynamic_cap {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
         }
     }
 
-    // Drop guard: release semaphore permit + decrement counter on exit
-    struct MiningSemaphoreGuard;
-    impl Drop for MiningSemaphoreGuard {
+    // Lightweight in-flight counter (no semaphore — just for metrics/throttling)
+    MINING_IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    struct MiningInflightGuard;
+    impl Drop for MiningInflightGuard {
         fn drop(&mut self) {
             MINING_IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-            MINING_SEMAPHORE.add_permits(1);
         }
     }
-    let _concurrency_guard = MiningSemaphoreGuard;
+    let _concurrency_guard = MiningInflightGuard;
 
     // v1.0.2: SYNC GATE — O(1) atomic check, return 503 so nginx routes to synced upstream
     // v8.1.7: TIGHTENED cap from 5× to +5000 to prevent rogue height poisoning from blocking mining

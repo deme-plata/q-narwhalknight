@@ -403,6 +403,7 @@ impl OAuth2Storage {
 /// /authorize endpoint query parameters
 #[derive(Debug, Deserialize)]
 pub struct AuthorizeRequest {
+    #[serde(default = "default_response_type")]
     pub response_type: String,
     pub client_id: String,
     pub redirect_uri: String,
@@ -410,6 +411,10 @@ pub struct AuthorizeRequest {
     pub state: Option<String>,
     pub code_challenge: Option<String>, // PKCE
     pub code_challenge_method: Option<String>,
+}
+
+fn default_response_type() -> String {
+    "code".to_string()
 }
 
 /// /token endpoint request
