@@ -1,6 +1,6 @@
 # Issue #018: Connection Draining Improvements
 
-**Status**: Planned
+**Status**: Done (Phases 1-3)
 **Priority**: Medium
 **Component**: q-flux
 **Labels**: reliability, deployment

@@ -125,6 +125,20 @@ fn main() -> anyhow::Result<()> {
     let shared_tls = acceptor::SharedTlsConfig::new(tls_config);
     tracing::info!("TLS config loaded from {} / {}", config.tls.cert.display(), config.tls.key.display());
 
+    // Issue #017: kTLS kernel offload detection
+    if config.tls.enable_ktls {
+        let ktls_features = acceptor::probe_ktls();
+        if ktls_features.available {
+            tracing::info!("kTLS: {}", ktls_features);
+        } else {
+            tracing::warn!(
+                "kTLS enabled in config but not available on this kernel. \
+                 Ensure kernel >= 4.13 and 'modprobe tls' has been run. \
+                 Falling back to userspace TLS.",
+            );
+        }
+    }
+
     // Initialize metrics
     let metrics = metrics::Metrics::new();
 
@@ -183,6 +197,10 @@ fn main() -> anyhow::Result<()> {
     // Shared flag so workers can cheaply poll shutdown state without channel recv overhead
     // in the hot accept loop.
     let shutdown_flag = Arc::new(AtomicBool::new(false));
+
+    // Issue #018: Drain signal for long-lived connections (SSE, WebSocket).
+    // When set to true, all active SSE/WS connections initiate graceful close.
+    let (drain_tx, drain_rx) = tokio::sync::watch::channel(false);
 
     // Create shared health map and spawn the background health checker.
     // The health map is shared between the checker (writer) and all workers (readers).
@@ -304,6 +322,7 @@ fn main() -> anyhow::Result<()> {
         access_logger,
         rate_limiter,
         peer_tracker.clone(),
+        drain_rx,
     );
 
     tracing::info!("All {} workers started -- q-flux is ready", worker_count);
@@ -333,6 +352,8 @@ fn main() -> anyhow::Result<()> {
         // TUI exited — trigger graceful shutdown
         shutdown_flag.store(true, Ordering::SeqCst);
         let _ = shutdown_tx.send(());
+        // Issue #018: signal SSE/WS connections to drain
+        let _ = drain_tx.send(true);
 
         // Brief drain period, then exit
         let drain_start = std::time::Instant::now();
@@ -370,6 +391,9 @@ fn main() -> anyhow::Result<()> {
         // Broadcast shutdown to all worker runtimes via the channel
         let _ = shutdown_tx.send(());
 
+        // Issue #018: signal SSE/WS connections to drain gracefully
+        let _ = drain_tx.send(true);
+
         // Wait for the drain timeout to let in-flight requests complete.
         // Workers will stop accepting but continue processing spawned tasks.
         // After the timeout, we log final metrics and exit -- worker thread
@@ -388,10 +412,14 @@ fn main() -> anyhow::Result<()> {
             let snap = metrics.snapshot();
             if snap.active_connections > 0 {
                 tracing::info!(
-                    "Draining: {} active connections, {} active upstream, {} active websockets ({:.0}s / {}s)",
+                    "Draining: {} active connections, {} active upstream, {} active websockets, \
+                     {} draining ({} completed, {} forced) ({:.0}s / {}s)",
                     snap.active_connections,
                     snap.upstream_active,
                     snap.active_websockets,
+                    snap.drain_active,
+                    snap.drain_completed_total,
+                    snap.drain_forced_total,
                     elapsed.as_secs_f64(),
                     drain_timeout.as_secs(),
                 );

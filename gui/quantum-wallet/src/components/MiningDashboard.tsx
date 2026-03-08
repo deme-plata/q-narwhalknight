@@ -1554,10 +1554,10 @@ export default function MiningDashboard() {
       >
         <h4 className="text-lg font-bold text-quantum-green mb-3 flex items-center gap-2">
           <Zap className="w-5 h-5" />
-          Download Optimized Miner v9.1.6
+          Download Optimized Miner v9.2.6
         </h4>
         <p className="text-gray-300 text-sm mb-4">
-          v9.1.6: OAuth2 login + Tor by default + Lock-free multi-threading + P2P propagation
+          v9.2.6: OAuth2 login + Tor by default + Lock-free multi-threading + P2P propagation
         </p>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <a

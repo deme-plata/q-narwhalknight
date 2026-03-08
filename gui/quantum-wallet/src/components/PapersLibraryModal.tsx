@@ -26,7 +26,6 @@ type Category = (typeof CATEGORIES)[number];
 
 const PAPERS: Paper[] = [
   // ── Core Protocol ──
-  { title: 'Yellow Paper: Formal Protocol Specification', description: 'The definitive QNK technical reference — sub-second finality, 48K+ TPS, DAG-Knight consensus, VDF mining, emission schedule, P2P networking, and cryptographic primitives', score: 10, category: 'Core Protocol', filename: 'qnk-yellow-paper.pdf' },
   { title: 'DAG-Knight Architecture', description: 'Detailed architecture of the DAG-Knight consensus protocol with quantum anchor election', score: 10, category: 'Core Protocol', filename: 'dagknight-architecture-detailed.pdf' },
   { title: 'Consensus Security Analysis', description: 'Formal security analysis of Q-NarwhalKnight consensus under adversarial conditions', score: 9, category: 'Core Protocol', filename: 'q-narwhalknight-consensus-security-analysis.pdf' },
   { title: 'BFT Slashing Protocol', description: 'Byzantine fault tolerance with economic slashing for misbehaving validators', score: 9, category: 'Core Protocol', filename: 'qnk-bft-slashing-whitepaper.pdf' },
@@ -104,7 +103,7 @@ const PAPERS: Paper[] = [
   { title: 'Quantum Water Robots Kingdom', description: 'Quantum-mechanical modeling of water robot swarm coordination', score: 5, category: 'Physics', filename: 'quantum-water-robots-kingdom.pdf' },
 ];
 
-const DL_BASE = 'https://quillon.xyz';
+const DL_BASE = 'https://quillon.xyz/downloads';
 
 function scoreBadgeColor(score: number): string {
   if (score >= 9) return 'from-amber-400 to-yellow-500';

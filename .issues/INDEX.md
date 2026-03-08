@@ -18,12 +18,12 @@
 | 014 | Splice Zero-Copy for WebSocket/SSE Passthrough | High | Done | performance, io_uring, zero-copy |
 | 015 | io_uring Config Section + Feature Detection | Medium | Done | io_uring, config |
 | 016 | Splice Zero-Copy Metrics | Low | Done | observability, io_uring, prometheus |
-| 017 | kTLS Kernel TLS Offload | Medium | Planned | performance, tls, kernel |
-| 018 | Connection Draining Improvements | Medium | Planned | reliability, deployment |
+| 017 | kTLS Kernel TLS Offload | Medium | Partial | performance, tls, kernel |
+| 018 | Connection Draining Improvements | Medium | Done | reliability, deployment |
 | 019 | OCSP Auto-Fetch and Periodic Refresh | High | Done | tls, security, performance |
 | 020 | Duration Parser Bug — "ms" Matched by "s" | Medium | Done | bug, config |
 | 021 | ACME Certificate Automation | Medium | Planned | tls, security, automation |
-| 022 | Upstream Round-Robin and Failover Tests | Medium | Open | testing, reliability |
+| 022 | Upstream Round-Robin and Failover Tests | Medium | Done | testing, reliability |
 
 ## How to pick up an issue
 

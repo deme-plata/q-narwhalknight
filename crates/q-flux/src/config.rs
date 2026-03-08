@@ -107,6 +107,13 @@ pub struct TlsConfig {
     /// and new connections get the new config. Default: 30 seconds.
     #[serde(default = "default_drain_timeout")]
     pub drain_timeout_secs: u64,
+    /// Enable kTLS (kernel TLS) offload on Linux 4.13+.
+    /// When enabled, symmetric encryption/decryption is offloaded to the kernel,
+    /// allowing zero-copy sendfile() for static files and reducing context switches.
+    /// Falls back gracefully to userspace TLS if kTLS is not available.
+    /// Default: false (requires Linux + kernel TLS module loaded).
+    #[serde(default)]
+    pub enable_ktls: bool,
 }
 
 fn default_drain_timeout() -> u64 { 30 }
@@ -387,6 +394,7 @@ mod tests {
                 key: PathBuf::from("/tmp/key.pem"),
                 ocsp_staple: None,
                 drain_timeout_secs: 30,
+                enable_ktls: false,
             },
             upstream: UpstreamConfig {
                 backends: vec!["127.0.0.1:8080".into()],

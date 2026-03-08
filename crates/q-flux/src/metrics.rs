@@ -240,6 +240,10 @@ struct MetricsInner {
     pub splice_connections_active: AtomicU64,
     pub splice_bytes_total: AtomicU64,
     pub splice_fallbacks_total: AtomicU64,
+    // Connection draining (Issue #018)
+    pub drain_active: AtomicU64,
+    pub drain_completed_total: AtomicU64,
+    pub drain_forced_total: AtomicU64,
 }
 
 impl Default for Metrics {
@@ -277,6 +281,9 @@ impl Metrics {
                 splice_connections_active: AtomicU64::new(0),
                 splice_bytes_total: AtomicU64::new(0),
                 splice_fallbacks_total: AtomicU64::new(0),
+                drain_active: AtomicU64::new(0),
+                drain_completed_total: AtomicU64::new(0),
+                drain_forced_total: AtomicU64::new(0),
             }),
         }
     }
@@ -448,6 +455,21 @@ impl Metrics {
         self.inner.splice_fallbacks_total.fetch_add(1, Ordering::Relaxed);
     }
 
+    // Connection draining (Issue #018)
+    pub fn drain_start(&self) {
+        self.inner.drain_active.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn drain_completed(&self) {
+        self.inner.drain_active.fetch_sub(1, Ordering::Relaxed);
+        self.inner.drain_completed_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn drain_forced(&self) {
+        self.inner.drain_active.fetch_sub(1, Ordering::Relaxed);
+        self.inner.drain_forced_total.fetch_add(1, Ordering::Relaxed);
+    }
+
     // Snapshot for logging/reporting
     pub fn snapshot(&self) -> MetricsSnapshot {
         MetricsSnapshot {
@@ -473,6 +495,9 @@ impl Metrics {
             splice_connections_active: self.inner.splice_connections_active.load(Ordering::Relaxed),
             splice_bytes_total: self.inner.splice_bytes_total.load(Ordering::Relaxed),
             splice_fallbacks_total: self.inner.splice_fallbacks_total.load(Ordering::Relaxed),
+            drain_active: self.inner.drain_active.load(Ordering::Relaxed),
+            drain_completed_total: self.inner.drain_completed_total.load(Ordering::Relaxed),
+            drain_forced_total: self.inner.drain_forced_total.load(Ordering::Relaxed),
         }
     }
 }
@@ -502,6 +527,10 @@ pub struct MetricsSnapshot {
     pub splice_connections_active: u64,
     pub splice_bytes_total: u64,
     pub splice_fallbacks_total: u64,
+    // Connection draining (Issue #018)
+    pub drain_active: u64,
+    pub drain_completed_total: u64,
+    pub drain_forced_total: u64,
 }
 
 impl std::fmt::Display for MetricsSnapshot {
@@ -618,5 +647,42 @@ mod tests {
         let prom = hist.prometheus("test_latency");
         assert!(prom.contains("test_latency_bucket"));
         assert!(prom.contains("test_latency_count 3"));
+    }
+
+    #[test]
+    fn test_drain_metrics_start_and_completed() {
+        let m = Metrics::new();
+        assert_eq!(m.snapshot().drain_active, 0);
+        assert_eq!(m.snapshot().drain_completed_total, 0);
+
+        m.drain_start();
+        m.drain_start();
+        assert_eq!(m.snapshot().drain_active, 2);
+
+        m.drain_completed();
+        assert_eq!(m.snapshot().drain_active, 1);
+        assert_eq!(m.snapshot().drain_completed_total, 1);
+
+        m.drain_completed();
+        assert_eq!(m.snapshot().drain_active, 0);
+        assert_eq!(m.snapshot().drain_completed_total, 2);
+    }
+
+    #[test]
+    fn test_drain_metrics_forced() {
+        let m = Metrics::new();
+        m.drain_start();
+        m.drain_start();
+        m.drain_start();
+
+        m.drain_forced();
+        assert_eq!(m.snapshot().drain_active, 2);
+        assert_eq!(m.snapshot().drain_forced_total, 1);
+
+        m.drain_completed();
+        m.drain_forced();
+        assert_eq!(m.snapshot().drain_active, 0);
+        assert_eq!(m.snapshot().drain_completed_total, 1);
+        assert_eq!(m.snapshot().drain_forced_total, 2);
     }
 }

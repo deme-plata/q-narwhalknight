@@ -23,7 +23,7 @@ import {
   Database, TrendingUp, MonitorSmartphone, Timer, DollarSign, Settings, Save,
   Landmark, CreditCard, FileText, Send, Eye, Trash2, BadgeCheck, Banknote,
   ChevronDown, ChevronRight, Copy, Terminal, AlertCircle, Wallet,
-  Key, Cpu, Lock, Fingerprint, Hash, Award
+  Key, Cpu, Lock, Fingerprint, Hash, Award, BarChart3
 } from 'lucide-react';
 import { getConnectionInfo } from '../services/api';
 
@@ -460,6 +460,119 @@ function KMetricsBar({ metrics }: { metrics: NodeKMetrics }) {
   );
 }
 
+// Analytics tab: time-series history for sparkline charts
+interface MetricsSnapshot {
+  ts: number;
+  // q-flux
+  flux_rps: number;
+  flux_err_pct: number;
+  flux_active_conns: number;
+  flux_upstream_active: number;
+  flux_active_ws: number;
+  flux_bytes_rx: number;
+  flux_bytes_tx: number;
+  flux_tls_fail_rate: number;
+  flux_h2_active: number;
+  // caddy
+  caddy_rps: number;
+  caddy_avg_ms: number;
+  caddy_p99_ms: number;
+  caddy_goroutines: number;
+  caddy_memory_mb: number;
+  caddy_err_pct: number;
+  // network
+  network_height: number;
+  total_peers: number;
+}
+
+const MAX_HISTORY = 120; // 120 samples × 15s poll = 30 minutes
+
+/** SVG Sparkline chart — renders a mini area chart from an array of numbers */
+function Sparkline({ data, color, height = 32, width = 160, fill = true, label, format, unit }: {
+  data: number[];
+  color: string;
+  height?: number;
+  width?: number;
+  fill?: boolean;
+  label?: string;
+  format?: (v: number) => string;
+  unit?: string;
+}) {
+  if (data.length < 2) {
+    return (
+      <div style={{ width, height }} className="flex items-center justify-center text-[9px] text-slate-500">
+        Collecting...
+      </div>
+    );
+  }
+
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const range = max - min || 1;
+  const pad = 2;
+  const chartH = height - pad * 2;
+  const chartW = width - pad * 2;
+
+  const points = data.map((v, i) => {
+    const x = pad + (i / (data.length - 1)) * chartW;
+    const y = pad + chartH - ((v - min) / range) * chartH;
+    return `${x},${y}`;
+  });
+
+  const lineStr = points.join(' ');
+  const areaStr = `${pad},${height - pad} ${lineStr} ${pad + chartW},${height - pad}`;
+
+  const current = data[data.length - 1];
+  const avg = data.reduce((a, b) => a + b, 0) / data.length;
+  const fmt = format || ((v: number) => v >= 1000000 ? `${(v / 1000000).toFixed(1)}M` : v >= 1000 ? `${(v / 1000).toFixed(1)}K` : v % 1 === 0 ? String(v) : v.toFixed(1));
+
+  return (
+    <div>
+      <svg width={width} height={height} className="block">
+        {fill && (
+          <polygon points={areaStr} fill={color} opacity={0.12} />
+        )}
+        <polyline points={lineStr} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" />
+        {/* Current value dot */}
+        {data.length > 0 && (() => {
+          const lastX = pad + ((data.length - 1) / (data.length - 1)) * chartW;
+          const lastY = pad + chartH - ((current - min) / range) * chartH;
+          return <circle cx={lastX} cy={lastY} r="2.5" fill={color} />;
+        })()}
+      </svg>
+      <div className="flex items-center justify-between mt-0.5">
+        <span className="text-[8px] text-slate-500">min: {fmt(min)}{unit || ''}</span>
+        <span className="text-[8px] text-slate-400">avg: {fmt(avg)}{unit || ''}</span>
+        <span className="text-[8px] text-slate-500">max: {fmt(max)}{unit || ''}</span>
+      </div>
+    </div>
+  );
+}
+
+/** Analytics metric card with sparkline */
+function AnalyticsCard({ title, value, unit, data, color, tooltip, format }: {
+  title: string;
+  value: string;
+  unit?: string;
+  data: number[];
+  color: string;
+  tooltip?: string;
+  format?: (v: number) => string;
+}) {
+  return (
+    <div className="rounded-lg bg-slate-800/50 border border-slate-700/30 p-3 cursor-help" title={tooltip}>
+      <div className="flex items-center justify-between mb-1">
+        <span className="text-[10px] text-slate-400 uppercase tracking-wider">{title}</span>
+        <div className="flex items-baseline gap-1">
+          <span className="text-lg font-bold" style={{ color }}>{value}</span>
+          {unit && <span className="text-[9px] text-slate-500">{unit}</span>}
+        </div>
+      </div>
+      <Sparkline data={data} color={color} width={200} height={36} format={format} unit={unit ? ` ${unit}` : ''} />
+    </div>
+  );
+}
+
 function formatUptime(secs: number): string {
   if (secs < 60) return `${secs}s`;
   if (secs < 3600) return `${Math.floor(secs / 60)}m ${secs % 60}s`;
@@ -845,9 +958,11 @@ export default function DeployControlPanel() {
   // v8.2.9: Peak height tracking — never show a height decrease (prevents "rollback" scare)
   const peakHeightsRef = useRef<Record<string, number>>({});
   const eventSourceRef = useRef<EventSource | null>(null);
+  const metricsHistoryRef = useRef<MetricsSnapshot[]>([]);
+  const [metricsHistory, setMetricsHistory] = useState<MetricsSnapshot[]>([]);
 
   // Tab state
-  const [activeTab, setActiveTab] = useState<'overview' | 'bank' | 'bridge' | 'settings' | 'bounty' | 'dex' | 'mining'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'analytics' | 'bank' | 'bridge' | 'settings' | 'bounty' | 'dex' | 'mining'>('overview');
 
   // v9.1.4: Mining mode switch state
   const [miningModeStatus, setMiningModeStatus] = useState<{ forced_mode: string; pool_url: string | null } | null>(null);
@@ -1085,7 +1200,9 @@ export default function DeployControlPanel() {
         } catch {}
       }
 
-      // v8.9.9: Fetch nginx stats (admin only)
+      // v8.9.9: Fetch caddy + flux stats (admin only)
+      let latestCaddy: CaddyStatsAll | null = null;
+      let latestFlux: FluxStats | null = null;
       if (isMaster) {
         try {
           const caddyResp = await fetch('/api/v1/admin/caddy/stats', {
@@ -1094,6 +1211,7 @@ export default function DeployControlPanel() {
           if (caddyResp.ok) {
             const caddyJson = await caddyResp.json();
             if (caddyJson.data) {
+              latestCaddy = caddyJson.data;
               setCaddyStats(caddyJson.data);
             }
           }
@@ -1106,10 +1224,51 @@ export default function DeployControlPanel() {
           if (fluxResp.ok) {
             const fluxJson = await fluxResp.json();
             if (fluxJson.data) {
+              latestFlux = fluxJson.data;
               setFluxStats(fluxJson.data);
             }
           }
         } catch {}
+      }
+
+      // v9.2.1: Collect analytics history snapshot (reuse already-fetched data)
+      {
+        const snap: MetricsSnapshot = {
+          ts: Date.now(),
+          flux_rps: 0, flux_err_pct: 0, flux_active_conns: 0, flux_upstream_active: 0,
+          flux_active_ws: 0, flux_bytes_rx: 0, flux_bytes_tx: 0, flux_tls_fail_rate: 0, flux_h2_active: 0,
+          caddy_rps: 0, caddy_avg_ms: 0, caddy_p99_ms: 0, caddy_goroutines: 0, caddy_memory_mb: 0, caddy_err_pct: 0,
+          network_height: 0, total_peers: 0,
+        };
+        if (latestFlux) {
+          const fx = latestFlux;
+          snap.flux_rps = fx.requests_per_second || 0;
+          snap.flux_err_pct = fx.error_rate_pct || 0;
+          snap.flux_active_conns = fx.active_connections || 0;
+          snap.flux_upstream_active = fx.upstream_active || 0;
+          snap.flux_active_ws = fx.active_websockets || 0;
+          snap.flux_bytes_rx = fx.bytes_received || 0;
+          snap.flux_bytes_tx = fx.bytes_sent || 0;
+          const totalTls = (fx.tls_handshakes || 0) + (fx.tls_handshake_failures || 0);
+          snap.flux_tls_fail_rate = totalTls > 0 ? ((fx.tls_handshake_failures || 0) / totalTls) * 100 : 0;
+          snap.flux_h2_active = (fx.h2_streams_opened || 0) - (fx.h2_streams_closed || 0);
+        }
+        const ce = (latestCaddy as any)?.epsilon;
+        if (ce) {
+          snap.caddy_rps = ce.requests_per_second || 0;
+          snap.caddy_avg_ms = ce.avg_response_ms || 0;
+          snap.caddy_p99_ms = ce.p99_response_ms || 0;
+          snap.caddy_goroutines = ce.goroutines || 0;
+          snap.caddy_memory_mb = ce.memory_mb || 0;
+          const tot = (ce.requests_by_status?.ok_2xx || 0) + (ce.requests_by_status?.client_err_4xx || 0) + (ce.requests_by_status?.server_err_5xx || 0);
+          snap.caddy_err_pct = tot > 0 ? ((ce.requests_by_status?.server_err_5xx || 0) / tot) * 100 : 0;
+        }
+
+        const hist = metricsHistoryRef.current;
+        hist.push(snap);
+        if (hist.length > MAX_HISTORY) hist.splice(0, hist.length - MAX_HISTORY);
+        metricsHistoryRef.current = hist;
+        setMetricsHistory([...hist]);
       }
     } catch (e: any) {
       setError(e.message || 'Failed to fetch status');
@@ -1612,7 +1771,7 @@ export default function DeployControlPanel() {
                 <div>
                   <h2 className="text-lg font-bold text-emerald-50">Node Admin</h2>
                   <p className="text-xs text-emerald-300/60">
-                    {activeTab === 'overview' ? 'Deploy Control Panel' : activeTab === 'settings' ? 'Node Settings' : activeTab === 'bridge' ? 'Bridge Pairs' : activeTab === 'bounty' ? 'Bounty Campaign Admin' : activeTab === 'dex' ? 'DEX Analytics' : activeTab === 'mining' ? 'Mining Mode Control' : 'Quillon Bank CLI'}
+                    {activeTab === 'overview' ? 'Deploy Control Panel' : activeTab === 'analytics' ? 'Live Analytics' : activeTab === 'settings' ? 'Node Settings' : activeTab === 'bridge' ? 'Bridge Pairs' : activeTab === 'bounty' ? 'Bounty Campaign Admin' : activeTab === 'dex' ? 'DEX Analytics' : activeTab === 'mining' ? 'Mining Mode Control' : 'Quillon Bank CLI'}
                   </p>
                 </div>
               </div>
@@ -1630,6 +1789,7 @@ export default function DeployControlPanel() {
                 // v8.6.4: Servers tab visible for all logged-in users
                 { id: 'overview' as const, icon: Server, label: 'Servers' },
                 ...(isMasterWallet ? [
+                  { id: 'analytics' as const, icon: BarChart3, label: 'Analytics' },
                   { id: 'bank' as const, icon: Landmark, label: 'Bank CLI' },
                   { id: 'bridge' as const, icon: Globe, label: 'Bridge Pairs' },
                   { id: 'bounty' as const, icon: Award, label: 'Bounty' },
@@ -2776,6 +2936,184 @@ export default function DeployControlPanel() {
                 Rollback
               </motion.button>
               </>)}
+              </>)}
+
+              {/* ═══════════════════════════════════════════════════════════ */}
+              {/* ANALYTICS TAB — Live sparkline charts                      */}
+              {/* ═══════════════════════════════════════════════════════════ */}
+              {activeTab === 'analytics' && (<>
+                {/* Header */}
+                <div className="flex items-center justify-between mb-1">
+                  <div className="flex items-center gap-2">
+                    <BarChart3 className="w-4 h-4 text-cyan-400" />
+                    <span className="text-xs font-bold text-cyan-200/80 uppercase tracking-wider">Live Metrics</span>
+                    <span className="text-[9px] text-slate-500">
+                      {metricsHistory.length} samples ({metricsHistory.length > 0 ? `${Math.round((Date.now() - metricsHistory[0].ts) / 60000)}m window` : 'collecting...'})
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    <span className="text-[9px] text-emerald-300/70">Polling 15s</span>
+                  </div>
+                </div>
+
+                {/* q-flux Section */}
+                <div className="rounded-xl border border-cyan-500/20 bg-cyan-500/5 p-3 space-y-3">
+                  <div className="flex items-center gap-2 mb-1">
+                    <Zap className="w-3.5 h-3.5 text-cyan-400" />
+                    <span className="text-[11px] font-semibold text-cyan-300">q-flux Reverse Proxy</span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-3">
+                    <AnalyticsCard
+                      title="Requests/s"
+                      value={metricsHistory.length > 0 ? (metricsHistory[metricsHistory.length - 1].flux_rps > 0 ? metricsHistory[metricsHistory.length - 1].flux_rps.toFixed(0) : '0') : '-'}
+                      unit="req/s"
+                      data={metricsHistory.map(s => s.flux_rps)}
+                      color="#06b6d4"
+                      tooltip="HTTP requests per second handled by q-flux. Each sample is from the 15-second polling interval."
+                    />
+                    <AnalyticsCard
+                      title="Error Rate"
+                      value={metricsHistory.length > 0 ? metricsHistory[metricsHistory.length - 1].flux_err_pct.toFixed(2) : '-'}
+                      unit="%"
+                      data={metricsHistory.map(s => s.flux_err_pct)}
+                      color={metricsHistory.length > 0 && metricsHistory[metricsHistory.length - 1].flux_err_pct > 1 ? '#ef4444' : '#10b981'}
+                      tooltip="Percentage of responses with 5xx status codes. Green <1%, red >1%."
+                      format={(v: number) => v.toFixed(2)}
+                    />
+                    <AnalyticsCard
+                      title="Active Connections"
+                      value={metricsHistory.length > 0 ? formatNumber(metricsHistory[metricsHistory.length - 1].flux_active_conns) : '-'}
+                      data={metricsHistory.map(s => s.flux_active_conns)}
+                      color="#8b5cf6"
+                      tooltip="Currently open TCP connections. Includes miners, wallets, SSE streams."
+                    />
+                    <AnalyticsCard
+                      title="Upstream Active"
+                      value={metricsHistory.length > 0 ? String(metricsHistory[metricsHistory.length - 1].flux_upstream_active) : '-'}
+                      data={metricsHistory.map(s => s.flux_upstream_active)}
+                      color="#f59e0b"
+                      tooltip="Concurrent requests forwarded to the backend. Global semaphore capped at 1024. If this hits the cap, new requests are rejected (503)."
+                    />
+                    <AnalyticsCard
+                      title="WebSockets"
+                      value={metricsHistory.length > 0 ? String(metricsHistory[metricsHistory.length - 1].flux_active_ws) : '-'}
+                      data={metricsHistory.map(s => s.flux_active_ws)}
+                      color="#a855f7"
+                      tooltip="Active WebSocket connections. Each connected wallet or miner may hold one persistent WS."
+                    />
+                    <AnalyticsCard
+                      title="H2 Streams"
+                      value={metricsHistory.length > 0 ? formatNumber(metricsHistory[metricsHistory.length - 1].flux_h2_active) : '-'}
+                      data={metricsHistory.map(s => s.flux_h2_active)}
+                      color="#10b981"
+                      tooltip="Active HTTP/2 multiplexed streams (opened minus closed)."
+                    />
+                  </div>
+
+                  {/* Bandwidth sparklines (special: show delta bytes/s) */}
+                  {metricsHistory.length >= 2 && (() => {
+                    // Compute bytes/sec deltas between consecutive samples
+                    const rxRate: number[] = [];
+                    const txRate: number[] = [];
+                    for (let i = 1; i < metricsHistory.length; i++) {
+                      const dt = (metricsHistory[i].ts - metricsHistory[i - 1].ts) / 1000;
+                      if (dt > 0) {
+                        rxRate.push(Math.max(0, (metricsHistory[i].flux_bytes_rx - metricsHistory[i - 1].flux_bytes_rx) / dt));
+                        txRate.push(Math.max(0, (metricsHistory[i].flux_bytes_tx - metricsHistory[i - 1].flux_bytes_tx) / dt));
+                      }
+                    }
+                    const fmtBw = (v: number) => v >= 1073741824 ? `${(v / 1073741824).toFixed(1)}GB/s` : v >= 1048576 ? `${(v / 1048576).toFixed(1)}MB/s` : v >= 1024 ? `${(v / 1024).toFixed(1)}KB/s` : `${v.toFixed(0)}B/s`;
+                    const lastRx = rxRate.length > 0 ? rxRate[rxRate.length - 1] : 0;
+                    const lastTx = txRate.length > 0 ? txRate[txRate.length - 1] : 0;
+                    return (
+                      <div className="grid grid-cols-2 gap-3 pt-1 border-t border-cyan-500/10">
+                        <AnalyticsCard
+                          title="Bandwidth RX"
+                          value={fmtBw(lastRx)}
+                          data={rxRate}
+                          color="#3b82f6"
+                          tooltip="Inbound bandwidth (bytes received from clients per second)."
+                          format={fmtBw}
+                        />
+                        <AnalyticsCard
+                          title="Bandwidth TX"
+                          value={fmtBw(lastTx)}
+                          data={txRate}
+                          color="#10b981"
+                          tooltip="Outbound bandwidth (bytes sent to clients per second)."
+                          format={fmtBw}
+                        />
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                {/* Caddy Section */}
+                <div className="rounded-xl border border-blue-500/20 bg-blue-500/5 p-3 space-y-3">
+                  <div className="flex items-center gap-2 mb-1">
+                    <Globe className="w-3.5 h-3.5 text-blue-400" />
+                    <span className="text-[11px] font-semibold text-blue-300">Caddy Reverse Proxy (Epsilon)</span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-3">
+                    <AnalyticsCard
+                      title="Requests/s"
+                      value={metricsHistory.length > 0 ? (metricsHistory[metricsHistory.length - 1].caddy_rps > 0 ? metricsHistory[metricsHistory.length - 1].caddy_rps.toFixed(0) : '0') : '-'}
+                      unit="req/s"
+                      data={metricsHistory.map(s => s.caddy_rps)}
+                      color="#3b82f6"
+                      tooltip="HTTP requests per second through Caddy on Epsilon."
+                    />
+                    <AnalyticsCard
+                      title="Avg Latency"
+                      value={metricsHistory.length > 0 ? (metricsHistory[metricsHistory.length - 1].caddy_avg_ms < 1 ? '<1' : metricsHistory[metricsHistory.length - 1].caddy_avg_ms.toFixed(0)) : '-'}
+                      unit="ms"
+                      data={metricsHistory.map(s => s.caddy_avg_ms)}
+                      color={metricsHistory.length > 0 && metricsHistory[metricsHistory.length - 1].caddy_avg_ms > 100 ? '#f59e0b' : '#10b981'}
+                      tooltip="Average response time in milliseconds. Green <100ms, amber >100ms."
+                      format={(v: number) => v < 1 ? '<1' : v.toFixed(0)}
+                    />
+                    <AnalyticsCard
+                      title="p99 Latency"
+                      value={metricsHistory.length > 0 ? (metricsHistory[metricsHistory.length - 1].caddy_p99_ms >= 1000 ? `${(metricsHistory[metricsHistory.length - 1].caddy_p99_ms / 1000).toFixed(1)}s` : metricsHistory[metricsHistory.length - 1].caddy_p99_ms.toFixed(0)) : '-'}
+                      unit="ms"
+                      data={metricsHistory.map(s => s.caddy_p99_ms)}
+                      color={metricsHistory.length > 0 && metricsHistory[metricsHistory.length - 1].caddy_p99_ms > 500 ? '#ef4444' : '#10b981'}
+                      tooltip="99th percentile response time. The slowest 1% of requests."
+                      format={(v: number) => v >= 1000 ? `${(v / 1000).toFixed(1)}s` : v.toFixed(0)}
+                    />
+                    <AnalyticsCard
+                      title="Error Rate"
+                      value={metricsHistory.length > 0 ? metricsHistory[metricsHistory.length - 1].caddy_err_pct.toFixed(2) : '-'}
+                      unit="%"
+                      data={metricsHistory.map(s => s.caddy_err_pct)}
+                      color={metricsHistory.length > 0 && metricsHistory[metricsHistory.length - 1].caddy_err_pct > 1 ? '#ef4444' : '#10b981'}
+                      tooltip="Caddy 5xx error rate."
+                      format={(v: number) => v.toFixed(2)}
+                    />
+                    <AnalyticsCard
+                      title="Goroutines"
+                      value={metricsHistory.length > 0 ? (metricsHistory[metricsHistory.length - 1].caddy_goroutines > 1000 ? `${(metricsHistory[metricsHistory.length - 1].caddy_goroutines / 1000).toFixed(1)}K` : String(metricsHistory[metricsHistory.length - 1].caddy_goroutines)) : '-'}
+                      data={metricsHistory.map(s => s.caddy_goroutines)}
+                      color="#6366f1"
+                      tooltip="Caddy goroutines (concurrent tasks). Rising steadily = possible connection leak."
+                    />
+                    <AnalyticsCard
+                      title="Heap Memory"
+                      value={metricsHistory.length > 0 ? `${metricsHistory[metricsHistory.length - 1].caddy_memory_mb.toFixed(0)}` : '-'}
+                      unit="MB"
+                      data={metricsHistory.map(s => s.caddy_memory_mb)}
+                      color="#f97316"
+                      tooltip="Caddy Go runtime heap memory usage."
+                      format={(v: number) => v.toFixed(0)}
+                    />
+                  </div>
+                </div>
+
+                {/* Info footer */}
+                <div className="text-[9px] text-slate-500 text-center">
+                  Charts show rolling {MAX_HISTORY}-sample window (up to {Math.round(MAX_HISTORY * 15 / 60)} minutes at 15s intervals). Data is in-memory only and resets on page reload.
+                </div>
               </>)}
 
               {/* ═══════════════════════════════════════════════════════════ */}

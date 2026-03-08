@@ -1,6 +1,6 @@
 # Issue #017: kTLS Kernel TLS Offload
 
-**Status**: Planned
+**Status**: Partial (config + detection done, key extraction pending rustls API)
 **Priority**: Medium
 **Component**: q-flux
 **Labels**: performance, tls, kernel

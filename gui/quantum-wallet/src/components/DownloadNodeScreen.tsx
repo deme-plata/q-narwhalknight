@@ -18,7 +18,7 @@ export default function DownloadNodeScreen() {
         </p>
         <div className="inline-flex items-center gap-2 px-4 py-2 bg-quantum-cyan/20 border border-quantum-cyan/50 rounded-full">
           <span className="w-2 h-2 bg-quantum-cyan rounded-full animate-pulse"></span>
-          <span className="text-sm font-bold text-quantum-cyan">v9.1.6 • Post-Quantum + DAG-Knight + DeFi Stack</span>
+          <span className="text-sm font-bold text-quantum-cyan">v9.2.6 • Post-Quantum + DAG-Knight + DeFi Stack</span>
         </div>
       </motion.div>
 
@@ -135,12 +135,12 @@ export default function DownloadNodeScreen() {
 
           <div className="space-y-3">
             <a
-              href="https://quillon.xyz/downloads/q-api-server-v9.1.6"
+              href="https://quillon.xyz/downloads/q-api-server-v9.2.6"
               download="q-api-server"
               className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-quantum-cyan to-quantum-purple rounded-xl font-bold text-white hover:shadow-lg hover:shadow-quantum-cyan/50 transition-all"
             >
               <Download className="w-5 h-5" />
-              Download Linux Binary (v9.1.6)
+              Download Linux Binary (v9.2.6)
             </a>
             <p className="text-center text-sm text-gray-200">
               Size: ~83 MB | Bitcoin-Style 21M Emission + P2P Gossipsub + DeFi Stack
@@ -151,9 +151,9 @@ export default function DownloadNodeScreen() {
           <div className="mt-6 p-4 bg-quantum-dark/50 rounded-xl border border-quantum-purple/20">
             <p className="text-sm font-mono text-gray-100 mb-2">Quick Start:</p>
             <pre className="text-xs text-quantum-cyan overflow-x-auto">
-{`wget https://quillon.xyz/downloads/q-api-server-v9.1.6
-chmod +x q-api-server-v9.1.6
-./q-api-server-v9.1.6 --port 8080 --tui --admin-wallet YOUR_WALLET_ADDRESS`}
+{`wget https://quillon.xyz/downloads/q-api-server-v9.2.6
+chmod +x q-api-server-v9.2.6
+./q-api-server-v9.2.6 --port 8080 --tui --admin-wallet YOUR_WALLET_ADDRESS`}
             </pre>
             <p className="text-xs text-quantum-green mt-2">
               WarpSync auto-discovers peers & syncs 900K+ blocks in minutes
@@ -212,12 +212,12 @@ chmod +x q-api-server-v9.1.6
 
           <div className="space-y-3">
             <a
-              href="https://quillon.xyz/downloads/q-api-server-v9.1.6-linux-arm64"
+              href="https://quillon.xyz/downloads/q-api-server-v9.2.6-linux-arm64"
               download="q-api-server-arm64"
               className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-emerald-500 to-quantum-green rounded-xl font-bold text-white hover:shadow-lg hover:shadow-emerald-500/50 transition-all"
             >
               <Download className="w-5 h-5" />
-              Download ARM64 Binary (v9.1.6)
+              Download ARM64 Binary (v9.2.6)
             </a>
             <p className="text-center text-sm text-gray-200">
               Size: ~75 MB | aarch64-unknown-linux-gnu
@@ -227,9 +227,9 @@ chmod +x q-api-server-v9.1.6
           <div className="mt-6 p-4 bg-quantum-dark/50 rounded-xl border border-emerald-500/20">
             <p className="text-sm font-mono text-gray-100 mb-2">Quick Start (ARM64):</p>
             <pre className="text-xs text-emerald-400 overflow-x-auto">
-{`wget https://quillon.xyz/downloads/q-api-server-v9.1.6-linux-arm64
-chmod +x q-api-server-v9.1.6-linux-arm64
-./q-api-server-v9.1.6-linux-arm64 --port 8080 --tui --admin-wallet YOUR_WALLET_ADDRESS`}
+{`wget https://quillon.xyz/downloads/q-api-server-v9.2.6-linux-arm64
+chmod +x q-api-server-v9.2.6-linux-arm64
+./q-api-server-v9.2.6-linux-arm64 --port 8080 --tui --admin-wallet YOUR_WALLET_ADDRESS`}
             </pre>
             <p className="text-xs text-gray-300 mt-2">
               Tested on: Raspberry Pi 4/5, AWS Graviton, Oracle Ampere, Apple M1/M2 (Linux VM)
@@ -280,12 +280,12 @@ chmod +x q-api-server-v9.1.6-linux-arm64
 
           <div className="space-y-3">
             <a
-              href="https://quillon.xyz/downloads/q-api-server-v9.1.6-windows-x64.exe"
-              download="q-api-server-v9.1.6-windows-x64.exe"
+              href="https://quillon.xyz/downloads/q-api-server-v9.2.6-windows-x64.exe"
+              download="q-api-server-v9.2.6-windows-x64.exe"
               className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-quantum-purple to-quantum-pink rounded-xl font-bold text-white hover:shadow-lg hover:shadow-quantum-purple/50 transition-all"
             >
               <Download className="w-5 h-5" />
-              Download Windows Node (v9.1.6)
+              Download Windows Node (v9.2.6)
             </a>
             <p className="text-center text-sm text-gray-200">
               Size: ~70 MB | Single EXE — Full Node + TUI + DeFi Stack
@@ -297,7 +297,7 @@ chmod +x q-api-server-v9.1.6-linux-arm64
             <p className="text-sm font-mono text-gray-100 mb-2">Quick Start (PowerShell):</p>
             <pre className="text-xs text-quantum-purple overflow-x-auto">
 {`# Download from browser or PowerShell:
-Invoke-WebRequest -Uri https://quillon.xyz/downloads/q-api-server-v9.1.6-windows-x64.exe -OutFile q-api-server.exe
+Invoke-WebRequest -Uri https://quillon.xyz/downloads/q-api-server-v9.2.6-windows-x64.exe -OutFile q-api-server.exe
 .\\q-api-server.exe --port 8080 --tui --admin-wallet YOUR_WALLET_ADDRESS`}
             </pre>
             <p className="text-xs text-gray-100 mt-2">
@@ -397,15 +397,15 @@ Invoke-WebRequest -Uri https://quillon.xyz/downloads/q-api-server-v9.1.6-windows
                 className="w-full flex items-center justify-center gap-3 px-6 py-3 bg-gradient-to-r from-purple-600 to-blue-600 rounded-xl font-bold text-purple-100 hover:shadow-lg hover:shadow-purple-500/50 transition-all"
               >
                 <Download className="w-5 h-5" />
-                Download Miner — Windows x64 (v9.1.6)
+                Download Miner — Windows x64 (v9.2.6)
               </a>
-              <p className="text-center text-xs text-orange-200">v9.1.6 — OAuth2 zero-config login, TUI wallet QR code, Tor by default, improved networking</p>
+              <p className="text-center text-xs text-orange-200">v9.2.6 — OAuth2 zero-config login, TUI wallet QR code, Tor by default, improved networking</p>
 
               {/* Universal wget download */}
               <div className="p-4 rounded-xl border border-amber-600" style={{ backgroundColor: '#0d0a00' }}>
                 <p className="text-sm font-mono text-amber-200 font-bold mb-2">Quick Download (wget):</p>
                 <pre className="text-xs text-amber-300 overflow-x-auto whitespace-pre-wrap select-all cursor-pointer p-2 rounded" style={{ backgroundColor: '#000000' }}>
-{`wget https://quillon.xyz/downloads/q-miner-v9.1.6 && chmod +x q-miner-v9.1.6`}
+{`wget https://quillon.xyz/downloads/q-miner-v9.2.6 && chmod +x q-miner-v9.2.6`}
                 </pre>
               </div>
 

@@ -17,7 +17,7 @@ use crate::h2_proxy;
 use crate::health::HealthMap;
 use crate::libp2p_aware::{BandwidthLimiter, PeerTracker};
 use crate::metrics::{Metrics, RateLimiter};
-use crate::proxy;
+use crate::proxy::{self, DrainReceiver};
 use crate::upstream::UpstreamPool;
 use crate::acceptor;
 
@@ -56,6 +56,7 @@ pub fn spawn_workers(
     access_logger: Option<AccessLogger>,
     rate_limiter: Option<Arc<RateLimiter>>,
     peer_tracker: Arc<PeerTracker>,
+    drain_rx: DrainReceiver,
 ) -> Vec<std::thread::JoinHandle<()>> {
     let worker_count = config.worker_count();
     let ip_tracker: IpConnTracker = Arc::new(DashMap::new());
@@ -99,6 +100,7 @@ pub fn spawn_workers(
         let rate_limiter = rate_limiter.clone();
         let peer_tracker = peer_tracker.clone();
         let global_sem = global_upstream_semaphore.clone();
+        let drain_rx = drain_rx.clone();
 
         let handle = std::thread::Builder::new()
             .name(format!("q-flux-w{}", worker_id))
@@ -115,6 +117,7 @@ pub fn spawn_workers(
                         worker_id, &config, shared_tls, metrics, ip_tracker,
                         active_conns, shutdown_rx, shutdown_flag, health_map,
                         access_logger, rate_limiter, peer_tracker, global_sem,
+                        drain_rx,
                     ).await;
                 });
             })
@@ -155,6 +158,7 @@ async fn worker_loop(
     rate_limiter: Option<Arc<RateLimiter>>,
     peer_tracker: Arc<PeerTracker>,
     global_upstream_semaphore: Option<Arc<Semaphore>>,
+    drain_rx: DrainReceiver,
 ) {
     // Backpressure: limit concurrent connection handlers to prevent OOM.
     // If all permits taken, accept() still runs but spawn waits for a permit.
@@ -364,6 +368,7 @@ async fn worker_loop(
         let semaphore = handler_semaphore.clone();
         let static_config = static_config.clone();
         let access_logger = access_logger.clone();
+        let drain_rx = drain_rx.clone();
 
         tokio::spawn(async move {
             // Acquire semaphore permit — backpressure if too many concurrent handlers.
@@ -416,6 +421,7 @@ async fn worker_loop(
                                         tls_stream, client_addr, &upstream, &metrics,
                                         body_limit, &static_config, logger,
                                         &peer_tracker, &bandwidth_limiter,
+                                        drain_rx.clone(),
                                     ).await;
                                 }
                                 None => {
@@ -423,6 +429,7 @@ async fn worker_loop(
                                         tls_stream, client_addr, &upstream, &metrics,
                                         body_limit, &static_config,
                                         &peer_tracker, &bandwidth_limiter,
+                                        drain_rx.clone(),
                                     ).await;
                                 }
                             }

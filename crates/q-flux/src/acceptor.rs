@@ -246,3 +246,137 @@ pub fn into_tokio_listener(socket: socket2::Socket) -> Result<tokio::net::TcpLis
     let listener = tokio::net::TcpListener::from_std(std_listener)?;
     Ok(listener)
 }
+
+// ─── kTLS Kernel TLS Offload (Issue #017) ────────────────────────────────
+
+/// kTLS feature detection result.
+#[derive(Debug, Clone, Copy)]
+pub struct KtlsFeatures {
+    /// Whether the kernel supports kTLS (SOL_TLS exists).
+    pub available: bool,
+    /// Whether TLS_TX (transmit offload) is supported.
+    pub tx_offload: bool,
+    /// Whether TLS_RX (receive offload) is supported.
+    pub rx_offload: bool,
+}
+
+impl Default for KtlsFeatures {
+    fn default() -> Self {
+        Self { available: false, tx_offload: false, rx_offload: false }
+    }
+}
+
+impl std::fmt::Display for KtlsFeatures {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.available {
+            write!(f, "kTLS available (TX: {}, RX: {})",
+                if self.tx_offload { "yes" } else { "no" },
+                if self.rx_offload { "yes" } else { "no" })
+        } else {
+            write!(f, "kTLS not available")
+        }
+    }
+}
+
+/// Probe the kernel for kTLS support.
+///
+/// Creates a temporary TCP socket and attempts `setsockopt(SOL_TLS, TLS_TX)`.
+/// This is a non-destructive check — the socket is immediately dropped.
+///
+/// On non-Linux platforms, always returns `KtlsFeatures::default()` (not available).
+pub fn probe_ktls() -> KtlsFeatures {
+    #[cfg(target_os = "linux")]
+    {
+        // SOL_TLS = 282, TLS_TX = 1, TLS_RX = 2 (from linux/tls.h)
+        const SOL_TLS: libc::c_int = 282;
+        const TLS_TX: libc::c_int = 1;
+        const TLS_RX: libc::c_int = 2;
+
+        // Check if kTLS module is loaded by attempting setsockopt on a dummy socket.
+        // If SOL_TLS doesn't exist (kernel < 4.13 or tls module not loaded),
+        // setsockopt returns ENOPROTOOPT.
+        let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+        if sock < 0 {
+            return KtlsFeatures::default();
+        }
+
+        // Try to set SOL_TLS level — just check if the protocol level exists.
+        // We pass a minimal struct that will fail validation, but the error code
+        // tells us if SOL_TLS is available:
+        // - ENOPROTOOPT = kTLS not available
+        // - EINVAL = kTLS available but bad params (this is what we want)
+        // - ENOENT = kTLS available but TLS not established
+        let dummy: [u8; 1] = [0];
+        let tx_result = unsafe {
+            libc::setsockopt(
+                sock, SOL_TLS, TLS_TX,
+                dummy.as_ptr() as *const libc::c_void, 1,
+            )
+        };
+        let tx_errno = if tx_result < 0 {
+            std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+        } else {
+            0
+        };
+
+        let rx_result = unsafe {
+            libc::setsockopt(
+                sock, SOL_TLS, TLS_RX,
+                dummy.as_ptr() as *const libc::c_void, 1,
+            )
+        };
+        let rx_errno = if rx_result < 0 {
+            std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+        } else {
+            0
+        };
+
+        unsafe { libc::close(sock); }
+
+        // ENOPROTOOPT (92) means SOL_TLS doesn't exist (kTLS not available).
+        // Any other error (EINVAL, ENOENT) means kTLS IS available.
+        let available = tx_errno != libc::ENOPROTOOPT;
+        KtlsFeatures {
+            available,
+            tx_offload: available && tx_errno != libc::ENOPROTOOPT,
+            rx_offload: available && rx_errno != libc::ENOPROTOOPT,
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        KtlsFeatures::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ktls_probe_returns_valid_features() {
+        let features = probe_ktls();
+        // Just verify it doesn't panic and returns a valid struct
+        let desc = format!("{}", features);
+        assert!(!desc.is_empty());
+        // If TX is available, kTLS must be available
+        if features.tx_offload {
+            assert!(features.available);
+        }
+        if features.rx_offload {
+            assert!(features.available);
+        }
+    }
+
+    #[test]
+    fn test_ktls_features_display_not_available() {
+        let f = KtlsFeatures::default();
+        assert_eq!(format!("{}", f), "kTLS not available");
+    }
+
+    #[test]
+    fn test_ktls_features_display_available() {
+        let f = KtlsFeatures { available: true, tx_offload: true, rx_offload: false };
+        assert_eq!(format!("{}", f), "kTLS available (TX: yes, RX: no)");
+    }
+}

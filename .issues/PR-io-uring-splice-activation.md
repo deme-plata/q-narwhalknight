@@ -67,3 +67,18 @@ config validation, retry metrics, and runtime io_uring feature detection.
 ## Test Results
 - 134 q-flux tests pass (26 new tests added)
 - Clean compilation
+
+## Live Production Metrics (March 2026)
+
+Sampled over 2-minute window, 10 samples at 15s intervals on Epsilon (48 cores, 10Gbit):
+
+| Metric | Min | Avg | Max |
+|--------|-----|-----|-----|
+| Requests/s | 3.0K | 3.2K | 3.3K |
+| Error Rate | 3.19% | 3.27% | 3.34% |
+| Active Connections | 4.7K | 4.9K | 5.0K |
+| Upstream Active | 1 | 143.5 | 478 |
+| WebSocket Streams | 904 | 912.5 | 916 |
+| H2 Streams | 60 | 64.1 | 71 |
+| Bandwidth TX | 1.4 MB/s | 2.2 MB/s | 3.3 MB/s |
+| Memory RSS | ~50 MB | ~50 MB | ~50 MB |

@@ -16,6 +16,11 @@ use crate::simd_parse;
 use crate::static_serve;
 use crate::upstream::UpstreamPool;
 
+/// Drain signal receiver. When the sender sets `true`, long-lived connections
+/// (SSE, WebSocket) should initiate graceful close. Uses tokio::sync::watch
+/// so each connection can independently observe the drain transition.
+pub type DrainReceiver = tokio::sync::watch::Receiver<bool>;
+
 // SpliceChannel will be used when plain TCP listeners are added.
 // For now, try_splice_bidirectional detects TLS and falls back.
 #[cfg(target_os = "linux")]
@@ -39,6 +44,7 @@ fn generate_request_id() -> String {
 }
 
 /// Handle a single HTTP connection (potentially multiple requests via keepalive).
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_connection<S>(
     stream: S,
     client_addr: SocketAddr,
@@ -48,10 +54,11 @@ pub async fn handle_connection<S>(
     static_config: &StaticConfig,
     peer_tracker: &Arc<PeerTracker>,
     bandwidth_limiter: &Arc<BandwidthLimiter>,
+    drain_rx: DrainReceiver,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    handle_connection_inner(stream, client_addr, upstream, metrics, body_limit, static_config, None, peer_tracker, bandwidth_limiter).await;
+    handle_connection_inner(stream, client_addr, upstream, metrics, body_limit, static_config, None, peer_tracker, bandwidth_limiter, drain_rx).await;
 }
 
 /// Handle a single HTTP connection with optional access logging.
@@ -66,10 +73,11 @@ pub async fn handle_connection_logged<S>(
     access_logger: &AccessLogger,
     peer_tracker: &Arc<PeerTracker>,
     bandwidth_limiter: &Arc<BandwidthLimiter>,
+    drain_rx: DrainReceiver,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    handle_connection_inner(stream, client_addr, upstream, metrics, body_limit, static_config, Some(access_logger), peer_tracker, bandwidth_limiter).await;
+    handle_connection_inner(stream, client_addr, upstream, metrics, body_limit, static_config, Some(access_logger), peer_tracker, bandwidth_limiter, drain_rx).await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -83,6 +91,7 @@ async fn handle_connection_inner<S>(
     access_logger: Option<&AccessLogger>,
     peer_tracker: &Arc<PeerTracker>,
     bandwidth_limiter: &Arc<BandwidthLimiter>,
+    drain_rx: DrainReceiver,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -168,7 +177,7 @@ async fn handle_connection_inner<S>(
                 .unwrap_or(false);
 
         if is_upgrade {
-            handle_websocket_upgrade(stream, header_end, &buf[..buf_len], client_addr, upstream, metrics, peer_tracker, bandwidth_limiter).await;
+            handle_websocket_upgrade(stream, header_end, &buf[..buf_len], client_addr, upstream, metrics, peer_tracker, bandwidth_limiter, drain_rx.clone()).await;
             let latency = req_start.elapsed();
             metrics.record_latency(latency);
             log_access(access_logger, client_addr, req_method, &req_path, 101, 0, 0, latency, user_agent.as_deref(), None, Some(request_id.as_str()));
@@ -180,7 +189,7 @@ async fn handle_connection_inner<S>(
         // forcing new TCP connections for every subsequent request. Under high load
         // this creates a death spiral: all semaphore permits consumed, all requests fail.
         if is_sse_path(&req_path) {
-            handle_sse_direct(stream, &req, client_addr, upstream, metrics, &request_id).await;
+            handle_sse_direct(stream, &req, client_addr, upstream, metrics, &request_id, drain_rx.clone()).await;
             let latency = req_start.elapsed();
             metrics.record_latency(latency);
             log_access(access_logger, client_addr, req_method, &req_path, 200, 0, 0, latency, user_agent.as_deref(), None, Some(request_id.as_str()));
@@ -680,6 +689,7 @@ async fn handle_websocket_upgrade<S>(
     metrics: &Metrics,
     peer_tracker: &Arc<PeerTracker>,
     bandwidth_limiter: &Arc<BandwidthLimiter>,
+    mut drain_rx: DrainReceiver,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -783,12 +793,20 @@ async fn handle_websocket_upgrade<S>(
             false, // upstream-to-client = tx
         );
 
+        // Issue #018: drain signal — when drain fires, close the WS gracefully.
+        metrics.drain_start();
         tokio::select! {
             r = c2u => {
                 if let Ok(n) = r { metrics.bytes_rx(n); }
+                metrics.drain_completed();
             }
             r = u2c => {
                 if let Ok(n) = r { metrics.bytes_tx(n); }
+                metrics.drain_completed();
+            }
+            _ = drain_rx.changed() => {
+                tracing::debug!(client = %client_addr, "WebSocket drain signal — closing connection");
+                metrics.drain_forced();
             }
         }
     }
@@ -904,6 +922,7 @@ async fn handle_sse_direct<S>(
     upstream: &UpstreamPool,
     metrics: &Metrics,
     request_id: &str,
+    mut drain_rx: DrainReceiver,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -964,12 +983,20 @@ async fn handle_sse_direct<S>(
         let u2c = tokio::io::copy(&mut upstream_read, &mut client_write);
         let c2u = tokio::io::copy(&mut client_read, &mut upstream_write);
 
+        // Issue #018: drain signal — when drain fires, close the SSE stream.
+        metrics.drain_start();
         tokio::select! {
             r = u2c => {
                 if let Ok(n) = r { metrics.bytes_tx(n); }
+                metrics.drain_completed();
             }
             r = c2u => {
                 if let Ok(n) = r { metrics.bytes_rx(n); }
+                metrics.drain_completed();
+            }
+            _ = drain_rx.changed() => {
+                tracing::debug!(client = %client_addr, "SSE drain signal — closing stream");
+                metrics.drain_forced();
             }
         }
     }
