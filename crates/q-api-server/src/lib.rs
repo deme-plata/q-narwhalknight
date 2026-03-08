@@ -318,6 +318,8 @@ pub mod parallel_workers; // 16x parallel worker pool for high TPS // 🔓 v0.9.
 pub mod transaction_utils; // ✅ v1.0.91-beta: Proper transaction handling with nonce management
 pub mod contracts_api; // ✅ v2.4.8-beta - Smart contract deployment and social media profiles (AFTER transaction_utils!)
 pub mod listing_api; // ✅ v6.5.0: Exchange Listing RWA packages (Gold/Silver/Bronze)
+pub mod game_items_api; // ✅ v9.3.0: CS:GO2-style game items RWA (cases, skins, trade-up)
+pub mod k_parameter_gauge; // ✅ v9.3.1: Lightweight K-parameter network health gauge (no q-resonance dep)
 pub mod bitcoin_bridge_api; // ✅ v7.2.0: Bitcoin atomic swap bridge (QNK ↔ BTC)
 pub mod zcash_bridge_api; // ✅ v7.2.2: Zcash shielded atomic swap bridge (QNK ↔ ZEC)
 pub mod ironfish_bridge_api; // ✅ v7.2.4: Iron Fish privacy atomic swap bridge (QNK ↔ IRON)
@@ -1213,6 +1215,9 @@ pub struct AppState {
 
     // PHASE 3: DAG-Knight Consensus - Byzantine Fault-Tolerant Block Ordering
     pub consensus: Arc<RwLock<DAGKnightConsensus>>,
+
+    // v9.3.1: Lightweight K-parameter network health gauge (always-on, no q-resonance dep)
+    pub k_parameter_state: Arc<k_parameter_gauge::KParameterState>,
 
     // Quillon Resonance Consensus - K-Parameter Phase Analysis
     #[cfg(feature = "resonance")]
@@ -2780,6 +2785,9 @@ impl AppState {
                 Arc::new(RwLock::new(consensus))
             },
 
+            // v9.3.1: K-parameter network health gauge (always-on)
+            k_parameter_state: Arc::new(k_parameter_gauge::KParameterState::default()),
+
             // Quillon Resonance - Will be initialized in main.rs
             k_parameter_analyzer: None,
             resonance_coordinator: None,
@@ -4214,6 +4222,9 @@ impl AppState {
 
                 Arc::new(RwLock::new(consensus))
             },
+
+            // v9.3.1: K-parameter network health gauge (always-on)
+            k_parameter_state: Arc::new(k_parameter_gauge::KParameterState::default()),
 
             // Quillon Resonance - Will be initialized in main.rs
             k_parameter_analyzer: None,

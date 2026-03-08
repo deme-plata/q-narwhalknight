@@ -243,6 +243,9 @@ pub struct SharedMinerState {
     pub api_requests_total: Arc<AtomicU64>,   // total API calls made
     pub api_requests_failed: Arc<AtomicU64>,  // failed API calls
 
+    // v9.2.6: "Mercedes" balance smoothing — SSE freshness timestamp (epoch secs)
+    pub last_balance_sse_epoch: Arc<AtomicU64>,
+
     // Config strings (read-only after init)
     pub server_url: String,
     pub wallet_address: String,
@@ -318,6 +321,7 @@ impl SharedMinerState {
             mining_mode,
             num_threads,
             proxy_url,
+            last_balance_sse_epoch: Arc::new(AtomicU64::new(0)),
             mode_switch_signal: Arc::new(AtomicU8::new(0)),
             mode_switch_pool_url: Arc::new(parking_lot::RwLock::new(None)),
             p2p_connected: Arc::new(AtomicBool::new(false)),

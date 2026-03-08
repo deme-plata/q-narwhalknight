@@ -4,7 +4,8 @@ import {
   Building, TrendingUp, Landmark, Gem, Leaf, Palette, FileText, Package,
   Search, Grid3X3, List, Shield, ChevronRight, ExternalLink, X,
   ArrowUpRight, Clock, DollarSign, BarChart3, Loader2, ShoppingCart,
-  CheckCircle2, AlertCircle, Filter, SortDesc, Briefcase, Star, Users
+  CheckCircle2, AlertCircle, Filter, SortDesc, Briefcase, Star, Users,
+  Crosshair
 } from 'lucide-react';
 import XListCrowdfundModal from './XListCrowdfundModal';
 
@@ -64,6 +65,7 @@ const CATEGORY_MAP: Record<string, { label: string; icon: typeof Building; apiKe
   ip_revenue:      { label: 'IP & Royalties',     icon: FileText,   apiKey: 'ip_revenue' },
   physical_goods:      { label: 'Physical Goods',     icon: Package,    apiKey: 'physical_goods' },
   exchange_listing:    { label: 'Exchange Listings',  icon: Star,       apiKey: 'exchange_listing' },
+  game_items:          { label: 'Game Items',         icon: Crosshair,  apiKey: 'game_items' },
 };
 
 const SORT_OPTIONS: { value: string; label: string }[] = [

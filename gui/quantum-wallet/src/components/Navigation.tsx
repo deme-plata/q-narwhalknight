@@ -1,7 +1,7 @@
 import { motion } from 'framer-motion';
-import { Home, Send, Settings, Activity, Search, ArrowDownUp, Pickaxe, Boxes, Download, MessageSquare, Building, Mail, BarChart3 } from 'lucide-react';
+import { Home, Send, Settings, Activity, Search, ArrowDownUp, Pickaxe, Boxes, Download, MessageSquare, Building, Mail, BarChart3, Crosshair } from 'lucide-react';
 
-type Screen = 'dashboard' | 'transactions' | 'explorer' | 'dex' | 'mining' | 'vm' | 'rwamarket' | 'download' | 'aichat' | 'email' | 'analytics' | 'settings';
+type Screen = 'dashboard' | 'transactions' | 'explorer' | 'dex' | 'mining' | 'vm' | 'rwamarket' | 'gameitems' | 'download' | 'aichat' | 'email' | 'analytics' | 'settings';
 
 interface NavigationProps {
   currentScreen: Screen;
@@ -18,6 +18,7 @@ export default function Navigation({ currentScreen, onNavigate, className }: Nav
     { id: 'mining' as Screen, icon: Pickaxe, label: 'Mining' },
     { id: 'vm' as Screen, icon: Boxes, label: 'QVM' },
     { id: 'rwamarket' as Screen, icon: Building, label: 'RWA' },
+    { id: 'gameitems' as Screen, icon: Crosshair, label: 'Game Items' },
     { id: 'aichat' as Screen, icon: MessageSquare, label: 'AI Chat' },
     { id: 'email' as Screen, icon: Mail, label: 'Mail' },
     { id: 'analytics' as Screen, icon: BarChart3, label: 'Analytics' },

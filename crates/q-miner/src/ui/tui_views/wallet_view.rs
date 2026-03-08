@@ -180,8 +180,8 @@ fn draw_balance_view(f: &mut Frame, area: Rect, app: &MinerTuiApp, wallet_addr: 
         ])
         .split(area);
 
-    // Balance
-    let balance = app.wallet_balance;
+    // Balance — use smoothly interpolated display value ("Mercedes" feel)
+    let balance = app.wallet_balance_display;
     let balance_str = format!("{:.8}", balance);
     let balance_lines = vec![
         Line::from(""),

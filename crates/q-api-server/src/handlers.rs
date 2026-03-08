@@ -9109,8 +9109,10 @@ pub async fn get_mining_challenge(
         block_height
     );
 
-    // VDF iterations
-    let vdf_iterations = (100 + (block_height / 1000) * 10) as u32;
+    // VDF iterations — v9.3.1: scaled by K-parameter gauge VDF multiplier
+    let base_vdf_iterations = (100 + (block_height / 1000) * 10) as u32;
+    let vdf_multiplier_bps = state.k_parameter_state.tuned_vdf_multiplier_bps.load(std::sync::atomic::Ordering::Relaxed);
+    let vdf_iterations = ((base_vdf_iterations as u64 * vdf_multiplier_bps) / 10_000) as u32;
 
     // Block reward
     let current_timestamp = chrono::Utc::now().timestamp() as u64;
@@ -9118,8 +9120,9 @@ pub async fn get_mining_challenge(
         calculate_block_reward_time_based(active_genesis_timestamp(), current_timestamp);
     let block_reward = block_reward_base_units as f64 / QUG_DISPLAY_DIVISOR;
 
-    // Challenge expires in 120 seconds (increased from 60 for stability)
-    let expires_at = issued_at + chrono::Duration::seconds(120);
+    // Challenge expiry — v9.3.1: tuned by K-parameter gauge
+    let challenge_expiry_secs = state.k_parameter_state.tuned_challenge_expiry_secs.load(std::sync::atomic::Ordering::Relaxed) as i64;
+    let expires_at = issued_at + chrono::Duration::seconds(challenge_expiry_secs);
 
     // 🔧 v1.0.4-beta: Cache the challenge
     let cached_challenge = crate::CachedChallenge {
@@ -9418,6 +9421,17 @@ pub async fn k_parameter_metrics(
     let _ = &state;
     Ok(Json(ApiResponse::error(
         "K-Parameter analyzer not initialized".to_string(),
+    )))
+}
+
+/// v9.3.1: K-parameter gauge endpoint — lightweight, always-on network health metric
+/// Returns current K value, phase, and dynamically tuned parameters
+pub async fn get_k_parameter(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<Value>>, StatusCode> {
+    let snapshot = state.k_parameter_state.snapshot();
+    Ok(Json(ApiResponse::success(
+        serde_json::to_value(snapshot).unwrap_or_default(),
     )))
 }
 

@@ -197,8 +197,10 @@ pub struct MinerTuiApp {
     pub log_filter: usize,         // 0=All, 1=Info+, 2=Warn+, 3=Error
     pub log_scroll_offset: usize,  // 0=auto-scroll (latest), >0=manual scroll
 
-    // Wallet tab state
-    pub wallet_balance: f64,
+    // Wallet tab state — "Mercedes" smooth balance display
+    pub wallet_balance: f64,        // target balance (latest confirmed value)
+    pub wallet_balance_display: f64, // smoothly interpolated display value
+    pub last_balance_sse: Instant,   // when SSE last pushed a balance update
     pub wallet_send_mode: bool,       // true = showing send form
     pub wallet_send_address: String,  // recipient address being typed
     pub wallet_send_amount: String,   // amount being typed
@@ -255,6 +257,8 @@ impl MinerTuiApp {
             log_filter: 0,
             log_scroll_offset: 0,
             wallet_balance: 0.0,
+            wallet_balance_display: 0.0,
+            last_balance_sse: Instant::now(),
             wallet_send_mode: false,
             wallet_send_address: String::new(),
             wallet_send_amount: String::new(),
@@ -356,6 +360,25 @@ impl MinerTuiApp {
             self.total_api_failures = state.api_requests_failed.load(Ordering::Relaxed);
         }
 
+        // Smooth balance interpolation ("Mercedes" feel)
+        // Animate wallet_balance_display toward wallet_balance over ~1s (4 ticks at 250ms)
+        let target = self.wallet_balance;
+        let current = self.wallet_balance_display;
+        if (target - current).abs() > 1e-12 {
+            // Lerp 35% per tick → reaches 99% in ~4 ticks (~1 second)
+            // Always move UP smoothly; snap DOWN only on confirmed decrease
+            if target > current {
+                self.wallet_balance_display = current + (target - current) * 0.35;
+                // Snap to target when close enough (avoid infinite approach)
+                if (target - self.wallet_balance_display).abs() < 1e-8 {
+                    self.wallet_balance_display = target;
+                }
+            } else {
+                // Balance decreased (spend/correction) — snap immediately
+                self.wallet_balance_display = target;
+            }
+        }
+
         // Auto-run diagnostics every 10 seconds
         if self.last_diagnostics_run.elapsed() >= Duration::from_secs(10) {
             if let Some(ref state) = self.state {
@@ -431,12 +454,28 @@ impl MinerTuiApp {
                 });
             }
             DiagnosticEvent::BalanceUpdated { new_balance } => {
-                self.wallet_balance = new_balance;
-                self.add_log(LogEntry {
-                    timestamp: now,
-                    level: LogLevel::Success,
-                    message: format!("Balance updated: {:.8} QNK", new_balance),
-                });
+                // "Mercedes" dedup: skip if same value within 2s (absorbs rapid SSE bursts)
+                let diff_pct = if self.wallet_balance > 0.0 {
+                    ((new_balance - self.wallet_balance) / self.wallet_balance).abs()
+                } else {
+                    1.0 // first update always applies
+                };
+                let elapsed = self.last_balance_sse.elapsed();
+                if diff_pct < 0.001 && elapsed < Duration::from_secs(2) {
+                    // <0.1% change within 2s — absorb duplicate
+                } else {
+                    let old = self.wallet_balance;
+                    self.wallet_balance = new_balance;
+                    self.last_balance_sse = Instant::now();
+                    // Only log if meaningfully different
+                    if (new_balance - old).abs() > 1e-8 {
+                        self.add_log(LogEntry {
+                            timestamp: now,
+                            level: LogLevel::Success,
+                            message: format!("Balance updated: {:.8} QUG", new_balance),
+                        });
+                    }
+                }
             }
             DiagnosticEvent::SseConnected { url } => {
                 self.add_log(LogEntry {

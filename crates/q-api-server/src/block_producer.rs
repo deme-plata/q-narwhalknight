@@ -352,6 +352,11 @@ impl BlockProducer {
         }
     }
 
+    /// 📊 v9.3.1: Set max solutions per block (K-parameter dynamic tuning)
+    pub fn set_max_solutions_per_block(&mut self, max_solutions: usize) {
+        self.config.max_solutions_per_block = max_solutions;
+    }
+
     /// 📡 v2.3.5-beta: Set node identity for P2P mining attribution
     /// Used in SSE events to identify which node mined rewards
     pub fn set_node_identity(&mut self, peer_id: String, node_name: Option<String>) {

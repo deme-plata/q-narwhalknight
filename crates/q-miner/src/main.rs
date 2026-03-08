@@ -1390,9 +1390,10 @@ async fn run_mining(
     let sse_new_block_signal = new_block_signal.clone();
     let sse_connected_flag = shared_state.sse_connected.clone();
     let sse_event_tx = shared_state.event_tx.clone();
+    let sse_bal_epoch = shared_state.last_balance_sse_epoch.clone();
     let sse_handle = if tls_available {
         Some(tokio::spawn(async move {
-            start_sse_listener(sse_wallet, sse_server_url, sse_running, sse_new_block_signal, sse_connected_flag, sse_event_tx).await;
+            start_sse_listener(sse_wallet, sse_server_url, sse_running, sse_new_block_signal, sse_connected_flag, sse_event_tx, sse_bal_epoch).await;
         }))
     } else {
         None
@@ -1400,11 +1401,13 @@ async fn run_mining(
 
     // v8.6.5: Periodic balance polling — ensures wallet tab always shows latest balance
     // SSE events are primary, this is a fallback that polls every 15s
+    // v9.2.6: "Mercedes" smoothing — polling yields to SSE when SSE pushed within 10s
     let bal_wallet = wallet.clone();
     let bal_server = server_url.clone();
     let bal_running = is_running.clone();
     let bal_event_tx = shared_state.event_tx.clone();
     let bal_proxy = proxy_url.clone();
+    let bal_sse_epoch = shared_state.last_balance_sse_epoch.clone();
     tokio::spawn(async move {
         // Wait 5s before first poll (let SSE connect first)
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
@@ -1420,6 +1423,17 @@ async fn run_mining(
         };
         while bal_running.load(Ordering::SeqCst) {
             interval.tick().await;
+            // v9.2.6: Skip poll if SSE pushed balance within last 10s (avoids overwrite flicker)
+            let last_sse = bal_sse_epoch.load(Ordering::Relaxed);
+            if last_sse > 0 {
+                let now_epoch = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                if now_epoch.saturating_sub(last_sse) < 10 {
+                    continue; // SSE is fresh — yield
+                }
+            }
             // Fetch balance from API
             let url = format!("{}/api/v1/wallets/{}/balance", bal_server, bal_wallet);
             match client.get(&url).send().await {
@@ -2761,6 +2775,7 @@ async fn start_sse_listener(
     new_block_signal: Arc<AtomicU64>,
     sse_connected: Arc<AtomicBool>,
     sse_event_tx: mpsc::UnboundedSender<DiagnosticEvent>,
+    last_balance_sse_epoch: Arc<AtomicU64>,
 ) {
     use eventsource_client::{self as eventsource, Client as _};
     use futures::StreamExt;
@@ -2958,6 +2973,12 @@ async fn start_sse_listener(
                                         .and_then(|v| v.as_str())
                                         .unwrap_or("unknown");
                                     info!("💰 Balance Updated: {:.8} QUG (reason: {})", new_balance, change_reason);
+                                    // v9.2.6: Stamp SSE freshness so polling yields
+                                    let epoch_secs = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_secs();
+                                    last_balance_sse_epoch.store(epoch_secs, Ordering::Relaxed);
                                     // Send balance update to TUI dashboard
                                     let _ = sse_event_tx.send(DiagnosticEvent::BalanceUpdated {
                                         new_balance,
