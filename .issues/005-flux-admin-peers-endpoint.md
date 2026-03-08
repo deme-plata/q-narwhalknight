@@ -1,9 +1,9 @@
 # Issue #005: Expose PeerTracker Stats via Admin /peers Endpoint
 
-**Status**: Open
+**Status**: Done
 **Priority**: Medium
 **Component**: q-flux
-**Assignee**: Unassigned
+**Assignee**: Server Beta
 **Labels**: enhancement, observability, admin
 
 ## Description

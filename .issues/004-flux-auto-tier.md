@@ -1,9 +1,9 @@
 # Issue #004: Auto-Tier Classification from Traffic Patterns
 
-**Status**: Open
+**Status**: Done
 **Priority**: Low
 **Component**: q-flux
-**Assignee**: Unassigned
+**Assignee**: Server Beta
 **Labels**: enhancement, libp2p
 
 ## Description

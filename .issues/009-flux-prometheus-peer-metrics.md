@@ -1,9 +1,9 @@
 # Issue #009: Prometheus Metrics for libp2p Peers
 
-**Status**: Open
+**Status**: Done
 **Priority**: Medium
 **Component**: q-flux
-**Assignee**: Unassigned
+**Assignee**: Server Beta
 **Labels**: enhancement, observability, prometheus
 
 ## Description

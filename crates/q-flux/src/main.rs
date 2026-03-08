@@ -236,6 +236,20 @@ fn main() -> anyhow::Result<()> {
     // Clone health_map for admin server (Arc<DashMap> is cheap to clone)
     let admin_health_map = health_map.clone();
 
+    // Shared PeerTracker: tracks per-peer stats for libp2p connections.
+    // Created once and shared across all workers + admin server.
+    let peer_tracker = Arc::new(libp2p_aware::PeerTracker::new(
+        vec![
+            "12D3KooWSBxw".to_string(),   // Beta bootstrap
+            "12D3KooWFfZK".to_string(),   // Gamma bootstrap
+            "12D3KooWPwin".to_string(),   // Alpha bootstrap
+            "12D3KooWLJJR".to_string(),   // Delta bootstrap
+        ],
+        vec![
+            "12D3KooWFpbX".to_string(),   // Epsilon 10Gbit supernode
+        ],
+    ));
+
     // Spawn workers with shutdown receivers
     let handles = worker::spawn_workers(
         &config,
@@ -246,6 +260,7 @@ fn main() -> anyhow::Result<()> {
         health_map,
         access_logger,
         rate_limiter,
+        peer_tracker.clone(),
     );
 
     tracing::info!("All {} workers started -- q-flux is ready", worker_count);
@@ -260,6 +275,7 @@ fn main() -> anyhow::Result<()> {
         Some(admin_health_map),
         config.upstream.backends.clone(),
         config.cluster.peers.clone(),
+        Some(peer_tracker),
     );
 
     if tui_mode {

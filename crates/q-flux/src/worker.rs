@@ -15,7 +15,7 @@ use crate::acceptor::SharedTlsConfig;
 use crate::config::FluxConfig;
 use crate::h2_proxy;
 use crate::health::HealthMap;
-use crate::libp2p_aware::PeerTracker;
+use crate::libp2p_aware::{BandwidthLimiter, PeerTracker};
 use crate::metrics::{Metrics, RateLimiter};
 use crate::proxy;
 use crate::upstream::UpstreamPool;
@@ -31,7 +31,7 @@ pub type ActiveConnCount = Arc<AtomicU64>;
 /// 48 workers × 8192 = 393,216 total concurrent handlers.
 /// Each handler holds a reference to the shared upstream pool + ~8KB buffer.
 /// At 393K concurrent × ~10KB = ~4GB. Scale further via config.
-const MAX_HANDLERS_PER_WORKER: usize = 8192;
+const MAX_HANDLERS_PER_WORKER: usize = 512;
 
 /// How often to garbage-collect the per-IP connection tracker (seconds).
 /// IPs with 0 active connections are removed to prevent unbounded growth.
@@ -55,6 +55,7 @@ pub fn spawn_workers(
     health_map: HealthMap,
     access_logger: Option<AccessLogger>,
     rate_limiter: Option<Arc<RateLimiter>>,
+    peer_tracker: Arc<PeerTracker>,
 ) -> Vec<std::thread::JoinHandle<()>> {
     let worker_count = config.worker_count();
     let ip_tracker: IpConnTracker = Arc::new(DashMap::new());
@@ -72,6 +73,7 @@ pub fn spawn_workers(
         let health_map = health_map.clone();
         let access_logger = access_logger.clone();
         let rate_limiter = rate_limiter.clone();
+        let peer_tracker = peer_tracker.clone();
 
         let handle = std::thread::Builder::new()
             .name(format!("q-flux-w{}", worker_id))
@@ -87,7 +89,7 @@ pub fn spawn_workers(
                     worker_loop(
                         worker_id, &config, shared_tls, metrics, ip_tracker,
                         active_conns, shutdown_rx, shutdown_flag, health_map,
-                        access_logger, rate_limiter,
+                        access_logger, rate_limiter, peer_tracker,
                     ).await;
                 });
             })
@@ -126,6 +128,7 @@ async fn worker_loop(
     health_map: HealthMap,
     access_logger: Option<AccessLogger>,
     rate_limiter: Option<Arc<RateLimiter>>,
+    peer_tracker: Arc<PeerTracker>,
 ) {
     // Backpressure: limit concurrent connection handlers to prevent OOM.
     // If all permits taken, accept() still runs but spawn waits for a permit.
@@ -176,27 +179,32 @@ async fn worker_loop(
     ));
 
     // PeerTracker: per-peer connection limits and circuit breakers for libp2p peers.
-    // Shared across all connections on this worker. Pre-seeded with known infrastructure.
-    let peer_tracker = Arc::new(PeerTracker::new(
-        vec![
-            "12D3KooWSBxw".to_string(),   // Beta bootstrap
-            "12D3KooWFfZK".to_string(),   // Gamma bootstrap
-            "12D3KooWPwin".to_string(),   // Alpha bootstrap
-            "12D3KooWLJJR".to_string(),   // Delta bootstrap
-        ],
-        vec![
-            "12D3KooWFpbX".to_string(),   // Epsilon 10Gbit supernode
-        ],
-    ));
+    // Shared across all workers and the admin server. Pre-seeded with known infrastructure.
+    // (Created in main.rs and passed in.)
 
-    // Periodic PeerTracker stale-peer cleanup (every 60s, evict idle >5min)
+    // BandwidthLimiter: per-peer token-bucket bandwidth limiting for WebSocket splice.
+    // Shared across all connections on this worker.
+    let bandwidth_limiter = Arc::new(BandwidthLimiter::new());
+
+    // Periodic PeerTracker maintenance (every 60s):
+    //   1. Evict stale peers (idle > 5min with no active connections)
+    //   2. Cleanup bandwidth limiter buckets for evicted peers
+    //   3. Auto-classify Unknown peers → Miner based on traffic heuristics
+    //      (active > 1hr with > 100MB transferred)
     {
         let tracker = peer_tracker.clone();
+        let bw_limiter = bandwidth_limiter.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
             loop {
                 interval.tick().await;
                 tracker.cleanup_stale(std::time::Duration::from_secs(300));
+                bw_limiter.cleanup(tracker.peer_map());
+                // Auto-tier: promote Unknown peers with >1hr activity and >100MB
+                tracker.auto_classify(
+                    std::time::Duration::from_secs(3600),  // 1 hour
+                    100 * 1024 * 1024,                     // 100 MB
+                );
             }
         });
     }
@@ -298,20 +306,19 @@ async fn worker_loop(
             *count += 1;
         }
 
+        active_conns.fetch_add(1, Ordering::Relaxed);
+        metrics.conn_opened();
+
         // Token-bucket rate limiting (per-IP request rate cap)
         if let Some(ref rl) = rate_limiter {
             if !rl.check(client_ip) {
                 metrics.rate_limited();
                 tracing::debug!(worker = worker_id, ip = %client_ip, "Token-bucket rate limited");
-                // Decrement the connection counter we just incremented
                 cleanup_conn(&ip_tracker, client_ip, &active_conns, &metrics);
                 drop(tcp_stream);
                 continue;
             }
         }
-
-        active_conns.fetch_add(1, Ordering::Relaxed);
-        metrics.conn_opened();
 
         // Determine if this is a TLS port (443) or plain HTTP (80)
         let local_port = tcp_stream.local_addr().map(|a| a.port()).unwrap_or(443);
@@ -325,6 +332,7 @@ async fn worker_loop(
         let active_conns = active_conns.clone();
         let upstream = upstream.clone();
         let peer_tracker = peer_tracker.clone();
+        let bandwidth_limiter = bandwidth_limiter.clone();
         let semaphore = handler_semaphore.clone();
         let static_config = static_config.clone();
         let access_logger = access_logger.clone();
@@ -342,6 +350,12 @@ async fn worker_loop(
                 }
             };
 
+            // Overall connection timeout: 5 minutes for normal requests,
+            // SSE/WebSocket connections will be dropped after this limit.
+            // This prevents connection leaks from keeping handlers alive forever.
+            const MAX_CONN_LIFETIME: std::time::Duration = std::time::Duration::from_secs(300);
+
+            let handler = async {
             if is_tls {
                 let tls_result = tokio::time::timeout(
                     std::time::Duration::from_secs(10),
@@ -373,14 +387,14 @@ async fn worker_loop(
                                     proxy::handle_connection_logged(
                                         tls_stream, client_addr, &upstream, &metrics,
                                         body_limit, &static_config, logger,
-                                        &peer_tracker,
+                                        &peer_tracker, &bandwidth_limiter,
                                     ).await;
                                 }
                                 None => {
                                     proxy::handle_connection(
                                         tls_stream, client_addr, &upstream, &metrics,
                                         body_limit, &static_config,
-                                        &peer_tracker,
+                                        &peer_tracker, &bandwidth_limiter,
                                     ).await;
                                 }
                             }
@@ -416,6 +430,11 @@ async fn worker_loop(
                 );
                 let _ = tcp_stream.write_all(redirect.as_bytes()).await;
             }
+
+            }; // end handler async block
+
+            // Enforce maximum connection lifetime
+            let _ = tokio::time::timeout(MAX_CONN_LIFETIME, handler).await;
 
             // Cleanup — semaphore permit auto-drops when _permit goes out of scope
             cleanup_conn(&ip_tracker, client_ip, &active_conns, &metrics);
@@ -458,7 +477,16 @@ fn cleanup_conn(
             entry.remove();
         }
     }
-    active_conns.fetch_sub(1, Ordering::Relaxed);
+    // Underflow-safe decrement: CAS loop prevents wrapping to u64::MAX
+    loop {
+        let current = active_conns.load(Ordering::Relaxed);
+        if current == 0 {
+            break; // Already zero — don't underflow
+        }
+        if active_conns.compare_exchange_weak(current, current - 1, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+            break;
+        }
+    }
     metrics.conn_closed();
 }
 

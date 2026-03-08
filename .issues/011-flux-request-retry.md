@@ -1,9 +1,9 @@
 # Issue #011: Automatic Request Retry on Upstream Failure
 
-**Status**: Open
+**Status**: Done
 **Priority**: High
 **Component**: q-flux
-**Assignee**: Unassigned
+**Assignee**: Server Beta
 **Labels**: enhancement, reliability
 
 ## Description

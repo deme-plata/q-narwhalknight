@@ -4,12 +4,13 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt};
 
 use crate::access_log::{AccessLogger, log_access};
 use crate::config::StaticConfig;
-use crate::libp2p_aware::{self, PeerTracker};
+use crate::libp2p_aware::{self, BandwidthLimiter, PeerPolicy, PeerTracker};
 use crate::metrics::Metrics;
 use crate::simd_parse;
 use crate::static_serve;
@@ -18,6 +19,18 @@ use crate::upstream::UpstreamPool;
 const MAX_HEADER_SIZE: usize = 8192;
 /// Client-side read timeout — prevents slowloris attacks.
 const CLIENT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Generate a short, unique request ID (hex-encoded worker-local counter).
+/// Format: "wXXXX-NNNNNN" where XXXX is thread hash, NNNNNN is counter.
+fn generate_request_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    // Use thread ID hash for worker disambiguation
+    let tid = std::thread::current().id();
+    let thash = format!("{:?}", tid);
+    let w = thash.bytes().fold(0u16, |acc, b| acc.wrapping_add(b as u16));
+    format!("{:04x}-{:06x}", w, n & 0xFFFFFF)
+}
 
 /// Handle a single HTTP connection (potentially multiple requests via keepalive).
 pub async fn handle_connection<S>(
@@ -28,10 +41,11 @@ pub async fn handle_connection<S>(
     body_limit: usize,
     static_config: &StaticConfig,
     peer_tracker: &Arc<PeerTracker>,
+    bandwidth_limiter: &Arc<BandwidthLimiter>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    handle_connection_inner(stream, client_addr, upstream, metrics, body_limit, static_config, None, peer_tracker).await;
+    handle_connection_inner(stream, client_addr, upstream, metrics, body_limit, static_config, None, peer_tracker, bandwidth_limiter).await;
 }
 
 /// Handle a single HTTP connection with optional access logging.
@@ -45,10 +59,11 @@ pub async fn handle_connection_logged<S>(
     static_config: &StaticConfig,
     access_logger: &AccessLogger,
     peer_tracker: &Arc<PeerTracker>,
+    bandwidth_limiter: &Arc<BandwidthLimiter>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    handle_connection_inner(stream, client_addr, upstream, metrics, body_limit, static_config, Some(access_logger), peer_tracker).await;
+    handle_connection_inner(stream, client_addr, upstream, metrics, body_limit, static_config, Some(access_logger), peer_tracker, bandwidth_limiter).await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -61,6 +76,7 @@ async fn handle_connection_inner<S>(
     static_config: &StaticConfig,
     access_logger: Option<&AccessLogger>,
     peer_tracker: &Arc<PeerTracker>,
+    bandwidth_limiter: &Arc<BandwidthLimiter>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -88,6 +104,12 @@ async fn handle_connection_inner<S>(
         let user_agent = req.headers().get(hyper::header::USER_AGENT)
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
+
+        // X-Request-ID: preserve client-provided ID or generate one
+        let request_id = req.headers().get("x-request-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+            .unwrap_or_else(generate_request_id);
         if let static_serve::RouteResult::ServeFile(file_resp) = static_serve::route(&req_path, static_config) {
             let if_none_match = req.headers().get("if-none-match")
                 .and_then(|v| v.to_str().ok())
@@ -109,7 +131,7 @@ async fn handle_connection_inner<S>(
             let latency = req_start.elapsed();
             metrics.response_status(status);
             metrics.record_latency(latency);
-            log_access(access_logger, client_addr, req_method, &req_path, status, 0, 0, latency, user_agent.as_deref(), None);
+            log_access(access_logger, client_addr, req_method, &req_path, status, 0, 0, latency, user_agent.as_deref(), None, Some(request_id.as_str()));
             if !should_keep_alive(&req) { break; }
             let consumed = header_end;
             if consumed < buf_len { buf.copy_within(consumed..buf_len, 0); buf_len -= consumed; } else { buf_len = 0; }
@@ -124,7 +146,7 @@ async fn handle_connection_inner<S>(
             let latency = req_start.elapsed();
             metrics.response_status(204);
             metrics.record_latency(latency);
-            log_access(access_logger, client_addr, req_method, &req_path, 204, 0, 0, latency, user_agent.as_deref(), None);
+            log_access(access_logger, client_addr, req_method, &req_path, 204, 0, 0, latency, user_agent.as_deref(), None, Some(request_id.as_str()));
             if !should_keep_alive(&req) { break; }
             buf_len = 0;
             continue;
@@ -140,10 +162,10 @@ async fn handle_connection_inner<S>(
                 .unwrap_or(false);
 
         if is_upgrade {
-            handle_websocket_upgrade(stream, header_end, &buf[..buf_len], client_addr, upstream, metrics, peer_tracker).await;
+            handle_websocket_upgrade(stream, header_end, &buf[..buf_len], client_addr, upstream, metrics, peer_tracker, bandwidth_limiter).await;
             let latency = req_start.elapsed();
             metrics.record_latency(latency);
-            log_access(access_logger, client_addr, req_method, &req_path, 101, 0, 0, latency, user_agent.as_deref(), None);
+            log_access(access_logger, client_addr, req_method, &req_path, 101, 0, 0, latency, user_agent.as_deref(), None, Some(request_id.as_str()));
             return; // Connection consumed by WebSocket
         }
 
@@ -157,7 +179,7 @@ async fn handle_connection_inner<S>(
         if content_length > body_limit {
             let latency = req_start.elapsed();
             metrics.record_latency(latency);
-            log_access(access_logger, client_addr, req_method, &req_path, 413, 0, 0, latency, user_agent.as_deref(), None);
+            log_access(access_logger, client_addr, req_method, &req_path, 413, 0, 0, latency, user_agent.as_deref(), None, Some(request_id.as_str()));
             let _ = write_error_response(&mut stream, 413, "Request body too large").await;
             break;
         }
@@ -196,6 +218,14 @@ async fn handle_connection_inner<S>(
             Bytes::new()
         };
 
+        let keep_alive = should_keep_alive(&req);
+
+        // Idempotent methods get one retry on a different backend (Issue #011).
+        let is_idempotent = matches!(req_method, "GET" | "HEAD" | "OPTIONS");
+
+        // Clone body before moving into the first request (needed for retry).
+        let retry_body = if is_idempotent { Some(body.clone()) } else { None };
+
         // Build upstream request with full body
         let upstream_req = {
             let mut builder = hyper::Request::builder()
@@ -206,10 +236,9 @@ async fn handle_connection_inner<S>(
             }
             builder = builder.header("X-Forwarded-For", client_addr.ip().to_string());
             builder = builder.header("X-Real-IP", client_addr.ip().to_string());
+            builder = builder.header("X-Request-ID", &request_id);
             builder.body(Full::new(body)).unwrap()
         };
-
-        let keep_alive = should_keep_alive(&req);
 
         match upstream.forward(upstream_req).await {
             Ok((resp, backend_addr)) => {
@@ -217,19 +246,73 @@ async fn handle_connection_inner<S>(
                 let latency = req_start.elapsed();
                 metrics.response_status(status);
                 metrics.record_latency(latency);
-                log_access(access_logger, client_addr, req_method, &req_path, status, content_length as u64, 0, latency, user_agent.as_deref(), Some(&backend_addr));
+                log_access(access_logger, client_addr, req_method, &req_path, status, content_length as u64, 0, latency, user_agent.as_deref(), Some(&backend_addr), Some(request_id.as_str()));
 
-                if let Err(e) = write_response(&mut stream, resp, metrics).await {
+                if let Err(e) = write_response(&mut stream, resp, metrics, Some(request_id.as_str())).await {
                     tracing::debug!(client = %client_addr, "Response write error: {}", e);
                     break;
                 }
             }
-            Err(e) => {
+            Err((err, failed_backend)) if is_idempotent => {
+                // Retry once on a different backend, skipping the one that failed
+                tracing::info!(
+                    client = %client_addr, method = req_method,
+                    path = %req_path, failed = %failed_backend,
+                    "Retrying {} on different backend (error: {})", req_method, err,
+                );
+                let retry_req = {
+                    let mut builder = hyper::Request::builder()
+                        .method(req.method().clone())
+                        .uri(req.uri().clone());
+                    for (k, v) in req.headers() {
+                        builder = builder.header(k, v);
+                    }
+                    builder = builder.header("X-Forwarded-For", client_addr.ip().to_string());
+                    builder = builder.header("X-Real-IP", client_addr.ip().to_string());
+                    builder = builder.header("X-Request-ID", &request_id);
+                    builder.body(Full::new(retry_body.unwrap_or_default())).unwrap()
+                };
+                match upstream.forward_excluding(retry_req, &failed_backend).await {
+                    Some(Ok((resp, backend_addr))) => {
+                        let status = resp.status().as_u16();
+                        let latency = req_start.elapsed();
+                        metrics.response_status(status);
+                        metrics.record_latency(latency);
+                        log_access(access_logger, client_addr, req_method, &req_path, status, content_length as u64, 0, latency, user_agent.as_deref(), Some(&backend_addr), Some(request_id.as_str()));
+                        if let Err(e) = write_response(&mut stream, resp, metrics, Some(request_id.as_str())).await {
+                            tracing::debug!(client = %client_addr, "Response write error (retry): {}", e);
+                            break;
+                        }
+                    }
+                    Some(Err(err2)) => {
+                        let latency = req_start.elapsed();
+                        tracing::warn!(client = %client_addr, "Retry also failed: {}", err2);
+                        metrics.response_status(502);
+                        metrics.record_latency(latency);
+                        log_access(access_logger, client_addr, req_method, &req_path, 502, content_length as u64, 0, latency, user_agent.as_deref(), None, Some(request_id.as_str()));
+                        if write_error_response(&mut stream, 502, "Bad Gateway").await.is_err() {
+                            break;
+                        }
+                    }
+                    None => {
+                        // No alternative backend available — return original error
+                        let latency = req_start.elapsed();
+                        tracing::warn!(client = %client_addr, "No alternative backend for retry: {}", err);
+                        metrics.response_status(502);
+                        metrics.record_latency(latency);
+                        log_access(access_logger, client_addr, req_method, &req_path, 502, content_length as u64, 0, latency, user_agent.as_deref(), None, Some(request_id.as_str()));
+                        if write_error_response(&mut stream, 502, "Bad Gateway").await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            Err((err, _)) => {
                 let latency = req_start.elapsed();
-                tracing::warn!(client = %client_addr, "Upstream error: {}", e);
+                tracing::warn!(client = %client_addr, "Upstream error: {}", err);
                 metrics.response_status(502);
                 metrics.record_latency(latency);
-                log_access(access_logger, client_addr, req_method, &req_path, 502, content_length as u64, 0, latency, user_agent.as_deref(), None);
+                log_access(access_logger, client_addr, req_method, &req_path, 502, content_length as u64, 0, latency, user_agent.as_deref(), None, Some(request_id.as_str()));
                 if write_error_response(&mut stream, 502, "Bad Gateway").await.is_err() {
                     break;
                 }
@@ -339,11 +422,18 @@ async fn write_response<S>(
     stream: &mut S,
     resp: hyper::Response<Incoming>,
     metrics: &Metrics,
+    request_id: Option<&str>,
 ) -> Result<()>
 where
     S: AsyncWrite + Unpin,
 {
-    let (parts, body) = resp.into_parts();
+    let (mut parts, body) = resp.into_parts();
+    // Inject X-Request-ID into response for end-to-end tracing
+    if let Some(rid) = request_id {
+        if let Ok(val) = hyper::header::HeaderValue::from_str(rid) {
+            parts.headers.insert("x-request-id", val);
+        }
+    }
 
     // Detect streaming responses: SSE or chunked transfer
     let is_streaming = parts.headers.get("content-type")
@@ -491,6 +581,71 @@ fn reason_phrase(status: u16) -> &'static str {
 
 // log_access is imported from access_log module (shared with h2_proxy)
 
+/// Copy bytes from `reader` to `writer` with per-peer bandwidth limiting.
+///
+/// If `max_bandwidth_mbps` is 0 the limiter is bypassed (used for non-libp2p
+/// connections where we do not want to impose a token-bucket).
+///
+/// Bytes are tracked on the peer's `PeerState` via `record_rx` / `record_tx`
+/// depending on the `is_rx` flag.
+///
+/// Returns the total number of bytes transferred.
+async fn bandwidth_limited_copy<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    peer_id: &str,
+    max_bandwidth_mbps: u64,
+    limiter: &BandwidthLimiter,
+    peer_tracker: &Arc<PeerTracker>,
+    is_rx: bool,
+) -> std::io::Result<u64>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut buf = [0u8; 16384]; // 16 KB chunks — balances syscall overhead vs latency
+    let mut total: u64 = 0;
+    let apply_limit = max_bandwidth_mbps > 0 && !peer_id.is_empty();
+
+    loop {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 {
+            return Ok(total); // EOF
+        }
+
+        // Bandwidth gate: if the peer's bucket is exhausted, yield briefly
+        // and retry. This creates natural back-pressure without dropping data.
+        if apply_limit {
+            let mut attempts = 0u32;
+            while !limiter.try_consume(peer_id, n, max_bandwidth_mbps) {
+                attempts += 1;
+                // Exponential micro-sleep: 1ms, 2ms, 4ms ... capped at 50ms
+                let delay_ms = (1u64 << attempts.min(5)).min(50);
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                // After ~6 retries (~126ms total) give up waiting and let the
+                // data through to avoid stalling the connection indefinitely.
+                if attempts >= 6 {
+                    break;
+                }
+            }
+        }
+
+        writer.write_all(&buf[..n]).await?;
+
+        // Track bytes on the peer
+        if !peer_id.is_empty() {
+            let peer = peer_tracker.get_or_create(peer_id);
+            if is_rx {
+                peer.record_rx(n as u64);
+            } else {
+                peer.record_tx(n as u64);
+            }
+        }
+
+        total += n as u64;
+    }
+}
+
 /// Handle WebSocket upgrade: forward the raw upgrade request to upstream,
 /// then bidirectional splice both directions.
 ///
@@ -504,6 +659,7 @@ async fn handle_websocket_upgrade<S>(
     upstream: &UpstreamPool,
     metrics: &Metrics,
     peer_tracker: &Arc<PeerTracker>,
+    bandwidth_limiter: &Arc<BandwidthLimiter>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -563,9 +719,36 @@ async fn handle_websocket_upgrade<S>(
 
     let (mut client_read, mut client_write) = tokio::io::split(client_stream);
 
-    // Bidirectional splice
-    let c2u = tokio::io::copy(&mut client_read, &mut upstream_write);
-    let u2c = tokio::io::copy(&mut upstream_read, &mut client_write);
+    // Bidirectional splice with per-peer bandwidth limiting.
+    // Track start time for circuit breaker (short connections = likely failure).
+    let splice_start = Instant::now();
+    let bw_peer_id = peer_key.clone().unwrap_or_default();
+    let max_bw = peer_key
+        .as_ref()
+        .map(|k| {
+            let peer = peer_tracker.get_or_create(k);
+            PeerPolicy::from_tier(peer.tier).max_bandwidth_mbps
+        })
+        .unwrap_or(0); // 0 = unlimited (non-libp2p connections)
+
+    let c2u = bandwidth_limited_copy(
+        &mut client_read,
+        &mut upstream_write,
+        &bw_peer_id,
+        max_bw,
+        bandwidth_limiter,
+        peer_tracker,
+        true, // client-to-upstream = rx
+    );
+    let u2c = bandwidth_limited_copy(
+        &mut upstream_read,
+        &mut client_write,
+        &bw_peer_id,
+        max_bw,
+        bandwidth_limiter,
+        peer_tracker,
+        false, // upstream-to-client = tx
+    );
 
     tokio::select! {
         r = c2u => {
@@ -576,9 +759,15 @@ async fn handle_websocket_upgrade<S>(
         }
     }
 
-    // Track connection close for libp2p peers
+    // Circuit breaker: short WebSocket connections (<2s) indicate upstream failure.
     if let Some(ref key) = peer_key {
         let peer = peer_tracker.get_or_create(key);
+        let splice_duration = splice_start.elapsed();
+        if splice_duration < std::time::Duration::from_secs(2) {
+            peer.circuit_breaker.write().record_failure();
+        } else {
+            peer.circuit_breaker.write().record_success();
+        }
         peer.conn_closed();
     }
 

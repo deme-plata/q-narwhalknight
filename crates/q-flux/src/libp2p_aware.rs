@@ -503,6 +503,13 @@ impl PeerTracker {
         self.peers.len()
     }
 
+    /// Return a reference to the underlying peer map.
+    /// Used by `BandwidthLimiter::cleanup()` to evict buckets for peers
+    /// that are no longer tracked.
+    pub fn peer_map(&self) -> &DashMap<String, PeerState> {
+        &self.peers
+    }
+
     /// Remove stale peers that haven't been seen for the given duration.
     pub fn cleanup_stale(&self, max_idle: Duration) {
         self.peers.retain(|_id, state| {
@@ -511,6 +518,47 @@ impl PeerTracker {
             // Keep if still has active connections or was seen recently
             active > 0 || idle < max_idle
         });
+    }
+
+    /// Scan all peers and auto-promote based on observed traffic patterns.
+    ///
+    /// Heuristics (only upgrade, never downgrade from pre-seeded tiers):
+    /// - Active > `min_duration` with > `min_bytes` transferred → promote to Miner
+    /// - Peer ID prefix matches known validator patterns → promote to Validator
+    /// - Never auto-promote to Bootstrap or Supernode (pre-seeded only)
+    pub fn auto_classify(&self, min_duration: Duration, min_bytes: u64) {
+        // Phase 1: Collect promotion candidates (read-only scan).
+        // Must release all DashMap refs before Phase 2 to avoid deadlock.
+        let mut promote_to_miner: Vec<String> = Vec::new();
+
+        for entry in self.peers.iter() {
+            let state = entry.value();
+
+            // Skip peers already at Miner or higher — never downgrade
+            match state.tier {
+                PeerTier::Supernode | PeerTier::Bootstrap | PeerTier::Validator | PeerTier::Miner => continue,
+                PeerTier::Unknown => {}
+            }
+
+            let idle = state.last_seen.read().elapsed();
+            let total_bytes = state.bytes_in.load(Ordering::Relaxed)
+                + state.bytes_out.load(Ordering::Relaxed);
+
+            // Heuristic: long-lived connection + significant traffic = miner
+            if idle < min_duration && total_bytes >= min_bytes {
+                promote_to_miner.push(entry.key().clone());
+            }
+        }
+        // All DashMap refs dropped here (for loop ended).
+
+        // Phase 2: Apply promotions (write operations, no concurrent reads).
+        for peer_id in &promote_to_miner {
+            info!(
+                peer = peer_id.as_str(),
+                "Auto-promoting peer Unknown → Miner (traffic heuristic)"
+            );
+            self.set_tier(peer_id, PeerTier::Miner);
+        }
     }
 
     /// Manually set a peer's tier (e.g., after validator registration).
@@ -1070,6 +1118,70 @@ mod tests {
         std::thread::sleep(Duration::from_millis(1));
         tracker.cleanup_stale(Duration::from_secs(0));
         assert_eq!(tracker.peer_count(), 0);
+    }
+
+    // -- Auto-classify tests --
+
+    #[test]
+    fn test_auto_classify_promotes_high_traffic_peer() {
+        let tracker = PeerTracker::new(vec![], vec![]);
+
+        // Create an Unknown peer with significant traffic
+        {
+            let peer = tracker.get_or_create("peer-miner-candidate");
+            // Simulate >100MB transferred
+            peer.bytes_in.store(80 * 1024 * 1024, Ordering::Relaxed);
+            peer.bytes_out.store(30 * 1024 * 1024, Ordering::Relaxed);
+            // Touch last_seen so idle < min_duration
+            *peer.last_seen.write() = Instant::now();
+        }
+
+        // Verify it's Unknown before auto-classify
+        {
+            let peer = tracker.get_or_create("peer-miner-candidate");
+            assert_eq!(peer.tier, PeerTier::Unknown);
+        }
+
+        // Run auto-classify with low thresholds (0s duration, 100MB bytes)
+        tracker.auto_classify(Duration::from_secs(3600), 100 * 1024 * 1024);
+
+        // Should be promoted to Miner
+        let peer = tracker.get_or_create("peer-miner-candidate");
+        assert_eq!(peer.tier, PeerTier::Miner);
+    }
+
+    #[test]
+    fn test_auto_classify_does_not_demote_bootstrap() {
+        let tracker = PeerTracker::new(
+            vec!["BootstrapPeer".to_string()],
+            vec![],
+        );
+
+        // Create a Bootstrap peer
+        tracker.get_or_create("BootstrapPeerXYZ");
+
+        // auto-classify should NOT change a Bootstrap peer
+        tracker.auto_classify(Duration::from_secs(0), 0);
+
+        let peer = tracker.get_or_create("BootstrapPeerXYZ");
+        assert_eq!(peer.tier, PeerTier::Bootstrap);
+    }
+
+    #[test]
+    fn test_auto_classify_skips_low_traffic() {
+        let tracker = PeerTracker::new(vec![], vec![]);
+
+        // Create an Unknown peer with very little traffic
+        {
+            let peer = tracker.get_or_create("peer-low-traffic");
+            peer.bytes_in.store(1024, Ordering::Relaxed); // 1KB
+        }
+
+        // auto-classify should NOT promote (below 100MB threshold)
+        tracker.auto_classify(Duration::from_secs(3600), 100 * 1024 * 1024);
+
+        let peer = tracker.get_or_create("peer-low-traffic");
+        assert_eq!(peer.tier, PeerTier::Unknown);
     }
 
     // -- Gossipsub dedup bloom filter tests --

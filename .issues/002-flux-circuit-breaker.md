@@ -1,9 +1,9 @@
 # Issue #002: Wire Circuit Breaker into Upstream Forward Path
 
-**Status**: Open
+**Status**: Done
 **Priority**: Medium
 **Component**: q-flux
-**Assignee**: Unassigned
+**Assignee**: Server Beta
 **Labels**: enhancement, reliability
 
 ## Description

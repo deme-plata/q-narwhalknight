@@ -1,9 +1,9 @@
 # Issue #012: Add X-Request-ID Header for Request Tracing
 
-**Status**: Open
+**Status**: Done
 **Priority**: Low
 **Component**: q-flux
-**Assignee**: Unassigned
+**Assignee**: Server Beta
 **Labels**: enhancement, observability
 
 ## Description

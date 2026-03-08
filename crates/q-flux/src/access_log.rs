@@ -23,6 +23,7 @@ pub struct AccessEntry {
     pub tls_version: Option<String>,
     pub user_agent: Option<String>,
     pub upstream_backend: Option<String>,
+    pub request_id: Option<String>,
 }
 
 impl AccessEntry {
@@ -79,6 +80,11 @@ impl AccessEntry {
         if let Some(ref backend) = self.upstream_backend {
             out.push_str(",\"upstream\":\"");
             out.push_str(backend);
+            out.push('"');
+        }
+        if let Some(ref rid) = self.request_id {
+            out.push_str(",\"rid\":\"");
+            out.push_str(rid);
             out.push('"');
         }
         out.push('}');
@@ -176,6 +182,7 @@ pub fn log_access(
     latency: Duration,
     user_agent: Option<&str>,
     upstream_backend: Option<&str>,
+    request_id: Option<&str>,
 ) {
     if let Some(logger) = logger {
         logger.log(AccessEntry {
@@ -190,6 +197,7 @@ pub fn log_access(
             tls_version: None,
             user_agent: user_agent.map(|s| s.to_string()),
             upstream_backend: upstream_backend.map(|s| s.to_string()),
+            request_id: request_id.map(|s| s.to_string()),
         });
     }
 }
@@ -213,6 +221,7 @@ mod tests {
             tls_version: Some("TLS1.3".to_string()),
             user_agent: Some("q-miner/9.2.4".to_string()),
             upstream_backend: Some("127.0.0.1:8080".to_string()),
+            request_id: Some("abc123".to_string()),
         };
 
         let json = entry.to_json();
@@ -225,6 +234,7 @@ mod tests {
         assert!(json.contains("\"tls\":\"TLS1.3\""));
         assert!(json.contains("\"ua\":\"q-miner/9.2.4\""));
         assert!(json.contains("\"upstream\":\"127.0.0.1:8080\""));
+        assert!(json.contains("\"rid\":\"abc123\""));
     }
 
     #[test]
@@ -241,6 +251,7 @@ mod tests {
             tls_version: None,
             user_agent: Some("agent\r\ninjection".to_string()),
             upstream_backend: None,
+            request_id: None,
         };
 
         let json = entry.to_json();

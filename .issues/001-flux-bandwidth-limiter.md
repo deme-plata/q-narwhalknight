@@ -1,9 +1,9 @@
 # Issue #001: Wire BandwidthLimiter into WebSocket Splice
 
-**Status**: Open
+**Status**: Done
 **Priority**: High
 **Component**: q-flux
-**Assignee**: Unassigned
+**Assignee**: Server Beta
 **Labels**: enhancement, libp2p, performance
 
 ## Description
@@ -15,8 +15,8 @@
 - `crates/q-flux/src/proxy.rs` — replace `tokio::io::copy` with bandwidth-limited copy
 
 ## Acceptance Criteria
-- [ ] BandwidthLimiter created per worker in worker.rs
-- [ ] Passed through handle_connection → handle_websocket_upgrade
-- [ ] WebSocket splice uses chunked read with bandwidth check
-- [ ] `cargo check --package q-flux` passes
-- [ ] Non-libp2p WebSocket connections unaffected
+- [x] BandwidthLimiter created per worker in worker.rs
+- [x] Passed through handle_connection → handle_websocket_upgrade
+- [x] WebSocket splice uses chunked read with bandwidth check
+- [x] `cargo check --package q-flux` passes
+- [x] Non-libp2p WebSocket connections unaffected

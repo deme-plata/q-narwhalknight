@@ -98,6 +98,11 @@ pub struct UpstreamConfig {
     /// Timeout for a single health probe including TCP connect + HTTP GET (default: 3s).
     #[serde(default = "default_health_check_timeout", deserialize_with = "deserialize_duration")]
     pub health_check_timeout: std::time::Duration,
+    /// Max concurrent upstream requests per worker (default: 64).
+    /// Total max = workers × this value. With 48 workers and 64, total = 3072.
+    /// Excess requests get an immediate 503. Prevents connection pileup on backend.
+    #[serde(default = "default_max_inflight_per_worker")]
+    pub max_inflight_per_worker: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -133,7 +138,7 @@ fn default_admin_listen() -> SocketAddr {
 fn default_listen() -> Vec<String> {
     vec!["0.0.0.0:443".into(), "0.0.0.0:80".into()]
 }
-fn default_max_conns_per_worker() -> usize { 128 }
+fn default_max_conns_per_worker() -> usize { 32 }
 fn default_keepalive_timeout() -> std::time::Duration { std::time::Duration::from_secs(30) }
 fn default_connect_timeout() -> std::time::Duration { std::time::Duration::from_secs(5) }
 fn default_response_timeout() -> std::time::Duration { std::time::Duration::from_secs(30) }
@@ -148,6 +153,7 @@ fn default_log_level() -> String { "info".into() }
 fn default_rate_limit_per_ip() -> usize { 100 }
 fn default_rate_limit_burst() -> usize { 200 }
 fn default_rate_limit_global_rps() -> usize { 100_000 }
+fn default_max_inflight_per_worker() -> usize { 64 }
 fn default_cluster_health_interval() -> std::time::Duration { std::time::Duration::from_secs(10) }
 
 impl Default for LimitsConfig {

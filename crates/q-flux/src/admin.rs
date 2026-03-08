@@ -13,6 +13,7 @@ use tokio::net::TcpListener;
 use crate::acceptor::SharedTlsConfig;
 use crate::config::TlsConfig;
 use crate::health::HealthMap;
+use crate::libp2p_aware::{BreakerState, PeerTracker};
 use crate::metrics::Metrics;
 
 /// Shared state for the admin HTTP server.
@@ -28,6 +29,8 @@ struct AdminState {
     local_backends: Vec<String>,
     /// Super-cluster remote peers
     cluster_peers: Vec<String>,
+    /// libp2p peer tracker for per-peer stats
+    peer_tracker: Option<Arc<PeerTracker>>,
 }
 
 /// Start the admin HTTP server on its own OS thread.
@@ -49,6 +52,7 @@ pub fn spawn_admin_server(
     health_map: Option<HealthMap>,
     local_backends: Vec<String>,
     cluster_peers: Vec<String>,
+    peer_tracker: Option<Arc<PeerTracker>>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("q-flux-admin".into())
@@ -59,7 +63,7 @@ pub fn spawn_admin_server(
                 .expect("failed to build admin tokio runtime");
 
             rt.block_on(async move {
-                run_admin_server(listen_addr, metrics, worker_count, shared_tls, tls_config_paths, health_map, local_backends, cluster_peers).await;
+                run_admin_server(listen_addr, metrics, worker_count, shared_tls, tls_config_paths, health_map, local_backends, cluster_peers, peer_tracker).await;
             });
         })
         .expect("failed to spawn admin thread")
@@ -74,6 +78,7 @@ async fn run_admin_server(
     health_map: Option<HealthMap>,
     local_backends: Vec<String>,
     cluster_peers: Vec<String>,
+    peer_tracker: Option<Arc<PeerTracker>>,
 ) {
     let listener = match TcpListener::bind(listen_addr).await {
         Ok(l) => l,
@@ -94,6 +99,7 @@ async fn run_admin_server(
         health_map,
         local_backends,
         cluster_peers,
+        peer_tracker,
     });
 
     loop {
@@ -144,6 +150,7 @@ async fn handle_admin_request(
         (&hyper::Method::GET, "/health") => handle_health(state),
         (&hyper::Method::GET, "/metrics") => handle_metrics(state),
         (&hyper::Method::GET, "/status") => handle_status(state),
+        (&hyper::Method::GET, "/peers") => handle_peers(state),
         (&hyper::Method::POST, "/tls-reload") => handle_tls_reload(state),
         _ => not_found(),
     };
@@ -306,6 +313,68 @@ fn handle_metrics(state: &AdminState) -> Response<Full<Bytes>> {
     // -- HTTP/2 metrics (Issue #15) -------------------------------------------
     buf.push_str(&crate::h2_proxy::h2_prometheus_export());
 
+    // -- libp2p peer metrics (Issue #9) ---------------------------------------
+    if let Some(ref tracker) = state.peer_tracker {
+        use std::fmt::Write;
+        // Aggregate per-tier counts
+        let mut tier_peers: std::collections::HashMap<&str, (u64, u64, u64, u64, u64)> =
+            std::collections::HashMap::new();
+        let mut breakers_open: u64 = 0;
+
+        for entry in tracker.peer_map().iter() {
+            let peer = entry.value();
+            let tier_name = match peer.tier {
+                crate::libp2p_aware::PeerTier::Supernode => "Supernode",
+                crate::libp2p_aware::PeerTier::Bootstrap => "Bootstrap",
+                crate::libp2p_aware::PeerTier::Validator => "Validator",
+                crate::libp2p_aware::PeerTier::Miner => "Miner",
+                crate::libp2p_aware::PeerTier::Unknown => "Unknown",
+            };
+            let conns = peer.active_connections.load(std::sync::atomic::Ordering::Relaxed) as u64;
+            let rx = peer.bytes_in.load(std::sync::atomic::Ordering::Relaxed);
+            let tx = peer.bytes_out.load(std::sync::atomic::Ordering::Relaxed);
+
+            let e = tier_peers.entry(tier_name).or_insert((0, 0, 0, 0, 0));
+            e.0 += 1;           // peer count
+            e.1 += conns;       // active connections
+            e.2 += rx;          // bytes rx
+            e.3 += tx;          // bytes tx
+
+            let cb = peer.circuit_breaker.read();
+            if matches!(cb.state, BreakerState::Open(_)) {
+                breakers_open += 1;
+            }
+        }
+
+        // Peer count by tier
+        let _ = writeln!(buf, "# HELP qflux_libp2p_peers_total Number of known peers by tier");
+        let _ = writeln!(buf, "# TYPE qflux_libp2p_peers_total gauge");
+        for (tier, (count, _, _, _, _)) in &tier_peers {
+            let _ = writeln!(buf, r#"qflux_libp2p_peers_total{{tier="{}"}} {}"#, tier, count);
+        }
+        buf.push('\n');
+
+        // Active connections by tier
+        let _ = writeln!(buf, "# HELP qflux_libp2p_connections_active Active connections by tier");
+        let _ = writeln!(buf, "# TYPE qflux_libp2p_connections_active gauge");
+        for (tier, (_, conns, _, _, _)) in &tier_peers {
+            let _ = writeln!(buf, r#"qflux_libp2p_connections_active{{tier="{}"}} {}"#, tier, conns);
+        }
+        buf.push('\n');
+
+        // Bytes by tier + direction
+        let _ = writeln!(buf, "# HELP qflux_libp2p_bytes_total Bytes transferred by tier and direction");
+        let _ = writeln!(buf, "# TYPE qflux_libp2p_bytes_total counter");
+        for (tier, (_, _, rx, tx, _)) in &tier_peers {
+            let _ = writeln!(buf, r#"qflux_libp2p_bytes_total{{tier="{}",direction="rx"}} {}"#, tier, rx);
+            let _ = writeln!(buf, r#"qflux_libp2p_bytes_total{{tier="{}",direction="tx"}} {}"#, tier, tx);
+        }
+        buf.push('\n');
+
+        // Circuit breakers open
+        prom_gauge(&mut buf, "qflux_libp2p_circuit_breaker_open", "Number of peers with open circuit breakers", breakers_open);
+    }
+
     Response::builder()
         .status(StatusCode::OK)
         .header(
@@ -454,6 +523,88 @@ fn handle_tls_reload(state: &AdminState) -> Response<Full<Bytes>> {
 }
 
 // ---------------------------------------------------------------------------
+// GET /peers  (libp2p peer tracker stats)
+// ---------------------------------------------------------------------------
+
+fn handle_peers(state: &AdminState) -> Response<Full<Bytes>> {
+    let tracker = match state.peer_tracker {
+        Some(ref t) => t,
+        None => {
+            let body = r#"{"total_peers":0,"peers":[],"note":"peer tracker not enabled"}"#;
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/json")
+                .body(Full::new(Bytes::from(body)))
+                .unwrap();
+        }
+    };
+
+    let mut peer_entries = Vec::new();
+
+    // Iterate all peers in the DashMap via the public peer_map() accessor.
+    for entry in tracker.peer_map().iter() {
+        let peer_id = entry.key();
+        let peer_state = entry.value();
+
+        let active = peer_state
+            .active_connections
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let bytes_in = peer_state
+            .bytes_in
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let bytes_out = peer_state
+            .bytes_out
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let last_seen_secs_ago = peer_state.last_seen.read().elapsed().as_secs();
+        let tier = &peer_state.tier;
+
+        let cb_state = {
+            let cb = peer_state.circuit_breaker.read();
+            match cb.state {
+                BreakerState::Closed => "Closed",
+                BreakerState::Open(_) => "Open",
+                BreakerState::HalfOpen => "HalfOpen",
+            }
+        };
+
+        // Escape peer_id for safe JSON embedding (peer IDs are alphanumeric + hyphens,
+        // but be defensive).
+        let safe_id: String = peer_id
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+
+        peer_entries.push(format!(
+            concat!(
+                "{{",
+                r#""peer_id":"{}","#,
+                r#""tier":"{}","#,
+                r#""active_connections":{},"#,
+                r#""bytes_in":{},"#,
+                r#""bytes_out":{},"#,
+                r#""circuit_breaker":"{}","#,
+                r#""last_seen_secs_ago":{}"#,
+                "}}",
+            ),
+            safe_id, tier, active, bytes_in, bytes_out, cb_state, last_seen_secs_ago,
+        ));
+    }
+
+    let total = peer_entries.len();
+    let body = format!(
+        r#"{{"total_peers":{},"peers":[{}]}}"#,
+        total,
+        peer_entries.join(","),
+    );
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/json")
+        .body(Full::new(Bytes::from(body)))
+        .unwrap()
+}
+
+// ---------------------------------------------------------------------------
 // 404
 // ---------------------------------------------------------------------------
 
@@ -462,7 +613,7 @@ fn not_found() -> Response<Full<Bytes>> {
         .status(StatusCode::NOT_FOUND)
         .header("Content-Type", "application/json")
         .body(Full::new(Bytes::from(
-            r#"{"error":"not_found","endpoints":["/health","/metrics","/status","/tls-reload"]}"#,
+            r#"{"error":"not_found","endpoints":["/health","/metrics","/status","/peers","/tls-reload"]}"#,
         )))
         .unwrap()
 }

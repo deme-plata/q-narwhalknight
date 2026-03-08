@@ -8,12 +8,18 @@ use hyper_util::rt::TokioExecutor;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+use tokio::sync::Semaphore;
 use tokio::time::timeout;
 use tracing::warn;
 
 use crate::config::UpstreamConfig;
 use crate::health::HealthMap;
 use crate::metrics::Metrics;
+
+/// Default max concurrent upstream requests per worker.
+/// Configurable via `max_inflight_per_worker` in `[upstream]` section.
+/// 48 workers × 64 = 3,072 total in-flight upstream requests.
+const DEFAULT_MAX_UPSTREAM_INFLIGHT: usize = 64;
 
 /// Per-worker upstream connection pool.
 /// Each worker gets its own pool to avoid cross-thread contention.
@@ -33,9 +39,14 @@ pub struct UpstreamPool {
     rr_index: AtomicUsize,
     /// Round-robin index for cluster peers
     cluster_rr_index: AtomicUsize,
+    /// Semaphore limiting concurrent upstream requests (prevents connection pileup)
+    upstream_semaphore: Arc<Semaphore>,
+    /// Max inflight limit (for error messages)
+    max_inflight: usize,
 }
 
 impl UpstreamPool {
+    #[allow(dead_code)]
     pub fn new(config: &UpstreamConfig, metrics: Metrics, health_map: HealthMap) -> Self {
         Self::new_with_cluster(config, metrics, health_map, vec![])
     }
@@ -71,6 +82,12 @@ impl UpstreamPool {
             );
         }
 
+        let max_inflight = if config.max_inflight_per_worker > 0 {
+            config.max_inflight_per_worker
+        } else {
+            DEFAULT_MAX_UPSTREAM_INFLIGHT
+        };
+
         Self {
             client,
             backends: Arc::new(config.backends.clone()),
@@ -80,6 +97,8 @@ impl UpstreamPool {
             health_map,
             rr_index: AtomicUsize::new(0),
             cluster_rr_index: AtomicUsize::new(0),
+            upstream_semaphore: Arc::new(Semaphore::new(max_inflight)),
+            max_inflight,
         }
     }
 
@@ -145,6 +164,52 @@ impl UpstreamPool {
         fallback
     }
 
+    /// Pick the next healthy backend, skipping a specific address.
+    /// Used for retry logic: after a failure on backend X, try a different one.
+    /// Returns None if no alternative backend is available.
+    fn next_backend_excluding(&self, exclude: &str) -> Option<&str> {
+        let len = self.backends.len();
+        let start = self.rr_index.fetch_add(1, Ordering::Relaxed);
+
+        // Try local backends, skipping the excluded one
+        for i in 0..len {
+            let idx = (start + i) % len;
+            let backend = &self.backends[idx];
+            if backend == exclude {
+                continue;
+            }
+            if let Some(entry) = self.health_map.get(backend.as_str()) {
+                if entry.is_healthy {
+                    return Some(backend);
+                }
+            } else {
+                return Some(backend);
+            }
+        }
+
+        // Try cluster peers, skipping the excluded one
+        if !self.cluster_peers.is_empty() {
+            let clen = self.cluster_peers.len();
+            let cstart = self.cluster_rr_index.fetch_add(1, Ordering::Relaxed);
+            for i in 0..clen {
+                let idx = (cstart + i) % clen;
+                let peer = &self.cluster_peers[idx];
+                if peer == exclude {
+                    continue;
+                }
+                if let Some(entry) = self.health_map.get(peer.as_str()) {
+                    if entry.is_healthy {
+                        return Some(peer);
+                    }
+                } else {
+                    return Some(peer);
+                }
+            }
+        }
+
+        None
+    }
+
     /// Get next backend address for direct TCP connections (e.g. WebSocket).
     pub fn next_backend_addr(&self) -> &str {
         self.next_backend()
@@ -152,10 +217,24 @@ impl UpstreamPool {
 
     /// Forward a request to the upstream and return the response along with
     /// the backend address that served it (for access logging).
+    ///
+    /// On failure, returns `(Err, tried_backend_addr)` so callers can retry
+    /// on a different backend via `forward_excluding()`.
     pub async fn forward(
         &self,
         mut req: hyper::Request<Full<Bytes>>,
-    ) -> Result<(hyper::Response<Incoming>, String)> {
+    ) -> std::result::Result<(hyper::Response<Incoming>, String), (anyhow::Error, String)> {
+        // Backpressure: cap concurrent upstream requests per worker.
+        // Without this, unlimited connections pile up when the backend is slow,
+        // growing to 46K+ connections and OOM-killing the backend.
+        let _permit = match self.upstream_semaphore.try_acquire() {
+            Ok(permit) => permit,
+            Err(_) => {
+                self.metrics.upstream_connect_fail();
+                return Err((anyhow::anyhow!("Upstream at capacity ({} in-flight)", self.max_inflight), String::new()));
+            }
+        };
+
         let backend = self.next_backend();
         let backend_addr = backend.to_string();
 
@@ -165,7 +244,10 @@ impl UpstreamPool {
             .unwrap_or("/");
 
         let uri = format!("http://{}{}", backend, path_and_query);
-        *req.uri_mut() = uri.parse().map_err(|e| anyhow::anyhow!("Bad URI: {}", e))?;
+        *req.uri_mut() = match uri.parse() {
+            Ok(u) => u,
+            Err(e) => return Err((anyhow::anyhow!("Bad URI: {}", e), backend_addr)),
+        };
 
         // Remove hop-by-hop headers that shouldn't be forwarded
         let headers = req.headers_mut();
@@ -202,11 +284,77 @@ impl UpstreamPool {
             }
             Ok(Err(e)) => {
                 self.metrics.upstream_connect_fail();
-                Err(anyhow::anyhow!("Upstream error: {}", e))
+                Err((anyhow::anyhow!("Upstream error: {}", e), backend_addr))
             }
             Err(_) => {
                 self.metrics.upstream_timeout();
-                Err(anyhow::anyhow!("Upstream timeout after {:?}", self.response_timeout))
+                Err((anyhow::anyhow!("Upstream timeout after {:?}", self.response_timeout), backend_addr))
+            }
+        }
+    }
+
+    /// Forward a request to an upstream backend, skipping the specified backend.
+    /// Used for retry after a failed first attempt on an idempotent request.
+    /// Returns None if no alternative backend is available.
+    pub async fn forward_excluding(
+        &self,
+        mut req: hyper::Request<Full<Bytes>>,
+        exclude_backend: &str,
+    ) -> Option<Result<(hyper::Response<Incoming>, String)>> {
+        let backend = self.next_backend_excluding(exclude_backend)?;
+        let backend_addr = backend.to_string();
+
+        let _permit = match self.upstream_semaphore.try_acquire() {
+            Ok(permit) => permit,
+            Err(_) => {
+                self.metrics.upstream_connect_fail();
+                return Some(Err(anyhow::anyhow!("Upstream at capacity (retry)")));
+            }
+        };
+
+        let path_and_query = req.uri().path_and_query()
+            .map(|pq| pq.as_str())
+            .unwrap_or("/");
+
+        let uri = format!("http://{}{}", backend_addr, path_and_query);
+        match uri.parse() {
+            Ok(parsed) => *req.uri_mut() = parsed,
+            Err(e) => return Some(Err(anyhow::anyhow!("Bad URI on retry: {}", e))),
+        }
+
+        let headers = req.headers_mut();
+        headers.remove(hyper::header::CONNECTION);
+        headers.remove(hyper::header::TRANSFER_ENCODING);
+        headers.remove("keep-alive");
+        headers.remove("proxy-connection");
+
+        self.metrics.upstream_acquired();
+        let result = timeout(self.response_timeout, self.client.request(req)).await;
+        self.metrics.upstream_released();
+
+        match result {
+            Ok(Ok(resp)) => {
+                if let Some(mut entry) = self.health_map.get_mut(backend_addr.as_str()) {
+                    if !entry.is_healthy {
+                        entry.is_healthy = true;
+                        entry.consecutive_failures = 0;
+                        entry.unhealthy_since = None;
+                        entry.last_success = Some(std::time::Instant::now());
+                        tracing::info!(
+                            backend = backend_addr.as_str(),
+                            "Backend auto-recovered via retry request (inline health)"
+                        );
+                    }
+                }
+                Some(Ok((resp, backend_addr)))
+            }
+            Ok(Err(e)) => {
+                self.metrics.upstream_connect_fail();
+                Some(Err(anyhow::anyhow!("Upstream retry error: {}", e)))
+            }
+            Err(_) => {
+                self.metrics.upstream_timeout();
+                Some(Err(anyhow::anyhow!("Upstream retry timeout after {:?}", self.response_timeout)))
             }
         }
     }

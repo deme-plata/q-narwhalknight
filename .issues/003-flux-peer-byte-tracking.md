@@ -1,9 +1,9 @@
 # Issue #003: Per-Peer Byte Tracking
 
-**Status**: Open
+**Status**: Done
 **Priority**: Low
 **Component**: q-flux
-**Assignee**: Unassigned
+**Assignee**: Server Beta
 **Labels**: enhancement, observability
 
 ## Description

@@ -380,7 +380,11 @@ async fn handle_h2_request(
 
     // Destructure request early so we own parts and body separately.
     let (parts, body) = req.into_parts();
-    let req_path = parts.uri.path().to_string();
+    // CRITICAL: Use path_and_query() to preserve query string parameters!
+    // .path() alone strips ?key=value which breaks OAuth2, search, etc.
+    let req_path = parts.uri.path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or_else(|| parts.uri.path().to_string());
     let req_method = parts.method.clone();
     let user_agent = parts
         .headers
@@ -397,7 +401,7 @@ async fn handle_h2_request(
             let latency = req_start.elapsed();
             metrics.response_status(204);
             metrics.record_latency(latency);
-            log_access(access_logger, client_addr, "OPTIONS", &req_path, 204, 0, 0, latency, user_agent.as_deref(), None);
+            log_access(access_logger, client_addr, "OPTIONS", &req_path, 204, 0, 0, latency, user_agent.as_deref(), None, None);
             h2_metrics.h2_stream_closed();
             return resp;
         }
@@ -407,7 +411,7 @@ async fn handle_h2_request(
         let latency = req_start.elapsed();
         metrics.response_status(status);
         metrics.record_latency(latency);
-        log_access(access_logger, client_addr, req_method.as_str(), &req_path, status, 0, 0, latency, user_agent.as_deref(), None);
+        log_access(access_logger, client_addr, req_method.as_str(), &req_path, status, 0, 0, latency, user_agent.as_deref(), None, None);
         h2_metrics.h2_stream_closed();
         return resp;
     }
@@ -418,7 +422,7 @@ async fn handle_h2_request(
         let latency = req_start.elapsed();
         metrics.response_status(204);
         metrics.record_latency(latency);
-        log_access(access_logger, client_addr, "OPTIONS", &req_path, 204, 0, 0, latency, user_agent.as_deref(), None);
+        log_access(access_logger, client_addr, "OPTIONS", &req_path, 204, 0, 0, latency, user_agent.as_deref(), None, None);
         h2_metrics.h2_stream_closed();
         return resp;
     }
@@ -430,7 +434,7 @@ async fn handle_h2_request(
             let latency = req_start.elapsed();
             metrics.response_status(413);
             metrics.record_latency(latency);
-            log_access(access_logger, client_addr, req_method.as_str(), &req_path, 413, 0, 0, latency, user_agent.as_deref(), None);
+            log_access(access_logger, client_addr, req_method.as_str(), &req_path, 413, 0, 0, latency, user_agent.as_deref(), None, None);
             h2_metrics.h2_stream_closed();
             return error_response(413, "Request body too large");
         }
@@ -468,7 +472,7 @@ async fn handle_h2_request(
             let latency = req_start.elapsed();
             metrics.response_status(status);
             metrics.record_latency(latency);
-            log_access(access_logger, client_addr, req_method.as_str(), &req_path, status, content_length, 0, latency, user_agent.as_deref(), Some(&backend_addr));
+            log_access(access_logger, client_addr, req_method.as_str(), &req_path, status, content_length, 0, latency, user_agent.as_deref(), Some(&backend_addr), None);
             h2_metrics.h2_stream_closed();
 
             // Pass upstream response through with Incoming body (zero-copy).
@@ -497,12 +501,12 @@ async fn handle_h2_request(
                 .body(Either::Right(resp_body))
                 .unwrap_or_else(|_| error_response(500, "Internal proxy error"))
         }
-        Err(e) => {
-            warn!(client = %client_addr, "H2 upstream error: {}", e);
+        Err((err, _backend)) => {
+            warn!(client = %client_addr, "H2 upstream error: {}", err);
             let latency = req_start.elapsed();
             metrics.response_status(502);
             metrics.record_latency(latency);
-            log_access(access_logger, client_addr, req_method.as_str(), &req_path, 502, content_length, 0, latency, user_agent.as_deref(), None);
+            log_access(access_logger, client_addr, req_method.as_str(), &req_path, 502, content_length, 0, latency, user_agent.as_deref(), None, None);
             h2_metrics.h2_stream_closed();
             error_response(502, "Bad Gateway")
         }
