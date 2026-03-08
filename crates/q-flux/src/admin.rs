@@ -15,6 +15,7 @@ use crate::config::TlsConfig;
 use crate::health::HealthMap;
 use crate::libp2p_aware::{BreakerState, PeerTracker};
 use crate::metrics::Metrics;
+use crate::ocsp_fetch::SharedOcspStatus;
 
 /// Shared state for the admin HTTP server.
 struct AdminState {
@@ -31,6 +32,8 @@ struct AdminState {
     cluster_peers: Vec<String>,
     /// libp2p peer tracker for per-peer stats
     peer_tracker: Option<Arc<PeerTracker>>,
+    /// OCSP auto-fetch status
+    ocsp_status: Option<SharedOcspStatus>,
 }
 
 /// Start the admin HTTP server on its own OS thread.
@@ -53,6 +56,7 @@ pub fn spawn_admin_server(
     local_backends: Vec<String>,
     cluster_peers: Vec<String>,
     peer_tracker: Option<Arc<PeerTracker>>,
+    ocsp_status: Option<SharedOcspStatus>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("q-flux-admin".into())
@@ -63,7 +67,7 @@ pub fn spawn_admin_server(
                 .expect("failed to build admin tokio runtime");
 
             rt.block_on(async move {
-                run_admin_server(listen_addr, metrics, worker_count, shared_tls, tls_config_paths, health_map, local_backends, cluster_peers, peer_tracker).await;
+                run_admin_server(listen_addr, metrics, worker_count, shared_tls, tls_config_paths, health_map, local_backends, cluster_peers, peer_tracker, ocsp_status).await;
             });
         })
         .expect("failed to spawn admin thread")
@@ -79,6 +83,7 @@ async fn run_admin_server(
     local_backends: Vec<String>,
     cluster_peers: Vec<String>,
     peer_tracker: Option<Arc<PeerTracker>>,
+    ocsp_status: Option<SharedOcspStatus>,
 ) {
     let listener = match TcpListener::bind(listen_addr).await {
         Ok(l) => l,
@@ -100,6 +105,7 @@ async fn run_admin_server(
         local_backends,
         cluster_peers,
         peer_tracker,
+        ocsp_status,
     });
 
     loop {
@@ -444,6 +450,20 @@ fn handle_status(state: &AdminState) -> Response<Full<Bytes>> {
         r#","cluster":{"enabled":false,"local_backends":[],"cluster_peers":[]}"#.to_string()
     };
 
+    // OCSP status JSON
+    let ocsp_json = if let Some(ref ocsp_st) = state.ocsp_status {
+        let s = ocsp_st.read();
+        let url = s.responder_url.as_deref().unwrap_or("unknown");
+        let last_fetch_ago = s.last_fetch.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+        let last_err = s.last_error.as_deref().unwrap_or("");
+        format!(
+            r#","ocsp":{{"auto_refresh":true,"responder_url":"{}","last_fetch_secs_ago":{},"response_bytes":{},"refresh_count":{},"last_error":"{}"}}"#,
+            url, last_fetch_ago, s.response_bytes, s.refresh_count, last_err,
+        )
+    } else {
+        r#","ocsp":{"auto_refresh":false}"#.to_string()
+    };
+
     // Build JSON manually to avoid pulling in serde Serialize on MetricsSnapshot.
     // This keeps the metrics module free of serde dependencies.
     let body = format!(
@@ -475,6 +495,7 @@ fn handle_status(state: &AdminState) -> Response<Full<Bytes>> {
             r#""h2_streams_opened":{},"#,
             r#""h2_streams_closed":{}"#,
             "{}",
+            "{}",
             "}}",
         ),
         env!("CARGO_PKG_VERSION"),
@@ -503,6 +524,7 @@ fn handle_status(state: &AdminState) -> Response<Full<Bytes>> {
         crate::h2_proxy::H2_METRICS.streams_opened.load(std::sync::atomic::Ordering::Relaxed),
         crate::h2_proxy::H2_METRICS.streams_closed.load(std::sync::atomic::Ordering::Relaxed),
         cluster_json,
+        ocsp_json,
     );
 
     Response::builder()

@@ -23,3 +23,6 @@ pub mod quic_proxy;
 
 // Phase 4: libp2p awareness
 pub mod libp2p_aware;
+
+// OCSP auto-fetch
+pub mod ocsp_fetch;

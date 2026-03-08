@@ -30,6 +30,7 @@ mod h2_proxy;
 mod quic_proxy;
 #[allow(dead_code)]
 mod libp2p_aware;
+mod ocsp_fetch;
 
 #[derive(Parser)]
 #[command(name = "q-flux", about = "High-performance reverse proxy for Q-NarwhalKnight")]
@@ -233,6 +234,34 @@ fn main() -> anyhow::Result<()> {
             .expect("Failed to spawn cluster health-checker thread");
     }
 
+    // Spawn OCSP auto-refresh background task
+    let ocsp_status: ocsp_fetch::SharedOcspStatus =
+        Arc::new(parking_lot::RwLock::new(ocsp_fetch::OcspStatus::default()));
+    {
+        let tls_cfg = config.tls.clone();
+        let shared_tls_for_ocsp = shared_tls.clone();
+        let ocsp_st = ocsp_status.clone();
+        std::thread::Builder::new()
+            .name("q-flux-ocsp".into())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Failed to build OCSP runtime");
+                rt.block_on(async move {
+                    ocsp_fetch::ocsp_refresh_task(
+                        tls_cfg,
+                        shared_tls_for_ocsp,
+                        ocsp_st,
+                        Duration::from_secs(12 * 3600), // refresh every 12 hours
+                    )
+                    .await;
+                });
+            })
+            .expect("Failed to spawn OCSP refresh thread");
+        tracing::info!("OCSP auto-refresh task started (12h interval)");
+    }
+
     // Clone health_map for admin server (Arc<DashMap> is cheap to clone)
     let admin_health_map = health_map.clone();
 
@@ -276,6 +305,7 @@ fn main() -> anyhow::Result<()> {
         config.upstream.backends.clone(),
         config.cluster.peers.clone(),
         Some(peer_tracker),
+        Some(ocsp_status),
     );
 
     if tui_mode {
