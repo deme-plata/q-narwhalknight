@@ -1901,6 +1901,13 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 .help("Run interactive node setup wizard (auto-configure .env, systemd service, and admin wallet via browser login)")
                 .action(ArgAction::SetTrue),
         )
+        .arg(
+            Arg::new("compute-mode")
+                .long("compute-mode")
+                .value_name("MODE")
+                .help("Compute utilization mode: mining-only, eco, full (default), nuke [env: Q_COMPUTE_MODE]")
+                .required(false),
+        )
         .get_matches();
 
     // v8.5.9: --cheap-ssd mode — limits RocksDB write rate and starts in Conservative throttle
@@ -6776,6 +6783,22 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     ));
     state.flight_computer = Some(flight_computer.clone());
     info!("{} [FLIGHT COMPUTER] Initialized — phase: PRELAUNCH", q_storage::StarshipPhase::Prelaunch.emoji());
+
+    // v9.5.0: Starship Endgame — Compute Orchestrator
+    {
+        let compute_mode_str = std::env::var("Q_COMPUTE_MODE")
+            .ok()
+            .or_else(|| matches.get_one::<String>("compute-mode").cloned())
+            .unwrap_or_else(|| "full".to_string());
+        let compute_mode: q_compute::ComputeMode = compute_mode_str.parse().unwrap_or_else(|e| {
+            warn!("Invalid compute mode '{}': {} — using Full", compute_mode_str, e);
+            q_compute::ComputeMode::Full
+        });
+        let orchestrator = Arc::new(q_compute::orchestrator::Orchestrator::new(compute_mode));
+        orchestrator.spawn();
+        state.compute_orchestrator = Some(orchestrator);
+        info!("🚀 [STARSHIP] Compute orchestrator running — mode={:?}", compute_mode);
+    }
 
     // 🌉 v0.9.6-beta: Initialize peer registry bridge (CRITICAL FIX)
     // This bridges libp2p peer discoveries to TurboSync peer registry
@@ -21148,6 +21171,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         // User-level OAuth2 consent management (any authenticated wallet)
         .route("/api/v1/oauth2/my-consents", get(q_api_server::admin_settings_api::my_oauth2_consents))
         .route("/api/v1/oauth2/my-consents/revoke", post(q_api_server::admin_settings_api::my_revoke_consent))
+        // v9.5.0: Starship Endgame — Compute orchestrator status
+        .route("/api/v1/compute/status", get(handlers::get_compute_status))
         // v8.6.5: Public node config endpoint for setup wizard (no auth required)
         .route("/api/v1/node-config", get(handlers::get_node_config))
         // v8.6.5: OAuth2 device login for miner/node setup

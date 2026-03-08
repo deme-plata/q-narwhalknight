@@ -1110,7 +1110,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
           >
             <Search className="w-4 h-4 text-amber-400" />
             <span className="text-amber-200/70 text-sm group-hover:text-amber-200 transition-colors">
-              Explore the Quantum Blockchain
+              Network Explorer
             </span>
             <motion.div
               animate={{ rotate: showExplorerDropdown ? 180 : 0 }}
@@ -1399,12 +1399,20 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
                 Quillon Graph
               </motion.h1>
               <motion.p
-                className="text-amber-200/70 mt-2 font-medium"
+                className="text-amber-200/80 mt-2 font-semibold text-base tracking-wide"
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 transition={{ delay: 0.5, duration: 0.6 }}
               >
-                Quantum Consensus Wallet
+                Private Settlement Infrastructure
+              </motion.p>
+              <motion.p
+                className="text-amber-200/40 mt-1.5 text-xs tracking-widest uppercase"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ delay: 0.65, duration: 0.6 }}
+              >
+                Post-Quantum Secure &middot; Sovereign-Grade &middot; Tor-Native
               </motion.p>
             </div>
 
@@ -1424,7 +1432,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
               <div className="space-y-6">
                 <div>
                   <label className="block text-sm font-medium text-amber-200 mb-2">
-                    BIP39 Quantum Seed Phrase
+                    BIP39 Seed Phrase
                   </label>
                   <textarea
                     value={seedPhrase}
@@ -1488,7 +1496,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
                   ) : (
                     <>
                       <Sparkles className="w-5 h-5 text-amber-400" />
-                      <span>Generate Quantum Entropy</span>
+                      <span>Generate New Seed Phrase</span>
                     </>
                   )}
                 </motion.button>
@@ -1540,7 +1548,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
                       >
                         <Key className="w-6 h-6" />
                       </motion.div>
-                      <span>Quantum Authenticating...</span>
+                      <span>Authenticating...</span>
                     </>
                   ) : (
                     <>
@@ -1620,7 +1628,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
               animate={{ opacity: 1 }}
               transition={{ delay: 0.8 }}
             >
-              🔐 Post-Quantum Cryptography &bull; 🌊 DAG-BFT Consensus &bull; 🧅 Tor Integration
+              Private Settlement Rails &bull; Deployable Sovereign Stack &bull; Post-Quantum Networking
             </motion.p>
           </motion.div>
         </div>

@@ -1138,6 +1138,11 @@ pub struct AppState {
     // Also gates QUGUSD: captured BEFORE wallet import runs, so QUGUSD can flow in the same response.
     pub bootstrap_wallet_sync_done: Arc<std::sync::atomic::AtomicBool>,
 
+    // 🤖 v9.3.3: AI inference active flag — when true, miners should throttle to 1 thread
+    // Set by web_search_handler when Ollama LLM is streaming, cleared when done.
+    // Mining challenge response includes `recommended_threads` so miners auto-throttle.
+    pub ai_active: Arc<std::sync::atomic::AtomicBool>,
+
     // 🔄 v8.5.1: Admin notification email for update alerts
     // Set via POST /api/v1/admin/update/notification-email or Q_ADMIN_NOTIFICATION_EMAIL env
     pub admin_notification_email: Arc<tokio::sync::RwLock<Option<String>>>,
@@ -1560,6 +1565,9 @@ pub struct AppState {
 
     // v9.4.0: Bridge safety controller — deposit verification, kill-switch, amount limits
     pub bridge_safety: Arc<bridge_safety::BridgeSafetyController>,
+
+    // v9.5.0: Starship Endgame — 100% compute utilization orchestrator
+    pub compute_orchestrator: Option<Arc<q_compute::orchestrator::Orchestrator>>,
 }
 
 // SAFETY: AppState is safe to Send/Sync because:
@@ -2631,6 +2639,7 @@ impl AppState {
                 std::env::var("Q_AUTO_UPDATE").unwrap_or_else(|_| "0".to_string()) == "1"
             )), // 🔄 v8.5.1: Runtime auto-update toggle
             bootstrap_wallet_sync_done: Arc::new(std::sync::atomic::AtomicBool::new(false)), // 🚀 v8.8.2: Bootstrap sync (test mode: not done)
+            ai_active: Arc::new(std::sync::atomic::AtomicBool::new(false)), // 🤖 v9.3.3: AI inference throttle
             admin_notification_email: Arc::new(tokio::sync::RwLock::new(
                 std::env::var("Q_ADMIN_NOTIFICATION_EMAIL").ok()
             )), // 🔄 v8.5.1: Admin notification email
@@ -3076,6 +3085,8 @@ impl AppState {
             bridge_committee: Arc::new(RwLock::new(bridge_committee::BridgeCommittee::new(String::new()))),
             // v9.4.0: Bridge safety controller
             bridge_safety: Arc::new(bridge_safety::BridgeSafetyController::new()),
+            // v9.5.0: Compute orchestrator (initialized later from CLI arg)
+            compute_orchestrator: None,
         })
     }
 
@@ -3973,6 +3984,7 @@ impl AppState {
             bootstrap_wallet_sync_done: Arc::new(std::sync::atomic::AtomicBool::new(
                 storage_engine.has_migration_flag(crate::BOOTSTRAP_WALLET_SYNC_FLAG).await
             )), // 🚀 v8.8.2: One-time bootstrap wallet sync (loaded from RocksDB)
+            ai_active: Arc::new(std::sync::atomic::AtomicBool::new(false)), // 🤖 v9.3.3: AI inference throttle
             admin_notification_email: Arc::new(tokio::sync::RwLock::new(
                 std::env::var("Q_ADMIN_NOTIFICATION_EMAIL").ok()
             )), // 🔄 v8.5.1: Admin notification email
@@ -4516,6 +4528,8 @@ impl AppState {
             bridge_committee: Arc::new(RwLock::new(bridge_committee::BridgeCommittee::new(String::new()))),
             // v9.4.0: Bridge safety controller
             bridge_safety: Arc::new(bridge_safety::BridgeSafetyController::new()),
+            // v9.5.0: Compute orchestrator (initialized later from CLI arg)
+            compute_orchestrator: None,
         })
     }
 

@@ -9012,6 +9012,13 @@ pub async fn get_mining_challenge(
          bits)
     };
 
+    // v9.3.3: AI inference throttle — when AI is active, tell miners to use 1 thread
+    let ai_recommended_threads: Option<u32> = if state.ai_active.load(std::sync::atomic::Ordering::Relaxed) {
+        Some(1)
+    } else {
+        None
+    };
+
     // When write-locked (challenge refresh/fork), skip cache and regenerate below.
     // Prevents 2800+ challenge requests from blocking on RwLock under heavy sync.
     {
@@ -9039,6 +9046,7 @@ pub async fn get_mining_challenge(
                         network_hashrate_hs: cp_hashrate,
                         connected_miners: cp_miners,
                         live_security_bits: cp_security,
+                        recommended_threads: ai_recommended_threads,
                     })));
                 } else if age_seconds < 150 {
                     // Grace period (120-150s): Warn but still return cached challenge
@@ -9062,6 +9070,7 @@ pub async fn get_mining_challenge(
                         network_hashrate_hs: cp_hashrate,
                         connected_miners: cp_miners,
                         live_security_bits: cp_security,
+                        recommended_threads: ai_recommended_threads,
                     })));
                 } else {
                     // Challenge is too old (>150s) - force regeneration
@@ -9159,6 +9168,7 @@ pub async fn get_mining_challenge(
         network_hashrate_hs: cp_hashrate,
         connected_miners: cp_miners,
         live_security_bits: cp_security,
+        recommended_threads: ai_recommended_threads,
     })))
 }
 
@@ -9293,6 +9303,11 @@ pub struct MiningChallengeResponse {
     /// v9.1.7: Live security bits derived from network hashrate
     #[serde(skip_serializing_if = "Option::is_none")]
     pub live_security_bits: Option<f64>,
+    /// v9.3.3: Recommended thread count when AI inference is active on server
+    /// When present, miner should throttle to this many threads to free CPU for LLM.
+    /// Absent = no throttle, use all threads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommended_threads: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -15727,4 +15742,26 @@ pub async fn get_node_config(
     });
 
     Json(ApiResponse::success(config))
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// v9.5.0: STARSHIP ENDGAME — Compute Orchestrator Status
+// ═══════════════════════════════════════════════════════════════════
+
+/// GET /api/v1/compute/status — Full compute orchestrator dashboard snapshot
+pub async fn get_compute_status(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<serde_json::Value>> {
+    match &state.compute_orchestrator {
+        Some(orch) => {
+            let status = orch.status();
+            Json(ApiResponse::success(serde_json::to_value(status).unwrap_or_default()))
+        }
+        None => {
+            Json(ApiResponse::success(serde_json::json!({
+                "enabled": false,
+                "message": "Compute orchestrator not initialized"
+            })))
+        }
+    }
 }

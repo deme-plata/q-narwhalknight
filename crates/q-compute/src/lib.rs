@@ -1,0 +1,213 @@
+//! # q-compute: Starship Endgame Revolution
+//!
+//! 100% compute utilization orchestrator for QNK nodes.
+//! Every cycle counts. Not a single electron wasted.
+//!
+//! ## Architecture
+//!
+//! 8-layer priority compute scheduler:
+//! - Layer 0: Mining (always wins)
+//! - Layer 1: AI Inference
+//! - Layer 2: ZK Proof Generation
+//! - Layer 3: Bridge Verification
+//! - Layer 4: IPFS Pinning
+//! - Layer 5: VDF Computation
+//! - Layer 6: Render Farm
+//! - Layer 7: Idle Crypto
+
+pub mod orchestrator;
+pub mod trainer;
+pub mod tunnel;
+pub mod os_tuner;
+pub mod resource_monitor;
+
+use serde::{Deserialize, Serialize};
+
+
+
+/// Compute mode — how aggressive should we be?
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ComputeMode {
+    /// Mining only — traditional behavior, no extra compute
+    MiningOnly,
+    /// Eco — fill idle cycles gently, respect thermal limits
+    Eco,
+    /// Full — maximize every core, GPU, and byte of RAM
+    Full,
+    /// NUKE — trainer mode, all cheats active, overclock everything
+    Nuke,
+}
+
+impl Default for ComputeMode {
+    fn default() -> Self {
+        ComputeMode::Full
+    }
+}
+
+impl std::str::FromStr for ComputeMode {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "mining-only" | "mining_only" | "miningonly" => Ok(ComputeMode::MiningOnly),
+            "eco" | "quiet" | "gentle" => Ok(ComputeMode::Eco),
+            "full" | "max" | "all" => Ok(ComputeMode::Full),
+            "nuke" | "yolo" | "extreme" | "trainer" => Ok(ComputeMode::Nuke),
+            _ => Err(format!("Unknown compute mode: '{}'. Use: mining-only, eco, full, nuke", s)),
+        }
+    }
+}
+
+/// Priority layers for compute task scheduling
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum ComputeLayer {
+    Mining = 0,
+    AiInference = 1,
+    ZkProofGen = 2,
+    BridgeVerify = 3,
+    IpfsPin = 4,
+    VdfCompute = 5,
+    RenderFarm = 6,
+    IdleCrypto = 7,
+}
+
+impl ComputeLayer {
+    pub fn all() -> &'static [ComputeLayer] {
+        &[
+            ComputeLayer::Mining,
+            ComputeLayer::AiInference,
+            ComputeLayer::ZkProofGen,
+            ComputeLayer::BridgeVerify,
+            ComputeLayer::IpfsPin,
+            ComputeLayer::VdfCompute,
+            ComputeLayer::RenderFarm,
+            ComputeLayer::IdleCrypto,
+        ]
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            ComputeLayer::Mining => "Mining",
+            ComputeLayer::AiInference => "AI Inference",
+            ComputeLayer::ZkProofGen => "ZK Proofs",
+            ComputeLayer::BridgeVerify => "Bridge Verify",
+            ComputeLayer::IpfsPin => "IPFS Pinning",
+            ComputeLayer::VdfCompute => "VDF Compute",
+            ComputeLayer::RenderFarm => "Render Farm",
+            ComputeLayer::IdleCrypto => "Idle Crypto",
+        }
+    }
+}
+
+/// Snapshot of resource utilization
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceSnapshot {
+    /// CPU utilization 0-100 per core
+    pub cpu_per_core: Vec<f32>,
+    /// Overall CPU utilization 0-100
+    pub cpu_total: f32,
+    /// GPU utilization 0-100 (0 if no GPU)
+    pub gpu_utilization: f32,
+    /// GPU memory used in bytes
+    pub gpu_memory_used: u64,
+    /// GPU memory total in bytes
+    pub gpu_memory_total: u64,
+    /// RAM used in bytes
+    pub ram_used: u64,
+    /// RAM total in bytes
+    pub ram_total: u64,
+    /// Network TX bytes/sec
+    pub net_tx_bps: u64,
+    /// Network RX bytes/sec
+    pub net_rx_bps: u64,
+    /// Network total capacity bytes/sec (estimated)
+    pub net_capacity_bps: u64,
+    /// Disk I/O bytes/sec
+    pub disk_io_bps: u64,
+    /// Timestamp (unix millis)
+    pub timestamp_ms: u64,
+}
+
+/// Per-layer compute stats
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LayerStats {
+    /// Cores assigned to this layer
+    pub cores_assigned: u32,
+    /// Tasks completed
+    pub tasks_completed: AtomicU64Ser,
+    /// Tasks pending
+    pub tasks_pending: u32,
+    /// Revenue earned (in micro-QUG)
+    pub revenue_micro_qug: u64,
+    /// Active since (unix millis, 0 = inactive)
+    pub active_since_ms: u64,
+}
+
+/// Serializable wrapper for AtomicU64
+#[derive(Debug, Clone, Default)]
+pub struct AtomicU64Ser(pub u64);
+
+impl Serialize for AtomicU64Ser {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u64(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for AtomicU64Ser {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        u64::deserialize(deserializer).map(AtomicU64Ser)
+    }
+}
+
+/// Compute cluster peer info (received via gossipsub)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComputePeerInfo {
+    pub peer_id: String,
+    pub available_cores: u32,
+    pub gpu_tflops: f32,
+    pub ram_available_gb: f32,
+    pub bandwidth_mbps: u32,
+    pub compute_mode: ComputeMode,
+    pub layers_active: Vec<ComputeLayer>,
+    pub operator_wallet: Option<String>,
+    pub last_seen_ms: u64,
+}
+
+/// Tunnel connection between two compute peers
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TunnelInfo {
+    pub peer_id: String,
+    pub tunnel_type: TunnelType,
+    pub established_ms: u64,
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
+    pub tasks_routed: u64,
+    pub latency_ms: u32,
+    pub encrypted: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TunnelType {
+    /// Miner → Node: mining solutions + telemetry
+    MinerToNode,
+    /// Node → Node: task distribution + results
+    NodeToNode,
+    /// Node → Miner: push compute tasks to idle miner GPU
+    NodeToMiner,
+    /// Miner → Miner: collaborative proof generation
+    MinerToMiner,
+}
+
+/// Full compute status for dashboard/API
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComputeStatus {
+    pub mode: ComputeMode,
+    pub resources: ResourceSnapshot,
+    pub layers: Vec<(String, LayerStats)>,
+    pub tunnels: Vec<TunnelInfo>,
+    pub cluster_peers: Vec<ComputePeerInfo>,
+    pub trainer_active: bool,
+    pub trainer_cheats: Vec<String>,
+    pub performance_boost_pct: f32,
+    pub total_revenue_micro_qug: u64,
+}
