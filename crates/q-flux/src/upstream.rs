@@ -16,13 +16,38 @@ use crate::config::UpstreamConfig;
 use crate::health::HealthMap;
 use crate::metrics::Metrics;
 
-/// Default max concurrent upstream requests per worker.
-/// Configurable via `max_inflight_per_worker` in `[upstream]` section.
-/// 48 workers × 64 = 3,072 total in-flight upstream requests.
+/// Default max concurrent upstream requests per worker (fallback).
 const DEFAULT_MAX_UPSTREAM_INFLIGHT: usize = 64;
 
+/// Default global max concurrent upstream requests across ALL workers.
+/// With a single backend, 512 concurrent requests is plenty for high throughput
+/// without overwhelming q-api-server. At 20ms avg response: 512/0.02 = 25,600 req/s.
+const DEFAULT_MAX_UPSTREAM_GLOBAL: usize = 512;
+
+/// RAII guard for upstream_active metric tracking.
+/// Ensures the counter is always decremented, even on task cancellation.
+/// Without this, cancelled tokio tasks leak the counter indefinitely.
+struct UpstreamActiveGuard<'a> {
+    metrics: &'a Metrics,
+}
+
+impl<'a> UpstreamActiveGuard<'a> {
+    #[inline]
+    fn new(metrics: &'a Metrics) -> Self {
+        metrics.upstream_acquired();
+        Self { metrics }
+    }
+}
+
+impl<'a> Drop for UpstreamActiveGuard<'a> {
+    fn drop(&mut self) {
+        self.metrics.upstream_released();
+    }
+}
+
 /// Per-worker upstream connection pool.
-/// Each worker gets its own pool to avoid cross-thread contention.
+/// Each worker gets its own hyper Client for connection pooling,
+/// but shares a GLOBAL semaphore to precisely cap total backend load.
 ///
 /// Super-cluster mode: when `cluster_peers` is non-empty, the pool tries local
 /// backends first. If ALL local backends are unhealthy, it fails over to cluster
@@ -39,8 +64,12 @@ pub struct UpstreamPool {
     rr_index: AtomicUsize,
     /// Round-robin index for cluster peers
     cluster_rr_index: AtomicUsize,
-    /// Semaphore limiting concurrent upstream requests (prevents connection pileup)
-    upstream_semaphore: Arc<Semaphore>,
+    /// Per-worker semaphore (fallback if no global semaphore provided).
+    per_worker_semaphore: Arc<Semaphore>,
+    /// Global semaphore shared across ALL workers — preferred over per-worker.
+    /// This prevents the death spiral where 48 workers × N permits each
+    /// overwhelm a single backend with too many concurrent connections.
+    global_semaphore: Option<Arc<Semaphore>>,
     /// Max inflight limit (for error messages)
     max_inflight: usize,
 }
@@ -56,6 +85,16 @@ impl UpstreamPool {
         metrics: Metrics,
         health_map: HealthMap,
         cluster_peers: Vec<String>,
+    ) -> Self {
+        Self::new_full(config, metrics, health_map, cluster_peers, None)
+    }
+
+    pub fn new_full(
+        config: &UpstreamConfig,
+        metrics: Metrics,
+        health_map: HealthMap,
+        cluster_peers: Vec<String>,
+        global_semaphore: Option<Arc<Semaphore>>,
     ) -> Self {
         let mut connector = HttpConnector::new();
         connector.set_nodelay(true);
@@ -82,11 +121,26 @@ impl UpstreamPool {
             );
         }
 
-        let max_inflight = if config.max_inflight_per_worker > 0 {
+        let per_worker_max = if config.max_inflight_per_worker > 0 {
             config.max_inflight_per_worker
         } else {
             DEFAULT_MAX_UPSTREAM_INFLIGHT
         };
+
+        // Effective limit for error messages: global if set, else per-worker
+        let max_inflight = if let Some(ref sem) = global_semaphore {
+            sem.available_permits()
+        } else {
+            per_worker_max
+        };
+
+        if global_semaphore.is_some() {
+            tracing::info!(
+                global_limit = max_inflight,
+                per_worker_fallback = per_worker_max,
+                "Using GLOBAL upstream semaphore (shared across all workers)"
+            );
+        }
 
         Self {
             client,
@@ -97,9 +151,16 @@ impl UpstreamPool {
             health_map,
             rr_index: AtomicUsize::new(0),
             cluster_rr_index: AtomicUsize::new(0),
-            upstream_semaphore: Arc::new(Semaphore::new(max_inflight)),
+            per_worker_semaphore: Arc::new(Semaphore::new(per_worker_max)),
+            global_semaphore,
             max_inflight,
         }
+    }
+
+    /// Get the effective semaphore (global if available, else per-worker).
+    #[inline]
+    fn effective_semaphore(&self) -> &Arc<Semaphore> {
+        self.global_semaphore.as_ref().unwrap_or(&self.per_worker_semaphore)
     }
 
     /// Pick the next healthy backend (round-robin, skipping unhealthy ones).
@@ -210,7 +271,7 @@ impl UpstreamPool {
         None
     }
 
-    /// Get next backend address for direct TCP connections (e.g. WebSocket).
+    /// Get next backend address for direct TCP connections (e.g. WebSocket, SSE).
     pub fn next_backend_addr(&self) -> &str {
         self.next_backend()
     }
@@ -224,10 +285,11 @@ impl UpstreamPool {
         &self,
         mut req: hyper::Request<Full<Bytes>>,
     ) -> std::result::Result<(hyper::Response<Incoming>, String), (anyhow::Error, String)> {
-        // Backpressure: cap concurrent upstream requests per worker.
-        // Without this, unlimited connections pile up when the backend is slow,
-        // growing to 46K+ connections and OOM-killing the backend.
-        let _permit = match self.upstream_semaphore.try_acquire() {
+        // Backpressure: cap concurrent upstream requests.
+        // Uses global semaphore (shared across all workers) when configured,
+        // preventing the death spiral of 48 workers × N permits overwhelming
+        // a single backend.
+        let _permit = match self.effective_semaphore().try_acquire() {
             Ok(permit) => permit,
             Err(_) => {
                 self.metrics.upstream_connect_fail();
@@ -256,11 +318,11 @@ impl UpstreamPool {
         headers.remove("keep-alive");
         headers.remove("proxy-connection");
 
-        self.metrics.upstream_acquired();
+        // RAII guard: upstream_active metric is decremented even on task cancellation.
+        // Without this, cancelled tasks leak the counter → inflated upstream_active.
+        let _active_guard = UpstreamActiveGuard::new(&self.metrics);
 
         let result = timeout(self.response_timeout, self.client.request(req)).await;
-
-        self.metrics.upstream_released();
 
         match result {
             Ok(Ok(resp)) => {
@@ -304,7 +366,7 @@ impl UpstreamPool {
         let backend = self.next_backend_excluding(exclude_backend)?;
         let backend_addr = backend.to_string();
 
-        let _permit = match self.upstream_semaphore.try_acquire() {
+        let _permit = match self.effective_semaphore().try_acquire() {
             Ok(permit) => permit,
             Err(_) => {
                 self.metrics.upstream_connect_fail();
@@ -328,9 +390,9 @@ impl UpstreamPool {
         headers.remove("keep-alive");
         headers.remove("proxy-connection");
 
-        self.metrics.upstream_acquired();
+        // RAII guard for metrics (cancellation-safe)
+        let _active_guard = UpstreamActiveGuard::new(&self.metrics);
         let result = timeout(self.response_timeout, self.client.request(req)).await;
-        self.metrics.upstream_released();
 
         match result {
             Ok(Ok(resp)) => {

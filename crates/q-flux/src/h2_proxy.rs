@@ -462,13 +462,67 @@ async fn handle_h2_request(
         builder = builder.header("x-forwarded-for", client_addr.ip().to_string());
         builder = builder.header("x-real-ip", client_addr.ip().to_string());
         builder = builder.header("x-forwarded-proto", "https");
-        builder.body(Full::new(body_bytes)).unwrap()
+        builder.body(Full::new(body_bytes.clone())).unwrap()
     };
 
     // 5. Forward to upstream
     match upstream.forward(upstream_req).await {
         Ok((resp, backend_addr)) => {
             let status = resp.status().as_u16();
+
+            // v9.2.6: Retry mining submissions on 503 — if primary backend is overloaded,
+            // try alternate backend (e.g., Beta). Mining POSTs are idempotent (nonce-deduped).
+            // Only retry POST /api/v1/mining/submit to avoid retrying non-idempotent requests.
+            if status == 503 && req_method == hyper::Method::POST && req_path.contains("/mining/submit") {
+                metrics.upstream_retry();
+                // Drop the 503 response body, rebuild request for retry
+                drop(resp);
+                let retry_req = {
+                    let mut builder = hyper::Request::builder()
+                        .method(&req_method)
+                        .uri(&req_path);
+                    for (k, v) in &parts.headers {
+                        let name = k.as_str();
+                        match name {
+                            "connection" | "transfer-encoding" | "keep-alive" | "proxy-connection" | "te" => continue,
+                            _ => { builder = builder.header(k, v); }
+                        }
+                    }
+                    builder = builder.header("x-forwarded-for", client_addr.ip().to_string());
+                    builder = builder.header("x-real-ip", client_addr.ip().to_string());
+                    builder = builder.header("x-forwarded-proto", "https");
+                    builder.body(Full::new(body_bytes.clone())).unwrap()
+                };
+                if let Some(Ok((retry_resp, retry_backend))) = upstream.forward_excluding(retry_req, &backend_addr).await {
+                    metrics.upstream_retry_success();
+                    let retry_status = retry_resp.status().as_u16();
+                    let latency = req_start.elapsed();
+                    metrics.response_status(retry_status);
+                    metrics.record_latency(latency);
+                    log_access(access_logger, client_addr, req_method.as_str(), &req_path, retry_status, content_length, 0, latency, user_agent.as_deref(), Some(&retry_backend), Some("retry-503"));
+                    h2_metrics.h2_stream_closed();
+
+                    let (rp, rb) = retry_resp.into_parts();
+                    let mut b = Response::builder().status(rp.status);
+                    for (k, v) in &rp.headers {
+                        let name = k.as_str();
+                        match name {
+                            "connection" | "transfer-encoding" | "keep-alive" | "proxy-connection" | "upgrade" => continue,
+                            _ => { b = b.header(k, v); }
+                        }
+                    }
+                    b = b.header("access-control-allow-origin", "*");
+                    return b.body(Either::Right(rb)).unwrap_or_else(|_| error_response(500, "Internal proxy error"));
+                }
+                // Retry failed or no alternate backend — fall through to return 503
+                let latency = req_start.elapsed();
+                metrics.response_status(503);
+                metrics.record_latency(latency);
+                log_access(access_logger, client_addr, req_method.as_str(), &req_path, 503, content_length, 0, latency, user_agent.as_deref(), Some(&backend_addr), Some("503-no-retry"));
+                h2_metrics.h2_stream_closed();
+                return error_response(503, "Service Unavailable");
+            }
+
             let latency = req_start.elapsed();
             metrics.response_status(status);
             metrics.record_latency(latency);
@@ -501,7 +555,47 @@ async fn handle_h2_request(
                 .body(Either::Right(resp_body))
                 .unwrap_or_else(|_| error_response(500, "Internal proxy error"))
         }
-        Err((err, _backend)) => {
+        Err((err, failed_backend)) => {
+            // v9.2.6: Retry on connection failure for idempotent mining POSTs
+            if req_method == hyper::Method::POST && req_path.contains("/mining/submit") && !failed_backend.is_empty() {
+                let retry_req = {
+                    let mut builder = hyper::Request::builder()
+                        .method(&req_method)
+                        .uri(&req_path);
+                    for (k, v) in &parts.headers {
+                        let name = k.as_str();
+                        match name {
+                            "connection" | "transfer-encoding" | "keep-alive" | "proxy-connection" | "te" => continue,
+                            _ => { builder = builder.header(k, v); }
+                        }
+                    }
+                    builder = builder.header("x-forwarded-for", client_addr.ip().to_string());
+                    builder = builder.header("x-real-ip", client_addr.ip().to_string());
+                    builder = builder.header("x-forwarded-proto", "https");
+                    builder.body(Full::new(body_bytes.clone())).unwrap()
+                };
+                if let Some(Ok((retry_resp, retry_backend))) = upstream.forward_excluding(retry_req, &failed_backend).await {
+                    let retry_status = retry_resp.status().as_u16();
+                    let latency = req_start.elapsed();
+                    metrics.response_status(retry_status);
+                    metrics.record_latency(latency);
+                    log_access(access_logger, client_addr, req_method.as_str(), &req_path, retry_status, content_length, 0, latency, user_agent.as_deref(), Some(&retry_backend), Some("retry-err"));
+                    h2_metrics.h2_stream_closed();
+
+                    let (rp, rb) = retry_resp.into_parts();
+                    let mut b = Response::builder().status(rp.status);
+                    for (k, v) in &rp.headers {
+                        let name = k.as_str();
+                        match name {
+                            "connection" | "transfer-encoding" | "keep-alive" | "proxy-connection" | "upgrade" => continue,
+                            _ => { b = b.header(k, v); }
+                        }
+                    }
+                    b = b.header("access-control-allow-origin", "*");
+                    return b.body(Either::Right(rb)).unwrap_or_else(|_| error_response(500, "Internal proxy error"));
+                }
+            }
+
             warn!(client = %client_addr, "H2 upstream error: {}", err);
             let latency = req_start.elapsed();
             metrics.response_status(502);

@@ -7,13 +7,17 @@
 | 003 | Per-Peer Byte Tracking | Low | Done | observability |
 | 004 | Auto-Tier Classification from Traffic Patterns | Low | Done | libp2p |
 | 005 | Expose PeerTracker Stats via Admin /peers | Medium | Done | observability, admin |
-| 006 | libp2p Detection for HTTP/2 Connections | Medium | Open | libp2p, h2 |
-| 007 | Wire GossipsubDedup into WebSocket Data Path | Low | Open | libp2p, performance |
-| 008 | Weighted Routing for Super-Cluster Peers | Low | Open | super-cluster |
+| 006 | libp2p Detection for HTTP/2 Connections | Medium | Deferred | libp2p, h2 |
+| 007 | Wire GossipsubDedup into WebSocket Data Path | Low | Deferred | libp2p, performance |
+| 008 | Weighted Routing for Super-Cluster Peers | Low | Deferred | super-cluster |
 | 009 | Prometheus Metrics for libp2p Peers | Medium | Done | prometheus |
-| 010 | Graceful Connection Draining on Config Reload | Medium | Open | reliability |
+| 010 | Graceful Connection Draining on Config Reload | Medium | Done | reliability |
 | 011 | Automatic Request Retry on Upstream Failure | High | Done | reliability |
 | 012 | Add X-Request-ID Header for Request Tracing | Low | Done | observability |
+| 013 | Upstream Retry Metrics (retries/successes) | Medium | Done | observability, prometheus |
+| 014 | Splice Zero-Copy for WebSocket/SSE Passthrough | High | Open | performance, io_uring, zero-copy |
+| 015 | io_uring Config Section + Feature Detection | Medium | Open | io_uring, config |
+| 016 | Splice Zero-Copy Metrics | Low | Open | observability, io_uring, prometheus |
 
 ## How to pick up an issue
 

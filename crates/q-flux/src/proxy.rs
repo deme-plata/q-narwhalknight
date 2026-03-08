@@ -169,6 +169,18 @@ async fn handle_connection_inner<S>(
             return; // Connection consumed by WebSocket
         }
 
+        // SSE/streaming endpoint: route via direct TCP to avoid hyper pool exhaustion.
+        // Without this, SSE responses hold hyper TCP connections indefinitely,
+        // forcing new TCP connections for every subsequent request. Under high load
+        // this creates a death spiral: all semaphore permits consumed, all requests fail.
+        if is_sse_path(&req_path) {
+            handle_sse_direct(stream, &req, client_addr, upstream, metrics, &request_id).await;
+            let latency = req_start.elapsed();
+            metrics.record_latency(latency);
+            log_access(access_logger, client_addr, req_method, &req_path, 200, 0, 0, latency, user_agent.as_deref(), None, Some(request_id.as_str()));
+            return; // Connection consumed by SSE stream
+        }
+
         // Read body if Content-Length present
         let content_length = req.headers()
             .get(hyper::header::CONTENT_LENGTH)
@@ -254,6 +266,7 @@ async fn handle_connection_inner<S>(
                 }
             }
             Err((err, failed_backend)) if is_idempotent => {
+                metrics.upstream_retry();
                 // Retry once on a different backend, skipping the one that failed
                 tracing::info!(
                     client = %client_addr, method = req_method,
@@ -274,6 +287,7 @@ async fn handle_connection_inner<S>(
                 };
                 match upstream.forward_excluding(retry_req, &failed_backend).await {
                     Some(Ok((resp, backend_addr))) => {
+                        metrics.upstream_retry_success();
                         let status = resp.status().as_u16();
                         let latency = req_start.elapsed();
                         metrics.response_status(status);
@@ -772,4 +786,94 @@ async fn handle_websocket_upgrade<S>(
     }
 
     metrics.ws_closed();
+}
+
+/// Check if a request path is a known SSE/streaming endpoint.
+/// These are routed via direct TCP to avoid consuming hyper's connection pool
+/// with long-lived streams that never return connections to the idle pool.
+#[inline]
+fn is_sse_path(path: &str) -> bool {
+    path == "/api/v1/sse"
+        || path.starts_with("/api/v1/sse?")
+        || path == "/sse"
+        || path.starts_with("/sse?")
+}
+
+/// Handle SSE/streaming request via direct TCP connection.
+/// This bypasses hyper's Client entirely — the connection goes straight from
+/// q-flux to the backend over raw TCP, just like WebSocket.
+///
+/// Why: SSE responses stream indefinitely. When routed through hyper's Client,
+/// the TCP connection to the backend is held by the streaming body reader and
+/// never returned to the idle pool. This forces hyper to create new TCP
+/// connections for every subsequent request, overwhelming the backend under load.
+///
+/// By using direct TCP (like WebSocket does), SSE connections don't affect
+/// hyper's connection pool, keeping it healthy for normal HTTP requests.
+async fn handle_sse_direct<S>(
+    mut client_stream: S,
+    req: &hyper::Request<()>,
+    client_addr: SocketAddr,
+    upstream: &UpstreamPool,
+    metrics: &Metrics,
+    request_id: &str,
+) where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let backend = upstream.next_backend_addr();
+    let mut upstream_conn = match tokio::net::TcpStream::connect(backend).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(client = %client_addr, backend = %backend, "SSE upstream connect failed: {}", e);
+            let _ = write_error_response(&mut client_stream, 502, "Bad Gateway").await;
+            return;
+        }
+    };
+
+    // Build raw HTTP request to send to backend.
+    // We construct this manually to add proxy headers (X-Forwarded-For, etc.)
+    // while preserving all original client headers.
+    let path = req.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    let mut raw_req = Vec::with_capacity(512);
+    use std::io::Write as IoWrite;
+    write!(raw_req, "{} {} HTTP/1.1\r\n", req.method(), path).ok();
+
+    // Forward original headers (skip hop-by-hop)
+    for (key, value) in req.headers() {
+        if key == hyper::header::CONNECTION
+            || key == hyper::header::TRANSFER_ENCODING
+            || key == "keep-alive"
+            || key == "proxy-connection"
+        {
+            continue;
+        }
+        write!(raw_req, "{}: {}\r\n", key, value.to_str().unwrap_or("")).ok();
+    }
+    // Add proxy headers
+    write!(raw_req, "X-Forwarded-For: {}\r\n", client_addr.ip()).ok();
+    write!(raw_req, "X-Real-IP: {}\r\n", client_addr.ip()).ok();
+    write!(raw_req, "X-Request-ID: {}\r\n", request_id).ok();
+    raw_req.extend_from_slice(b"\r\n");
+
+    // Send request to backend
+    if upstream_conn.write_all(&raw_req).await.is_err() {
+        let _ = write_error_response(&mut client_stream, 502, "Bad Gateway").await;
+        return;
+    }
+
+    // Bidirectional splice: upstream→client is the SSE stream, client→upstream is minimal.
+    let (mut upstream_read, mut upstream_write) = tokio::io::split(upstream_conn);
+    let (mut client_read, mut client_write) = tokio::io::split(client_stream);
+
+    let u2c = tokio::io::copy(&mut upstream_read, &mut client_write);
+    let c2u = tokio::io::copy(&mut client_read, &mut upstream_write);
+
+    tokio::select! {
+        r = u2c => {
+            if let Ok(n) = r { metrics.bytes_tx(n); }
+        }
+        r = c2u => {
+            if let Ok(n) = r { metrics.bytes_rx(n); }
+        }
+    }
 }
