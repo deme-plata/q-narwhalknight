@@ -325,6 +325,26 @@ fn handle_metrics(state: &AdminState) -> Response<Full<Bytes>> {
         state.shared_tls.reload_count(),
     );
 
+    // -- splice zero-copy (Issue #016) ----------------------------------------
+    prom_gauge(
+        &mut buf,
+        "q_flux_splice_connections_active",
+        "Current connections using splice(2) zero-copy",
+        snap.splice_connections_active,
+    );
+    prom_counter(
+        &mut buf,
+        "q_flux_splice_bytes_total",
+        "Total bytes transferred via splice(2) zero-copy",
+        snap.splice_bytes_total,
+    );
+    prom_counter(
+        &mut buf,
+        "q_flux_splice_fallbacks_total",
+        "Total times splice(2) failed and fell back to userspace copy",
+        snap.splice_fallbacks_total,
+    );
+
     // -- latency histogram (Issue #11) ----------------------------------------
     buf.push_str(&state.metrics.prometheus_export_histogram());
 

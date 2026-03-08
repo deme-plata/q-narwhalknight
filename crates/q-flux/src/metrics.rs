@@ -236,6 +236,10 @@ struct MetricsInner {
     pub bytes_sent: AtomicU64,
     // Latency histogram (Issue #11)
     pub latency: LatencyHistogram,
+    // Splice zero-copy (Issue #016)
+    pub splice_connections_active: AtomicU64,
+    pub splice_bytes_total: AtomicU64,
+    pub splice_fallbacks_total: AtomicU64,
 }
 
 impl Default for Metrics {
@@ -270,6 +274,9 @@ impl Metrics {
                 bytes_received: AtomicU64::new(0),
                 bytes_sent: AtomicU64::new(0),
                 latency: LatencyHistogram::new(),
+                splice_connections_active: AtomicU64::new(0),
+                splice_bytes_total: AtomicU64::new(0),
+                splice_fallbacks_total: AtomicU64::new(0),
             }),
         }
     }
@@ -419,6 +426,28 @@ impl Metrics {
         self.inner.bytes_sent.fetch_add(n, Ordering::Relaxed);
     }
 
+    // Splice zero-copy (Issue #016)
+    // These are used by try_splice_bidirectional when plain TCP splice succeeds.
+    // Currently TLS connections always fall back, so only splice_fallback() is called.
+    #[allow(dead_code)]
+    pub fn splice_opened(&self) {
+        self.inner.splice_connections_active.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[allow(dead_code)]
+    pub fn splice_closed(&self) {
+        self.inner.splice_connections_active.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    #[allow(dead_code)]
+    pub fn splice_bytes(&self, n: u64) {
+        self.inner.splice_bytes_total.fetch_add(n, Ordering::Relaxed);
+    }
+
+    pub fn splice_fallback(&self) {
+        self.inner.splice_fallbacks_total.fetch_add(1, Ordering::Relaxed);
+    }
+
     // Snapshot for logging/reporting
     pub fn snapshot(&self) -> MetricsSnapshot {
         MetricsSnapshot {
@@ -441,6 +470,9 @@ impl Metrics {
             active_websockets: self.inner.active_websockets.load(Ordering::Relaxed),
             bytes_received: self.inner.bytes_received.load(Ordering::Relaxed),
             bytes_sent: self.inner.bytes_sent.load(Ordering::Relaxed),
+            splice_connections_active: self.inner.splice_connections_active.load(Ordering::Relaxed),
+            splice_bytes_total: self.inner.splice_bytes_total.load(Ordering::Relaxed),
+            splice_fallbacks_total: self.inner.splice_fallbacks_total.load(Ordering::Relaxed),
         }
     }
 }
@@ -466,6 +498,10 @@ pub struct MetricsSnapshot {
     pub active_websockets: u64,
     pub bytes_received: u64,
     pub bytes_sent: u64,
+    // Splice zero-copy (Issue #016)
+    pub splice_connections_active: u64,
+    pub splice_bytes_total: u64,
+    pub splice_fallbacks_total: u64,
 }
 
 impl std::fmt::Display for MetricsSnapshot {

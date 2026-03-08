@@ -106,6 +106,20 @@ fn main() -> anyhow::Result<()> {
         config.upstream.backends.len(),
     );
 
+    // io_uring / splice feature detection
+    #[cfg(target_os = "linux")]
+    {
+        let features = io_uring_loop::probe_io_uring_features();
+        tracing::info!(
+            io_uring = features.basic,
+            multishot_accept = features.multishot_accept,
+            provided_buffers = features.provided_buffers,
+            splice_enabled = config.io_uring.splice_enabled,
+            "io_uring probe: {}",
+            if features.basic { "available" } else { "not available (using epoll)" },
+        );
+    }
+
     // Build TLS config (shared across all workers, hot-reloadable)
     let tls_config = acceptor::build_tls_config(&config.tls)?;
     let shared_tls = acceptor::SharedTlsConfig::new(tls_config);

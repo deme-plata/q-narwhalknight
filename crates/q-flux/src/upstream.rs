@@ -355,6 +355,12 @@ impl UpstreamPool {
         }
     }
 
+    /// Expose health map for testing.
+    #[cfg(test)]
+    pub fn health_map(&self) -> &HealthMap {
+        &self.health_map
+    }
+
     /// Forward a request to an upstream backend, skipping the specified backend.
     /// Used for retry after a failed first attempt on an idempotent request.
     /// Returns None if no alternative backend is available.
@@ -418,6 +424,161 @@ impl UpstreamPool {
                 self.metrics.upstream_timeout();
                 Some(Err(anyhow::anyhow!("Upstream retry timeout after {:?}", self.response_timeout)))
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::UpstreamConfig;
+    use crate::health;
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    /// Build a minimal UpstreamConfig for testing.
+    fn test_config(backends: Vec<&str>) -> UpstreamConfig {
+        UpstreamConfig {
+            backends: backends.into_iter().map(|s| s.to_string()).collect(),
+            max_conns_per_worker: 32,
+            keepalive_timeout: Duration::from_secs(30),
+            connect_timeout: Duration::from_secs(5),
+            response_timeout: Duration::from_secs(30),
+            health_check_interval: Duration::from_secs(5),
+            health_check_path: "/health".to_string(),
+            health_check_timeout: Duration::from_secs(3),
+            max_inflight_per_worker: 64,
+            max_upstream_global: 0,
+        }
+    }
+
+    /// Build an UpstreamPool from a list of backend addresses and optional cluster peers.
+    fn make_pool(backends: Vec<&str>, cluster: Vec<&str>) -> UpstreamPool {
+        let mut all: Vec<String> = backends.iter().map(|s| s.to_string()).collect();
+        all.extend(cluster.iter().map(|s| s.to_string()));
+        let health_map = health::new_health_map(&all);
+        let config = test_config(backends);
+        let metrics = Metrics::new();
+        UpstreamPool::new_with_cluster(
+            &config,
+            metrics,
+            health_map,
+            cluster.into_iter().map(|s| s.to_string()).collect(),
+        )
+    }
+
+    #[test]
+    fn test_round_robin_distributes_evenly() {
+        let pool = make_pool(vec!["A:80", "B:80", "C:80"], vec![]);
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        for _ in 0..300 {
+            let b = pool.next_backend();
+            *counts.entry(b).or_insert(0) += 1;
+        }
+        // Each backend should get exactly 100 picks (300 / 3)
+        assert_eq!(counts.get("A:80"), Some(&100));
+        assert_eq!(counts.get("B:80"), Some(&100));
+        assert_eq!(counts.get("C:80"), Some(&100));
+    }
+
+    #[test]
+    fn test_skips_unhealthy_backend() {
+        let pool = make_pool(vec!["A:80", "B:80", "C:80"], vec![]);
+        // Mark B:80 as unhealthy
+        if let Some(mut entry) = pool.health_map().get_mut("B:80") {
+            entry.is_healthy = false;
+        }
+        for _ in 0..100 {
+            let b = pool.next_backend();
+            assert_ne!(b, "B:80", "Unhealthy backend B:80 should be skipped");
+        }
+    }
+
+    #[test]
+    fn test_cluster_failover_when_all_local_unhealthy() {
+        let pool = make_pool(vec!["A:80", "B:80"], vec!["C:80", "D:80"]);
+        // Mark all local backends unhealthy
+        for backend in ["A:80", "B:80"] {
+            if let Some(mut entry) = pool.health_map().get_mut(backend) {
+                entry.is_healthy = false;
+            }
+        }
+        for _ in 0..100 {
+            let b = pool.next_backend();
+            assert!(
+                b == "C:80" || b == "D:80",
+                "Should failover to cluster peer, got: {}",
+                b,
+            );
+        }
+    }
+
+    #[test]
+    fn test_local_preferred_over_cluster() {
+        let pool = make_pool(vec!["A:80"], vec!["C:80"]);
+        // Both healthy — should always pick local
+        for _ in 0..100 {
+            assert_eq!(pool.next_backend(), "A:80");
+        }
+    }
+
+    #[test]
+    fn test_fallback_when_all_unhealthy() {
+        let pool = make_pool(vec!["A:80", "B:80"], vec!["C:80"]);
+        // Mark everything unhealthy
+        for backend in ["A:80", "B:80", "C:80"] {
+            if let Some(mut entry) = pool.health_map().get_mut(backend) {
+                entry.is_healthy = false;
+            }
+        }
+        // Should fall back to a local backend (degraded)
+        let b = pool.next_backend();
+        assert!(b == "A:80" || b == "B:80", "Fallback should be a local backend, got: {}", b);
+    }
+
+    #[test]
+    fn test_excluding_skips_specified_backend() {
+        let pool = make_pool(vec!["A:80", "B:80", "C:80"], vec![]);
+        for _ in 0..100 {
+            let b = pool.next_backend_excluding("B:80");
+            assert!(b.is_some());
+            assert_ne!(b.unwrap(), "B:80");
+        }
+    }
+
+    #[test]
+    fn test_excluding_returns_none_when_no_alternative() {
+        let pool = make_pool(vec!["A:80"], vec![]);
+        // Only one backend — excluding it leaves nothing
+        let b = pool.next_backend_excluding("A:80");
+        assert!(b.is_none(), "Should return None when only backend is excluded");
+    }
+
+    #[test]
+    fn test_excluding_tries_cluster_peers() {
+        let pool = make_pool(vec!["A:80"], vec!["C:80"]);
+        // Exclude the only local backend — should fall to cluster peer
+        let b = pool.next_backend_excluding("A:80");
+        assert_eq!(b, Some("C:80"));
+    }
+
+    #[test]
+    fn test_no_health_entry_assumes_healthy() {
+        // Create pool with backends NOT pre-registered in health map
+        let config = test_config(vec!["X:80", "Y:80"]);
+        let health_map = Arc::new(DashMap::new()); // empty — no entries
+        let metrics = Metrics::new();
+        let pool = UpstreamPool::new_with_cluster(&config, metrics, health_map, vec![]);
+        // Should still pick backends (optimistic — no entry = healthy)
+        let b = pool.next_backend();
+        assert!(b == "X:80" || b == "Y:80");
+    }
+
+    #[test]
+    fn test_single_backend_always_returned() {
+        let pool = make_pool(vec!["A:80"], vec![]);
+        for _ in 0..50 {
+            assert_eq!(pool.next_backend(), "A:80");
         }
     }
 }
