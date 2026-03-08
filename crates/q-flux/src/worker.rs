@@ -62,6 +62,30 @@ pub fn spawn_workers(
     let active_conns: ActiveConnCount = Arc::new(AtomicU64::new(0));
     let mut handles = Vec::with_capacity(worker_count);
 
+    // Global upstream semaphore: shared across ALL workers to precisely cap
+    // total concurrent backend connections. This prevents the death spiral where
+    // 48 workers × N permits each overwhelm a single backend.
+    let global_upstream_semaphore = if config.upstream.max_upstream_global > 0 {
+        let limit = config.upstream.max_upstream_global;
+        tracing::info!(
+            limit,
+            workers = worker_count,
+            "Global upstream semaphore: {} max concurrent backend requests (shared across {} workers)",
+            limit, worker_count,
+        );
+        Some(Arc::new(Semaphore::new(limit)))
+    } else {
+        tracing::info!(
+            per_worker = config.upstream.max_inflight_per_worker,
+            workers = worker_count,
+            total = config.upstream.max_inflight_per_worker * worker_count,
+            "Per-worker upstream semaphore: {} × {} = {} total",
+            config.upstream.max_inflight_per_worker, worker_count,
+            config.upstream.max_inflight_per_worker * worker_count,
+        );
+        None
+    };
+
     for worker_id in 0..worker_count {
         let config = config.clone();
         let shared_tls = shared_tls.clone();
@@ -74,6 +98,7 @@ pub fn spawn_workers(
         let access_logger = access_logger.clone();
         let rate_limiter = rate_limiter.clone();
         let peer_tracker = peer_tracker.clone();
+        let global_sem = global_upstream_semaphore.clone();
 
         let handle = std::thread::Builder::new()
             .name(format!("q-flux-w{}", worker_id))
@@ -89,7 +114,7 @@ pub fn spawn_workers(
                     worker_loop(
                         worker_id, &config, shared_tls, metrics, ip_tracker,
                         active_conns, shutdown_rx, shutdown_flag, health_map,
-                        access_logger, rate_limiter, peer_tracker,
+                        access_logger, rate_limiter, peer_tracker, global_sem,
                     ).await;
                 });
             })
@@ -129,6 +154,7 @@ async fn worker_loop(
     access_logger: Option<AccessLogger>,
     rate_limiter: Option<Arc<RateLimiter>>,
     peer_tracker: Arc<PeerTracker>,
+    global_upstream_semaphore: Option<Arc<Semaphore>>,
 ) {
     // Backpressure: limit concurrent connection handlers to prevent OOM.
     // If all permits taken, accept() still runs but spawn waits for a permit.
@@ -171,11 +197,13 @@ async fn worker_loop(
     // opened a fresh TCP connection to upstream (same failure mode as keepalive=off).
     // Now: one hyper Client per worker with pooled keepalive connections to upstream.
     // Super-cluster: cluster peers are passed as failover backends (local-first).
-    let upstream = Arc::new(UpstreamPool::new_with_cluster(
+    // Global semaphore: shared across ALL workers to cap total backend load.
+    let upstream = Arc::new(UpstreamPool::new_full(
         &config.upstream,
         metrics.clone(),
         health_map.clone(),
         config.cluster.peers.clone(),
+        global_upstream_semaphore,
     ));
 
     // PeerTracker: per-peer connection limits and circuit breakers for libp2p peers.

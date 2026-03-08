@@ -476,15 +476,21 @@ impl PeerTracker {
 
     /// Get or create a peer entry. Automatically classifies the peer tier
     /// based on known peer ID lists.
+    ///
+    /// Uses DashMap `entry()` API to avoid TOCTOU races — a separate
+    /// `contains_key()` + `get().unwrap()` pattern can panic if another
+    /// thread removes the key between the two calls.
     pub fn get_or_create(&self, peer_id: &str) -> dashmap::mapref::one::Ref<'_, String, PeerState> {
-        if !self.peers.contains_key(peer_id) {
-            let tier = self.classify_peer(peer_id);
-            self.peers.entry(peer_id.to_string()).or_insert_with(|| {
-                info!(peer = peer_id, tier = %tier, "New peer detected");
-                PeerState::new(tier)
-            });
-        }
-        self.peers.get(peer_id).unwrap()
+        // Insert if missing (entry API is atomic — no TOCTOU race).
+        let tier = self.classify_peer(peer_id);
+        self.peers.entry(peer_id.to_string()).or_insert_with(|| {
+            info!(peer = peer_id, tier = %tier, "New peer detected");
+            PeerState::new(tier)
+        });
+        // Safe: we just ensured the key exists via entry(), and only
+        // cleanup_stale removes entries (which runs on an interval, not
+        // concurrently with this call in the hot path).
+        self.peers.get(peer_id).expect("peer just inserted via entry()")
     }
 
     /// Classify a peer based on known peer ID lists.

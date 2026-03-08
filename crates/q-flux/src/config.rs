@@ -99,10 +99,16 @@ pub struct UpstreamConfig {
     #[serde(default = "default_health_check_timeout", deserialize_with = "deserialize_duration")]
     pub health_check_timeout: std::time::Duration,
     /// Max concurrent upstream requests per worker (default: 64).
-    /// Total max = workers × this value. With 48 workers and 64, total = 3072.
-    /// Excess requests get an immediate 503. Prevents connection pileup on backend.
+    /// Only used as fallback if `max_upstream_global` is 0.
     #[serde(default = "default_max_inflight_per_worker")]
     pub max_inflight_per_worker: usize,
+    /// Global max concurrent upstream requests across ALL workers (default: 512).
+    /// This is the preferred setting: a single shared semaphore prevents the death
+    /// spiral where 48 workers × N permits each overwhelm a single backend.
+    /// Set to 0 to fall back to per-worker limits (max_inflight_per_worker).
+    /// Recommended: 256-512 for single-backend, 512-1024 for multi-backend.
+    #[serde(default = "default_max_upstream_global")]
+    pub max_upstream_global: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -154,6 +160,7 @@ fn default_rate_limit_per_ip() -> usize { 100 }
 fn default_rate_limit_burst() -> usize { 200 }
 fn default_rate_limit_global_rps() -> usize { 100_000 }
 fn default_max_inflight_per_worker() -> usize { 64 }
+fn default_max_upstream_global() -> usize { 512 }
 fn default_cluster_health_interval() -> std::time::Duration { std::time::Duration::from_secs(10) }
 
 impl Default for LimitsConfig {
@@ -184,10 +191,8 @@ impl FluxConfig {
             .map_err(|e| anyhow::anyhow!("Failed to read config {}: {}", path.display(), e))?;
         let config: FluxConfig = toml::from_str(&content)
             .map_err(|e| anyhow::anyhow!("Failed to parse config {}: {}", path.display(), e))?;
-        // Validate
-        if config.upstream.backends.is_empty() {
-            anyhow::bail!("At least one upstream backend is required");
-        }
+        config.validate()?;
+        // File-system checks (only in load, not in validate — tests don't need real files)
         if !config.tls.cert.exists() {
             anyhow::bail!("TLS cert not found: {}", config.tls.cert.display());
         }
@@ -199,7 +204,75 @@ impl FluxConfig {
                 anyhow::bail!("OCSP staple file not found: {}", ocsp_path.display());
             }
         }
+        if let Some(ref root) = config.static_files.root {
+            if !root.exists() {
+                anyhow::bail!("Static files root not found: {}", root.display());
+            }
+        }
         Ok(config)
+    }
+
+    /// Validate config values without checking filesystem.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        // --- upstream ---
+        if self.upstream.backends.is_empty() {
+            anyhow::bail!("At least one upstream backend is required");
+        }
+        for b in &self.upstream.backends {
+            Self::validate_host_port(b, "upstream backend")?;
+        }
+        for p in &self.cluster.peers {
+            Self::validate_host_port(p, "cluster peer")?;
+        }
+
+        // --- listen addresses ---
+        if self.server.listen.is_empty() {
+            anyhow::bail!("At least one listen address is required");
+        }
+        for addr in &self.server.listen {
+            addr.parse::<SocketAddr>()
+                .map_err(|_| anyhow::anyhow!("Invalid listen address: '{}' (expected host:port)", addr))?;
+        }
+
+        // --- timeouts ---
+        if self.upstream.connect_timeout >= self.upstream.response_timeout {
+            anyhow::bail!(
+                "connect_timeout ({:?}) must be less than response_timeout ({:?})",
+                self.upstream.connect_timeout, self.upstream.response_timeout
+            );
+        }
+        if self.upstream.health_check_timeout >= self.upstream.health_check_interval {
+            anyhow::bail!(
+                "health_check_timeout ({:?}) must be less than health_check_interval ({:?})",
+                self.upstream.health_check_timeout, self.upstream.health_check_interval
+            );
+        }
+
+        // --- limits ---
+        if self.upstream.max_conns_per_worker == 0 {
+            anyhow::bail!("max_conns_per_worker must be > 0");
+        }
+        if self.limits.request_body_limit == 0 {
+            anyhow::bail!("request_body_limit must be > 0");
+        }
+
+        Ok(())
+    }
+
+    /// Validate a "host:port" string (does not require DNS resolution, just format).
+    fn validate_host_port(s: &str, label: &str) -> anyhow::Result<()> {
+        if s.is_empty() {
+            anyhow::bail!("Empty {} address", label);
+        }
+        // Try as SocketAddr first (covers IP:port)
+        if s.parse::<SocketAddr>().is_ok() {
+            return Ok(());
+        }
+        // Try as hostname:port (e.g. "backend.local:8080")
+        match s.rsplit_once(':') {
+            Some((host, port)) if !host.is_empty() && port.parse::<u16>().is_ok() => Ok(()),
+            _ => anyhow::bail!("Invalid {} address: '{}' (expected host:port)", label, s),
+        }
     }
 
     pub fn worker_count(&self) -> usize {
@@ -238,5 +311,138 @@ fn parse_duration(s: &str) -> Result<std::time::Duration, String> {
         s.parse::<u64>()
             .map(std::time::Duration::from_secs)
             .map_err(|_| format!("Invalid duration '{}': use '30s', '100ms', or '5m'", s))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: build a minimal valid FluxConfig for testing validate().
+    fn valid_config() -> FluxConfig {
+        FluxConfig {
+            server: ServerConfig {
+                listen: vec!["0.0.0.0:443".into()],
+                workers: 0,
+                admin_listen: default_admin_listen(),
+            },
+            tls: TlsConfig {
+                cert: PathBuf::from("/tmp/cert.pem"),
+                key: PathBuf::from("/tmp/key.pem"),
+                ocsp_staple: None,
+                drain_timeout_secs: 30,
+            },
+            upstream: UpstreamConfig {
+                backends: vec!["127.0.0.1:8080".into()],
+                max_conns_per_worker: default_max_conns_per_worker(),
+                keepalive_timeout: default_keepalive_timeout(),
+                connect_timeout: default_connect_timeout(),
+                response_timeout: default_response_timeout(),
+                health_check_interval: default_health_check_interval(),
+                health_check_path: default_health_check_path(),
+                health_check_timeout: default_health_check_timeout(),
+                max_inflight_per_worker: default_max_inflight_per_worker(),
+                max_upstream_global: default_max_upstream_global(),
+            },
+            limits: LimitsConfig::default(),
+            logging: LoggingConfig::default(),
+            static_files: StaticConfig::default(),
+            cluster: ClusterConfig::default(),
+        }
+    }
+
+    #[test]
+    fn test_valid_config_passes() {
+        valid_config().validate().unwrap();
+    }
+
+    #[test]
+    fn test_empty_backends_rejected() {
+        let mut cfg = valid_config();
+        cfg.upstream.backends.clear();
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("upstream backend"), "{}", err);
+    }
+
+    #[test]
+    fn test_invalid_backend_address_rejected() {
+        let mut cfg = valid_config();
+        cfg.upstream.backends = vec!["not-a-valid-address".into()];
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("Invalid upstream backend"), "{}", err);
+    }
+
+    #[test]
+    fn test_hostname_port_backend_accepted() {
+        let mut cfg = valid_config();
+        cfg.upstream.backends = vec!["backend.local:8080".into()];
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn test_invalid_cluster_peer_rejected() {
+        let mut cfg = valid_config();
+        cfg.cluster.peers = vec!["bad-peer".into()];
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("cluster peer"), "{}", err);
+    }
+
+    #[test]
+    fn test_empty_listen_rejected() {
+        let mut cfg = valid_config();
+        cfg.server.listen.clear();
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("listen address"), "{}", err);
+    }
+
+    #[test]
+    fn test_invalid_listen_address_rejected() {
+        let mut cfg = valid_config();
+        cfg.server.listen = vec!["not-an-address".into()];
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("Invalid listen address"), "{}", err);
+    }
+
+    #[test]
+    fn test_connect_timeout_gte_response_timeout_rejected() {
+        let mut cfg = valid_config();
+        cfg.upstream.connect_timeout = std::time::Duration::from_secs(30);
+        cfg.upstream.response_timeout = std::time::Duration::from_secs(30);
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("connect_timeout"), "{}", err);
+    }
+
+    #[test]
+    fn test_health_timeout_gte_interval_rejected() {
+        let mut cfg = valid_config();
+        cfg.upstream.health_check_timeout = std::time::Duration::from_secs(10);
+        cfg.upstream.health_check_interval = std::time::Duration::from_secs(5);
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("health_check_timeout"), "{}", err);
+    }
+
+    #[test]
+    fn test_zero_max_conns_rejected() {
+        let mut cfg = valid_config();
+        cfg.upstream.max_conns_per_worker = 0;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("max_conns_per_worker"), "{}", err);
+    }
+
+    #[test]
+    fn test_zero_body_limit_rejected() {
+        let mut cfg = valid_config();
+        cfg.limits.request_body_limit = 0;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("request_body_limit"), "{}", err);
+    }
+
+    #[test]
+    fn test_parse_duration_variants() {
+        assert_eq!(parse_duration("30s").unwrap(), std::time::Duration::from_secs(30));
+        assert_eq!(parse_duration("100ms").unwrap(), std::time::Duration::from_millis(100));
+        assert_eq!(parse_duration("5m").unwrap(), std::time::Duration::from_secs(300));
+        assert_eq!(parse_duration("60").unwrap(), std::time::Duration::from_secs(60));
+        assert!(parse_duration("abc").is_err());
     }
 }
