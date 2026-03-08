@@ -18,6 +18,8 @@
 | 014 | Splice Zero-Copy for WebSocket/SSE Passthrough | High | Open | performance, io_uring, zero-copy |
 | 015 | io_uring Config Section + Feature Detection | Medium | Open | io_uring, config |
 | 016 | Splice Zero-Copy Metrics | Low | Open | observability, io_uring, prometheus |
+| 017 | kTLS Kernel TLS Offload | Medium | Planned | performance, tls, kernel |
+| 018 | Connection Draining Improvements | Medium | Planned | reliability, deployment |
 
 ## How to pick up an issue
 
