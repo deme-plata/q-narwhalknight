@@ -1,11 +1,11 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Send, QrCode, Sparkles, Check, AlertTriangle, X, Shield, Eye, EyeOff, Camera, Wallet, TrendingDown, Radio, Globe } from 'lucide-react';
 import { qnkAPI, FEE_REDUCTION_ACTIVATION_HEIGHT, CURRENT_MIN_FEE_QUG, NEW_MIN_FEE_QUG } from '../services/api';
 import { signTransactionForP2P, verifyPasswordHash } from '../services/walletAuth';
 import QRScanner from './QRScanner';
 import QRDisplay from './QRDisplay';
-import QuantumMixerVisualization from './QuantumMixerVisualization';
+const QuantumMixerVisualization = lazy(() => import('./QuantumMixerVisualization'));
 import AddressBook from './AddressBook';
 import { flashBorderRed } from './AnimatedBorder';
 import { useLibP2P } from '../contexts/LibP2PContext';
@@ -2028,6 +2028,7 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
             className="fixed inset-0 z-50 bg-black"
           >
             <div className="w-full h-full">
+              <Suspense fallback={<div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}><div style={{ width: 48, height: 48, borderRadius: '50%', border: '3px solid rgba(212,175,55,0.2)', borderTopColor: '#d4af37', animation: 'spin 0.8s linear infinite' }} /></div>}>
               <QuantumMixerVisualization
               sessionId={mixingSessionId}
               privacyLevel={privacyLevel}
@@ -2072,6 +2073,7 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
                 }));
               }}
             />
+              </Suspense>
             </div>
           </motion.div>
         )}

@@ -14,6 +14,22 @@ declare global {
   }
 }
 
+/** Dynamically load the Stripe.js SDK on first use */
+let stripeLoadPromise: Promise<void> | null = null;
+function loadStripeScript(): Promise<void> {
+  if (window.Stripe) return Promise.resolve();
+  if (stripeLoadPromise) return stripeLoadPromise;
+  stripeLoadPromise = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = 'https://js.stripe.com/v3/';
+    script.async = true;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error('Failed to load Stripe.js'));
+    document.head.appendChild(script);
+  });
+  return stripeLoadPromise;
+}
+
 const StripeCheckout: React.FC<StripeCheckoutProps> = ({ amount, walletAddress, onSuccess, onCancel }) => {
   const [stripe, setStripe] = useState<any>(null);
   const [cardElement, setCardElement] = useState<any>(null);
@@ -22,38 +38,41 @@ const StripeCheckout: React.FC<StripeCheckoutProps> = ({ amount, walletAddress, 
   const [processing, setProcessing] = useState(false);
   const [succeeded, setSucceeded] = useState(false);
 
-  // Initialize Stripe
+  // Load Stripe SDK dynamically and initialize
   useEffect(() => {
-    if (window.Stripe) {
-      // Use Stripe publishable key from environment variable
-      const publishableKey = import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY;
-      if (!publishableKey) {
-        setError('Stripe publishable key not configured');
-        return;
-      }
-      const stripeInstance = window.Stripe(publishableKey);
-      setStripe(stripeInstance);
+    loadStripeScript()
+      .then(() => {
+        const publishableKey = import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY;
+        if (!publishableKey) {
+          setError('Stripe publishable key not configured');
+          return;
+        }
+        const stripeInstance = window.Stripe(publishableKey);
+        setStripe(stripeInstance);
 
-      const elementsInstance = stripeInstance.elements();
+        const elementsInstance = stripeInstance.elements();
 
-      const cardElementInstance = elementsInstance.create('card', {
-        style: {
-          base: {
-            fontSize: '16px',
-            color: '#fff',
-            '::placeholder': {
-              color: 'rgba(255, 255, 255, 0.5)',
+        const cardElementInstance = elementsInstance.create('card', {
+          style: {
+            base: {
+              fontSize: '16px',
+              color: '#fff',
+              '::placeholder': {
+                color: 'rgba(255, 255, 255, 0.5)',
+              },
+              backgroundColor: 'transparent',
             },
-            backgroundColor: 'transparent',
+            invalid: {
+              color: '#f87171',
+            },
           },
-          invalid: {
-            color: '#f87171',
-          },
-        },
-      });
+        });
 
-      setCardElement(cardElementInstance);
-    }
+        setCardElement(cardElementInstance);
+      })
+      .catch(() => {
+        setError('Failed to load payment system. Please try again.');
+      });
   }, []);
 
   // Mount card element
@@ -99,7 +118,6 @@ const StripeCheckout: React.FC<StripeCheckoutProps> = ({ amount, walletAddress, 
         }
       } catch (err) {
         setError('Failed to initialize payment. Please try again.');
-        console.error('Payment intent creation error:', err);
       }
     };
 
@@ -156,7 +174,6 @@ const StripeCheckout: React.FC<StripeCheckoutProps> = ({ amount, walletAddress, 
       }
     } catch (err) {
       setError('Payment failed. Please try again.');
-      console.error('Payment error:', err);
     } finally {
       setProcessing(false);
     }

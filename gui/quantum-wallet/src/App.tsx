@@ -1,29 +1,44 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import LoginScreen from './components/LoginScreen';
 import Dashboard from './components/Dashboard';
-import TransactionScreenV2 from './components/TransactionScreenV2';
-import ExplorerScreen from './components/ExplorerScreen';
 import DexScreen from './components/DexScreen';
-import MiningScreen from './components/MiningScreen';
-import VittuaVMScreen from './components/VittuaVMScreen';
-import DownloadNodeScreen from './components/DownloadNodeScreen';
 import AIChatScreen from './components/AIChatScreen';
-import SettingsScreen from './components/SettingsScreen';
-import RwaMarketplaceScreen from './components/RwaMarketplaceScreen';
-import EmailScreen from './components/EmailScreen';
-import AnalyticsScreen from './components/AnalyticsScreen';
 import Navigation from './components/Navigation';
 import TopBar from './components/TopBar';
 import TokenBar from './components/TokenBar';
 import QuantumBackground from './components/QuantumBackground';
 import AnimatedBorder from './components/AnimatedBorder';
-import DeployControlPanel from './components/DeployControlPanel';
-import NodeSettingsModal from './components/NodeSettingsModal';
-import AIWheelButton from './components/AIWheelButton';
 import OAuthConsentPage from './components/OAuthConsentPage';
 import MinerLoginPage from './components/MinerLoginPage';
 import { sseManager } from './services/sseManager';
 import './App.css';
+
+// Lazy-loaded screens — split into separate chunks, loaded on first navigation
+const TransactionScreenV2 = lazy(() => import('./components/TransactionScreenV2'));
+const ExplorerScreen = lazy(() => import('./components/ExplorerScreen'));
+const MiningScreen = lazy(() => import('./components/MiningScreen'));
+const VittuaVMScreen = lazy(() => import('./components/VittuaVMScreen'));
+const DownloadNodeScreen = lazy(() => import('./components/DownloadNodeScreen'));
+const SettingsScreen = lazy(() => import('./components/SettingsScreen'));
+const RwaMarketplaceScreen = lazy(() => import('./components/RwaMarketplaceScreen'));
+const GameItemsScreen = lazy(() => import('./components/GameItemsScreen'));
+const EmailScreen = lazy(() => import('./components/EmailScreen'));
+const AnalyticsScreen = lazy(() => import('./components/AnalyticsScreen'));
+const DeployControlPanel = lazy(() => import('./components/DeployControlPanel'));
+const NodeSettingsModal = lazy(() => import('./components/NodeSettingsModal'));
+const AIWheelButton = lazy(() => import('./components/AIWheelButton'));
+
+// Loading spinner for lazy-loaded screen transitions
+const LoadingSpinner = () => (
+  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '200px' }}>
+    <div style={{
+      width: 36, height: 36, borderRadius: '50%',
+      border: '3px solid rgba(212, 175, 55, 0.2)',
+      borderTopColor: '#d4af37',
+      animation: 'spin 0.8s linear infinite',
+    }} />
+  </div>
+);
 
 // v3.6.1-beta: SANITY CHECK - Max possible balance is 21 million QUG (total supply)
 // Any balance exceeding this is corrupted data and must be rejected
@@ -55,7 +70,7 @@ function safeCacheBalance(balance: number): void {
   }
 }
 
-type Screen = 'dashboard' | 'transactions' | 'explorer' | 'dex' | 'mining' | 'vm' | 'rwamarket' | 'download' | 'aichat' | 'email' | 'analytics' | 'settings';
+type Screen = 'dashboard' | 'transactions' | 'explorer' | 'dex' | 'mining' | 'vm' | 'rwamarket' | 'gameitems' | 'download' | 'aichat' | 'email' | 'analytics' | 'settings';
 
 function App() {
   console.log('🚀 App function executing - TOP OF FUNCTION');
@@ -779,9 +794,9 @@ function App() {
           />
 
           {/* v5.1.1: Deploy Control Panel - master wallet + node admin */}
-          <DeployControlPanel />
+          <Suspense fallback={null}><DeployControlPanel /></Suspense>
           {/* v7.3.0: Node Settings Modal - admin wallet OAuth2 + node info */}
-          <NodeSettingsModal />
+          <Suspense fallback={null}><NodeSettingsModal /></Suspense>
           {/* Token Bar - Below TopBar */}
           <TokenBar onTokenClick={handleTokenClick} />
 
@@ -799,30 +814,33 @@ function App() {
               <div style={{ display: currentScreen === 'dashboard' ? 'block' : 'none' }}>
                 <Dashboard key="dashboard-stable" onNavigateToSend={handleCoinSendClick} liveBalance={nodeData.balance} />
               </div>
-              {currentScreen === 'transactions' && <TransactionScreenV2 currentBalance={nodeData.balance} />}
               {/* v2.3.12-beta: Keep DexScreen mounted to preserve swap state */}
               <div style={{ display: currentScreen === 'dex' ? 'block' : 'none' }}>
                 <DexScreen />
               </div>
-              {currentScreen === 'explorer' && <ExplorerScreen />}
-              {currentScreen === 'mining' && <MiningScreen />}
-              {currentScreen === 'vm' && <VittuaVMScreen />}
-              {currentScreen === 'rwamarket' && <RwaMarketplaceScreen />}
               {/* Keep AIChatScreen mounted to preserve state (messages, currentChatId, isGenerating) */}
               <div style={{ display: currentScreen === 'aichat' ? 'block' : 'none' }}>
                 <AIChatScreen />
               </div>
-              {currentScreen === 'email' && <EmailScreen />}
-              {currentScreen === 'analytics' && <AnalyticsScreen />}
-              {currentScreen === 'download' && <DownloadNodeScreen />}
-              {currentScreen === 'settings' && <SettingsScreen onLogout={handleLogout} />}
+              <Suspense fallback={<LoadingSpinner />}>
+                {currentScreen === 'transactions' && <TransactionScreenV2 currentBalance={nodeData.balance} />}
+                {currentScreen === 'explorer' && <ExplorerScreen />}
+                {currentScreen === 'mining' && <MiningScreen />}
+                {currentScreen === 'vm' && <VittuaVMScreen />}
+                {currentScreen === 'rwamarket' && <RwaMarketplaceScreen />}
+                {currentScreen === 'gameitems' && <GameItemsScreen />}
+                {currentScreen === 'email' && <EmailScreen />}
+                {currentScreen === 'analytics' && <AnalyticsScreen />}
+                {currentScreen === 'download' && <DownloadNodeScreen />}
+                {currentScreen === 'settings' && <SettingsScreen onLogout={handleLogout} />}
+              </Suspense>
             </main>
 
           </div>
         </div>
       </div>
       {/* v8.9.0: AI Wheel Button — floating AI assistant with radial tool wheel */}
-      <AIWheelButton />
+      <Suspense fallback={null}><AIWheelButton /></Suspense>
     </AnimatedBorder>
   );
 }

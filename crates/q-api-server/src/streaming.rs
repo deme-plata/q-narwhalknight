@@ -523,7 +523,8 @@ impl EventBroadcaster {
     ) -> Result<(), broadcast::error::SendError<StreamEvent>> {
         let subscriber_count = self.tx.receiver_count();
 
-        // 🔒 DEDUPLICATION: Skip duplicate balance updates within 500ms window
+        // 🔒 DEDUPLICATION: Skip duplicate balance updates within 100ms window
+        // v9.2.7: Reduced from 500ms to 100ms for faster SSE updates
         if let StreamEvent::BalanceUpdated {
             wallet_address,
             new_balance,
@@ -536,10 +537,10 @@ impl EventBroadcaster {
             // Check if we recently broadcast this exact balance
             if let Some((last_balance, last_time)) = cache.get(wallet_address) {
                 if (*last_balance - new_balance).abs() < 0.00000001
-                    && now.duration_since(*last_time).as_millis() < 500
+                    && now.duration_since(*last_time).as_millis() < 100
                 {
                     trace!(
-                        "📡 [SSE] Skipping duplicate BalanceUpdated for {}... (within 500ms)",
+                        "📡 [SSE] Skipping duplicate BalanceUpdated for {}... (within 100ms)",
                         &wallet_address[..16]
                     );
                     return Ok(());
@@ -549,8 +550,8 @@ impl EventBroadcaster {
             // Update cache
             cache.insert(wallet_address.clone(), (*new_balance, now));
 
-            // Clean old entries (older than 1 second)
-            cache.retain(|_, (_, time)| now.duration_since(*time).as_secs() < 1);
+            // Clean old entries (older than 500ms)
+            cache.retain(|_, (_, time)| now.duration_since(*time).as_millis() < 500);
         }
 
         // 🔒 PRIVACY: Log aggregate statistics only, no individual wallet data

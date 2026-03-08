@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, memo, useRef } from 'react';
+import { useState, useEffect, useCallback, memo, useRef, lazy, Suspense } from 'react';
 import { motion, AnimatePresence, Reorder } from 'framer-motion';
 import { Activity, Zap, AlertCircle, Copy, Check, Wallet, ChevronLeft, ChevronRight, Calendar, DollarSign, TrendingUp, TrendingDown, QrCode, Info, Plus, Send, BarChart3, Radio, Mail, MessageCircle, Settings2, GripVertical, ArrowUp, ArrowDown, Globe } from 'lucide-react';
 import { qnkAPI, type NodeStatus } from '../services/api'; // debounce not needed - SSE in App.tsx
@@ -6,7 +6,7 @@ import TransactionDetailsModal from './TransactionDetailsModal';
 // 🌐 v3.4.3-browser: P2P real-time block streaming
 import { useRealtimeBlocks } from '../hooks/useRealtimeBlocks';
 import QRCodeModal from './QRCodeModal';
-import StripeCheckout from './StripeCheckout';
+const StripeCheckout = lazy(() => import('./StripeCheckout'));
 import DAGKnightVisualization from './DAGKnightVisualization';
 import QNOOracleVisualization from './QNOOracleVisualization';
 import LoanApplicationModal from './LoanApplicationModal';
@@ -3870,20 +3870,22 @@ Provide a brief analysis (under 250 tokens) covering:
                   </p>
                 </div>
               ) : (
-                <StripeCheckout
-                  amount={usdAmount}
-                  walletAddress={localStorage.getItem('walletAddress') || ''}
-                  onSuccess={() => {
-                    setShowStripeCheckout(false);
-                    setIsAddUSDModalOpen(false);
-                    setUsdAmount('');
-                    setStripeError(null);
-                    setRefreshTrigger(prev => prev + 1);
-                  }}
-                  onCancel={() => {
-                    setShowStripeCheckout(false);
-                  }}
-                />
+                <Suspense fallback={<div style={{ display: 'flex', justifyContent: 'center', padding: 32 }}><div style={{ width: 32, height: 32, borderRadius: '50%', border: '3px solid rgba(212,175,55,0.2)', borderTopColor: '#d4af37', animation: 'spin 0.8s linear infinite' }} /></div>}>
+                  <StripeCheckout
+                    amount={usdAmount}
+                    walletAddress={localStorage.getItem('walletAddress') || ''}
+                    onSuccess={() => {
+                      setShowStripeCheckout(false);
+                      setIsAddUSDModalOpen(false);
+                      setUsdAmount('');
+                      setStripeError(null);
+                      setRefreshTrigger(prev => prev + 1);
+                    }}
+                    onCancel={() => {
+                      setShowStripeCheckout(false);
+                    }}
+                  />
+                </Suspense>
               )}
             </motion.div>
           </motion.div>

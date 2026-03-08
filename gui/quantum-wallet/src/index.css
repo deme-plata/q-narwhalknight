@@ -11,11 +11,7 @@
    PERFORMANCE OPTIMIZATIONS v2.4.0
    ============================================ */
 
-/* GPU acceleration for common animated elements */
-.motion-safe *,
-button,
-[class*="modal"],
-[class*="card"],
+/* GPU acceleration for animated elements only */
 [class*="animate"] {
   transform: translateZ(0);
   backface-visibility: hidden;

@@ -6377,6 +6377,92 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     }
 
     // ========================================
+    // v9.3.1: K-PARAMETER NETWORK HEALTH GAUGE (always-on, lightweight)
+    // ========================================
+    {
+        use q_api_server::k_parameter_gauge::{KParameterEngine, KPhase, RawMetrics};
+        use std::sync::atomic::Ordering as AtOrd;
+
+        let k_state = state.k_parameter_state.clone();
+        let k_submitted = state.mining_solutions_submitted.clone();
+        let k_accepted = state.mining_solutions_accepted.clone();
+        let k_bytes_in = state.p2p_bytes_in.clone();
+        let k_bytes_out = state.p2p_bytes_out.clone();
+        let k_peer_count = state.libp2p_peer_count.clone();
+        let k_local_height = state.current_height_atomic.clone();
+        let k_network_height = state.highest_network_height.clone();
+        let k_pool = state.block_producer_pool.clone();
+
+        tokio::spawn(async move {
+            info!("📊 K-PARAM GAUGE: Starting (60s interval, formula: K = 2π √(ΔH · Δs · ℏ) / τ)");
+            let mut engine = KParameterEngine::new();
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            interval.tick().await; // skip first immediate tick
+
+            loop {
+                interval.tick().await;
+
+                let metrics = RawMetrics {
+                    mining_submitted: k_submitted.load(AtOrd::Relaxed),
+                    mining_accepted: k_accepted.load(AtOrd::Relaxed),
+                    p2p_bytes_in: k_bytes_in.load(AtOrd::Relaxed),
+                    p2p_bytes_out: k_bytes_out.load(AtOrd::Relaxed),
+                    peer_count: k_peer_count
+                        .as_ref()
+                        .map(|p| p.load(AtOrd::Relaxed) as u64)
+                        .unwrap_or(0),
+                    local_height: k_local_height.load(AtOrd::Relaxed),
+                    network_height: k_network_height.load(AtOrd::Relaxed),
+                };
+
+                let (k, new_phase, prev_phase) = engine.compute_round(&metrics, &k_state);
+
+                if new_phase != prev_phase {
+                    match new_phase {
+                        KPhase::Stable => {
+                            tracing::warn!(
+                                "📊 K-PARAM PHASE: {} → {} (K={:.4}) — relaxing parameters",
+                                prev_phase.as_str(), new_phase.as_str(), k
+                            );
+                        }
+                        KPhase::Approaching => {
+                            tracing::warn!(
+                                "📊 K-PARAM PHASE: {} → {} (K={:.4}) — tightening parameters",
+                                prev_phase.as_str(), new_phase.as_str(), k
+                            );
+                        }
+                        KPhase::Critical => {
+                            tracing::error!(
+                                "📊 K-PARAM PHASE: {} → CRITICAL (K={:.4}) — maximum protection",
+                                prev_phase.as_str(), k
+                            );
+                        }
+                    }
+
+                    // Update max_solutions_per_block on all producers
+                    let max_sol = k_state.tuned_max_solutions.load(AtOrd::Relaxed) as usize;
+                    k_pool.set_max_solutions_per_block(max_sol);
+                } else {
+                    tracing::info!("📊 K-PARAM GAUGE: K={:.4} phase={}", k, new_phase.as_str());
+                }
+
+                // Store zk-STARK commitment and phase proof
+                k_state.store_zk_proof(
+                    engine.last_zk_commitment().to_string(),
+                    q_api_server::k_parameter_gauge::ZkPhaseProof {
+                        commitment: engine.last_zk_phase_proof().commitment.clone(),
+                        range_witness: engine.last_zk_phase_proof().range_witness.clone(),
+                        challenge: engine.last_zk_phase_proof().challenge.clone(),
+                        response: engine.last_zk_phase_proof().response.clone(),
+                        verified: engine.last_zk_phase_proof().verified,
+                    },
+                );
+            }
+        });
+        info!("✅ K-Parameter gauge spawned (60s periodic, lock-free reads, zk-STARK proofs)");
+    }
+
+    // ========================================
     // PHASE 1: DAG STATE SYNCHRONIZATION INFRASTRUCTURE
     // ========================================
     info!("🔄 Initializing DAG State Synchronization...");
@@ -7530,6 +7616,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
         // v8.4.0: Seed default exchange listing campaigns if none exist
         listing_api::seed_default_campaigns(&app_state).await;
+
+        // v9.3.0: Seed default game item cases and collections
+        q_api_server::game_items_api::seed_default_content(&app_state).await;
     }
 
     // ========================================
@@ -13954,13 +14043,14 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         });
     }
 
-    // --- SSE MINING EVENT AGGREGATOR TASK (10Hz) ---
+    // --- SSE MINING EVENT AGGREGATOR TASK (20Hz) ---
     // Batches SSE events from all shards and broadcasts aggregated events
+    // v9.2.7: Increased from 10Hz (100ms) to 20Hz (50ms) for faster SSE updates
     {
         let app_state_sse = app_state.clone();
         tokio::spawn(async move {
-            info!("📡 [SSE AGG] Starting SSE mining event aggregator (10Hz broadcast)");
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+            info!("📡 [SSE AGG] Starting SSE mining event aggregator (20Hz broadcast)");
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(50));
             let mut pending_rewards: Vec<q_api_server::SseMiningEvent> = Vec::with_capacity(1000);
             loop {
                 interval.tick().await;
@@ -20610,6 +20700,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             "/api/v1/consensus/resonance/status",
             get(handlers::resonance_status),
         )
+        .route("/api/v1/k-parameter", get(handlers::get_k_parameter)) // v9.3.1: Lightweight K-parameter gauge
         .route(
             "/api/v1/consensus/resonance/k-parameter",
             get(handlers::k_parameter_metrics),
@@ -20787,6 +20878,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .nest("/api/v1/perp", q_api_server::perpetual_api::create_perp_router())
         // ⛏️ v2.2.1-beta: Stratum Mining Pool API - PPLNS rewards
         .nest("/api/v1/pool", q_api_server::pool_api::create_pool_router())
+        // 🎮 v9.3.0: Game Items RWA — CS:GO2-style skins, cases, trade-up
+        .nest("/api/v1/game-items", q_api_server::game_items_api::create_game_items_router())
         // 💳 v8.5.5: QCREDIT Yield Vault API - Lock QUG, earn tiered yield
         .route("/api/v1/qcredit/status", get(qcredit_api::get_status))
         .route("/api/v1/qcredit/tiers", get(qcredit_api::get_tiers))
