@@ -3055,6 +3055,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         }
     }
 
+    // v9.3.3: Track whether any balance rebuild migration ran this boot.
+    // If so, we must re-apply DEX QUG adjustments after all migrations complete,
+    // because rebuilds replay the blockchain and overwrite DEX swap deductions.
+    let mut any_balance_rebuild_this_boot = false;
+
     // v8.5.0: One-time testnet wallet purge + rebuild from mainnet blocks.
     // Pass emission controller total so balances are scaled to match reality.
     // Also load the balance watermark to prevent re-inflation on restart.
@@ -3077,6 +3082,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 *supply = total;
                 info!("✅ Balance rebuild complete: {} wallets, {} QUG",
                       rebuilt.len(), total / 1_000_000_000_000_000_000_000_000u128);
+                any_balance_rebuild_this_boot = true;
                 true
             }
             Ok(false) => {
@@ -3131,6 +3137,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 *supply = total;
                 info!("✅ [v8.5.4] Balance reconciliation loaded: {} wallets, {} QUG",
                       reconciled.len(), total / 1_000_000_000_000_000_000_000_000u128);
+                any_balance_rebuild_this_boot = true;
 
                 // Reset watermark to current tip after reconciliation
                 let tip = state.storage_engine.get_highest_contiguous_block().await.unwrap_or(0);
@@ -3226,6 +3233,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 *supply = total;
                 info!("✅ [v8.8.1] Chain balance rebuild loaded: {} wallets, {} QUG total supply",
                       rebuilt.len(), total / 1_000_000_000_000_000_000_000_000u128);
+                any_balance_rebuild_this_boot = true;
             }
             Ok(false) => debug!("[v8.8.1] Chain balance rebuild already done"),
             Err(e) => warn!("⚠️ [v8.8.1] Chain balance rebuild failed: {}", e),
@@ -3251,6 +3259,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 let qug = 1_000_000_000_000_000_000_000_000u128;
                 info!("✅ [v8.8.5] Deterministic replay loaded: {} wallets, {} QUG",
                       rebuilt.len(), total / qug);
+                any_balance_rebuild_this_boot = true;
 
                 // v8.8.6 fixup: Sync emission controller + clear rate windows (for fresh nodes)
                 {
@@ -3369,6 +3378,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             }
                             info!("✅ [v1.0.3] Loaded {} wallets into memory ({} QUG)",
                                   wallet_count, wallet_total / qug);
+                            any_balance_rebuild_this_boot = true;
                         }
 
                         // Sync emission controller to match wallet total
@@ -3419,6 +3429,58 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             }
             Ok(false) => debug!("[v1.0.3] Convergence migration already done"),
             Err(e) => warn!("⚠️ [v1.0.3] Convergence migration failed: {}", e),
+        }
+    }
+
+    // v9.3.3: DEX QUG adjustment tracking — rebuild-safe swap balance accounting.
+    //
+    // Step 1: One-time migration to retroactively compute DEX QUG adjustment counters
+    // from existing CF_SWAP_HISTORY records (for swaps before v9.3.3 tracking was added).
+    {
+        match state.storage_engine.migrate_dex_qug_counters_from_swap_history().await {
+            Ok(true) => {
+                info!("✅ [v9.3.3] DEX QUG counters initialized from swap history");
+                // If counters were just computed AND a rebuild also happened, apply adjustments
+                any_balance_rebuild_this_boot = true;
+            }
+            Ok(false) => debug!("[v9.3.3] DEX QUG counter migration already done"),
+            Err(e) => warn!("⚠️ [v9.3.3] DEX QUG counter migration failed: {}", e),
+        }
+    }
+
+    // Step 2: If any balance rebuild migration ran this boot, re-apply DEX adjustments.
+    // Balance rebuilds replay the blockchain and overwrite wallet_balance_* entries.
+    // DEX swaps are NOT blockchain transactions, so the adjustments must be re-applied.
+    if any_balance_rebuild_this_boot {
+        match state.storage_engine.apply_dex_qug_adjustments().await {
+            Ok(adjusted) if adjusted > 0 => {
+                // Refresh in-memory wallet_balances from the corrected RocksDB values
+                match state.storage_engine.load_wallet_balances().await {
+                    Ok(corrected) => {
+                        let mut balances = state.wallet_balances.write().await;
+                        let mut corrected_count = 0u64;
+                        for (addr, amount) in &corrected {
+                            let current = balances.get(addr).copied().unwrap_or(0);
+                            if *amount != current {
+                                balances.insert(*addr, *amount);
+                                corrected_count += 1;
+                            }
+                        }
+                        drop(balances);
+
+                        let total: u128 = corrected.values().sum();
+                        let mut supply = state.total_minted_supply.write().await;
+                        *supply = total;
+                        drop(supply);
+
+                        info!("✅ [v9.3.3] DEX adjustments applied: {} wallets corrected, total supply: {} QUG",
+                              corrected_count, total / 1_000_000_000_000_000_000_000_000u128);
+                    }
+                    Err(e) => warn!("⚠️ [v9.3.3] Failed to reload balances after DEX adjustment: {}", e),
+                }
+            }
+            Ok(_) => debug!("[v9.3.3] No DEX adjustments needed after rebuild"),
+            Err(e) => warn!("⚠️ [v9.3.3] DEX adjustment application failed: {}", e),
         }
     }
 
@@ -7063,6 +7125,17 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 committee.cleanup_expired();
             }
         });
+    }
+
+    // ========================================
+    // v9.4.0: BRIDGE SAFETY — Swap expiry scanner (background task)
+    // Scans for stalled/expired swaps every 60s and marks them for refund
+    // ========================================
+    {
+        q_api_server::bridge_safety::spawn_swap_expiry_scanner(
+            app_state.bridge_safety.clone(),
+            app_state.storage_engine.clone(),
+        );
     }
 
     // ========================================
@@ -21135,6 +21208,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         // v7.2.5: Aggregate bridge status + operations endpoints
         .route("/api/v1/bridge/status", get(bridge_status_handler))
         .route("/api/v1/bridge/operations/:wallet", get(bridge_operations_handler))
+        // v9.4.0: Bridge admin safety endpoints (master-wallet-only)
+        .route("/api/v1/bridge/admin/freeze", post(q_api_server::bridge_safety::admin_freeze_bridge))
+        .route("/api/v1/bridge/admin/unfreeze", post(q_api_server::bridge_safety::admin_unfreeze_bridge))
+        .route("/api/v1/bridge/admin/safety-status", get(q_api_server::bridge_safety::admin_safety_status))
         // Serve static frontend files
         .nest_service("/ui", ServeDir::new("web-ui/dist-final"))
         // v0.9.3-beta: REMOVED .fallback_service() - was shadowing all API routes with 404

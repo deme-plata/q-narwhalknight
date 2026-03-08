@@ -8035,6 +8035,219 @@ impl QStorage {
     }
 
     // ========================================================================
+    // v9.3.3: DEX QUG Adjustment Tracking (Rebuild-Safe)
+    //
+    // Problem: Balance rebuild migrations replay the blockchain and overwrite
+    // wallet_balance_* entries. DEX swaps are NOT blockchain transactions, so
+    // subtract_balance()/add_balance() deductions get lost after any rebuild.
+    //
+    // Solution: Track cumulative DEX QUG debits/credits per wallet in durable
+    // counters. After any balance rebuild, re-apply these adjustments.
+    //
+    // Key format: "dex_qug_debited:{wallet_hex}" → u128 (total QUG sold on DEX)
+    //             "dex_qug_credited:{wallet_hex}" → u128 (total QUG bought on DEX)
+    // ========================================================================
+
+    /// Record a QUG debit from a DEX swap (user sold QUG)
+    /// Atomically increments the cumulative debit counter for this wallet.
+    pub async fn record_dex_qug_debit(&self, wallet_hex: &str, amount: u128) -> Result<()> {
+        let key = format!("dex_qug_debited:{}", wallet_hex);
+        let current = match self.hot_db.get(CF_MANIFEST, key.as_bytes()).await? {
+            Some(bytes) if bytes.len() == 16 => u128::from_le_bytes(bytes[..16].try_into().unwrap()),
+            _ => 0u128,
+        };
+        let new_total = current.saturating_add(amount);
+        self.hot_db.put_sync(CF_MANIFEST, key.as_bytes(), &new_total.to_le_bytes()).await?;
+        debug!("📉 [DEX ADJUST] Recorded QUG debit: {} += {} (total: {})",
+            &wallet_hex[..8.min(wallet_hex.len())], amount as f64 / 1e24, new_total as f64 / 1e24);
+        Ok(())
+    }
+
+    /// Record a QUG credit from a DEX swap (user bought QUG)
+    /// Atomically increments the cumulative credit counter for this wallet.
+    pub async fn record_dex_qug_credit(&self, wallet_hex: &str, amount: u128) -> Result<()> {
+        let key = format!("dex_qug_credited:{}", wallet_hex);
+        let current = match self.hot_db.get(CF_MANIFEST, key.as_bytes()).await? {
+            Some(bytes) if bytes.len() == 16 => u128::from_le_bytes(bytes[..16].try_into().unwrap()),
+            _ => 0u128,
+        };
+        let new_total = current.saturating_add(amount);
+        self.hot_db.put_sync(CF_MANIFEST, key.as_bytes(), &new_total.to_le_bytes()).await?;
+        debug!("📈 [DEX ADJUST] Recorded QUG credit: {} += {} (total: {})",
+            &wallet_hex[..8.min(wallet_hex.len())], amount as f64 / 1e24, new_total as f64 / 1e24);
+        Ok(())
+    }
+
+    /// Apply DEX QUG adjustments to wallet balances after a balance rebuild.
+    ///
+    /// ONLY call this after a balance rebuild migration has run. On a normal restart
+    /// (no rebuild), subtract_balance()/add_balance() already maintain correct balances.
+    ///
+    /// Formula: correct_balance = chain_rebuilt_balance + total_credited - total_debited
+    pub async fn apply_dex_qug_adjustments(&self) -> Result<u64> {
+        info!("🔄 [DEX ADJUST v9.3.3] Applying DEX QUG adjustments after balance rebuild...");
+
+        // Load all debit counters
+        let debit_entries = self.hot_db.scan_prefix(CF_MANIFEST, b"dex_qug_debited:").await?;
+        let credit_entries = self.hot_db.scan_prefix(CF_MANIFEST, b"dex_qug_credited:").await?;
+
+        let mut debit_map: HashMap<String, u128> = HashMap::new();
+        let mut credit_map: HashMap<String, u128> = HashMap::new();
+
+        for (key, value) in debit_entries {
+            if let Ok(key_str) = String::from_utf8(key) {
+                let wallet_hex = key_str.trim_start_matches("dex_qug_debited:").to_string();
+                if value.len() == 16 && !wallet_hex.is_empty() {
+                    let amount = u128::from_le_bytes(value[..16].try_into().unwrap());
+                    if amount > 0 {
+                        debit_map.insert(wallet_hex, amount);
+                    }
+                }
+            }
+        }
+
+        for (key, value) in credit_entries {
+            if let Ok(key_str) = String::from_utf8(key) {
+                let wallet_hex = key_str.trim_start_matches("dex_qug_credited:").to_string();
+                if value.len() == 16 && !wallet_hex.is_empty() {
+                    let amount = u128::from_le_bytes(value[..16].try_into().unwrap());
+                    if amount > 0 {
+                        credit_map.insert(wallet_hex, amount);
+                    }
+                }
+            }
+        }
+
+        // Collect all wallets with any DEX activity
+        let mut all_wallets: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for k in debit_map.keys() { all_wallets.insert(k.clone()); }
+        for k in credit_map.keys() { all_wallets.insert(k.clone()); }
+
+        if all_wallets.is_empty() {
+            info!("🔄 [DEX ADJUST v9.3.3] No DEX QUG adjustments to apply (no counters found)");
+            return Ok(0);
+        }
+
+        let mut adjusted = 0u64;
+        let qug = 1_000_000_000_000_000_000_000_000u128;
+
+        for wallet_hex in &all_wallets {
+            let debited = debit_map.get(wallet_hex).copied().unwrap_or(0);
+            let credited = credit_map.get(wallet_hex).copied().unwrap_or(0);
+
+            let addr_bytes = match hex::decode(wallet_hex) {
+                Ok(b) if b.len() == 32 => {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&b);
+                    arr
+                }
+                _ => continue,
+            };
+
+            let chain_balance = self.load_wallet_balance(&addr_bytes).await?.unwrap_or(0);
+            let correct_balance = chain_balance.saturating_add(credited).saturating_sub(debited);
+
+            if correct_balance != chain_balance {
+                self.save_wallet_balance(&addr_bytes, correct_balance).await?;
+                adjusted += 1;
+                info!("  🔧 [DEX ADJUST] Wallet {}...: {} → {} QUG (credited: {}, debited: {})",
+                    &wallet_hex[..16.min(wallet_hex.len())],
+                    chain_balance / qug, correct_balance / qug,
+                    debited as f64 / 1e24, credited as f64 / 1e24);
+            }
+        }
+
+        info!("✅ [DEX ADJUST v9.3.3] Applied adjustments to {} of {} DEX wallets", adjusted, all_wallets.len());
+        Ok(adjusted)
+    }
+
+    /// One-time migration: Retroactively compute DEX QUG adjustment counters
+    /// from existing CF_SWAP_HISTORY records.
+    ///
+    /// This handles swaps that occurred BEFORE the v9.3.3 tracking was added.
+    /// Scans all swap history, extracts QUG debits/credits per wallet, and
+    /// initializes the cumulative counters.
+    pub async fn migrate_dex_qug_counters_from_swap_history(&self) -> Result<bool> {
+        const MIGRATION_FLAG: &[u8] = b"migration_dex_qug_counters_v933_done";
+
+        if self.has_migration_flag(MIGRATION_FLAG).await {
+            return Ok(false); // Already done
+        }
+
+        info!("🔧 [v9.3.3 MIGRATION] Computing DEX QUG adjustment counters from swap history...");
+
+        // Scan ALL swap history records
+        let all_records = self.hot_db.scan_prefix(CF_SWAP_HISTORY, b"swap:").await?;
+
+        let mut debit_totals: HashMap<String, u128> = HashMap::new();
+        let mut credit_totals: HashMap<String, u128> = HashMap::new();
+        let mut processed = 0u64;
+
+        for (_key, value) in &all_records {
+            let record: serde_json::Value = match serde_json::from_slice(value) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            let tx_type = record.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let from_token = record.get("fromToken").and_then(|v| v.as_str()).unwrap_or("");
+            let to_token = record.get("toToken").and_then(|v| v.as_str()).unwrap_or("");
+            let amount = record.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
+
+            if amount <= 0.0 { continue; }
+
+            // Convert display amount back to raw u128 (24 decimals)
+            let raw_amount = (amount * 1e24) as u128;
+
+            if tx_type == "sell" && from_token.to_uppercase() == "QUG" {
+                // User sold QUG — this is a debit
+                // from_address = "qnk{wallet_hex}"
+                let from_addr = record.get("from").and_then(|v| v.as_str()).unwrap_or("");
+                let wallet_hex = from_addr.trim_start_matches("qnk");
+                if wallet_hex.len() == 64 {
+                    *debit_totals.entry(wallet_hex.to_string()).or_insert(0) += raw_amount;
+                }
+            } else if tx_type == "buy" && to_token.to_uppercase() == "QUG" {
+                // User bought QUG — this is a credit
+                // to_address = "qnk{wallet_hex}"
+                let to_addr = record.get("to").and_then(|v| v.as_str()).unwrap_or("");
+                let wallet_hex = to_addr.trim_start_matches("qnk");
+                if wallet_hex.len() == 64 {
+                    *credit_totals.entry(wallet_hex.to_string()).or_insert(0) += raw_amount;
+                }
+            }
+
+            processed += 1;
+        }
+
+        let qug = 1_000_000_000_000_000_000_000_000u128;
+
+        // Write cumulative counters to RocksDB
+        for (wallet_hex, total) in &debit_totals {
+            let key = format!("dex_qug_debited:{}", wallet_hex);
+            self.hot_db.put_sync(CF_MANIFEST, key.as_bytes(), &total.to_le_bytes()).await?;
+        }
+        for (wallet_hex, total) in &credit_totals {
+            let key = format!("dex_qug_credited:{}", wallet_hex);
+            self.hot_db.put_sync(CF_MANIFEST, key.as_bytes(), &total.to_le_bytes()).await?;
+        }
+
+        info!("✅ [v9.3.3 MIGRATION] Processed {} swap records → {} wallets with debits, {} with credits",
+            processed, debit_totals.len(), credit_totals.len());
+
+        for (wallet_hex, debited) in &debit_totals {
+            let credited = credit_totals.get(wallet_hex).copied().unwrap_or(0);
+            info!("   Wallet {}...: debited={} QUG, credited={} QUG, net={}",
+                &wallet_hex[..16.min(wallet_hex.len())],
+                *debited / qug, credited / qug,
+                (*debited as i128 - credited as i128) / qug as i128);
+        }
+
+        self.set_migration_flag(MIGRATION_FLAG).await?;
+        Ok(true)
+    }
+
+    // ========================================================================
     // v2.4.9-beta: DCA (Dollar Cost Averaging) Persistence
     // Store DCA orders and execution history in RocksDB
     // ========================================================================

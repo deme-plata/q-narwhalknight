@@ -64,7 +64,7 @@ members = [
 , "sdk/rust", "crates/q-ai-inference", "crates/q-crypto-advanced", "crates/q-index-fund", "crates/q-mining-pool", "crates/q-temporal-shield", "crates/q-bitnet-ffi", "crates/q-consensus-guard", "crates/q-bio-dsl", "crates/q-eternal-cypher", "crates/q-dune", "crates/q-flux", "crates/q-queue"]
 
 [workspace.package]
-version = "9.3.2"  # v9.3.2: GLM-4-Flash AI web search + frontend code splitting
+version = "9.4.0"  # v9.4.0: Bridge safety layer — deposit verification, kill-switch, amount limits
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"

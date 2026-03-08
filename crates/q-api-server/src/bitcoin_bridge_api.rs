@@ -72,6 +72,9 @@ pub struct SwapStatusResponse {
 pub struct ClaimSwapRequest {
     /// The secret preimage (hex-encoded, 32 bytes)
     pub secret: String,
+    /// v9.4.0: Transaction ID of the BTC deposit on Bitcoin chain (REQUIRED for safety)
+    #[serde(default)]
+    pub deposit_txid: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -216,8 +219,16 @@ pub async fn create_atomic_swap(
     // Generate secret for the swap (bank side generates, user gets hash)
     let (_secret, hash_lock) = AtomicSwapManager::generate_secret();
 
-    // Use a placeholder bank pubkey (in production, from secure key storage)
-    let bank_btc_pubkey = vec![0x02; 33]; // placeholder compressed pubkey
+    // v9.4.0: Derive bank BTC pubkey from node's Ed25519 signing key
+    // Uses SHA256(node_verifying_key) as x-coordinate with 0x02 prefix for compressed format
+    let bank_btc_pubkey = {
+        use sha2::{Sha256, Digest as Sha2Digest};
+        let verifying_key = state.node_signing_key.verifying_key();
+        let hash = Sha256::digest(verifying_key.as_bytes());
+        let mut pubkey = vec![0x02u8]; // compressed pubkey prefix (even y-coordinate)
+        pubkey.extend_from_slice(&hash);
+        pubkey
+    };
 
     // Create swap proposal
     let proposal = match swap_manager.create_swap_proposal(
@@ -415,6 +426,27 @@ pub async fn claim_swap(
             };
 
             // ═══════════════════════════════════════════════════════════════
+            // v9.4.0: Bridge safety check — MUST pass before minting
+            // Verifies: kill-switch, amount limits, deposit on Bitcoin chain
+            // ═══════════════════════════════════════════════════════════════
+            if btc_amount > 0 && direction == "sell_btc" {
+                if let Err(safety_err) = state.bridge_safety.pre_mint_check(
+                    crate::bridge_tokens::BridgeChain::Bitcoin,
+                    btc_amount as u128,
+                    &swap_id,
+                    request.deposit_txid.as_deref(),
+                ).await {
+                    warn!("🚨 [BRIDGE SAFETY] BTC mint blocked for swap {}: {}", swap_id, safety_err);
+                    return Ok(Json(ApiResponse {
+                        success: false,
+                        data: None,
+                        error: Some(format!("Bridge safety check failed: {}", safety_err)),
+                        timestamp: Utc::now(),
+                    }));
+                }
+            }
+
+            // ═══════════════════════════════════════════════════════════════
             // v7.3.1: Multi-sig bridge attestation (7-of-11 committee validation)
             // Falls back to single-node if committee too small
             // ═══════════════════════════════════════════════════════════════
@@ -513,7 +545,7 @@ pub async fn claim_swap(
                     },
                     wallet: wallet.address,
                     amount: btc_amount as u128,
-                    native_txid: None,
+                    native_txid: request.deposit_txid.clone(),
                     swap_id: Some(swap_id.clone()),
                     timestamp: Utc::now(),
                     status: if bridge_result.is_ok() {

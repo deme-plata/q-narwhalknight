@@ -327,6 +327,7 @@ pub mod ironfish_bridge_api; // ✅ v7.2.4: Iron Fish privacy atomic swap bridge
 pub mod ethereum_bridge_api; // ✅ v7.3.0: Ethereum atomic swap bridge (QNK ↔ ETH)
 pub mod bridge_committee; // ✅ v7.3.1: Multi-sig bridge validation with rotating 11-node committee
 pub mod bridge_tokens; // ✅ v7.2.5: Wrapped bridge tokens (wBTC, wZEC, wIRON) mint/burn system
+pub mod bridge_safety; // ✅ v9.4.0: Bridge safety layer — deposit verification, kill-switch, amount limits
 pub mod swap_indexer; // ✅ v2.4.0-beta: Consensus-verified swap history indexer
 pub mod price_history_indexer; // ✅ v3.7.1-beta: Consensus-verified price history indexer
 pub mod mining_commit_reveal; // ✅ v1.4.11-beta: Commit-reveal cryptographic time-locks for mining
@@ -352,6 +353,12 @@ pub use streaming::{EventBroadcaster, HighPerformanceEmitter, StreamEvent, SseQu
 pub use contracts_api::TokenSocialProfile;
 
 // v7.0.0: FaucetState, FaucetRequestRecord, AbusePattern removed — faucet eliminated
+
+/// v9.4.0: Check if a wallet address is the master (founder) wallet
+pub fn is_master_wallet(address: &[u8; 32]) -> bool {
+    let founder_hex = aegis_auth_middleware::FOUNDER_WALLET;
+    hex::encode(address) == founder_hex
+}
 
 /// Pending quantum mixing request
 #[derive(Debug, Clone)]
@@ -1550,6 +1557,9 @@ pub struct AppState {
 
     // v7.3.1: Multi-sig bridge validation committee (7-of-11 rotating attestations)
     pub bridge_committee: Arc<RwLock<bridge_committee::BridgeCommittee>>,
+
+    // v9.4.0: Bridge safety controller — deposit verification, kill-switch, amount limits
+    pub bridge_safety: Arc<bridge_safety::BridgeSafetyController>,
 }
 
 // SAFETY: AppState is safe to Send/Sync because:
@@ -3064,6 +3074,8 @@ impl AppState {
             atomic_swap_manager: None,
             // v7.3.1: Bridge committee (peer ID set later)
             bridge_committee: Arc::new(RwLock::new(bridge_committee::BridgeCommittee::new(String::new()))),
+            // v9.4.0: Bridge safety controller
+            bridge_safety: Arc::new(bridge_safety::BridgeSafetyController::new()),
         })
     }
 
@@ -4502,6 +4514,8 @@ impl AppState {
             atomic_swap_manager: None,
             // v7.3.1: Bridge committee (peer ID set later)
             bridge_committee: Arc::new(RwLock::new(bridge_committee::BridgeCommittee::new(String::new()))),
+            // v9.4.0: Bridge safety controller
+            bridge_safety: Arc::new(bridge_safety::BridgeSafetyController::new()),
         })
     }
 

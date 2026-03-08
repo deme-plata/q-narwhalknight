@@ -187,9 +187,10 @@ pub struct OperatorRewardEntry {
     pub peer_id_short: String,
 }
 
-/// v8.7.0: Activation height for distributed operator fee
-/// Blocks below this height use legacy single-operator behavior
-pub const DISTRIBUTED_OPERATOR_FEE_HEIGHT: u64 = 5_400_000;
+/// v8.7.0 → v9.4.0: Activation height for distributed operator fee
+/// Lowered from 5_400_000 to 0 so any node with --admin-wallet or OAuth2 login
+/// automatically earns a share of operator fees from every block produced on the network.
+pub const DISTRIBUTED_OPERATOR_FEE_HEIGHT: u64 = 0;
 
 /// 📊 v1.0.72-beta: Finality metrics for sub-50ms tracking
 #[derive(Debug, Default)]

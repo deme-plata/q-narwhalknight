@@ -71,6 +71,7 @@ export default function WebSearchScreen() {
   const [sources, setSources] = useState<SourceCard[]>([]);
   const [loading, setLoading] = useState(false);
   const [searching, setSearching] = useState(false);
+  const [summarizing, setSummarizing] = useState(false);
   const [recency, setRecency] = useState<RecencyFilter>('any');
   const [history, setHistory] = useState<HistoryEntry[]>(() => {
     try {
@@ -191,11 +192,15 @@ export default function WebSearchScreen() {
                       );
                       return [...prev, ...newResults];
                     });
+                    // Sources arrived — show them immediately, switch to "summarizing"
+                    setLoading(false);
+                    setSummarizing(true);
                   }
                   break;
 
                 case 'done':
                   setSearching(false);
+                  setSummarizing(false);
                   break;
 
                 case 'error':
@@ -203,6 +208,7 @@ export default function WebSearchScreen() {
                     prev + `\n\n**Error:** ${parsed.message || 'Unknown error'}`
                   );
                   setSearching(false);
+                  setSummarizing(false);
                   break;
               }
             } catch {
@@ -219,6 +225,7 @@ export default function WebSearchScreen() {
     } finally {
       setLoading(false);
       setSearching(false);
+      setSummarizing(false);
       setAbortController(null);
     }
   }, [query, recency, abortController, saveHistory]);
@@ -229,6 +236,7 @@ export default function WebSearchScreen() {
       setAbortController(null);
       setLoading(false);
       setSearching(false);
+      setSummarizing(false);
     }
   };
 
@@ -238,6 +246,7 @@ export default function WebSearchScreen() {
     setSources([]);
     setLoading(false);
     setSearching(false);
+    setSummarizing(false);
     if (abortController) {
       abortController.abort();
       setAbortController(null);
@@ -471,51 +480,13 @@ export default function WebSearchScreen() {
             exit={{ opacity: 0 }}
             className="space-y-4"
           >
-            {/* AI Response */}
-            {streamedText && (
-              <div
-                className="rounded-xl p-5 backdrop-blur-xl"
-                style={{
-                  background: 'linear-gradient(135deg, rgba(15, 10, 35, 0.7), rgba(20, 15, 40, 0.7))',
-                  border: '1px solid rgba(245, 158, 11, 0.15)',
-                }}
-              >
-                <div className="flex items-center gap-2 mb-3">
-                  <Sparkles className="w-4 h-4 text-amber-400" />
-                  <span className="text-xs font-semibold text-amber-400/80 uppercase tracking-wider">
-                    AI Summary
-                  </span>
-                  {searching && (
-                    <Loader2 className="w-3 h-3 text-amber-400/60 animate-spin ml-1" />
-                  )}
-                </div>
-
-                <div className="prose prose-sm prose-invert max-w-none
-                  prose-p:text-gray-300 prose-p:leading-relaxed prose-p:text-sm
-                  prose-headings:text-white prose-headings:font-semibold
-                  prose-a:text-amber-400 prose-a:no-underline hover:prose-a:underline
-                  prose-strong:text-white
-                  prose-code:text-amber-300 prose-code:bg-amber-400/10 prose-code:px-1 prose-code:py-0.5 prose-code:rounded
-                  prose-li:text-gray-300 prose-li:text-sm
-                  prose-blockquote:border-amber-400/30 prose-blockquote:text-gray-400
-                ">
-                  <ReactMarkdown>{streamedText}</ReactMarkdown>
-                </div>
-
-                {/* Streaming cursor */}
-                {searching && (
-                  <motion.span
-                    className="inline-block w-2 h-4 bg-amber-400/60 rounded-sm ml-0.5"
-                    animate={{ opacity: [1, 0] }}
-                    transition={{ repeat: Infinity, duration: 0.8 }}
-                  />
-                )}
-              </div>
-            )}
-
-            {/* Source Cards */}
+            {/* Source Cards — shown FIRST, immediately when DDG results arrive */}
             {sources.length > 0 && (
-              <div className="space-y-2">
+              <motion.div
+                initial={{ opacity: 0, y: 5 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="space-y-2"
+              >
                 <div className="flex items-center gap-2 px-1">
                   <BookOpen className="w-3.5 h-3.5 text-gray-500" />
                   <span className="text-[11px] text-gray-500 font-semibold uppercase tracking-wider">
@@ -564,7 +535,73 @@ export default function WebSearchScreen() {
                     </motion.a>
                   ))}
                 </div>
-              </div>
+              </motion.div>
+            )}
+
+            {/* "Generating summary" indicator — shown after sources arrive, before AI tokens */}
+            {summarizing && !streamedText && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="flex items-center gap-2 px-2 py-3"
+              >
+                <Loader2 className="w-4 h-4 text-amber-400 animate-spin" />
+                <span className="text-sm text-gray-400">Generating AI summary...</span>
+                <div className="flex gap-1 ml-1">
+                  {[0, 1, 2].map(i => (
+                    <motion.div
+                      key={i}
+                      className="w-1 h-1 rounded-full bg-amber-400/40"
+                      animate={{ opacity: [0.3, 1, 0.3] }}
+                      transition={{ repeat: Infinity, duration: 1.2, delay: i * 0.2 }}
+                    />
+                  ))}
+                </div>
+              </motion.div>
+            )}
+
+            {/* AI Response — streams in after sources are already visible */}
+            {streamedText && (
+              <motion.div
+                initial={{ opacity: 0, y: 5 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="rounded-xl p-5 backdrop-blur-xl"
+                style={{
+                  background: 'linear-gradient(135deg, rgba(15, 10, 35, 0.7), rgba(20, 15, 40, 0.7))',
+                  border: '1px solid rgba(245, 158, 11, 0.15)',
+                }}
+              >
+                <div className="flex items-center gap-2 mb-3">
+                  <Sparkles className="w-4 h-4 text-amber-400" />
+                  <span className="text-xs font-semibold text-amber-400/80 uppercase tracking-wider">
+                    AI Summary
+                  </span>
+                  {searching && (
+                    <Loader2 className="w-3 h-3 text-amber-400/60 animate-spin ml-1" />
+                  )}
+                </div>
+
+                <div className="prose prose-sm prose-invert max-w-none
+                  prose-p:text-gray-300 prose-p:leading-relaxed prose-p:text-sm
+                  prose-headings:text-white prose-headings:font-semibold
+                  prose-a:text-amber-400 prose-a:no-underline hover:prose-a:underline
+                  prose-strong:text-white
+                  prose-code:text-amber-300 prose-code:bg-amber-400/10 prose-code:px-1 prose-code:py-0.5 prose-code:rounded
+                  prose-li:text-gray-300 prose-li:text-sm
+                  prose-blockquote:border-amber-400/30 prose-blockquote:text-gray-400
+                ">
+                  <ReactMarkdown>{streamedText}</ReactMarkdown>
+                </div>
+
+                {/* Streaming cursor */}
+                {searching && (
+                  <motion.span
+                    className="inline-block w-2 h-4 bg-amber-400/60 rounded-sm ml-0.5"
+                    animate={{ opacity: [1, 0] }}
+                    transition={{ repeat: Infinity, duration: 0.8 }}
+                  />
+                )}
+              </motion.div>
             )}
 
             {/* New Search button */}

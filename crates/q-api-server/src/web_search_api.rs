@@ -1,8 +1,13 @@
-/// Web Search API — GLM-4-Flash with built-in web_search tool
+/// Web Search API — GLM-4.7-Flash via local Ollama + DuckDuckGo
 ///
 /// POST /api/v1/web-search
-/// Proxies to Zhipu AI's GLM-4-Flash model, which has a native `web_search` tool.
-/// Streams back AI-summarized answers with source citations via SSE.
+/// 1. Scrapes DuckDuckGo for search results
+/// 2. Feeds results as context to GLM-4.7-Flash running on Ollama
+/// 3. Streams back AI-summarized answers with source citations via SSE
+///
+/// Environment variables:
+///   OLLAMA_URL  — Ollama base URL (default: http://localhost:11434)
+///   OLLAMA_MODEL — Model name (default: glm-4.7-flash)
 
 use axum::{
     extract::State,
@@ -21,8 +26,13 @@ use tracing::{debug, error, info, warn};
 
 use crate::AppState;
 
-const ZHIPU_API_URL: &str = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
-const SYSTEM_PROMPT: &str = "You are a helpful search assistant. Answer the user's query using web search results. Always cite your sources with URLs when available. Be concise and informative.";
+// Use 127.0.0.1 instead of localhost to avoid IPv6 ::1 resolution failures
+const DEFAULT_OLLAMA_URL: &str = "http://127.0.0.1:11434";
+const DEFAULT_MODEL: &str = "glm-4.7-flash";
+
+const SYSTEM_PROMPT: &str = "You are a helpful search assistant. The user asked a question and web search results are provided below as context. \
+Answer the user's query using the search results. Always cite your sources by referencing [Source N] where N corresponds to the numbered search results. \
+Be concise, informative, and accurate. If the search results don't contain relevant information, say so honestly.";
 
 #[derive(Deserialize)]
 pub struct WebSearchRequest {
@@ -31,34 +41,6 @@ pub struct WebSearchRequest {
     pub recency: Option<String>,
     /// Whether to stream (default true)
     pub stream: Option<bool>,
-}
-
-#[derive(Serialize)]
-struct ZhipuRequest {
-    model: String,
-    messages: Vec<ZhipuMessage>,
-    tools: Vec<ZhipuTool>,
-    stream: bool,
-}
-
-#[derive(Serialize)]
-struct ZhipuMessage {
-    role: String,
-    content: String,
-}
-
-#[derive(Serialize)]
-struct ZhipuTool {
-    #[serde(rename = "type")]
-    tool_type: String,
-    web_search: ZhipuWebSearch,
-}
-
-#[derive(Serialize)]
-struct ZhipuWebSearch {
-    enable: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    search_query: Option<String>,
 }
 
 /// SSE event data sent to the frontend
@@ -96,21 +78,225 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
+/// Ollama chat request
+#[derive(Serialize)]
+struct OllamaChatRequest {
+    model: String,
+    messages: Vec<OllamaMessage>,
+    stream: bool,
+}
+
+#[derive(Serialize)]
+struct OllamaMessage {
+    role: String,
+    content: String,
+}
+
+/// Scrape DuckDuckGo HTML lite for search results
+async fn fetch_duckduckgo_results(query: &str, max_results: usize) -> Vec<SearchResultItem> {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .user_agent("Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0")
+        .redirect(reqwest::redirect::Policy::limited(3))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("[WebSearch] Failed to create DDG client: {}", e);
+            return Vec::new();
+        }
+    };
+
+    let url = format!(
+        "https://html.duckduckgo.com/html/?q={}",
+        urlencoding::encode(query)
+    );
+
+    let response = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("[WebSearch] DDG request failed: {}", e);
+            return Vec::new();
+        }
+    };
+
+    let html = match response.text().await {
+        Ok(t) => t,
+        Err(e) => {
+            warn!("[WebSearch] DDG body read failed: {}", e);
+            return Vec::new();
+        }
+    };
+
+    parse_ddg_html(&html, max_results)
+}
+
+/// Parse DuckDuckGo HTML lite results using string matching
+fn parse_ddg_html(html: &str, max_results: usize) -> Vec<SearchResultItem> {
+    let mut results = Vec::new();
+
+    // DuckDuckGo HTML results are in <a class="result__a" href="...">title</a>
+    // and <a class="result__snippet" ...>snippet</a>
+    // We parse by looking for result__a and result__snippet class markers
+
+    let mut search_pos = 0;
+    while results.len() < max_results {
+        // Find the next result link
+        let link_marker = "class=\"result__a\"";
+        let link_start = match html[search_pos..].find(link_marker) {
+            Some(pos) => search_pos + pos,
+            None => break,
+        };
+
+        // Extract href from the <a> tag
+        let tag_start = html[..link_start].rfind('<').unwrap_or(link_start);
+        let tag_content = &html[tag_start..];
+
+        let href = extract_attr(tag_content, "href").unwrap_or_default();
+
+        // Extract title (text between > and </a>)
+        let title_start = match html[link_start..].find('>') {
+            Some(pos) => link_start + pos + 1,
+            None => {
+                search_pos = link_start + link_marker.len();
+                continue;
+            }
+        };
+        let title_end = match html[title_start..].find("</a>") {
+            Some(pos) => title_start + pos,
+            None => {
+                search_pos = title_start;
+                continue;
+            }
+        };
+        let title = strip_html_tags(&html[title_start..title_end]);
+
+        // Find snippet after this result
+        let snippet_marker = "class=\"result__snippet\"";
+        let snippet = if let Some(snippet_pos) = html[title_end..].find(snippet_marker) {
+            let snippet_abs = title_end + snippet_pos;
+            let snippet_start = match html[snippet_abs..].find('>') {
+                Some(pos) => snippet_abs + pos + 1,
+                None => snippet_abs,
+            };
+            let snippet_end_markers = ["</a>", "</td>", "</div>"];
+            let mut snippet_end = html.len();
+            for marker in &snippet_end_markers {
+                if let Some(pos) = html[snippet_start..].find(marker) {
+                    let candidate = snippet_start + pos;
+                    if candidate < snippet_end {
+                        snippet_end = candidate;
+                    }
+                }
+            }
+            strip_html_tags(&html[snippet_start..snippet_end])
+        } else {
+            String::new()
+        };
+
+        // Resolve DDG redirect URL
+        let clean_url = resolve_ddg_url(&href);
+
+        if !clean_url.is_empty() && !title.is_empty() {
+            results.push(SearchResultItem {
+                title: html_decode(&title),
+                url: clean_url,
+                snippet: html_decode(&snippet),
+            });
+        }
+
+        search_pos = title_end;
+    }
+
+    results
+}
+
+/// Extract an attribute value from an HTML tag
+fn extract_attr(tag: &str, attr: &str) -> Option<String> {
+    let pattern = format!("{}=\"", attr);
+    let start = tag.find(&pattern)? + pattern.len();
+    let end = tag[start..].find('"')? + start;
+    Some(tag[start..end].to_string())
+}
+
+/// Strip HTML tags from text
+fn strip_html_tags(html: &str) -> String {
+    let mut result = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => result.push(ch),
+            _ => {}
+        }
+    }
+    result.trim().to_string()
+}
+
+/// Decode common HTML entities
+fn html_decode(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("&#x27;", "'")
+        .replace("&nbsp;", " ")
+}
+
+/// Resolve DuckDuckGo redirect URLs to actual URLs
+fn resolve_ddg_url(href: &str) -> String {
+    // DDG uses //duckduckgo.com/l/?uddg=ENCODED_URL&rut=...
+    if href.contains("uddg=") {
+        if let Some(start) = href.find("uddg=") {
+            let encoded = &href[start + 5..];
+            let end = encoded.find('&').unwrap_or(encoded.len());
+            let encoded_url = &encoded[..end];
+            return urlencoding::decode(encoded_url)
+                .unwrap_or_else(|_| encoded_url.into())
+                .to_string();
+        }
+    }
+    // Direct URL
+    if href.starts_with("http") {
+        return href.to_string();
+    }
+    // Relative URL
+    if href.starts_with("//") {
+        return format!("https:{}", href);
+    }
+    href.to_string()
+}
+
+/// Build the user prompt with search context
+fn build_context_prompt(query: &str, results: &[SearchResultItem]) -> String {
+    if results.is_empty() {
+        return format!(
+            "The user asked: \"{}\"\n\nNo web search results were found. Please answer based on your knowledge and clearly state that no web sources were available.",
+            query
+        );
+    }
+
+    let mut prompt = format!("The user asked: \"{}\"\n\nHere are the web search results:\n\n", query);
+    for (i, result) in results.iter().enumerate() {
+        prompt.push_str(&format!(
+            "[Source {}] {}\nURL: {}\n{}\n\n",
+            i + 1,
+            result.title,
+            result.url,
+            result.snippet
+        ));
+    }
+    prompt.push_str("Please provide a comprehensive answer using the search results above. Cite sources using [Source N] notation.");
+    prompt
+}
+
 pub async fn web_search_handler(
-    State(state): State<Arc<AppState>>,
+    State(_state): State<Arc<AppState>>,
     Json(req): Json<WebSearchRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, (StatusCode, Json<ErrorResponse>)> {
-    let api_key = std::env::var("ZHIPU_API_KEY").map_err(|_| {
-        error!("ZHIPU_API_KEY not set");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                success: false,
-                error: "Web search is not configured (missing API key)".to_string(),
-            }),
-        )
-    })?;
-
     let query = req.query.trim().to_string();
     if query.is_empty() {
         return Err((
@@ -122,82 +308,103 @@ pub async fn web_search_handler(
         ));
     }
 
-    info!("[WebSearch] Query: {}", query);
+    let ollama_url = std::env::var("OLLAMA_URL")
+        .unwrap_or_else(|_| DEFAULT_OLLAMA_URL.to_string());
+    let model = std::env::var("OLLAMA_MODEL")
+        .unwrap_or_else(|_| DEFAULT_MODEL.to_string());
 
-    let zhipu_req = ZhipuRequest {
-        model: "glm-4-flash".to_string(),
-        messages: vec![
-            ZhipuMessage {
-                role: "system".to_string(),
-                content: SYSTEM_PROMPT.to_string(),
-            },
-            ZhipuMessage {
-                role: "user".to_string(),
-                content: query.clone(),
-            },
-        ],
-        tools: vec![ZhipuTool {
-            tool_type: "web_search".to_string(),
-            web_search: ZhipuWebSearch {
-                enable: true,
-                search_query: None, // Let the model decide
-            },
-        }],
-        stream: true,
-    };
+    info!("[WebSearch] Query: {} (model: {}, ollama: {})", query, model, ollama_url);
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(60))
-        .build()
-        .map_err(|e| {
-            error!("[WebSearch] Failed to create HTTP client: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    success: false,
-                    error: "Internal error".to_string(),
-                }),
-            )
-        })?;
-
-    let response = client
-        .post(ZHIPU_API_URL)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("Content-Type", "application/json")
-        .json(&zhipu_req)
-        .send()
-        .await
-        .map_err(|e| {
-            error!("[WebSearch] Failed to call Zhipu API: {}", e);
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(ErrorResponse {
-                    success: false,
-                    error: format!("Search API unavailable: {}", e),
-                }),
-            )
-        })?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        error!("[WebSearch] Zhipu API error {}: {}", status, body);
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            Json(ErrorResponse {
-                success: false,
-                error: format!("Search API returned error: {}", status),
-            }),
-        ));
-    }
-
-    // Stream the response as SSE
-    let byte_stream = response.bytes_stream();
-
+    // v9.3.3: Return SSE stream IMMEDIATELY so tower TimeoutLayer doesn't kill us.
+    // All slow work (DDG scraping, Ollama inference) happens inside the stream.
+    // This means the HTTP 200 + SSE headers go back in <1ms, and the frontend
+    // can show a loading state while we scrape + infer.
     let stream = async_stream::stream! {
+        // Step 1: Fetch search results from DuckDuckGo
+        let search_results = fetch_duckduckgo_results(&query, 8).await;
+        info!("[WebSearch] Got {} DDG results", search_results.len());
+
+        // Send search results immediately so frontend can display them
+        if !search_results.is_empty() {
+            let citations_event = SearchResultsEvent {
+                results: search_results.clone(),
+            };
+            if let Ok(json) = serde_json::to_string(&citations_event) {
+                yield Ok(Event::default().event("search_results").data(json));
+            }
+        }
+
+        // Step 2: Build context-augmented prompt
+        let user_prompt = build_context_prompt(&query, &search_results);
+
+        // Step 3: Call Ollama streaming API
+        let ollama_req = OllamaChatRequest {
+            model,
+            messages: vec![
+                OllamaMessage {
+                    role: "system".to_string(),
+                    content: SYSTEM_PROMPT.to_string(),
+                },
+                OllamaMessage {
+                    role: "user".to_string(),
+                    content: user_prompt,
+                },
+            ],
+            stream: true,
+        };
+
+        // Use connect_timeout (not global timeout) because the response is streamed.
+        // A global timeout would kill the stream after N seconds even while tokens flow.
+        let client = match reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(30))
+            .read_timeout(Duration::from_secs(300))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                error!("[WebSearch] Failed to create HTTP client: {}", e);
+                let err = ErrorEvent { message: "Internal error creating HTTP client".to_string() };
+                if let Ok(json) = serde_json::to_string(&err) {
+                    yield Ok(Event::default().event("error").data(json));
+                }
+                return;
+            }
+        };
+
+        let chat_url = format!("{}/api/chat", ollama_url);
+        let response = match client
+            .post(&chat_url)
+            .header("Content-Type", "application/json")
+            .json(&ollama_req)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                error!("[WebSearch] Failed to call Ollama at {}: {:?}", chat_url, e);
+                let err = ErrorEvent { message: format!("AI model unavailable: {}", e) };
+                if let Ok(json) = serde_json::to_string(&err) {
+                    yield Ok(Event::default().event("error").data(json));
+                }
+                return;
+            }
+        };
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            error!("[WebSearch] Ollama error {}: {}", status, body);
+            let err = ErrorEvent { message: format!("AI model returned error: {}", status) };
+            if let Ok(json) = serde_json::to_string(&err) {
+                yield Ok(Event::default().event("error").data(json));
+            }
+            return;
+        }
+
+        // Stream the Ollama response as SSE tokens
+        let byte_stream = response.bytes_stream();
         let mut pinned = std::pin::pin!(byte_stream);
         let mut buffer = String::new();
-        let mut collected_citations: Vec<SearchResultItem> = Vec::new();
         let mut total_tokens: Option<u64> = None;
 
         while let Some(chunk_result) = pinned.next().await {
@@ -205,116 +412,49 @@ pub async fn web_search_handler(
                 Ok(bytes) => {
                     buffer.push_str(&String::from_utf8_lossy(&bytes));
 
-                    // Process complete SSE lines from buffer
+                    // Ollama streams one JSON object per line
                     while let Some(line_end) = buffer.find('\n') {
                         let line = buffer[..line_end].trim().to_string();
                         buffer = buffer[line_end + 1..].to_string();
 
-                        if line.is_empty() || line == ":" {
+                        if line.is_empty() {
                             continue;
                         }
 
-                        // Parse SSE data lines
-                        if let Some(data) = line.strip_prefix("data: ") {
-                            if data.trim() == "[DONE]" {
-                                // Send citations if we collected any
-                                if !collected_citations.is_empty() {
-                                    let citations_event = SearchResultsEvent {
-                                        results: collected_citations.clone(),
-                                    };
-                                    if let Ok(json) = serde_json::to_string(&citations_event) {
-                                        yield Ok(Event::default().event("search_results").data(json));
+                        // Parse Ollama streaming JSON
+                        if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(&line) {
+                            // Extract content from message.content
+                            if let Some(content) = chunk
+                                .get("message")
+                                .and_then(|m| m.get("content"))
+                                .and_then(|c| c.as_str())
+                            {
+                                if !content.is_empty() {
+                                    let token = TokenEvent { content: content.to_string() };
+                                    if let Ok(json) = serde_json::to_string(&token) {
+                                        yield Ok(Event::default().event("token").data(json));
                                     }
                                 }
+                            }
 
-                                // Send done event
+                            // Check if done
+                            if chunk.get("done").and_then(|d| d.as_bool()).unwrap_or(false) {
+                                total_tokens = chunk
+                                    .get("eval_count")
+                                    .and_then(|c| c.as_u64())
+                                    .map(|eval| {
+                                        let prompt = chunk
+                                            .get("prompt_eval_count")
+                                            .and_then(|p| p.as_u64())
+                                            .unwrap_or(0);
+                                        prompt + eval
+                                    });
+
                                 let done = DoneEvent { total_tokens };
                                 if let Ok(json) = serde_json::to_string(&done) {
                                     yield Ok(Event::default().event("done").data(json));
                                 }
                                 break;
-                            }
-
-                            // Parse Zhipu SSE chunk
-                            if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) {
-                                // Extract token content from choices[0].delta.content
-                                if let Some(choices) = chunk.get("choices").and_then(|c| c.as_array()) {
-                                    for choice in choices {
-                                        if let Some(delta) = choice.get("delta") {
-                                            if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
-                                                if !content.is_empty() {
-                                                    let token = TokenEvent { content: content.to_string() };
-                                                    if let Ok(json) = serde_json::to_string(&token) {
-                                                        yield Ok(Event::default().event("token").data(json));
-                                                    }
-                                                }
-                                            }
-                                        }
-
-                                        // Extract web_search results from tool calls or annotations
-                                        // GLM-4-Flash returns web_search results in the choice metadata
-                                        if let Some(tool_calls) = choice.get("delta")
-                                            .and_then(|d| d.get("tool_calls"))
-                                            .and_then(|t| t.as_array())
-                                        {
-                                            for tc in tool_calls {
-                                                if let Some(search_results) = tc.get("web_search")
-                                                    .and_then(|ws| ws.get("search_results"))
-                                                    .and_then(|sr| sr.as_array())
-                                                {
-                                                    for result in search_results {
-                                                        let item = SearchResultItem {
-                                                            title: result.get("title")
-                                                                .and_then(|t| t.as_str())
-                                                                .unwrap_or("")
-                                                                .to_string(),
-                                                            url: result.get("link")
-                                                                .and_then(|l| l.as_str())
-                                                                .unwrap_or("")
-                                                                .to_string(),
-                                                            snippet: result.get("content")
-                                                                .and_then(|c| c.as_str())
-                                                                .unwrap_or("")
-                                                                .to_string(),
-                                                        };
-                                                        if !item.url.is_empty() {
-                                                            collected_citations.push(item);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // Also check top-level web_search field (some API versions)
-                                if let Some(web_search) = chunk.get("web_search").and_then(|ws| ws.as_array()) {
-                                    for result in web_search {
-                                        let item = SearchResultItem {
-                                            title: result.get("title")
-                                                .and_then(|t| t.as_str())
-                                                .unwrap_or("")
-                                                .to_string(),
-                                            url: result.get("link")
-                                                .and_then(|l| l.as_str())
-                                                .unwrap_or("")
-                                                .to_string(),
-                                            snippet: result.get("content")
-                                                .and_then(|c| c.as_str())
-                                                .unwrap_or("")
-                                                .to_string(),
-                                        };
-                                        if !item.url.is_empty() && !collected_citations.iter().any(|c| c.url == item.url) {
-                                            collected_citations.push(item);
-                                        }
-                                    }
-                                }
-
-                                // Extract usage stats
-                                if let Some(usage) = chunk.get("usage") {
-                                    total_tokens = usage.get("total_tokens")
-                                        .and_then(|t| t.as_u64());
-                                }
                             }
                         }
                     }

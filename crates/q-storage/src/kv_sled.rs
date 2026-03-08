@@ -13,7 +13,7 @@ use sled::Db;
 #[cfg(target_os = "windows")]
 use std::{path::Path, sync::Arc};
 #[cfg(target_os = "windows")]
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[cfg(target_os = "windows")]
 use super::kv::KVStore;
@@ -41,19 +41,24 @@ impl RocksDBKV {
         // - cache_capacity: page cache limit (configurable via SLED_CACHE_MB)
         // - mode(LowSpace): prioritize disk usage over memory
         // NOTE: segment_size CANNOT be changed on existing databases (Sled rejects it)
-        // v9.1.7: Reduced default from 256→128 MB. At height 5M+ the old default caused
-        // OOM on 8-16GB Windows machines (sled overshoots cache_capacity under burst writes).
+        // v9.3.3: Reduced default from 128→64 MB. Sled's page cache overshoots
+        // cache_capacity by up to 10x under burst batch writes (64MB configured →
+        // ~640MB peak), which fits safely in 8GB Windows machines.
         // Users with >=32GB RAM can set SLED_CACHE_MB=256 for better read performance.
         let cache_mb: u64 = std::env::var("SLED_CACHE_MB")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(128);
-        info!("💾 Sled page cache limit: {} MB (mode: LowSpace)", cache_mb);
+            .unwrap_or(64);
+        let flush_ms: u64 = std::env::var("SLED_FLUSH_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(200);
+        info!("💾 Sled page cache limit: {} MB, flush every {}ms (mode: LowSpace)", cache_mb, flush_ms);
         let db = sled::Config::new()
             .path(path)
             .cache_capacity(cache_mb * 1024 * 1024)
             .mode(sled::Mode::LowSpace)
-            .flush_every_ms(Some(1000))
+            .flush_every_ms(Some(flush_ms))
             .open()
             .context("Failed to open sled database")?;
 
@@ -113,6 +118,36 @@ impl RocksDBKV {
         self.db
             .open_tree(cf)
             .context(format!("Failed to open tree '{}'", cf))
+    }
+
+    /// Apply a sled batch with panic protection.
+    /// Sled's custom Arc allocator calls `assert!` (not `Result`) when memory is
+    /// exhausted, so `apply_batch()` panics instead of returning Err.
+    /// This wrapper catches that panic and falls back to individual inserts,
+    /// which produce far less page-cache pressure than a single large batch.
+    fn apply_sled_batch_safe(
+        tree: &sled::Tree,
+        batch: sled::Batch,
+        fallback_ops: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<()> {
+        let tree_clone = tree.clone();
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            tree_clone.apply_batch(batch)
+        })) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(anyhow::anyhow!("sled batch write failed: {}", e)),
+            Err(_panic) => {
+                error!(
+                    "🚨 sled apply_batch panicked (OOM in Arc allocator) — falling back to {} individual inserts",
+                    fallback_ops.len()
+                );
+                for (key, value) in fallback_ops {
+                    tree.insert(key.as_slice(), value.as_slice())
+                        .context("sled individual insert failed after batch panic")?;
+                }
+                Ok(())
+            }
+        }
     }
 
     /// Get a raw database handle (returns Arc<()> on Windows since there's no RocksDB)
@@ -177,6 +212,16 @@ impl KVStore for RocksDBKV {
     }
 
     async fn write_batch(&self, batch: Vec<(&str, Vec<u8>, Vec<u8>)>) -> Result<()> {
+        // v9.3.3: Chunked batch writes to prevent sled OOM.
+        // Sled's page cache overshoots cache_capacity by up to 10x under burst
+        // writes. Syncing 1489 blocks = ~5956 ops in one sled::Batch can push a
+        // 64MB cache to 640MB+ and panic in sled's Arc allocator.
+        // Fix: break into chunks of SLED_BATCH_CHUNK_SIZE ops with flush between.
+        let chunk_size: usize = std::env::var("SLED_BATCH_CHUNK_SIZE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(2000);
+
         // Group operations by tree
         let mut trees: std::collections::HashMap<String, Vec<(Vec<u8>, Vec<u8>)>> =
             std::collections::HashMap::new();
@@ -188,17 +233,35 @@ impl KVStore for RocksDBKV {
                 .push((key, value));
         }
 
-        // Execute batches per tree
+        // Execute chunked batches per tree
         for (cf_name, ops) in trees {
             let tree = self.get_tree(&cf_name)?;
-            let mut batch = sled::Batch::default();
 
-            for (key, value) in ops {
-                batch.insert(key, value);
+            if ops.len() <= chunk_size {
+                // Fast path: small batch, no chunking overhead
+                let mut batch = sled::Batch::default();
+                for (ref key, ref value) in &ops {
+                    batch.insert(key.as_slice(), value.as_slice());
+                }
+                Self::apply_sled_batch_safe(&tree, batch, &ops)?;
+            } else {
+                // Chunked path: break into pieces with flush between
+                info!(
+                    "💾 sled chunked write: {} ops in {} chunks for tree '{}'",
+                    ops.len(),
+                    (ops.len() + chunk_size - 1) / chunk_size,
+                    cf_name
+                );
+                for chunk in ops.chunks(chunk_size) {
+                    let mut batch = sled::Batch::default();
+                    for (key, value) in chunk {
+                        batch.insert(key.as_slice(), value.as_slice());
+                    }
+                    Self::apply_sled_batch_safe(&tree, batch, chunk)?;
+                    // Flush between chunks to drain page cache and prevent OOM
+                    tree.flush_async().await.context("sled inter-chunk flush failed")?;
+                }
             }
-
-            tree.apply_batch(batch)
-                .context("sled batch write failed")?;
         }
 
         Ok(())
@@ -262,7 +325,8 @@ impl KVStore for RocksDBKV {
     }
 
     async fn write_batch_turbo(&self, batch: Vec<(&str, Vec<u8>, Vec<u8>)>) -> Result<()> {
-        // Sled has no separate turbo mode - delegate to regular write_batch
+        // Sled has no separate turbo mode - uses same chunked write_batch
+        // which handles OOM protection via apply_sled_batch_safe()
         self.write_batch(batch).await
     }
 

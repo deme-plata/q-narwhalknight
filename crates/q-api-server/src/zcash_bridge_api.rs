@@ -72,6 +72,9 @@ pub struct ZecSwapStatusResponse {
 pub struct ClaimZecSwapRequest {
     /// The secret preimage (hex-encoded, 32 bytes)
     pub secret: String,
+    /// v9.4.0: Transaction ID of the ZEC deposit on Zcash chain (REQUIRED for safety)
+    #[serde(default)]
+    pub deposit_txid: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -455,6 +458,27 @@ pub async fn claim_zec_swap(
 
     // Update state
     proposal.state = ZcashSwapState::QnkClaimed { secret: secret.clone() };
+
+    // ═══════════════════════════════════════════════════════════════
+    // v9.4.0: Bridge safety check — MUST pass before minting
+    // Verifies: kill-switch, amount limits, deposit on Zcash chain
+    // ═══════════════════════════════════════════════════════════════
+    if proposal.direction == "sell_zec" && proposal.zec_amount > 0 {
+        if let Err(safety_err) = state.bridge_safety.pre_mint_check(
+            crate::bridge_tokens::BridgeChain::Zcash,
+            proposal.zec_amount as u128,
+            &swap_id,
+            request.deposit_txid.as_deref(),
+        ).await {
+            warn!("🚨 [BRIDGE SAFETY] ZEC mint blocked for swap {}: {}", swap_id, safety_err);
+            return Ok(Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some(format!("Bridge safety check failed: {}", safety_err)),
+                timestamp: Utc::now(),
+            }));
+        }
+    }
 
     // ═══════════════════════════════════════════════════════════════
     // v7.3.1: Multi-sig bridge attestation (7-of-11 committee validation)

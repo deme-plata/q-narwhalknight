@@ -225,6 +225,17 @@ const BitcoinSwapModal = ({ isOpen, onClose, walletAddress }: BitcoinSwapModalPr
             </button>
           </div>
 
+          {/* v9.4.0: Bridge Safety Warning Banner */}
+          <div className="mx-5 mt-3 p-3 rounded-lg flex items-start gap-2"
+            style={{ background: 'rgba(251, 146, 60, 0.1)', border: '1px solid rgba(251, 146, 60, 0.3)' }}>
+            <AlertCircle size={16} className="text-orange-400 mt-0.5 flex-shrink-0" />
+            <div className="text-xs text-orange-300/80">
+              <span className="font-semibold text-orange-300">Bridge requires deposit proof.</span>{' '}
+              You must provide your BTC deposit transaction ID when claiming.
+              Deposits require 3+ confirmations. Max swap: 0.1 BTC.
+            </div>
+          </div>
+
           {/* Bridge Status */}
           <div className="px-5 py-2 flex items-center gap-2 text-xs">
             <div className={`w-2 h-2 rounded-full ${bridgeStatus?.bridge_enabled ? 'bg-green-400 animate-pulse' : 'bg-red-400'}`} />

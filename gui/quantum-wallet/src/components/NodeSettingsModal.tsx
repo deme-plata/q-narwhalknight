@@ -266,7 +266,7 @@ export default function NodeSettingsModal() {
 
           {/* Modal */}
           <motion.div
-            className="relative w-full max-w-2xl mx-4 bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 border border-blue-500/30 rounded-2xl shadow-2xl overflow-hidden"
+            className="relative w-full max-w-5xl mx-auto bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 border border-blue-500/30 rounded-2xl shadow-2xl overflow-hidden"
             initial={{ scale: 0.9, y: 20 }}
             animate={{ scale: 1, y: 0 }}
             exit={{ scale: 0.9, y: 20 }}
@@ -334,7 +334,7 @@ export default function NodeSettingsModal() {
             </div>
 
             {/* Content */}
-            <div className="p-6 max-h-[60vh] overflow-y-auto">
+            <div className="p-6 max-h-[80vh] overflow-y-auto">
               {error ? (
                 <div className="flex flex-col items-center justify-center py-12 text-center">
                   <div className="w-14 h-14 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center mb-4">

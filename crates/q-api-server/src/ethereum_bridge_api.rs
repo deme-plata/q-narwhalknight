@@ -82,6 +82,9 @@ pub struct EthSwapStatusResponse {
 pub struct ClaimEthSwapRequest {
     /// The secret preimage (hex-encoded, 32 bytes)
     pub secret: String,
+    /// v9.4.0: Transaction hash of the ETH deposit on Ethereum chain (REQUIRED for safety)
+    #[serde(default)]
+    pub deposit_txid: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -499,6 +502,27 @@ pub async fn claim_eth_swap(
 
     // Parse ETH amount (wei) to u128 for bridge token operations
     let eth_amount_u128: u128 = eth_amount_str.parse().unwrap_or(0);
+
+    // ═══════════════════════════════════════════════════════════════
+    // v9.4.0: Bridge safety check — MUST pass before minting
+    // Verifies: kill-switch, amount limits, deposit on Ethereum chain
+    // ═══════════════════════════════════════════════════════════════
+    if eth_amount_u128 > 0 && direction == "sell_eth" {
+        if let Err(safety_err) = state.bridge_safety.pre_mint_check(
+            crate::bridge_tokens::BridgeChain::Ethereum,
+            eth_amount_u128,
+            &swap_id,
+            request.deposit_txid.as_deref(),
+        ).await {
+            warn!("🚨 [BRIDGE SAFETY] ETH mint blocked for swap {}: {}", swap_id, safety_err);
+            return Ok(Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some(format!("Bridge safety check failed: {}", safety_err)),
+                timestamp: Utc::now(),
+            }));
+        }
+    }
 
     // ═══════════════════════════════════════════════════════════════
     // v7.3.1: Multi-sig bridge attestation (7-of-11 committee validation)

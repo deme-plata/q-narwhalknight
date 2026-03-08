@@ -82,6 +82,9 @@ pub struct IronSwapStatusResponse {
 pub struct ClaimIronSwapRequest {
     /// The secret preimage (hex-encoded, 32 bytes)
     pub secret: String,
+    /// v9.4.0: Transaction ID of the IRON deposit on Iron Fish chain (REQUIRED for safety)
+    #[serde(default)]
+    pub deposit_txid: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -446,6 +449,27 @@ pub async fn claim_iron_swap(
     }
 
     proposal.state = IronFishSwapState::QnkClaimed { secret: secret.clone() };
+
+    // ═══════════════════════════════════════════════════════════════
+    // v9.4.0: Bridge safety check — MUST pass before minting
+    // Verifies: kill-switch, amount limits, deposit on Iron Fish chain
+    // ═══════════════════════════════════════════════════════════════
+    if proposal.direction == "sell_iron" && proposal.iron_amount > 0 {
+        if let Err(safety_err) = state.bridge_safety.pre_mint_check(
+            crate::bridge_tokens::BridgeChain::IronFish,
+            proposal.iron_amount as u128,
+            &swap_id,
+            request.deposit_txid.as_deref(),
+        ).await {
+            warn!("🚨 [BRIDGE SAFETY] IRON mint blocked for swap {}: {}", swap_id, safety_err);
+            return Ok(Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some(format!("Bridge safety check failed: {}", safety_err)),
+                timestamp: Utc::now(),
+            }));
+        }
+    }
 
     // ═══════════════════════════════════════════════════════════════
     // v7.3.1: Multi-sig bridge attestation (7-of-11 committee validation)

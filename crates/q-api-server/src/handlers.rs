@@ -10945,6 +10945,14 @@ pub async fn execute_swap(
             if let Err(e) = state.storage_engine.subtract_balance(&wallet_hex, request.amount_in as u128).await {
                 warn!("⚠️ [SWAP v9.1.4] Failed to persist QUG debit: {} — in-memory still updated", e);
             }
+
+            // v9.3.3: Record cumulative DEX debit counter for rebuild-safe accounting.
+            // This counter survives balance rebuilds and is re-applied after any migration
+            // that replays the blockchain (which would otherwise lose DEX swap deductions).
+            if let Err(e) = state.storage_engine.record_dex_qug_debit(&wallet_hex, request.amount_in as u128).await {
+                warn!("⚠️ [SWAP v9.3.3] Failed to record DEX QUG debit counter: {}", e);
+            }
+
             token_balances = state.token_balances.write().await;
         } else if from_is_qugusd {
             // v4.0.3: Deduct QUGUSD from token_balances using standard QUGUSD_TOKEN_ADDRESS
@@ -11040,6 +11048,11 @@ pub async fn execute_swap(
             let wallet_hex = hex::encode(wallet_addr);
             if let Err(e) = state.storage_engine.add_balance(&wallet_hex, final_amount_out as u128).await {
                 warn!("⚠️ [SWAP v9.1.4] Failed to persist QUG credit: {}", e);
+            }
+
+            // v9.3.3: Record cumulative DEX credit counter for rebuild-safe accounting.
+            if let Err(e) = state.storage_engine.record_dex_qug_credit(&wallet_hex, final_amount_out as u128).await {
+                warn!("⚠️ [SWAP v9.3.3] Failed to record DEX QUG credit counter: {}", e);
             }
         } else if to_is_qugusd {
             // v4.0.3: Credit QUGUSD to token_balances using standard QUGUSD_TOKEN_ADDRESS
