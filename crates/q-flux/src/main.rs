@@ -214,7 +214,8 @@ fn main() -> anyhow::Result<()> {
         interval: config.upstream.health_check_interval,
         timeout: config.upstream.health_check_timeout,
         path: config.upstream.health_check_path.clone(),
-        failure_threshold: 3,
+        failure_threshold: config.upstream.failure_threshold,
+        healthy_threshold: config.upstream.healthy_threshold,
     };
 
     // The health checker needs its own multi-thread runtime since workers each
@@ -245,6 +246,7 @@ fn main() -> anyhow::Result<()> {
                 .clone()
                 .unwrap_or_else(|| config.upstream.health_check_path.clone()),
             failure_threshold: 5,
+            healthy_threshold: config.upstream.healthy_threshold,
         };
         tracing::info!(
             peers = cluster_peers.len(),

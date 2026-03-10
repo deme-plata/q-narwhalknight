@@ -91,6 +91,12 @@ pub struct StaticConfig {
     /// Max total memory for file cache (bytes). Default: 64MB.
     #[serde(default = "default_cache_max_total")]
     pub cache_max_total: usize,
+    /// Enable gzip/Brotli compression for proxied API responses (JSON, text).
+    /// Compresses responses >= 1KB with compressible content-types.
+    /// Brotli preferred when client supports it, gzip as fallback.
+    /// Default: true.
+    #[serde(default = "default_true")]
+    pub proxy_compression: bool,
 }
 
 fn default_spa_fallback() -> bool { true }
@@ -174,6 +180,14 @@ pub struct UpstreamConfig {
     /// reducing spurious 502s. Set to "0ms" to restore old instant-reject behavior.
     #[serde(default = "default_acquire_timeout", deserialize_with = "deserialize_duration")]
     pub acquire_timeout: std::time::Duration,
+    /// Number of consecutive health check failures before marking backend unhealthy.
+    /// Default: 3.
+    #[serde(default = "default_failure_threshold")]
+    pub failure_threshold: u32,
+    /// Number of consecutive health check successes required to promote a backend
+    /// from half-open (recovering) to fully healthy. Default: 2.
+    #[serde(default = "default_healthy_threshold")]
+    pub healthy_threshold: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -227,6 +241,8 @@ fn default_rate_limit_global_rps() -> usize { 100_000 }
 fn default_max_inflight_per_worker() -> usize { 64 }
 fn default_max_upstream_global() -> usize { 2048 }
 fn default_acquire_timeout() -> std::time::Duration { std::time::Duration::from_millis(500) }
+fn default_failure_threshold() -> u32 { 3 }
+fn default_healthy_threshold() -> u32 { 2 }
 fn default_cluster_health_interval() -> std::time::Duration { std::time::Duration::from_secs(10) }
 fn default_cluster_health_timeout() -> std::time::Duration { std::time::Duration::from_secs(5) }
 
@@ -434,6 +450,8 @@ mod tests {
                 max_inflight_per_worker: default_max_inflight_per_worker(),
                 max_upstream_global: default_max_upstream_global(),
                 acquire_timeout: default_acquire_timeout(),
+                failure_threshold: default_failure_threshold(),
+                healthy_threshold: default_healthy_threshold(),
             },
             limits: LimitsConfig::default(),
             logging: LoggingConfig::default(),

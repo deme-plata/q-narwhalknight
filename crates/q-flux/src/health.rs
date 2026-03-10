@@ -12,26 +12,36 @@ const MAX_UNHEALTHY_SECS: u64 = 30;
 /// Health status of a single backend.
 #[derive(Debug, Clone)]
 pub struct BackendHealth {
-    /// Whether this backend is currently considered healthy.
+    /// Whether this backend is currently considered healthy (true for Healthy and HalfOpen).
     pub is_healthy: bool,
+    /// Whether this backend is in half-open (recovering) state.
+    /// HalfOpen backends accept traffic but haven't proven full recovery yet.
+    pub half_open: bool,
     /// When the last health check completed (success or failure).
     pub last_check: Instant,
     /// When the last successful health check occurred.
     pub last_success: Option<Instant>,
     /// Number of consecutive failures (resets to 0 on success).
     pub consecutive_failures: u32,
+    /// Number of consecutive successes since last failure.
+    pub consecutive_successes: u32,
     /// When the backend was first marked unhealthy (for auto-recovery).
     pub unhealthy_since: Option<Instant>,
+    /// Last health probe response time in milliseconds.
+    pub last_response_time_ms: Option<u64>,
 }
 
 impl BackendHealth {
     fn new() -> Self {
         Self {
             is_healthy: true, // optimistic: assume healthy until proven otherwise
+            half_open: false,
             last_check: Instant::now(),
             last_success: None,
             consecutive_failures: 0,
+            consecutive_successes: 0,
             unhealthy_since: None,
+            last_response_time_ms: None,
         }
     }
 }
@@ -61,6 +71,10 @@ pub struct HealthCheckConfig {
     pub path: String,
     /// Number of consecutive failures before marking unhealthy.
     pub failure_threshold: u32,
+    /// Number of consecutive successes to promote from half-open to healthy.
+    /// When an unhealthy backend gets its first success, it enters half-open state.
+    /// After `healthy_threshold` consecutive successes, it becomes fully healthy.
+    pub healthy_threshold: u32,
 }
 
 impl Default for HealthCheckConfig {
@@ -70,6 +84,7 @@ impl Default for HealthCheckConfig {
             timeout: Duration::from_secs(3),
             path: "/api/v1/status".to_string(),
             failure_threshold: 3,
+            healthy_threshold: 2,
         }
     }
 }
@@ -122,7 +137,9 @@ pub fn spawn_health_checker(
                     for backend in &backends {
                         if let Some(mut entry) = health_map.get_mut(backend.as_str()) {
                             entry.is_healthy = true;
+                            entry.half_open = false;
                             entry.consecutive_failures = 0;
+                            entry.consecutive_successes = 0;
                             entry.unhealthy_since = None;
                             info!(backend = backend.as_str(), "Auto-recovered backend to healthy");
                         }
@@ -136,14 +153,16 @@ pub fn spawn_health_checker(
                 let b = backend.clone();
                 let cfg = config.clone();
                 probes.push(tokio::spawn(async move {
+                    let probe_start = Instant::now();
                     let healthy = probe_backend(&b, &cfg).await;
-                    (b, healthy)
+                    let response_time_ms = probe_start.elapsed().as_millis() as u64;
+                    (b, healthy, response_time_ms)
                 }));
             }
 
             for handle in probes {
-                if let Ok((backend, healthy)) = handle.await {
-                    update_health(&health_map, &backend, healthy, config.failure_threshold);
+                if let Ok((backend, healthy, response_time_ms)) = handle.await {
+                    update_health(&health_map, &backend, healthy, response_time_ms, config.failure_threshold, config.healthy_threshold);
                 }
             }
         }
@@ -241,11 +260,19 @@ async fn probe_backend(backend: &str, config: &HealthCheckConfig) -> bool {
 }
 
 /// Update the health map for a single backend after a probe result.
+///
+/// State machine:
+///   Healthy → (failure_threshold consecutive failures) → Unhealthy
+///   Unhealthy → (1 success) → HalfOpen
+///   HalfOpen → (healthy_threshold consecutive successes) → Healthy
+///   HalfOpen → (1 failure) → Unhealthy
 fn update_health(
     health_map: &HealthMap,
     backend: &str,
     probe_ok: bool,
+    response_time_ms: u64,
     failure_threshold: u32,
+    healthy_threshold: u32,
 ) {
     let now = Instant::now();
 
@@ -253,25 +280,64 @@ fn update_health(
     let health = entry.value_mut();
 
     let was_healthy = health.is_healthy;
+    let was_half_open = health.half_open;
     health.last_check = now;
+    health.last_response_time_ms = Some(response_time_ms);
 
     if probe_ok {
         health.consecutive_failures = 0;
+        health.consecutive_successes += 1;
         health.last_success = Some(now);
-        health.unhealthy_since = None;
 
-        if !was_healthy {
+        if !was_healthy && !was_half_open {
+            // Unhealthy → HalfOpen (first success after being down)
             health.is_healthy = true;
+            health.half_open = true;
+            health.consecutive_successes = 1;
             info!(
                 backend,
-                "Backend is now HEALTHY (recovered)"
+                response_time_ms,
+                healthy_threshold,
+                "Backend entering HALF-OPEN state (recovering)"
             );
+        } else if was_half_open {
+            // HalfOpen → check if we've reached healthy_threshold
+            if health.consecutive_successes >= healthy_threshold {
+                health.half_open = false;
+                health.unhealthy_since = None;
+                info!(
+                    backend,
+                    consecutive_successes = health.consecutive_successes,
+                    response_time_ms,
+                    "Backend is now HEALTHY (promoted from half-open)"
+                );
+            } else {
+                debug!(
+                    backend,
+                    consecutive_successes = health.consecutive_successes,
+                    healthy_threshold,
+                    "Backend still HALF-OPEN (awaiting more successes)"
+                );
+            }
         }
+        // Fully healthy + probe_ok: nothing to change
     } else {
         health.consecutive_failures += 1;
+        health.consecutive_successes = 0;
 
-        if was_healthy && health.consecutive_failures >= failure_threshold {
+        if was_half_open {
+            // HalfOpen → Unhealthy (failure during recovery)
             health.is_healthy = false;
+            health.half_open = false;
+            health.unhealthy_since = Some(now);
+            warn!(
+                backend,
+                response_time_ms,
+                "Backend fell back to UNHEALTHY from half-open (probe failed during recovery)"
+            );
+        } else if was_healthy && health.consecutive_failures >= failure_threshold {
+            health.is_healthy = false;
+            health.half_open = false;
             health.unhealthy_since = Some(now);
             error!(
                 backend,
@@ -311,41 +377,69 @@ mod tests {
         map.insert("backend1".to_string(), BackendHealth::new());
 
         // First two failures: still healthy
-        update_health(&map, "backend1", false, 3);
+        update_health(&map, "backend1", false, 5, 3, 2);
         assert!(map.get("backend1").unwrap().is_healthy);
         assert_eq!(map.get("backend1").unwrap().consecutive_failures, 1);
 
-        update_health(&map, "backend1", false, 3);
+        update_health(&map, "backend1", false, 5, 3, 2);
         assert!(map.get("backend1").unwrap().is_healthy);
         assert_eq!(map.get("backend1").unwrap().consecutive_failures, 2);
 
         // Third failure: now unhealthy
-        update_health(&map, "backend1", false, 3);
+        update_health(&map, "backend1", false, 5, 3, 2);
         assert!(!map.get("backend1").unwrap().is_healthy);
         assert_eq!(map.get("backend1").unwrap().consecutive_failures, 3);
 
         // One more failure while already unhealthy: stays unhealthy
-        update_health(&map, "backend1", false, 3);
+        update_health(&map, "backend1", false, 5, 3, 2);
         assert!(!map.get("backend1").unwrap().is_healthy);
         assert_eq!(map.get("backend1").unwrap().consecutive_failures, 4);
     }
 
     #[test]
-    fn test_update_health_recovery_after_one_success() {
+    fn test_half_open_recovery() {
         let map: HealthMap = Arc::new(DashMap::new());
         map.insert("backend1".to_string(), BackendHealth::new());
 
         // Drive to unhealthy
-        update_health(&map, "backend1", false, 3);
-        update_health(&map, "backend1", false, 3);
-        update_health(&map, "backend1", false, 3);
+        update_health(&map, "backend1", false, 5, 3, 2);
+        update_health(&map, "backend1", false, 5, 3, 2);
+        update_health(&map, "backend1", false, 5, 3, 2);
+        assert!(!map.get("backend1").unwrap().is_healthy);
+        assert!(!map.get("backend1").unwrap().half_open);
+
+        // First success: enters half-open (is_healthy=true, half_open=true)
+        update_health(&map, "backend1", true, 10, 3, 2);
+        assert!(map.get("backend1").unwrap().is_healthy);
+        assert!(map.get("backend1").unwrap().half_open);
+        assert_eq!(map.get("backend1").unwrap().consecutive_successes, 1);
+
+        // Second success: promoted to fully healthy (healthy_threshold=2)
+        update_health(&map, "backend1", true, 10, 3, 2);
+        assert!(map.get("backend1").unwrap().is_healthy);
+        assert!(!map.get("backend1").unwrap().half_open);
+        assert_eq!(map.get("backend1").unwrap().consecutive_failures, 0);
+    }
+
+    #[test]
+    fn test_half_open_failure_drops_to_unhealthy() {
+        let map: HealthMap = Arc::new(DashMap::new());
+        map.insert("backend1".to_string(), BackendHealth::new());
+
+        // Drive to unhealthy
+        update_health(&map, "backend1", false, 5, 3, 2);
+        update_health(&map, "backend1", false, 5, 3, 2);
+        update_health(&map, "backend1", false, 5, 3, 2);
         assert!(!map.get("backend1").unwrap().is_healthy);
 
-        // Single success recovers
-        update_health(&map, "backend1", true, 3);
-        assert!(map.get("backend1").unwrap().is_healthy);
-        assert_eq!(map.get("backend1").unwrap().consecutive_failures, 0);
-        assert!(map.get("backend1").unwrap().last_success.is_some());
+        // Enter half-open with one success
+        update_health(&map, "backend1", true, 10, 3, 2);
+        assert!(map.get("backend1").unwrap().half_open);
+
+        // Failure while half-open: drops immediately to unhealthy
+        update_health(&map, "backend1", false, 5, 3, 2);
+        assert!(!map.get("backend1").unwrap().is_healthy);
+        assert!(!map.get("backend1").unwrap().half_open);
     }
 
     #[test]
@@ -354,12 +448,12 @@ mod tests {
         map.insert("b1".to_string(), BackendHealth::new());
 
         // 2 failures (below threshold)
-        update_health(&map, "b1", false, 3);
-        update_health(&map, "b1", false, 3);
+        update_health(&map, "b1", false, 5, 3, 2);
+        update_health(&map, "b1", false, 5, 3, 2);
         assert_eq!(map.get("b1").unwrap().consecutive_failures, 2);
 
         // Success resets counter
-        update_health(&map, "b1", true, 3);
+        update_health(&map, "b1", true, 10, 3, 2);
         assert_eq!(map.get("b1").unwrap().consecutive_failures, 0);
         assert!(map.get("b1").unwrap().is_healthy);
     }
@@ -369,7 +463,46 @@ mod tests {
         let map: HealthMap = Arc::new(DashMap::new());
 
         // Updating a backend that was never inserted should auto-create it
-        update_health(&map, "new-backend", true, 3);
+        update_health(&map, "new-backend", true, 10, 3, 2);
         assert!(map.get("new-backend").unwrap().is_healthy);
+    }
+
+    #[test]
+    fn test_response_time_tracked() {
+        let map: HealthMap = Arc::new(DashMap::new());
+        map.insert("b1".to_string(), BackendHealth::new());
+
+        update_health(&map, "b1", true, 42, 3, 2);
+        assert_eq!(map.get("b1").unwrap().last_response_time_ms, Some(42));
+
+        update_health(&map, "b1", false, 100, 3, 2);
+        assert_eq!(map.get("b1").unwrap().last_response_time_ms, Some(100));
+    }
+
+    #[test]
+    fn test_higher_healthy_threshold() {
+        let map: HealthMap = Arc::new(DashMap::new());
+        map.insert("b1".to_string(), BackendHealth::new());
+
+        // Drive to unhealthy
+        for _ in 0..3 {
+            update_health(&map, "b1", false, 5, 3, 5); // healthy_threshold=5
+        }
+        assert!(!map.get("b1").unwrap().is_healthy);
+
+        // First success: half-open
+        update_health(&map, "b1", true, 10, 3, 5);
+        assert!(map.get("b1").unwrap().half_open);
+
+        // 2nd, 3rd, 4th successes: still half-open
+        for _ in 0..3 {
+            update_health(&map, "b1", true, 10, 3, 5);
+            assert!(map.get("b1").unwrap().half_open);
+        }
+
+        // 5th success: promoted to healthy
+        update_health(&map, "b1", true, 10, 3, 5);
+        assert!(map.get("b1").unwrap().is_healthy);
+        assert!(!map.get("b1").unwrap().half_open);
     }
 }

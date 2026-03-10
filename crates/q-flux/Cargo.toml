@@ -39,6 +39,7 @@ x509-parser = { workspace = true }
 sha2 = { workspace = true }
 reqwest = { workspace = true }
 flate2 = "1"
+brotli = "7"
 
 # Phase 2: io_uring (Linux only)
 [target.'cfg(target_os = "linux")'.dependencies]

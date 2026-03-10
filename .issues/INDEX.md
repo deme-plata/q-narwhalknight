@@ -26,10 +26,10 @@
 | 022 | Upstream Round-Robin and Failover Tests | Medium | Done | testing, reliability |
 | 023 | HTTP/2 Server Push for Static Assets | Low | Planned | performance, h2 |
 | 024 | Request Body Streaming for Large Uploads | Medium | Planned | performance, proxy |
-| 025 | Response Compression (gzip + Brotli) | High | Planned | performance, proxy |
+| 025 | Response Compression (gzip + Brotli) | High | Done | performance, proxy |
 | 026 | Upstream Connection Pool Metrics | Medium | Planned | observability, prometheus |
 | 027 | IP Allowlist / Blocklist with CIDR Support | Medium | Planned | security, config |
-| 028 | Graceful Upstream Health Checks | High | Planned | reliability, health |
+| 028 | Graceful Upstream Health Checks | High | Done | reliability, health |
 | 029 | Trainer boost percentages are fiction | Medium | Done | q-compute, audit |
 | 030 | ResourceMonitor GPU query blocks async runtime | High | Done | q-compute, async, audit |
 | 031 | Ring buffer uses O(n) drain | Low | Done | q-compute, performance, audit |

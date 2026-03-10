@@ -440,29 +440,31 @@ fn handle_status(state: &AdminState) -> Response<Full<Bytes>> {
     let cluster_json = if let Some(ref hm) = state.health_map {
         let mut local_entries = Vec::new();
         for backend in &state.local_backends {
-            let (healthy, failures, last_check_ago_ms) = if let Some(entry) = hm.get(backend.as_str()) {
+            let (healthy, half_open, failures, last_check_ago_ms, resp_time) = if let Some(entry) = hm.get(backend.as_str()) {
                 let ago = entry.last_check.elapsed().as_millis() as u64;
-                (entry.is_healthy, entry.consecutive_failures, ago)
+                (entry.is_healthy, entry.half_open, entry.consecutive_failures, ago, entry.last_response_time_ms)
             } else {
-                (true, 0, 0) // no entry = assume healthy
+                (true, false, 0, 0, None) // no entry = assume healthy
             };
             local_entries.push(format!(
-                r#"{{"addr":"{}","healthy":{},"failures":{},"last_check_ms_ago":{}}}"#,
-                backend, healthy, failures, last_check_ago_ms,
+                r#"{{"addr":"{}","healthy":{},"half_open":{},"failures":{},"last_check_ms_ago":{},"response_time_ms":{}}}"#,
+                backend, healthy, half_open, failures, last_check_ago_ms,
+                resp_time.map(|t| t.to_string()).unwrap_or_else(|| "null".to_string()),
             ));
         }
 
         let mut peer_entries = Vec::new();
         for peer in &state.cluster_peers {
-            let (healthy, failures, last_check_ago_ms) = if let Some(entry) = hm.get(peer.as_str()) {
+            let (healthy, half_open, failures, last_check_ago_ms, resp_time) = if let Some(entry) = hm.get(peer.as_str()) {
                 let ago = entry.last_check.elapsed().as_millis() as u64;
-                (entry.is_healthy, entry.consecutive_failures, ago)
+                (entry.is_healthy, entry.half_open, entry.consecutive_failures, ago, entry.last_response_time_ms)
             } else {
-                (true, 0, 0)
+                (true, false, 0, 0, None)
             };
             peer_entries.push(format!(
-                r#"{{"addr":"{}","healthy":{},"failures":{},"last_check_ms_ago":{}}}"#,
-                peer, healthy, failures, last_check_ago_ms,
+                r#"{{"addr":"{}","healthy":{},"half_open":{},"failures":{},"last_check_ms_ago":{},"response_time_ms":{}}}"#,
+                peer, healthy, half_open, failures, last_check_ago_ms,
+                resp_time.map(|t| t.to_string()).unwrap_or_else(|| "null".to_string()),
             ));
         }
 

@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
+use std::io::Write as IoWrite;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt};
 
 use crate::access_log::{AccessLogger, log_access};
@@ -122,6 +123,13 @@ async fn handle_connection_inner<S>(
         let user_agent = req.headers().get(hyper::header::USER_AGENT)
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
+
+        // Determine compression from client's Accept-Encoding header
+        let client_compression = if static_config.proxy_compression {
+            parse_accept_encoding(&buf[..buf_len])
+        } else {
+            Compression::None
+        };
 
         // X-Request-ID: preserve client-provided ID or generate one
         let request_id = req.headers().get("x-request-id")
@@ -279,7 +287,7 @@ async fn handle_connection_inner<S>(
                 metrics.record_latency(latency);
                 log_access(access_logger, client_addr, req_method, &req_path, status, content_length as u64, 0, latency, user_agent.as_deref(), Some(&backend_addr), Some(request_id.as_str()));
 
-                if let Err(e) = write_response(&mut stream, resp, metrics, Some(request_id.as_str())).await {
+                if let Err(e) = write_response(&mut stream, resp, metrics, Some(request_id.as_str()), client_compression, static_config.proxy_compression).await {
                     tracing::debug!(client = %client_addr, "Response write error: {}", e);
                     break;
                 }
@@ -312,7 +320,7 @@ async fn handle_connection_inner<S>(
                         metrics.response_status(status);
                         metrics.record_latency(latency);
                         log_access(access_logger, client_addr, req_method, &req_path, status, content_length as u64, 0, latency, user_agent.as_deref(), Some(&backend_addr), Some(request_id.as_str()));
-                        if let Err(e) = write_response(&mut stream, resp, metrics, Some(request_id.as_str())).await {
+                        if let Err(e) = write_response(&mut stream, resp, metrics, Some(request_id.as_str()), client_compression, static_config.proxy_compression).await {
                             tracing::debug!(client = %client_addr, "Response write error (retry): {}", e);
                             break;
                         }
@@ -449,6 +457,75 @@ fn should_keep_alive(req: &hyper::Request<()>) -> bool {
     req.version() != hyper::Version::HTTP_10
 }
 
+/// Compression encoding selected based on client's Accept-Encoding header.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Compression {
+    None,
+    Gzip,
+    Brotli,
+}
+
+/// Minimum response body size for compression (bytes).
+/// Responses smaller than this are sent uncompressed — the compression overhead
+/// exceeds the bandwidth savings.
+const MIN_COMPRESS_SIZE: usize = 1024;
+
+/// Parse Accept-Encoding from raw request headers to determine compression.
+fn parse_accept_encoding(headers: &[u8]) -> Compression {
+    // Quick scan for Accept-Encoding in the raw header bytes.
+    // We look for "accept-encoding:" (case-insensitive) in the buffer.
+    let lower = headers.to_ascii_lowercase();
+    if let Some(pos) = lower.windows(17).position(|w| w == b"accept-encoding:") {
+        let value_start = pos + 17;
+        // Find end of this header line
+        let value_end = lower[value_start..].iter().position(|&b| b == b'\r' || b == b'\n')
+            .map(|p| value_start + p)
+            .unwrap_or(lower.len());
+        let value = &lower[value_start..value_end];
+        // Prefer Brotli over gzip (15-20% better compression)
+        if value.windows(2).any(|w| w == b"br") {
+            return Compression::Brotli;
+        }
+        if value.windows(4).any(|w| w == b"gzip") {
+            return Compression::Gzip;
+        }
+    }
+    Compression::None
+}
+
+/// Check if a content-type is compressible (text-based or structured data).
+fn is_compressible_content_type(content_type: &str) -> bool {
+    let ct = content_type.to_ascii_lowercase();
+    ct.starts_with("text/")
+        || ct.starts_with("application/json")
+        || ct.starts_with("application/javascript")
+        || ct.starts_with("application/xml")
+        || ct.starts_with("application/x-javascript")
+        || ct.starts_with("image/svg+xml")
+        || ct.starts_with("application/manifest+json")
+        || ct.starts_with("application/ld+json")
+}
+
+/// Compress bytes with gzip (flate2).
+fn gzip_compress(data: &[u8]) -> Vec<u8> {
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    let mut encoder = GzEncoder::new(Vec::with_capacity(data.len() / 2), Compression::fast());
+    encoder.write_all(data).unwrap_or_default();
+    encoder.finish().unwrap_or_default()
+}
+
+/// Compress bytes with Brotli.
+fn brotli_compress(data: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(data.len() / 2);
+    // Quality 4 is a good speed/ratio tradeoff for on-the-fly compression.
+    // Window size 22 (4MB) is standard for web content.
+    let mut writer = brotli::CompressorWriter::new(&mut output, 4096, 4, 22);
+    writer.write_all(data).unwrap_or_default();
+    drop(writer);
+    output
+}
+
 /// Write an HTTP response back to the client.
 /// Detects SSE/streaming responses and streams them without buffering.
 async fn write_response<S>(
@@ -456,6 +533,8 @@ async fn write_response<S>(
     resp: hyper::Response<Incoming>,
     metrics: &Metrics,
     request_id: Option<&str>,
+    compression: Compression,
+    proxy_compression_enabled: bool,
 ) -> Result<()>
 where
     S: AsyncWrite + Unpin,
@@ -501,14 +580,48 @@ where
             }
         }
     } else {
-        // BUFFERED MODE: collect full body, set Content-Length, send.
+        // BUFFERED MODE: collect full body, optionally compress, set Content-Length, send.
         let body_bytes = body.collect().await
             .map_err(|e| anyhow::anyhow!("Body collect error: {}", e))?
             .to_bytes();
 
+        // Determine if we should compress this response
+        let content_type = parts.headers.get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let already_encoded = parts.headers.contains_key("content-encoding");
+        let should_compress = proxy_compression_enabled
+            && compression != Compression::None
+            && !already_encoded
+            && body_bytes.len() >= MIN_COMPRESS_SIZE
+            && is_compressible_content_type(content_type);
+
+        let (final_body, encoding_header): (std::borrow::Cow<[u8]>, Option<&str>) = if should_compress {
+            match compression {
+                Compression::Brotli => {
+                    let compressed = brotli_compress(&body_bytes);
+                    if compressed.len() < body_bytes.len() {
+                        (std::borrow::Cow::Owned(compressed), Some("br"))
+                    } else {
+                        (std::borrow::Cow::Borrowed(&body_bytes), None)
+                    }
+                }
+                Compression::Gzip => {
+                    let compressed = gzip_compress(&body_bytes);
+                    if compressed.len() < body_bytes.len() {
+                        (std::borrow::Cow::Owned(compressed), Some("gzip"))
+                    } else {
+                        (std::borrow::Cow::Borrowed(&body_bytes), None)
+                    }
+                }
+                Compression::None => (std::borrow::Cow::Borrowed(&body_bytes), None),
+            }
+        } else {
+            (std::borrow::Cow::Borrowed(&body_bytes), None)
+        };
+
         // Pre-allocate response buffer to reduce per-header allocations
         let mut resp_buf = Vec::with_capacity(512);
-        use std::io::Write as IoWrite;
 
         // Write status line
         write!(resp_buf, "HTTP/1.1 {} {}\r\n",
@@ -516,28 +629,34 @@ where
             parts.status.canonical_reason().unwrap_or("OK")
         ).ok();
 
-        // Write headers
-        let mut wrote_content_length = false;
+        // Write headers (skip original Content-Length — we'll write our own)
         for (key, value) in &parts.headers {
             if key == hyper::header::TRANSFER_ENCODING || key == "keep-alive" {
                 continue;
             }
             if key == hyper::header::CONTENT_LENGTH {
-                wrote_content_length = true;
+                continue; // always rewrite Content-Length to match final body
+            }
+            if encoding_header.is_some() && key == "content-encoding" {
+                continue; // we're replacing this
             }
             write!(resp_buf, "{}: {}\r\n", key, value.to_str().unwrap_or("")).ok();
         }
 
-        if !wrote_content_length {
-            write!(resp_buf, "content-length: {}\r\n", body_bytes.len()).ok();
+        // Add compression headers
+        if let Some(enc) = encoding_header {
+            write!(resp_buf, "content-encoding: {}\r\n", enc).ok();
+            write!(resp_buf, "vary: Accept-Encoding\r\n").ok();
         }
+
+        write!(resp_buf, "content-length: {}\r\n", final_body.len()).ok();
         resp_buf.extend_from_slice(b"\r\n");
 
         stream.write_all(&resp_buf).await?;
 
-        if !body_bytes.is_empty() {
-            stream.write_all(&body_bytes).await?;
-            metrics.bytes_tx(body_bytes.len() as u64);
+        if !final_body.is_empty() {
+            stream.write_all(&final_body).await?;
+            metrics.bytes_tx(final_body.len() as u64);
         }
 
         stream.flush().await?;
@@ -556,8 +675,6 @@ where
 {
     // Pre-allocate header buffer to reduce per-header allocations
     let mut resp_buf = Vec::with_capacity(512);
-    use std::io::Write as IoWrite;
-
     write!(resp_buf, "HTTP/1.1 {} {}\r\n",
         parts.status.as_u16(),
         parts.status.canonical_reason().unwrap_or("OK")

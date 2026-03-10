@@ -289,23 +289,27 @@ impl UpstreamPool {
 
     /// Pick the next healthy backend (round-robin, skipping unhealthy ones).
     ///
-    /// Strategy (super-cluster aware):
-    ///   1. Try local backends first (round-robin, skip unhealthy)
-    ///   2. If ALL local backends are unhealthy AND cluster peers exist,
-    ///      try cluster peers (round-robin, skip unhealthy)
+    /// Strategy (super-cluster aware, half-open aware):
+    ///   1. Try local backends: prefer fully healthy, then half-open
+    ///   2. If no healthy/half-open local backends AND cluster peers exist,
+    ///      try cluster peers (same preference order)
     ///   3. If everything is unhealthy, fall back to first local backend
     ///      (degraded attempt is better than immediate 503)
     fn next_backend(&self) -> &str {
         let len = self.backends.len();
         let start = self.rr_index.fetch_add(1, Ordering::Relaxed);
 
-        // First pass: look for a healthy LOCAL backend starting at the RR index
+        // First pass: look for a FULLY HEALTHY local backend (not half-open)
+        let mut first_half_open: Option<&str> = None;
         for i in 0..len {
             let idx = (start + i) % len;
             let backend = &self.backends[idx];
             if let Some(entry) = self.health_map.get(backend.as_str()) {
-                if entry.is_healthy {
+                if entry.is_healthy && !entry.half_open {
                     return backend;
+                }
+                if entry.is_healthy && entry.half_open && first_half_open.is_none() {
+                    first_half_open = Some(backend);
                 }
             } else {
                 // No health entry means we haven't checked yet -- assume healthy
@@ -313,21 +317,30 @@ impl UpstreamPool {
             }
         }
 
+        // No fully healthy local backends — use half-open if available
+        if let Some(ho_backend) = first_half_open {
+            return ho_backend;
+        }
+
         // All local backends unhealthy — try cluster peers if available
         if !self.cluster_peers.is_empty() {
             let clen = self.cluster_peers.len();
             let cstart = self.cluster_rr_index.fetch_add(1, Ordering::Relaxed);
 
+            let mut cluster_half_open: Option<&str> = None;
             for i in 0..clen {
                 let idx = (cstart + i) % clen;
                 let peer = &self.cluster_peers[idx];
                 if let Some(entry) = self.health_map.get(peer.as_str()) {
-                    if entry.is_healthy {
+                    if entry.is_healthy && !entry.half_open {
                         warn!(
                             peer = peer.as_str(),
                             "Super-cluster failover: all local backends unhealthy, routing to cluster peer"
                         );
                         return peer;
+                    }
+                    if entry.is_healthy && entry.half_open && cluster_half_open.is_none() {
+                        cluster_half_open = Some(peer);
                     }
                 } else {
                     // No health entry — assume healthy (optimistic)
@@ -337,6 +350,14 @@ impl UpstreamPool {
                     );
                     return peer;
                 }
+            }
+
+            if let Some(ho_peer) = cluster_half_open {
+                warn!(
+                    peer = ho_peer,
+                    "Super-cluster failover: routing to half-open cluster peer"
+                );
+                return ho_peer;
             }
         }
 
@@ -488,12 +509,14 @@ impl UpstreamPool {
                 if let Some(mut entry) = self.health_map.get_mut(backend_addr.as_str()) {
                     if !entry.is_healthy {
                         entry.is_healthy = true;
+                        entry.half_open = true; // enter half-open, let health checker promote
                         entry.consecutive_failures = 0;
+                        entry.consecutive_successes = 1;
                         entry.unhealthy_since = None;
                         entry.last_success = Some(std::time::Instant::now());
                         tracing::info!(
                             backend = backend_addr.as_str(),
-                            "Backend auto-recovered via successful request (inline health)"
+                            "Backend auto-recovered via successful request (inline → half-open)"
                         );
                     }
                 }
@@ -577,12 +600,14 @@ impl UpstreamPool {
                 if let Some(mut entry) = self.health_map.get_mut(backend_addr.as_str()) {
                     if !entry.is_healthy {
                         entry.is_healthy = true;
+                        entry.half_open = true;
                         entry.consecutive_failures = 0;
+                        entry.consecutive_successes = 1;
                         entry.unhealthy_since = None;
                         entry.last_success = Some(std::time::Instant::now());
                         tracing::info!(
                             backend = backend_addr.as_str(),
-                            "Backend auto-recovered via retry request (inline health)"
+                            "Backend auto-recovered via retry request (inline → half-open)"
                         );
                     }
                 }
@@ -623,6 +648,8 @@ mod tests {
             max_inflight_per_worker: 64,
             max_upstream_global: 0,
             acquire_timeout: Duration::from_millis(500),
+            failure_threshold: 3,
+            healthy_threshold: 2,
         }
     }
 
@@ -665,6 +692,36 @@ mod tests {
         for _ in 0..100 {
             let b = pool.next_backend();
             assert_ne!(b, "B:80", "Unhealthy backend B:80 should be skipped");
+        }
+    }
+
+    #[test]
+    fn test_prefers_healthy_over_half_open() {
+        let pool = make_pool(vec!["A:80", "B:80", "C:80"], vec![]);
+        // Mark B:80 as half-open (recovering)
+        if let Some(mut entry) = pool.health_map().get_mut("B:80") {
+            entry.half_open = true;
+        }
+        // A and C are fully healthy — B should be skipped
+        for _ in 0..100 {
+            let b = pool.next_backend();
+            assert_ne!(b, "B:80", "Half-open B:80 should be skipped when healthy backends exist");
+        }
+    }
+
+    #[test]
+    fn test_half_open_used_when_no_fully_healthy() {
+        let pool = make_pool(vec!["A:80", "B:80"], vec![]);
+        // Mark A unhealthy, B half-open
+        if let Some(mut entry) = pool.health_map().get_mut("A:80") {
+            entry.is_healthy = false;
+        }
+        if let Some(mut entry) = pool.health_map().get_mut("B:80") {
+            entry.half_open = true;
+        }
+        for _ in 0..50 {
+            let b = pool.next_backend();
+            assert_eq!(b, "B:80", "Half-open B:80 should be used when no fully healthy");
         }
     }
 

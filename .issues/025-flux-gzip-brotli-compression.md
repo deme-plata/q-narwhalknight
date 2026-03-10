@@ -1,6 +1,6 @@
 # Issue #025: Response Compression (gzip + Brotli)
 
-**Status**: Planned
+**Status**: Done
 **Priority**: High
 **Component**: q-flux
 **Labels**: performance, proxy

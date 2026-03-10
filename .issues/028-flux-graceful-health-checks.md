@@ -1,6 +1,6 @@
 # Issue #028: Graceful Upstream Health Checks
 
-**Status**: Planned
+**Status**: Done
 **Priority**: High
 **Component**: q-flux
 **Labels**: reliability, health
