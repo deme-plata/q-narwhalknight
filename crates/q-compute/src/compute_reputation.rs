@@ -299,10 +299,12 @@ impl ComputeReputationManager {
 
         let now = now_ms();
         if let Some(h) = inner.histories.get_mut(peer_id) {
-            h.total_tasks += 1;
-            h.total_failures += 1;
+            // Timeouts count as 2 tasks / 2 failures so the success rate
+            // drops faster than a regular failure.
+            h.total_tasks += 2;
+            h.total_failures += 2;
             h.total_timeouts += 1;
-            // Timeouts are worse: double-increment consecutive failures.
+            // Also double-increment consecutive failures for faster demotion.
             h.consecutive_failures += 2;
             h.consecutive_successes = 0;
             h.last_failure_time = now;

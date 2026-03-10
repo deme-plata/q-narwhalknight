@@ -213,8 +213,11 @@ impl MeteringHandle {
     /// Calculates total resource consumption by integrating samples over time.
     /// Returns the `MeteringRecord` with computed cost.
     pub fn finalize(self) -> MeteringRecord {
-        let duration = self.started.elapsed();
-        let duration_ms = duration.as_millis() as u64;
+        let wall_ms = self.started.elapsed().as_millis() as u64;
+        // Use the max of wall-clock and sample-declared time so tests that
+        // don't sleep still get correct integration.
+        let sample_max_ms = self.samples.last().map(|s| s.elapsed_ms).unwrap_or(0);
+        let duration_ms = wall_ms.max(sample_max_ms);
         let ended_ms = self.started_ms + duration_ms;
 
         // Integrate resource consumption over time using trapezoidal rule
@@ -227,8 +230,13 @@ impl MeteringHandle {
             + (memory_gb_seconds * self.rate_card.memory_gb_second as f64) as u64
             + (network_mb * self.rate_card.network_mb as f64) as u64;
 
-        // Minimum 1 micro-QUG for any non-zero work
-        let cost = if self.samples.is_empty() || duration_ms == 0 {
+        // Minimum 1 micro-QUG for any non-zero work, but respect zero-rate
+        // layers (e.g. Mining) where all rates are 0.
+        let rate_is_zero = self.rate_card.cpu_second == 0
+            && self.rate_card.gpu_second == 0
+            && self.rate_card.memory_gb_second == 0
+            && self.rate_card.network_mb == 0;
+        let cost = if self.samples.is_empty() || duration_ms == 0 || rate_is_zero {
             0
         } else {
             cost.max(1)

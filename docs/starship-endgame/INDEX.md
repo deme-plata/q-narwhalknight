@@ -34,7 +34,7 @@
 | [#003](issues/003-gpu-mining-acceleration.md) | GPU Mining Acceleration | HIGH | **In Progress** | Epsilon | GpuHasher + rayon CPU backend + 16 tests |
 | [#015](issues/015-quantum-grover-miner-integration.md) | Quantum Grover Miner Integration | HIGH | Open | Epsilon | Python impl in q-grover/, needs Rust FFI |
 | [#006](issues/006-zk-proof-farm.md) | ZK Proof Farm | MEDIUM | Open | Gamma | Not started |
-| [#023](issues/023-multi-gpu-scheduling.md) | Multi-GPU Scheduling | HIGH | **In Progress** | Epsilon | gpu_scheduler.rs: 762 lines — device detection, VRAM-aware placement |
+| [#023](issues/023-multi-gpu-scheduling.md) | Multi-GPU Scheduling | HIGH | **Closed** | Epsilon | gpu_scheduler.rs: 763 lines — device detection, VRAM-aware placement, 15 tests |
 
 ### Distributed AI & Marketplace (Phase 3)
 
@@ -72,8 +72,8 @@
 
 | # | Title | Priority | Status | Assigned | Progress |
 |---|-------|----------|--------|----------|----------|
-| [#021](issues/021-compute-billing-metering.md) | Compute Billing & Metering | HIGH | **In Progress** | Beta | metering.rs: 659 lines — billing, cost tracking, rate limiting |
-| [#022](issues/022-node-reputation-compute-scoring.md) | Node Reputation Scoring | HIGH | **In Progress** | Beta | compute_reputation.rs: 804 lines — scoring, decay, blacklisting |
+| [#021](issues/021-compute-billing-metering.md) | Compute Billing & Metering | HIGH | **Closed** | Beta | metering.rs: 670 lines — RateCard, MeteringHandle, MeteringSink, 14 tests |
+| [#022](issues/022-node-reputation-compute-scoring.md) | Node Reputation Scoring | HIGH | **Closed** | Beta | compute_reputation.rs: 804 lines — 6-dim scoring, decay, blacklisting, 12 tests |
 | [#026](issues/026-compute-job-persistence.md) | Compute Job Persistence | MEDIUM | Open | Beta | All queues in-memory, no WAL |
 
 ### Frontend & Visualization
@@ -163,10 +163,10 @@
 |-----------|--------|--------|--------|
 | **Phase 1: Orchestrator Foundation** | #001, #002, #004, #007 | 2026-03-10 | 4/4 closed |
 | **Phase 1.5: Hardening** | #012, #013, #014 | 2026-03-15 | 3/3 closed |
-| **Phase 2: GPU & Quantum** | #003, #006, #015, #023 | 2026-03-25 | 1/4 in progress |
+| **Phase 2: GPU & Quantum** | #003, #006, #015, #023 | 2026-03-25 | 2/4 (#003 in progress, #023 closed) |
 | **Phase 3: Distributed Compute** | #005, #016, #017, #018, #024, #025, #027 | 2026-04-10 | 2/7 in progress |
 | **Phase 4: Payments** | #019, #020 | 2026-03-10 | 2/2 closed |
-| **Phase 5: Compute Economics** | #021, #022, #026 | 2026-04-20 | 0/3 |
+| **Phase 5: Compute Economics** | #021, #022, #026 | 2026-04-20 | 2/3 closed (#021, #022 done) |
 | **Monitoring** | #028 | 2026-04-15 | 0/1 |
 | **Auto-Update** | #009, #010, #011 | 2026-03-10 | 3/3 closed |
 
