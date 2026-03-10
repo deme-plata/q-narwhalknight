@@ -59,6 +59,69 @@ verify_upgrade_gate() {
     return 0  # Don't fail deployment, just warn
 }
 
+# Announce update to P2P network after successful deployment
+# Non-blocking: warns on failure but does not fail the deploy
+announce_update() {
+    log_info "Announcing update to P2P network..."
+
+    # All commands use || fallbacks to prevent set -e from aborting
+    local version
+    version=$(grep '^version' "$PROJECT_DIR/Cargo.toml" | head -1 | sed 's/.*"\(.*\)"/\1/' || echo "")
+    if [ -z "$version" ]; then
+        log_warn "Could not determine version from Cargo.toml — skipping announce"
+        return 0
+    fi
+
+    local sha256_checksum
+    sha256_checksum=$(sha256sum "$BINARY_PATH" 2>/dev/null | awk '{print $1}' || echo "")
+
+    local blake3_checksum
+    blake3_checksum=$(b3sum "$BINARY_PATH" 2>/dev/null | awk '{print $1}' || echo "")
+
+    local binary_size
+    binary_size=$(stat --format=%s "$BINARY_PATH" 2>/dev/null || echo "0")
+
+    if [ -z "$sha256_checksum" ] || [ "$binary_size" = "0" ]; then
+        log_warn "Could not compute checksums for binary — skipping announce"
+        return 0
+    fi
+
+    local download_url="https://quillon.xyz/downloads/q-api-server-v${version}"
+    local release_notes="v${version} automated deployment via safe-deploy.sh"
+
+    log_info "  Version:  $version"
+    log_info "  SHA-256:  $sha256_checksum"
+    log_info "  BLAKE3:   ${blake3_checksum:-<b3sum not available>}"
+    log_info "  Size:     $binary_size bytes"
+    log_info "  URL:      $download_url"
+
+    local response
+    response=$(curl -s -w "\n%{http_code}" -X POST "http://localhost:8080/api/v1/admin/update/announce" \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"version\": \"${version}\",
+            \"sha256_checksum\": \"${sha256_checksum}\",
+            \"blake3_checksum\": \"${blake3_checksum}\",
+            \"binary_size\": ${binary_size},
+            \"download_url\": \"${download_url}\",
+            \"mandatory\": false,
+            \"release_notes\": \"${release_notes}\"
+        }" 2>/dev/null) || true
+
+    local http_code
+    http_code=$(echo "$response" | tail -1)
+    local body
+    body=$(echo "$response" | sed '$d')
+
+    if [ "$http_code" = "200" ]; then
+        log_success "Update announced to P2P network: v${version}"
+    else
+        log_warn "Update announce returned HTTP ${http_code} (non-fatal) — ${body}"
+    fi
+
+    return 0
+}
+
 # Health check endpoint
 health_check() {
     local port=${1:-8080}
@@ -570,8 +633,11 @@ cmd_deploy_beta() {
         log_info "Soak test: ${i}/10 checks passed"
     done
 
+    # Announce update to P2P network (non-blocking)
+    announce_update || log_warn "Update announce failed (non-fatal)"
+
     log_success "Production deployment complete: $version"
-    echo "Download: wget https://dl.quillon.xyz/downloads/$BINARY_NAME-$version"
+    echo "Download: wget https://quillon.xyz/downloads/$BINARY_NAME-$version"
 }
 
 # Rollback to previous binary

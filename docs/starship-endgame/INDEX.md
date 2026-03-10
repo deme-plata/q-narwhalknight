@@ -12,20 +12,24 @@
 
 | # | Title | Priority | Status | Assigned | Progress |
 |---|-------|----------|--------|----------|----------|
-| [#001](issues/001-compute-orchestrator-core.md) | Compute Orchestrator Core | CRITICAL | In Progress | Beta | 5/7 criteria done |
-| [#002](issues/002-p2p-compute-tunnels.md) | P2P Compute Tunnels | CRITICAL | Open | Beta+Epsilon | Framework exists, needs gossipsub wiring |
+| [#001](issues/001-compute-orchestrator-core.md) | Compute Orchestrator Core | CRITICAL | **Closed** | Beta | 7/7 criteria done |
+| [#002](issues/002-p2p-compute-tunnels.md) | P2P Compute Tunnels | CRITICAL | **In Progress** | Beta+Epsilon | Gossipsub wired, 3/6 criteria done |
 | [#003](issues/003-gpu-mining-acceleration.md) | GPU Mining Acceleration | HIGH | Open | Epsilon | Not started |
-| [#004](issues/004-trainer-cheat-engine.md) | Trainer Cheat Engine | HIGH | In Progress | Beta | 10/12 cheats done |
+| [#004](issues/004-trainer-cheat-engine.md) | Trainer Cheat Engine | HIGH | **Closed** | Beta | 12/12 cheats done |
 | [#005](issues/005-distributed-ai-inference.md) | Distributed AI Inference | MEDIUM | Open | Epsilon | Not started |
 | [#006](issues/006-zk-proof-farm.md) | ZK Proof Farm | MEDIUM | Open | Gamma | Not started |
-| [#007](issues/007-os-level-auto-tuning.md) | OS-Level Auto-Tuning | HIGH | In Progress | Beta | Linux done, IRQ pending |
+| [#007](issues/007-os-level-auto-tuning.md) | OS-Level Auto-Tuning | HIGH | **Closed** | Beta | All Linux + Windows tuning done |
 | [#008](issues/008-tunnel-mesh-visualization.md) | Tunnel Mesh Visualization | LOW | In Progress | Beta | Compute panel done, D3 graph pending |
+| [#009](issues/009-node-auto-update-deploy-integration.md) | Auto-Update Deploy Integration | HIGH | Open | Beta | Deploy script needs announce call |
+| [#010](issues/010-node-auto-update-systemd-sigusr1.md) | Auto-Update Systemd + SIGUSR1 | HIGH | Open | Beta | Env vars + signal handler |
+| [#011](issues/011-node-auto-update-missing-types.md) | Auto-Update Missing Types | MEDIUM | Open | Beta | Types + email stub |
 
 ## Pull Requests
 
 | # | Title | State | Branch | Closes |
 |---|-------|-------|--------|--------|
 | [PR-001](pulls/PR-001-compute-orchestrator-integration.md) | Compute Orchestrator Integration | Open | `feature/safe-batched-sync-v1.0.2` | #001, #004, #007, #008 (partial) |
+| [PR-003](pulls/PR-003-node-auto-update-integration.md) | Node Auto-Update Integration | Open | `feature/safe-batched-sync-v1.0.2` | #009, #010, #011 |
 
 ## Dependency Graph
 

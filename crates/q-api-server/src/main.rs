@@ -2867,6 +2867,16 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 }
             }
 
+            // v9.5.0: Subscribe to compute-tunnel topic for P2P compute peer discovery (Starship #002)
+            {
+                let compute_tunnel_topic = network_id.compute_tunnel_topic();
+                if let Err(e) = manager.subscribe_topic(&compute_tunnel_topic) {
+                    warn!("⚠️  Failed to subscribe to compute-tunnel topic: {}", e);
+                } else {
+                    info!("🔗 Subscribed to compute-tunnel topic: {}", compute_tunnel_topic);
+                }
+            }
+
             // ✅ v0.9.75-beta: Wrap manager but DON'T spawn event loop yet
             // CRITICAL FIX: Prevents deadlock where event loop locks manager forever,
             // causing Phase 3 storage injection to timeout and breaking BlockPackCodec responses.
@@ -12908,6 +12918,14 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         }
                     }
                 // ========================================
+                // 🔗 v9.5.0: COMPUTE TUNNEL PEER DISCOVERY HANDLER (Starship #002)
+                // Receives compute capacity announcements from peers.
+                // Feeds into orchestrator's PeerRegistry for score-based task routing.
+                // ========================================
+                } else if topic.ends_with("/compute-tunnel") {
+                    if let Some(ref orch) = app_state_gossip.compute_orchestrator {
+                        orch.process_peer_announcement(&data);
+                    }
                 // ========================================
                 // 📤 v3.3.0-beta: P2P MEMPOOL TRANSACTION PROPAGATION HANDLER
                 // Receives transactions broadcast by other nodes for real-time mempool sync
@@ -13755,6 +13773,63 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             }
         });
         info!("✅ [COMPUTE POWER] Compute power announcement task started");
+    }
+
+    // ========================================
+    // 🔗 v9.5.0: COMPUTE TUNNEL PEER ANNOUNCEMENT TASK (Starship Endgame #002)
+    // Publishes ComputePeerInfo to gossipsub every 30s so peers can discover
+    // our compute capacity for distributed task routing.
+    // Also cleans up stale peers from the tunnel manager's PeerRegistry.
+    // ========================================
+    if let Some(network_tx) = &app_state.libp2p_command_tx {
+        let network_clone = network_tx.clone();
+        let peer_info_clone = app_state.libp2p_peer_info.clone();
+        let orchestrator_clone = app_state.compute_orchestrator.clone();
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            info!("🔗 [COMPUTE TUNNEL] Starting peer announcement task (30s interval)");
+
+            loop {
+                interval.tick().await;
+
+                let orch = match orchestrator_clone {
+                    Some(ref o) => o.clone(),
+                    None => continue,
+                };
+
+                // Ensure local peer ID is set on orchestrator
+                let peer_id = {
+                    let info = peer_info_clone.read().await;
+                    info.0.clone()
+                };
+                if peer_id.is_empty() {
+                    continue;
+                }
+                orch.set_local_peer_id(&peer_id);
+
+                // Build announcement using orchestrator (includes resource snapshot,
+                // active layers, trainer status)
+                let json_bytes = orch.get_peer_announcement();
+                if json_bytes.is_empty() {
+                    continue;
+                }
+
+                let network_id = std::env::var("Q_NETWORK_ID")
+                    .ok()
+                    .and_then(|s| s.parse::<q_types::NetworkId>().ok())
+                    .unwrap_or(q_types::NetworkId::MainnetGenesis);
+
+                let _ = network_clone.send(q_network::NetworkCommand::PublishBlock {
+                    topic: network_id.compute_tunnel_topic(),
+                    block_bytes: json_bytes,
+                    block_height: 0, // Not block-related
+                });
+                debug!("🔗 [COMPUTE TUNNEL] Published capacity announcement to gossipsub (peers={})",
+                    orch.peer_registry().len());
+            }
+        });
+        info!("✅ [COMPUTE TUNNEL] Peer announcement task started");
     }
 
     // ========================================
@@ -20543,9 +20618,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
     // Build the application router
     let mut app = Router::new()
-        // Gmail ZK-STARK privacy auth (server never sees email/Google identity)
-        .route("/api/v1/auth/challenge", post(handlers::auth_challenge))
-        .route("/api/v1/auth/gmail-stark", post(handlers::gmail_stark_auth))
+        // Gmail ZK-STARK privacy auth — TODO: implement handlers (see plan)
+        // .route("/api/v1/auth/challenge", post(handlers::auth_challenge))
+        // .route("/api/v1/auth/gmail-stark", post(handlers::gmail_stark_auth))
         // Wallet endpoints
         .route("/api/v1/wallets", get(handlers::list_wallets))
         .route("/api/v1/wallets/create", post(handlers::create_wallet))
