@@ -1,6 +1,6 @@
 # Issue #028: Compute Metrics — Prometheus + Grafana Dashboard
 
-**State**: `open`
+**State**: `in_progress`
 **Priority**: MEDIUM
 **Labels**: `starship-endgame`, `monitoring`, `ops`
 **Assigned**: Gamma
@@ -77,8 +77,12 @@ qnk_gpu_temperature_celsius{gpu="0"} 72
 - #014 (Inference revenue — revenue metrics source)
 - #002 (P2P tunnels — tunnel metrics source)
 
+## Progress
+
+**Current**: metrics.rs (1843 lines) — Comprehensive Prometheus metrics with per-layer CPU/GPU/revenue counters, inference latency histograms (p50/p95/p99), tunnel health gauges, job queue depth, and per-GPU utilization/VRAM/temperature. Grafana dashboard JSON with 12+ panels for real-time monitoring.
+
 ## Files
 
-- `crates/q-compute/src/metrics.rs` — Expand with histograms, per-layer counters
+- `crates/q-compute/src/metrics.rs` — Histograms, per-layer counters, gauges
 - `crates/q-api-server/src/compute_api.rs` — `/metrics` endpoint
-- `docs/grafana/starship-endgame.json` — NEW: Pre-built Grafana dashboard
+- `docs/grafana/starship-endgame.json` — Pre-built Grafana dashboard

@@ -1,6 +1,6 @@
 # Issue #026: Compute Job Queue Persistence — Survive Restarts
 
-**State**: `open`
+**State**: `in_progress`
 **Priority**: MEDIUM
 **Labels**: `starship-endgame`, `compute`, `reliability`
 **Assigned**: Beta
@@ -52,9 +52,13 @@ Node restarts:
 - #001 (Orchestrator job dispatch)
 - #021 (Billing — job-to-reservation linkage)
 
+## Progress
+
+**Current**: job_wal.rs (1153 lines) — Append-only WAL backed by RocksDB column family with CompactedRange tracking. Job status transitions: Queued → InProgress → Completed → Settled/Failed. Recovery on restart with timeout handling for long-running jobs. Compaction removes stale entries > 24 hours.
+
 ## Files
 
-- `crates/q-compute/src/job_wal.rs` — NEW: RocksDB-backed job write-ahead log
+- `crates/q-compute/src/job_wal.rs` — ComputeJobWAL, recovery, compaction, timeout handling
 - `crates/q-compute/src/orchestrator.rs` — WAL integration for job dispatch
 - `crates/q-compute/src/inference_pool.rs` — Persist inference tasks
 - `crates/q-api-server/src/compute_api.rs` — Job status endpoints

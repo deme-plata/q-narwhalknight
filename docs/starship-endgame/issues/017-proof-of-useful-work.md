@@ -1,6 +1,6 @@
 # Issue #017: Proof-of-Useful-Work — Replace Idle Crypto with Revenue
 
-**State**: `open`
+**State**: `in_progress`
 **Priority**: MEDIUM
 **Labels**: `starship-endgame`, `consensus`, `economics`
 **Assigned**: Beta
@@ -51,8 +51,12 @@ Idle cores detected (Layer 7)
 - #005 (AI inference as a work type)
 - #006 (ZK proofs as a work type)
 
-## Files (planned)
+## Progress
 
-- `crates/q-compute/src/marketplace.rs` — NEW: Work marketplace
-- `crates/q-api-server/src/marketplace_api.rs` — NEW: REST endpoints
+**Current**: marketplace.rs (926 lines) — MarketplaceManager with 6 work types (AI inference, ZK proofs, IPFS pinning, render jobs, VDF computation, model fine-tuning). Bid/ask protocol with revenue tracking. Integration with Layer 7 idle dispatch pending.
+
+## Files
+
+- `crates/q-compute/src/marketplace.rs` — MarketplaceManager, task registry, revenue tracking
+- `crates/q-api-server/src/marketplace_api.rs` — REST endpoints for marketplace
 - `crates/q-compute/src/orchestrator.rs` — Wire marketplace into Layer 7

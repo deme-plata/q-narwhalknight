@@ -1,6 +1,6 @@
 # Issue #018: Cross-Node Tensor Parallelism for Large Model Inference
 
-**State**: `open`
+**State**: `in_progress`
 **Priority**: MEDIUM
 **Labels**: `starship-endgame`, `ai-inference`, `p2p`
 **Assigned**: Epsilon
@@ -54,8 +54,12 @@ The `TunnelPayload` enum already defines the needed message types:
 - #005 (Distributed AI inference framework)
 - #014 (Inference revenue wiring)
 
-## Files (planned)
+## Progress
 
-- `crates/q-compute/src/tensor_parallel.rs` — NEW: Partitioner + pipeline scheduler
-- `crates/q-compute/src/tunnel.rs` — TunnelPayload already has TensorShard/LayerOutput
-- `crates/q-ai-inference/src/distributed.rs` — NEW: Multi-node inference coordinator
+**Current**: tensor_parallel.rs (563 lines) — ModelPartitioner for layer-to-peer assignment based on VRAM, PipelineScheduler for overlapping compute/network transfer, KvCacheManager for intermediate result caching. TunnelPayload TensorShard/LayerOutput messages integrated.
+
+## Files
+
+- `crates/q-compute/src/tensor_parallel.rs` — ModelPartitioner, PipelineScheduler, KvCacheManager
+- `crates/q-compute/src/tunnel.rs` — TensorShard/LayerOutput payload types
+- `crates/q-ai-inference/src/distributed.rs` — Multi-node inference coordinator

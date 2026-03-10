@@ -1,6 +1,6 @@
 # Issue #025: Model Catalog & Hot-Swap — Dynamic Model Management
 
-**State**: `open`
+**State**: `in_progress`
 **Priority**: MEDIUM
 **Labels**: `starship-endgame`, `ai-inference`, `ops`
 **Assigned**: Beta
@@ -61,9 +61,13 @@ Auto-load: Incoming request for unloaded model
 - #014 (Inference revenue wiring — ModelTier pricing)
 - #023 (Multi-GPU scheduling — model-to-GPU assignment)
 
+## Progress
+
+**Current**: model_catalog.rs (761 lines) — ModelCatalog with 4 default GGUF models and extensibility, auto-download from catalog URLs with SHA256 verification. VramBudgetManager with LRU eviction. Hot-swap load/unload with graceful in-flight request draining.
+
 ## Files
 
-- `crates/q-ai-inference/src/model_catalog.rs` — Extend with download + load/unload management
-- `crates/q-ai-inference/src/model_manager.rs` — Hot-swap load/unload with VRAM tracking
-- `crates/q-api-server/src/ai_api.rs` — Add model management endpoints
-- `crates/q-compute/src/inference_pool.rs` — Route requests to correct loaded model
+- `crates/q-ai-inference/src/model_catalog.rs` — ModelCatalog, VramBudgetManager, hot-swap logic
+- `crates/q-ai-inference/src/model_manager.rs` — Load/unload implementation
+- `crates/q-api-server/src/ai_api.rs` — Model management endpoints
+- `crates/q-compute/src/inference_pool.rs` — Model request routing

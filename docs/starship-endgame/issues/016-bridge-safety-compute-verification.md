@@ -1,6 +1,6 @@
 # Issue #016: Bridge Safety — Compute-Verified Cross-Chain Proofs
 
-**State**: `open`
+**State**: `in_progress`
 **Priority**: HIGH
 **Labels**: `starship-endgame`, `bridge`, `security`
 **Assigned**: Delta
@@ -40,8 +40,13 @@ Bridge Deposit Detected
 - #002 (P2P tunnels for task routing)
 - Bridge safety module (`bridge_safety.rs`)
 
+## Progress
+
+**Current**: bridge_verification.rs (1089 lines) — AttestationCollector with 2-of-3 quorum voting, timeout escalation to Layer 4 review. Gossipsub publisher for bridge-attestations topic. Integration pending with orchestrator Layer 3 dispatch.
+
 ## Files
 
+- `crates/q-compute/src/bridge_verification.rs` — AttestationCollector, quorum voting, escalation logic
 - `crates/q-api-server/src/bridge_safety.rs` — Existing safety controller
 - `crates/q-api-server/src/bitcoin_bridge_api.rs` — Existing bridge API
 - `crates/q-compute/src/orchestrator.rs` — Layer 3 task routing

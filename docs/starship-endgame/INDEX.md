@@ -40,18 +40,18 @@
 
 | # | Title | Priority | Status | Assigned | Progress |
 |---|-------|----------|--------|----------|----------|
-| [#005](issues/005-distributed-ai-inference.md) | Distributed AI Inference | MEDIUM | **In Progress** | Epsilon | DistributedInferenceRouter + peer routing + 13 tests |
-| [#018](issues/018-cross-node-tensor-parallelism.md) | Cross-Node Tensor Parallelism | MEDIUM | Open | Epsilon | TunnelPayload types ready |
-| [#017](issues/017-proof-of-useful-work.md) | Proof-of-Useful-Work Marketplace | MEDIUM | Open | Beta | Design only |
-| [#025](issues/025-model-catalog-hot-swap.md) | Model Catalog & Hot-Swap | MEDIUM | Open | Beta | model_catalog.rs exists, needs runtime mgmt |
+| [#005](issues/005-distributed-ai-inference.md) | Distributed AI Inference | MEDIUM | **Closed** | Epsilon | DistributedInferenceRouter + peer routing + 13 tests |
+| [#018](issues/018-cross-node-tensor-parallelism.md) | Cross-Node Tensor Parallelism | MEDIUM | **In Progress** | Epsilon | tensor_parallel.rs: 563 lines — partitioner, pipeline scheduler, KV cache |
+| [#017](issues/017-proof-of-useful-work.md) | Proof-of-Useful-Work Marketplace | MEDIUM | **In Progress** | Beta | marketplace.rs: 926 lines — MarketplaceManager, bid/ask, 6 work types |
+| [#025](issues/025-model-catalog-hot-swap.md) | Model Catalog & Hot-Swap | MEDIUM | **In Progress** | Beta | model_catalog.rs: 761 lines — catalog + VramBudgetManager + hot-swap |
 | [#027](issues/027-compute-marketplace-p2p.md) | Compute Marketplace P2P Protocol | MEDIUM | Open | Epsilon | Design only |
 
 ### Bridge & Security (Phase 3)
 
 | # | Title | Priority | Status | Assigned | Progress |
 |---|-------|----------|--------|----------|----------|
-| [#016](issues/016-bridge-safety-compute-verification.md) | Bridge Compute Verification | HIGH | **In Progress** | Delta | AttestationCollector + 2-of-3 quorum logic |
-| [#024](issues/024-tunnel-key-rotation.md) | Tunnel Key Rotation | MEDIUM | Open | Beta+Epsilon | NOISE XX done, rekey not implemented |
+| [#016](issues/016-bridge-safety-compute-verification.md) | Bridge Compute Verification | HIGH | **In Progress** | Delta | bridge_verification.rs: 1089 lines — AttestationCollector + 2-of-3 quorum |
+| [#024](issues/024-tunnel-key-rotation.md) | Tunnel Key Rotation | MEDIUM | **In Progress** | Beta+Epsilon | tunnel_rekey.rs: 477 lines — RekeyManager, zeroize, auto-rekey |
 
 ### Node Operations
 
@@ -74,7 +74,7 @@
 |---|-------|----------|--------|----------|----------|
 | [#021](issues/021-compute-billing-metering.md) | Compute Billing & Metering | HIGH | **Closed** | Beta | metering.rs: 670 lines — RateCard, MeteringHandle, MeteringSink, 14 tests |
 | [#022](issues/022-node-reputation-compute-scoring.md) | Node Reputation Scoring | HIGH | **Closed** | Beta | compute_reputation.rs: 804 lines — 6-dim scoring, decay, blacklisting, 12 tests |
-| [#026](issues/026-compute-job-persistence.md) | Compute Job Persistence | MEDIUM | Open | Beta | All queues in-memory, no WAL |
+| [#026](issues/026-compute-job-persistence.md) | Compute Job Persistence | MEDIUM | **In Progress** | Beta | job_wal.rs: 1153 lines — append-only WAL, recovery, compaction |
 
 ### Frontend & Visualization
 
@@ -86,7 +86,7 @@
 
 | # | Title | Priority | Status | Assigned | Progress |
 |---|-------|----------|--------|----------|----------|
-| [#028](issues/028-compute-metrics-prometheus.md) | Compute Metrics Prometheus | MEDIUM | Open | Gamma | metrics.rs exists (feature-gated), needs expansion |
+| [#028](issues/028-compute-metrics-prometheus.md) | Compute Metrics Prometheus | MEDIUM | **In Progress** | Gamma | metrics.rs: 1843 lines + Grafana JSON — histograms, counters, gauges |
 
 ### q-flux Custom Proxy
 
@@ -164,10 +164,10 @@
 | **Phase 1: Orchestrator Foundation** | #001, #002, #004, #007 | 2026-03-10 | 4/4 closed |
 | **Phase 1.5: Hardening** | #012, #013, #014 | 2026-03-15 | 3/3 closed |
 | **Phase 2: GPU & Quantum** | #003, #006, #015, #023 | 2026-03-25 | 2/4 (#003 in progress, #023 closed) |
-| **Phase 3: Distributed Compute** | #005, #016, #017, #018, #024, #025, #027 | 2026-04-10 | 2/7 in progress |
+| **Phase 3: Distributed Compute** | #005, #016, #017, #018, #024, #025, #027 | 2026-04-10 | 1/7 closed, 6/7 in progress (#027 open) |
 | **Phase 4: Payments** | #019, #020 | 2026-03-10 | 2/2 closed |
-| **Phase 5: Compute Economics** | #021, #022, #026 | 2026-04-20 | 2/3 closed (#021, #022 done) |
-| **Monitoring** | #028 | 2026-04-15 | 0/1 |
+| **Phase 5: Compute Economics** | #021, #022, #026 | 2026-04-20 | 2/3 closed, 1/3 in progress |
+| **Monitoring** | #028 | 2026-04-15 | 1/1 in progress |
 | **Auto-Update** | #009, #010, #011 | 2026-03-10 | 3/3 closed |
 
 ## Related Docs

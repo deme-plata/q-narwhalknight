@@ -1,6 +1,6 @@
 # Issue #024: Tunnel Encryption Key Rotation — Forward Secrecy
 
-**State**: `open`
+**State**: `in_progress`
 **Priority**: MEDIUM
 **Labels**: `starship-endgame`, `security`, `p2p`
 **Assigned**: Beta+Epsilon
@@ -53,8 +53,12 @@ Epoch 2: Same pattern → K2 from K1
 
 - #002 (P2P tunnel NOISE XX handshake — must be complete first)
 
+## Progress
+
+**Current**: tunnel_rekey.rs (477 lines) — RekeyManager with epoch-based rotation (1 hour or 10GB threshold), zeroize integration for old key cleanup. Auto-rekey coordination via TunnelPayload::Rekey message. Rekey stats tracking in tunnel telemetry.
+
 ## Files
 
-- `crates/q-compute/src/tunnel.rs` — Add rekey to TunnelStream + TunnelManager epoch timer
-- `crates/q-compute/Cargo.toml` — Add `zeroize = "1"` dependency
-- `crates/q-compute/src/lib.rs` — `TunnelPayload::Rekey { epoch: u64 }` variant
+- `crates/q-compute/src/tunnel_rekey.rs` — RekeyManager, epoch tracking, zeroize
+- `crates/q-compute/src/tunnel.rs` — TunnelStream::rekey() integration, TunnelPayload::Rekey variant
+- `crates/q-compute/Cargo.toml` — zeroize dependency
