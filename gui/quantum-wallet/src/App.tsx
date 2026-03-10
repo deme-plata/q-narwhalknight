@@ -10,6 +10,7 @@ import QuantumBackground from './components/QuantumBackground';
 import AnimatedBorder from './components/AnimatedBorder';
 import OAuthConsentPage from './components/OAuthConsentPage';
 import MinerLoginPage from './components/MinerLoginPage';
+import POSMode from './components/POSMode';
 import { sseManager } from './services/sseManager';
 import './App.css';
 
@@ -717,6 +718,18 @@ function App() {
     const urlParams = new URLSearchParams(window.location.search);
     const deviceCode = urlParams.get('code') || '';
     return <MinerLoginPage deviceCode={deviceCode} />;
+  }
+
+  // v9.5.0: Merchant POS mode — full-screen point-of-sale for accepting QR payments
+  if (window.location.pathname === '/pos') {
+    const posWalletAddress = localStorage.getItem('walletAddress') || '';
+    if (!posWalletAddress) {
+      // Merchant not logged in — redirect to main app to authenticate first
+      window.history.pushState(null, '', '/');
+      window.location.reload();
+      return null;
+    }
+    return <POSMode walletAddress={posWalletAddress} serverUrl="" />;
   }
 
   if (!authenticated) {

@@ -19358,6 +19358,71 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     }
 
     // ========================================
+    // 💳 v9.5.1: PERIODIC QCREDIT RESERVE FUNDING FROM BLOCK EMISSION
+    // ========================================
+    // Routes 5% of new block emission to the QCREDIT protocol reserve.
+    // This is what funds the 5-25% APY yield payouts.
+    // Runs every 60 seconds, calculates reward since last check based on emission rate.
+    {
+        let app_state_qcredit = app_state.clone();
+        tokio::spawn(async move {
+            // Wait 30s for initial sync
+            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+            info!("💳 [QCREDIT] Starting periodic reserve funding task (60s interval, 5% of emission)");
+
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+            let mut last_height: u64 = app_state_qcredit.current_height_atomic
+                .load(std::sync::atomic::Ordering::Relaxed);
+
+            loop {
+                interval.tick().await;
+
+                let current_height = app_state_qcredit.current_height_atomic
+                    .load(std::sync::atomic::Ordering::Relaxed);
+
+                // Calculate new blocks since last check
+                let new_blocks = current_height.saturating_sub(last_height);
+                if new_blocks == 0 {
+                    continue;
+                }
+
+                // Estimate reward per block: ~0.083 QUG/block (2,625,000 QUG/year / ~31,536,000 seconds)
+                // Take 5% for QCREDIT reserve
+                let one_qug: u128 = 1_000_000_000_000_000_000_000_000;
+                let reward_per_block: u128 = one_qug / 12; // ~0.083 QUG
+                let reserve_rate_bps: u128 = 500; // 5% = 500 bps
+                let reserve_amount = (new_blocks as u128)
+                    .saturating_mul(reward_per_block)
+                    .saturating_mul(reserve_rate_bps)
+                    / 10_000;
+
+                if reserve_amount > 0 {
+                    let mut vault = app_state_qcredit.qcredit_vault.write().await;
+                    vault.fund_reserve(reserve_amount);
+                    let reserve_display = vault.protocol_reserve as f64 / one_qug as f64;
+                    drop(vault);
+
+                    // Persist vault state
+                    let vault_read = app_state_qcredit.qcredit_vault.read().await;
+                    if let Ok(bytes) = serde_json::to_vec(&*vault_read) {
+                        let _ = app_state_qcredit.storage_engine.save_qcredit_vault(&bytes).await;
+                    }
+
+                    tracing::debug!(
+                        "💳 [QCREDIT] Reserve funded: +{:.4} QUG ({} blocks × 5%), total reserve: {:.2} QUG",
+                        reserve_amount as f64 / one_qug as f64,
+                        new_blocks,
+                        reserve_display
+                    );
+                }
+
+                last_height = current_height;
+            }
+        });
+        info!("✅ QCREDIT reserve funding task started (60s interval, 5% of emission)");
+    }
+
+    // ========================================
     // 🪙 v8.7.4: PERIODIC TOKEN BALANCE REFRESH FROM ROCKSDB
     // ========================================
     // CRITICAL FIX: Previously this task wrote FROM HashMap TO RocksDB, which
@@ -21376,6 +21441,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/bridge/admin/freeze", post(q_api_server::bridge_safety::admin_freeze_bridge))
         .route("/api/v1/bridge/admin/unfreeze", post(q_api_server::bridge_safety::admin_unfreeze_bridge))
         .route("/api/v1/bridge/admin/safety-status", get(q_api_server::bridge_safety::admin_safety_status))
+        // v9.6.1: QR code payment requests for brick-and-mortar POS
+        .route("/api/v1/payment-requests", post(q_api_server::payment_request_api::create_payment_request))
+        .route("/api/v1/payment-requests/:id", get(q_api_server::payment_request_api::get_payment_request))
+        .route("/api/v1/payment-requests/:id", delete(q_api_server::payment_request_api::cancel_payment_request))
         // Serve static frontend files
         .nest_service("/ui", ServeDir::new("web-ui/dist-final"))
         // v0.9.3-beta: REMOVED .fallback_service() - was shadowing all API routes with 404
@@ -21414,6 +21483,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     } else {
         info!("✅ Manual block trigger endpoint DISABLED (secure by default)");
     }
+
+    // v9.6.1: Spawn payment request expiry/cleanup background task
+    q_api_server::payment_request_api::spawn_expiry_cleanup(app_state.payment_requests.clone());
 
     let app = app.with_state(app_state.clone());
 

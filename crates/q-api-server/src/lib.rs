@@ -294,6 +294,7 @@ pub mod paas_billing_v2; // ✅ ENABLED - Atomic billing v2 with Grok improvemen
 pub mod paas_idempotency; // ✅ ENABLED - Idempotency support for safe retries
 pub mod paas_pricing; // ✅ ENABLED - Dynamic USD pricing with oracle integration
 pub mod payment_api; // ✅ ENABLED - Stripe payment processing with async-stripe
+pub mod payment_request_api; // ✅ v9.6.1 - QR code payment requests for brick-and-mortar POS
 pub mod privacy_service_api; // ✅ ENABLED - Privacy-as-a-Service (PaaS) enterprise API
 pub mod quillon_bank_api; // ✅ ENABLED - Full Quillon Bank CDP system
 pub mod security_tier_governance; // ✅ v1.0.16-beta - Community governance for VDF security tiers
@@ -320,6 +321,8 @@ pub mod contracts_api; // ✅ v2.4.8-beta - Smart contract deployment and social
 pub mod listing_api; // ✅ v6.5.0: Exchange Listing RWA packages (Gold/Silver/Bronze)
 pub mod game_items_api; // ✅ v9.3.0: CS:GO2-style game items RWA (cases, skins, trade-up)
 pub mod web_search_api; // ✅ v9.3.2: GLM-4-Flash web search with AI summaries + citations
+pub mod compute_api; // ✅ v9.5.0: Starship Endgame — Compute Orchestrator API
+pub mod ai_api; // ✅ v9.5.0: Starship Endgame — AI Inference Pool API
 pub mod k_parameter_gauge; // ✅ v9.3.1: Lightweight K-parameter network health gauge (no q-resonance dep)
 pub mod bitcoin_bridge_api; // ✅ v7.2.0: Bitcoin atomic swap bridge (QNK ↔ BTC)
 pub mod zcash_bridge_api; // ✅ v7.2.2: Zcash shielded atomic swap bridge (QNK ↔ ZEC)
@@ -1568,6 +1571,9 @@ pub struct AppState {
 
     // v9.5.0: Starship Endgame — 100% compute utilization orchestrator
     pub compute_orchestrator: Option<Arc<q_compute::orchestrator::Orchestrator>>,
+
+    // v9.6.1: QR code payment requests for brick-and-mortar POS
+    pub payment_requests: Arc<dashmap::DashMap<String, payment_request_api::PaymentRequest>>,
 }
 
 // SAFETY: AppState is safe to Send/Sync because:
@@ -2422,12 +2428,20 @@ impl AppState {
                 }
             }
             Ok(None) => {
-                tracing::info!("💳 No persisted QCREDIT vault found, creating new");
-                Arc::new(RwLock::new(q_vm::contracts::QCreditVault::new()))
+                tracing::info!("💳 No persisted QCREDIT vault found, creating new with seed reserve");
+                let mut vault = q_vm::contracts::QCreditVault::new();
+                // v9.5.1: Seed protocol reserve with 100K QUG to fund yield payouts
+                let seed_reserve: u128 = 100_000 * 1_000_000_000_000_000_000_000_000u128;
+                vault.fund_reserve(seed_reserve);
+                tracing::info!("💳 Seeded QCREDIT protocol reserve with 100,000 QUG");
+                Arc::new(RwLock::new(vault))
             }
             Err(e) => {
-                tracing::warn!("Failed to load QCREDIT vault: {}, creating new", e);
-                Arc::new(RwLock::new(q_vm::contracts::QCreditVault::new()))
+                tracing::warn!("Failed to load QCREDIT vault: {}, creating new with seed reserve", e);
+                let mut vault = q_vm::contracts::QCreditVault::new();
+                let seed_reserve: u128 = 100_000 * 1_000_000_000_000_000_000_000_000u128;
+                vault.fund_reserve(seed_reserve);
+                Arc::new(RwLock::new(vault))
             }
         };
         tracing::info!("💳 QCREDIT Yield Vault initialized");
@@ -3087,6 +3101,8 @@ impl AppState {
             bridge_safety: Arc::new(bridge_safety::BridgeSafetyController::new()),
             // v9.5.0: Compute orchestrator (initialized later from CLI arg)
             compute_orchestrator: None,
+            // v9.6.1: QR code payment requests for brick-and-mortar POS
+            payment_requests: Arc::new(dashmap::DashMap::new()),
         })
     }
 
@@ -3811,12 +3827,20 @@ impl AppState {
                 }
             }
             Ok(None) => {
-                tracing::info!("💳 No persisted QCREDIT vault found, creating new");
-                Arc::new(RwLock::new(q_vm::contracts::QCreditVault::new()))
+                tracing::info!("💳 No persisted QCREDIT vault found, creating new with seed reserve");
+                let mut vault = q_vm::contracts::QCreditVault::new();
+                // v9.5.1: Seed protocol reserve with 100K QUG to fund yield payouts
+                let seed_reserve: u128 = 100_000 * 1_000_000_000_000_000_000_000_000u128;
+                vault.fund_reserve(seed_reserve);
+                tracing::info!("💳 Seeded QCREDIT protocol reserve with 100,000 QUG");
+                Arc::new(RwLock::new(vault))
             }
             Err(e) => {
-                tracing::warn!("Failed to load QCREDIT vault: {}, creating new", e);
-                Arc::new(RwLock::new(q_vm::contracts::QCreditVault::new()))
+                tracing::warn!("Failed to load QCREDIT vault: {}, creating new with seed reserve", e);
+                let mut vault = q_vm::contracts::QCreditVault::new();
+                let seed_reserve: u128 = 100_000 * 1_000_000_000_000_000_000_000_000u128;
+                vault.fund_reserve(seed_reserve);
+                Arc::new(RwLock::new(vault))
             }
         };
         tracing::info!("💳 QCREDIT Yield Vault initialized");
@@ -4530,6 +4554,8 @@ impl AppState {
             bridge_safety: Arc::new(bridge_safety::BridgeSafetyController::new()),
             // v9.5.0: Compute orchestrator (initialized later from CLI arg)
             compute_orchestrator: None,
+            // v9.6.1: QR code payment requests for brick-and-mortar POS
+            payment_requests: Arc::new(dashmap::DashMap::new()),
         })
     }
 
