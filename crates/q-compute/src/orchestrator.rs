@@ -8,6 +8,7 @@ use crate::{ComputeLayer, ComputeMode, ComputeStatus, LayerStats, AtomicU64Ser};
 use crate::resource_monitor::ResourceMonitor;
 use crate::trainer::Trainer;
 use crate::os_tuner::OsTuner;
+use crate::inference_pool::InferenceWorkerPool;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -18,11 +19,16 @@ use tracing::{info, debug, trace};
 #[derive(Debug, Clone)]
 struct LayerAssignment {
     layer: ComputeLayer,
-    cores: Vec<usize>,       // Which CPU cores are assigned
+    /// Advisory core budget (count, not specific cores — OS handles actual scheduling)
+    core_budget: usize,
     active: bool,
     tasks_completed: Arc<AtomicU64>,
     tasks_pending: Arc<AtomicU64>,
     revenue_micro_qug: Arc<AtomicU64>,
+    /// Tick counter for feedback loop — last tick where tasks_completed increased
+    last_active_tick: u64,
+    /// Snapshot of tasks_completed at last activity check
+    prev_tasks_completed: u64,
 }
 
 /// The Compute Orchestrator — brain of Starship Endgame
@@ -34,6 +40,8 @@ pub struct Orchestrator {
     total_cores: usize,
     mining_cores: Arc<AtomicU64>,      // Cores reserved for mining
     running: Arc<AtomicBool>,
+    /// v9.6.0: AI inference worker pool (runs inference on idle cores)
+    inference_pool: Arc<InferenceWorkerPool>,
 }
 
 impl Orchestrator {
@@ -55,13 +63,29 @@ impl Orchestrator {
         for layer in ComputeLayer::all() {
             assignments.insert(*layer, LayerAssignment {
                 layer: *layer,
-                cores: Vec::new(),
-                active: *layer == ComputeLayer::Mining, // Only mining active by default
+                core_budget: 0,
+                active: *layer == ComputeLayer::Mining,
                 tasks_completed: Arc::new(AtomicU64::new(0)),
                 tasks_pending: Arc::new(AtomicU64::new(0)),
                 revenue_micro_qug: Arc::new(AtomicU64::new(0)),
+                last_active_tick: 0,
+                prev_tasks_completed: 0,
             });
         }
+
+        // #034: Wire inference pool revenue callback to orchestrator assignments
+        // Clone the HashMap — the Arc<AtomicU64> values inside are shared, so
+        // writes from the callback are visible in the orchestrator's copy.
+        let mut pool = InferenceWorkerPool::new();
+        let callback_assignments: HashMap<ComputeLayer, LayerAssignment> = assignments.clone();
+        pool.set_orchestrator_callback(move |layer, revenue| {
+            if let Some(assignment) = callback_assignments.get(&layer) {
+                assignment.tasks_completed.fetch_add(1, Ordering::Relaxed);
+                assignment.revenue_micro_qug.fetch_add(revenue, Ordering::Relaxed);
+            }
+        });
+
+        let inference_pool = Arc::new(pool);
 
         Self {
             mode: Arc::new(RwLock::new(mode)),
@@ -71,6 +95,7 @@ impl Orchestrator {
             total_cores,
             mining_cores: Arc::new(AtomicU64::new(mining_cores as u64)),
             running: Arc::new(AtomicBool::new(false)),
+            inference_pool,
         }
     }
 
@@ -95,6 +120,11 @@ impl Orchestrator {
         &self.trainer
     }
 
+    /// Get inference worker pool
+    pub fn inference_pool(&self) -> &Arc<InferenceWorkerPool> {
+        &self.inference_pool
+    }
+
     /// Record a completed task for a layer
     pub fn record_task(&self, layer: ComputeLayer, revenue_micro_qug: u64) {
         let assignments = self.assignments.read();
@@ -113,7 +143,7 @@ impl Orchestrator {
         for layer in ComputeLayer::all() {
             if let Some(a) = assignments.get(layer) {
                 layers.push((layer.name().to_string(), LayerStats {
-                    cores_assigned: a.cores.len() as u32,
+                    cores_assigned: a.core_budget as u32,
                     tasks_completed: AtomicU64Ser(a.tasks_completed.load(Ordering::Relaxed)),
                     tasks_pending: a.tasks_pending.load(Ordering::Relaxed) as u32,
                     revenue_micro_qug: a.revenue_micro_qug.load(Ordering::Relaxed),
@@ -129,6 +159,13 @@ impl Orchestrator {
         let trainer = self.trainer.clone();
         let cheats = trainer.active_cheats();
 
+        // v9.6.0: Get AI inference stats if pool is active
+        let ai_inference = if self.inference_pool.has_engine() {
+            Some(self.inference_pool.stats())
+        } else {
+            None
+        };
+
         ComputeStatus {
             mode: self.mode(),
             resources,
@@ -139,6 +176,7 @@ impl Orchestrator {
             trainer_cheats: cheats,
             performance_boost_pct: trainer.estimated_boost_pct(),
             total_revenue_micro_qug: total_revenue,
+            ai_inference,
         }
     }
 
@@ -168,47 +206,70 @@ impl Orchestrator {
         let mode_arc = self.mode.clone();
         let total_cores = self.total_cores;
         let _trainer = self.trainer.clone();
+        let inference_pool = self.inference_pool.clone();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
             info!("🚀 [STARSHIP] Adaptive scheduler started — {} total cores", total_cores);
+            let mut tick: u64 = 0;
 
             loop {
                 interval.tick().await;
                 if !running.load(Ordering::Relaxed) { break; }
+                tick += 1;
 
                 let snap = monitor.snapshot();
                 let mode = *mode_arc.read();
 
                 if mode == ComputeMode::MiningOnly {
-                    continue; // Don't touch anything in mining-only mode
+                    continue;
                 }
 
                 let idle_cpu = 100.0 - snap.cpu_total;
-                let _idle_ram_pct = if snap.ram_total > 0 {
-                    ((snap.ram_total - snap.ram_used) as f64 / snap.ram_total as f64 * 100.0) as f32
-                } else {
-                    0.0
-                };
 
-                // Adaptive core assignment based on idle resources
                 let mut assignments = assignments.write();
 
                 // Mining always gets its reserved cores
                 let mining_reserved = mining_cores.load(Ordering::Relaxed) as usize;
                 if let Some(mining) = assignments.get_mut(&ComputeLayer::Mining) {
-                    mining.cores = (0..mining_reserved).collect();
+                    mining.core_budget = mining_reserved;
                     mining.active = true;
                 }
 
-                // If CPU is > 20% idle and mode allows, assign to lower layers
+                // #039: Feedback loop — detect idle layers and reclaim their budgets
+                let mut idle_layers: Vec<ComputeLayer> = Vec::new();
+                for layer in ComputeLayer::all() {
+                    if *layer == ComputeLayer::Mining { continue; }
+                    if let Some(a) = assignments.get_mut(layer) {
+                        let current_completed = a.tasks_completed.load(Ordering::Relaxed);
+                        if current_completed > a.prev_tasks_completed {
+                            a.last_active_tick = tick;
+                            a.prev_tasks_completed = current_completed;
+                        }
+                        // If no new tasks completed in 10 ticks (10s), mark idle
+                        if a.active && a.core_budget > 0 && tick > a.last_active_tick + 10 {
+                            idle_layers.push(*layer);
+                        }
+                    }
+                }
+                // Reclaim cores from idle layers
+                for layer in &idle_layers {
+                    if let Some(a) = assignments.get_mut(layer) {
+                        trace!(
+                            "🚀 [STARSHIP] Reclaiming {} cores from {} (idle for {}s)",
+                            a.core_budget, layer.name(), tick - a.last_active_tick
+                        );
+                        a.core_budget = 0;
+                        a.active = false;
+                    }
+                }
+
+                // #032: Weighted distribution of spare cores
                 if idle_cpu > 20.0 && mode != ComputeMode::MiningOnly {
-                    let spare_cores: Vec<usize> = (mining_reserved..total_cores).collect();
-                    let spare_count = spare_cores.len();
+                    let spare_count = total_cores.saturating_sub(mining_reserved);
 
                     if spare_count > 0 {
-                        // Distribute spare cores across layers by priority
-                        let layers_to_fill = match mode {
+                        let layers_to_fill: Vec<ComputeLayer> = match mode {
                             ComputeMode::Eco => vec![ComputeLayer::AiInference],
                             ComputeMode::Full => vec![
                                 ComputeLayer::AiInference,
@@ -227,41 +288,65 @@ impl Orchestrator {
                             ComputeMode::MiningOnly => vec![],
                         };
 
-                        let cores_per_layer = spare_count / layers_to_fill.len().max(1);
-                        let mut core_idx = mining_reserved;
+                        // Filter out idle layers (they lost their budget this tick)
+                        let active_layers: Vec<&ComputeLayer> = layers_to_fill.iter()
+                            .filter(|l| !idle_layers.contains(l))
+                            .collect();
 
-                        for layer in &layers_to_fill {
-                            if let Some(assignment) = assignments.get_mut(layer) {
-                                let end = (core_idx + cores_per_layer).min(total_cores);
-                                assignment.cores = (core_idx..end).collect();
-                                assignment.active = true;
-                                core_idx = end;
+                        let total_weight: u32 = active_layers.iter().map(|l| l.weight()).sum();
+
+                        if total_weight > 0 {
+                            let mut allocated = 0;
+                            for (i, layer) in active_layers.iter().enumerate() {
+                                let budget = if i == active_layers.len() - 1 {
+                                    // Last layer gets remainder to avoid rounding loss
+                                    spare_count - allocated
+                                } else {
+                                    (spare_count as u64 * layer.weight() as u64 / total_weight as u64) as usize
+                                };
+                                if let Some(assignment) = assignments.get_mut(layer) {
+                                    assignment.core_budget = budget;
+                                    assignment.active = budget > 0;
+                                    if budget > 0 {
+                                        assignment.last_active_tick = assignment.last_active_tick.max(tick.saturating_sub(5));
+                                    }
+                                }
+                                allocated += budget;
                             }
                         }
 
                         trace!(
-                            "🚀 [STARSHIP] Core assignment: mining={}, spare={} across {} layers, idle_cpu={:.1}%",
-                            mining_reserved, spare_count, layers_to_fill.len(), idle_cpu
+                            "🚀 [STARSHIP] Core assignment: mining={}, spare={} across {} layers (weighted), idle_cpu={:.1}%",
+                            mining_reserved, spare_count, active_layers.len(), idle_cpu
                         );
                     }
                 }
 
-                // If mining is struggling (CPU > 90%), reclaim cores from lower layers
+                // Sync inference pool with AiInference layer core budget
+                if let Some(ai_assignment) = assignments.get(&ComputeLayer::AiInference) {
+                    let budget = ai_assignment.core_budget;
+                    // Build a Vec<usize> of advisory core indices for the pool
+                    let cores: Vec<usize> = (mining_reserved..mining_reserved + budget).collect();
+                    inference_pool.update_cores(cores);
+                }
+
+                // If mining is struggling (CPU > 90%), reclaim all non-mining cores
                 if snap.cpu_total > 90.0 {
                     for layer in ComputeLayer::all() {
                         if *layer != ComputeLayer::Mining {
                             if let Some(assignment) = assignments.get_mut(layer) {
-                                if assignment.active && !assignment.cores.is_empty() {
+                                if assignment.active && assignment.core_budget > 0 {
                                     debug!(
                                         "🚀 [STARSHIP] Reclaiming {} cores from {} for mining (CPU={:.1}%)",
-                                        assignment.cores.len(), layer.name(), snap.cpu_total
+                                        assignment.core_budget, layer.name(), snap.cpu_total
                                     );
-                                    assignment.cores.clear();
+                                    assignment.core_budget = 0;
                                     assignment.active = false;
                                 }
                             }
                         }
                     }
+                    inference_pool.update_cores(vec![]);
                 }
             }
             info!("🚀 [STARSHIP] Adaptive scheduler stopped");

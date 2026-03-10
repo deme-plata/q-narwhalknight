@@ -6796,8 +6796,56 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         });
         let orchestrator = Arc::new(q_compute::orchestrator::Orchestrator::new(compute_mode));
         orchestrator.spawn();
-        state.compute_orchestrator = Some(orchestrator);
+
+        // v9.6.0: Start inference pool background worker
+        // Engine will be set later when chat_api loads the model on first request
+        orchestrator.inference_pool().spawn();
+        info!("🧠 [INFERENCE POOL] Background worker started — engine will be loaded on first AI request");
+
+        state.compute_orchestrator = Some(orchestrator.clone());
         info!("🚀 [STARSHIP] Compute orchestrator running — mode={:?}", compute_mode);
+
+        // #036: Emit SSE ComputeStatus events every 5 seconds
+        let orch_sse = orchestrator.clone();
+        let broadcaster_sse = state.event_broadcaster.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                let status = orch_sse.status();
+                let layers: Vec<serde_json::Value> = status.layers.iter().map(|(name, stats)| {
+                    serde_json::json!({
+                        "name": name,
+                        "cores_assigned": stats.cores_assigned,
+                        "tasks_completed": stats.tasks_completed.0,
+                        "tasks_pending": stats.tasks_pending,
+                        "revenue_micro_qug": stats.revenue_micro_qug,
+                        "active": stats.active_since_ms > 0,
+                    })
+                }).collect();
+                let ai_inference = status.ai_inference.as_ref().map(|ai| {
+                    serde_json::json!({
+                        "total_requests_served": ai.total_requests_served,
+                        "total_tokens_generated": ai.total_tokens_generated,
+                        "revenue_earned_micro_qug": ai.revenue_earned_micro_qug,
+                        "avg_tokens_per_second": ai.avg_tokens_per_second,
+                        "model_loaded": ai.model_loaded,
+                        "tasks_in_queue": ai.tasks_in_queue,
+                        "active_tasks": ai.active_tasks,
+                    })
+                });
+                let _ = broadcaster_sse.broadcast(
+                    crate::streaming::StreamEvent::ComputeStatus {
+                        mode: format!("{:?}", status.mode),
+                        ai_inference,
+                        layers,
+                        trainer_active: status.trainer_active,
+                        performance_boost_pct: status.performance_boost_pct,
+                        timestamp: chrono::Utc::now(),
+                    }
+                ).await;
+            }
+        });
     }
 
     // 🌉 v0.9.6-beta: Initialize peer registry bridge (CRITICAL FIX)
@@ -14920,12 +14968,19 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                                 if bytes.len() == 32 {
                                                     let mut wallet = [0u8; 32];
                                                     wallet.copy_from_slice(&bytes);
-                                                    // Map bandwidth → weight
+                                                    // Map bandwidth → weight + AI inference bonus
                                                     let bw = q_network::unified_network_manager::PEER_BANDWIDTH_TIERS
                                                         .get(&peer_id_str)
                                                         .map(|v| *v)
                                                         .unwrap_or(0);
-                                                    let weight = if bw >= 5000 { 5 } else if bw >= 500 { 2 } else { 1 };
+                                                    let mut weight: u32 = if bw >= 5000 { 5 } else if bw >= 500 { 2 } else { 1 };
+                                                    // v9.6.0: Nodes serving AI inference get weight bonus
+                                                    // +1 per 100 inference tasks completed
+                                                    if let Some(ref orch) = app_state_mining.compute_orchestrator {
+                                                        let ai_stats = orch.inference_pool().stats();
+                                                        let ai_bonus = (ai_stats.total_requests_served / 100) as u32;
+                                                        weight = weight.saturating_add(ai_bonus.min(10)); // Cap bonus at +10
+                                                    }
                                                     seen_wallets.insert(wallet_hex);
                                                     operator_entries.push(OperatorRewardEntry {
                                                         wallet,
@@ -20488,6 +20543,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
     // Build the application router
     let mut app = Router::new()
+        // Gmail ZK-STARK privacy auth (server never sees email/Google identity)
+        .route("/api/v1/auth/challenge", post(handlers::auth_challenge))
+        .route("/api/v1/auth/gmail-stark", post(handlers::gmail_stark_auth))
         // Wallet endpoints
         .route("/api/v1/wallets", get(handlers::list_wallets))
         .route("/api/v1/wallets/create", post(handlers::create_wallet))
@@ -21171,8 +21229,14 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         // User-level OAuth2 consent management (any authenticated wallet)
         .route("/api/v1/oauth2/my-consents", get(q_api_server::admin_settings_api::my_oauth2_consents))
         .route("/api/v1/oauth2/my-consents/revoke", post(q_api_server::admin_settings_api::my_revoke_consent))
-        // v9.5.0: Starship Endgame — Compute orchestrator status
-        .route("/api/v1/compute/status", get(handlers::get_compute_status))
+        // v9.5.0: Starship Endgame — Compute orchestrator control + status
+        .nest("/api/v1/compute", q_api_server::compute_api::create_compute_router())
+        // v9.6.0: OpenAI-compatible AI inference API
+        .route("/api/v1/ai/chat/completions", post(q_api_server::ai_api::chat_completions))
+        .route("/api/v1/ai/completions", post(q_api_server::ai_api::completions))
+        .route("/api/v1/ai/models", get(q_api_server::ai_api::list_models))
+        .route("/api/v1/ai/workers", get(q_api_server::ai_api::list_workers))
+        .route("/api/v1/ai/stats", get(q_api_server::ai_api::inference_stats))
         // v8.6.5: Public node config endpoint for setup wizard (no auth required)
         .route("/api/v1/node-config", get(handlers::get_node_config))
         // v8.6.5: OAuth2 device login for miner/node setup

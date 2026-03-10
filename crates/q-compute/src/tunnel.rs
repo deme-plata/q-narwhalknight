@@ -1,5 +1,10 @@
 //! Compute Tunnel — Encrypted P2P task routing between nodes and miners
 //!
+//! **Phase 5 future work**: This module defines the types and routing logic
+//! for distributed compute tunnels. The types are architecturally correct
+//! but `TunnelManager` is not yet instantiated in production — tunnels will
+//! be wired when P2P compute distribution is implemented.
+//!
 //! Tunnels enable distributed compute by connecting:
 //! - Miner → Node: mining solutions + telemetry
 //! - Node → Node: task distribution + results
@@ -8,6 +13,8 @@
 //!
 //! Each tunnel is encrypted (NOISE XX pattern) and carries
 //! typed work items with priority routing.
+
+#![allow(dead_code)]
 
 use crate::{ComputeLayer, TunnelInfo, TunnelType};
 use std::collections::HashMap;
@@ -24,6 +31,40 @@ pub struct TunnelWorkItem {
     pub payload_bytes: usize,
     pub priority: u8,           // 0 = highest (mining), 7 = lowest
     pub sender_peer: String,
+}
+
+/// v9.6.0: Typed tunnel payload for AI inference task routing
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum TunnelPayload {
+    /// Mining solution from miner
+    MiningSubmit(Vec<u8>),
+    /// AI inference request routed to capable peer
+    InferenceRequest {
+        request_id: String,
+        prompt: String,
+        max_tokens: usize,
+        model: Option<String>,
+        wallet: Option<String>,
+    },
+    /// AI inference response back to requester
+    InferenceResponse {
+        request_id: String,
+        generated_text: String,
+        tokens_generated: usize,
+        tokens_per_second: f64,
+    },
+    /// Tensor shard for distributed model serving
+    TensorShard {
+        request_id: String,
+        layer_id: u32,
+        shard_data: Vec<u8>,
+    },
+    /// Layer output forwarded in pipeline parallelism
+    LayerOutput {
+        request_id: String,
+        layer_range: (u32, u32),
+        activations: Vec<u8>,
+    },
 }
 
 /// A single compute tunnel to a remote peer

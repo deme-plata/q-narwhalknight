@@ -20,6 +20,7 @@ pub mod trainer;
 pub mod tunnel;
 pub mod os_tuner;
 pub mod resource_monitor;
+pub mod inference_pool; // v9.6.0: AI inference worker pool for idle cores
 
 use serde::{Deserialize, Serialize};
 
@@ -95,6 +96,21 @@ impl ComputeLayer {
             ComputeLayer::VdfCompute => "VDF Compute",
             ComputeLayer::RenderFarm => "Render Farm",
             ComputeLayer::IdleCrypto => "Idle Crypto",
+        }
+    }
+
+    /// Priority weight for core allocation. Higher = more cores when distributing.
+    /// Mining is handled separately (reserved cores), so its weight here is irrelevant.
+    pub fn weight(&self) -> u32 {
+        match self {
+            ComputeLayer::Mining => 100,       // Reserved separately
+            ComputeLayer::AiInference => 50,   // Revenue-generating
+            ComputeLayer::ZkProofGen => 20,
+            ComputeLayer::BridgeVerify => 15,
+            ComputeLayer::IpfsPin => 5,
+            ComputeLayer::VdfCompute => 5,
+            ComputeLayer::RenderFarm => 3,
+            ComputeLayer::IdleCrypto => 1,
         }
     }
 }
@@ -210,4 +226,7 @@ pub struct ComputeStatus {
     pub trainer_cheats: Vec<String>,
     pub performance_boost_pct: f32,
     pub total_revenue_micro_qug: u64,
+    /// v9.6.0: AI inference statistics (populated when inference pool is active)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai_inference: Option<inference_pool::AIInferenceStats>,
 }

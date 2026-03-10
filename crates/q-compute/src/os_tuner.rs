@@ -100,24 +100,38 @@ impl OsTuner {
         let _ = std::fs::write("/sys/kernel/mm/transparent_hugepage/defrag", "defer+madvise");
     }
 
-    /// Set I/O scheduler to none/noop for NVMe, deadline for HDD
+    /// Set I/O scheduler to none/noop for NVMe, deadline for HDD.
+    /// Discovers devices dynamically from /sys/block/ instead of hardcoding names.
     #[cfg(target_os = "linux")]
     fn tune_io_scheduler() {
-        // Try to set noop scheduler on common block devices
-        let devices = ["sda", "nvme0n1", "vda"];
-        for dev in &devices {
+        let entries = match std::fs::read_dir("/sys/block") {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let dev = name.to_string_lossy().to_string();
+
+            // Skip virtual/pseudo devices
+            if dev.starts_with("loop") || dev.starts_with("ram") || dev.starts_with("dm-") {
+                continue;
+            }
+
             let path = format!("/sys/block/{}/queue/scheduler", dev);
-            if std::path::Path::new(&path).exists() {
-                // NVMe benefits from none/noop
-                if dev.starts_with("nvme") {
-                    if std::fs::write(&path, "none").is_ok() {
-                        info!("🔧 [OS TUNER] ✅ {} scheduler → none", dev);
-                    }
-                } else {
-                    // Spinning disks benefit from mq-deadline
-                    if std::fs::write(&path, "mq-deadline").is_ok() {
-                        info!("🔧 [OS TUNER] ✅ {} scheduler → mq-deadline", dev);
-                    }
+            if !std::path::Path::new(&path).exists() {
+                continue;
+            }
+
+            // NVMe benefits from none/noop
+            if dev.starts_with("nvme") {
+                if std::fs::write(&path, "none").is_ok() {
+                    info!("🔧 [OS TUNER] ✅ {} scheduler → none", dev);
+                }
+            } else {
+                // Spinning disks / virtio benefit from mq-deadline
+                if std::fs::write(&path, "mq-deadline").is_ok() {
+                    info!("🔧 [OS TUNER] ✅ {} scheduler → mq-deadline", dev);
                 }
             }
         }

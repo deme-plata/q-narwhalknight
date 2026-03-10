@@ -1,4 +1,4 @@
-# Q-Flux Issues
+# Q-NarwhalKnight Issues
 
 | # | Title | Priority | Status | Labels |
 |---|-------|----------|--------|--------|
@@ -30,6 +30,17 @@
 | 026 | Upstream Connection Pool Metrics | Medium | Planned | observability, prometheus |
 | 027 | IP Allowlist / Blocklist with CIDR Support | Medium | Planned | security, config |
 | 028 | Graceful Upstream Health Checks | High | Planned | reliability, health |
+| 029 | Trainer boost percentages are fiction | Medium | Done | q-compute, audit |
+| 030 | ResourceMonitor GPU query blocks async runtime | High | Done | q-compute, async, audit |
+| 031 | Ring buffer uses O(n) drain | Low | Done | q-compute, performance, audit |
+| 032 | Orchestrator has no priority weighting between layers | Medium | Done | q-compute, scheduler, audit |
+| 033 | Core assignments are metadata-only, never enforced | High | Done | q-compute, scheduler, audit |
+| 034 | Inference pool revenue callback never wired | Medium | Done | q-compute, inference, audit |
+| 035 | Inference pool max_concurrent hardcoded to 2 | Medium | Done | q-compute, inference, audit |
+| 036 | SSE ComputeStatus event defined but never emitted | Medium | Done | q-compute, q-api-server, sse, audit |
+| 037 | Tunnel system is dead code | Low | Done | q-compute, dead-code, audit |
+| 038 | OsTuner hardcodes device names | Low | Done | q-compute, os-tuner, audit |
+| 039 | Orchestrator lacks feedback loop on actual utilization | High | Done | q-compute, scheduler, audit |
 
 ## How to pick up an issue
 

@@ -18,9 +18,11 @@ pub struct ResourceMonitor {
     /// Latest snapshot (lock-free read via RwLock)
     latest: Arc<RwLock<ResourceSnapshot>>,
     /// Historical snapshots for trend analysis (last 60 seconds = 600 samples)
-    history: Arc<RwLock<Vec<ResourceSnapshot>>>,
+    history: Arc<RwLock<std::collections::VecDeque<ResourceSnapshot>>>,
     /// Stop flag
     running: Arc<std::sync::atomic::AtomicBool>,
+    /// #030: Cached GPU stats (updated every 2s via spawn_blocking)
+    gpu_cache: Arc<RwLock<(f32, u64, u64)>>,
 }
 
 impl ResourceMonitor {
@@ -40,8 +42,9 @@ impl ResourceMonitor {
                 disk_io_bps: 0,
                 timestamp_ms: 0,
             })),
-            history: Arc::new(RwLock::new(Vec::with_capacity(600))),
+            history: Arc::new(RwLock::new(std::collections::VecDeque::with_capacity(600))),
             running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            gpu_cache: Arc::new(RwLock::new((0.0, 0, 0))),
         }
     }
 
@@ -53,8 +56,9 @@ impl ResourceMonitor {
     /// Get historical snapshots for trend analysis
     pub fn history(&self, last_n: usize) -> Vec<ResourceSnapshot> {
         let h = self.history.read();
-        let start = h.len().saturating_sub(last_n);
-        h[start..].to_vec()
+        let len = h.len();
+        let start = len.saturating_sub(last_n);
+        h.iter().skip(start).cloned().collect()
     }
 
     /// Idle CPU percentage (how much headroom we have)
@@ -73,7 +77,22 @@ impl ResourceMonitor {
         let latest = self.latest.clone();
         let history = self.history.clone();
         let running = self.running.clone();
+        let gpu_cache = self.gpu_cache.clone();
         running.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        // #030: Spawn a separate task for GPU sampling (every 2s, via spawn_blocking)
+        let gpu_cache_writer = gpu_cache.clone();
+        let gpu_running = running.clone();
+        tokio::spawn(async move {
+            let mut gpu_interval = tokio::time::interval(Duration::from_secs(2));
+            while gpu_running.load(std::sync::atomic::Ordering::Relaxed) {
+                gpu_interval.tick().await;
+                let result = tokio::task::spawn_blocking(get_gpu_stats).await;
+                if let Ok(stats) = result {
+                    *gpu_cache_writer.write() = stats;
+                }
+            }
+        });
 
         tokio::spawn(async move {
             let mut sys = System::new_with_specifics(
@@ -118,13 +137,16 @@ impl ResourceMonitor {
                 prev_net_rx = net_rx;
                 prev_net_tx = net_tx;
 
-                // GPU — placeholder (needs OpenCL/NVML integration)
-                let (gpu_util, gpu_mem_used, gpu_mem_total) = get_gpu_stats();
+                // #030: Read cached GPU stats (non-blocking)
+                let (gpu_util, gpu_mem_used, gpu_mem_total) = *gpu_cache.read();
 
                 let timestamp_ms = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_millis() as u64;
+
+                // Disk I/O — read from /proc/diskstats on Linux
+                let disk_io_bps = get_disk_io_bps(elapsed.as_secs_f64());
 
                 let snapshot = ResourceSnapshot {
                     cpu_per_core,
@@ -137,20 +159,20 @@ impl ResourceMonitor {
                     net_tx_bps,
                     net_rx_bps,
                     net_capacity_bps: estimate_net_capacity(net_rx_bps + net_tx_bps),
-                    disk_io_bps: 0, // TODO: /proc/diskstats
+                    disk_io_bps,
                     timestamp_ms,
                 };
 
                 // Update latest
                 *latest.write() = snapshot.clone();
 
-                // Append to history (ring buffer, keep last 600 = 60s)
+                // #031: VecDeque ring buffer — O(1) push_back + pop_front
                 {
                     let mut h = history.write();
-                    h.push(snapshot);
-                    if h.len() > 600 {
-                        h.drain(0..100); // Drain in batches to avoid per-sample overhead
+                    if h.len() >= 600 {
+                        h.pop_front();
                     }
+                    h.push_back(snapshot);
                 }
 
                 sample_count += 1;
@@ -222,6 +244,61 @@ fn get_gpu_stats() -> (f32, u64, u64) {
         }
     }
     (0.0, 0, 0)
+}
+
+/// Read disk I/O bytes/sec from /proc/diskstats (Linux) or return 0 (other OS)
+///
+/// /proc/diskstats format (fields 6,10 are sectors read/written):
+/// major minor name rd_ios rd_merge rd_sectors rd_ticks wr_ios wr_merge wr_sectors ...
+/// We track the delta of rd_sectors + wr_sectors between samples.
+/// Sector size is 512 bytes on Linux.
+fn get_disk_io_bps(dt_secs: f64) -> u64 {
+    use std::sync::Mutex;
+    use once_cell::sync::Lazy;
+
+    static PREV_SECTORS: Lazy<Mutex<u64>> = Lazy::new(|| Mutex::new(0));
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(content) = std::fs::read_to_string("/proc/diskstats") {
+            let mut total_sectors: u64 = 0;
+            for line in content.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() < 14 { continue; }
+                let name = parts[2];
+                // Only count whole-disk devices (sda, nvme0n1, vda), not partitions
+                if name.ends_with(|c: char| c.is_ascii_digit()) && !name.starts_with("nvme") {
+                    // Skip partitions like sda1, vda1
+                    let base = name.trim_end_matches(|c: char| c.is_ascii_digit());
+                    if base != name { continue; }
+                }
+                // For nvme, skip partition entries (nvme0n1p1, etc.)
+                if name.contains("p") && name.starts_with("nvme") {
+                    continue;
+                }
+                // Skip loop, dm, ram devices
+                if name.starts_with("loop") || name.starts_with("dm-") || name.starts_with("ram") {
+                    continue;
+                }
+
+                // Field 6 = sectors read, Field 10 = sectors written (0-indexed from field 0)
+                let rd_sectors = parts[5].parse::<u64>().unwrap_or(0);
+                let wr_sectors = parts[9].parse::<u64>().unwrap_or(0);
+                total_sectors += rd_sectors + wr_sectors;
+            }
+
+            let mut prev = PREV_SECTORS.lock().unwrap();
+            let delta = total_sectors.saturating_sub(*prev);
+            *prev = total_sectors;
+
+            if dt_secs > 0.001 {
+                // Each sector = 512 bytes
+                return ((delta as f64 * 512.0) / dt_secs) as u64;
+            }
+        }
+    }
+    let _ = dt_secs; // suppress unused warning on non-Linux
+    0
 }
 
 /// Estimate network capacity from observed throughput
