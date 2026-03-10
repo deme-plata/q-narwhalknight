@@ -1,6 +1,6 @@
 # Issue #023: Multi-GPU Scheduling — Orchestrate All Cards
 
-**State**: `open`
+**State**: `in_progress`
 **Priority**: HIGH
 **Labels**: `starship-endgame`, `compute`, `gpu`
 **Assigned**: Epsilon
@@ -15,11 +15,12 @@ The orchestrator assumes a single GPU per node. `ResourceMonitor` queries `nvidi
 
 ## Current State
 
-- `GpuStats` in `resource_monitor.rs`: single `utilization_percent`, `memory_used_mb`, `temperature`
-- `GpuBackend::detect()` finds ONE backend (NvidiaSmi/RocmSmi/Sysinfo)
-- `nvidia-smi` supports `--id=N` for per-GPU queries but we don't use it
-- `InferenceWorkerPool` has no GPU awareness (CPU-only scheduling)
-- `tensor_parallel_engine.rs` in `q-ai-inference` exists but assumes local multi-GPU
+- ✅ Multi-GPU device detection with per-device enumeration
+- ✅ Per-GPU layer assignment (GPU 0 for mining, GPU 1 for inference, etc.)
+- ✅ Round-robin and load-balanced scheduling strategies
+- ✅ VRAM-aware GPU placement
+- ✅ GPU health monitoring with automatic failover
+- **Implementation**: `crates/q-compute/src/gpu_scheduler.rs` (762 lines)
 
 ## Architecture
 

@@ -1,6 +1,6 @@
 # Issue #021: Compute Billing & Metering — Track Every Cycle
 
-**State**: `open`
+**State**: `in_progress`
 **Priority**: HIGH
 **Labels**: `starship-endgame`, `economics`, `billing`
 **Assigned**: Beta
@@ -20,10 +20,12 @@ The PaaS billing system (`paas_billing_v2.rs`) handles balance reservations and 
 
 ## Current State
 
-- `PaaSBillingManagerV2` exists with `reserve_balance()`, `record_usage()`, `settle_bill()`
-- `InferenceWorkerPool` has `RevenueSummary` but only tracks AI inference
-- Orchestrator tracks `revenue_earned_micro_qug` per layer but nothing writes to layers 2-7
-- No metering for ZK proof generation, IPFS pinning, VDF compute, or render jobs
+- ✅ `MeteringSink` trait implemented with `start_task()`, `record_sample()`, `finalize_task()`
+- ✅ Rate card configuration for CPU/GPU/memory pricing per layer
+- ✅ Per-job cost tracking and usage summaries
+- ✅ Rate limiting by credit balance
+- ✅ Configurable pricing tiers
+- **Implementation**: `crates/q-compute/src/metering.rs` (659 lines)
 
 ## Architecture
 

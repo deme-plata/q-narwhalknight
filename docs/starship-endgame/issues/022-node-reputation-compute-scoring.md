@@ -1,6 +1,6 @@
 # Issue #022: Node Reputation for Compute Task Assignment
 
-**State**: `open`
+**State**: `in_progress`
 **Priority**: HIGH
 **Labels**: `starship-endgame`, `p2p`, `reputation`
 **Assigned**: Beta
@@ -28,10 +28,12 @@ We need compute-specific reputation scoring so the tunnel manager preferentially
 
 ## Current State
 
-- `PeerReputationManager` exists with `update_score()`, `decay_scores()`, `ban()`
-- `PeerRegistry` in `tunnel.rs` tracks peer capacity announcements
-- `ResultVerifier` in `tunnel.rs` verifies task results but doesn't feed back to reputation
-- `QuantumReputationSystem` in `q-oracle` is quantum-aware but not compute-aware
+- ✅ `ComputeReputation` struct with success/failure tracking
+- ✅ Latency-weighted scoring for peer performance
+- ✅ Automatic decay over time (aging of reputation data)
+- ✅ Peer blacklisting for repeated failures (3+ consecutive failures)
+- ✅ Multi-dimensional reputation scoring system
+- **Implementation**: `crates/q-compute/src/compute_reputation.rs` (804 lines)
 
 ## Acceptance Criteria
 

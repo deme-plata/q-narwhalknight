@@ -34,7 +34,7 @@
 | [#003](issues/003-gpu-mining-acceleration.md) | GPU Mining Acceleration | HIGH | **In Progress** | Epsilon | GpuHasher + rayon CPU backend + 16 tests |
 | [#015](issues/015-quantum-grover-miner-integration.md) | Quantum Grover Miner Integration | HIGH | Open | Epsilon | Python impl in q-grover/, needs Rust FFI |
 | [#006](issues/006-zk-proof-farm.md) | ZK Proof Farm | MEDIUM | Open | Gamma | Not started |
-| [#023](issues/023-multi-gpu-scheduling.md) | Multi-GPU Scheduling | HIGH | Open | Epsilon | Not started |
+| [#023](issues/023-multi-gpu-scheduling.md) | Multi-GPU Scheduling | HIGH | **In Progress** | Epsilon | gpu_scheduler.rs: 762 lines — device detection, VRAM-aware placement |
 
 ### Distributed AI & Marketplace (Phase 3)
 
@@ -72,15 +72,15 @@
 
 | # | Title | Priority | Status | Assigned | Progress |
 |---|-------|----------|--------|----------|----------|
-| [#021](issues/021-compute-billing-metering.md) | Compute Billing & Metering | HIGH | Open | Beta | paas_billing_v2.rs exists, not wired to orchestrator |
-| [#022](issues/022-node-reputation-compute-scoring.md) | Node Reputation Scoring | HIGH | Open | Beta | peer_reputation.rs exists, no compute awareness |
+| [#021](issues/021-compute-billing-metering.md) | Compute Billing & Metering | HIGH | **In Progress** | Beta | metering.rs: 659 lines — billing, cost tracking, rate limiting |
+| [#022](issues/022-node-reputation-compute-scoring.md) | Node Reputation Scoring | HIGH | **In Progress** | Beta | compute_reputation.rs: 804 lines — scoring, decay, blacklisting |
 | [#026](issues/026-compute-job-persistence.md) | Compute Job Persistence | MEDIUM | Open | Beta | All queues in-memory, no WAL |
 
 ### Frontend & Visualization
 
 | # | Title | Priority | Status | Assigned | Progress |
 |---|-------|----------|--------|----------|----------|
-| [#008](issues/008-tunnel-mesh-visualization.md) | Tunnel Mesh Visualization | LOW | **In Progress** | Gamma | Compute panel done, D3 graph in progress |
+| [#008](issues/008-tunnel-mesh-visualization.md) | Tunnel Mesh Visualization | LOW | **In Progress** | Gamma | Compute panel done, ComputeMeshGraph.tsx: 938 lines pure React+SVG |
 
 ### Monitoring & Observability
 
