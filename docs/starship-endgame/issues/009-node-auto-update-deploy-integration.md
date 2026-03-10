@@ -28,10 +28,10 @@ Currently, the entire auto-update P2P pipeline is dormant because no announcemen
 - [x] Admin endpoint `POST /api/v1/admin/update/announce` implemented
 - [x] Gossipsub topic `/qnk/{network}/update-announcements` subscribed
 - [x] Message forwarding from gossipsub to auto-updater channel
-- [ ] `safe-deploy.sh` computes checksums after build
-- [ ] `safe-deploy.sh` calls announce endpoint after successful restart
-- [ ] `ha-deploy.sh` (if it exists) also calls announce endpoint
-- [ ] Announce includes: version, sha256, blake3, binary_size, download_url, release_notes
+- [x] `safe-deploy.sh` computes checksums after build
+- [x] `safe-deploy.sh` calls announce endpoint after successful restart
+- [ ] `ha-deploy.sh` (if it exists) also calls announce endpoint (deferred — ha-deploy calls safe-deploy)
+- [x] Announce includes: version, sha256, blake3, binary_size, download_url, release_notes
 
 ## Technical Details
 

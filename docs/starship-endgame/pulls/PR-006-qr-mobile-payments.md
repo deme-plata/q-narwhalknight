@@ -1,6 +1,6 @@
 # PR #006: QR Code Mobile Payments for Brick-and-Mortar
 
-**State**: `open`
+**State**: `merged` (commit 32503bb8)
 **Head**: `feature/safe-batched-sync-v1.0.2`
 **Base**: `main`
 **Author**: Server Beta

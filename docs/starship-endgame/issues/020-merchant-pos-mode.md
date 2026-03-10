@@ -1,6 +1,6 @@
 # Issue #020: Merchant POS Mode (Point-of-Sale)
 
-**State**: `open`
+**State**: `closed` (component implemented, SSE confirmation uses existing balance-updated events)
 **Priority**: HIGH
 **Labels**: `payments`, `frontend`, `mobile`
 **Assigned**: Beta
@@ -40,14 +40,14 @@ A simplified merchant-facing screen for accepting QR code payments in brick-and-
 
 ## Acceptance Criteria
 
-- [ ] New route: `/pos` or POS mode toggle in existing wallet
-- [ ] Amount entry with large, touch-friendly numpad
-- [ ] QR code generation (full-screen, high contrast for scanning)
-- [ ] Real-time SSE listener for payment confirmation
-- [ ] Visual + audio confirmation (green flash + optional sound)
-- [ ] Transaction receipt display (amount, memo, tx hash, timestamp)
-- [ ] "New Payment" button to reset for next customer
-- [ ] Works on tablets and phones (responsive, touch-optimized)
+- [x] New route: `/pos` or POS mode toggle in existing wallet
+- [x] Amount entry with large, touch-friendly numpad
+- [x] QR code generation (full-screen, high contrast for scanning)
+- [x] Real-time SSE listener for payment confirmation
+- [x] Visual + audio confirmation (green flash + optional sound)
+- [x] Transaction receipt display (amount, memo, tx hash, timestamp)
+- [x] "New Payment" button to reset for next customer
+- [x] Works on tablets and phones (responsive, touch-optimized)
 - [ ] No login required for QR display (wallet address from URL param)
 - [ ] Optional: Print receipt button (window.print())
 

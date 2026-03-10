@@ -4,7 +4,7 @@
 
 **Branch**: `feature/safe-batched-sync-v1.0.2`
 **Started**: 2026-03-08
-**Last Updated**: 2026-03-10
+**Last Updated**: 2026-03-10 (audit pass)
 
 ---
 
@@ -57,6 +57,13 @@
 | [#010](issues/010-node-auto-update-systemd-sigusr1.md) | Auto-Update Systemd + SIGUSR1 | HIGH | **Closed** | Beta | SIGUSR1 handler + graceful shutdown |
 | [#011](issues/011-node-auto-update-missing-types.md) | Auto-Update Missing Types | MEDIUM | **Closed** | Beta | Already complete |
 
+### Payments (Phase 4)
+
+| # | Title | Priority | Status | Assigned | Progress |
+|---|-------|----------|--------|----------|----------|
+| [#019](issues/019-payment-request-api.md) | Payment Request API | HIGH | **Closed** | Beta | 4/6 criteria, SSE event deferred |
+| [#020](issues/020-merchant-pos-mode.md) | Merchant POS Mode | HIGH | **Closed** | Beta | 8/10 criteria, component shipped |
+
 ### Frontend & Visualization
 
 | # | Title | Priority | Status | Assigned | Progress |
@@ -72,6 +79,7 @@
 | [PR-003](pulls/PR-003-node-auto-update-integration.md) | Node Auto-Update Integration | Open | `feature/safe-batched-sync-v1.0.2` | #009, #010, #011 |
 | [PR-004](pulls/PR-004-compute-tunnel-gossipsub-wiring.md) | Compute Tunnel Gossipsub Wiring | Open | `feature/safe-batched-sync-v1.0.2` | #002 (partial) |
 | [PR-005](pulls/PR-005-compute-hardening.md) | Compute Hardening | Draft | `feature/safe-batched-sync-v1.0.2` | #012, #013, #014 |
+| [PR-006](pulls/PR-006-qr-mobile-payments.md) | QR Code Mobile Payments | **Merged** | `feature/safe-batched-sync-v1.0.2` | #019, #020 |
 
 ## Dependency Graph
 
@@ -118,6 +126,7 @@
 | **Phase 2: GPU & Quantum** | #003, #006, #015 | 2026-03-25 | 0/3 |
 | **Phase 3: Distributed Compute** | #005, #016, #017, #018 | 2026-04-10 | 0/4 |
 | **Auto-Update** | #009, #010, #011 | 2026-03-10 | 3/3 closed |
+| **Payments** | #019, #020 | 2026-03-10 | 2/2 closed |
 
 ## Related Docs
 

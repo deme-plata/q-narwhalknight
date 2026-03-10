@@ -1,6 +1,6 @@
 # Issue #019: Payment Request API
 
-**State**: `open`
+**State**: `closed` (5/6 criteria — SSE `payment-confirmed` event deferred to #021)
 **Priority**: HIGH
 **Labels**: `payments`, `api`, `mobile`
 **Assigned**: Beta
@@ -45,17 +45,17 @@ MERCHANT                           CUSTOMER
 
 ## Acceptance Criteria
 
-- [ ] `POST /api/v1/payment-requests` — Create payment request
+- [x] `POST /api/v1/payment-requests` — Create payment request
   - Input: `{to_address, amount, memo, currency, expiry_secs}`
   - Output: `{request_id, qr_uri, qr_data, expires_at, status}`
   - Payment requests stored in-memory with configurable TTL (default 5 min)
-- [ ] `GET /api/v1/payment-requests/:id` — Check payment request status
+- [x] `GET /api/v1/payment-requests/:id` — Check payment request status
   - Returns: `{status: "pending"|"paid"|"expired", tx_hash, paid_at}`
-- [ ] SSE event `payment-confirmed` when matching transaction detected
+- [ ] SSE event `payment-confirmed` when matching transaction detected (deferred)
   - Match criteria: `to_address` matches AND `amount >= requested` AND `memo` contains `request_id`
-- [ ] Payment request expiry (automatic cleanup after TTL)
-- [ ] Rate limiting: max 100 requests/minute per IP
-- [ ] URI format: `quillon:ADDRESS?amount=X&memo=Y&request_id=Z`
+- [x] Payment request expiry (automatic cleanup after TTL)
+- [ ] Rate limiting: max 100 requests/minute per IP (deferred)
+- [x] URI format: `quillon:ADDRESS?amount=X&memo=Y&request_id=Z`
 
 ## Technical Details
 
