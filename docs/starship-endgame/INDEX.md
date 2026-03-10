@@ -4,7 +4,7 @@
 
 **Branch**: `feature/safe-batched-sync-v1.0.2`
 **Started**: 2026-03-08
-**Last Updated**: 2026-03-10 (parallel agent sprint)
+**Last Updated**: 2026-03-10 (GPU miner, distributed inference, bridge attestation)
 
 ---
 
@@ -15,7 +15,7 @@
 | # | Title | Priority | Status | Assigned | Progress |
 |---|-------|----------|--------|----------|----------|
 | [#001](issues/001-compute-orchestrator-core.md) | Compute Orchestrator Core | CRITICAL | **Closed** | Beta | 7/7 criteria done |
-| [#002](issues/002-p2p-compute-tunnels.md) | P2P Compute Tunnels | CRITICAL | **In Progress** | Beta+Epsilon | Gossipsub + NOISE XX + yamux (4/6 criteria) |
+| [#002](issues/002-p2p-compute-tunnels.md) | P2P Compute Tunnels | CRITICAL | **Closed** | Beta+Epsilon | 6/6: Handshake + yamux + gossipsub + routing + 2-of-3 verify + dashboard |
 | [#004](issues/004-trainer-cheat-engine.md) | Trainer Cheat Engine | HIGH | **Closed** | Beta | 12/12 cheats done |
 | [#007](issues/007-os-level-auto-tuning.md) | OS-Level Auto-Tuning | HIGH | **Closed** | Beta | All Linux + Windows tuning done |
 
@@ -25,29 +25,33 @@
 |---|-------|----------|--------|----------|----------|
 | [#012](issues/012-async-gpu-monitoring.md) | Async GPU Monitoring | HIGH | **Closed** | Beta | tokio::process::Command + 2s cache |
 | [#013](issues/013-orchestrator-core-enforcement.md) | Core Enforcement | HIGH | **Closed** | Beta | sched_setaffinity + CoreEnforcer + inference pinning |
-| [#014](issues/014-inference-revenue-wiring.md) | Inference Revenue Wiring | MEDIUM | **In Progress** | Beta | ModelTier + revenue callback wired |
+| [#014](issues/014-inference-revenue-wiring.md) | Inference Revenue Wiring | MEDIUM | **Closed** | Beta | ModelTier + revenue callback + RevenueSummary |
 
 ### GPU & Quantum Compute (Phase 2)
 
 | # | Title | Priority | Status | Assigned | Progress |
 |---|-------|----------|--------|----------|----------|
-| [#003](issues/003-gpu-mining-acceleration.md) | GPU Mining Acceleration | HIGH | Open | Epsilon | Not started |
+| [#003](issues/003-gpu-mining-acceleration.md) | GPU Mining Acceleration | HIGH | **In Progress** | Epsilon | GpuHasher + rayon CPU backend + 16 tests |
 | [#015](issues/015-quantum-grover-miner-integration.md) | Quantum Grover Miner Integration | HIGH | Open | Epsilon | Python impl in q-grover/, needs Rust FFI |
 | [#006](issues/006-zk-proof-farm.md) | ZK Proof Farm | MEDIUM | Open | Gamma | Not started |
+| [#023](issues/023-multi-gpu-scheduling.md) | Multi-GPU Scheduling | HIGH | Open | Epsilon | Not started |
 
 ### Distributed AI & Marketplace (Phase 3)
 
 | # | Title | Priority | Status | Assigned | Progress |
 |---|-------|----------|--------|----------|----------|
-| [#005](issues/005-distributed-ai-inference.md) | Distributed AI Inference | MEDIUM | Open | Epsilon | Pool exists, not distributed |
+| [#005](issues/005-distributed-ai-inference.md) | Distributed AI Inference | MEDIUM | **In Progress** | Epsilon | DistributedInferenceRouter + peer routing + 13 tests |
 | [#018](issues/018-cross-node-tensor-parallelism.md) | Cross-Node Tensor Parallelism | MEDIUM | Open | Epsilon | TunnelPayload types ready |
 | [#017](issues/017-proof-of-useful-work.md) | Proof-of-Useful-Work Marketplace | MEDIUM | Open | Beta | Design only |
+| [#025](issues/025-model-catalog-hot-swap.md) | Model Catalog & Hot-Swap | MEDIUM | Open | Beta | model_catalog.rs exists, needs runtime mgmt |
+| [#027](issues/027-compute-marketplace-p2p.md) | Compute Marketplace P2P Protocol | MEDIUM | Open | Epsilon | Design only |
 
 ### Bridge & Security (Phase 3)
 
 | # | Title | Priority | Status | Assigned | Progress |
 |---|-------|----------|--------|----------|----------|
-| [#016](issues/016-bridge-safety-compute-verification.md) | Bridge Compute Verification | HIGH | Open | Delta | bridge_safety.rs exists, needs quorum |
+| [#016](issues/016-bridge-safety-compute-verification.md) | Bridge Compute Verification | HIGH | **In Progress** | Delta | AttestationCollector + 2-of-3 quorum logic |
+| [#024](issues/024-tunnel-key-rotation.md) | Tunnel Key Rotation | MEDIUM | Open | Beta+Epsilon | NOISE XX done, rekey not implemented |
 
 ### Node Operations
 
@@ -64,11 +68,25 @@
 | [#019](issues/019-payment-request-api.md) | Payment Request API | HIGH | **Closed** | Beta | 4/6 criteria, SSE event deferred |
 | [#020](issues/020-merchant-pos-mode.md) | Merchant POS Mode | HIGH | **Closed** | Beta | 8/10 criteria, component shipped |
 
+### Compute Economics (Phase 5)
+
+| # | Title | Priority | Status | Assigned | Progress |
+|---|-------|----------|--------|----------|----------|
+| [#021](issues/021-compute-billing-metering.md) | Compute Billing & Metering | HIGH | Open | Beta | paas_billing_v2.rs exists, not wired to orchestrator |
+| [#022](issues/022-node-reputation-compute-scoring.md) | Node Reputation Scoring | HIGH | Open | Beta | peer_reputation.rs exists, no compute awareness |
+| [#026](issues/026-compute-job-persistence.md) | Compute Job Persistence | MEDIUM | Open | Beta | All queues in-memory, no WAL |
+
 ### Frontend & Visualization
 
 | # | Title | Priority | Status | Assigned | Progress |
 |---|-------|----------|--------|----------|----------|
 | [#008](issues/008-tunnel-mesh-visualization.md) | Tunnel Mesh Visualization | LOW | **In Progress** | Gamma | Compute panel done, D3 graph in progress |
+
+### Monitoring & Observability
+
+| # | Title | Priority | Status | Assigned | Progress |
+|---|-------|----------|--------|----------|----------|
+| [#028](issues/028-compute-metrics-prometheus.md) | Compute Metrics Prometheus | MEDIUM | Open | Gamma | metrics.rs exists (feature-gated), needs expansion |
 
 ### q-flux Custom Proxy
 
@@ -87,29 +105,44 @@
 | [PR-005](pulls/PR-005-compute-hardening.md) | Compute Hardening | Open | `feature/safe-batched-sync-v1.0.2` | #012, #013, #014 |
 | [PR-006](pulls/PR-006-qr-mobile-payments.md) | QR Code Mobile Payments | **Merged** | `feature/safe-batched-sync-v1.0.2` | #019, #020 |
 | [PR-007](pulls/PR-007-q-flux-custom-proxy.md) | q-flux Custom Proxy | Open | `feature/safe-batched-sync-v1.0.2` | q-flux #017-#034 |
+| [PR-008](pulls/PR-008-core-enforcement-async-gpu.md) | Core Enforcement + Async GPU | Open | `feature/safe-batched-sync-v1.0.2` | #012, #013 |
+| [PR-009](pulls/PR-009-inference-revenue-wiring.md) | Inference Revenue Wiring | Open | `feature/safe-batched-sync-v1.0.2` | #014 |
+| [PR-010](pulls/PR-010-p2p-tunnel-noise-xx.md) | P2P Tunnel NOISE XX Streams | Open | `feature/safe-batched-sync-v1.0.2` | #002 (partial) |
+| [PR-011](pulls/PR-011-d3-tunnel-mesh-visualization.md) | D3 Tunnel Mesh Visualization | Open | `feature/safe-batched-sync-v1.0.2` | #008 (D3 graph) |
 
 ## Dependency Graph
 
 ```
 #001 Compute Orchestrator (CLOSED) ─────────────────────────────┐
- ├── #002 P2P Tunnels (IN PROGRESS — NOISE XX + yamux)          │
+ ├── #002 P2P Tunnels (CLOSED — 6/6 criteria)                   │
  │    ├── #005 AI Inference (needs tunnels for task routing)     │
  │    ├── #018 Tensor Parallelism (needs tunnels for shards)    │
- │    └── #016 Bridge Verification (needs tunnels for quorum)   │
+ │    ├── #016 Bridge Verification (needs tunnels for quorum)   │
+ │    └── #024 Tunnel Key Rotation (needs NOISE XX complete)    │
  ├── #004 Trainer (CLOSED)                                      │
  ├── #007 OS Tuning (CLOSED)                                    │
  ├── #008 Visualization (compute panel done, D3 in progress)    │
  ├── #012 Async GPU (CLOSED — tokio::process + 2s cache)        │
  ├── #013 Core Enforcement (CLOSED — sched_setaffinity)         │
- └── #014 Inference Revenue (IN PROGRESS — ModelTier wired)     │
+ └── #014 Inference Revenue (CLOSED — ModelTier + callbacks)    │
+      └── #021 Billing & Metering (needs revenue as template)   │
+           └── #026 Job Persistence (needs billing linkage)     │
                                                                 │
 #003 GPU Acceleration ──────────────────────────────────────────┤
  ├── #006 ZK Proof Farm (needs GPU for NTT)                     │
- └── #015 Quantum Grover Miner (needs GPU for simulation)       │
+ ├── #015 Quantum Grover Miner (needs GPU for simulation)       │
+ └── #023 Multi-GPU Scheduling (needs GPU detection)            │
                                                                 │
 #005 Distributed AI Inference ──────────────────────────────────┤
  ├── #018 Cross-Node Tensor Parallelism                         │
- └── #017 Proof-of-Useful-Work Marketplace                      │
+ ├── #017 Proof-of-Useful-Work Marketplace                      │
+ ├── #025 Model Catalog Hot-Swap (needs inference pool)         │
+ └── #027 Compute Marketplace P2P (needs tunnels + billing)     │
+                                                                │
+#022 Node Reputation Scoring ───────────────────────────────────┤
+ └── #027 Marketplace (winner selection needs reputation)       │
+                                                                │
+#028 Compute Metrics Prometheus ────────────────────────────────┤
                                                                 │
 #009 + #010 + #011 Auto-Update (CLOSED)                         │
 ```
@@ -118,9 +151,9 @@
 
 | Server | Role | Issues |
 |--------|------|--------|
-| **Beta** (185.182.185.227) | Coordinator | #001, #002, #004, #007, #008, #009-#014, #017 |
-| **Epsilon** (89.149.241.126) | GPU Beast | #002, #003, #005, #015, #018 |
-| **Gamma** (109.205.176.60) | CPU Worker | #006, #008 (D3 graph) |
+| **Beta** (185.182.185.227) | Coordinator | #001, #002, #004, #007, #008, #009-#014, #017, #021, #022, #024-#026 |
+| **Epsilon** (89.149.241.126) | GPU Beast | #002, #003, #005, #015, #018, #023, #024, #027 |
+| **Gamma** (109.205.176.60) | CPU Worker | #006, #008 (D3 graph), #028 |
 | **Delta** (5.79.79.158) | Bridge Node | #016 |
 | **Alpha** (161.35.219.10) | Canary | — |
 
@@ -128,12 +161,14 @@
 
 | Milestone | Issues | Target | Status |
 |-----------|--------|--------|--------|
-| **Phase 1: Orchestrator Foundation** | #001, #002, #004, #007 | 2026-03-10 | 3/4 closed, #002 in progress |
-| **Phase 1.5: Hardening** | #012, #013, #014 | 2026-03-15 | 2/3 closed, #014 in progress |
-| **Phase 2: GPU & Quantum** | #003, #006, #015 | 2026-03-25 | 0/3 |
-| **Phase 3: Distributed Compute** | #005, #016, #017, #018 | 2026-04-10 | 0/4 |
+| **Phase 1: Orchestrator Foundation** | #001, #002, #004, #007 | 2026-03-10 | 4/4 closed |
+| **Phase 1.5: Hardening** | #012, #013, #014 | 2026-03-15 | 3/3 closed |
+| **Phase 2: GPU & Quantum** | #003, #006, #015, #023 | 2026-03-25 | 1/4 in progress |
+| **Phase 3: Distributed Compute** | #005, #016, #017, #018, #024, #025, #027 | 2026-04-10 | 2/7 in progress |
+| **Phase 4: Payments** | #019, #020 | 2026-03-10 | 2/2 closed |
+| **Phase 5: Compute Economics** | #021, #022, #026 | 2026-04-20 | 0/3 |
+| **Monitoring** | #028 | 2026-04-15 | 0/1 |
 | **Auto-Update** | #009, #010, #011 | 2026-03-10 | 3/3 closed |
-| **Payments** | #019, #020 | 2026-03-10 | 2/2 closed |
 
 ## Related Docs
 
