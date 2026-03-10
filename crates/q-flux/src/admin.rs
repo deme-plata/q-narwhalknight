@@ -16,6 +16,7 @@ use crate::health::HealthMap;
 use crate::libp2p_aware::{BreakerState, PeerTracker};
 use crate::metrics::Metrics;
 use crate::ocsp_fetch::SharedOcspStatus;
+use crate::upstream::BackendCounters;
 
 /// Shared state for the admin HTTP server.
 struct AdminState {
@@ -34,6 +35,10 @@ struct AdminState {
     peer_tracker: Option<Arc<PeerTracker>>,
     /// OCSP auto-fetch status
     ocsp_status: Option<SharedOcspStatus>,
+    /// Per-backend request counters (Issue #026)
+    backend_counters: Option<Arc<dashmap::DashMap<String, Arc<BackendCounters>>>>,
+    /// Adaptive concurrency effective limit (Issue #026)
+    adaptive_concurrency: Option<Arc<crate::upstream::AdaptiveConcurrency>>,
 }
 
 /// Start the admin HTTP server on its own OS thread.
@@ -57,6 +62,8 @@ pub fn spawn_admin_server(
     cluster_peers: Vec<String>,
     peer_tracker: Option<Arc<PeerTracker>>,
     ocsp_status: Option<SharedOcspStatus>,
+    backend_counters: Option<Arc<dashmap::DashMap<String, Arc<BackendCounters>>>>,
+    adaptive_concurrency: Option<Arc<crate::upstream::AdaptiveConcurrency>>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("q-flux-admin".into())
@@ -67,7 +74,7 @@ pub fn spawn_admin_server(
                 .expect("failed to build admin tokio runtime");
 
             rt.block_on(async move {
-                run_admin_server(listen_addr, metrics, worker_count, shared_tls, tls_config_paths, health_map, local_backends, cluster_peers, peer_tracker, ocsp_status).await;
+                run_admin_server(listen_addr, metrics, worker_count, shared_tls, tls_config_paths, health_map, local_backends, cluster_peers, peer_tracker, ocsp_status, backend_counters, adaptive_concurrency).await;
             });
         })
         .expect("failed to spawn admin thread")
@@ -84,6 +91,8 @@ async fn run_admin_server(
     cluster_peers: Vec<String>,
     peer_tracker: Option<Arc<PeerTracker>>,
     ocsp_status: Option<SharedOcspStatus>,
+    backend_counters: Option<Arc<dashmap::DashMap<String, Arc<BackendCounters>>>>,
+    adaptive_concurrency: Option<Arc<crate::upstream::AdaptiveConcurrency>>,
 ) {
     let listener = match TcpListener::bind(listen_addr).await {
         Ok(l) => l,
@@ -106,6 +115,8 @@ async fn run_admin_server(
         cluster_peers,
         peer_tracker,
         ocsp_status,
+        backend_counters,
+        adaptive_concurrency,
     });
 
     loop {
@@ -157,6 +168,7 @@ async fn handle_admin_request(
         (&hyper::Method::GET, "/metrics") => handle_metrics(state),
         (&hyper::Method::GET, "/status") => handle_status(state),
         (&hyper::Method::GET, "/peers") => handle_peers(state),
+        (&hyper::Method::GET, "/backends") => handle_backends(state),
         (&hyper::Method::POST, "/tls-reload") => handle_tls_reload(state),
         _ => not_found(),
     };
@@ -354,8 +366,92 @@ fn handle_metrics(state: &AdminState) -> Response<Full<Bytes>> {
     // -- latency histogram (Issue #11) ----------------------------------------
     buf.push_str(&state.metrics.prometheus_export_histogram());
 
+    // -- latency percentiles (Issue #031) ------------------------------------
+    {
+        use std::fmt::Write;
+        let p50 = state.metrics.latency_p50();
+        let p95 = state.metrics.latency_p95();
+        let p99 = state.metrics.latency_p99();
+        let _ = writeln!(buf, "# HELP q_flux_request_duration_p50_seconds P50 request latency in seconds");
+        let _ = writeln!(buf, "# TYPE q_flux_request_duration_p50_seconds gauge");
+        let _ = writeln!(buf, "q_flux_request_duration_p50_seconds {:.6}", p50);
+        buf.push('\n');
+        let _ = writeln!(buf, "# HELP q_flux_request_duration_p95_seconds P95 request latency in seconds");
+        let _ = writeln!(buf, "# TYPE q_flux_request_duration_p95_seconds gauge");
+        let _ = writeln!(buf, "q_flux_request_duration_p95_seconds {:.6}", p95);
+        buf.push('\n');
+        let _ = writeln!(buf, "# HELP q_flux_request_duration_p99_seconds P99 request latency in seconds");
+        let _ = writeln!(buf, "# TYPE q_flux_request_duration_p99_seconds gauge");
+        let _ = writeln!(buf, "q_flux_request_duration_p99_seconds {:.6}", p99);
+        buf.push('\n');
+    }
+
     // -- HTTP/2 metrics (Issue #15) -------------------------------------------
     buf.push_str(&crate::h2_proxy::h2_prometheus_export());
+
+    // -- upstream pool per-backend metrics (Issue #026) -------------------------
+    if let Some(ref hm) = state.health_map {
+        use std::fmt::Write;
+        let _ = writeln!(buf, "# HELP q_flux_backend_healthy Whether the backend is healthy (1=yes, 0=no)");
+        let _ = writeln!(buf, "# TYPE q_flux_backend_healthy gauge");
+        for backend in state.local_backends.iter().chain(state.cluster_peers.iter()) {
+            let healthy = hm.get(backend.as_str())
+                .map(|e| if e.is_healthy { 1 } else { 0 })
+                .unwrap_or(1); // no entry = assume healthy
+            let _ = writeln!(buf, r#"q_flux_backend_healthy{{backend="{}"}} {}"#, backend, healthy);
+        }
+        buf.push('\n');
+
+        let _ = writeln!(buf, "# HELP q_flux_backend_response_time_ms Last health check response time in milliseconds");
+        let _ = writeln!(buf, "# TYPE q_flux_backend_response_time_ms gauge");
+        for backend in state.local_backends.iter().chain(state.cluster_peers.iter()) {
+            let ms = hm.get(backend.as_str())
+                .and_then(|e| e.last_response_time_ms)
+                .unwrap_or(0);
+            let _ = writeln!(buf, r#"q_flux_backend_response_time_ms{{backend="{}"}} {}"#, backend, ms);
+        }
+        buf.push('\n');
+
+        let _ = writeln!(buf, "# HELP q_flux_backend_consecutive_failures Consecutive health check failures");
+        let _ = writeln!(buf, "# TYPE q_flux_backend_consecutive_failures gauge");
+        for backend in state.local_backends.iter().chain(state.cluster_peers.iter()) {
+            let failures = hm.get(backend.as_str())
+                .map(|e| e.consecutive_failures)
+                .unwrap_or(0);
+            let _ = writeln!(buf, r#"q_flux_backend_consecutive_failures{{backend="{}"}} {}"#, backend, failures);
+        }
+        buf.push('\n');
+    }
+
+    if let Some(ref counters) = state.backend_counters {
+        use std::fmt::Write;
+        let _ = writeln!(buf, "# HELP q_flux_backend_requests_total Total requests forwarded to backend");
+        let _ = writeln!(buf, "# TYPE q_flux_backend_requests_total counter");
+        for entry in counters.iter() {
+            let _ = writeln!(buf, r#"q_flux_backend_requests_total{{backend="{}"}} {}"#,
+                entry.key(), entry.value().total_requests.load(std::sync::atomic::Ordering::Relaxed));
+        }
+        buf.push('\n');
+
+        let _ = writeln!(buf, "# HELP q_flux_backend_failed_requests_total Total failed requests to backend");
+        let _ = writeln!(buf, "# TYPE q_flux_backend_failed_requests_total counter");
+        for entry in counters.iter() {
+            let _ = writeln!(buf, r#"q_flux_backend_failed_requests_total{{backend="{}"}} {}"#,
+                entry.key(), entry.value().failed_requests.load(std::sync::atomic::Ordering::Relaxed));
+        }
+        buf.push('\n');
+    }
+
+    // Adaptive concurrency effective limit (Issue #026)
+    if let Some(ref ac) = state.adaptive_concurrency {
+        prom_gauge(&mut buf, "q_flux_upstream_effective_limit",
+            "Current adaptive concurrency effective limit",
+            ac.effective_limit() as u64);
+    }
+
+    // -- static file cache metrics (Issue #034) ----------------------------------
+    prom_counter(&mut buf, "q_flux_cache_hits_total", "Total static file cache hits", crate::static_serve::global_cache_hits());
+    prom_counter(&mut buf, "q_flux_cache_misses_total", "Total static file cache misses", crate::static_serve::global_cache_misses());
 
     // -- libp2p peer metrics (Issue #9) ---------------------------------------
     if let Some(ref tracker) = state.peer_tracker {
@@ -673,6 +769,84 @@ fn handle_peers(state: &AdminState) -> Response<Full<Bytes>> {
 }
 
 // ---------------------------------------------------------------------------
+// GET /backends  (per-backend health + request counters)
+// ---------------------------------------------------------------------------
+
+fn handle_backends(state: &AdminState) -> Response<Full<Bytes>> {
+    let mut backend_entries = Vec::new();
+
+    for backend in state.local_backends.iter().chain(state.cluster_peers.iter()) {
+        let (healthy, half_open, consecutive_failures, response_time_ms) =
+            if let Some(ref hm) = state.health_map {
+                if let Some(entry) = hm.get(backend.as_str()) {
+                    (
+                        entry.is_healthy,
+                        entry.half_open,
+                        entry.consecutive_failures,
+                        entry.last_response_time_ms,
+                    )
+                } else {
+                    (true, false, 0, None)
+                }
+            } else {
+                (true, false, 0, None)
+            };
+
+        let (total_requests, failed_requests) =
+            if let Some(ref counters) = state.backend_counters {
+                if let Some(c) = counters.get(backend.as_str()) {
+                    (
+                        c.value().total_requests.load(std::sync::atomic::Ordering::Relaxed),
+                        c.value().failed_requests.load(std::sync::atomic::Ordering::Relaxed),
+                    )
+                } else {
+                    (0, 0)
+                }
+            } else {
+                (0, 0)
+            };
+
+        let resp_time_json = response_time_ms
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| "null".to_string());
+
+        backend_entries.push(format!(
+            concat!(
+                "{{",
+                r#""addr":"{}","#,
+                r#""healthy":{},"#,
+                r#""half_open":{},"#,
+                r#""consecutive_failures":{},"#,
+                r#""response_time_ms":{},"#,
+                r#""total_requests":{},"#,
+                r#""failed_requests":{}"#,
+                "}}",
+            ),
+            backend,
+            healthy,
+            half_open,
+            consecutive_failures,
+            resp_time_json,
+            total_requests,
+            failed_requests,
+        ));
+    }
+
+    let total = backend_entries.len();
+    let body = format!(
+        r#"{{"total_backends":{},"backends":[{}]}}"#,
+        total,
+        backend_entries.join(","),
+    );
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/json")
+        .body(Full::new(Bytes::from(body)))
+        .unwrap()
+}
+
+// ---------------------------------------------------------------------------
 // 404
 // ---------------------------------------------------------------------------
 
@@ -681,7 +855,7 @@ fn not_found() -> Response<Full<Bytes>> {
         .status(StatusCode::NOT_FOUND)
         .header("Content-Type", "application/json")
         .body(Full::new(Bytes::from(
-            r#"{"error":"not_found","endpoints":["/health","/metrics","/status","/peers","/tls-reload"]}"#,
+            r#"{"error":"not_found","endpoints":["/health","/metrics","/status","/peers","/backends","/tls-reload"]}"#,
         )))
         .unwrap()
 }
@@ -837,11 +1011,26 @@ mod tests {
         let resp = not_found();
         // The body is a Full<Bytes>, which we can check via the expected constant
         // (not_found returns a known static JSON string)
-        let expected = r#"{"error":"not_found","endpoints":["/health","/metrics","/status","/peers","/tls-reload"]}"#;
+        let expected = r#"{"error":"not_found","endpoints":["/health","/metrics","/status","/peers","/backends","/tls-reload"]}"#;
         // Reconstruct what we know: the function uses a static string for the body.
         // Just verify the format from the function definition matches expectations.
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let _ = expected; // verify string compiles
+    }
+
+    #[tokio::test]
+    async fn test_not_found_lists_backends() {
+        use http_body_util::BodyExt as _;
+        let resp = not_found();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let collected = resp.into_body().collect().await.expect("collect not_found body");
+        let body_str =
+            String::from_utf8(collected.to_bytes().to_vec()).expect("body is valid UTF-8");
+        assert!(
+            body_str.contains("/backends"),
+            "not_found response must list /backends endpoint, got: {}",
+            body_str,
+        );
     }
 
     // ── multiple metrics concatenation ──────────────────────────────

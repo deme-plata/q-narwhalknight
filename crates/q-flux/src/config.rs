@@ -21,6 +21,12 @@ pub struct FluxConfig {
     /// io_uring and splice(2) zero-copy configuration.
     #[serde(default)]
     pub io_uring: IoUringSection,
+    /// IP allowlist/blocklist access control (Issue #027).
+    #[serde(default)]
+    pub access_control: AccessControlConfig,
+    /// ACME certificate automation (Issue #021).
+    #[serde(default)]
+    pub acme: AcmeConfig,
 }
 
 /// io_uring and splice(2) zero-copy configuration.
@@ -98,6 +104,90 @@ pub struct StaticConfig {
     #[serde(default = "default_true")]
     pub proxy_compression: bool,
 }
+
+/// IP access control configuration (Issue #027).
+///
+/// Modes:
+/// - `disabled` (default): all IPs allowed
+/// - `blocklist`: listed IPs/CIDRs blocked, all others allowed
+/// - `allowlist`: only listed IPs/CIDRs allowed, all others blocked
+///
+/// Checked BEFORE TLS handshake — blocked IPs consume zero resources.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AccessControlConfig {
+    /// Access control mode: "disabled", "allowlist", or "blocklist".
+    #[serde(default = "default_access_mode")]
+    pub mode: String,
+    /// IP addresses or CIDR ranges to allow (used in allowlist mode).
+    /// Examples: ["10.0.0.0/8", "192.168.1.100"]
+    #[serde(default)]
+    pub allowlist: Vec<String>,
+    /// IP addresses or CIDR ranges to block (used in blocklist mode).
+    /// Examples: ["10.0.0.0/8", "192.168.1.0/24"]
+    #[serde(default)]
+    pub blocklist: Vec<String>,
+}
+
+impl Default for AccessControlConfig {
+    fn default() -> Self {
+        Self {
+            mode: "disabled".to_string(),
+            allowlist: Vec::new(),
+            blocklist: Vec::new(),
+        }
+    }
+}
+
+fn default_access_mode() -> String { "disabled".to_string() }
+
+/// ACME certificate automation configuration (Issue #021).
+///
+/// When enabled, q-flux automatically obtains and renews TLS certificates
+/// from Let's Encrypt (or another ACME CA) using the HTTP-01 challenge.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AcmeConfig {
+    /// Enable ACME certificate automation. Default: false.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Domain names to obtain certificates for.
+    /// Example: ["quillon.xyz", "www.quillon.xyz"]
+    #[serde(default)]
+    pub domains: Vec<String>,
+    /// Contact email for the ACME account (used for expiry notifications).
+    #[serde(default)]
+    pub email: Option<String>,
+    /// ACME directory URL. Default: Let's Encrypt production.
+    #[serde(default = "default_acme_directory")]
+    pub directory_url: String,
+    /// Directory to store certificates and account keys.
+    /// Default: "/etc/q-flux/acme"
+    #[serde(default = "default_acme_cert_dir")]
+    pub cert_dir: std::path::PathBuf,
+    /// Days before expiry to trigger renewal. Default: 30.
+    #[serde(default = "default_acme_renewal_days")]
+    pub renewal_days: u32,
+}
+
+impl Default for AcmeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            domains: Vec::new(),
+            email: None,
+            directory_url: default_acme_directory(),
+            cert_dir: default_acme_cert_dir(),
+            renewal_days: default_acme_renewal_days(),
+        }
+    }
+}
+
+fn default_acme_directory() -> String {
+    "https://acme-v02.api.letsencrypt.org/directory".to_string()
+}
+fn default_acme_cert_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from("/etc/q-flux/acme")
+}
+fn default_acme_renewal_days() -> u32 { 30 }
 
 fn default_spa_fallback() -> bool { true }
 fn default_true() -> bool { true }
@@ -198,6 +288,12 @@ pub struct LimitsConfig {
     pub max_conns_per_ip: usize,
     #[serde(default = "default_request_body_limit")]
     pub request_body_limit: usize,
+    /// Request body size threshold (bytes) above which the body is streamed
+    /// directly to the upstream instead of being fully buffered first.
+    /// Streaming bodies cannot be retried on a different backend (body is consumed).
+    /// Default: 10MB. Set to 0 to disable streaming (always buffer).
+    #[serde(default = "default_streaming_body_threshold")]
+    pub streaming_body_threshold: usize,
     /// Token-bucket rate limit per IP (requests/sec). 0 = disabled.
     #[serde(default = "default_rate_limit_per_ip")]
     pub rate_limit_per_ip: usize,
@@ -235,6 +331,7 @@ fn default_max_conns_per_ip() -> usize { 500 }
 fn default_request_body_limit() -> usize { 25 * 1024 * 1024 } // 25MB
 fn default_log_level() -> String { "info".into() }
 
+fn default_streaming_body_threshold() -> usize { 10 * 1024 * 1024 } // 10MB
 fn default_rate_limit_per_ip() -> usize { 100 }
 fn default_rate_limit_burst() -> usize { 200 }
 fn default_rate_limit_global_rps() -> usize { 100_000 }
@@ -273,6 +370,7 @@ impl Default for LimitsConfig {
             max_connections: default_max_connections(),
             max_conns_per_ip: default_max_conns_per_ip(),
             request_body_limit: default_request_body_limit(),
+            streaming_body_threshold: default_streaming_body_threshold(),
             rate_limit_per_ip: default_rate_limit_per_ip(),
             rate_limit_burst: default_rate_limit_burst(),
             rate_limit_global_rps: default_rate_limit_global_rps(),
@@ -458,6 +556,8 @@ mod tests {
             static_files: StaticConfig::default(),
             cluster: ClusterConfig::default(),
             io_uring: IoUringSection::default(),
+            access_control: AccessControlConfig::default(),
+            acme: AcmeConfig::default(),
         }
     }
 

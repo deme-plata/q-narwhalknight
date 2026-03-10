@@ -476,6 +476,16 @@ pub enum StreamEvent {
         reason: Option<String>,
         timestamp: chrono::DateTime<chrono::Utc>,
     },
+
+    /// v9.5.0: Starship Endgame — Compute orchestrator status update
+    ComputeStatus {
+        mode: String,
+        ai_inference: Option<serde_json::Value>,
+        layers: Vec<serde_json::Value>,
+        trainer_active: bool,
+        performance_boost_pct: f32,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
 }
 
 /// v1.4.3: Oracle source information for SSE events
@@ -1249,6 +1259,7 @@ fn event_type_name(event: &StreamEvent) -> String {
         StreamEvent::CalendarReminder { .. } => "calendar-reminder".to_string(),
         StreamEvent::ScheduledTransactionExecuted { .. } => "scheduled-tx-executed".to_string(),
         StreamEvent::MiningModeSwitch { .. } => "mining-mode-switch".to_string(),
+        StreamEvent::ComputeStatus { .. } => "compute-status".to_string(),
     }
 }
 

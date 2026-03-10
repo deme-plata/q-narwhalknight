@@ -4157,6 +4157,14 @@ impl NetworkId {
     pub fn update_announcements_topic(&self) -> String {
         format!("{}/update-announcements", self.gossipsub_topic_prefix())
     }
+
+    /// v9.5.0: Compute tunnel peer discovery topic (Starship Endgame #002)
+    /// Nodes publish their compute capacity (CPU, GPU, RAM, bandwidth) so
+    /// peers can discover resources for distributed task routing.
+    /// Topic: /qnk/{network}/compute-tunnel
+    pub fn compute_tunnel_topic(&self) -> String {
+        format!("{}/compute-tunnel", self.gossipsub_topic_prefix())
+    }
 }
 
 impl std::str::FromStr for NetworkId {

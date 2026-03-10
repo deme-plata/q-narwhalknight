@@ -5,7 +5,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tracing_subscriber::EnvFilter;
 
+mod access_control;
 mod access_log;
+mod acme;
 mod admin;
 mod config;
 mod acceptor;
@@ -16,6 +18,10 @@ mod metrics;
 mod health;
 mod static_serve;
 mod tui;
+
+// Issue #017: kTLS kernel TLS offload
+#[cfg(target_os = "linux")]
+mod ktls;
 
 // Phase 2+ modules (compiled but wired in incrementally)
 #[cfg(target_os = "linux")]
@@ -184,6 +190,74 @@ fn main() -> anyhow::Result<()> {
         None
     };
 
+    // Issue #027: IP access control (allowlist/blocklist with CIDR)
+    let access_control = match access_control::AccessControl::new(
+        &config.access_control.mode,
+        &config.access_control.allowlist,
+        &config.access_control.blocklist,
+    ) {
+        Ok(ac) => {
+            if ac.is_active() {
+                tracing::info!(
+                    mode = ac.mode_name(),
+                    rules = ac.rule_count(),
+                    "IP access control: {} mode with {} rules",
+                    ac.mode_name(),
+                    ac.rule_count(),
+                );
+            } else {
+                tracing::info!("IP access control: disabled");
+            }
+            Arc::new(ac)
+        }
+        Err(e) => {
+            anyhow::bail!("Invalid access_control config: {}", e);
+        }
+    };
+
+    // Issue #021: ACME certificate automation
+    let acme_challenge_store: acme::ChallengeStore = Arc::new(parking_lot::RwLock::new(
+        std::collections::HashMap::new(),
+    ));
+    if config.acme.enabled {
+        let acme_config = config.acme.clone();
+        let shared_tls_for_acme = shared_tls.clone();
+        let tls_config_for_acme = config.tls.clone();
+        let challenge_store = acme_challenge_store.clone();
+        std::thread::Builder::new()
+            .name("q-flux-acme".into())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Failed to build ACME runtime");
+                rt.block_on(async move {
+                    acme::acme_renewal_task(
+                        acme_config,
+                        shared_tls_for_acme,
+                        tls_config_for_acme,
+                        challenge_store,
+                    ).await;
+                });
+            })
+            .expect("Failed to spawn ACME thread");
+        tracing::info!(
+            domains = ?config.acme.domains,
+            "ACME certificate automation started (renewal check every 12h)"
+        );
+    }
+
+    // Issue #026: Global backend request counters (shared across all workers + admin)
+    let global_backend_counters: Arc<dashmap::DashMap<String, Arc<upstream::BackendCounters>>> =
+        Arc::new(dashmap::DashMap::new());
+    // Pre-populate for all known backends
+    for b in &config.upstream.backends {
+        global_backend_counters.insert(b.clone(), Arc::new(upstream::BackendCounters::new()));
+    }
+    for p in &config.cluster.peers {
+        global_backend_counters.insert(p.clone(), Arc::new(upstream::BackendCounters::new()));
+    }
+
     // Log listen addresses
     for addr in &config.server.listen {
         tracing::info!("Listening on {}", addr);
@@ -326,6 +400,9 @@ fn main() -> anyhow::Result<()> {
         rate_limiter,
         peer_tracker.clone(),
         drain_rx,
+        access_control,
+        acme_challenge_store,
+        global_backend_counters.clone(),
     );
 
     tracing::info!("All {} workers started -- q-flux is ready", worker_count);
@@ -342,6 +419,8 @@ fn main() -> anyhow::Result<()> {
         config.cluster.peers.clone(),
         Some(peer_tracker),
         Some(ocsp_status),
+        Some(global_backend_counters),
+        None, // adaptive concurrency — populated per-worker; admin reads via metrics
     );
 
     if tui_mode {

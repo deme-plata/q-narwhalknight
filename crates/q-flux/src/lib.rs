@@ -1,4 +1,6 @@
+pub mod access_control;
 pub mod access_log;
+pub mod acme;
 pub mod admin;
 pub mod config;
 pub mod acceptor;
@@ -9,6 +11,10 @@ pub mod metrics;
 pub mod health;
 pub mod static_serve;
 pub mod tui;
+
+// Issue #017: kTLS kernel TLS offload
+#[cfg(target_os = "linux")]
+pub mod ktls;
 
 // Phase 2: io_uring + SIMD
 #[cfg(target_os = "linux")]

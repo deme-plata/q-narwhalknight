@@ -51,6 +51,43 @@ impl LatencyHistogram {
         self.buckets[9].fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Estimate a percentile (0.0–1.0) from the histogram using linear interpolation.
+    /// Returns the estimated latency in seconds.
+    pub fn percentile_seconds(&self, p: f64) -> f64 {
+        let total = self.count.load(Ordering::Relaxed);
+        if total == 0 {
+            return 0.0;
+        }
+        let target = (total as f64 * p).ceil() as u64;
+
+        // Collect non-cumulative bucket counts
+        let mut counts = [0u64; 10];
+        for i in 0..10 {
+            counts[i] = self.buckets[i].load(Ordering::Relaxed);
+        }
+
+        // Walk buckets to find which one contains the target observation
+        let mut cumulative = 0u64;
+        let lower_bounds_us: [u64; 10] = [0, 1_000, 5_000, 10_000, 25_000, 50_000, 100_000, 250_000, 500_000, 1_000_000];
+        for i in 0..10 {
+            cumulative += counts[i];
+            if cumulative >= target {
+                // Linear interpolation within this bucket
+                let prev_cum = cumulative - counts[i];
+                let lower = lower_bounds_us[i] as f64;
+                let upper = self.bounds_us[i] as f64;
+                let fraction = if counts[i] > 0 {
+                    (target - prev_cum) as f64 / counts[i] as f64
+                } else {
+                    0.5
+                };
+                return (lower + fraction * (upper - lower)) / 1_000_000.0;
+            }
+        }
+        // Beyond last bucket
+        5.0
+    }
+
     /// Format as Prometheus histogram lines.
     pub fn prometheus(&self, name: &str) -> String {
         let mut out = format!(
@@ -300,6 +337,21 @@ impl Metrics {
     /// Export just the latency histogram in Prometheus text format.
     pub fn prometheus_export_histogram(&self) -> String {
         self.inner.latency.prometheus("q_flux_request_duration_seconds")
+    }
+
+    /// P50 latency in seconds.
+    pub fn latency_p50(&self) -> f64 {
+        self.inner.latency.percentile_seconds(0.5)
+    }
+
+    /// P95 latency in seconds.
+    pub fn latency_p95(&self) -> f64 {
+        self.inner.latency.percentile_seconds(0.95)
+    }
+
+    /// P99 latency in seconds.
+    pub fn latency_p99(&self) -> f64 {
+        self.inner.latency.percentile_seconds(0.99)
     }
 
     /// Export all metrics in Prometheus text format.
@@ -694,5 +746,37 @@ mod tests {
         assert_eq!(m.snapshot().drain_active, 0);
         assert_eq!(m.snapshot().drain_completed_total, 1);
         assert_eq!(m.snapshot().drain_forced_total, 2);
+    }
+
+    #[test]
+    fn test_latency_percentile() {
+        let hist = LatencyHistogram::new();
+        // Add 100 observations at 1ms
+        for _ in 0..100 {
+            hist.observe(Duration::from_millis(1));
+        }
+        let p50 = hist.percentile_seconds(0.5);
+        assert!(p50 > 0.0 && p50 <= 0.001, "P50 should be ~1ms, got {}", p50);
+        let p99 = hist.percentile_seconds(0.99);
+        assert!(p99 > 0.0 && p99 <= 0.001, "P99 should be ~1ms, got {}", p99);
+    }
+
+    #[test]
+    fn test_latency_percentile_empty() {
+        let hist = LatencyHistogram::new();
+        assert_eq!(hist.percentile_seconds(0.5), 0.0);
+    }
+
+    #[test]
+    fn test_latency_percentile_spread() {
+        let hist = LatencyHistogram::new();
+        for _ in 0..50 { hist.observe(Duration::from_millis(1)); }
+        for _ in 0..50 { hist.observe(Duration::from_millis(100)); }
+        let p50 = hist.percentile_seconds(0.5);
+        // P50 should be around 1ms (50th of 100 observations, first 50 are 1ms)
+        assert!(p50 <= 0.005, "P50 should be <=5ms, got {}", p50);
+        let p99 = hist.percentile_seconds(0.99);
+        // P99 should be around 100ms
+        assert!(p99 >= 0.01, "P99 should be >=10ms, got {}", p99);
     }
 }

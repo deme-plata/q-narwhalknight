@@ -43,6 +43,7 @@ pub mod sampling;
 pub mod generation;
 pub mod distributed_cache;
 pub mod engine_trait; // v5.1.0: Unified InferenceEngine trait for all backends (always compiled)
+pub mod model_catalog; // v9.5.0: Model catalog for available inference models
 
 // Feature-gated modules
 #[cfg(feature = "legacy-mistralrs")]

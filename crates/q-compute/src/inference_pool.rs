@@ -22,6 +22,14 @@ use tracing::{info, warn, debug, error};
 /// Per-token price in micro-QUG (default: 1 micro-QUG per token = 0.000001 QUG)
 pub const DEFAULT_PRICE_PER_TOKEN_MICRO_QUG: u64 = 1;
 
+/// v9.5.1: Read price per token from env var, fallback to default (#014)
+pub fn configured_price_per_token() -> u64 {
+    std::env::var("INFERENCE_PRICE_PER_TOKEN")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_PRICE_PER_TOKEN_MICRO_QUG)
+}
+
 /// Inference task submitted to the pool
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InferenceTask {
@@ -63,6 +71,10 @@ pub struct AIInferenceStats {
     pub active_since_ms: u64,
     pub tasks_in_queue: u32,
     pub active_tasks: u32,
+    /// v9.5.1: Per-token price in micro-QUG (#014)
+    pub price_per_token_micro_qug: u64,
+    /// v9.5.1: Max concurrent tasks (synced from orchestrator core budget)
+    pub max_concurrent: u64,
 }
 
 /// The Inference Worker Pool — runs inference on orchestrator-assigned cores
@@ -194,8 +206,10 @@ impl InferenceWorkerPool {
         let max_concurrent = self.max_concurrent.clone();
         let orch_record = self.orchestrator_record.clone();
 
+        let price_per_token = configured_price_per_token();
+
         tokio::spawn(async move {
-            info!("🧠 [INFERENCE POOL] Background worker started");
+            info!("🧠 [INFERENCE POOL] Background worker started (price={} µQUG/token)", price_per_token);
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
 
             loop {
@@ -253,7 +267,7 @@ impl InferenceWorkerPool {
                         Ok(text) => {
                             let stats = eng.get_stats().await;
                             let tokens = stats.tokens_generated;
-                            let revenue = tokens as u64 * DEFAULT_PRICE_PER_TOKEN_MICRO_QUG;
+                            let revenue = tokens as u64 * price_per_token;
 
                             ct.fetch_add(1, Ordering::Relaxed);
                             tt.fetch_add(tokens as u64, Ordering::Relaxed);
@@ -313,6 +327,8 @@ impl InferenceWorkerPool {
             active_since_ms: self.started_ms,
             tasks_in_queue: self.task_queue.read().len() as u32,
             active_tasks: self.active_tasks.load(Ordering::Relaxed) as u32,
+            price_per_token_micro_qug: configured_price_per_token(),
+            max_concurrent: self.max_concurrent.load(Ordering::Relaxed),
         }
     }
 
@@ -359,6 +375,25 @@ mod tests {
         pool.update_cores(vec![]);
         assert!(!pool.is_accepting());
         assert_eq!(pool.max_concurrent.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_configured_price_default() {
+        // Without env var, should return default
+        let price = configured_price_per_token();
+        assert!(price >= 1, "Default price should be at least 1 µQUG/token");
+    }
+
+    #[test]
+    fn test_stats_include_pricing() {
+        let pool = InferenceWorkerPool::new();
+        let stats = pool.stats();
+        assert!(stats.price_per_token_micro_qug >= 1);
+        assert_eq!(stats.max_concurrent, 0); // No cores assigned yet
+
+        pool.update_cores(vec![0, 1, 2, 3]);
+        let stats = pool.stats();
+        assert_eq!(stats.max_concurrent, 2); // 4 cores / 2
     }
 
     #[test]

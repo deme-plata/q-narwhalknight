@@ -61,6 +61,18 @@ struct CachedFile {
     mtime_secs: u64,
 }
 
+// Global cache metrics (aggregated across all workers)
+static GLOBAL_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+static GLOBAL_CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
+
+pub fn global_cache_hits() -> u64 {
+    GLOBAL_CACHE_HITS.load(Ordering::Relaxed)
+}
+
+pub fn global_cache_misses() -> u64 {
+    GLOBAL_CACHE_MISSES.load(Ordering::Relaxed)
+}
+
 /// Thread-safe in-memory file cache. Pre-compresses text assets on insert.
 /// Keyed by relative path (e.g., "assets/index-CgzZl2jy.js").
 pub struct FileCache {
@@ -72,6 +84,8 @@ pub struct FileCache {
     root: PathBuf,
     /// Canonicalized root for safe-path checks (computed once at startup).
     canonical_root: PathBuf,
+    pub cache_hits: AtomicU64,
+    pub cache_misses: AtomicU64,
 }
 
 impl FileCache {
@@ -86,6 +100,8 @@ impl FileCache {
             gzip_enabled: config.gzip,
             root: root.clone(),
             canonical_root,
+            cache_hits: AtomicU64::new(0),
+            cache_misses: AtomicU64::new(0),
         }))
     }
 
@@ -191,6 +207,14 @@ impl FileCache {
         let entries = self.entries.read().len();
         let bytes = self.total_bytes.load(Ordering::Relaxed);
         (entries, bytes)
+    }
+
+    pub fn hits(&self) -> u64 {
+        self.cache_hits.load(Ordering::Relaxed)
+    }
+
+    pub fn misses(&self) -> u64 {
+        self.cache_misses.load(Ordering::Relaxed)
     }
 }
 
@@ -300,17 +324,22 @@ pub async fn serve_file<S: AsyncWrite + Unpin>(
                 .map(|s| s.to_string());
 
             if let Some(rel) = rel_path {
-                // Try cache lookup, or insert on miss
-                let cached = file_cache.get(&rel).or_else(|| {
-                    if file_cache.is_safe(&resp.path) {
-                        file_cache.insert(&rel, &resp.path, resp.mime, resp.cache_control)
-                    } else {
-                        None
-                    }
-                });
-
-                if let Some(entry) = cached {
+                // Try cache lookup first
+                if let Some(entry) = file_cache.get(&rel) {
+                    // Cache hit
+                    file_cache.cache_hits.fetch_add(1, Ordering::Relaxed);
+                    GLOBAL_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
                     return serve_cached(stream, &entry, method, if_none_match, accepts_gzip, resp.cache_control, metrics).await;
+                }
+
+                // Cache miss — try to insert from disk
+                file_cache.cache_misses.fetch_add(1, Ordering::Relaxed);
+                GLOBAL_CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
+
+                if file_cache.is_safe(&resp.path) {
+                    if let Some(entry) = file_cache.insert(&rel, &resp.path, resp.mime, resp.cache_control) {
+                        return serve_cached(stream, &entry, method, if_none_match, accepts_gzip, resp.cache_control, metrics).await;
+                    }
                 }
             }
         }

@@ -223,13 +223,18 @@ pub async fn lock_qug(
         *entry = entry.saturating_add(amount_raw);
     }
 
-    // Persist
+    // Persist vault + balances
     if let Err(e) = persist_vault(&state).await {
         warn!("Failed to persist QCREDIT vault: {}", e);
     }
     let _ = state.storage_engine.save_token_balance(&auth.address, &QCREDIT_TOKEN_ADDRESS, {
         let tb = state.token_balances.read().await;
         tb.get(&(auth.address, QCREDIT_TOKEN_ADDRESS)).copied().unwrap_or(0)
+    }).await;
+    // v9.5.1: Persist QUG balance after deduction
+    let _ = state.storage_engine.save_wallet_balance(&auth.address, {
+        let wb = state.wallet_balances.read().await;
+        wb.get(&auth.address).copied().unwrap_or(0)
     }).await;
 
     info!(
@@ -278,10 +283,20 @@ pub async fn unlock_position(
         *entry = entry.saturating_add(qug_returned.saturating_add(yield_claimed));
     }
 
-    // Persist
+    // Persist vault + balances
     if let Err(e) = persist_vault(&state).await {
         warn!("Failed to persist QCREDIT vault: {}", e);
     }
+    // v9.5.1: Persist QCREDIT token balance after burn
+    let _ = state.storage_engine.save_token_balance(&auth.address, &QCREDIT_TOKEN_ADDRESS, {
+        let tb = state.token_balances.read().await;
+        tb.get(&(auth.address, QCREDIT_TOKEN_ADDRESS)).copied().unwrap_or(0)
+    }).await;
+    // v9.5.1: Persist QUG balance after credit
+    let _ = state.storage_engine.save_wallet_balance(&auth.address, {
+        let wb = state.wallet_balances.read().await;
+        wb.get(&auth.address).copied().unwrap_or(0)
+    }).await;
 
     info!(
         "💳 [QCREDIT] {} unlocked: {} QUG returned + {} yield",
@@ -319,10 +334,15 @@ pub async fn claim_yield(
         *entry = entry.saturating_add(yield_amount);
     }
 
-    // Persist
+    // Persist vault + QUG balance
     if let Err(e) = persist_vault(&state).await {
         warn!("Failed to persist QCREDIT vault: {}", e);
     }
+    // v9.5.1: Persist QUG balance after yield credit
+    let _ = state.storage_engine.save_wallet_balance(&auth.address, {
+        let wb = state.wallet_balances.read().await;
+        wb.get(&auth.address).copied().unwrap_or(0)
+    }).await;
 
     info!(
         "💳 [QCREDIT] {} claimed {} yield",

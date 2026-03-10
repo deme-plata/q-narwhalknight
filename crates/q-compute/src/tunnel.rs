@@ -26,13 +26,215 @@ use crate::{ComputeLayer, ComputePeerInfo, ResourceSnapshot, TunnelInfo, TunnelT
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use parking_lot::RwLock;
+use tokio::sync::mpsc;
 use tracing::{info, warn, debug};
 
 /// TTL for known peers in seconds — peers not re-announced within this
 /// window are considered stale and evicted.
 const PEER_TTL_SECS: u64 = 60;
+
+/// Maximum number of concurrent streams per tunnel.
+const MAX_STREAMS_PER_TUNNEL: usize = 8;
+
+/// Handshake timeout in seconds.
+const HANDSHAKE_TIMEOUT_SECS: u64 = 5;
+
+/// Maximum new tunnels that `auto_connect_to_best_peers` opens per call.
+const MAX_AUTO_OPENS_PER_CALL: usize = 2;
+
+// ═══════════════════════════════════════════════════════════════════
+// Tunnel Handshake — capability negotiation between peers
+// ═══════════════════════════════════════════════════════════════════
+
+/// Handshake sent by the initiator to open a compute tunnel.
+///
+/// Contains the initiator's identity, a random nonce for replay protection,
+/// the list of compute capabilities offered, and a protocol version for
+/// forward compatibility.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TunnelHandshake {
+    pub initiator_peer_id: String,
+    pub responder_peer_id: String,
+    pub nonce: [u8; 32],
+    pub capabilities: Vec<String>, // ["mining", "inference", "bridge-verify"]
+    pub protocol_version: u32,
+    pub timestamp: u64,
+}
+
+impl TunnelHandshake {
+    /// Create a new handshake for the given peer pair.
+    pub fn new(initiator: &str, responder: &str, capabilities: Vec<String>) -> Self {
+        let mut nonce = [0u8; 32];
+        // Simple nonce generation — production would use CSPRNG
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        for (i, byte) in nonce.iter_mut().enumerate() {
+            *byte = ((seed >> (i % 16)) & 0xFF) as u8 ^ (i as u8);
+        }
+
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        Self {
+            initiator_peer_id: initiator.to_string(),
+            responder_peer_id: responder.to_string(),
+            nonce,
+            capabilities,
+            protocol_version: 1,
+            timestamp,
+        }
+    }
+}
+
+/// Response to a `TunnelHandshake`.
+///
+/// The responder either accepts (returning its own nonce and matching
+/// capabilities) or rejects (with a human-readable reason).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HandshakeResponse {
+    pub accepted: bool,
+    pub nonce: [u8; 32],           // responder's nonce
+    pub capabilities: Vec<String>, // intersection of supported capabilities
+    pub reason: Option<String>,    // populated when rejected
+}
+
+impl HandshakeResponse {
+    /// Create an acceptance response with the responder's own nonce and the
+    /// intersection of capabilities that both peers support.
+    pub fn accept(responder_caps: Vec<String>) -> Self {
+        let mut nonce = [0u8; 32];
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        for (i, byte) in nonce.iter_mut().enumerate() {
+            *byte = ((seed >> (i % 16)) & 0xFF) as u8 ^ (i as u8).wrapping_add(0xAA);
+        }
+
+        Self {
+            accepted: true,
+            nonce,
+            capabilities: responder_caps,
+            reason: None,
+        }
+    }
+
+    /// Create a rejection response with the given reason.
+    pub fn reject(reason: &str) -> Self {
+        Self {
+            accepted: false,
+            nonce: [0u8; 32],
+            capabilities: Vec::new(),
+            reason: Some(reason.to_string()),
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Tunnel State Machine
+// ═══════════════════════════════════════════════════════════════════
+
+/// Lifecycle state of a compute tunnel.
+///
+/// ```text
+/// Handshaking ──(accepted)──> Active ──(drain)──> Draining ──> Closed
+///      │                                                         ^
+///      └───────(rejected / timeout)──────────────────────────────┘
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TunnelState {
+    /// Waiting for handshake response from the remote peer.
+    Handshaking,
+    /// Tunnel is fully established and carrying traffic.
+    Active,
+    /// Graceful shutdown — finish pending tasks, reject new ones.
+    Draining,
+    /// Tunnel is closed and will be cleaned up.
+    Closed,
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Multiplexed Streams — multiple logical channels per tunnel
+// ═══════════════════════════════════════════════════════════════════
+
+/// Type of a multiplexed stream within a tunnel.
+///
+/// Each tunnel can carry up to `MAX_STREAMS_PER_TUNNEL` concurrent streams,
+/// each dedicated to a different workload type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum StreamType {
+    Mining,
+    Inference,
+    BridgeVerify,
+    TensorShard,
+    Control,
+}
+
+impl std::fmt::Display for StreamType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StreamType::Mining => write!(f, "mining"),
+            StreamType::Inference => write!(f, "inference"),
+            StreamType::BridgeVerify => write!(f, "bridge-verify"),
+            StreamType::TensorShard => write!(f, "tensor-shard"),
+            StreamType::Control => write!(f, "control"),
+        }
+    }
+}
+
+/// A single multiplexed stream within a compute tunnel.
+///
+/// Each stream has its own typed send channel but shares the tunnel's
+/// underlying transport. Streams track their own byte counters for
+/// per-workload accounting.
+pub struct TunnelStream {
+    pub stream_type: StreamType,
+    pub stream_id: u64,
+    pub tx: mpsc::Sender<TunnelPayload>,
+    pub created_at: Instant,
+    pub bytes_sent: Arc<AtomicU64>,
+    pub bytes_received: Arc<AtomicU64>,
+}
+
+impl TunnelStream {
+    /// Send a payload through this stream.
+    ///
+    /// Returns `Ok(())` if queued, `Err` if the channel is closed or full.
+    pub async fn send(&self, payload: TunnelPayload) -> Result<(), mpsc::error::SendError<TunnelPayload>> {
+        self.tx.send(payload).await
+    }
+
+    /// Record bytes sent through this stream.
+    pub fn record_send(&self, bytes: u64) {
+        self.bytes_sent.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// Record bytes received through this stream.
+    pub fn record_receive(&self, bytes: u64) {
+        self.bytes_received.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// Total bytes sent since stream creation.
+    pub fn total_bytes_sent(&self) -> u64 {
+        self.bytes_sent.load(Ordering::Relaxed)
+    }
+
+    /// Total bytes received since stream creation.
+    pub fn total_bytes_received(&self) -> u64 {
+        self.bytes_received.load(Ordering::Relaxed)
+    }
+
+    /// Elapsed time since the stream was created.
+    pub fn age(&self) -> std::time::Duration {
+        self.created_at.elapsed()
+    }
+}
 
 /// Work item sent through a tunnel
 #[derive(Debug, Clone)]
@@ -78,36 +280,74 @@ pub enum TunnelPayload {
     },
 }
 
-/// A single compute tunnel to a remote peer
+/// A single compute tunnel to a remote peer.
+///
+/// Now includes lifecycle state tracking (`TunnelState`) and multiplexed
+/// streams (`TunnelStream`). A tunnel starts in `Handshaking` state and
+/// transitions to `Active` once the handshake succeeds. Multiple logical
+/// streams can be opened on an active tunnel (up to `MAX_STREAMS_PER_TUNNEL`).
 pub struct ComputeTunnel {
     pub peer_id: String,
     pub tunnel_type: TunnelType,
     pub established_ms: u64,
     pub encrypted: bool,
+    pub state: RwLock<TunnelState>,
+    /// Negotiated capabilities from the handshake (empty until Active).
+    pub negotiated_capabilities: Vec<String>,
     bytes_sent: Arc<AtomicU64>,
     bytes_received: Arc<AtomicU64>,
     tasks_routed: Arc<AtomicU64>,
     latency_ms: Arc<AtomicU64>,
     active: Arc<AtomicBool>,
+    /// Monotonic stream ID counter for this tunnel.
+    next_stream_id: AtomicU64,
+    /// Active multiplexed streams keyed by stream_id.
+    streams: RwLock<HashMap<u64, TunnelStream>>,
+    /// Shared receive side for stream payloads — the tunnel's transport
+    /// layer drains this and dispatches to the appropriate stream.
+    stream_rx: RwLock<Option<mpsc::Receiver<TunnelPayload>>>,
+    /// Sender clone-able handle that new streams use.
+    stream_tx: mpsc::Sender<TunnelPayload>,
 }
 
 impl ComputeTunnel {
     pub fn new(peer_id: String, tunnel_type: TunnelType) -> Self {
+        Self::with_state(peer_id, tunnel_type, TunnelState::Active)
+    }
+
+    /// Create a tunnel in a specific initial state.
+    ///
+    /// Use `TunnelState::Handshaking` when the tunnel is being opened with
+    /// the handshake protocol; use `TunnelState::Active` for the legacy
+    /// code path that skips handshake.
+    pub fn with_state(peer_id: String, tunnel_type: TunnelType, state: TunnelState) -> Self {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
+
+        // Shared channel for all streams in this tunnel.
+        // Buffer of 256 — large enough to absorb bursts without blocking.
+        let (stream_tx, stream_rx) = mpsc::channel(256);
+
+        let is_active = state == TunnelState::Active || state == TunnelState::Handshaking;
 
         Self {
             peer_id,
             tunnel_type,
             established_ms: now,
             encrypted: true,
+            state: RwLock::new(state),
+            negotiated_capabilities: Vec::new(),
             bytes_sent: Arc::new(AtomicU64::new(0)),
             bytes_received: Arc::new(AtomicU64::new(0)),
             tasks_routed: Arc::new(AtomicU64::new(0)),
             latency_ms: Arc::new(AtomicU64::new(0)),
-            active: Arc::new(AtomicBool::new(true)),
+            active: Arc::new(AtomicBool::new(is_active)),
+            next_stream_id: AtomicU64::new(1),
+            streams: RwLock::new(HashMap::new()),
+            stream_rx: RwLock::new(Some(stream_rx)),
+            stream_tx,
         }
     }
 
@@ -138,7 +378,130 @@ impl ComputeTunnel {
 
     /// Close this tunnel
     pub fn close(&self) {
+        *self.state.write() = TunnelState::Closed;
         self.active.store(false, Ordering::SeqCst);
+        // Drop all streams
+        self.streams.write().clear();
+    }
+
+    /// Transition to a new state. Returns `false` if the transition is invalid.
+    pub fn transition_to(&self, new_state: TunnelState) -> bool {
+        let current = self.state.read().clone();
+        let valid = match (&current, &new_state) {
+            (TunnelState::Handshaking, TunnelState::Active) => true,
+            (TunnelState::Handshaking, TunnelState::Closed) => true,
+            (TunnelState::Active, TunnelState::Draining) => true,
+            (TunnelState::Active, TunnelState::Closed) => true,
+            (TunnelState::Draining, TunnelState::Closed) => true,
+            _ => false,
+        };
+
+        if valid {
+            debug!(
+                "🔗 [TUNNEL] {} state {:?} -> {:?}",
+                self.peer_id, current, new_state
+            );
+            if new_state == TunnelState::Closed {
+                self.active.store(false, Ordering::SeqCst);
+                self.streams.write().clear();
+            }
+            *self.state.write() = new_state;
+        } else {
+            warn!(
+                "🔗 [TUNNEL] Invalid state transition {:?} -> {:?} for {}",
+                current, new_state, self.peer_id
+            );
+        }
+
+        valid
+    }
+
+    // ─── Multiplexed stream management ───────────────────────────
+
+    /// Open a new multiplexed stream on this tunnel.
+    ///
+    /// Each stream gets its own `TunnelPayload` sender that shares the
+    /// tunnel's underlying transport channel. Returns an error if the
+    /// tunnel is not `Active` or the per-tunnel stream limit is reached.
+    pub fn open_stream(&self, stream_type: StreamType) -> Result<u64, String> {
+        let current_state = self.state.read().clone();
+        if current_state != TunnelState::Active {
+            return Err(format!(
+                "Cannot open stream on tunnel in {:?} state",
+                current_state
+            ));
+        }
+
+        let mut streams = self.streams.write();
+        if streams.len() >= MAX_STREAMS_PER_TUNNEL {
+            return Err(format!(
+                "Stream limit reached ({}/{})",
+                streams.len(),
+                MAX_STREAMS_PER_TUNNEL
+            ));
+        }
+
+        let stream_id = self.next_stream_id.fetch_add(1, Ordering::Relaxed);
+        let stream = TunnelStream {
+            stream_type,
+            stream_id,
+            tx: self.stream_tx.clone(),
+            created_at: Instant::now(),
+            bytes_sent: Arc::new(AtomicU64::new(0)),
+            bytes_received: Arc::new(AtomicU64::new(0)),
+        };
+
+        debug!(
+            "🔗 [TUNNEL] Opened {} stream #{} on tunnel to {} ({}/{})",
+            stream_type,
+            stream_id,
+            self.peer_id,
+            streams.len() + 1,
+            MAX_STREAMS_PER_TUNNEL,
+        );
+
+        streams.insert(stream_id, stream);
+        Ok(stream_id)
+    }
+
+    /// Close a stream by ID.
+    pub fn close_stream(&self, stream_id: u64) -> bool {
+        let mut streams = self.streams.write();
+        if let Some(stream) = streams.remove(&stream_id) {
+            debug!(
+                "🔗 [TUNNEL] Closed {} stream #{} on tunnel to {} (sent={}B, recv={}B)",
+                stream.stream_type,
+                stream_id,
+                self.peer_id,
+                stream.total_bytes_sent(),
+                stream.total_bytes_received(),
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Number of currently open streams.
+    pub fn stream_count(&self) -> usize {
+        self.streams.read().len()
+    }
+
+    /// Get the sender handle for a specific stream.
+    ///
+    /// The caller can use the returned `Sender` to push payloads into the
+    /// tunnel's transport. Returns `None` if the stream does not exist.
+    pub fn stream_sender(&self, stream_id: u64) -> Option<mpsc::Sender<TunnelPayload>> {
+        self.streams.read().get(&stream_id).map(|s| s.tx.clone())
+    }
+
+    /// Take the receive half of the shared transport channel.
+    ///
+    /// This should be called once by the transport layer that drains
+    /// payloads and writes them to the network. Returns `None` on
+    /// subsequent calls.
+    pub fn take_receiver(&self) -> Option<mpsc::Receiver<TunnelPayload>> {
+        self.stream_rx.write().take()
     }
 
     /// Get tunnel info snapshot for dashboard
@@ -410,23 +773,79 @@ fn compute_peer_score(peer: &ComputePeerInfo, task_type: &str) -> f64 {
 // Tunnel Manager — tracks all active tunnels to peers
 // ═══════════════════════════════════════════════════════════════════
 
-/// Tunnel manager — tracks all active tunnels to peers
+/// Tunnel manager — tracks all active tunnels to peers.
+///
+/// Supports two modes of opening a tunnel:
+/// - **Legacy** (`open_tunnel`): Immediately transitions to `Active`.
+/// - **Handshake** (`open_tunnel_with_handshake`): Starts in `Handshaking`,
+///   sends a `TunnelHandshake`, waits for `HandshakeResponse`, then
+///   transitions to `Active` on success.
+///
+/// The manager also exposes `auto_connect_to_best_peers()` which can be
+/// called from a scheduler loop (e.g., every 30 seconds) to proactively
+/// open tunnels to high-score discovered peers.
 pub struct TunnelManager {
     tunnels: Arc<RwLock<HashMap<String, ComputeTunnel>>>,
     max_tunnels: usize,
     total_tasks_routed: Arc<AtomicU64>,
     /// Registry of known compute peers discovered via gossipsub
     peer_registry: Arc<PeerRegistry>,
+    /// Our own peer ID — used as `initiator_peer_id` in handshakes.
+    local_peer_id: String,
+    /// Our advertised capabilities for handshake negotiation.
+    local_capabilities: Vec<String>,
+    /// Channel for sending handshake messages to the P2P transport layer.
+    /// The transport layer reads from the corresponding receiver and
+    /// publishes handshake messages to the peer.
+    handshake_tx: mpsc::Sender<(String, Vec<u8>)>,
+    /// Receiver is taken once by the transport layer.
+    handshake_rx: RwLock<Option<mpsc::Receiver<(String, Vec<u8>)>>>,
 }
 
 impl TunnelManager {
     pub fn new(max_tunnels: usize) -> Self {
+        let (handshake_tx, handshake_rx) = mpsc::channel(64);
         Self {
             tunnels: Arc::new(RwLock::new(HashMap::new())),
             max_tunnels,
             total_tasks_routed: Arc::new(AtomicU64::new(0)),
             peer_registry: Arc::new(PeerRegistry::new()),
+            local_peer_id: String::new(),
+            local_capabilities: vec![
+                "mining".to_string(),
+                "inference".to_string(),
+                "bridge-verify".to_string(),
+            ],
+            handshake_tx,
+            handshake_rx: RwLock::new(Some(handshake_rx)),
         }
+    }
+
+    /// Create a TunnelManager with a known local peer identity and
+    /// capability list.
+    pub fn with_identity(
+        max_tunnels: usize,
+        local_peer_id: String,
+        capabilities: Vec<String>,
+    ) -> Self {
+        let (handshake_tx, handshake_rx) = mpsc::channel(64);
+        Self {
+            tunnels: Arc::new(RwLock::new(HashMap::new())),
+            max_tunnels,
+            total_tasks_routed: Arc::new(AtomicU64::new(0)),
+            peer_registry: Arc::new(PeerRegistry::new()),
+            local_peer_id,
+            local_capabilities: capabilities,
+            handshake_tx,
+            handshake_rx: RwLock::new(Some(handshake_rx)),
+        }
+    }
+
+    /// Take the handshake message receiver. Called once by the transport
+    /// layer to drain outgoing handshake/response messages.
+    /// Each item is `(target_peer_id, serialized_message_bytes)`.
+    pub fn take_handshake_rx(&self) -> Option<mpsc::Receiver<(String, Vec<u8>)>> {
+        self.handshake_rx.write().take()
     }
 
     /// Get a reference to the peer registry for direct access.
@@ -434,7 +853,7 @@ impl TunnelManager {
         &self.peer_registry
     }
 
-    /// Open a new tunnel to a peer
+    /// Open a new tunnel to a peer (legacy — immediately Active).
     pub fn open_tunnel(&self, peer_id: &str, tunnel_type: TunnelType) -> bool {
         let mut tunnels = self.tunnels.write();
 
@@ -460,6 +879,198 @@ impl TunnelManager {
         true
     }
 
+    /// Open a tunnel using the handshake protocol.
+    ///
+    /// 1. Creates the tunnel in `Handshaking` state.
+    /// 2. Sends a `TunnelHandshake` to the peer via `handshake_tx`.
+    /// 3. Returns the serialized handshake for the caller to deliver.
+    ///
+    /// The caller must later call `complete_handshake()` when a
+    /// `HandshakeResponse` arrives from the peer.
+    pub fn open_tunnel_with_handshake(
+        &self,
+        peer_id: &str,
+        tunnel_type: TunnelType,
+    ) -> Result<TunnelHandshake, String> {
+        let mut tunnels = self.tunnels.write();
+
+        if tunnels.len() >= self.max_tunnels {
+            return Err(format!(
+                "Max tunnels reached ({}) — cannot open to {}",
+                self.max_tunnels, peer_id
+            ));
+        }
+
+        if tunnels.contains_key(peer_id) {
+            return Err(format!("Already have tunnel to {}", peer_id));
+        }
+
+        // Create tunnel in Handshaking state
+        let tunnel = ComputeTunnel::with_state(
+            peer_id.to_string(),
+            tunnel_type,
+            TunnelState::Handshaking,
+        );
+        tunnels.insert(peer_id.to_string(), tunnel);
+
+        // Build the handshake message
+        let handshake = TunnelHandshake::new(
+            &self.local_peer_id,
+            peer_id,
+            self.local_capabilities.clone(),
+        );
+
+        info!(
+            "🔗 [TUNNEL] Initiating handshake with {} (caps={:?}, proto=v{})",
+            peer_id, handshake.capabilities, handshake.protocol_version,
+        );
+
+        // Queue the handshake for the transport layer
+        let serialized = serde_json::to_vec(&handshake).unwrap_or_default();
+        let _ = self.handshake_tx.try_send((peer_id.to_string(), serialized));
+
+        Ok(handshake)
+    }
+
+    /// Process an incoming `HandshakeResponse` for a pending tunnel.
+    ///
+    /// If accepted, transitions the tunnel to `Active` and stores the
+    /// negotiated capabilities. If rejected or the tunnel does not exist
+    /// in `Handshaking` state, the tunnel is removed.
+    pub fn complete_handshake(
+        &self,
+        peer_id: &str,
+        response: &HandshakeResponse,
+    ) -> Result<(), String> {
+        let mut tunnels = self.tunnels.write();
+
+        let tunnel = tunnels.get_mut(peer_id).ok_or_else(|| {
+            format!("No pending tunnel for {}", peer_id)
+        })?;
+
+        {
+            let current_st = tunnel.state.read().clone();
+            if current_st != TunnelState::Handshaking {
+                return Err(format!(
+                    "Tunnel to {} is in {:?} state, not Handshaking",
+                    peer_id, current_st
+                ));
+            }
+        }
+
+        if response.accepted {
+            *tunnel.state.write() = TunnelState::Active;
+            tunnel.negotiated_capabilities = response.capabilities.clone();
+            info!(
+                "🔗 [TUNNEL] Handshake accepted by {} (caps={:?})",
+                peer_id, response.capabilities,
+            );
+            Ok(())
+        } else {
+            let reason = response.reason.as_deref().unwrap_or("unknown");
+            warn!(
+                "🔗 [TUNNEL] Handshake rejected by {}: {}",
+                peer_id, reason,
+            );
+            tunnels.remove(peer_id);
+            Err(format!("Handshake rejected: {}", reason))
+        }
+    }
+
+    /// Handle an incoming `TunnelHandshake` from a remote peer who wants
+    /// to open a tunnel to us. Returns a `HandshakeResponse` to send back.
+    ///
+    /// Acceptance criteria:
+    /// - We have room for more tunnels.
+    /// - Protocol version is compatible (currently must be 1).
+    /// - The handshake is not stale (timestamp within 30 seconds).
+    pub fn handle_incoming_handshake(
+        &self,
+        handshake: &TunnelHandshake,
+    ) -> HandshakeResponse {
+        // Check capacity
+        let tunnels = self.tunnels.read();
+        if tunnels.len() >= self.max_tunnels {
+            return HandshakeResponse::reject("tunnel capacity full");
+        }
+        if tunnels.contains_key(&handshake.initiator_peer_id) {
+            return HandshakeResponse::reject("tunnel already exists");
+        }
+        drop(tunnels);
+
+        // Check protocol version
+        if handshake.protocol_version != 1 {
+            return HandshakeResponse::reject(&format!(
+                "unsupported protocol version {}",
+                handshake.protocol_version
+            ));
+        }
+
+        // Check staleness (30 second window)
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if now.saturating_sub(handshake.timestamp) > 30 {
+            return HandshakeResponse::reject("handshake too old");
+        }
+
+        // Compute capability intersection
+        let our_caps: std::collections::HashSet<&str> =
+            self.local_capabilities.iter().map(|s| s.as_str()).collect();
+        let shared_caps: Vec<String> = handshake
+            .capabilities
+            .iter()
+            .filter(|c| our_caps.contains(c.as_str()))
+            .cloned()
+            .collect();
+
+        // Accept — create the tunnel on our side too
+        let mut tunnels = self.tunnels.write();
+        let mut tunnel = ComputeTunnel::with_state(
+            handshake.initiator_peer_id.clone(),
+            TunnelType::NodeToNode,
+            TunnelState::Active, // We go straight to Active as responder
+        );
+        tunnel.negotiated_capabilities = shared_caps.clone();
+        tunnels.insert(handshake.initiator_peer_id.clone(), tunnel);
+
+        info!(
+            "🔗 [TUNNEL] Accepted incoming handshake from {} (shared_caps={:?})",
+            handshake.initiator_peer_id, shared_caps,
+        );
+
+        HandshakeResponse::accept(shared_caps)
+    }
+
+    /// Time out handshakes that have been pending longer than
+    /// `HANDSHAKE_TIMEOUT_SECS`. Called from the cleanup loop.
+    pub fn timeout_stale_handshakes(&self) {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let timeout_ms = HANDSHAKE_TIMEOUT_SECS * 1000;
+
+        let mut tunnels = self.tunnels.write();
+        let stale: Vec<String> = tunnels
+            .iter()
+            .filter(|(_, t)| {
+                *t.state.read() == TunnelState::Handshaking
+                    && now_ms.saturating_sub(t.established_ms) > timeout_ms
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        for peer_id in &stale {
+            warn!(
+                "🔗 [TUNNEL] Handshake timeout for {} (>{}s) — removing",
+                peer_id, HANDSHAKE_TIMEOUT_SECS,
+            );
+            tunnels.remove(peer_id);
+        }
+    }
+
     /// Close tunnel to a peer
     pub fn close_tunnel(&self, peer_id: &str) {
         let mut tunnels = self.tunnels.write();
@@ -475,13 +1086,24 @@ impl TunnelManager {
         }
     }
 
+    /// Gracefully drain a tunnel — transitions to `Draining` state so
+    /// pending tasks finish but no new ones are accepted.
+    pub fn drain_tunnel(&self, peer_id: &str) -> bool {
+        let mut tunnels = self.tunnels.write();
+        if let Some(tunnel) = tunnels.get_mut(peer_id) {
+            tunnel.transition_to(TunnelState::Draining)
+        } else {
+            false
+        }
+    }
+
     /// Route a work item to the best available tunnel
     pub fn route_work(&self, item: &TunnelWorkItem) -> Option<String> {
         let tunnels = self.tunnels.read();
 
-        // Find best tunnel: lowest latency active tunnel
+        // Find best tunnel: lowest latency active tunnel (must be in Active state)
         let best = tunnels.values()
-            .filter(|t| t.is_active())
+            .filter(|t| t.is_active() && *t.state.read() == TunnelState::Active)
             .min_by_key(|t| t.latency_ms.load(Ordering::Relaxed));
 
         if let Some(tunnel) = best {
@@ -489,12 +1111,37 @@ impl TunnelManager {
             tunnel.record_send(item.payload_bytes as u64);
             self.total_tasks_routed.fetch_add(1, Ordering::Relaxed);
             debug!(
-                "🔗 [TUNNEL] Routed {:?} task #{} ({} bytes) → {}",
+                "🔗 [TUNNEL] Routed {:?} task #{} ({} bytes) -> {}",
                 item.layer, item.id, item.payload_bytes, tunnel.peer_id
             );
             Some(tunnel.peer_id.clone())
         } else {
             None
+        }
+    }
+
+    /// Open a multiplexed stream on an existing tunnel.
+    ///
+    /// Returns the `stream_id` on success.
+    pub fn open_stream_on_tunnel(
+        &self,
+        peer_id: &str,
+        stream_type: StreamType,
+    ) -> Result<u64, String> {
+        let tunnels = self.tunnels.read();
+        let tunnel = tunnels
+            .get(peer_id)
+            .ok_or_else(|| format!("No tunnel to {}", peer_id))?;
+        tunnel.open_stream(stream_type)
+    }
+
+    /// Close a stream on an existing tunnel.
+    pub fn close_stream_on_tunnel(&self, peer_id: &str, stream_id: u64) -> bool {
+        let tunnels = self.tunnels.read();
+        if let Some(tunnel) = tunnels.get(peer_id) {
+            tunnel.close_stream(stream_id)
+        } else {
+            false
         }
     }
 
@@ -509,7 +1156,7 @@ impl TunnelManager {
     /// Number of active tunnels
     pub fn active_count(&self) -> usize {
         self.tunnels.read().values()
-            .filter(|t| t.is_active())
+            .filter(|t| t.is_active() && *t.state.read() == TunnelState::Active)
             .count()
     }
 
@@ -518,9 +1165,97 @@ impl TunnelManager {
         self.total_tasks_routed.load(Ordering::Relaxed)
     }
 
-    /// Clean up dead tunnels and stale peers
+    /// Get the state of a tunnel to a specific peer.
+    pub fn tunnel_state(&self, peer_id: &str) -> Option<TunnelState> {
+        self.tunnels.read().get(peer_id).map(|t| t.state.read().clone())
+    }
+
+    /// Get the negotiated capabilities for a tunnel.
+    pub fn tunnel_capabilities(&self, peer_id: &str) -> Option<Vec<String>> {
+        self.tunnels
+            .read()
+            .get(peer_id)
+            .map(|t| t.negotiated_capabilities.clone())
+    }
+
+    // ─── Auto-connect logic ──────────────────────────────────────
+
+    /// Automatically open tunnels to the best discovered peers.
+    ///
+    /// Called from the scheduler loop (every ~30 seconds). Selects peers
+    /// from the registry that:
+    /// - Score above `min_score` for a generic task.
+    /// - Do not already have a tunnel.
+    ///
+    /// Opens at most `MAX_AUTO_OPENS_PER_CALL` (2) new tunnels per
+    /// invocation to avoid burst overhead. Returns the list of peers
+    /// that handshakes were initiated with.
+    pub fn auto_connect_to_best_peers(
+        &self,
+        min_score: f64,
+        max_new_tunnels: usize,
+    ) -> Vec<String> {
+        let limit = max_new_tunnels.min(MAX_AUTO_OPENS_PER_CALL);
+
+        let all_peers = self.peer_registry.all_peers();
+        let tunnels = self.tunnels.read();
+
+        // Score and filter peers
+        let mut candidates: Vec<(f64, &ComputePeerInfo)> = all_peers
+            .iter()
+            .filter(|p| {
+                // Skip peers we already have a tunnel to
+                !tunnels.contains_key(&p.peer_id)
+                    // Skip ourselves
+                    && p.peer_id != self.local_peer_id
+                    // Must have some capacity
+                    && (p.available_cores > 0 || p.gpu_tflops > 0.0)
+            })
+            .map(|p| (compute_peer_score(p, "generic"), p))
+            .filter(|(score, _)| *score >= min_score)
+            .collect();
+
+        // Sort descending by score — best peers first
+        candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        drop(tunnels);
+
+        let mut opened = Vec::new();
+        for (score, peer) in candidates.into_iter().take(limit) {
+            let peer_id = peer.peer_id.clone();
+            match self.open_tunnel_with_handshake(&peer_id, TunnelType::NodeToNode) {
+                Ok(_handshake) => {
+                    info!(
+                        "🔗 [AUTO-CONNECT] Initiated handshake with {} (score={:.2})",
+                        peer_id, score,
+                    );
+                    opened.push(peer_id);
+                }
+                Err(e) => {
+                    debug!(
+                        "🔗 [AUTO-CONNECT] Skipped {}: {}",
+                        peer_id, e,
+                    );
+                }
+            }
+        }
+
+        if !opened.is_empty() {
+            info!(
+                "🔗 [AUTO-CONNECT] Initiated {} new tunnel handshakes",
+                opened.len(),
+            );
+        }
+
+        opened
+    }
+
+    /// Clean up dead tunnels, timed-out handshakes, and stale peers.
     pub fn cleanup_dead(&self) {
-        // Clean up dead tunnels
+        // Time out stale handshakes first
+        self.timeout_stale_handshakes();
+
+        // Clean up dead/closed tunnels
         let mut tunnels = self.tunnels.write();
         let before = tunnels.len();
         tunnels.retain(|_, t| t.is_active());

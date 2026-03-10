@@ -10,8 +10,10 @@ use tokio::io::AsyncWriteExt;
 
 use futures::future::select_all;
 
+use crate::access_control::AccessControl;
 use crate::access_log::AccessLogger;
 use crate::acceptor::SharedTlsConfig;
+use crate::acme::ChallengeStore;
 use crate::config::FluxConfig;
 use crate::h2_proxy;
 use crate::health::HealthMap;
@@ -58,6 +60,9 @@ pub fn spawn_workers(
     rate_limiter: Option<Arc<RateLimiter>>,
     peer_tracker: Arc<PeerTracker>,
     drain_rx: DrainReceiver,
+    access_control: Arc<AccessControl>,
+    challenge_store: ChallengeStore,
+    global_backend_counters: Arc<dashmap::DashMap<String, Arc<crate::upstream::BackendCounters>>>,
 ) -> Vec<std::thread::JoinHandle<()>> {
     let worker_count = config.worker_count();
     let ip_tracker: IpConnTracker = Arc::new(DashMap::new());
@@ -102,6 +107,9 @@ pub fn spawn_workers(
         let peer_tracker = peer_tracker.clone();
         let global_sem = global_upstream_semaphore.clone();
         let drain_rx = drain_rx.clone();
+        let access_control = access_control.clone();
+        let challenge_store = challenge_store.clone();
+        let global_backend_counters = global_backend_counters.clone();
 
         let handle = std::thread::Builder::new()
             .name(format!("q-flux-w{}", worker_id))
@@ -118,7 +126,8 @@ pub fn spawn_workers(
                         worker_id, &config, shared_tls, metrics, ip_tracker,
                         active_conns, shutdown_rx, shutdown_flag, health_map,
                         access_logger, rate_limiter, peer_tracker, global_sem,
-                        drain_rx,
+                        drain_rx, access_control, challenge_store,
+                        global_backend_counters,
                     ).await;
                 });
             })
@@ -160,6 +169,9 @@ async fn worker_loop(
     peer_tracker: Arc<PeerTracker>,
     global_upstream_semaphore: Option<Arc<Semaphore>>,
     drain_rx: DrainReceiver,
+    access_control: Arc<AccessControl>,
+    challenge_store: ChallengeStore,
+    global_backend_counters: Arc<dashmap::DashMap<String, Arc<crate::upstream::BackendCounters>>>,
 ) {
     // Backpressure: limit concurrent connection handlers to prevent OOM.
     // If all permits taken, accept() still runs but spawn waits for a permit.
@@ -194,6 +206,7 @@ async fn worker_loop(
     let max_conns = config.limits.max_connections as u64;
     let max_per_ip = config.limits.max_conns_per_ip as u64;
     let body_limit = config.limits.request_body_limit;
+    let streaming_body_threshold = config.limits.streaming_body_threshold;
     let static_config = Arc::new(config.static_files.clone());
 
     // In-memory file cache with pre-compressed gzip variants.
@@ -221,12 +234,13 @@ async fn worker_loop(
     // Now: one hyper Client per worker with pooled keepalive connections to upstream.
     // Super-cluster: cluster peers are passed as failover backends (local-first).
     // Global semaphore: shared across ALL workers to cap total backend load.
-    let upstream = Arc::new(UpstreamPool::new_full(
+    let upstream = Arc::new(UpstreamPool::new_with_counters(
         &config.upstream,
         metrics.clone(),
         health_map.clone(),
         config.cluster.peers.clone(),
         global_upstream_semaphore,
+        global_backend_counters,
     ));
 
     // Spawn adaptive concurrency adjuster (AIMD) — runs every 1s, adjusting
@@ -356,8 +370,16 @@ async fn worker_loop(
             continue;
         }
 
-        // Per-IP connection limit (concurrent connection cap)
+        // Issue #027: IP access control — checked BEFORE TLS handshake (zero resources for blocked IPs)
         let client_ip = client_addr.ip();
+        if !access_control.is_allowed(client_ip) {
+            tracing::debug!(worker = worker_id, ip = %client_ip, "IP blocked by access control");
+            metrics.rate_limited(); // Reuse rate_limited counter for blocked IPs
+            drop(tcp_stream);
+            continue;
+        }
+
+        // Per-IP connection limit (concurrent connection cap)
         {
             let mut count = ip_tracker.entry(client_ip).or_insert(0);
             if *count >= max_per_ip {
@@ -403,6 +425,7 @@ async fn worker_loop(
         let access_logger = access_logger.clone();
         let drain_rx = drain_rx.clone();
         let file_cache = file_cache.clone();
+        let challenge_store = challenge_store.clone();
 
         tokio::spawn(async move {
             // Acquire semaphore permit — backpressure if too many concurrent handlers.
@@ -454,7 +477,8 @@ async fn worker_loop(
                                 Some(ref logger) => {
                                     proxy::handle_connection_logged(
                                         tls_stream, client_addr, &upstream, &metrics,
-                                        body_limit, &static_config, logger,
+                                        body_limit, streaming_body_threshold,
+                                        &static_config, logger,
                                         &peer_tracker, &bandwidth_limiter,
                                         drain_rx.clone(), cache_ref,
                                     ).await;
@@ -462,7 +486,8 @@ async fn worker_loop(
                                 None => {
                                     proxy::handle_connection(
                                         tls_stream, client_addr, &upstream, &metrics,
-                                        body_limit, &static_config,
+                                        body_limit, streaming_body_threshold,
+                                        &static_config,
                                         &peer_tracker, &bandwidth_limiter,
                                         drain_rx.clone(), cache_ref,
                                     ).await;
@@ -480,25 +505,46 @@ async fn worker_loop(
                     }
                 }
             } else {
-                // Plain HTTP — read first line to get Host header, then redirect
+                // Plain HTTP — read request, check for ACME challenges, then redirect
                 let mut tcp_stream = tcp_stream;
                 let mut peek_buf = [0u8; 1024];
-                let host = match tokio::time::timeout(
+                let (host, path) = match tokio::time::timeout(
                     std::time::Duration::from_secs(5),
                     tokio::io::AsyncReadExt::read(&mut tcp_stream, &mut peek_buf),
                 ).await {
                     Ok(Ok(n)) if n > 0 => {
-                        extract_host_header(&peek_buf[..n])
-                            .unwrap_or_else(|| client_addr.ip().to_string())
+                        let h = extract_host_header(&peek_buf[..n])
+                            .unwrap_or_else(|| client_addr.ip().to_string());
+                        let p = extract_request_path(&peek_buf[..n])
+                            .unwrap_or_default();
+                        (h, p)
                     }
-                    _ => client_addr.ip().to_string(),
+                    _ => (client_addr.ip().to_string(), String::new()),
                 };
 
-                let redirect = format!(
-                    "HTTP/1.1 301 Moved Permanently\r\nlocation: https://{}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
-                    host
-                );
-                let _ = tcp_stream.write_all(redirect.as_bytes()).await;
+                // Issue #021: Serve ACME HTTP-01 challenges on port 80
+                if let Some(token) = path.strip_prefix("/.well-known/acme-challenge/") {
+                    // Clone the proof out before await to avoid holding
+                    // parking_lot guard across await (not Send).
+                    let proof = challenge_store.read().get(token).cloned();
+                    if let Some(proof) = proof {
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                            proof.len(), proof
+                        );
+                        let _ = tcp_stream.write_all(response.as_bytes()).await;
+                    } else {
+                        let _ = tcp_stream.write_all(
+                            b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        ).await;
+                    }
+                } else {
+                    let redirect = format!(
+                        "HTTP/1.1 301 Moved Permanently\r\nlocation: https://{}{}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                        host, path,
+                    );
+                    let _ = tcp_stream.write_all(redirect.as_bytes()).await;
+                }
             }
 
             }; // end handler async block
@@ -693,6 +739,17 @@ fn extract_host_header(data: &[u8]) -> Option<String> {
 /// Exposed for testing via pub(crate).
 pub(crate) fn extract_host_header_pub(data: &[u8]) -> Option<String> {
     extract_host_header(data)
+}
+
+/// Extract the request path from raw HTTP request bytes.
+fn extract_request_path(data: &[u8]) -> Option<String> {
+    let mut headers = [httparse::EMPTY_HEADER; 32];
+    let mut req = httparse::Request::new(&mut headers);
+    if req.parse(data).is_ok() {
+        req.path.map(|p| p.to_string())
+    } else {
+        None
+    }
 }
 
 /// Accept a connection from any of the provided listeners.

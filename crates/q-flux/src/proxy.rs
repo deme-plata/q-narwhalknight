@@ -52,6 +52,7 @@ pub async fn handle_connection<S>(
     upstream: &UpstreamPool,
     metrics: &Metrics,
     body_limit: usize,
+    streaming_body_threshold: usize,
     static_config: &StaticConfig,
     peer_tracker: &Arc<PeerTracker>,
     bandwidth_limiter: &Arc<BandwidthLimiter>,
@@ -60,7 +61,7 @@ pub async fn handle_connection<S>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    handle_connection_inner(stream, client_addr, upstream, metrics, body_limit, static_config, None, peer_tracker, bandwidth_limiter, drain_rx, file_cache).await;
+    handle_connection_inner(stream, client_addr, upstream, metrics, body_limit, streaming_body_threshold, static_config, None, peer_tracker, bandwidth_limiter, drain_rx, file_cache).await;
 }
 
 /// Handle a single HTTP connection with optional access logging.
@@ -71,6 +72,7 @@ pub async fn handle_connection_logged<S>(
     upstream: &UpstreamPool,
     metrics: &Metrics,
     body_limit: usize,
+    streaming_body_threshold: usize,
     static_config: &StaticConfig,
     access_logger: &AccessLogger,
     peer_tracker: &Arc<PeerTracker>,
@@ -80,7 +82,7 @@ pub async fn handle_connection_logged<S>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    handle_connection_inner(stream, client_addr, upstream, metrics, body_limit, static_config, Some(access_logger), peer_tracker, bandwidth_limiter, drain_rx, file_cache).await;
+    handle_connection_inner(stream, client_addr, upstream, metrics, body_limit, streaming_body_threshold, static_config, Some(access_logger), peer_tracker, bandwidth_limiter, drain_rx, file_cache).await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -90,6 +92,7 @@ async fn handle_connection_inner<S>(
     upstream: &UpstreamPool,
     metrics: &Metrics,
     body_limit: usize,
+    streaming_body_threshold: usize,
     static_config: &StaticConfig,
     access_logger: Option<&AccessLogger>,
     peer_tracker: &Arc<PeerTracker>,
@@ -220,6 +223,37 @@ async fn handle_connection_inner<S>(
             metrics.record_latency(latency);
             log_access(access_logger, client_addr, req_method, &req_path, 413, 0, 0, latency, user_agent.as_deref(), None, Some(request_id.as_str()));
             let _ = write_error_response(&mut stream, 413, "Request body too large").await;
+            break;
+        }
+
+        // ── Issue #024: Stream large request bodies directly to upstream ──
+        // When Content-Length exceeds the streaming threshold, bypass the
+        // hyper Client and stream the body directly to an upstream backend
+        // via a raw TCP connection. This avoids buffering multi-MB uploads
+        // in memory. Streaming bodies cannot be retried (body is consumed).
+        if streaming_body_threshold > 0
+            && content_length > streaming_body_threshold
+            && !is_upgrade
+            && !is_sse_path(&req_path)
+        {
+            let result = stream_body_to_upstream(
+                &mut stream, &req, &buf[header_end..buf_len], content_length,
+                upstream, client_addr, metrics, &request_id,
+            ).await;
+            let latency = req_start.elapsed();
+            metrics.record_latency(latency);
+            let status = match &result {
+                Ok(s) => *s,
+                Err(_) => 502,
+            };
+            metrics.response_status(status);
+            log_access(access_logger, client_addr, req_method, &req_path, status,
+                       content_length as u64, 0, latency, user_agent.as_deref(), None,
+                       Some(request_id.as_str()));
+            if result.is_err() {
+                let _ = write_error_response(&mut stream, 502, "Bad Gateway").await;
+            }
+            // Streaming body consumes the connection — can't keepalive after
             break;
         }
 
@@ -643,6 +677,11 @@ where
             write!(resp_buf, "{}: {}\r\n", key, value.to_str().unwrap_or("")).ok();
         }
 
+        // Security headers (Issue #032)
+        write!(resp_buf, "x-content-type-options: nosniff\r\n").ok();
+        write!(resp_buf, "x-frame-options: SAMEORIGIN\r\n").ok();
+        write!(resp_buf, "referrer-policy: strict-origin-when-cross-origin\r\n").ok();
+
         // Add compression headers
         if let Some(enc) = encoding_header {
             write!(resp_buf, "content-encoding: {}\r\n", enc).ok();
@@ -691,6 +730,11 @@ where
         write!(resp_buf, "{}: {}\r\n", key, value.to_str().unwrap_or("")).ok();
     }
 
+    // Security headers (Issue #032)
+    write!(resp_buf, "x-content-type-options: nosniff\r\n").ok();
+    write!(resp_buf, "x-frame-options: SAMEORIGIN\r\n").ok();
+    write!(resp_buf, "referrer-policy: strict-origin-when-cross-origin\r\n").ok();
+
     resp_buf.extend_from_slice(b"\r\n");
 
     stream.write_all(&resp_buf).await?;
@@ -706,7 +750,7 @@ where
     let escaped_msg = msg.replace('\\', "\\\\").replace('"', "\\\"");
     let body = format!("{{\"error\":\"{}\"}}", escaped_msg);
     let response = format!(
-        "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\nx-content-type-options: nosniff\r\nx-frame-options: SAMEORIGIN\r\nreferrer-policy: strict-origin-when-cross-origin\r\n\r\n{}",
         status,
         reason_phrase(status),
         body.len(),
@@ -1121,6 +1165,149 @@ async fn handle_sse_direct<S>(
             }
         }
     }
+}
+
+/// Issue #024: Stream a large request body directly to an upstream backend.
+///
+/// Opens a raw TCP connection to one upstream backend and pipes the request
+/// headers + body through in 64KB chunks. The response is then streamed back
+/// to the client. This avoids buffering multi-MB uploads in memory.
+///
+/// Returns the HTTP status code on success, or an error on failure.
+/// Streaming bodies cannot be retried on a different backend (body consumed).
+async fn stream_body_to_upstream<S: AsyncRead + AsyncWrite + Unpin>(
+    client_stream: &mut S,
+    req: &hyper::Request<()>,
+    already_read_body: &[u8],
+    content_length: usize,
+    upstream: &UpstreamPool,
+    client_addr: SocketAddr,
+    metrics: &Metrics,
+    request_id: &str,
+) -> Result<u16> {
+    // Pick a backend
+    let backend_addr = upstream.pick_backend()
+        .ok_or_else(|| anyhow::anyhow!("No healthy backends"))?;
+
+    // Connect to upstream
+    let mut upstream_stream = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::net::TcpStream::connect(&backend_addr),
+    ).await
+        .map_err(|_| anyhow::anyhow!("Upstream connect timeout"))?
+        .map_err(|e| anyhow::anyhow!("Upstream connect error: {}", e))?;
+
+    // Build raw HTTP request header
+    let mut header_buf = Vec::with_capacity(1024);
+    write!(header_buf, "{} {} HTTP/1.1\r\n", req.method(), req.uri())?;
+    for (name, value) in req.headers() {
+        write!(header_buf, "{}: ", name)?;
+        header_buf.extend_from_slice(value.as_bytes());
+        header_buf.extend_from_slice(b"\r\n");
+    }
+    write!(header_buf, "X-Forwarded-For: {}\r\n", client_addr.ip())?;
+    write!(header_buf, "X-Real-IP: {}\r\n", client_addr.ip())?;
+    write!(header_buf, "X-Request-ID: {}\r\n", request_id)?;
+    header_buf.extend_from_slice(b"\r\n");
+
+    // Send headers to upstream
+    upstream_stream.write_all(&header_buf).await
+        .map_err(|e| anyhow::anyhow!("Upstream header write: {}", e))?;
+
+    // Send body bytes we already have
+    if !already_read_body.is_empty() {
+        upstream_stream.write_all(already_read_body).await
+            .map_err(|e| anyhow::anyhow!("Upstream body write: {}", e))?;
+        metrics.bytes_rx(already_read_body.len() as u64);
+    }
+
+    // Stream remaining body from client to upstream in 64KB chunks
+    let mut streamed = already_read_body.len();
+    let mut chunk_buf = vec![0u8; 65536];
+    while streamed < content_length {
+        let remaining = content_length - streamed;
+        let to_read = remaining.min(65536);
+        match tokio::time::timeout(
+            CLIENT_READ_TIMEOUT,
+            client_stream.read(&mut chunk_buf[..to_read]),
+        ).await {
+            Ok(Ok(0)) => break,
+            Ok(Ok(n)) => {
+                upstream_stream.write_all(&chunk_buf[..n]).await
+                    .map_err(|e| anyhow::anyhow!("Upstream body stream: {}", e))?;
+                metrics.bytes_rx(n as u64);
+                streamed += n;
+            }
+            Ok(Err(e)) => return Err(anyhow::anyhow!("Client body read: {}", e)),
+            Err(_) => return Err(anyhow::anyhow!("Client body read timeout")),
+        }
+    }
+    upstream_stream.flush().await?;
+
+    // Read upstream response and forward to client
+    let mut resp_buf = vec![0u8; 8192];
+    let mut resp_len = 0;
+    loop {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            upstream_stream.read(&mut resp_buf[resp_len..]),
+        ).await {
+            Ok(Ok(0)) => break,
+            Ok(Ok(n)) => {
+                resp_len += n;
+                // Check if we have the full headers
+                if let Some(_header_end) = find_header_end_resp(&resp_buf[..resp_len]) {
+                    // Write headers to client
+                    client_stream.write_all(&resp_buf[..resp_len]).await?;
+                    metrics.bytes_tx(resp_len as u64);
+
+                    // Parse status code from first line
+                    let status = parse_response_status(&resp_buf[..resp_len]);
+
+                    // Stream remaining response body
+                    let mut stream_buf = vec![0u8; 65536];
+                    loop {
+                        match upstream_stream.read(&mut stream_buf).await {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                client_stream.write_all(&stream_buf[..n]).await?;
+                                metrics.bytes_tx(n as u64);
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    client_stream.flush().await?;
+                    return Ok(status);
+                }
+                if resp_len >= resp_buf.len() {
+                    resp_buf.resize(resp_len + 8192, 0);
+                }
+            }
+            Ok(Err(e)) => return Err(anyhow::anyhow!("Upstream response read: {}", e)),
+            Err(_) => return Err(anyhow::anyhow!("Upstream response timeout")),
+        }
+    }
+
+    // If we got here, upstream closed without sending headers
+    Err(anyhow::anyhow!("Upstream closed without response"))
+}
+
+/// Find the end of HTTP headers (\r\n\r\n) in a response buffer.
+fn find_header_end_resp(buf: &[u8]) -> Option<usize> {
+    buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
+}
+
+/// Parse the HTTP status code from the first line of a response.
+fn parse_response_status(header: &[u8]) -> u16 {
+    // HTTP/1.1 200 OK\r\n...
+    if let Ok(s) = std::str::from_utf8(header) {
+        if let Some(line) = s.lines().next() {
+            if let Some(status_str) = line.split_whitespace().nth(1) {
+                return status_str.parse().unwrap_or(502);
+            }
+        }
+    }
+    502
 }
 
 #[cfg(test)]

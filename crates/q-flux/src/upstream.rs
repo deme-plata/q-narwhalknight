@@ -15,6 +15,7 @@ use tracing::warn;
 use crate::config::UpstreamConfig;
 use crate::health::HealthMap;
 use crate::metrics::Metrics;
+use dashmap::DashMap;
 
 /// Default max concurrent upstream requests per worker (fallback).
 const DEFAULT_MAX_UPSTREAM_INFLIGHT: usize = 64;
@@ -166,6 +167,21 @@ impl AdaptiveConcurrency {
     }
 }
 
+/// Per-backend request counters for Prometheus metrics (Issue #026).
+pub struct BackendCounters {
+    pub total_requests: AtomicU64,
+    pub failed_requests: AtomicU64,
+}
+
+impl BackendCounters {
+    pub fn new() -> Self {
+        Self {
+            total_requests: AtomicU64::new(0),
+            failed_requests: AtomicU64::new(0),
+        }
+    }
+}
+
 pub struct UpstreamPool {
     client: Client<HttpConnector, Full<Bytes>>,
     pub backends: Arc<Vec<String>>,
@@ -184,13 +200,13 @@ pub struct UpstreamPool {
     /// Per-worker semaphore (fallback if no global semaphore provided).
     per_worker_semaphore: Arc<Semaphore>,
     /// Global semaphore shared across ALL workers — preferred over per-worker.
-    /// This prevents the death spiral where 48 workers × N permits each
-    /// overwhelm a single backend with too many concurrent connections.
     global_semaphore: Option<Arc<Semaphore>>,
     /// Max inflight limit (for error messages)
     max_inflight: usize,
     /// Adaptive concurrency controller (AIMD).
     pub adaptive: Arc<AdaptiveConcurrency>,
+    /// Per-backend request counters (Issue #026).
+    pub backend_counters: Arc<dashmap::DashMap<String, Arc<BackendCounters>>>,
 }
 
 impl UpstreamPool {
@@ -214,6 +230,18 @@ impl UpstreamPool {
         health_map: HealthMap,
         cluster_peers: Vec<String>,
         global_semaphore: Option<Arc<Semaphore>>,
+    ) -> Self {
+        let backend_counters: Arc<DashMap<String, Arc<BackendCounters>>> = Arc::new(DashMap::new());
+        Self::new_with_counters(config, metrics, health_map, cluster_peers, global_semaphore, backend_counters)
+    }
+
+    pub fn new_with_counters(
+        config: &UpstreamConfig,
+        metrics: Metrics,
+        health_map: HealthMap,
+        cluster_peers: Vec<String>,
+        global_semaphore: Option<Arc<Semaphore>>,
+        backend_counters: Arc<DashMap<String, Arc<BackendCounters>>>,
     ) -> Self {
         let mut connector = HttpConnector::new();
         connector.set_nodelay(true);
@@ -264,6 +292,14 @@ impl UpstreamPool {
 
         let adaptive = Arc::new(AdaptiveConcurrency::new(max_inflight));
 
+        // Pre-populate per-backend counters (Issue #026) if not already present
+        for b in &config.backends {
+            backend_counters.entry(b.clone()).or_insert_with(|| Arc::new(BackendCounters::new()));
+        }
+        for p in &cluster_peers {
+            backend_counters.entry(p.clone()).or_insert_with(|| Arc::new(BackendCounters::new()));
+        }
+
         Self {
             client,
             backends: Arc::new(config.backends.clone()),
@@ -278,6 +314,7 @@ impl UpstreamPool {
             global_semaphore,
             max_inflight,
             adaptive,
+            backend_counters,
         }
     }
 
@@ -421,6 +458,38 @@ impl UpstreamPool {
         self.next_backend()
     }
 
+    /// Pick a healthy backend address (for direct TCP streaming).
+    /// Returns None if no backends are healthy.
+    pub fn pick_backend(&self) -> Option<String> {
+        // Round-robin through healthy backends
+        let backends = &self.backends;
+        let len = backends.len();
+        if len == 0 { return None; }
+        for _ in 0..len {
+            let idx = self.rr_index.fetch_add(1, Ordering::Relaxed) % len;
+            let addr = &backends[idx];
+            if let Some(entry) = self.health_map.get(addr.as_str()) {
+                if entry.is_healthy {
+                    return Some(addr.clone());
+                }
+            } else {
+                // No health entry — assume healthy (optimistic)
+                return Some(addr.clone());
+            }
+        }
+        // No healthy local backends — try cluster failover
+        for peer in self.cluster_peers.iter() {
+            if let Some(entry) = self.health_map.get(peer.as_str()) {
+                if entry.is_healthy {
+                    return Some(peer.clone());
+                }
+            } else {
+                return Some(peer.clone());
+            }
+        }
+        None
+    }
+
     /// Forward a request to the upstream and return the response along with
     /// the backend address that served it (for access logging).
     ///
@@ -500,6 +569,13 @@ impl UpstreamPool {
         let elapsed = req_start.elapsed();
         self.adaptive.record_latency(elapsed);
 
+        // Issue #026: increment per-backend counters
+        let counters = self.backend_counters
+            .entry(backend_addr.clone())
+            .or_insert_with(|| Arc::new(BackendCounters::new()))
+            .clone();
+        counters.total_requests.fetch_add(1, Ordering::Relaxed);
+
         match result {
             Ok(Ok(resp)) => {
                 // Inline health recovery: if a request to this backend succeeded,
@@ -523,10 +599,12 @@ impl UpstreamPool {
                 Ok((resp, backend_addr))
             }
             Ok(Err(e)) => {
+                counters.failed_requests.fetch_add(1, Ordering::Relaxed);
                 self.metrics.upstream_connect_fail();
                 Err((anyhow::anyhow!("Upstream error: {}", e), backend_addr))
             }
             Err(_) => {
+                counters.failed_requests.fetch_add(1, Ordering::Relaxed);
                 self.metrics.upstream_timeout();
                 Err((anyhow::anyhow!("Upstream timeout after {:?}", self.response_timeout), backend_addr))
             }

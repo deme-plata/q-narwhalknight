@@ -8,10 +8,55 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use parking_lot::RwLock;
 use sysinfo::{System, CpuRefreshKind, MemoryRefreshKind, RefreshKind};
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 /// How often to sample resources (100ms = 10 samples/sec)
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
+
+/// How long to cache GPU results before re-querying
+const GPU_CACHE_TTL: Duration = Duration::from_secs(2);
+
+/// Maximum time to wait for an async GPU query before returning cached data
+const GPU_QUERY_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// Cached GPU query result
+#[derive(Debug, Clone, Copy)]
+struct GpuStats {
+    utilization: f32,
+    memory_used: u64,
+    memory_total: u64,
+}
+
+impl Default for GpuStats {
+    fn default() -> Self {
+        Self { utilization: 0.0, memory_used: 0, memory_total: 0 }
+    }
+}
+
+impl GpuStats {
+    fn as_tuple(self) -> (f32, u64, u64) {
+        (self.utilization, self.memory_used, self.memory_total)
+    }
+}
+
+/// GPU result cache — avoids re-querying the CLI tool on every sample tick.
+/// The backend is detected once at startup via `GpuBackend::detect()`.
+struct GpuCache {
+    last_result: Option<GpuStats>,
+    last_query: tokio::time::Instant,
+    backend: GpuBackend,
+}
+
+impl GpuCache {
+    fn new(backend: GpuBackend) -> Self {
+        Self {
+            last_result: None,
+            // Start in the past so the first tick triggers a query immediately
+            last_query: tokio::time::Instant::now() - GPU_CACHE_TTL,
+            backend,
+        }
+    }
+}
 
 /// Resource monitor that runs in background, sampling every 100ms
 pub struct ResourceMonitor {
@@ -21,12 +66,14 @@ pub struct ResourceMonitor {
     history: Arc<RwLock<std::collections::VecDeque<ResourceSnapshot>>>,
     /// Stop flag
     running: Arc<std::sync::atomic::AtomicBool>,
-    /// #030: Cached GPU stats (updated every 2s via spawn_blocking)
-    gpu_cache: Arc<RwLock<(f32, u64, u64)>>,
+    /// GPU cache with backend detection and TTL (updated every 2s, non-blocking)
+    gpu_cache: Arc<RwLock<GpuCache>>,
 }
 
 impl ResourceMonitor {
     pub fn new() -> Self {
+        // Backend detection happens lazily on first GPU poll tick (async),
+        // so we initialize with Unknown here.
         Self {
             latest: Arc::new(RwLock::new(ResourceSnapshot {
                 cpu_per_core: Vec::new(),
@@ -44,7 +91,7 @@ impl ResourceMonitor {
             })),
             history: Arc::new(RwLock::new(std::collections::VecDeque::with_capacity(600))),
             running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            gpu_cache: Arc::new(RwLock::new((0.0, 0, 0))),
+            gpu_cache: Arc::new(RwLock::new(GpuCache::new(GpuBackend::Unknown))),
         }
     }
 
@@ -80,16 +127,51 @@ impl ResourceMonitor {
         let gpu_cache = self.gpu_cache.clone();
         running.store(true, std::sync::atomic::Ordering::SeqCst);
 
-        // #030: Spawn a separate task for GPU sampling (every 2s, via spawn_blocking)
+        // #012: Spawn a separate task for GPU sampling (every 2s, fully async)
         let gpu_cache_writer = gpu_cache.clone();
         let gpu_running = running.clone();
         tokio::spawn(async move {
-            let mut gpu_interval = tokio::time::interval(Duration::from_secs(2));
+            // Detect GPU backend once at startup (async)
+            let backend = GpuBackend::detect().await;
+            debug!("GPU backend detected at startup: {:?}", backend);
+            {
+                let mut cache = gpu_cache_writer.write();
+                cache.backend = backend;
+            }
+
+            let mut gpu_interval = tokio::time::interval(GPU_CACHE_TTL);
             while gpu_running.load(std::sync::atomic::Ordering::Relaxed) {
                 gpu_interval.tick().await;
-                let result = tokio::task::spawn_blocking(get_gpu_stats).await;
-                if let Ok(stats) = result {
-                    *gpu_cache_writer.write() = stats;
+
+                let current_backend = gpu_cache_writer.read().backend;
+                if current_backend == GpuBackend::None {
+                    // No GPU — skip querying entirely
+                    continue;
+                }
+
+                // Query GPU stats asynchronously with a timeout
+                let query_result = tokio::time::timeout(
+                    GPU_QUERY_TIMEOUT,
+                    query_gpu_async(current_backend),
+                ).await;
+
+                match query_result {
+                    Ok(Some(stats)) => {
+                        let mut cache = gpu_cache_writer.write();
+                        cache.last_result = Some(stats);
+                        cache.last_query = tokio::time::Instant::now();
+                    }
+                    Ok(None) => {
+                        // Query ran but returned no data — keep cached value
+                        trace!("GPU query returned no data, keeping cached value");
+                    }
+                    Err(_elapsed) => {
+                        // Timeout — return cached value, log warning
+                        warn!(
+                            "GPU query exceeded {}ms timeout, using cached value",
+                            GPU_QUERY_TIMEOUT.as_millis()
+                        );
+                    }
                 }
             }
         });
@@ -137,8 +219,11 @@ impl ResourceMonitor {
                 prev_net_rx = net_rx;
                 prev_net_tx = net_tx;
 
-                // #030: Read cached GPU stats (non-blocking)
-                let (gpu_util, gpu_mem_used, gpu_mem_total) = *gpu_cache.read();
+                // #012: Read cached GPU stats (non-blocking read of GpuCache)
+                let (gpu_util, gpu_mem_used, gpu_mem_total) = {
+                    let cache = gpu_cache.read();
+                    cache.last_result.unwrap_or_default().as_tuple()
+                };
 
                 let timestamp_ms = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -223,7 +308,7 @@ fn get_network_bytes() -> (u64, u64) {
 }
 
 /// Which GPU detection backend we last succeeded with.
-/// Cached so we don't retry failing backends on every 2-second tick.
+/// Detected once at startup via `GpuBackend::detect()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GpuBackend {
     /// Haven't probed yet
@@ -238,71 +323,59 @@ enum GpuBackend {
     None,
 }
 
-/// Get GPU stats with multi-backend detection.
-///
-/// Probe order:
-/// 1. **sysinfo component scan** -- detects GPU thermal sensors on some drivers,
-///    but does not provide utilization. If a GPU component is found we note it
-///    and still try CLI tools for richer data.
-/// 2. **nvidia-smi** -- NVIDIA proprietary driver CLI (most common).
-/// 3. **rocm-smi** -- AMD ROCm driver CLI.
-///
-/// After the first successful backend is found it is cached in a process-global
-/// static so subsequent calls skip failing paths (the 2-second GPU poll loop
-/// calls this function repeatedly).
-fn get_gpu_stats() -> (f32, u64, u64) {
-    use std::sync::Mutex;
-    static CACHED_BACKEND: std::sync::LazyLock<Mutex<GpuBackend>> =
-        std::sync::LazyLock::new(|| Mutex::new(GpuBackend::Unknown));
-
-    let mut backend = CACHED_BACKEND.lock().unwrap();
-
-    // If we already know there is no GPU, short-circuit
-    if *backend == GpuBackend::None {
-        return (0.0, 0, 0);
-    }
-
-    // ── 1. Try nvidia-smi (if backend is Unknown or NvidiaSmi) ──
-    if *backend == GpuBackend::Unknown || *backend == GpuBackend::NvidiaSmi {
-        if let Some(stats) = try_nvidia_smi() {
-            *backend = GpuBackend::NvidiaSmi;
-            return stats;
+impl GpuBackend {
+    /// Detect which GPU backend is available. Called once at startup.
+    ///
+    /// Probe order:
+    /// 1. **nvidia-smi** -- NVIDIA proprietary driver CLI (most common).
+    /// 2. **rocm-smi** -- AMD ROCm driver CLI.
+    /// 3. **sysinfo component scan** -- detects presence via thermal sensors.
+    async fn detect() -> Self {
+        // 1. Check if nvidia-smi is available
+        if try_nvidia_smi_async().await.is_some() {
+            debug!("GPU backend: nvidia-smi detected");
+            return GpuBackend::NvidiaSmi;
         }
-    }
 
-    // ── 2. Try rocm-smi (AMD ROCm) ──
-    if *backend == GpuBackend::Unknown || *backend == GpuBackend::RocmSmi {
-        if let Some(stats) = try_rocm_smi() {
-            *backend = GpuBackend::RocmSmi;
-            return stats;
+        // 2. Check if rocm-smi is available
+        if try_rocm_smi_async().await.is_some() {
+            debug!("GPU backend: rocm-smi detected");
+            return GpuBackend::RocmSmi;
         }
-    }
 
-    // ── 3. sysinfo component scan (last resort — detects presence only) ──
-    if *backend == GpuBackend::Unknown || *backend == GpuBackend::Sysinfo {
-        if let Some(stats) = try_sysinfo_gpu() {
-            *backend = GpuBackend::Sysinfo;
-            return stats;
+        // 3. Fallback: sysinfo component scan (sync, but lightweight)
+        if try_sysinfo_gpu().is_some() {
+            debug!("GPU backend: sysinfo thermal sensor detected");
+            return GpuBackend::Sysinfo;
         }
-    }
 
-    // No GPU found on any backend
-    if *backend == GpuBackend::Unknown {
-        *backend = GpuBackend::None;
+        debug!("GPU backend: none detected");
+        GpuBackend::None
     }
-    (0.0, 0, 0)
+}
+
+/// Query GPU stats asynchronously using the pre-detected backend.
+async fn query_gpu_async(backend: GpuBackend) -> Option<GpuStats> {
+    match backend {
+        GpuBackend::NvidiaSmi => try_nvidia_smi_async().await,
+        GpuBackend::RocmSmi => try_rocm_smi_async().await,
+        GpuBackend::Sysinfo => try_sysinfo_gpu(),
+        GpuBackend::None | GpuBackend::Unknown => None,
+    }
 }
 
 /// Try to query GPU stats via `nvidia-smi` (NVIDIA proprietary driver).
-fn try_nvidia_smi() -> Option<(f32, u64, u64)> {
+/// Uses `tokio::process::Command` to avoid blocking the tokio worker thread.
+async fn try_nvidia_smi_async() -> Option<GpuStats> {
     #[cfg(target_os = "linux")]
     {
-        let output = std::process::Command::new("nvidia-smi")
+        let output = tokio::process::Command::new("nvidia-smi")
             .args([
                 "--query-gpu=utilization.gpu,memory.used,memory.total",
                 "--format=csv,noheader,nounits",
             ])
             .output()
+            .await
             .ok()?;
 
         if !output.status.success() {
@@ -312,10 +385,10 @@ fn try_nvidia_smi() -> Option<(f32, u64, u64)> {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let parts: Vec<&str> = stdout.trim().split(", ").collect();
         if parts.len() == 3 {
-            let util = parts[0].parse::<f32>().unwrap_or(0.0);
-            let mem_used = parts[1].parse::<u64>().unwrap_or(0) * 1024 * 1024; // MiB -> bytes
-            let mem_total = parts[2].parse::<u64>().unwrap_or(0) * 1024 * 1024;
-            return Some((util, mem_used, mem_total));
+            let utilization = parts[0].parse::<f32>().unwrap_or(0.0);
+            let memory_used = parts[1].parse::<u64>().unwrap_or(0) * 1024 * 1024; // MiB -> bytes
+            let memory_total = parts[2].parse::<u64>().unwrap_or(0) * 1024 * 1024;
+            return Some(GpuStats { utilization, memory_used, memory_total });
         }
     }
     #[cfg(not(target_os = "linux"))]
@@ -324,6 +397,7 @@ fn try_nvidia_smi() -> Option<(f32, u64, u64)> {
 }
 
 /// Try to query GPU stats via `rocm-smi` (AMD ROCm driver).
+/// Uses `tokio::process::Command` to avoid blocking the tokio worker thread.
 ///
 /// `rocm-smi` output for `--showuse --showmeminfo vram` is multi-line:
 /// ```text
@@ -331,12 +405,13 @@ fn try_nvidia_smi() -> Option<(f32, u64, u64)> {
 /// GPU[0]          : vram Total Memory (B): 17163091968
 /// GPU[0]          : vram Total Used Memory (B): 2147483648
 /// ```
-fn try_rocm_smi() -> Option<(f32, u64, u64)> {
+async fn try_rocm_smi_async() -> Option<GpuStats> {
     #[cfg(target_os = "linux")]
     {
-        let output = std::process::Command::new("rocm-smi")
+        let output = tokio::process::Command::new("rocm-smi")
             .args(["--showuse", "--showmeminfo", "vram"])
             .output()
+            .await
             .ok()?;
 
         if !output.status.success() {
@@ -344,31 +419,31 @@ fn try_rocm_smi() -> Option<(f32, u64, u64)> {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut util: f32 = 0.0;
-        let mut mem_total: u64 = 0;
-        let mut mem_used: u64 = 0;
+        let mut utilization: f32 = 0.0;
+        let mut memory_total: u64 = 0;
+        let mut memory_used: u64 = 0;
 
         for line in stdout.lines() {
             let line = line.trim();
             if line.contains("GPU use (%)") {
                 // "GPU[0]          : GPU use (%): 42"
                 if let Some(val) = line.rsplit(':').next() {
-                    util = val.trim().parse::<f32>().unwrap_or(0.0);
+                    utilization = val.trim().parse::<f32>().unwrap_or(0.0);
                 }
             } else if line.contains("vram Total Memory (B)") {
                 if let Some(val) = line.rsplit(':').next() {
-                    mem_total = val.trim().parse::<u64>().unwrap_or(0);
+                    memory_total = val.trim().parse::<u64>().unwrap_or(0);
                 }
             } else if line.contains("vram Total Used Memory (B)") {
                 if let Some(val) = line.rsplit(':').next() {
-                    mem_used = val.trim().parse::<u64>().unwrap_or(0);
+                    memory_used = val.trim().parse::<u64>().unwrap_or(0);
                 }
             }
         }
 
         // Only return if we got at least the utilization value
-        if util > 0.0 || mem_total > 0 {
-            return Some((util, mem_used, mem_total));
+        if utilization > 0.0 || memory_total > 0 {
+            return Some(GpuStats { utilization, memory_used, memory_total });
         }
     }
     #[cfg(not(target_os = "linux"))]
@@ -382,8 +457,8 @@ fn try_rocm_smi() -> Option<(f32, u64, u64)> {
 /// NVIDIA with the open-source `nouveau` driver, and some AMD AMDGPU setups)
 /// there will be a component whose label contains "gpu". This does NOT provide
 /// utilization or memory — only presence detection — so we return
-/// `(1.0, 0, 0)` as a sentinel meaning "GPU present, utilization unknown".
-fn try_sysinfo_gpu() -> Option<(f32, u64, u64)> {
+/// a sentinel `GpuStats { utilization: 1.0, .. }` meaning "GPU present, utilization unknown".
+fn try_sysinfo_gpu() -> Option<GpuStats> {
     use sysinfo::Components;
 
     let components = Components::new_with_refreshed_list();
@@ -397,7 +472,7 @@ fn try_sysinfo_gpu() -> Option<(f32, u64, u64)> {
                 component.label(),
                 component.temperature(),
             );
-            return Some((1.0, 0, 0));
+            return Some(GpuStats { utilization: 1.0, memory_used: 0, memory_total: 0 });
         }
     }
     None
@@ -490,5 +565,75 @@ mod tests {
         // On Linux CI, should return something > 0
         #[cfg(target_os = "linux")]
         assert!(rx > 0 || tx > 0, "Expected non-zero network bytes on Linux");
+    }
+
+    #[test]
+    fn test_gpu_stats_default() {
+        let stats = GpuStats::default();
+        assert_eq!(stats.utilization, 0.0);
+        assert_eq!(stats.memory_used, 0);
+        assert_eq!(stats.memory_total, 0);
+        assert_eq!(stats.as_tuple(), (0.0, 0, 0));
+    }
+
+    #[test]
+    fn test_gpu_cache_starts_expired() {
+        // GpuCache should start with last_query in the past so the first tick
+        // triggers an immediate query rather than waiting for the TTL.
+        let cache = GpuCache::new(GpuBackend::Unknown);
+        assert!(cache.last_result.is_none());
+        assert!(cache.last_query.elapsed() >= GPU_CACHE_TTL);
+    }
+
+    /// Verify that GPU monitoring does not block the tokio runtime.
+    ///
+    /// We spawn the resource monitor, then concurrently run a future that
+    /// must complete within 500ms. If GPU sampling were blocking the worker
+    /// thread, this concurrent future would be starved and the timeout
+    /// would fire.
+    #[tokio::test]
+    async fn test_gpu_monitoring_does_not_block_runtime() {
+        let monitor = ResourceMonitor::new();
+        let handle = monitor.spawn();
+
+        // Run a concurrent async task that should complete almost instantly.
+        // If GPU sampling blocks the runtime, this will time out.
+        let concurrent_work = async {
+            let mut sum = 0u64;
+            for _ in 0..10 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                sum += 1;
+            }
+            sum
+        };
+
+        let result = tokio::time::timeout(Duration::from_millis(500), concurrent_work).await;
+        assert!(result.is_ok(), "Concurrent async task was blocked — GPU monitoring likely blocking the runtime");
+        assert_eq!(result.unwrap(), 10);
+
+        // Verify we can still read a snapshot (the monitor task is running)
+        let snap = monitor.snapshot();
+        // cpu_total could be 0.0 if the monitor hasn't had time to sample yet,
+        // but reading should not panic or block.
+        let _ = snap.cpu_total;
+
+        monitor.stop();
+        // Give the tasks time to notice the stop flag
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn test_gpu_backend_detect_completes() {
+        // GpuBackend::detect() should return without blocking, regardless of
+        // whether nvidia-smi or rocm-smi are installed.
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            GpuBackend::detect(),
+        ).await;
+        assert!(result.is_ok(), "GpuBackend::detect() timed out");
+        // On a server without GPU, we expect None; with GPU, NvidiaSmi or RocmSmi.
+        // Just verify it doesn't panic.
+        let _backend = result.unwrap();
     }
 }

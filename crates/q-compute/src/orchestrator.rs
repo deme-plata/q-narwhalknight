@@ -16,12 +16,43 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use parking_lot::RwLock;
 use tracing::{info, debug, trace, warn};
 
+/// Concrete core range assigned to a layer (start..end)
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoreRange {
+    pub start: usize,
+    pub end: usize, // exclusive
+}
+
+impl CoreRange {
+    pub fn new(start: usize, end: usize) -> Self {
+        Self { start, end }
+    }
+
+    /// Number of cores in this range
+    pub fn len(&self) -> usize {
+        self.end.saturating_sub(self.start)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Convert to core_affinity CoreId set
+    pub fn to_core_ids(&self) -> Vec<core_affinity::CoreId> {
+        (self.start..self.end)
+            .map(|id| core_affinity::CoreId { id })
+            .collect()
+    }
+}
+
 /// Core assignment for each layer
 #[derive(Debug, Clone)]
 struct LayerAssignment {
     layer: ComputeLayer,
     /// Advisory core budget (count, not specific cores — OS handles actual scheduling)
     core_budget: usize,
+    /// v9.5.1: Concrete core range for enforcement (#013)
+    core_range: Option<CoreRange>,
     active: bool,
     tasks_completed: Arc<AtomicU64>,
     tasks_pending: Arc<AtomicU64>,
@@ -69,6 +100,7 @@ impl Orchestrator {
             assignments.insert(*layer, LayerAssignment {
                 layer: *layer,
                 core_budget: 0,
+                core_range: None,
                 active: *layer == ComputeLayer::Mining,
                 tasks_completed: Arc::new(AtomicU64::new(0)),
                 tasks_pending: Arc::new(AtomicU64::new(0)),
@@ -155,6 +187,48 @@ impl Orchestrator {
             assignment.tasks_completed.fetch_add(1, Ordering::Relaxed);
             assignment.revenue_micro_qug.fetch_add(revenue_micro_qug, Ordering::Relaxed);
         }
+    }
+
+    /// v9.5.1: Record inference revenue specifically (convenience for external callers)
+    pub fn record_inference_revenue(&self, tokens: u64, price_per_token_micro_qug: u64) {
+        let revenue = tokens.saturating_mul(price_per_token_micro_qug);
+        self.record_task(ComputeLayer::AiInference, revenue);
+    }
+
+    /// v9.5.1: Get the concrete core range assigned to a layer (#013)
+    pub fn get_layer_core_range(&self, layer: &ComputeLayer) -> Option<CoreRange> {
+        let assignments = self.assignments.read();
+        assignments.get(layer).and_then(|a| a.core_range.clone())
+    }
+
+    /// v9.5.1: Pin the calling thread to the core range assigned to a layer (#013).
+    /// Returns true if affinity was successfully set, false if fallback to advisory.
+    pub fn enforce_affinity_for_layer(layer: &ComputeLayer, core_range: &CoreRange) -> bool {
+        if core_range.is_empty() {
+            return false;
+        }
+
+        let core_ids = core_range.to_core_ids();
+        if core_ids.is_empty() {
+            return false;
+        }
+
+        // core_affinity::set_for_current sets affinity for the current thread
+        // to ONE core — we pick the first in the range. For multi-core layers,
+        // each worker thread should call this with its own core offset.
+        let success = core_affinity::set_for_current(core_ids[0]);
+        if success {
+            debug!(
+                "🚀 [STARSHIP] Core affinity enforced for {} — pinned to cores {}..{}",
+                layer.name(), core_range.start, core_range.end
+            );
+        } else {
+            warn!(
+                "🚀 [STARSHIP] Core affinity failed for {} (cores {}..{}), falling back to advisory",
+                layer.name(), core_range.start, core_range.end
+            );
+        }
+        success
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -319,10 +393,11 @@ impl Orchestrator {
 
                 let mut assignments = assignments.write();
 
-                // Mining always gets its reserved cores
+                // Mining always gets its reserved cores (pinned to 0..N for cache locality)
                 let mining_reserved = mining_cores.load(Ordering::Relaxed) as usize;
                 if let Some(mining) = assignments.get_mut(&ComputeLayer::Mining) {
                     mining.core_budget = mining_reserved;
+                    mining.core_range = Some(CoreRange::new(0, mining_reserved));
                     mining.active = true;
                 }
 
@@ -350,6 +425,7 @@ impl Orchestrator {
                             a.core_budget, layer.name(), tick - a.last_active_tick
                         );
                         a.core_budget = 0;
+                        a.core_range = None;
                         a.active = false;
                     }
                 }
@@ -387,6 +463,8 @@ impl Orchestrator {
 
                         if total_weight > 0 {
                             let mut allocated = 0;
+                            // Core ranges start after mining's reserved range
+                            let mut range_cursor = mining_reserved;
                             for (i, layer) in active_layers.iter().enumerate() {
                                 let budget = if i == active_layers.len() - 1 {
                                     // Last layer gets remainder to avoid rounding loss
@@ -396,6 +474,14 @@ impl Orchestrator {
                                 };
                                 if let Some(assignment) = assignments.get_mut(layer) {
                                     assignment.core_budget = budget;
+                                    // v9.5.1: Compute concrete core range (#013)
+                                    assignment.core_range = if budget > 0 {
+                                        let range = CoreRange::new(range_cursor, range_cursor + budget);
+                                        range_cursor += budget;
+                                        Some(range)
+                                    } else {
+                                        None
+                                    };
                                     assignment.active = budget > 0;
                                     if budget > 0 {
                                         assignment.last_active_tick = assignment.last_active_tick.max(tick.saturating_sub(5));
@@ -412,11 +498,13 @@ impl Orchestrator {
                     }
                 }
 
-                // Sync inference pool with AiInference layer core budget
+                // Sync inference pool with AiInference layer core budget + range (#013, #014)
                 if let Some(ai_assignment) = assignments.get(&ComputeLayer::AiInference) {
-                    let budget = ai_assignment.core_budget;
-                    // Build a Vec<usize> of advisory core indices for the pool
-                    let cores: Vec<usize> = (mining_reserved..mining_reserved + budget).collect();
+                    let cores: Vec<usize> = if let Some(ref range) = ai_assignment.core_range {
+                        (range.start..range.end).collect()
+                    } else {
+                        vec![]
+                    };
                     inference_pool.update_cores(cores);
                 }
 
@@ -431,6 +519,7 @@ impl Orchestrator {
                                         assignment.core_budget, layer.name(), snap.cpu_total
                                     );
                                     assignment.core_budget = 0;
+                                    assignment.core_range = None;
                                     assignment.active = false;
                                 }
                             }
@@ -590,6 +679,60 @@ mod tests {
 
         // None should be stored
         assert_eq!(orch.peer_registry().len(), 0);
+    }
+
+    #[test]
+    fn test_core_range() {
+        let range = CoreRange::new(4, 8);
+        assert_eq!(range.len(), 4);
+        assert!(!range.is_empty());
+        let ids = range.to_core_ids();
+        assert_eq!(ids.len(), 4);
+        assert_eq!(ids[0].id, 4);
+        assert_eq!(ids[3].id, 7);
+
+        let empty = CoreRange::new(0, 0);
+        assert!(empty.is_empty());
+        assert_eq!(empty.len(), 0);
+    }
+
+    #[test]
+    fn test_record_inference_revenue() {
+        let orch = Orchestrator::new(ComputeMode::Full);
+
+        // Record 1000 tokens at 5 micro-QUG each = 5000 revenue
+        orch.record_inference_revenue(1000, 5);
+
+        let status = orch.status();
+        let ai_layer = status.layers.iter().find(|(name, _)| name == "AI Inference").unwrap();
+        assert_eq!(ai_layer.1.tasks_completed.0, 1);
+        assert_eq!(ai_layer.1.revenue_micro_qug, 5000);
+    }
+
+    #[test]
+    fn test_get_layer_core_range() {
+        let orch = Orchestrator::new(ComputeMode::Full);
+
+        // Initially, non-mining layers have no range
+        assert!(orch.get_layer_core_range(&ComputeLayer::AiInference).is_none());
+
+        // Mining should have a range (set in constructor)
+        // Note: ranges only get set after spawn() scheduler runs, but
+        // the constructor sets mining_cores so let's verify the concept
+        let assignments = orch.assignments.read();
+        let mining = assignments.get(&ComputeLayer::Mining).unwrap();
+        // The range is set by the scheduler, not the constructor, so it's None initially
+        // This is correct — the scheduler loop sets it on first tick
+        drop(assignments);
+    }
+
+    #[test]
+    fn test_enforce_affinity_graceful() {
+        // Even on systems with limited cores, this should not crash
+        let range = CoreRange::new(0, 1);
+        let result = Orchestrator::enforce_affinity_for_layer(&ComputeLayer::Mining, &range);
+        // We don't assert true — it may fail in CI/containers — just assert no panic
+        let _ = result;
     }
 
     #[test]

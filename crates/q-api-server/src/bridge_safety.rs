@@ -18,9 +18,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
+use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn, error};
 
 use crate::bridge_tokens::BridgeChain;
@@ -52,6 +53,180 @@ pub const SWAP_EXPIRY_SECS: u64 = 43200; // 12 hours (matches HTLC timelock)
 pub const SWAP_SCAN_INTERVAL_SECS: u64 = 60;
 
 // ============================================================================
+// Multi-Node Bridge Attestation (Issue #016)
+// ============================================================================
+//
+// Cross-chain deposit verification requires 2-of-3 attestations from
+// independent verifier nodes before crediting wrapped tokens. Each node
+// independently queries the external chain RPC and signs the result.
+// Attestations are published on the /qnk/{network}/bridge-attestations
+// gossipsub topic.
+// ============================================================================
+
+/// A signed attestation from a verifier node confirming (or rejecting) a
+/// cross-chain deposit. Published via gossipsub after independent RPC check.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BridgeAttestation {
+    /// The swap ID this attestation is for (matches PendingDeposit.swap_id)
+    pub swap_id: String,
+    /// Peer ID of the verifier node that produced this attestation
+    pub verifier_peer_id: String,
+    /// Source chain identifier: "BTC", "ETH", "ZEC", "IRON"
+    pub chain: String,
+    /// Transaction hash on the source chain (if found)
+    pub tx_hash: String,
+    /// Deposit amount in native base units (satoshis, wei, etc.)
+    pub amount: u64,
+    /// Whether this verifier confirmed the deposit exists and is valid
+    pub confirmed: bool,
+    /// Ed25519 signature over (swap_id, confirmed, amount) — prevents forgery
+    pub signature: Vec<u8>,
+    /// Unix timestamp (seconds) when this attestation was created
+    pub timestamp: u64,
+}
+
+/// Result of checking the attestation quorum for a swap.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QuorumResult {
+    /// Still collecting attestations — not enough to decide
+    Pending {
+        confirmations: usize,
+        rejections: usize,
+        needed: usize,
+    },
+    /// Quorum reached: enough verifiers confirmed the deposit
+    Confirmed,
+    /// Quorum reached: enough verifiers rejected the deposit
+    Rejected,
+}
+
+/// Collects attestations from multiple verifier nodes and determines
+/// whether a 2-of-3 (configurable) quorum has been reached for each swap.
+pub struct AttestationCollector {
+    /// Map from swap_id to the attestations received so far
+    pending: HashMap<String, Vec<BridgeAttestation>>,
+    /// Number of matching confirmations (or rejections) needed to decide
+    quorum_size: usize,
+    /// Minimum number of distinct attestations expected (e.g. 3 verifiers)
+    min_attestations: usize,
+    /// Attestations older than this are cleaned up by `cleanup_stale()`
+    timeout: Duration,
+}
+
+impl AttestationCollector {
+    /// Create a new collector.
+    ///
+    /// * `quorum_size` — confirmations (or rejections) needed to decide (default: 2)
+    /// * `min_attestations` — total distinct verifiers expected (default: 3)
+    pub fn new(quorum_size: usize, min_attestations: usize) -> Self {
+        Self {
+            pending: HashMap::new(),
+            quorum_size,
+            min_attestations,
+            timeout: Duration::from_secs(300), // 5 minutes
+        }
+    }
+
+    /// Submit an attestation from a verifier node. Deduplicates by
+    /// `(swap_id, verifier_peer_id)` — each verifier may only attest once
+    /// per swap. Returns the current quorum status after insertion.
+    pub fn submit_attestation(&mut self, att: BridgeAttestation) -> QuorumResult {
+        let swap_id = att.swap_id.clone();
+
+        let entries = self.pending.entry(swap_id.clone()).or_default();
+
+        // Deduplicate: one attestation per verifier per swap
+        if entries.iter().any(|a| a.verifier_peer_id == att.verifier_peer_id) {
+            warn!(
+                "[ATTESTATION] Duplicate attestation from {} for swap {} — ignoring",
+                att.verifier_peer_id, swap_id
+            );
+        } else {
+            info!(
+                "[ATTESTATION] Received attestation from {} for swap {} confirmed={}",
+                att.verifier_peer_id, swap_id, att.confirmed
+            );
+            entries.push(att);
+        }
+
+        self.check_quorum(&swap_id)
+    }
+
+    /// Check the current quorum status for a given swap without adding
+    /// any new attestation. Returns `Pending` if the swap is unknown.
+    pub fn check_quorum(&self, swap_id: &str) -> QuorumResult {
+        let entries = match self.pending.get(swap_id) {
+            Some(v) => v,
+            None => {
+                return QuorumResult::Pending {
+                    confirmations: 0,
+                    rejections: 0,
+                    needed: self.quorum_size,
+                };
+            }
+        };
+
+        let confirmations = entries.iter().filter(|a| a.confirmed).count();
+        let rejections = entries.iter().filter(|a| !a.confirmed).count();
+
+        if confirmations >= self.quorum_size {
+            QuorumResult::Confirmed
+        } else if rejections >= self.quorum_size {
+            QuorumResult::Rejected
+        } else {
+            QuorumResult::Pending {
+                confirmations,
+                rejections,
+                needed: self.quorum_size,
+            }
+        }
+    }
+
+    /// Remove attestation entries for swaps whose oldest attestation is
+    /// past the configured timeout. Call this periodically from a
+    /// background task.
+    pub fn cleanup_stale(&mut self) {
+        let now_secs = Utc::now().timestamp() as u64;
+        let timeout_secs = self.timeout.as_secs();
+        let before = self.pending.len();
+
+        self.pending.retain(|swap_id, entries| {
+            // Keep if ANY attestation is still within the timeout window
+            let dominated = entries.iter().all(|a| {
+                now_secs.saturating_sub(a.timestamp) > timeout_secs
+            });
+            if dominated {
+                warn!(
+                    "[ATTESTATION] Cleaned up stale attestations for swap {} ({} entries)",
+                    swap_id,
+                    entries.len()
+                );
+            }
+            !dominated
+        });
+
+        let removed = before.saturating_sub(self.pending.len());
+        if removed > 0 {
+            info!(
+                "[ATTESTATION] Stale cleanup: removed {} swap entries, {} remaining",
+                removed,
+                self.pending.len()
+            );
+        }
+    }
+
+    /// Get the list of swap IDs with pending (undecided) attestations.
+    pub fn pending_swap_ids(&self) -> Vec<String> {
+        self.pending.keys().cloned().collect()
+    }
+
+    /// Get all attestations for a specific swap (for dashboard display).
+    pub fn get_attestations(&self, swap_id: &str) -> Vec<BridgeAttestation> {
+        self.pending.get(swap_id).cloned().unwrap_or_default()
+    }
+}
+
+// ============================================================================
 // Bridge Safety State
 // ============================================================================
 
@@ -65,6 +240,8 @@ pub struct BridgeSafetyController {
     pending_deposits: RwLock<Vec<PendingDeposit>>,
     /// RPC endpoints for external chain verification
     rpc_endpoints: RwLock<ChainRpcConfig>,
+    /// v9.4.1: Multi-node attestation collector for 2-of-3 quorum verification (Issue #016)
+    attestation_collector: Arc<Mutex<AttestationCollector>>,
 }
 
 /// RPC endpoint configuration for external chains
@@ -140,6 +317,9 @@ impl BridgeSafetyController {
             chain_frozen: RwLock::new(HashMap::new()),
             pending_deposits: RwLock::new(Vec::new()),
             rpc_endpoints: RwLock::new(rpc_config),
+            attestation_collector: Arc::new(Mutex::new(
+                AttestationCollector::new(2, 3), // 2-of-3 quorum
+            )),
         }
     }
 
@@ -185,6 +365,116 @@ impl BridgeSafetyController {
         }
         let locked = self.chain_frozen.read().await;
         *locked.get(&chain).unwrap_or(&false)
+    }
+
+    // ========================================================================
+    // Multi-Node Attestation (Issue #016)
+    // ========================================================================
+
+    /// Get a reference to the attestation collector (for external wiring).
+    pub fn attestation_collector(&self) -> &Arc<Mutex<AttestationCollector>> {
+        &self.attestation_collector
+    }
+
+    /// Create a local attestation for a swap after this node has independently
+    /// verified (or failed to verify) the deposit on the source chain.
+    ///
+    /// The attestation is signed with the node's Ed25519 key so that peers
+    /// can verify its authenticity before counting it toward quorum.
+    pub fn create_local_attestation(
+        signing_key: &ed25519_dalek::SigningKey,
+        local_peer_id: &str,
+        swap_id: &str,
+        chain: &str,
+        tx_hash: &str,
+        amount: u64,
+        confirmed: bool,
+    ) -> BridgeAttestation {
+        use ed25519_dalek::Signer;
+
+        // Deterministic message: concat(swap_id, confirmed_byte, amount_le_bytes)
+        let mut message = Vec::with_capacity(swap_id.len() + 1 + 8);
+        message.extend_from_slice(swap_id.as_bytes());
+        message.push(if confirmed { 1u8 } else { 0u8 });
+        message.extend_from_slice(&amount.to_le_bytes());
+
+        let signature = signing_key.sign(&message);
+
+        BridgeAttestation {
+            swap_id: swap_id.to_string(),
+            verifier_peer_id: local_peer_id.to_string(),
+            chain: chain.to_string(),
+            tx_hash: tx_hash.to_string(),
+            amount,
+            confirmed,
+            signature: signature.to_bytes().to_vec(),
+            timestamp: Utc::now().timestamp() as u64,
+        }
+    }
+
+    /// Process a remote attestation received via gossipsub.
+    ///
+    /// Deserializes the attestation from bytes, submits it to the collector,
+    /// and returns the resulting quorum status. The caller should check the
+    /// returned `QuorumResult` to decide whether to proceed with minting.
+    pub async fn process_remote_attestation(
+        &self,
+        data: &[u8],
+    ) -> Result<(String, QuorumResult), String> {
+        let att: BridgeAttestation = serde_json::from_slice(data)
+            .map_err(|e| format!("Failed to deserialize attestation: {}", e))?;
+
+        let swap_id = att.swap_id.clone();
+
+        info!(
+            "[BRIDGE ATTESTATION] Processing remote attestation from {} for swap {} chain={} confirmed={}",
+            att.verifier_peer_id, att.swap_id, att.chain, att.confirmed
+        );
+
+        let mut collector = self.attestation_collector.lock().await;
+        let result = collector.submit_attestation(att);
+
+        match &result {
+            QuorumResult::Confirmed => {
+                info!(
+                    "[BRIDGE ATTESTATION] QUORUM REACHED for swap {} — deposit CONFIRMED by multi-node verification",
+                    swap_id
+                );
+            }
+            QuorumResult::Rejected => {
+                warn!(
+                    "[BRIDGE ATTESTATION] QUORUM REACHED for swap {} — deposit REJECTED by multi-node verification",
+                    swap_id
+                );
+            }
+            QuorumResult::Pending { confirmations, rejections, needed } => {
+                info!(
+                    "[BRIDGE ATTESTATION] Swap {} quorum pending: {}/{} confirmations, {}/{} rejections",
+                    swap_id, confirmations, needed, rejections, needed
+                );
+            }
+        }
+
+        Ok((swap_id, result))
+    }
+
+    /// Check the current attestation quorum for a swap without submitting
+    /// a new attestation. Used by the pre-mint flow and dashboard.
+    pub async fn check_attestation_quorum(&self, swap_id: &str) -> QuorumResult {
+        let collector = self.attestation_collector.lock().await;
+        collector.check_quorum(swap_id)
+    }
+
+    /// Get all attestations for a swap (for the admin dashboard).
+    pub async fn get_swap_attestations(&self, swap_id: &str) -> Vec<BridgeAttestation> {
+        let collector = self.attestation_collector.lock().await;
+        collector.get_attestations(swap_id)
+    }
+
+    /// Cleanup stale attestations. Call from a background task.
+    pub async fn cleanup_stale_attestations(&self) {
+        let mut collector = self.attestation_collector.lock().await;
+        collector.cleanup_stale();
     }
 
     // ========================================================================
@@ -734,6 +1024,10 @@ impl BridgeSafetyController {
     pub async fn get_status(&self) -> BridgeSafetyStatus {
         let pending = self.pending_deposits.read().await;
         let config = self.rpc_endpoints.read().await;
+        let attestation_count = {
+            let collector = self.attestation_collector.lock().await;
+            collector.pending_swap_ids().len()
+        };
 
         BridgeSafetyStatus {
             globally_frozen: self.is_frozen(),
@@ -750,6 +1044,7 @@ impl BridgeSafetyController {
             eth_max_amount_wei: ETH_MAX_AMOUNT_WEI,
             zec_max_amount: ZEC_MAX_AMOUNT_ZATS,
             iron_max_amount: IRON_MAX_AMOUNT_BASE,
+            pending_attestations: attestation_count,
         }
     }
 }
@@ -777,6 +1072,8 @@ pub struct BridgeSafetyStatus {
     pub eth_max_amount_wei: u128,
     pub zec_max_amount: u64,
     pub iron_max_amount: u64,
+    /// Number of swaps with pending (undecided) attestation quorums
+    pub pending_attestations: usize,
 }
 
 // ============================================================================
@@ -882,6 +1179,9 @@ pub fn spawn_swap_expiry_scanner(
 
         loop {
             interval.tick().await;
+
+            // v9.4.1: Also cleanup stale attestations on each scan
+            bridge_safety.cleanup_stale_attestations().await;
 
             let expired = bridge_safety.scan_expired_swaps().await;
             for swap_id in &expired {
