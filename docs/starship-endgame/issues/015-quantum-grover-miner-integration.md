@@ -1,11 +1,21 @@
 # Issue #015: Quantum Grover Miner — Rust FFI Integration
 
-**State**: `open`
+**State**: `in_progress`
 **Priority**: HIGH
 **Labels**: `starship-endgame`, `quantum`, `mining`
 **Assigned**: Epsilon
 **Branch**: `feature/safe-batched-sync-v1.0.2`
 **Created**: 2026-03-10
+**Updated**: 2026-03-10
+
+## Progress
+
+- `grover_backend.rs`: 1303 lines implemented
+  - GroverMiningBackend trait implementation
+  - QuantumCircuitSimulator with QPanda/Qiskit fallback
+  - Classical hybrid mining (20-bit Grover + 44-bit brute force)
+  - MEV protection via quantum RNG for nonce ordering
+  - 22 comprehensive unit tests
 
 ---
 

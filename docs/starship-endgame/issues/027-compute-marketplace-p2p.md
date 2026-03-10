@@ -1,11 +1,21 @@
 # Issue #027: Compute Marketplace P2P Protocol — Bid/Ask for Work
 
-**State**: `open`
+**State**: `in_progress`
 **Priority**: MEDIUM
 **Labels**: `starship-endgame`, `p2p`, `economics`
 **Assigned**: Epsilon
 **Branch**: `feature/safe-batched-sync-v1.0.2`
 **Created**: 2026-03-10
+**Updated**: 2026-03-10
+
+## Progress
+
+- `marketplace_p2p.rs`: 1228 lines implemented
+  - MarketplaceRouter with gossipsub integration
+  - OrderBook with bid/ask protocol
+  - WinnerSelection logic (lowest price, reputation > 0.5)
+  - SettlementManager for billing integration
+  - 19 comprehensive unit tests
 
 ---
 

@@ -1,12 +1,20 @@
 # Issue #006: ZK Proof Farm
 
-**State**: `open`
+**State**: `in_progress`
 **Priority**: MEDIUM
 **Labels**: `starship-endgame`, `zk`, `proofs`
 **Assigned**: Gamma
-**Branch**: (not started)
+**Branch**: `feature/safe-batched-sync-v1.0.2`
 **Created**: 2026-03-08
 **Updated**: 2026-03-10
+
+## Progress
+
+- `zk_proof_farm.rs`: 1732 lines implemented
+  - STARK/SNARK/Bulletproof proof generation
+  - GPU-accelerated NTT (Cooley-Tukey algorithm)
+  - Recursive proof batching for cost amortization
+  - 26 comprehensive unit tests
 
 ---
 

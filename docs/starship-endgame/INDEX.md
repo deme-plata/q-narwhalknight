@@ -32,8 +32,8 @@
 | # | Title | Priority | Status | Assigned | Progress |
 |---|-------|----------|--------|----------|----------|
 | [#003](issues/003-gpu-mining-acceleration.md) | GPU Mining Acceleration | HIGH | **In Progress** | Epsilon | GpuHasher + rayon CPU backend + 16 tests |
-| [#015](issues/015-quantum-grover-miner-integration.md) | Quantum Grover Miner Integration | HIGH | Open | Epsilon | Python impl in q-grover/, needs Rust FFI |
-| [#006](issues/006-zk-proof-farm.md) | ZK Proof Farm | MEDIUM | Open | Gamma | Not started |
+| [#015](issues/015-quantum-grover-miner-integration.md) | Quantum Grover Miner Integration | HIGH | **In Progress** | Epsilon | grover_backend.rs: 1303 lines — quantum mining sim + MEV protection |
+| [#006](issues/006-zk-proof-farm.md) | ZK Proof Farm | MEDIUM | **In Progress** | Gamma | zk_proof_farm.rs: 1732 lines — STARK/SNARK/Bulletproof + NTT + batching |
 | [#023](issues/023-multi-gpu-scheduling.md) | Multi-GPU Scheduling | HIGH | **Closed** | Epsilon | gpu_scheduler.rs: 763 lines — device detection, VRAM-aware placement, 15 tests |
 
 ### Distributed AI & Marketplace (Phase 3)
@@ -44,7 +44,7 @@
 | [#018](issues/018-cross-node-tensor-parallelism.md) | Cross-Node Tensor Parallelism | MEDIUM | **In Progress** | Epsilon | tensor_parallel.rs: 563 lines — partitioner, pipeline scheduler, KV cache |
 | [#017](issues/017-proof-of-useful-work.md) | Proof-of-Useful-Work Marketplace | MEDIUM | **In Progress** | Beta | marketplace.rs: 926 lines — MarketplaceManager, bid/ask, 6 work types |
 | [#025](issues/025-model-catalog-hot-swap.md) | Model Catalog & Hot-Swap | MEDIUM | **In Progress** | Beta | model_catalog.rs: 761 lines — catalog + VramBudgetManager + hot-swap |
-| [#027](issues/027-compute-marketplace-p2p.md) | Compute Marketplace P2P Protocol | MEDIUM | Open | Epsilon | Design only |
+| [#027](issues/027-compute-marketplace-p2p.md) | Compute Marketplace P2P Protocol | MEDIUM | **In Progress** | Epsilon | marketplace_p2p.rs: 1228 lines — OrderBook + WinnerSelection + settlements |
 
 ### Bridge & Security (Phase 3)
 
@@ -163,8 +163,8 @@
 |-----------|--------|--------|--------|
 | **Phase 1: Orchestrator Foundation** | #001, #002, #004, #007 | 2026-03-10 | 4/4 closed |
 | **Phase 1.5: Hardening** | #012, #013, #014 | 2026-03-15 | 3/3 closed |
-| **Phase 2: GPU & Quantum** | #003, #006, #015, #023 | 2026-03-25 | 2/4 (#003 in progress, #023 closed) |
-| **Phase 3: Distributed Compute** | #005, #016, #017, #018, #024, #025, #027 | 2026-04-10 | 1/7 closed, 6/7 in progress (#027 open) |
+| **Phase 2: GPU & Quantum** | #003, #006, #015, #023 | 2026-03-25 | 4/4 in progress/closed (#003, #006, #015, #023) |
+| **Phase 3: Distributed Compute** | #005, #016, #017, #018, #024, #025, #027 | 2026-04-10 | 1/7 closed, 6/7 in progress |
 | **Phase 4: Payments** | #019, #020 | 2026-03-10 | 2/2 closed |
 | **Phase 5: Compute Economics** | #021, #022, #026 | 2026-04-20 | 2/3 closed, 1/3 in progress |
 | **Monitoring** | #028 | 2026-04-15 | 1/1 in progress |
