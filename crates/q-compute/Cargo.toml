@@ -21,6 +21,14 @@ num_cpus = "1"
 parking_lot = "0.12"
 q-ai-inference = { path = "../q-ai-inference" }
 prometheus = { version = "0.13", optional = true }
+# Crypto for tunnel handshake (X25519 key exchange + HKDF session key derivation)
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+sha3 = { workspace = true }
+rayon = { workspace = true }
+# Use rand 0.8 (not workspace 0.9) for compatibility with x25519-dalek's rand_core 0.6
+rand = "0.8"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"

@@ -16,12 +16,14 @@
 //! - Layer 7: Idle Crypto
 
 pub mod orchestrator;
+pub mod gpu_miner; // Issue #003: GPU mining acceleration via wgpu compute pipelines
 pub mod core_enforcer; // v9.7.0: Real CPU affinity enforcement via sched_setaffinity (#013)
 pub mod trainer;
 pub mod tunnel;
 pub mod os_tuner;
 pub mod resource_monitor;
 pub mod inference_pool; // v9.6.0: AI inference worker pool for idle cores
+pub mod distributed_inference; // v9.8.0: Issue #005 — distributed AI inference routing
 #[cfg(feature = "metrics")]
 pub mod metrics; // Prometheus metrics export (feature-gated)
 

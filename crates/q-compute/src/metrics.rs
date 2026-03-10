@@ -206,6 +206,8 @@ mod tests {
             gpu_utilization: 78.3,
             gpu_memory_used: 4_000_000_000,
             gpu_memory_total: 8_000_000_000,
+            gpu_temperature: 65.0,
+            gpu_name: "NVIDIA GeForce RTX 4090".to_string(),
             ram_used: 16_000_000_000,
             ram_total: 32_000_000_000,
             net_tx_bps: 50_000_000,
