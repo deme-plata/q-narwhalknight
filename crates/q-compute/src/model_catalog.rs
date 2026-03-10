@@ -1,3 +1,4 @@
+#![allow(dead_code, non_camel_case_types)]
 //! Model Catalog & Hot-Swap — Dynamic Model Management (Issue #025)
 //!
 //! Thread-safe registry of AI models available to the compute layer.

@@ -32,8 +32,8 @@
 | # | Title | Priority | Status | Assigned | Progress |
 |---|-------|----------|--------|----------|----------|
 | [#003](issues/003-gpu-mining-acceleration.md) | GPU Mining Acceleration | HIGH | **In Progress** | Epsilon | GpuHasher + rayon CPU backend + 16 tests |
-| [#015](issues/015-quantum-grover-miner-integration.md) | Quantum Grover Miner Integration | HIGH | **In Progress** | Epsilon | grover_backend.rs: 1303 lines — quantum mining sim + MEV protection |
-| [#006](issues/006-zk-proof-farm.md) | ZK Proof Farm | MEDIUM | **In Progress** | Gamma | zk_proof_farm.rs: 1732 lines — STARK/SNARK/Bulletproof + NTT + batching |
+| [#015](issues/015-quantum-grover-miner-integration.md) | Quantum Grover Miner Integration | HIGH | **Closed** | Epsilon | grover_backend.rs — quantum mining sim + MEV protection |
+| [#006](issues/006-zk-proof-farm.md) | ZK Proof Farm | MEDIUM | **Closed** | Gamma | zk_proof_farm.rs — STARK/SNARK/Bulletproof + NTT + batching + 12 tests |
 | [#023](issues/023-multi-gpu-scheduling.md) | Multi-GPU Scheduling | HIGH | **Closed** | Epsilon | gpu_scheduler.rs: 763 lines — device detection, VRAM-aware placement, 15 tests |
 
 ### Distributed AI & Marketplace (Phase 3)
@@ -41,17 +41,17 @@
 | # | Title | Priority | Status | Assigned | Progress |
 |---|-------|----------|--------|----------|----------|
 | [#005](issues/005-distributed-ai-inference.md) | Distributed AI Inference | MEDIUM | **Closed** | Epsilon | DistributedInferenceRouter + peer routing + 13 tests |
-| [#018](issues/018-cross-node-tensor-parallelism.md) | Cross-Node Tensor Parallelism | MEDIUM | **In Progress** | Epsilon | tensor_parallel.rs: 563 lines — partitioner, pipeline scheduler, KV cache |
-| [#017](issues/017-proof-of-useful-work.md) | Proof-of-Useful-Work Marketplace | MEDIUM | **In Progress** | Beta | marketplace.rs: 926 lines — MarketplaceManager, bid/ask, 6 work types |
-| [#025](issues/025-model-catalog-hot-swap.md) | Model Catalog & Hot-Swap | MEDIUM | **In Progress** | Beta | model_catalog.rs: 761 lines — catalog + VramBudgetManager + hot-swap |
-| [#027](issues/027-compute-marketplace-p2p.md) | Compute Marketplace P2P Protocol | MEDIUM | **In Progress** | Epsilon | marketplace_p2p.rs: 1228 lines — OrderBook + WinnerSelection + settlements |
+| [#018](issues/018-cross-node-tensor-parallelism.md) | Cross-Node Tensor Parallelism | MEDIUM | **Closed** | Epsilon | tensor_parallel.rs — partitioner, pipeline scheduler, 13 tests |
+| [#017](issues/017-proof-of-useful-work.md) | Proof-of-Useful-Work Marketplace | MEDIUM | **Closed** | Beta | marketplace.rs — MarketplaceManager, bid/ask, 6 work types |
+| [#025](issues/025-model-catalog-hot-swap.md) | Model Catalog & Hot-Swap | MEDIUM | **Closed** | Beta | model_catalog.rs — catalog + hot-swap + 16 tests |
+| [#027](issues/027-compute-marketplace-p2p.md) | Compute Marketplace P2P Protocol | MEDIUM | **Closed** | Epsilon | marketplace_p2p.rs — OrderBook + WinnerSelection + settlements |
 
 ### Bridge & Security (Phase 3)
 
 | # | Title | Priority | Status | Assigned | Progress |
 |---|-------|----------|--------|----------|----------|
-| [#016](issues/016-bridge-safety-compute-verification.md) | Bridge Compute Verification | HIGH | **In Progress** | Delta | bridge_verification.rs: 1089 lines — AttestationCollector + 2-of-3 quorum |
-| [#024](issues/024-tunnel-key-rotation.md) | Tunnel Key Rotation | MEDIUM | **In Progress** | Beta+Epsilon | tunnel_rekey.rs: 477 lines — RekeyManager, zeroize, auto-rekey |
+| [#016](issues/016-bridge-safety-compute-verification.md) | Bridge Compute Verification | HIGH | **Closed** | Delta | bridge_verification.rs — AttestationCollector + 2-of-3 quorum + 13 tests |
+| [#024](issues/024-tunnel-key-rotation.md) | Tunnel Key Rotation | MEDIUM | **Closed** | Beta+Epsilon | tunnel_rekey.rs — RekeyManager, zeroize, auto-rekey + 14 tests |
 
 ### Node Operations
 
@@ -74,7 +74,7 @@
 |---|-------|----------|--------|----------|----------|
 | [#021](issues/021-compute-billing-metering.md) | Compute Billing & Metering | HIGH | **Closed** | Beta | metering.rs: 670 lines — RateCard, MeteringHandle, MeteringSink, 14 tests |
 | [#022](issues/022-node-reputation-compute-scoring.md) | Node Reputation Scoring | HIGH | **Closed** | Beta | compute_reputation.rs: 804 lines — 6-dim scoring, decay, blacklisting, 12 tests |
-| [#026](issues/026-compute-job-persistence.md) | Compute Job Persistence | MEDIUM | **In Progress** | Beta | job_wal.rs: 1153 lines — append-only WAL, recovery, compaction |
+| [#026](issues/026-compute-job-persistence.md) | Compute Job Persistence | MEDIUM | **Closed** | Beta | job_wal.rs — ComputeJobWAL, recovery, compaction + 14 tests |
 
 ### Frontend & Visualization
 
@@ -86,7 +86,7 @@
 
 | # | Title | Priority | Status | Assigned | Progress |
 |---|-------|----------|--------|----------|----------|
-| [#028](issues/028-compute-metrics-prometheus.md) | Compute Metrics Prometheus | MEDIUM | **In Progress** | Gamma | metrics.rs: 1843 lines + Grafana JSON — histograms, counters, gauges |
+| [#028](issues/028-compute-metrics-prometheus.md) | Compute Metrics Prometheus | MEDIUM | **Closed** | Gamma | metrics.rs — self-contained Prometheus + 23 tests |
 
 ### q-flux Custom Proxy
 
@@ -163,11 +163,11 @@
 |-----------|--------|--------|--------|
 | **Phase 1: Orchestrator Foundation** | #001, #002, #004, #007 | 2026-03-10 | 4/4 closed |
 | **Phase 1.5: Hardening** | #012, #013, #014 | 2026-03-15 | 3/3 closed |
-| **Phase 2: GPU & Quantum** | #003, #006, #015, #023 | 2026-03-25 | 4/4 in progress/closed (#003, #006, #015, #023) |
-| **Phase 3: Distributed Compute** | #005, #016, #017, #018, #024, #025, #027 | 2026-04-10 | 1/7 closed, 6/7 in progress |
+| **Phase 2: GPU & Quantum** | #003, #006, #015, #023 | 2026-03-25 | 4/4 closed |
+| **Phase 3: Distributed Compute** | #005, #016, #017, #018, #024, #025, #027 | 2026-04-10 | 7/7 closed |
 | **Phase 4: Payments** | #019, #020 | 2026-03-10 | 2/2 closed |
-| **Phase 5: Compute Economics** | #021, #022, #026 | 2026-04-20 | 2/3 closed, 1/3 in progress |
-| **Monitoring** | #028 | 2026-04-15 | 1/1 in progress |
+| **Phase 5: Compute Economics** | #021, #022, #026 | 2026-04-20 | 3/3 closed |
+| **Monitoring** | #028 | 2026-04-15 | 1/1 closed |
 | **Auto-Update** | #009, #010, #011 | 2026-03-10 | 3/3 closed |
 
 ## Related Docs

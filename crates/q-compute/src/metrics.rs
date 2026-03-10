@@ -184,30 +184,33 @@ impl AtomicHistogram {
     }
 
     /// Render just the data lines (no HELP/TYPE) for per-label histogram series.
+    ///
+    /// Note: `observe()` already stores cumulative counts in each bucket
+    /// (every bucket with `bound >= value` is incremented), so we emit
+    /// the raw atomic values directly without re-accumulating.
     fn render_data(&self, name: &str, labels: &str, out: &mut String) {
-        let mut cumulative: u64 = 0;
         for (i, bound_us) in self.bucket_bounds_us.iter().enumerate() {
-            cumulative += self.bucket_counts[i].load(Ordering::Relaxed);
+            let count = self.bucket_counts[i].load(Ordering::Relaxed);
             let le = *bound_us as f64 / 1_000_000.0;
             if labels.is_empty() {
-                let _ = writeln!(out, "{name}_bucket{{le=\"{le}\"}} {cumulative}");
+                let _ = writeln!(out, "{name}_bucket{{le=\"{le}\"}} {count}");
             } else {
                 let inner = labels.trim_start_matches('{').trim_end_matches('}');
                 let _ = writeln!(
                     out,
-                    "{name}_bucket{{{inner},le=\"{le}\"}} {cumulative}"
+                    "{name}_bucket{{{inner},le=\"{le}\"}} {count}"
                 );
             }
         }
-        // +Inf
-        cumulative += self.bucket_counts.last().unwrap().load(Ordering::Relaxed);
+        // +Inf bucket (== total count, since observe always increments it)
+        let inf_count = self.bucket_counts.last().unwrap().load(Ordering::Relaxed);
         if labels.is_empty() {
-            let _ = writeln!(out, "{name}_bucket{{le=\"+Inf\"}} {cumulative}");
+            let _ = writeln!(out, "{name}_bucket{{le=\"+Inf\"}} {inf_count}");
         } else {
             let inner = labels.trim_start_matches('{').trim_end_matches('}');
             let _ = writeln!(
                 out,
-                "{name}_bucket{{{inner},le=\"+Inf\"}} {cumulative}"
+                "{name}_bucket{{{inner},le=\"+Inf\"}} {inf_count}"
             );
         }
 
