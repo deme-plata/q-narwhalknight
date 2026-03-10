@@ -27,6 +27,12 @@ pub mod distributed_inference; // v9.8.0: Issue #005 — distributed AI inferenc
 pub mod gpu_scheduler; // Issue #023: Multi-GPU scheduling and layer assignment
 pub mod compute_reputation; // Issue #022: Node reputation for compute task assignment
 pub mod metering; // Issue #021: Compute billing & metering — unified resource tracking
+pub mod model_catalog; // Issue #025: Model catalog & hot-swap — dynamic AI model management
+pub mod tensor_parallel; // Issue #018: Cross-node tensor parallelism for distributed model inference
+pub mod job_wal; // Issue #026: Compute job queue persistence (WAL)
+pub mod bridge_verification; // Issue #016: Bridge safety — multi-peer attestation & 2-of-3 quorum
+pub mod marketplace; // Issue #017: Proof-of-Useful-Work marketplace — replace idle crypto with revenue
+pub mod tunnel_rekey; // Issue #024: Tunnel key rotation — forward secrecy via periodic rekey
 #[cfg(feature = "metrics")]
 pub mod metrics; // Prometheus metrics export (feature-gated)
 

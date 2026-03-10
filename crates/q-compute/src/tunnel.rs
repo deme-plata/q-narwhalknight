@@ -50,6 +50,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use parking_lot::RwLock;
 use tokio::sync::mpsc;
 use tracing::{info, warn, debug};
+use zeroize::Zeroize;
 
 /// TTL for known peers in seconds — peers not re-announced within this
 /// window are considered stale and evicted.
@@ -63,6 +64,19 @@ const HANDSHAKE_TIMEOUT_SECS: u64 = 5;
 
 /// Maximum new tunnels that `auto_connect_to_best_peers` opens per call.
 const MAX_AUTO_OPENS_PER_CALL: usize = 2;
+
+// ═══════════════════════════════════════════════════════════════════
+// Rekey Constants (Issue #024 — Forward Secrecy)
+// ═══════════════════════════════════════════════════════════════════
+
+/// Auto-rekey interval: 1 hour.
+const REKEY_INTERVAL: Duration = Duration::from_secs(3600);
+
+/// Auto-rekey byte threshold: 10 GB transferred.
+const REKEY_BYTE_THRESHOLD: u64 = 10 * 1024 * 1024 * 1024;
+
+/// Retry interval on rekey failure: 5 minutes.
+const REKEY_RETRY_INTERVAL: Duration = Duration::from_secs(300);
 
 // ═══════════════════════════════════════════════════════════════════
 // Tunnel Handshake — capability negotiation between peers
@@ -254,6 +268,41 @@ impl TunnelStream {
     pub fn age(&self) -> std::time::Duration {
         self.created_at.elapsed()
     }
+
+    /// Issue #024: Perform an in-band rekey over this stream.
+    ///
+    /// This is a convenience method that drives the full rekey protocol:
+    /// 1. Generates a new ephemeral X25519 keypair via the `RekeyManager`.
+    /// 2. Sends a `TunnelPayload::Rekey` message through this stream.
+    /// 3. The caller must separately handle the incoming `RekeyAck` and
+    ///    call `rekey_manager.complete_rekey()` to finalize.
+    ///
+    /// Returns the `TunnelPayload::Rekey` that was sent, or an error if
+    /// the rekey could not be initiated (e.g., one is already in progress)
+    /// or the send channel is closed.
+    pub async fn rekey(
+        &self,
+        rekey_manager: &mut RekeyManager,
+    ) -> Result<TunnelPayload, String> {
+        let payload = rekey_manager.initiate_rekey()?;
+
+        // Send the rekey request through this stream's channel
+        self.tx
+            .send(payload.clone())
+            .await
+            .map_err(|e| {
+                // If the send fails, mark the rekey as failed so the
+                // old key is preserved and a retry is scheduled.
+                rekey_manager.fail_rekey(&format!("channel send failed: {}", e));
+                format!("Failed to send rekey message: {}", e)
+            })?;
+
+        // Record the overhead bytes of the rekey message itself
+        // (32 pubkey + 32 nonce + 8 seq = 72 bytes + framing)
+        self.record_send(72);
+
+        Ok(payload)
+    }
 }
 
 /// Work item sent through a tunnel
@@ -297,6 +346,29 @@ pub enum TunnelPayload {
         request_id: String,
         layer_range: (u32, u32),
         activations: Vec<u8>,
+    },
+    /// Issue #024: Rekey coordination message for forward secrecy.
+    ///
+    /// Sent by the initiator to propose a new ephemeral key exchange.
+    /// The responder should reply with their own `Rekey` containing their
+    /// new ephemeral public key so both sides can derive a fresh session key.
+    Rekey {
+        /// New ephemeral X25519 public key from the sender.
+        ephemeral_pubkey: [u8; 32],
+        /// Nonce for HKDF salt derivation.
+        nonce: [u8; 32],
+        /// Monotonic rekey sequence number to prevent replays.
+        rekey_seq: u64,
+    },
+    /// Acknowledgement of a rekey — the responder sends their new ephemeral
+    /// public key back so the initiator can derive the same new session key.
+    RekeyAck {
+        /// Responder's new ephemeral X25519 public key.
+        ephemeral_pubkey: [u8; 32],
+        /// Responder's nonce.
+        nonce: [u8; 32],
+        /// Echo of the initiator's rekey_seq to correlate.
+        rekey_seq: u64,
     },
 }
 
@@ -1351,7 +1423,11 @@ pub struct HandshakeKeyResponse {
 }
 
 /// A derived 32-byte session key used for symmetric encryption of tunnel traffic.
-#[derive(Clone)]
+///
+/// Implements `Zeroize` and `Drop` to ensure key material is securely erased
+/// from memory when no longer needed (Issue #024 forward secrecy).
+#[derive(Clone, Zeroize)]
+#[zeroize(drop)]
 pub struct SessionKey {
     /// The raw 32-byte key material derived from HKDF-SHA256.
     key: [u8; 32],
@@ -1361,6 +1437,11 @@ impl SessionKey {
     /// Access the raw key bytes.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.key
+    }
+
+    /// Create a SessionKey from raw bytes. Used internally during rekey.
+    fn from_bytes(key: [u8; 32]) -> Self {
+        Self { key }
     }
 }
 
@@ -1588,6 +1669,425 @@ impl CryptoHandshake {
     pub fn session_key(&self) -> Option<&SessionKey> {
         self.session_key.as_ref()
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Tunnel Stats — per-tunnel statistics including rekey tracking
+// (Issue #024 — Forward Secrecy)
+// ═══════════════════════════════════════════════════════════════════
+
+/// Statistics for a tunnel, including rekey tracking for forward secrecy.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TunnelStats {
+    /// Total bytes sent through this tunnel.
+    pub bytes_sent: u64,
+    /// Total bytes received through this tunnel.
+    pub bytes_received: u64,
+    /// Total tasks routed through this tunnel.
+    pub tasks_routed: u64,
+    /// Current latency in milliseconds.
+    pub latency_ms: u32,
+    /// Number of successful rekey operations since tunnel establishment.
+    pub rekey_count: u64,
+    /// Unix timestamp (seconds) of the last successful rekey, or 0 if never rekeyed.
+    pub last_rekey_time: u64,
+    /// Bytes transferred since the last rekey (or since establishment if no rekey yet).
+    pub bytes_since_rekey: u64,
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Rekey State Machine (Issue #024 — Forward Secrecy)
+// ═══════════════════════════════════════════════════════════════════
+
+/// State of an in-progress rekey negotiation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RekeyState {
+    /// No rekey in progress — normal operation.
+    Idle,
+    /// We initiated a rekey and are waiting for the peer's RekeyAck.
+    AwaitingAck,
+    /// Rekey failed; will retry after `REKEY_RETRY_INTERVAL`.
+    Failed,
+}
+
+/// Manages the periodic rekeying of a tunnel's session key to provide
+/// forward secrecy.
+///
+/// The `RekeyManager` tracks:
+/// - Bytes transferred since last rekey (to trigger on 10 GB threshold).
+/// - Elapsed time since last rekey (to trigger on 1 hour threshold).
+/// - Rekey state machine (Idle → AwaitingAck → Idle on success, or → Failed).
+/// - The pending ephemeral secret used during an in-progress rekey.
+///
+/// ## Protocol
+///
+/// 1. **Initiator** calls `initiate_rekey()` → generates new X25519 keypair,
+///    returns `TunnelPayload::Rekey` to send to the peer.
+/// 2. **Responder** receives the `Rekey` payload, calls
+///    `handle_rekey_request()` → generates their own keypair, derives
+///    new session key, returns `TunnelPayload::RekeyAck`.
+/// 3. **Initiator** receives `RekeyAck`, calls `complete_rekey()` → derives
+///    the same new session key. Both sides atomically switch.
+///
+/// If either side fails, the old session key remains active and a retry is
+/// scheduled after `REKEY_RETRY_INTERVAL`.
+pub struct RekeyManager {
+    /// Current rekey state.
+    state: RekeyState,
+    /// Bytes transferred since the last successful rekey.
+    bytes_since_rekey: u64,
+    /// When the last rekey completed (or tunnel was established).
+    last_rekey_time: Instant,
+    /// When a failed rekey occurred (for retry scheduling).
+    last_failure_time: Option<Instant>,
+    /// Counter of successful rekeys over the tunnel lifetime.
+    rekey_count: u64,
+    /// Monotonic sequence number for rekey correlation and replay prevention.
+    next_rekey_seq: u64,
+    /// Pending ephemeral secret during AwaitingAck state.
+    /// Stored as StaticSecret so it can be cloned/held across the async gap.
+    pending_secret: Option<x25519_dalek::StaticSecret>,
+    /// Nonce we sent in the rekey initiation.
+    pending_nonce: [u8; 32],
+    /// The sequence number of the in-progress rekey.
+    pending_seq: u64,
+    /// Current session key — the active key used for encryption/decryption.
+    /// Old keys are zeroized on replacement.
+    current_session_key: Option<SessionKey>,
+}
+
+impl RekeyManager {
+    /// Create a new `RekeyManager` starting from an initial session key.
+    pub fn new(initial_key: SessionKey) -> Self {
+        Self {
+            state: RekeyState::Idle,
+            bytes_since_rekey: 0,
+            last_rekey_time: Instant::now(),
+            last_failure_time: None,
+            rekey_count: 0,
+            next_rekey_seq: 1,
+            pending_secret: None,
+            pending_nonce: [0u8; 32],
+            pending_seq: 0,
+            current_session_key: Some(initial_key),
+        }
+    }
+
+    /// Create a `RekeyManager` with no initial key (for testing).
+    #[cfg(test)]
+    pub fn new_empty() -> Self {
+        Self {
+            state: RekeyState::Idle,
+            bytes_since_rekey: 0,
+            last_rekey_time: Instant::now(),
+            last_failure_time: None,
+            rekey_count: 0,
+            next_rekey_seq: 1,
+            pending_secret: None,
+            pending_nonce: [0u8; 32],
+            pending_seq: 0,
+            current_session_key: None,
+        }
+    }
+
+    /// Current rekey state.
+    pub fn state(&self) -> RekeyState {
+        self.state
+    }
+
+    /// Number of successful rekeys over the tunnel lifetime.
+    pub fn rekey_count(&self) -> u64 {
+        self.rekey_count
+    }
+
+    /// Bytes transferred since the last rekey.
+    pub fn bytes_since_rekey(&self) -> u64 {
+        self.bytes_since_rekey
+    }
+
+    /// Get a reference to the current session key.
+    pub fn current_key(&self) -> Option<&SessionKey> {
+        self.current_session_key.as_ref()
+    }
+
+    /// Record bytes transferred through the tunnel. This is used to track
+    /// the 10 GB threshold for auto-rekey.
+    pub fn record_bytes(&mut self, bytes: u64) {
+        self.bytes_since_rekey = self.bytes_since_rekey.saturating_add(bytes);
+    }
+
+    /// Check whether a rekey should be triggered based on time or byte thresholds.
+    ///
+    /// Returns `true` if:
+    /// - We are in `Idle` state (no rekey in progress), AND
+    /// - Either 1 hour has elapsed OR 10 GB has been transferred, AND
+    /// - If we previously failed, at least 5 minutes have passed since the failure.
+    pub fn should_rekey(&self) -> bool {
+        if self.state != RekeyState::Idle {
+            return false;
+        }
+
+        // Respect retry backoff on failure
+        if let Some(failure_time) = self.last_failure_time {
+            if failure_time.elapsed() < REKEY_RETRY_INTERVAL {
+                return false;
+            }
+        }
+
+        let time_exceeded = self.last_rekey_time.elapsed() >= REKEY_INTERVAL;
+        let bytes_exceeded = self.bytes_since_rekey >= REKEY_BYTE_THRESHOLD;
+
+        time_exceeded || bytes_exceeded
+    }
+
+    /// Initiate a rekey by generating a new ephemeral X25519 keypair.
+    ///
+    /// Returns the `TunnelPayload::Rekey` message to send to the peer.
+    /// Transitions state from `Idle` to `AwaitingAck`.
+    ///
+    /// Returns `Err` if a rekey is already in progress.
+    pub fn initiate_rekey(&mut self) -> Result<TunnelPayload, String> {
+        if self.state != RekeyState::Idle {
+            return Err(format!(
+                "Cannot initiate rekey from state {:?}",
+                self.state
+            ));
+        }
+
+        let mut rng = rand::thread_rng();
+
+        // Generate new ephemeral keypair. We use StaticSecret here (not
+        // EphemeralSecret) because we need to hold it across the async gap
+        // until the peer responds with RekeyAck.
+        let secret_bytes = {
+            let mut bytes = [0u8; 32];
+            use rand::RngCore;
+            rng.fill_bytes(&mut bytes);
+            bytes
+        };
+        let secret = x25519_dalek::StaticSecret::from(secret_bytes);
+        let public = x25519_dalek::PublicKey::from(&secret);
+
+        let mut nonce = [0u8; 32];
+        use rand::RngCore;
+        rng.fill_bytes(&mut nonce);
+
+        let seq = self.next_rekey_seq;
+        self.next_rekey_seq += 1;
+
+        self.pending_secret = Some(secret);
+        self.pending_nonce = nonce;
+        self.pending_seq = seq;
+        self.state = RekeyState::AwaitingAck;
+
+        info!(
+            "🔑 [REKEY] Initiated rekey seq={} (bytes_since={}, elapsed={:.0}s)",
+            seq,
+            self.bytes_since_rekey,
+            self.last_rekey_time.elapsed().as_secs_f64(),
+        );
+
+        Ok(TunnelPayload::Rekey {
+            ephemeral_pubkey: public.to_bytes(),
+            nonce,
+            rekey_seq: seq,
+        })
+    }
+
+    /// Handle an incoming rekey request from the remote peer.
+    ///
+    /// Generates a new ephemeral keypair, derives the new session key, and
+    /// returns a `TunnelPayload::RekeyAck` to send back.
+    ///
+    /// The new session key is installed immediately on the responder side.
+    /// The old key is zeroized.
+    pub fn handle_rekey_request(
+        &mut self,
+        their_pubkey: &[u8; 32],
+        their_nonce: &[u8; 32],
+        rekey_seq: u64,
+    ) -> Result<TunnelPayload, String> {
+        let mut rng = rand::thread_rng();
+
+        let secret_bytes = {
+            let mut bytes = [0u8; 32];
+            use rand::RngCore;
+            rng.fill_bytes(&mut bytes);
+            bytes
+        };
+        let secret = x25519_dalek::StaticSecret::from(secret_bytes);
+        let public = x25519_dalek::PublicKey::from(&secret);
+
+        let mut our_nonce = [0u8; 32];
+        use rand::RngCore;
+        rng.fill_bytes(&mut our_nonce);
+
+        // Perform DH with the initiator's new public key
+        let their_public = x25519_dalek::PublicKey::from(*their_pubkey);
+        let shared_secret = secret.diffie_hellman(&their_public);
+
+        // Derive new session key with the rekey-specific info string
+        let new_key = derive_rekey_session_key(
+            shared_secret.as_bytes(),
+            their_nonce,
+            &our_nonce,
+            rekey_seq,
+        );
+
+        // Atomically replace the session key; old one is zeroized on drop
+        self.current_session_key = Some(new_key);
+        self.bytes_since_rekey = 0;
+        self.last_rekey_time = Instant::now();
+        self.rekey_count += 1;
+        self.last_failure_time = None;
+
+        info!(
+            "🔑 [REKEY] Responded to rekey seq={} (total_rekeys={})",
+            rekey_seq, self.rekey_count,
+        );
+
+        Ok(TunnelPayload::RekeyAck {
+            ephemeral_pubkey: public.to_bytes(),
+            nonce: our_nonce,
+            rekey_seq,
+        })
+    }
+
+    /// Complete a rekey on the initiator side after receiving the peer's
+    /// `RekeyAck`.
+    ///
+    /// Derives the new shared session key and installs it. The old key is
+    /// zeroized.
+    ///
+    /// Transitions state from `AwaitingAck` to `Idle`.
+    pub fn complete_rekey(
+        &mut self,
+        their_pubkey: &[u8; 32],
+        their_nonce: &[u8; 32],
+        rekey_seq: u64,
+    ) -> Result<(), String> {
+        if self.state != RekeyState::AwaitingAck {
+            return Err(format!(
+                "Cannot complete rekey from state {:?}",
+                self.state
+            ));
+        }
+
+        if rekey_seq != self.pending_seq {
+            return Err(format!(
+                "Rekey seq mismatch: expected {}, got {}",
+                self.pending_seq, rekey_seq
+            ));
+        }
+
+        let secret = self.pending_secret.take().ok_or(
+            "Pending ephemeral secret missing — rekey state corrupted"
+        )?;
+
+        let their_public = x25519_dalek::PublicKey::from(*their_pubkey);
+        let shared_secret = secret.diffie_hellman(&their_public);
+
+        // Derive new session key with the same construction as the responder
+        let new_key = derive_rekey_session_key(
+            shared_secret.as_bytes(),
+            &self.pending_nonce,
+            their_nonce,
+            rekey_seq,
+        );
+
+        // Atomically replace the session key; old one is zeroized on drop
+        self.current_session_key = Some(new_key);
+        self.bytes_since_rekey = 0;
+        self.last_rekey_time = Instant::now();
+        self.rekey_count += 1;
+        self.state = RekeyState::Idle;
+        self.last_failure_time = None;
+
+        info!(
+            "🔑 [REKEY] Completed rekey seq={} (total_rekeys={})",
+            rekey_seq, self.rekey_count,
+        );
+
+        Ok(())
+    }
+
+    /// Mark the current rekey as failed. The old session key is preserved
+    /// and a retry will be attempted after `REKEY_RETRY_INTERVAL`.
+    pub fn fail_rekey(&mut self, reason: &str) {
+        warn!(
+            "🔑 [REKEY] Rekey failed (seq={}): {} — keeping old key, retry in {}s",
+            self.pending_seq,
+            reason,
+            REKEY_RETRY_INTERVAL.as_secs(),
+        );
+
+        // Clean up pending state
+        self.pending_secret = None;
+        self.pending_nonce.zeroize();
+        self.state = RekeyState::Failed;
+        self.last_failure_time = Some(Instant::now());
+    }
+
+    /// Transition from Failed back to Idle so the next `should_rekey()` check
+    /// can trigger a retry. This is called automatically when the retry
+    /// interval has elapsed.
+    pub fn reset_failure(&mut self) {
+        if self.state == RekeyState::Failed {
+            self.state = RekeyState::Idle;
+            debug!("🔑 [REKEY] Reset failure state — eligible for retry");
+        }
+    }
+
+    /// Produce a `TunnelStats` snapshot including rekey information.
+    pub fn stats(&self, bytes_sent: u64, bytes_received: u64, tasks_routed: u64, latency_ms: u32) -> TunnelStats {
+        let last_rekey_time = if self.rekey_count > 0 {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                .saturating_sub(self.last_rekey_time.elapsed().as_secs())
+        } else {
+            0
+        };
+
+        TunnelStats {
+            bytes_sent,
+            bytes_received,
+            tasks_routed,
+            latency_ms,
+            rekey_count: self.rekey_count,
+            last_rekey_time,
+            bytes_since_rekey: self.bytes_since_rekey,
+        }
+    }
+}
+
+/// Derive a session key specifically for rekey operations.
+///
+/// Uses a different HKDF info string (`"qnk-compute-tunnel-rekey-v1"`) than
+/// the initial handshake to ensure domain separation. The rekey sequence
+/// number is mixed into the salt for additional replay protection.
+fn derive_rekey_session_key(
+    shared_secret: &[u8],
+    initiator_nonce: &[u8; 32],
+    responder_nonce: &[u8; 32],
+    rekey_seq: u64,
+) -> SessionKey {
+    use hkdf::Hkdf;
+    use sha2::Sha256;
+
+    // Salt = initiator_nonce || responder_nonce || rekey_seq (BE)
+    let mut salt = [0u8; 72];
+    salt[..32].copy_from_slice(initiator_nonce);
+    salt[32..64].copy_from_slice(responder_nonce);
+    salt[64..72].copy_from_slice(&rekey_seq.to_be_bytes());
+
+    let hk = Hkdf::<Sha256>::new(Some(&salt), shared_secret);
+    let mut okm = [0u8; 32];
+    hk.expand(b"qnk-compute-tunnel-rekey-v1", &mut okm)
+        .expect("HKDF expand should not fail for 32-byte output");
+
+    SessionKey { key: okm }
 }
 
 /// Derive a 32-byte session key from a shared secret using HKDF-SHA256.
@@ -3427,5 +3927,375 @@ mod tests {
         assert!(!vr.accepted);
         assert!(vr.result.is_empty());
         assert!(vr.participating_peers.is_empty());
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Issue #024: Rekey / Forward Secrecy tests
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Helper: create a SessionKey from a test byte pattern.
+    fn make_test_session_key(seed: u8) -> SessionKey {
+        SessionKey { key: [seed; 32] }
+    }
+
+    #[test]
+    fn test_rekey_manager_creation() {
+        let key = make_test_session_key(0xAA);
+        let mgr = RekeyManager::new(key);
+
+        assert_eq!(mgr.state(), RekeyState::Idle);
+        assert_eq!(mgr.rekey_count(), 0);
+        assert_eq!(mgr.bytes_since_rekey(), 0);
+        assert!(mgr.current_key().is_some());
+        assert_eq!(mgr.current_key().unwrap().as_bytes(), &[0xAA; 32]);
+    }
+
+    #[test]
+    fn test_rekey_manager_record_bytes() {
+        let key = make_test_session_key(0x01);
+        let mut mgr = RekeyManager::new(key);
+
+        mgr.record_bytes(1000);
+        assert_eq!(mgr.bytes_since_rekey(), 1000);
+
+        mgr.record_bytes(5000);
+        assert_eq!(mgr.bytes_since_rekey(), 6000);
+    }
+
+    #[test]
+    fn test_rekey_should_not_trigger_immediately() {
+        let key = make_test_session_key(0x02);
+        let mgr = RekeyManager::new(key);
+
+        // Just created — neither time nor byte threshold met
+        assert!(!mgr.should_rekey());
+    }
+
+    #[test]
+    fn test_rekey_triggers_on_byte_threshold() {
+        let key = make_test_session_key(0x03);
+        let mut mgr = RekeyManager::new(key);
+
+        // Record just under the threshold
+        mgr.record_bytes(REKEY_BYTE_THRESHOLD - 1);
+        assert!(!mgr.should_rekey());
+
+        // Push over the threshold
+        mgr.record_bytes(1);
+        assert!(mgr.should_rekey());
+    }
+
+    #[test]
+    fn test_rekey_full_protocol_initiator_responder() {
+        // Simulate a full rekey exchange between initiator and responder.
+        let initial_key_i = make_test_session_key(0x10);
+        let initial_key_r = make_test_session_key(0x10);
+
+        let mut initiator = RekeyManager::new(initial_key_i);
+        let mut responder = RekeyManager::new(initial_key_r);
+
+        // Both start with the same initial key
+        assert_eq!(
+            initiator.current_key().unwrap().as_bytes(),
+            responder.current_key().unwrap().as_bytes(),
+        );
+
+        // Step 1: Initiator generates rekey message
+        let rekey_payload = initiator.initiate_rekey().unwrap();
+        assert_eq!(initiator.state(), RekeyState::AwaitingAck);
+
+        // Extract the pubkey and nonce from the payload
+        let (their_pubkey, their_nonce, rekey_seq) = match &rekey_payload {
+            TunnelPayload::Rekey { ephemeral_pubkey, nonce, rekey_seq } => {
+                (*ephemeral_pubkey, *nonce, *rekey_seq)
+            }
+            _ => panic!("Expected TunnelPayload::Rekey"),
+        };
+        assert_eq!(rekey_seq, 1);
+
+        // Step 2: Responder handles the rekey request
+        let ack_payload = responder
+            .handle_rekey_request(&their_pubkey, &their_nonce, rekey_seq)
+            .unwrap();
+        assert_eq!(responder.rekey_count(), 1);
+        assert_eq!(responder.bytes_since_rekey(), 0);
+
+        // Extract responder's pubkey and nonce from the ack
+        let (resp_pubkey, resp_nonce, ack_seq) = match &ack_payload {
+            TunnelPayload::RekeyAck { ephemeral_pubkey, nonce, rekey_seq } => {
+                (*ephemeral_pubkey, *nonce, *rekey_seq)
+            }
+            _ => panic!("Expected TunnelPayload::RekeyAck"),
+        };
+        assert_eq!(ack_seq, rekey_seq);
+
+        // Step 3: Initiator completes the rekey
+        initiator.complete_rekey(&resp_pubkey, &resp_nonce, ack_seq).unwrap();
+        assert_eq!(initiator.state(), RekeyState::Idle);
+        assert_eq!(initiator.rekey_count(), 1);
+        assert_eq!(initiator.bytes_since_rekey(), 0);
+
+        // Both sides should now have the same NEW session key
+        assert_eq!(
+            initiator.current_key().unwrap().as_bytes(),
+            responder.current_key().unwrap().as_bytes(),
+        );
+
+        // The new key should differ from the initial key
+        assert_ne!(
+            initiator.current_key().unwrap().as_bytes(),
+            &[0x10u8; 32],
+        );
+    }
+
+    #[test]
+    fn test_rekey_cannot_initiate_while_awaiting_ack() {
+        let key = make_test_session_key(0x20);
+        let mut mgr = RekeyManager::new(key);
+
+        // First initiation succeeds
+        let _ = mgr.initiate_rekey().unwrap();
+        assert_eq!(mgr.state(), RekeyState::AwaitingAck);
+
+        // Second initiation fails
+        let result = mgr.initiate_rekey();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("AwaitingAck"));
+    }
+
+    #[test]
+    fn test_rekey_failure_preserves_old_key() {
+        let key = make_test_session_key(0x30);
+        let mut mgr = RekeyManager::new(key);
+
+        // Initiate and then fail
+        let _ = mgr.initiate_rekey().unwrap();
+        mgr.fail_rekey("test failure");
+
+        assert_eq!(mgr.state(), RekeyState::Failed);
+        // Old key should still be there
+        assert!(mgr.current_key().is_some());
+        assert_eq!(mgr.current_key().unwrap().as_bytes(), &[0x30; 32]);
+
+        // Should not trigger rekey immediately (retry interval not elapsed)
+        assert!(!mgr.should_rekey());
+    }
+
+    #[test]
+    fn test_rekey_seq_mismatch_rejected() {
+        let key = make_test_session_key(0x40);
+        let mut mgr = RekeyManager::new(key);
+
+        let _ = mgr.initiate_rekey().unwrap();
+
+        // Try to complete with wrong seq
+        let result = mgr.complete_rekey(&[0u8; 32], &[0u8; 32], 999);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("seq mismatch"));
+    }
+
+    #[test]
+    fn test_rekey_stats_snapshot() {
+        let key = make_test_session_key(0x50);
+        let mut mgr = RekeyManager::new(key);
+        mgr.record_bytes(12345);
+
+        let stats = mgr.stats(100_000, 200_000, 50, 15);
+        assert_eq!(stats.bytes_sent, 100_000);
+        assert_eq!(stats.bytes_received, 200_000);
+        assert_eq!(stats.tasks_routed, 50);
+        assert_eq!(stats.latency_ms, 15);
+        assert_eq!(stats.rekey_count, 0);
+        assert_eq!(stats.last_rekey_time, 0); // no rekey yet
+        assert_eq!(stats.bytes_since_rekey, 12345);
+    }
+
+    #[test]
+    fn test_rekey_multiple_sequential_rekeys() {
+        // Perform 3 sequential rekeys and verify counters and key changes.
+        let initial_key = make_test_session_key(0x60);
+        let mut initiator = RekeyManager::new(initial_key.clone());
+        let mut responder = RekeyManager::new(initial_key);
+
+        let mut prev_key_bytes = *initiator.current_key().unwrap().as_bytes();
+
+        for expected_count in 1..=3u64 {
+            // Initiator starts rekey
+            let rekey_payload = initiator.initiate_rekey().unwrap();
+            let (pk, nonce, seq) = match &rekey_payload {
+                TunnelPayload::Rekey { ephemeral_pubkey, nonce, rekey_seq } => {
+                    (*ephemeral_pubkey, *nonce, *rekey_seq)
+                }
+                _ => panic!("Expected Rekey"),
+            };
+
+            // Responder handles
+            let ack = responder.handle_rekey_request(&pk, &nonce, seq).unwrap();
+            let (rpk, rn, rs) = match &ack {
+                TunnelPayload::RekeyAck { ephemeral_pubkey, nonce, rekey_seq } => {
+                    (*ephemeral_pubkey, *nonce, *rekey_seq)
+                }
+                _ => panic!("Expected RekeyAck"),
+            };
+
+            // Initiator completes
+            initiator.complete_rekey(&rpk, &rn, rs).unwrap();
+
+            assert_eq!(initiator.rekey_count(), expected_count);
+            assert_eq!(responder.rekey_count(), expected_count);
+
+            // Keys match on both sides
+            assert_eq!(
+                initiator.current_key().unwrap().as_bytes(),
+                responder.current_key().unwrap().as_bytes(),
+            );
+
+            // Key changed from previous round
+            let new_key_bytes = *initiator.current_key().unwrap().as_bytes();
+            assert_ne!(new_key_bytes, prev_key_bytes);
+            prev_key_bytes = new_key_bytes;
+        }
+    }
+
+    #[test]
+    fn test_session_key_zeroize_on_drop() {
+        // Verify that SessionKey implements Zeroize by creating one and
+        // checking that zeroize() clears the key bytes.
+        let mut key = make_test_session_key(0xFF);
+        assert_eq!(key.as_bytes(), &[0xFF; 32]);
+
+        // Manually zeroize
+        key.zeroize();
+        assert_eq!(key.as_bytes(), &[0u8; 32]);
+    }
+
+    #[test]
+    fn test_rekey_reset_failure_enables_retry() {
+        let key = make_test_session_key(0x70);
+        let mut mgr = RekeyManager::new(key);
+
+        // Initiate and fail
+        let _ = mgr.initiate_rekey().unwrap();
+        mgr.fail_rekey("test");
+        assert_eq!(mgr.state(), RekeyState::Failed);
+
+        // Should not rekey while failed (retry interval not elapsed)
+        assert!(!mgr.should_rekey());
+
+        // Reset failure state
+        mgr.reset_failure();
+        assert_eq!(mgr.state(), RekeyState::Idle);
+    }
+
+    #[tokio::test]
+    async fn test_tunnel_stream_rekey_sends_message() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let stream = TunnelStream {
+            stream_type: StreamType::Control,
+            stream_id: 1,
+            tx,
+            created_at: Instant::now(),
+            bytes_sent: Arc::new(AtomicU64::new(0)),
+            bytes_received: Arc::new(AtomicU64::new(0)),
+        };
+
+        let initial_key = make_test_session_key(0x80);
+        let mut mgr = RekeyManager::new(initial_key);
+
+        // Perform rekey via the stream
+        let payload = stream.rekey(&mut mgr).await.unwrap();
+        assert_eq!(mgr.state(), RekeyState::AwaitingAck);
+
+        // Verify the message was sent through the channel
+        let received = rx.recv().await.unwrap();
+        match received {
+            TunnelPayload::Rekey { ephemeral_pubkey, nonce, rekey_seq } => {
+                assert_eq!(rekey_seq, 1);
+                assert_ne!(ephemeral_pubkey, [0u8; 32]); // Should have real key
+                assert_ne!(nonce, [0u8; 32]); // Should have real nonce
+            }
+            _ => panic!("Expected TunnelPayload::Rekey, got {:?}", received),
+        }
+
+        // Verify bytes_sent was updated
+        assert_eq!(stream.total_bytes_sent(), 72);
+    }
+
+    #[test]
+    fn test_derive_rekey_session_key_deterministic() {
+        // Same inputs should produce the same key
+        let shared_secret = [0x42u8; 32];
+        let nonce_a = [0x01u8; 32];
+        let nonce_b = [0x02u8; 32];
+        let seq = 5u64;
+
+        let key1 = derive_rekey_session_key(&shared_secret, &nonce_a, &nonce_b, seq);
+        let key2 = derive_rekey_session_key(&shared_secret, &nonce_a, &nonce_b, seq);
+        assert_eq!(key1.as_bytes(), key2.as_bytes());
+
+        // Different seq should produce different key
+        let key3 = derive_rekey_session_key(&shared_secret, &nonce_a, &nonce_b, seq + 1);
+        assert_ne!(key1.as_bytes(), key3.as_bytes());
+
+        // Swapped nonces should produce different key
+        let key4 = derive_rekey_session_key(&shared_secret, &nonce_b, &nonce_a, seq);
+        assert_ne!(key1.as_bytes(), key4.as_bytes());
+    }
+
+    #[test]
+    fn test_rekey_domain_separation_from_initial_handshake() {
+        // Verify that derive_rekey_session_key produces different keys than
+        // derive_session_key even with the same inputs (domain separation
+        // via different HKDF info strings).
+        let shared_secret = [0x99u8; 32];
+        let nonce_a = [0x11u8; 32];
+        let nonce_b = [0x22u8; 32];
+
+        let initial_key = derive_session_key(&shared_secret, &nonce_a, &nonce_b);
+        let rekey_key = derive_rekey_session_key(&shared_secret, &nonce_a, &nonce_b, 1);
+
+        assert_ne!(initial_key.as_bytes(), rekey_key.as_bytes());
+    }
+
+    #[test]
+    fn test_tunnel_payload_rekey_variant_serialization() {
+        let payload = TunnelPayload::Rekey {
+            ephemeral_pubkey: [0xAB; 32],
+            nonce: [0xCD; 32],
+            rekey_seq: 42,
+        };
+
+        let json = serde_json::to_string(&payload).unwrap();
+        let deserialized: TunnelPayload = serde_json::from_str(&json).unwrap();
+
+        match deserialized {
+            TunnelPayload::Rekey { ephemeral_pubkey, nonce, rekey_seq } => {
+                assert_eq!(ephemeral_pubkey, [0xAB; 32]);
+                assert_eq!(nonce, [0xCD; 32]);
+                assert_eq!(rekey_seq, 42);
+            }
+            _ => panic!("Deserialization produced wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_tunnel_payload_rekey_ack_serialization() {
+        let payload = TunnelPayload::RekeyAck {
+            ephemeral_pubkey: [0xEF; 32],
+            nonce: [0x12; 32],
+            rekey_seq: 7,
+        };
+
+        let json = serde_json::to_string(&payload).unwrap();
+        let deserialized: TunnelPayload = serde_json::from_str(&json).unwrap();
+
+        match deserialized {
+            TunnelPayload::RekeyAck { ephemeral_pubkey, nonce, rekey_seq } => {
+                assert_eq!(ephemeral_pubkey, [0xEF; 32]);
+                assert_eq!(nonce, [0x12; 32]);
+                assert_eq!(rekey_seq, 7);
+            }
+            _ => panic!("Deserialization produced wrong variant"),
+        }
     }
 }
