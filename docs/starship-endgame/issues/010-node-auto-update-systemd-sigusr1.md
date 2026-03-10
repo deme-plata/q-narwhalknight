@@ -1,6 +1,6 @@
 # Issue #010: Node Auto-Update — Systemd Config + SIGUSR1 Handler
 
-**State**: `open`
+**State**: `closed`
 **Priority**: HIGH
 **Labels**: `auto-update`, `systemd`, `signal-handling`
 **Assigned**: Beta

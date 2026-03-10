@@ -1,6 +1,6 @@
 # Issue #011: Node Auto-Update — Missing Types and Email Stub
 
-**State**: `open`
+**State**: `closed` (no changes needed — types already exist)
 **Priority**: MEDIUM
 **Labels**: `auto-update`, `bugfix`, `types`
 **Assigned**: Beta

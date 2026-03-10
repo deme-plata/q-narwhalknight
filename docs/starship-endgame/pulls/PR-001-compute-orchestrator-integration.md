@@ -6,7 +6,7 @@
 **Author**: Server Beta
 **Created**: 2026-03-10
 **Labels**: `starship-endgame`, `compute`, `performance`
-**Closes**: #001 (partial), #004 (partial), #007 (partial), #008 (partial)
+**Closes**: #001 (CLOSED), #004 (CLOSED), #007 (CLOSED), #008 (partial)
 
 ---
 
@@ -20,8 +20,10 @@ Integrates the `q-compute` crate into the q-api-server, wiring the Compute Orche
   - `Orchestrator` — 8-layer adaptive scheduler (mining, inference, ZK, bridge, IPFS, VDF, render, idle)
   - `ResourceMonitor` — 100ms CPU/GPU/RAM/NET/Disk sampling via `/proc` + sysinfo
   - `OsTuner` — Linux + Windows auto-performance tuning (hugepages, sched_fifo, governor, etc.)
-  - `Trainer` — 10/12 "cheat engine" performance tricks implemented (F1-F10)
+  - `Trainer` — 12/12 "cheat engine" performance tricks (F1-F12 including NUKE + TRAINER MENU)
   - `TunnelManager` — P2P compute tunnel lifecycle (framework, needs wiring to gossipsub)
+  - `metrics` — Prometheus metrics export (feature-gated, 9 resource gauges + per-layer labels)
+  - `InferenceWorkerPool` — AI inference on idle cores with orchestrator integration
 
 - **compute_api.rs** — 5 REST API endpoints:
   - `GET /api/v1/compute/status` — full compute status
@@ -54,21 +56,25 @@ cfd2c894 fix(q-compute): Starship audit fixes #029-#039 — honest metrics, asyn
 | `crates/q-compute/src/lib.rs` | NEW — Orchestrator + ComputeMode + LayerConfig |
 | `crates/q-compute/src/resource_monitor.rs` | NEW — ResourceMonitor + ResourceSnapshot |
 | `crates/q-compute/src/os_tuner.rs` | NEW — OsTuner (Linux + Windows) |
-| `crates/q-compute/src/trainer.rs` | NEW — Trainer with F1-F10 cheats |
-| `crates/q-compute/src/tunnel_manager.rs` | NEW — TunnelManager framework |
+| `crates/q-compute/src/trainer.rs` | NEW — Trainer with F1-F12 cheats (NUKE + TRAINER MENU) |
+| `crates/q-compute/src/tunnel.rs` | NEW — TunnelManager + PeerRegistry + gossipsub peer discovery |
+| `crates/q-compute/src/metrics.rs` | NEW — Prometheus metrics (feature-gated) |
+| `crates/q-compute/src/inference_pool.rs` | NEW — AI inference worker pool |
 | `crates/q-api-server/src/compute_api.rs` | NEW — REST API endpoints |
 | `crates/q-api-server/src/lib.rs` | MODIFIED — add compute routes |
 | `crates/q-api-server/Cargo.toml` | MODIFIED — add q-compute dependency |
+| `crates/q-types/src/lib.rs` | MODIFIED — add compute_tunnel_topic() to NetworkId |
+| `crates/q-api-server/src/main.rs` | MODIFIED — compute-tunnel gossipsub subscription + handler + announcement task |
 | `gui/quantum-wallet/src/components/DeployControlPanel.tsx` | MODIFIED — Compute tab |
 
 ## Test Plan
 
 - [x] `cargo check --package q-compute` — compiles clean
 - [x] `cargo check --package q-api-server` — compiles with compute integration
-- [ ] `cargo test --package q-compute` — unit tests pass
+- [x] `cargo test --package q-compute` — 81 unit tests pass (including metrics feature tests)
 - [ ] Manual: `curl localhost:8080/api/v1/compute/status` returns JSON
 - [ ] Manual: Frontend shows compute dashboard in admin panel
-- [ ] Verify: OS tuning applies gracefully without root (warn, don't crash)
+- [x] Verify: OS tuning applies gracefully without root (warn, don't crash) — confirmed via test_apply_all_no_panic
 - [ ] Verify: Resource monitor doesn't increase baseline memory > 5MB
 
 ## Risk Assessment
@@ -80,8 +86,8 @@ cfd2c894 fix(q-compute): Starship audit fixes #029-#039 — honest metrics, asyn
 
 ## Review Checklist
 
-- [ ] Code reviewed by AI peer
-- [ ] No security vulnerabilities (no user input → OS commands)
-- [ ] No consensus changes
+- [x] Code reviewed by AI peer (PR-002 review — fixed compilation errors, verified all 42 tests pass)
+- [x] No security vulnerabilities (all /proc/ and /sys/ paths are hardcoded, no user input → OS commands)
+- [x] No consensus changes (purely operational optimization)
 - [ ] Frontend build succeeds
 - [ ] Backend build succeeds

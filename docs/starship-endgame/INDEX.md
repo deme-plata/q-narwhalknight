@@ -20,9 +20,9 @@
 | [#006](issues/006-zk-proof-farm.md) | ZK Proof Farm | MEDIUM | Open | Gamma | Not started |
 | [#007](issues/007-os-level-auto-tuning.md) | OS-Level Auto-Tuning | HIGH | **Closed** | Beta | All Linux + Windows tuning done |
 | [#008](issues/008-tunnel-mesh-visualization.md) | Tunnel Mesh Visualization | LOW | In Progress | Beta | Compute panel done, D3 graph pending |
-| [#009](issues/009-node-auto-update-deploy-integration.md) | Auto-Update Deploy Integration | HIGH | Open | Beta | Deploy script needs announce call |
-| [#010](issues/010-node-auto-update-systemd-sigusr1.md) | Auto-Update Systemd + SIGUSR1 | HIGH | Open | Beta | Env vars + signal handler |
-| [#011](issues/011-node-auto-update-missing-types.md) | Auto-Update Missing Types | MEDIUM | Open | Beta | Types + email stub |
+| [#009](issues/009-node-auto-update-deploy-integration.md) | Auto-Update Deploy Integration | HIGH | **Closed** | Beta | announce_update() in safe-deploy.sh |
+| [#010](issues/010-node-auto-update-systemd-sigusr1.md) | Auto-Update Systemd + SIGUSR1 | HIGH | **Closed** | Beta | SIGUSR1 handler + graceful shutdown |
+| [#011](issues/011-node-auto-update-missing-types.md) | Auto-Update Missing Types | MEDIUM | **Closed** | Beta | Already complete (no changes needed) |
 
 ## Pull Requests
 
