@@ -24,10 +24,14 @@ pub mod os_tuner;
 pub mod resource_monitor;
 pub mod inference_pool; // v9.6.0: AI inference worker pool for idle cores
 pub mod distributed_inference; // v9.8.0: Issue #005 — distributed AI inference routing
+pub mod gpu_scheduler; // Issue #023: Multi-GPU scheduling and layer assignment
+pub mod compute_reputation; // Issue #022: Node reputation for compute task assignment
+pub mod metering; // Issue #021: Compute billing & metering — unified resource tracking
 #[cfg(feature = "metrics")]
 pub mod metrics; // Prometheus metrics export (feature-gated)
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Gossipsub topic for compute tunnel peer announcements.
 /// Nodes publish their compute capacity on this topic so peers can
@@ -166,6 +170,28 @@ pub struct ResourceSnapshot {
     /// Timestamp (unix millis)
     pub timestamp_ms: u64,
 }
+
+/// Individual GPU device info for multi-GPU nodes (Issue #023)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GpuDevice {
+    /// GPU index (0, 1, 2, ...)
+    pub id: u32,
+    /// Device name (e.g., "NVIDIA GeForce RTX 4090")
+    pub name: String,
+    /// Total VRAM in MB
+    pub vram_total_mb: u64,
+    /// Used VRAM in MB
+    pub vram_used_mb: u64,
+    /// Utilization 0-100%
+    pub utilization: f32,
+    /// Temperature in Celsius
+    pub temperature: f32,
+    /// Assigned compute layer (if any)
+    pub assigned_layer: Option<ComputeLayer>,
+}
+
+/// Maps compute layers to GPU device IDs (Issue #023)
+pub type GpuAssignment = HashMap<ComputeLayer, Vec<u32>>;
 
 /// Per-layer compute stats
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
