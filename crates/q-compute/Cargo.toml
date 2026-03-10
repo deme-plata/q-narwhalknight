@@ -4,6 +4,10 @@ version.workspace = true
 edition = "2021"
 description = "Starship Endgame Revolution — 100% compute utilization orchestrator"
 
+[features]
+default = []
+metrics = ["prometheus"]
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
@@ -15,6 +19,8 @@ core_affinity = "0.8"
 sysinfo = "0.30"
 num_cpus = "1"
 parking_lot = "0.12"
+q-ai-inference = { path = "../q-ai-inference" }
+prometheus = { version = "0.13", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"

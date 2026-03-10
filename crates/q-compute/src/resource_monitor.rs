@@ -222,28 +222,185 @@ fn get_network_bytes() -> (u64, u64) {
     (0, 0)
 }
 
-/// Get GPU stats — placeholder until OpenCL/NVML integration
+/// Which GPU detection backend we last succeeded with.
+/// Cached so we don't retry failing backends on every 2-second tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GpuBackend {
+    /// Haven't probed yet
+    Unknown,
+    /// nvidia-smi CLI worked
+    NvidiaSmi,
+    /// rocm-smi CLI worked (AMD)
+    RocmSmi,
+    /// sysinfo component list detected a GPU (basic: reports presence, not utilization)
+    Sysinfo,
+    /// No GPU detected at all
+    None,
+}
+
+/// Get GPU stats with multi-backend detection.
+///
+/// Probe order:
+/// 1. **sysinfo component scan** -- detects GPU thermal sensors on some drivers,
+///    but does not provide utilization. If a GPU component is found we note it
+///    and still try CLI tools for richer data.
+/// 2. **nvidia-smi** -- NVIDIA proprietary driver CLI (most common).
+/// 3. **rocm-smi** -- AMD ROCm driver CLI.
+///
+/// After the first successful backend is found it is cached in a process-global
+/// static so subsequent calls skip failing paths (the 2-second GPU poll loop
+/// calls this function repeatedly).
 fn get_gpu_stats() -> (f32, u64, u64) {
-    // Try nvidia-smi as a quick check
+    use std::sync::Mutex;
+    static CACHED_BACKEND: std::sync::LazyLock<Mutex<GpuBackend>> =
+        std::sync::LazyLock::new(|| Mutex::new(GpuBackend::Unknown));
+
+    let mut backend = CACHED_BACKEND.lock().unwrap();
+
+    // If we already know there is no GPU, short-circuit
+    if *backend == GpuBackend::None {
+        return (0.0, 0, 0);
+    }
+
+    // ── 1. Try nvidia-smi (if backend is Unknown or NvidiaSmi) ──
+    if *backend == GpuBackend::Unknown || *backend == GpuBackend::NvidiaSmi {
+        if let Some(stats) = try_nvidia_smi() {
+            *backend = GpuBackend::NvidiaSmi;
+            return stats;
+        }
+    }
+
+    // ── 2. Try rocm-smi (AMD ROCm) ──
+    if *backend == GpuBackend::Unknown || *backend == GpuBackend::RocmSmi {
+        if let Some(stats) = try_rocm_smi() {
+            *backend = GpuBackend::RocmSmi;
+            return stats;
+        }
+    }
+
+    // ── 3. sysinfo component scan (last resort — detects presence only) ──
+    if *backend == GpuBackend::Unknown || *backend == GpuBackend::Sysinfo {
+        if let Some(stats) = try_sysinfo_gpu() {
+            *backend = GpuBackend::Sysinfo;
+            return stats;
+        }
+    }
+
+    // No GPU found on any backend
+    if *backend == GpuBackend::Unknown {
+        *backend = GpuBackend::None;
+    }
+    (0.0, 0, 0)
+}
+
+/// Try to query GPU stats via `nvidia-smi` (NVIDIA proprietary driver).
+fn try_nvidia_smi() -> Option<(f32, u64, u64)> {
     #[cfg(target_os = "linux")]
     {
-        if let Ok(output) = std::process::Command::new("nvidia-smi")
-            .args(["--query-gpu=utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"])
+        let output = std::process::Command::new("nvidia-smi")
+            .args([
+                "--query-gpu=utilization.gpu,memory.used,memory.total",
+                "--format=csv,noheader,nounits",
+            ])
             .output()
-        {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let parts: Vec<&str> = stdout.trim().split(", ").collect();
-                if parts.len() == 3 {
-                    let util = parts[0].parse::<f32>().unwrap_or(0.0);
-                    let mem_used = parts[1].parse::<u64>().unwrap_or(0) * 1024 * 1024; // MiB→bytes
-                    let mem_total = parts[2].parse::<u64>().unwrap_or(0) * 1024 * 1024;
-                    return (util, mem_used, mem_total);
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let parts: Vec<&str> = stdout.trim().split(", ").collect();
+        if parts.len() == 3 {
+            let util = parts[0].parse::<f32>().unwrap_or(0.0);
+            let mem_used = parts[1].parse::<u64>().unwrap_or(0) * 1024 * 1024; // MiB -> bytes
+            let mem_total = parts[2].parse::<u64>().unwrap_or(0) * 1024 * 1024;
+            return Some((util, mem_used, mem_total));
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (); // suppress unused warning
+    None
+}
+
+/// Try to query GPU stats via `rocm-smi` (AMD ROCm driver).
+///
+/// `rocm-smi` output for `--showuse --showmeminfo vram` is multi-line:
+/// ```text
+/// GPU[0]          : GPU use (%): 42
+/// GPU[0]          : vram Total Memory (B): 17163091968
+/// GPU[0]          : vram Total Used Memory (B): 2147483648
+/// ```
+fn try_rocm_smi() -> Option<(f32, u64, u64)> {
+    #[cfg(target_os = "linux")]
+    {
+        let output = std::process::Command::new("rocm-smi")
+            .args(["--showuse", "--showmeminfo", "vram"])
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut util: f32 = 0.0;
+        let mut mem_total: u64 = 0;
+        let mut mem_used: u64 = 0;
+
+        for line in stdout.lines() {
+            let line = line.trim();
+            if line.contains("GPU use (%)") {
+                // "GPU[0]          : GPU use (%): 42"
+                if let Some(val) = line.rsplit(':').next() {
+                    util = val.trim().parse::<f32>().unwrap_or(0.0);
+                }
+            } else if line.contains("vram Total Memory (B)") {
+                if let Some(val) = line.rsplit(':').next() {
+                    mem_total = val.trim().parse::<u64>().unwrap_or(0);
+                }
+            } else if line.contains("vram Total Used Memory (B)") {
+                if let Some(val) = line.rsplit(':').next() {
+                    mem_used = val.trim().parse::<u64>().unwrap_or(0);
                 }
             }
         }
+
+        // Only return if we got at least the utilization value
+        if util > 0.0 || mem_total > 0 {
+            return Some((util, mem_used, mem_total));
+        }
     }
-    (0.0, 0, 0)
+    #[cfg(not(target_os = "linux"))]
+    let _ = (); // suppress unused warning
+    None
+}
+
+/// Try to detect a GPU via `sysinfo` component list.
+///
+/// `sysinfo` exposes hardware thermal sensors. On some Linux drivers (notably
+/// NVIDIA with the open-source `nouveau` driver, and some AMD AMDGPU setups)
+/// there will be a component whose label contains "gpu". This does NOT provide
+/// utilization or memory — only presence detection — so we return
+/// `(1.0, 0, 0)` as a sentinel meaning "GPU present, utilization unknown".
+fn try_sysinfo_gpu() -> Option<(f32, u64, u64)> {
+    use sysinfo::Components;
+
+    let components = Components::new_with_refreshed_list();
+    for component in &components {
+        let label = component.label().to_lowercase();
+        if label.contains("gpu") || label.contains("radeon") || label.contains("nvidia") || label.contains("geforce") {
+            // GPU detected via thermal sensor — return sentinel utilization
+            // The temperature is informational but we don't report it as utilization.
+            debug!(
+                "GPU detected via sysinfo component: '{}' (temp={:.1}C)",
+                component.label(),
+                component.temperature(),
+            );
+            return Some((1.0, 0, 0));
+        }
+    }
+    None
 }
 
 /// Read disk I/O bytes/sec from /proc/diskstats (Linux) or return 0 (other OS)
@@ -254,9 +411,8 @@ fn get_gpu_stats() -> (f32, u64, u64) {
 /// Sector size is 512 bytes on Linux.
 fn get_disk_io_bps(dt_secs: f64) -> u64 {
     use std::sync::Mutex;
-    use once_cell::sync::Lazy;
 
-    static PREV_SECTORS: Lazy<Mutex<u64>> = Lazy::new(|| Mutex::new(0));
+    static PREV_SECTORS: std::sync::LazyLock<Mutex<u64>> = std::sync::LazyLock::new(|| Mutex::new(0));
 
     #[cfg(target_os = "linux")]
     {

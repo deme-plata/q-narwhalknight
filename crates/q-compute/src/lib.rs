@@ -21,10 +21,15 @@ pub mod tunnel;
 pub mod os_tuner;
 pub mod resource_monitor;
 pub mod inference_pool; // v9.6.0: AI inference worker pool for idle cores
+#[cfg(feature = "metrics")]
+pub mod metrics; // Prometheus metrics export (feature-gated)
 
 use serde::{Deserialize, Serialize};
 
-
+/// Gossipsub topic for compute tunnel peer announcements.
+/// Nodes publish their compute capacity on this topic so peers can
+/// discover available resources for distributed task routing.
+pub const COMPUTE_TUNNEL_TOPIC: &str = "/qnk/compute-tunnel";
 
 /// Compute mode — how aggressive should we be?
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +47,17 @@ pub enum ComputeMode {
 impl Default for ComputeMode {
     fn default() -> Self {
         ComputeMode::Full
+    }
+}
+
+impl std::fmt::Display for ComputeMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ComputeMode::MiningOnly => write!(f, "mining-only"),
+            ComputeMode::Eco => write!(f, "eco"),
+            ComputeMode::Full => write!(f, "full"),
+            ComputeMode::Nuke => write!(f, "nuke"),
+        }
     }
 }
 
@@ -175,18 +191,36 @@ impl<'de> Deserialize<'de> for AtomicU64Ser {
     }
 }
 
-/// Compute cluster peer info (received via gossipsub)
+/// Compute cluster peer info (received via gossipsub on COMPUTE_TUNNEL_TOPIC).
+///
+/// Each node periodically publishes its compute capabilities so that peers
+/// can discover resources for distributed task routing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComputePeerInfo {
+    /// Peer ID (libp2p PeerId as string)
     pub peer_id: String,
+    /// Number of CPU cores currently available for compute tasks
     pub available_cores: u32,
-    pub gpu_tflops: f32,
-    pub ram_available_gb: f32,
-    pub bandwidth_mbps: u32,
-    pub compute_mode: ComputeMode,
-    pub layers_active: Vec<ComputeLayer>,
-    pub operator_wallet: Option<String>,
-    pub last_seen_ms: u64,
+    /// Total CPU cores on this machine
+    pub total_cores: u32,
+    /// GPU compute capability in TFLOPS (0.0 if no GPU)
+    pub gpu_tflops: f64,
+    /// RAM currently available in GB
+    pub ram_available_gb: f64,
+    /// Total RAM in GB
+    pub ram_total_gb: f64,
+    /// Network bandwidth in Mbps (estimated)
+    pub bandwidth_mbps: f64,
+    /// Current compute mode as string (e.g. "full", "eco", "nuke")
+    pub compute_mode: String,
+    /// Names of currently active compute layers
+    pub active_layers: Vec<String>,
+    /// Whether the trainer (cheat engine) is active
+    pub trainer_active: bool,
+    /// Software version string
+    pub version: String,
+    /// Unix timestamp in seconds when this announcement was created
+    pub timestamp: u64,
 }
 
 /// Tunnel connection between two compute peers

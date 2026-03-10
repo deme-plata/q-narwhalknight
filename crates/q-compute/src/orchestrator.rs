@@ -4,16 +4,17 @@
 //! to idle CPU/GPU/RAM. Mining (Layer 0) always has priority.
 //! Lower layers fill the gaps.
 
-use crate::{ComputeLayer, ComputeMode, ComputeStatus, LayerStats, AtomicU64Ser};
+use crate::{ComputeLayer, ComputeMode, ComputePeerInfo, ComputeStatus, LayerStats, AtomicU64Ser};
 use crate::resource_monitor::ResourceMonitor;
 use crate::trainer::Trainer;
 use crate::os_tuner::OsTuner;
 use crate::inference_pool::InferenceWorkerPool;
+use crate::tunnel::{PeerRegistry, TunnelManager, create_peer_announcement, parse_peer_announcement};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use parking_lot::RwLock;
-use tracing::{info, debug, trace};
+use tracing::{info, debug, trace, warn};
 
 /// Core assignment for each layer
 #[derive(Debug, Clone)]
@@ -42,6 +43,10 @@ pub struct Orchestrator {
     running: Arc<AtomicBool>,
     /// v9.6.0: AI inference worker pool (runs inference on idle cores)
     inference_pool: Arc<InferenceWorkerPool>,
+    /// v9.5.0: Tunnel manager + peer registry for P2P compute (Issue #002)
+    tunnel_manager: Arc<TunnelManager>,
+    /// Local peer ID (set after P2P identity is available)
+    local_peer_id: Arc<RwLock<String>>,
 }
 
 impl Orchestrator {
@@ -96,7 +101,15 @@ impl Orchestrator {
             mining_cores: Arc::new(AtomicU64::new(mining_cores as u64)),
             running: Arc::new(AtomicBool::new(false)),
             inference_pool,
+            tunnel_manager: Arc::new(TunnelManager::new(64)), // Max 64 simultaneous tunnels
+            local_peer_id: Arc::new(RwLock::new(String::new())),
         }
+    }
+
+    /// Set the local peer ID (called once the P2P identity is available).
+    pub fn set_local_peer_id(&self, peer_id: &str) {
+        *self.local_peer_id.write() = peer_id.to_string();
+        info!("🚀 [STARSHIP] Local peer ID set to {}", peer_id);
     }
 
     /// Get current compute mode
@@ -125,6 +138,16 @@ impl Orchestrator {
         &self.inference_pool
     }
 
+    /// Get the peer registry for direct access (delegates to tunnel manager).
+    pub fn peer_registry(&self) -> &Arc<PeerRegistry> {
+        self.tunnel_manager.peer_registry()
+    }
+
+    /// Get the tunnel manager for P2P compute tunnel lifecycle.
+    pub fn tunnel_manager(&self) -> &Arc<TunnelManager> {
+        &self.tunnel_manager
+    }
+
     /// Record a completed task for a layer
     pub fn record_task(&self, layer: ComputeLayer, revenue_micro_qug: u64) {
         let assignments = self.assignments.read();
@@ -132,6 +155,69 @@ impl Orchestrator {
             assignment.tasks_completed.fetch_add(1, Ordering::Relaxed);
             assignment.revenue_micro_qug.fetch_add(revenue_micro_qug, Ordering::Relaxed);
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Gossipsub compute tunnel integration (Issue #002)
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Serialize a `ComputePeerInfo` announcement for publishing on the
+    /// compute tunnel gossipsub topic.
+    ///
+    /// The announcement includes the current resource snapshot, compute mode,
+    /// active layers, and trainer status. The caller should publish the returned
+    /// bytes on `COMPUTE_TUNNEL_TOPIC`.
+    pub fn get_peer_announcement(&self) -> Vec<u8> {
+        let snapshot = self.monitor.snapshot();
+        let mode = self.mode();
+        let peer_id = self.local_peer_id.read().clone();
+
+        let mut info = create_peer_announcement(&snapshot, &mode.to_string(), &peer_id);
+
+        // Populate active layers from current assignments
+        let assignments = self.assignments.read();
+        info.active_layers = assignments
+            .iter()
+            .filter(|(_, a)| a.active && a.core_budget > 0)
+            .map(|(layer, _)| layer.name().to_string())
+            .collect();
+
+        // Populate trainer status
+        info.trainer_active = !self.trainer.active_cheats().is_empty();
+
+        serde_json::to_vec(&info).unwrap_or_else(|e| {
+            warn!("🚀 [STARSHIP] Failed to serialize peer announcement: {}", e);
+            Vec::new()
+        })
+    }
+
+    /// Process a received gossipsub message from `COMPUTE_TUNNEL_TOPIC`.
+    ///
+    /// Parses the announcement and stores it in the peer registry with
+    /// a 60-second TTL. Stale or self-announcements are silently dropped.
+    pub fn process_peer_announcement(&self, data: &[u8]) {
+        let info = match parse_peer_announcement(data) {
+            Some(i) => i,
+            None => {
+                debug!("🚀 [STARSHIP] Ignoring unparseable compute peer announcement ({} bytes)", data.len());
+                return;
+            }
+        };
+
+        // Skip our own announcements
+        let local_id = self.local_peer_id.read().clone();
+        if !local_id.is_empty() && info.peer_id == local_id {
+            return;
+        }
+
+        debug!(
+            "🚀 [STARSHIP] Received compute announcement from {} — cores={}/{}, gpu={:.1}TF, ram={:.1}/{:.1}GB, mode={}",
+            info.peer_id, info.available_cores, info.total_cores,
+            info.gpu_tflops, info.ram_available_gb, info.ram_total_gb,
+            info.compute_mode
+        );
+
+        self.tunnel_manager.peer_registry().upsert(info);
     }
 
     /// Get full compute status for dashboard
@@ -166,12 +252,15 @@ impl Orchestrator {
             None
         };
 
+        // Include discovered compute peers from the registry
+        let cluster_peers = self.tunnel_manager.peer_registry().all_peers();
+
         ComputeStatus {
             mode: self.mode(),
             resources,
             layers,
-            tunnels: Vec::new(), // Populated by tunnel module
-            cluster_peers: Vec::new(), // Populated from gossipsub
+            tunnels: self.tunnel_manager.tunnel_infos(),
+            cluster_peers,
             trainer_active: !cheats.is_empty(),
             trainer_cheats: cheats,
             performance_boost_pct: trainer.estimated_boost_pct(),
@@ -207,6 +296,7 @@ impl Orchestrator {
         let total_cores = self.total_cores;
         let _trainer = self.trainer.clone();
         let inference_pool = self.inference_pool.clone();
+        let tunnel_manager = self.tunnel_manager.clone();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -348,6 +438,11 @@ impl Orchestrator {
                     }
                     inference_pool.update_cores(vec![]);
                 }
+
+                // Periodic tunnel + peer registry cleanup (every 30 ticks = 30s)
+                if tick % 30 == 0 {
+                    tunnel_manager.cleanup_dead();
+                }
             }
             info!("🚀 [STARSHIP] Adaptive scheduler stopped");
         });
@@ -399,5 +494,135 @@ mod tests {
         assert_eq!("mining-only".parse::<ComputeMode>().unwrap(), ComputeMode::MiningOnly);
         assert_eq!("yolo".parse::<ComputeMode>().unwrap(), ComputeMode::Nuke);
         assert!("invalid".parse::<ComputeMode>().is_err());
+    }
+
+    #[test]
+    fn test_get_peer_announcement() {
+        let orch = Orchestrator::new(ComputeMode::Full);
+        orch.set_local_peer_id("12D3KooWTestOrch");
+
+        let bytes = orch.get_peer_announcement();
+        assert!(!bytes.is_empty(), "Peer announcement should not be empty");
+
+        // Should be valid JSON
+        let parsed: ComputePeerInfo = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed.peer_id, "12D3KooWTestOrch");
+        assert_eq!(parsed.compute_mode, "full");
+        // total_cores may be 0 in test environments where ResourceMonitor
+        // snapshot has no per-core data yet (not spawned)
+        assert!(parsed.total_cores <= num_cpus::get() as u32 + 1);
+    }
+
+    #[test]
+    fn test_process_peer_announcement() {
+        let orch = Orchestrator::new(ComputeMode::Full);
+        orch.set_local_peer_id("local-peer");
+
+        // Create a foreign peer announcement
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let foreign_peer = ComputePeerInfo {
+            peer_id: "remote-peer-123".to_string(),
+            available_cores: 16,
+            total_cores: 32,
+            gpu_tflops: 15.0,
+            ram_available_gb: 48.0,
+            ram_total_gb: 64.0,
+            bandwidth_mbps: 10000.0,
+            compute_mode: "nuke".to_string(),
+            active_layers: vec!["Mining".to_string(), "AI Inference".to_string()],
+            trainer_active: true,
+            version: "9.7.0".to_string(),
+            timestamp: now,
+        };
+
+        let data = serde_json::to_vec(&foreign_peer).unwrap();
+        orch.process_peer_announcement(&data);
+
+        // Should be stored in registry
+        assert_eq!(orch.peer_registry().len(), 1);
+        let fetched = orch.peer_registry().get("remote-peer-123").unwrap();
+        assert_eq!(fetched.available_cores, 16);
+        assert_eq!(fetched.gpu_tflops, 15.0);
+    }
+
+    #[test]
+    fn test_process_own_announcement_ignored() {
+        let orch = Orchestrator::new(ComputeMode::Full);
+        orch.set_local_peer_id("my-peer-id");
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let self_announcement = ComputePeerInfo {
+            peer_id: "my-peer-id".to_string(),
+            available_cores: 8,
+            total_cores: 8,
+            gpu_tflops: 0.0,
+            ram_available_gb: 16.0,
+            ram_total_gb: 32.0,
+            bandwidth_mbps: 1000.0,
+            compute_mode: "full".to_string(),
+            active_layers: vec![],
+            trainer_active: false,
+            version: "test".to_string(),
+            timestamp: now,
+        };
+
+        let data = serde_json::to_vec(&self_announcement).unwrap();
+        orch.process_peer_announcement(&data);
+
+        // Should NOT be stored (it's our own)
+        assert_eq!(orch.peer_registry().len(), 0);
+    }
+
+    #[test]
+    fn test_process_invalid_announcement() {
+        let orch = Orchestrator::new(ComputeMode::Full);
+        orch.process_peer_announcement(b"not json");
+        orch.process_peer_announcement(b"");
+        orch.process_peer_announcement(b"{}");
+
+        // None should be stored
+        assert_eq!(orch.peer_registry().len(), 0);
+    }
+
+    #[test]
+    fn test_status_includes_peers() {
+        let orch = Orchestrator::new(ComputeMode::Full);
+        orch.set_local_peer_id("local");
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        // Add two remote peers
+        for i in 0..2 {
+            let peer = ComputePeerInfo {
+                peer_id: format!("remote-{}", i),
+                available_cores: 4,
+                total_cores: 8,
+                gpu_tflops: 5.0,
+                ram_available_gb: 8.0,
+                ram_total_gb: 16.0,
+                bandwidth_mbps: 1000.0,
+                compute_mode: "full".to_string(),
+                active_layers: vec![],
+                trainer_active: false,
+                version: "test".to_string(),
+                timestamp: now,
+            };
+            let data = serde_json::to_vec(&peer).unwrap();
+            orch.process_peer_announcement(&data);
+        }
+
+        let status = orch.status();
+        assert_eq!(status.cluster_peers.len(), 2);
     }
 }
