@@ -5,6 +5,7 @@
 //! Lower layers fill the gaps.
 
 use crate::{ComputeLayer, ComputeMode, ComputePeerInfo, ComputeStatus, LayerStats, AtomicU64Ser};
+use crate::core_enforcer::CoreEnforcer;
 use crate::resource_monitor::ResourceMonitor;
 use crate::trainer::Trainer;
 use crate::os_tuner::OsTuner;
@@ -43,6 +44,19 @@ impl CoreRange {
             .map(|id| core_affinity::CoreId { id })
             .collect()
     }
+
+    /// #013: Convert to a comma-separated CPU list for cgroup cpuset (e.g. "0,1,2,3")
+    pub fn to_cpuset_str(&self) -> String {
+        (self.start..self.end)
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    /// #013: Convert to a Vec of core indices
+    pub fn to_core_vec(&self) -> Vec<usize> {
+        (self.start..self.end).collect()
+    }
 }
 
 /// Core assignment for each layer
@@ -78,6 +92,8 @@ pub struct Orchestrator {
     tunnel_manager: Arc<TunnelManager>,
     /// Local peer ID (set after P2P identity is available)
     local_peer_id: Arc<RwLock<String>>,
+    /// v9.7.0: Real CPU affinity enforcement via sched_setaffinity (#013)
+    core_enforcer: Arc<RwLock<CoreEnforcer>>,
 }
 
 impl Orchestrator {
@@ -135,6 +151,7 @@ impl Orchestrator {
             inference_pool,
             tunnel_manager: Arc::new(TunnelManager::new(64)), // Max 64 simultaneous tunnels
             local_peer_id: Arc::new(RwLock::new(String::new())),
+            core_enforcer: Arc::new(RwLock::new(CoreEnforcer::new())),
         }
     }
 
@@ -201,34 +218,49 @@ impl Orchestrator {
         assignments.get(layer).and_then(|a| a.core_range.clone())
     }
 
-    /// v9.5.1: Pin the calling thread to the core range assigned to a layer (#013).
-    /// Returns true if affinity was successfully set, false if fallback to advisory.
+    /// v9.7.0: Get the core enforcer for direct access (e.g. worker threads
+    /// that need to pin themselves to their layer's assigned cores).
+    pub fn core_enforcer(&self) -> &Arc<RwLock<CoreEnforcer>> {
+        &self.core_enforcer
+    }
+
+    /// v9.7.0: Pin the calling thread to the specific cores for a layer (#013).
+    ///
+    /// Uses `libc::sched_setaffinity` on Linux to set affinity to the FULL
+    /// set of cores (not just one). On non-Linux platforms, logs a warning
+    /// and degrades gracefully.
+    ///
+    /// Returns true if affinity was successfully enforced, false otherwise.
     pub fn enforce_affinity_for_layer(layer: &ComputeLayer, core_range: &CoreRange) -> bool {
+        use crate::core_enforcer::AffinityResult;
+
         if core_range.is_empty() {
             return false;
         }
 
-        let core_ids = core_range.to_core_ids();
-        if core_ids.is_empty() {
-            return false;
-        }
+        let cores: Vec<usize> = (core_range.start..core_range.end).collect();
 
-        // core_affinity::set_for_current sets affinity for the current thread
-        // to ONE core — we pick the first in the range. For multi-core layers,
-        // each worker thread should call this with its own core offset.
-        let success = core_affinity::set_for_current(core_ids[0]);
-        if success {
-            debug!(
-                "🚀 [STARSHIP] Core affinity enforced for {} — pinned to cores {}..{}",
-                layer.name(), core_range.start, core_range.end
-            );
-        } else {
-            warn!(
-                "🚀 [STARSHIP] Core affinity failed for {} (cores {}..{}), falling back to advisory",
-                layer.name(), core_range.start, core_range.end
-            );
-        }
-        success
+        // Use a temporary enforcer for static calls (thread-local enforcement).
+        // For tracked enforcement, callers should use core_enforcer() directly.
+        let mut enforcer = CoreEnforcer::new();
+        matches!(
+            enforcer.enforce_layer_affinity(*layer, &cores),
+            AffinityResult::Enforced { .. }
+        )
+    }
+
+    /// v9.7.0: Release affinity for a layer — resets the calling thread to
+    /// be schedulable on all cores (#013).
+    ///
+    /// Returns true if affinity was successfully released.
+    pub fn release_affinity_for_layer(layer: &ComputeLayer) -> bool {
+        use crate::core_enforcer::AffinityResult;
+
+        let mut enforcer = CoreEnforcer::new();
+        matches!(
+            enforcer.release_affinity(*layer),
+            AffinityResult::Released
+        )
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -694,6 +726,39 @@ mod tests {
         let empty = CoreRange::new(0, 0);
         assert!(empty.is_empty());
         assert_eq!(empty.len(), 0);
+    }
+
+    #[test]
+    fn test_core_range_cpuset_str() {
+        let range = CoreRange::new(4, 8);
+        assert_eq!(range.to_cpuset_str(), "4,5,6,7");
+
+        let single = CoreRange::new(0, 1);
+        assert_eq!(single.to_cpuset_str(), "0");
+
+        let empty = CoreRange::new(0, 0);
+        assert_eq!(empty.to_cpuset_str(), "");
+    }
+
+    #[test]
+    fn test_core_range_to_vec() {
+        let range = CoreRange::new(2, 6);
+        assert_eq!(range.to_core_vec(), vec![2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn test_core_enforcer_accessible() {
+        let orch = Orchestrator::new(ComputeMode::Full);
+        let enforcer = orch.core_enforcer();
+        let guard = enforcer.read();
+        assert!(guard.total_cores() > 0);
+    }
+
+    #[test]
+    fn test_release_affinity_graceful() {
+        // Release on a layer that was never pinned — should not crash
+        let result = Orchestrator::release_affinity_for_layer(&ComputeLayer::AiInference);
+        let _ = result; // May succeed or fail depending on platform
     }
 
     #[test]

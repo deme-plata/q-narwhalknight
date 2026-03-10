@@ -4,7 +4,7 @@
 
 **Branch**: `feature/safe-batched-sync-v1.0.2`
 **Started**: 2026-03-08
-**Last Updated**: 2026-03-10 (audit pass)
+**Last Updated**: 2026-03-10 (parallel agent sprint)
 
 ---
 
@@ -15,7 +15,7 @@
 | # | Title | Priority | Status | Assigned | Progress |
 |---|-------|----------|--------|----------|----------|
 | [#001](issues/001-compute-orchestrator-core.md) | Compute Orchestrator Core | CRITICAL | **Closed** | Beta | 7/7 criteria done |
-| [#002](issues/002-p2p-compute-tunnels.md) | P2P Compute Tunnels | CRITICAL | **In Progress** | Beta+Epsilon | Gossipsub wired, 3/6 criteria done |
+| [#002](issues/002-p2p-compute-tunnels.md) | P2P Compute Tunnels | CRITICAL | **In Progress** | Beta+Epsilon | Gossipsub + NOISE XX + yamux (4/6 criteria) |
 | [#004](issues/004-trainer-cheat-engine.md) | Trainer Cheat Engine | HIGH | **Closed** | Beta | 12/12 cheats done |
 | [#007](issues/007-os-level-auto-tuning.md) | OS-Level Auto-Tuning | HIGH | **Closed** | Beta | All Linux + Windows tuning done |
 
@@ -23,9 +23,9 @@
 
 | # | Title | Priority | Status | Assigned | Progress |
 |---|-------|----------|--------|----------|----------|
-| [#012](issues/012-async-gpu-monitoring.md) | Async GPU Monitoring | HIGH | Open | Beta | nvidia-smi blocks tokio runtime |
-| [#013](issues/013-orchestrator-core-enforcement.md) | Core Enforcement | HIGH | Open | Beta | Assignments are advisory-only |
-| [#014](issues/014-inference-revenue-wiring.md) | Inference Revenue Wiring | MEDIUM | Open | Beta | Revenue always shows $0 |
+| [#012](issues/012-async-gpu-monitoring.md) | Async GPU Monitoring | HIGH | **Closed** | Beta | tokio::process::Command + 2s cache |
+| [#013](issues/013-orchestrator-core-enforcement.md) | Core Enforcement | HIGH | **Closed** | Beta | sched_setaffinity + CoreEnforcer + inference pinning |
+| [#014](issues/014-inference-revenue-wiring.md) | Inference Revenue Wiring | MEDIUM | **In Progress** | Beta | ModelTier + revenue callback wired |
 
 ### GPU & Quantum Compute (Phase 2)
 
@@ -68,7 +68,13 @@
 
 | # | Title | Priority | Status | Assigned | Progress |
 |---|-------|----------|--------|----------|----------|
-| [#008](issues/008-tunnel-mesh-visualization.md) | Tunnel Mesh Visualization | LOW | In Progress | Beta | Compute panel done, D3 graph pending |
+| [#008](issues/008-tunnel-mesh-visualization.md) | Tunnel Mesh Visualization | LOW | **In Progress** | Gamma | Compute panel done, D3 graph in progress |
+
+### q-flux Custom Proxy
+
+| # | Title | Priority | Status | Assigned | Progress |
+|---|-------|----------|--------|----------|----------|
+| [#017-#034](issues/) | q-flux Features | HIGH | **Closed** | Beta | Access control, ACME, kTLS, metrics, admin panel |
 
 ## Pull Requests
 
@@ -78,23 +84,24 @@
 | [PR-002](pulls/PR-002-irq-affinity-f11-nuke-fixes.md) | IRQ Affinity + F11 NUKE Fixes | Open | `feature/safe-batched-sync-v1.0.2` | #007 (audit) |
 | [PR-003](pulls/PR-003-node-auto-update-integration.md) | Node Auto-Update Integration | Open | `feature/safe-batched-sync-v1.0.2` | #009, #010, #011 |
 | [PR-004](pulls/PR-004-compute-tunnel-gossipsub-wiring.md) | Compute Tunnel Gossipsub Wiring | Open | `feature/safe-batched-sync-v1.0.2` | #002 (partial) |
-| [PR-005](pulls/PR-005-compute-hardening.md) | Compute Hardening | Draft | `feature/safe-batched-sync-v1.0.2` | #012, #013, #014 |
+| [PR-005](pulls/PR-005-compute-hardening.md) | Compute Hardening | Open | `feature/safe-batched-sync-v1.0.2` | #012, #013, #014 |
 | [PR-006](pulls/PR-006-qr-mobile-payments.md) | QR Code Mobile Payments | **Merged** | `feature/safe-batched-sync-v1.0.2` | #019, #020 |
+| [PR-007](pulls/PR-007-q-flux-custom-proxy.md) | q-flux Custom Proxy | Open | `feature/safe-batched-sync-v1.0.2` | q-flux #017-#034 |
 
 ## Dependency Graph
 
 ```
 #001 Compute Orchestrator (CLOSED) ─────────────────────────────┐
- ├── #002 P2P Tunnels (IN PROGRESS — gossipsub wired)           │
+ ├── #002 P2P Tunnels (IN PROGRESS — NOISE XX + yamux)          │
  │    ├── #005 AI Inference (needs tunnels for task routing)     │
  │    ├── #018 Tensor Parallelism (needs tunnels for shards)    │
  │    └── #016 Bridge Verification (needs tunnels for quorum)   │
  ├── #004 Trainer (CLOSED)                                      │
  ├── #007 OS Tuning (CLOSED)                                    │
- ├── #008 Visualization (compute panel done, D3 pending)        │
- ├── #012 Async GPU (blocks tokio — HIGH priority fix)          │
- ├── #013 Core Enforcement (advisory → real pinning)            │
- └── #014 Inference Revenue (wire callback to orchestrator)     │
+ ├── #008 Visualization (compute panel done, D3 in progress)    │
+ ├── #012 Async GPU (CLOSED — tokio::process + 2s cache)        │
+ ├── #013 Core Enforcement (CLOSED — sched_setaffinity)         │
+ └── #014 Inference Revenue (IN PROGRESS — ModelTier wired)     │
                                                                 │
 #003 GPU Acceleration ──────────────────────────────────────────┤
  ├── #006 ZK Proof Farm (needs GPU for NTT)                     │
@@ -113,7 +120,7 @@
 |--------|------|--------|
 | **Beta** (185.182.185.227) | Coordinator | #001, #002, #004, #007, #008, #009-#014, #017 |
 | **Epsilon** (89.149.241.126) | GPU Beast | #002, #003, #005, #015, #018 |
-| **Gamma** (109.205.176.60) | CPU Worker | #006 |
+| **Gamma** (109.205.176.60) | CPU Worker | #006, #008 (D3 graph) |
 | **Delta** (5.79.79.158) | Bridge Node | #016 |
 | **Alpha** (161.35.219.10) | Canary | — |
 
@@ -122,7 +129,7 @@
 | Milestone | Issues | Target | Status |
 |-----------|--------|--------|--------|
 | **Phase 1: Orchestrator Foundation** | #001, #002, #004, #007 | 2026-03-10 | 3/4 closed, #002 in progress |
-| **Phase 1.5: Hardening** | #012, #013, #014 | 2026-03-15 | 0/3 |
+| **Phase 1.5: Hardening** | #012, #013, #014 | 2026-03-15 | 2/3 closed, #014 in progress |
 | **Phase 2: GPU & Quantum** | #003, #006, #015 | 2026-03-25 | 0/3 |
 | **Phase 3: Distributed Compute** | #005, #016, #017, #018 | 2026-04-10 | 0/4 |
 | **Auto-Update** | #009, #010, #011 | 2026-03-10 | 3/3 closed |

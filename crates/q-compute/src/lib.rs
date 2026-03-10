@@ -16,6 +16,7 @@
 //! - Layer 7: Idle Crypto
 
 pub mod orchestrator;
+pub mod core_enforcer; // v9.7.0: Real CPU affinity enforcement via sched_setaffinity (#013)
 pub mod trainer;
 pub mod tunnel;
 pub mod os_tuner;
@@ -144,6 +145,10 @@ pub struct ResourceSnapshot {
     pub gpu_memory_used: u64,
     /// GPU memory total in bytes
     pub gpu_memory_total: u64,
+    /// GPU temperature in degrees Celsius (0.0 if unavailable)
+    pub gpu_temperature: f32,
+    /// GPU device name (empty string if unavailable)
+    pub gpu_name: String,
     /// RAM used in bytes
     pub ram_used: u64,
     /// RAM total in bytes

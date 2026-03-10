@@ -1,11 +1,12 @@
 # Issue #012: Async GPU Monitoring — Unblock Tokio Runtime
 
-**State**: `open`
+**State**: `closed`
 **Priority**: HIGH
 **Labels**: `starship-endgame`, `performance`, `bug`
 **Assigned**: Beta
 **Branch**: `feature/safe-batched-sync-v1.0.2`
 **Created**: 2026-03-10
+**Closed**: 2026-03-10
 
 ---
 
@@ -26,11 +27,28 @@
 
 ## Acceptance Criteria
 
-- [ ] GPU monitoring uses `tokio::process::Command`
-- [ ] Results cached for 2s with async refresh
-- [ ] Backend detection runs once at startup
-- [ ] Fallback to cached/zero on timeout
-- [ ] No blocking of tokio runtime during GPU queries
+- [x] GPU monitoring uses `tokio::process::Command`
+- [x] Results cached for 2s with async refresh
+- [x] Backend detection runs once at startup
+- [x] Fallback to cached/zero on timeout
+- [x] No blocking of tokio runtime during GPU queries
+
+## Implementation
+
+### Resource Monitor (`resource_monitor.rs`)
+- `GpuBackend` enum: `NvidiaSmi`, `RocmSmi`, `Sysinfo`, `None`, `Unknown`
+- `GpuBackend::detect()` — async, probes once at startup
+- `GpuCache` struct with 2-second TTL
+- Separate tokio task for GPU polling (every 2s, isolated from main 100ms loop)
+- `GPU_QUERY_TIMEOUT = 200ms` — returns cached value if exceeded
+- Main sample loop reads GPU data from cache (non-blocking `RwLock::read()`)
+- `try_nvidia_smi_async()` / `try_rocm_smi_async()` — fully async
+- `try_sysinfo_gpu()` — sync but lightweight (thermal sensors only)
+
+### Tests
+- `test_gpu_monitoring_does_not_block_runtime` — spawns monitor + concurrent task, verifies no starvation
+- `test_gpu_backend_detect_completes` — ensures detection returns within 5s timeout
+- `test_gpu_stats_default`, `test_gpu_cache_starts_expired`
 
 ## Files
 
