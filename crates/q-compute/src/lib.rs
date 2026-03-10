@@ -32,7 +32,10 @@ pub mod tensor_parallel; // Issue #018: Cross-node tensor parallelism for distri
 pub mod job_wal; // Issue #026: Compute job queue persistence (WAL)
 pub mod bridge_verification; // Issue #016: Bridge safety — multi-peer attestation & 2-of-3 quorum
 pub mod marketplace; // Issue #017: Proof-of-Useful-Work marketplace — replace idle crypto with revenue
+pub mod marketplace_p2p; // Issue #027: Compute marketplace P2P protocol — gossipsub routing, order book, settlement
 pub mod tunnel_rekey; // Issue #024: Tunnel key rotation — forward secrecy via periodic rekey
+pub mod zk_proof_farm; // Issue #006: ZK proof farm — background proof generation
+pub mod grover_backend; // Issue #015: Quantum Grover mining — amplitude-amplified nonce search
 #[cfg(feature = "metrics")]
 pub mod metrics; // Prometheus metrics export (feature-gated)
 
