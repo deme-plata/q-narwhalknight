@@ -1431,11 +1431,23 @@ impl UnifiedNetworkManager {
         use libp2p::connection_limits::{ConnectionLimits, Behaviour as ConnLimitsBehaviour};
 
         // v8.4.0: Bootstrap nodes get higher connection limits to handle more peers
+        // v9.6.1: Env var override to reduce connections (prevents memory leak from per-conn buffers)
         let is_bootstrap = std::env::var("Q_IS_BOOTSTRAP").unwrap_or_default() == "1";
-        let (max_established_total, max_established_incoming) = if is_bootstrap {
-            (500, 400)  // Bootstrap: handle more peers (1Gbit servers have bandwidth)
-        } else {
-            (300, 256)  // Regular nodes: current limits
+        let (max_established_total, max_established_incoming) = {
+            let (default_total, default_incoming) = if is_bootstrap {
+                (500, 400)
+            } else {
+                (300, 256)
+            };
+            let total = std::env::var("Q_MAX_CONNECTIONS")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(default_total);
+            let incoming = std::env::var("Q_MAX_INCOMING_CONNECTIONS")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(default_incoming.min(total));
+            (total, incoming)
         };
 
         let limits = ConnectionLimits::default()
@@ -1443,7 +1455,7 @@ impl UnifiedNetworkManager {
             .with_max_pending_outgoing(Some(64))
             .with_max_established_incoming(Some(max_established_incoming as u32))
             .with_max_established_outgoing(Some(256))
-            .with_max_established_per_peer(Some(8))
+            .with_max_established_per_peer(Some(2))  // v9.6.1: 2 per peer (was 8)
             .with_max_established(Some(max_established_total as u32));
 
         info!("🔒 Connection limits configured: max {} total, {} incoming, 8 per peer{}",
@@ -1711,13 +1723,26 @@ impl UnifiedNetworkManager {
                 })
             })?
             .with_swarm_config(|c| {
-                // v1.4.12-beta: PERFORMANCE OPTIMIZATION - Increase buffer sizes for high-throughput sync
-                // Previous values (32/64) were bottlenecking libp2p at ~7 blocks/s
-                // New values (256/256) allow 100+ blocks/s through the event queues
-                // This matches the actual network capacity (100+ Mbit/s)
-                c.with_idle_connection_timeout(Duration::from_secs(30 * 60))
-                 .with_notify_handler_buffer_size(NonZeroUsize::new(512).unwrap())  // v8.6.0: 16x larger (was 256)
-                 .with_per_connection_event_buffer_size(256)  // 4x larger
+                // v9.6.1: MEMORY FIX - Reduce per-connection buffers to prevent OOM
+                // Previous: 512/256 with 30min idle → 300 conns × 768 events × ~2KB = 460MB of buffers
+                // New: 64/32 with 5min idle → much lower baseline memory
+                // Sync throughput stays fine since block-pack uses request-response, not gossipsub
+                let idle_secs = std::env::var("Q_IDLE_CONN_TIMEOUT_SECS")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(300); // 5 minutes default (was 30 min)
+                let handler_buf = std::env::var("Q_HANDLER_BUFFER_SIZE")
+                    .ok()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(64); // was 512
+                let conn_buf = std::env::var("Q_CONN_EVENT_BUFFER_SIZE")
+                    .ok()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(32); // was 256
+                info!("🔧 Swarm config: idle_timeout={}s, handler_buf={}, conn_buf={}", idle_secs, handler_buf, conn_buf);
+                c.with_idle_connection_timeout(Duration::from_secs(idle_secs))
+                 .with_notify_handler_buffer_size(NonZeroUsize::new(handler_buf.max(8)).unwrap())
+                 .with_per_connection_event_buffer_size(conn_buf.max(8))
             })
             .build();
 
