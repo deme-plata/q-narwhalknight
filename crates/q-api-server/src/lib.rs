@@ -325,12 +325,14 @@ pub mod compute_api; // ✅ v9.5.0: Starship Endgame — Compute Orchestrator AP
 pub mod ai_api; // ✅ v9.5.0: Starship Endgame — AI Inference Pool API
 pub mod k_parameter_gauge; // ✅ v9.3.1: Lightweight K-parameter network health gauge (no q-resonance dep)
 pub mod bitcoin_bridge_api; // ✅ v7.2.0: Bitcoin atomic swap bridge (QNK ↔ BTC)
+pub mod bitcoin_rpc; // ✅ v9.6.5: Bitcoin Knots RPC client (balance, address, send, txs)
 pub mod zcash_bridge_api; // ✅ v7.2.2: Zcash shielded atomic swap bridge (QNK ↔ ZEC)
 pub mod ironfish_bridge_api; // ✅ v7.2.4: Iron Fish privacy atomic swap bridge (QNK ↔ IRON)
 pub mod ethereum_bridge_api; // ✅ v7.3.0: Ethereum atomic swap bridge (QNK ↔ ETH)
 pub mod bridge_committee; // ✅ v7.3.1: Multi-sig bridge validation with rotating 11-node committee
 pub mod bridge_tokens; // ✅ v7.2.5: Wrapped bridge tokens (wBTC, wZEC, wIRON) mint/burn system
 pub mod bridge_safety; // ✅ v9.4.0: Bridge safety layer — deposit verification, kill-switch, amount limits
+pub mod sharkgod; // 🦈 SharkGod: Maximum power transaction beam (bypass all bottlenecks)
 pub mod swap_indexer; // ✅ v2.4.0-beta: Consensus-verified swap history indexer
 pub mod price_history_indexer; // ✅ v3.7.1-beta: Consensus-verified price history indexer
 pub mod mining_commit_reveal; // ✅ v1.4.11-beta: Commit-reveal cryptographic time-locks for mining
@@ -487,6 +489,56 @@ pub async fn bootstrap_bridge_pools(
             }
         }
     }
+
+    // v9.4.0: Bootstrap QUGUSD ↔ bridge pools (QUGUSD/wBTC, QUGUSD/wETH, etc.)
+    // Enables direct QUGUSD stablecoin swaps to wrapped bridge tokens
+    let qugusd_bridge_pools: [(&str, &str, f64, f64); 4] = [
+        ("pool-qugusd-wbtc-bridge", "wBTC", btc_price, 0.25),
+        ("pool-qugusd-weth-bridge", "wETH", eth_price, 2.0),
+        ("pool-qugusd-wzec-bridge", "wZEC", zec_price, 100.0),
+        ("pool-qugusd-wiron-bridge", "wIRON", iron_price, 50_000.0),
+    ];
+
+    for (pool_id, symbol, native_price_usd, native_amount) in &qugusd_bridge_pools {
+        // QUGUSD side: native_amount * native_price_usd worth of QUGUSD (1 QUGUSD = $1)
+        let qugusd_equivalent = native_amount * native_price_usd; // in dollars = QUGUSD units
+        let bootstrap_qugusd: u128 = (qugusd_equivalent * 1e24) as u128;
+        // Wrapped token side (same as QUG pools)
+        let bootstrap_wrapped: u128 = (native_amount * 1e8) as u128;
+        let reserve_wrapped_24: u128 = bootstrap_wrapped * 10u128.pow(16);
+
+        if let Some(existing) = liquidity_pools_map.get_mut(*pool_id) {
+            let old_r0 = existing.reserve0;
+            existing.reserve0 = bootstrap_qugusd;
+            existing.reserve1 = reserve_wrapped_24;
+            existing.lp_token_supply = ((bootstrap_qugusd as f64 * reserve_wrapped_24 as f64).sqrt()) as u128;
+            tracing::info!("🔄 [BRIDGE] Updated QUGUSD/{} reserves: ${:.0} (QUGUSD reserve: {:.2} → {:.2})",
+                symbol, native_price_usd, old_r0 as f64 / 1e24, bootstrap_qugusd as f64 / 1e24);
+        } else {
+            let pool = LiquidityPool {
+                pool_id: pool_id.to_string(),
+                token0: "QUGUSD".to_string(),
+                token1: symbol.to_string(),
+                reserve0: bootstrap_qugusd,
+                reserve1: reserve_wrapped_24,
+                provider: [0u8; 32],
+                created_at: chrono::Utc::now(),
+                lp_token_supply: ((bootstrap_qugusd as f64 * reserve_wrapped_24 as f64).sqrt()) as u128,
+                token0_decimals: 24,
+                token1_decimals: 24,
+            };
+            liquidity_pools_map.insert(pool_id.to_string(), pool.clone());
+            tracing::info!("🌉 [BRIDGE] Created QUGUSD/{} pool: ${:.0}/unit", symbol, native_price_usd);
+        }
+        if let Some(p) = liquidity_pools_map.get(*pool_id) {
+            if let Ok(pool_bytes) = serde_json::to_vec(p) {
+                if let Err(e) = storage_engine.save_liquidity_pool(pool_id, &pool_bytes).await {
+                    tracing::warn!("⚠️ Failed to persist QUGUSD/{} pool: {}", symbol, e);
+                }
+            }
+        }
+    }
+    tracing::info!("🌉 [BRIDGE v9.4.0] All bridge pools ready: QUG+QUGUSD ↔ wBTC/wETH/wZEC/wIRON");
 }
 
 /// Mining submission for async queue processing
@@ -982,6 +1034,10 @@ pub struct AppState {
     // Each wallet has a monotonically increasing nonce
     pub nonce_tracker: Arc<transaction_utils::NonceTracker>,
 
+    // ✅ v9.7.0: Cross-block transaction dedup cache — prevents replay of applied tx IDs
+    // Maps tx_hash → block_height where it was applied. Pruned for entries >1000 blocks old.
+    pub applied_tx_dedup: Arc<dashmap::DashMap<[u8; 32], u64>>,
+
     // ✅ v0.9.99-beta: Adaptive Block Rewards - Throughput-independent emission
     /// Balance consensus engine with adaptive reward calculation
     /// Ensures constant 2,625,000 QUG/year (Era 0) emission regardless of network throughput (1-10,000+ bps)
@@ -1087,6 +1143,9 @@ pub struct AppState {
 
     // v5.2.0: Immediate sync trigger - wakes sync loop when peer announces higher height
     pub sync_trigger: Arc<tokio::sync::Notify>,
+
+    // 🦈 SharkGod: Wake block producer immediately when a SharkGod tx is submitted
+    pub sharkgod_block_wake: Option<Arc<tokio::sync::Notify>>,
 
     // v7.1.5: Configurable dev fee in basis points (100 = 1%, adjustable by master wallet)
     pub dev_fee_bps: Arc<std::sync::atomic::AtomicU64>,
@@ -1562,6 +1621,12 @@ pub struct AppState {
 
     // v7.2.0: Bitcoin atomic swap manager (QNK ↔ BTC via HTLC)
     pub atomic_swap_manager: Option<Arc<q_bitcoin_bridge::atomic_swap::AtomicSwapManager>>,
+
+    // v9.6.5: Bitcoin Knots RPC client for wallet operations (balance, address, send)
+    pub bitcoin_rpc_client: Option<Arc<bitcoin_rpc::BitcoinRpcClient>>,
+
+    // v9.7.2: Zcash Zebra RPC client for real wallet operations (z-addresses, balance, send)
+    pub zcash_rpc_client: Option<Arc<zcash_rpc::ZcashRpcClient>>,
 
     // v7.3.1: Multi-sig bridge validation committee (7-of-11 rotating attestations)
     pub bridge_committee: Arc<RwLock<bridge_committee::BridgeCommittee>>,
@@ -2531,6 +2596,8 @@ impl AppState {
 
             // ✅ v1.0.91-beta: Initialize nonce tracker for replay attack prevention
             nonce_tracker: Arc::new(transaction_utils::NonceTracker::new()),
+            // ✅ v9.7.0: Cross-block tx dedup cache
+            applied_tx_dedup: Arc::new(dashmap::DashMap::new()),
 
             balance_consensus_engine: balance_consensus_engine.clone(),
             event_broadcaster,
@@ -2634,6 +2701,7 @@ impl AppState {
             highest_network_height: Arc::new(std::sync::atomic::AtomicU64::new(0)), // Sync mode tracking
             last_peer_height_update: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v5.2.0: Peer height staleness
             sync_trigger: Arc::new(tokio::sync::Notify::new()), // v5.2.0: Immediate sync wake-up
+            sharkgod_block_wake: Some(Arc::new(tokio::sync::Notify::new())), // 🦈 SharkGod block producer wake
             dev_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(190)), // v8.8.1: 190 bps = 1.9% mainnet dev fee
             node_operator_fee_promille: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v7.3.1: disabled by default
             dex_protocol_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(5)), // v7.3.1: 5 bps = 0.05% protocol fee from swaps
@@ -3095,6 +3163,10 @@ impl AppState {
             miner_link_registry: miner_link_api::new_registry(),
             // v7.2.0: Bitcoin bridge (initialized separately if configured)
             atomic_swap_manager: None,
+            // v9.6.5: Bitcoin Knots RPC client (initialized below)
+            bitcoin_rpc_client: None,
+            // v9.7.2: Zcash Zebra RPC client (initialized below)
+            zcash_rpc_client: None,
             // v7.3.1: Bridge committee (peer ID set later)
             bridge_committee: Arc::new(RwLock::new(bridge_committee::BridgeCommittee::new(String::new()))),
             // v9.4.0: Bridge safety controller
@@ -3927,6 +3999,8 @@ impl AppState {
 
             // ✅ v1.0.91-beta: Initialize nonce tracker for replay attack prevention
             nonce_tracker: Arc::new(transaction_utils::NonceTracker::new()),
+            // ✅ v9.7.0: Cross-block tx dedup cache
+            applied_tx_dedup: Arc::new(dashmap::DashMap::new()),
 
             balance_consensus_engine: balance_consensus_engine.clone(),
             event_broadcaster,
@@ -3987,6 +4061,7 @@ impl AppState {
             highest_network_height: Arc::new(std::sync::atomic::AtomicU64::new(0)), // Sync mode tracking
             last_peer_height_update: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v5.2.0: Peer height staleness
             sync_trigger: Arc::new(tokio::sync::Notify::new()), // v5.2.0: Immediate sync wake-up
+            sharkgod_block_wake: Some(Arc::new(tokio::sync::Notify::new())), // 🦈 SharkGod block producer wake
             dev_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(190)), // v8.8.1: 190 bps = 1.9% mainnet dev fee
             node_operator_fee_promille: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v7.3.1: disabled by default
             dex_protocol_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(5)), // v7.3.1: 5 bps = 0.05% protocol fee from swaps
@@ -4548,6 +4623,10 @@ impl AppState {
             miner_link_registry: miner_link_api::new_registry(),
             // v7.2.0: Bitcoin bridge (initialized separately if configured)
             atomic_swap_manager: None,
+            // v9.6.5: Bitcoin Knots RPC client (initialized below)
+            bitcoin_rpc_client: None,
+            // v9.7.2: Zcash Zebra RPC client (initialized below)
+            zcash_rpc_client: None,
             // v7.3.1: Bridge committee (peer ID set later)
             bridge_committee: Arc::new(RwLock::new(bridge_committee::BridgeCommittee::new(String::new()))),
             // v9.4.0: Bridge safety controller

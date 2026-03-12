@@ -1056,8 +1056,9 @@ async fn update_tui_metrics(
     let network_id = std::env::var("Q_NETWORK_ID").unwrap_or_default();
     let version = env!("CARGO_PKG_VERSION").to_string();
 
-    // Sync detection — use >10 block gap as threshold
-    let is_syncing = network_height > block_height + 10;
+    // v9.7.0: Sync detection — use >50 block gap (was 10) to prevent premature
+    // is_syncing=false during turbo sync bursts that caused TUI status bar vanishing
+    let is_syncing = network_height > block_height + 50;
     let sync_progress = if is_syncing && network_height > 0 {
         (block_height as f32 / network_height as f32 * 100.0).clamp(0.0, 99.9)
     } else if block_height > 0 {
@@ -2771,27 +2772,39 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             }
 
             // 🌐 v2.2.2-beta: Subscribe to mining-solutions topic for DECENTRALIZED MINING
-            // This fixes the 10x reward disparity between bootstrap and connected nodes!
-            // When mining to a connected node, solutions are now broadcast to ALL nodes.
-            let mining_solutions_topic = turbo_network_id.mining_solutions_topic();
-            if let Err(e) = manager.subscribe_topic(&mining_solutions_topic) {
-                warn!("⚠️  Failed to subscribe to mining-solutions topic: {}", e);
+            // v9.6.3: Skip on bootstrap nodes (Q_SKIP_MINING_GOSSIP=1) — miners submit via HTTP
+            // directly, and forwarding 80+ miners' solutions via gossipsub floods the send queue
+            // (895/960 "Send Queue full" msgs), burning CPU and leaking ~1.7GB/hour.
+            let skip_mining_gossip = std::env::var("Q_SKIP_MINING_GOSSIP")
+                .map(|v| v == "1" || v == "true")
+                .unwrap_or(false);
+            if skip_mining_gossip {
+                info!("⛏️  Skipping mining-solutions gossipsub (Q_SKIP_MINING_GOSSIP=1)");
             } else {
-                info!(
-                    "⛏️  Subscribed to {} for decentralized mining (P2P solution broadcast)",
-                    mining_solutions_topic
-                );
+                let mining_solutions_topic = turbo_network_id.mining_solutions_topic();
+                if let Err(e) = manager.subscribe_topic(&mining_solutions_topic) {
+                    warn!("⚠️  Failed to subscribe to mining-solutions topic: {}", e);
+                } else {
+                    info!(
+                        "⛏️  Subscribed to {} for decentralized mining (P2P solution broadcast)",
+                        mining_solutions_topic
+                    );
+                }
             }
 
             // v9.1.7: Subscribe to mining-challenges topic for P2P challenge relay
-            let mining_challenges_topic = turbo_network_id.mining_challenges_topic();
-            if let Err(e) = manager.subscribe_topic(&mining_challenges_topic) {
-                warn!("⚠️  Failed to subscribe to mining-challenges topic: {}", e);
+            if skip_mining_gossip {
+                info!("⛏️  Skipping mining-challenges gossipsub (Q_SKIP_MINING_GOSSIP=1)");
             } else {
-                info!(
-                    "⛏️  Subscribed to {} for P2P mining challenge relay",
-                    mining_challenges_topic
-                );
+                let mining_challenges_topic = turbo_network_id.mining_challenges_topic();
+                if let Err(e) = manager.subscribe_topic(&mining_challenges_topic) {
+                    warn!("⚠️  Failed to subscribe to mining-challenges topic: {}", e);
+                } else {
+                    info!(
+                        "⛏️  Subscribed to {} for P2P mining challenge relay",
+                        mining_challenges_topic
+                    );
+                }
             }
 
             info!("🔄 [LEGACY] Skipped block-pack-requests/responses topics (replaced by BlockPackCodec)");
@@ -3523,6 +3536,49 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             Err(e) => {
                 warn!("₿ Bitcoin bridge unavailable (RPC connection failed): {}", e);
                 // Non-fatal: bridge endpoints will return "not configured" errors
+            }
+        }
+
+        // v9.6.5: Initialize Bitcoin Knots RPC client for wallet operations
+        match q_api_server::bitcoin_rpc::BitcoinRpcClient::with_config(
+            q_api_server::bitcoin_rpc::BitcoinRpcConfig {
+                rpc_url: btc_rpc_url.clone(),
+                rpc_user: std::env::var("BTC_RPC_USER").unwrap_or_else(|_| "qnk".to_string()),
+                rpc_password: std::env::var("BTC_RPC_PASS").unwrap_or_else(|_| "QnkBtcBridge2026".to_string()),
+                timeout_secs: 30,
+                network: "mainnet".to_string(),
+            },
+        ) {
+            Ok(client) => {
+                state.bitcoin_rpc_client = Some(Arc::new(client));
+                info!("₿ Bitcoin Knots RPC client initialized for wallet operations");
+            }
+            Err(e) => {
+                warn!("₿ Bitcoin RPC client unavailable: {} (balance/address features disabled)", e);
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // v9.7.2: Initialize Zcash Zebra RPC client for real wallet ops
+    // ═══════════════════════════════════════════════════════════════
+    {
+        let zec_rpc_url = std::env::var("ZEC_RPC_URL")
+            .unwrap_or_else(|_| "http://5.79.79.158:8232".to_string());
+        match q_api_server::zcash_rpc::ZcashRpcClient::with_config(
+            q_api_server::zcash_rpc::ZcashRpcConfig {
+                rpc_url: zec_rpc_url.clone(),
+                rpc_user: None,
+                rpc_password: None,
+                timeout_secs: 30,
+            },
+        ) {
+            Ok(client) => {
+                state.zcash_rpc_client = Some(Arc::new(client));
+                info!("Ⓩ Zcash Zebra RPC client initialized: {}", zec_rpc_url);
+            }
+            Err(e) => {
+                warn!("Ⓩ Zcash RPC client unavailable: {} (wallet features degraded)", e);
             }
         }
     }
@@ -6597,15 +6653,14 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     // 8 shards with larger queues performs better: fewer context switches, better cache locality.
     // Each shard still uses rayon par_iter across ALL cores for VDF verification.
     let num_mining_shards = num_cpus::get().min(8).max(4);
-    // v1.0.2: 10x queue capacity — zero-drop queue waits for space instead of dropping,
-    // but larger buffers reduce the chance of hitting the 3s timeout at all.
-    // Base 1M + 50K per core beyond 16. Epsilon 48-core → 1M + 1.6M = 2.6M total.
-    let total_capacity = if num_mining_shards > 16 {
-        1_000_000 + (num_mining_shards - 16) * 50_000
-    } else {
-        1_000_000
-    };
-    let shard_capacity = total_capacity / num_mining_shards; // Spread total capacity across shards
+    // v9.6.2: Reduced default from 1M to 50K — 1M buffers 9+ hours of submissions
+    // which wastes hundreds of MB if channels fill during stalls. 50K = 27 min buffer at 30/s peak.
+    // Override via Q_MINING_CHANNEL_CAPACITY env var.
+    let total_capacity = std::env::var("Q_MINING_CHANNEL_CAPACITY")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(50_000);
+    let shard_capacity = (total_capacity / num_mining_shards).max(100); // Spread total capacity across shards
     let mut mining_txs: Vec<tokio::sync::mpsc::Sender<q_api_server::MiningSubmission>> = Vec::with_capacity(num_mining_shards);
     let mut mining_rxs: Vec<tokio::sync::mpsc::Receiver<q_api_server::MiningSubmission>> = Vec::with_capacity(num_mining_shards);
     for _shard_id in 0..num_mining_shards {
@@ -7810,7 +7865,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             let our_topic_prefix = format!("/qnk/{}/", our_network_id_for_gossip);
             info!("🔒 [GOSSIPSUB] Network isolation: only accepting topics with prefix '{}'", our_topic_prefix);
 
-            while let Some((topic, data)) = gossipsub_rx.recv().await {
+            'gossip_loop: while let Some((topic, data)) = gossipsub_rx.recv().await {
                 // v1.0.2: Track inbound P2P bandwidth
                 app_state_gossip.p2p_bytes_in.fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
 
@@ -9381,12 +9436,14 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                            block_height);
                                     error!("   Upgrade activation height: 100000 (testnet)");
                                     error!("   This block height: {}", block_height);
-                                    return; // Reject block
+                                    continue 'gossip_loop; // Reject block — skip to next gossipsub message
                                 }
                             }
 
-                            // ✨ v1.0.16-beta: PQC SIGNATURE VERIFICATION - ACTIVE!
-                            // Verify all spectral signatures on the block before accepting it
+                            // ✨ v1.0.16-beta / v9.7.0 HARDENED: PQC SIGNATURE VERIFICATION
+                            // Never skip PQC verification — reject blocks with unverifiable signatures.
+                            // Tries Dilithium5 first, falls back to SQIsign. Ed25519 is optional (Phase0).
+                            // If >50% of signatures lack a PQC key, the entire block is rejected.
                             if !block.quantum_metadata.spectral_signatures.is_empty() {
                                 debug!(
                                     "🔐 [PQC] Block {} has {} spectral signatures - verifying...",
@@ -9396,6 +9453,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
                                 // Load validator key registry for verification
                                 let registry = app_state_gossip.validator_key_registry.read().await;
+                                let total_sigs = block.quantum_metadata.spectral_signatures.len();
+                                let mut pqc_failures: usize = 0;
+                                let mut pqc_verified: usize = 0;
 
                                 for (idx, sig) in block
                                     .quantum_metadata
@@ -9403,33 +9463,38 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                     .iter()
                                     .enumerate()
                                 {
-                                    // Get validator's public keys from registry
-                                    let (ed25519_key, dilithium5_key) = match (
-                                        registry.get_ed25519(&sig.validator),
-                                        registry.get_dilithium5(&sig.validator),
-                                    ) {
-                                        (Some(ed_key), Some(dil_key)) => (ed_key, dil_key),
-                                        _ => {
-                                            warn!("⚠️  [PQC] No public keys for validator {} - skipping verification",
-                                                  hex::encode(&sig.validator[..4]));
-                                            debug!(
-                                                "🔐 [PQC] Block {} signature {} skipped (no keys)",
-                                                block_height, idx
-                                            );
-                                            continue; // Skip verification if keys not available
-                                        }
-                                    };
+                                    // v9.7.0: Try Dilithium5 first, fall back to SQIsign
+                                    let pq_key_dil = registry.get_dilithium5(&sig.validator);
+                                    let pq_key_sqi = registry.get_sqisign(&sig.validator);
+                                    let ed_key = registry.get_ed25519(&sig.validator);
 
-                                    // Verify the spectral signature
-                                    match q_types::verify_spectral_signature(
+                                    if pq_key_dil.is_none() && pq_key_sqi.is_none() {
+                                        // v9.7.0 HARDENED: No PQC key available — REJECT, don't skip!
+                                        error!("❌ [PQC] REJECTING sig {}: No PQC key (Dilithium5 or SQIsign) for validator {} — unverifiable",
+                                               idx, hex::encode(&sig.validator[..4]));
+                                        pqc_failures += 1;
+
+                                        // If majority unverifiable, reject entire block immediately
+                                        if pqc_failures > total_sigs / 2 {
+                                            error!("🚨 [PQC] BLOCK {} REJECTED: {}/{} signatures unverifiable (>50% threshold)",
+                                                   block_height, pqc_failures, total_sigs);
+                                            continue 'gossip_loop; // Reject block — skip to next gossipsub message
+                                        }
+                                        continue;
+                                    }
+
+                                    // Verify with available keys (extended verification supports all key types)
+                                    match q_types::verify_spectral_signature_extended(
                                         sig,
                                         &block_hash_bytes,
-                                        Some(&ed25519_key),
-                                        Some(&dilithium5_key),
+                                        ed_key,
+                                        pq_key_dil,
+                                        pq_key_sqi,
                                     ) {
                                         Ok(_) => {
                                             debug!("✅ [PQC] Signature {} verified for block {} (phase: {:?})",
                                                    idx, block_height, sig.crypto_phase);
+                                            pqc_verified += 1;
                                         }
                                         Err(e) => {
                                             error!("❌ [PQC] Signature {} verification FAILED for block {}: {}",
@@ -9442,15 +9507,21 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                             error!(
                                                 "   Block REJECTED due to invalid PQC signature!"
                                             );
-                                            return; // Reject block with invalid signature
+                                            continue 'gossip_loop; // Reject block — skip to next gossipsub message
                                         }
                                     }
                                 }
 
+                                // Final check: reject if too many failures even if under 50% threshold
+                                if pqc_failures > total_sigs / 2 {
+                                    error!("🚨 [PQC] BLOCK {} REJECTED: {}/{} signatures unverifiable after full scan",
+                                           block_height, pqc_failures, total_sigs);
+                                    return;
+                                }
+
                                 debug!(
-                                    "✅ [PQC] {} signatures verified for block {}",
-                                    block.quantum_metadata.spectral_signatures.len(),
-                                    block_height
+                                    "✅ [PQC] Block {} verification complete: {}/{} verified, {} unverifiable",
+                                    block_height, pqc_verified, total_sigs, pqc_failures
                                 );
                             } else {
                                 // No signatures - acceptable for blocks from validators without PQC keys
@@ -19968,13 +20039,87 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     .map(|pages| pages * 4096 / 1_048_576)
                     .unwrap_or(0);
 
-                // v6.1.0: Force glibc to return free memory to OS
-                #[cfg(target_os = "linux")]
-                unsafe {
-                    libc::malloc_trim(0);
+                // v9.6.2: Clean unbounded collections that leak memory
+                // price_snapshots: keep only last 24 hours
+                {
+                    let cutoff_ms = chrono::Utc::now().timestamp_millis() - 86_400_000; // 24h
+                    let mut ps = app_state_cleanup.price_snapshots.write().await;
+                    let mut total_removed = 0usize;
+                    for (_key, snapshots) in ps.iter_mut() {
+                        let before = snapshots.len();
+                        snapshots.retain(|(ts, _)| *ts > cutoff_ms);
+                        total_removed += before - snapshots.len();
+                    }
+                    if total_removed > 0 {
+                        info!("🧹 [MEMORY] Cleaned price_snapshots: removed {} old entries", total_removed);
+                    }
+                }
+                // swap_history: cap at 500 records per token
+                {
+                    let mut sh = app_state_cleanup.swap_history.write().await;
+                    let mut total_removed = 0usize;
+                    for (_key, records) in sh.iter_mut() {
+                        if records.len() > 500 {
+                            let excess = records.len() - 500;
+                            records.drain(..excess);
+                            total_removed += excess;
+                        }
+                    }
+                    if total_removed > 0 {
+                        info!("🧹 [MEMORY] Cleaned swap_history: removed {} old records", total_removed);
+                    }
+                }
+                // contract_events: cap at 200 events per contract
+                {
+                    let mut ce = app_state_cleanup.contract_events.write().await;
+                    let mut total_removed = 0usize;
+                    for (_key, events) in ce.iter_mut() {
+                        if events.len() > 200 {
+                            let excess = events.len() - 200;
+                            events.drain(..excess);
+                            total_removed += excess;
+                        }
+                    }
+                    if total_removed > 0 {
+                        info!("🧹 [MEMORY] Cleaned contract_events: removed {} old events", total_removed);
+                    }
+                }
+                // mixing_requests: remove entries older than 1 hour
+                {
+                    let mut mr = app_state_cleanup.mixing_requests.write().await;
+                    let before = mr.len();
+                    // Can't check timestamps easily, just cap at 100 entries
+                    if mr.len() > 100 {
+                        let keys: Vec<String> = mr.keys().take(mr.len() - 100).cloned().collect();
+                        for k in &keys { mr.remove(k); }
+                        info!("🧹 [MEMORY] Cleaned mixing_requests: {} → {}", before, mr.len());
+                    }
                 }
 
-                // Re-read RSS after malloc_trim to see actual effect
+                // v9.6.2: Force jemalloc to return unused memory to OS
+                // CRITICAL FIX: malloc_trim(0) is a glibc function that does NOTHING when
+                // jemalloc is the allocator. Must use jemalloc's native arena purge instead.
+                #[cfg(all(target_os = "linux", not(target_os = "windows")))]
+                {
+                    // Advance jemalloc epoch for fresh stats
+                    let _ = tikv_jemalloc_ctl::epoch::advance();
+
+                    // Force purge by temporarily setting decay to 0 (immediate purge)
+                    // then restoring to 1000ms. This releases dirty/muzzy pages back to OS.
+                    unsafe {
+                        let _ = tikv_jemalloc_ctl::raw::write(b"arenas.dirty_decay_ms\0", 0_isize);
+                        let _ = tikv_jemalloc_ctl::raw::write(b"arenas.muzzy_decay_ms\0", 0_isize);
+                    }
+                    // Advance epoch to apply the purge
+                    let _ = tikv_jemalloc_ctl::epoch::advance();
+                    // Restore normal decay (1 second)
+                    unsafe {
+                        let _ = tikv_jemalloc_ctl::raw::write(b"arenas.dirty_decay_ms\0", 1000_isize);
+                        let _ = tikv_jemalloc_ctl::raw::write(b"arenas.muzzy_decay_ms\0", 1000_isize);
+                    }
+                }
+
+                // Re-read RSS after jemalloc purge to see actual effect
                 let rss_after_trim = std::fs::read_to_string("/proc/self/statm")
                     .ok()
                     .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
@@ -19984,8 +20129,18 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 // v6.1.1: Report RocksDB memory breakdown for OOM diagnostics
                 let (rocks_memtable, rocks_readers, rocks_cache) = app_state_cleanup.storage_engine.get_rocksdb_memory_mb();
 
-                info!("🧹 [MEMORY] RSS={}MB (trim={}MB) | rocks: memtbl={:.0}MB readers={:.0}MB cache={:.0}MB | app: pool={} status={} swap={} vol={} prices={}",
-                    rss_mb, rss_after_trim, rocks_memtable, rocks_readers, rocks_cache,
+                // v9.6.2: jemalloc stats for diagnosing memory leaks
+                #[cfg(all(target_os = "linux", not(target_os = "windows")))]
+                let (je_alloc_mb, je_resident_mb) = {
+                    let alloc = tikv_jemalloc_ctl::stats::allocated::read().unwrap_or(0);
+                    let resident = tikv_jemalloc_ctl::stats::resident::read().unwrap_or(0);
+                    (alloc / 1_048_576, resident / 1_048_576)
+                };
+                #[cfg(not(all(target_os = "linux", not(target_os = "windows"))))]
+                let (je_alloc_mb, je_resident_mb) = (0u64, 0u64);
+
+                info!("🧹 [MEMORY] RSS={}MB (purge={}MB) je_alloc={}MB je_resident={}MB | rocks: memtbl={:.0}MB readers={:.0}MB cache={:.0}MB | app: pool={} status={} swap={} vol={} prices={}",
+                    rss_mb, rss_after_trim, je_alloc_mb, je_resident_mb, rocks_memtable, rocks_readers, rocks_cache,
                     pool_count, status_count, swap_history_count, volume_count, price_count);
                 info!("🧹 [MEMORY] vtx: storage={} cache={} rounds={} authors={} children={} causal={} | dag: committed={} pending={} round={} | wallets={} tokens={} | {}",
                     vtx_storage_count, vtx_cache_count, vtx_rounds, vtx_authors, vtx_children, vtx_causal,
@@ -20745,6 +20900,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/stablecoin/transparency", get(handlers::get_stablecoin_transparency))
         // .route("/api/v1/blocks/range", get(handlers::get_blocks_range)) // HTTP-based block sync - disabled for now
         .route("/api/v1/transactions", post(handlers::submit_transaction))
+        .route("/api/v1/sharkgod/submit", post(q_api_server::sharkgod::sharkgod_submit_handler)) // 🦈 SharkGod: Max power tx beam
         .route(
             "/api/v1/transactions/send",
             post(handlers::send_transaction),
@@ -20864,11 +21020,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             "/api/v1/network/discovery/stats",
             get(handlers::discovery_stats),
         )
-        // Bitcoin-Tor Bridge endpoints
-        .route(
-            "/api/v1/bitcoin/bridge/status",
-            get(handlers::bitcoin_bridge_status),
-        )
+        // Bitcoin-Tor Bridge endpoints (status moved to bitcoin_bridge_api::get_bridge_status)
         .route(
             "/api/v1/bitcoin/bridge/peers",
             get(handlers::bitcoin_bridge_peers),
@@ -21403,7 +21555,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/bitcoin/swap/:id/refund", post(q_api_server::bitcoin_bridge_api::refund_swap))
         .route("/api/v1/bitcoin/swaps", get(q_api_server::bitcoin_bridge_api::list_swaps))
         .route("/api/v1/bitcoin/balance", get(q_api_server::bitcoin_bridge_api::get_btc_balance))
-        // Note: /api/v1/bitcoin/bridge/status already defined above via handlers::bitcoin_bridge_status
+        // v9.6.5: Bitcoin wallet operations (parity with ZEC bridge)
+        .route("/api/v1/bitcoin/address", get(q_api_server::bitcoin_bridge_api::get_btc_address))
+        .route("/api/v1/bitcoin/send", post(q_api_server::bitcoin_bridge_api::send_btc))
+        .route("/api/v1/bitcoin/transactions", get(q_api_server::bitcoin_bridge_api::get_btc_transactions))
+        .route("/api/v1/bitcoin/bridge/status", get(q_api_server::bitcoin_bridge_api::get_bridge_status))
         // ═══ Zcash Shielded Bridge (v7.2.2) ═══
         .route("/api/v1/zcash/swap", post(q_api_server::zcash_bridge_api::create_zcash_swap))
         .route("/api/v1/zcash/swap/:id", get(q_api_server::zcash_bridge_api::get_zec_swap_status))
@@ -21414,6 +21570,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/zcash/bridge/address", get(q_api_server::zcash_bridge_api::get_zec_address))
         .route("/api/v1/zcash/bridge/status", get(q_api_server::zcash_bridge_api::get_zec_bridge_status))
         .route("/api/v1/zcash/bridge/send", post(q_api_server::zcash_bridge_api::send_shielded_zec))
+        .route("/api/v1/zcash/bridge/transactions", get(q_api_server::zcash_bridge_api::get_zec_transactions))
         // ═══ Iron Fish Privacy Bridge (v7.2.4) ═══
         .route("/api/v1/ironfish/swap", post(q_api_server::ironfish_bridge_api::create_iron_swap))
         .route("/api/v1/ironfish/swap/:id", get(q_api_server::ironfish_bridge_api::get_iron_swap_status))

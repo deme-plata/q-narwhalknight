@@ -65,7 +65,7 @@ members = [
  "sdk/rust", "crates/q-ai-inference", "crates/q-crypto-advanced", "crates/q-index-fund", "crates/q-mining-pool", "crates/q-temporal-shield", "crates/q-bitnet-ffi", "crates/q-consensus-guard", "crates/q-bio-dsl", "crates/q-eternal-cypher", "crates/q-dune", "crates/q-flux", "crates/q-queue"]
 
 [workspace.package]
-version = "9.6.1"  # v9.6.1: Parallel sprint — NOISE XX tunnels, compute marketplace issues, q-flux proxy, Prometheus metrics
+version = "9.8.0"  # v9.8.0: SharkGod — maximum power transaction beam (bypass all bottlenecks)
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"
@@ -405,6 +405,19 @@ mistralrs-mcp = { path = "mistral.rs/mistralrs-mcp" }
 
 # ═══════════════════════════════════════════════════════════════════
 # v7.4.3: Release profile optimizations for maximum mining performance
+# ═══════════════════════════════════════════════════════════════════
+# Dev profile: faster incremental builds (Issue #033)
+# codegen-units=16 parallelizes LLVM codegen; opt-level=1 gives
+# enough optimization for debug runs without full release overhead.
+# ═══════════════════════════════════════════════════════════════════
+[profile.dev]
+opt-level = 1               # Basic optimizations — prevents debug-mode slowness
+codegen-units = 16           # Parallel codegen for faster incremental builds
+debug = "line-tables-only"   # Minimal debug info — saves link time, still get backtraces
+
+[profile.dev.package."*"]
+opt-level = 2               # Optimize dependencies more than local code
+
 # LTO + codegen-units=1 enables cross-crate inlining and whole-program optimization
 # This allows blake3's SIMD routines to be fully inlined into the mining hot loop
 # ═══════════════════════════════════════════════════════════════════

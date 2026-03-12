@@ -75,9 +75,29 @@ async fn production_loop(
         Some(i)
     } else { None };
 
+    // 🦈 SharkGod: Clone the wake notify for the select! loop
+    let sharkgod_wake = app.sharkgod_block_wake.clone();
+
     loop {
         ph.store(ProductionPhase::BeforeTick as u8, Ordering::SeqCst);
-        if let Some(ref mut i) = interval { i.tick().await; } else { time::sleep(Duration::from_secs(1)).await; }
+
+        // 🦈 SharkGod: Listen for both normal tick AND SharkGod wake signal
+        // If SharkGod fires, we skip the interval wait and produce immediately
+        let _sharkgod_triggered = if let Some(ref wake) = sharkgod_wake {
+            tokio::select! {
+                _ = async {
+                    if let Some(ref mut i) = interval { i.tick().await; } else { time::sleep(Duration::from_secs(1)).await; }
+                } => false,
+                _ = wake.notified() => {
+                    info!("🦈 [SHARKGOD] Block producer WOKEN — producing block immediately");
+                    true
+                }
+            }
+        } else {
+            if let Some(ref mut i) = interval { i.tick().await; } else { time::sleep(Duration::from_secs(1)).await; }
+            false
+        };
+
         ph.store(ProductionPhase::AfterTick as u8, Ordering::SeqCst);
 
         hb.fetch_add(1, Ordering::SeqCst);

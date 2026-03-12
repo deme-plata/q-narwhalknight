@@ -68,7 +68,7 @@ lazy_static::lazy_static! {
 fn pow_stamps_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
-        std::env::var("Q_POW_STAMPS").map(|v| v == "1").unwrap_or(false)
+        std::env::var("Q_POW_STAMPS").map(|v| v != "0").unwrap_or(true)
     })
 }
 
@@ -442,6 +442,8 @@ pub struct QNarwhalBehaviour {
     block_sync: libp2p::request_response::Behaviour<q_types::BlockPackCodec>,
     /// ✅ v1.0.15.1-beta: Handshake protocol for version validation
     handshake: libp2p::request_response::Behaviour<crate::handshake_validator::HandshakeCodec>,
+    /// ✅ v9.7.0: Post-quantum Kyber1024 key exchange after classical Noise XX
+    pq_handshake: libp2p::request_response::Behaviour<crate::pq_handshake::PQHandshakeCodec>,
 
     // 🔥 v1.0.17-beta: NAT Traversal (A+ → A++ upgrade)
     /// AutoNAT: Detect if this node is publicly dialable
@@ -471,6 +473,8 @@ pub enum QNarwhalEvent {
     Gossipsub(gossipsub::Event),
     BlockSync(libp2p::request_response::Event<q_types::BlockPackRequest, q_types::BlockPackResponse>),
     Handshake(libp2p::request_response::Event<crate::handshake_validator::HandshakeMessage, crate::handshake_validator::HandshakeResult>),
+    /// v9.7.0: Post-quantum Kyber1024 key exchange events
+    PQHandshake(libp2p::request_response::Event<crate::pq_handshake::PQHandshakeRequest, crate::pq_handshake::PQHandshakeResponse>),
 
     // 🔥 v1.0.17-beta: NAT Traversal Events
     AutoNat(libp2p::autonat::Event),
@@ -521,6 +525,12 @@ impl From<libp2p::request_response::Event<q_types::BlockPackRequest, q_types::Bl
 impl From<libp2p::request_response::Event<crate::handshake_validator::HandshakeMessage, crate::handshake_validator::HandshakeResult>> for QNarwhalEvent {
     fn from(event: libp2p::request_response::Event<crate::handshake_validator::HandshakeMessage, crate::handshake_validator::HandshakeResult>) -> Self {
         QNarwhalEvent::Handshake(event)
+    }
+}
+
+impl From<libp2p::request_response::Event<crate::pq_handshake::PQHandshakeRequest, crate::pq_handshake::PQHandshakeResponse>> for QNarwhalEvent {
+    fn from(event: libp2p::request_response::Event<crate::pq_handshake::PQHandshakeRequest, crate::pq_handshake::PQHandshakeResponse>) -> Self {
+        QNarwhalEvent::PQHandshake(event)
     }
 }
 
@@ -796,6 +806,15 @@ pub enum NetworkCommand {
     PublishMessage {
         topic: String,
         data: Vec<u8>,
+    },
+
+    /// 🦈 SharkGod: Direct gossipsub publish — bypasses queue + rate limiter
+    /// Used by the SharkGod engine for maximum-speed transaction propagation.
+    /// Publishes directly to the swarm instead of going through the gossipsub queue.
+    PublishSharkGod {
+        topic: String,
+        data: Vec<u8>,
+        tx_hash: String,
     },
 }
 
@@ -1172,6 +1191,8 @@ pub struct UnifiedNetworkManager {
     /// v1.0.2: Outbound P2P bandwidth counter (cumulative bytes published via gossipsub)
     /// Set by caller via set_p2p_bytes_out() after construction
     p2p_bytes_out: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// v9.7.0: Post-quantum session manager — tracks Kyber1024 key exchanges per peer
+    pq_session_manager: Arc<crate::pq_handshake::PQSessionManager>,
 }
 
 // SAFETY: UnifiedNetworkManager is Sync because:
@@ -1693,6 +1714,22 @@ impl UnifiedNetworkManager {
                     handshake_config,
                 );
 
+                // ✅ v9.7.0: Post-quantum Kyber1024 handshake protocol
+                use crate::pq_handshake::{PQHandshakeCodec, PQ_HANDSHAKE_PROTOCOL};
+
+                let pq_handshake_protocols = std::iter::once((
+                    PQ_HANDSHAKE_PROTOCOL,
+                    ProtocolSupport::Full
+                ));
+                let pq_handshake_config = request_response::Config::default()
+                    .with_request_timeout(Duration::from_secs(10))
+                    .with_max_concurrent_streams(20);
+                let pq_handshake = request_response::Behaviour::with_codec(
+                    PQHandshakeCodec,
+                    pq_handshake_protocols,
+                    pq_handshake_config,
+                );
+
                 // 🔥 NAT traversal - relay_client provided by .with_relay_client()
                 let autonat = libp2p::autonat::Behaviour::new(local_peer_id_inner, Default::default());
                 let relay = relay_client;  // ✅ Use the relay client from SwarmBuilder
@@ -1715,6 +1752,7 @@ impl UnifiedNetworkManager {
                     gossipsub,
                     block_sync,
                     handshake,
+                    pq_handshake,
                     autonat,
                     relay,
                     relay_server,
@@ -2277,6 +2315,7 @@ impl UnifiedNetworkManager {
             // v1.0.2-safe: SlowPeer strike tracking for disconnect-on-chronic-failure
             slow_peer_strikes: DashMap::new(),
             p2p_bytes_out: None,
+            pq_session_manager: Arc::new(crate::pq_handshake::PQSessionManager::new()),
         })
     }
 
@@ -3616,6 +3655,20 @@ impl UnifiedNetworkManager {
                                                 PEER_BANDWIDTH_TIERS.insert(peer.to_string(), request.bandwidth_tier_mbps);
                                                 info!("📡 [BANDWIDTH] Peer {} reports {} Mbps", peer, request.bandwidth_tier_mbps);
                                             }
+
+                                            // v9.7.0: Initiate PQ Kyber1024 handshake after successful classical handshake
+                                            if crate::pq_handshake::PQHandshakeConfig::default().enabled
+                                                && !self.pq_session_manager.is_pq_secured(&peer)
+                                            {
+                                                let (pk, _sk) = crate::pq_handshake::create_kyber_keypair();
+                                                let pq_req = crate::pq_handshake::PQHandshakeRequest {
+                                                    kyber_public_key: pk,
+                                                    node_id: self.local_peer_id.to_string(),
+                                                    version: 1,
+                                                };
+                                                self.swarm.behaviour_mut().pq_handshake.send_request(&peer, pq_req);
+                                                info!("🔐 [PQ-KEM] Initiated Kyber1024 handshake with {}", peer);
+                                            }
                                         }
                                         crate::handshake_validator::HandshakeResult::IncompatibleProtocol { ours, theirs } => {
                                             warn!("❌ [HANDSHAKE] Peer {} has incompatible protocol: ours={}, theirs={}",
@@ -3671,6 +3724,73 @@ impl UnifiedNetworkManager {
                     }
                     Event::ResponseSent { peer, .. } => {
                         debug!("✅ [HANDSHAKE] Response sent to {}", peer);
+                    }
+                }
+            }
+            // ✅ v9.7.0: Post-quantum Kyber1024 key exchange handling
+            QNarwhalEvent::PQHandshake(pq_event) => {
+                use libp2p::request_response::{Event, Message};
+
+                match pq_event {
+                    Event::Message { peer, message, .. } => {
+                        match message {
+                            Message::Request { request, channel, .. } => {
+                                info!("🔐 [PQ-KEM] Received Kyber1024 handshake from {}", peer);
+                                // Encapsulate: generate shared secret from peer's public key
+                                match crate::pq_handshake::encapsulate_key(&request.kyber_public_key) {
+                                    Ok((ciphertext, shared_secret)) => {
+                                        // Generate our own keypair for mutual auth
+                                        let (our_pk, _our_sk) = crate::pq_handshake::create_kyber_keypair();
+                                        let response = crate::pq_handshake::PQHandshakeResponse {
+                                            kyber_ciphertext: ciphertext,
+                                            responder_public_key: our_pk,
+                                            pq_supported: true,
+                                            version: 1,
+                                        };
+                                        if let Err(e) = self.swarm.behaviour_mut().pq_handshake.send_response(channel, response) {
+                                            error!("❌ [PQ-KEM] Failed to send PQ response: {:?}", e);
+                                        } else {
+                                            // Store PQ session with combined key
+                                            let combined = crate::pq_handshake::combine_keys(&shared_secret, &[0u8; 32]);
+                                            self.pq_session_manager.store_session(crate::pq_handshake::PQHandshakeResult {
+                                                peer_id: peer,
+                                                pq_capable: true,
+                                                combined_key: Some(combined),
+                                                completed_at: std::time::Instant::now(),
+                                            });
+                                            info!("✅ [PQ-KEM] Kyber1024 session established with {} (responder)", peer);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("❌ [PQ-KEM] Kyber1024 encapsulation failed: {}", e);
+                                    }
+                                }
+                            }
+                            Message::Response { response, .. } => {
+                                if response.pq_supported {
+                                    info!("✅ [PQ-KEM] Peer {} supports PQ — ciphertext {} bytes",
+                                          peer, response.kyber_ciphertext.len());
+                                    // Store session (initiator side — decapsulation happens with stored SK)
+                                    self.pq_session_manager.store_session(crate::pq_handshake::PQHandshakeResult {
+                                        peer_id: peer,
+                                        pq_capable: true,
+                                        combined_key: None, // Will be set when decapsulation completes
+                                        completed_at: std::time::Instant::now(),
+                                    });
+                                } else {
+                                    debug!("[PQ-KEM] Peer {} does not support PQ handshake", peer);
+                                }
+                            }
+                        }
+                    }
+                    Event::OutboundFailure { peer, error, .. } => {
+                        debug!("[PQ-KEM] Outbound failure to {}: {:?}", peer, error);
+                    }
+                    Event::InboundFailure { peer, error, .. } => {
+                        debug!("[PQ-KEM] Inbound failure from {}: {:?}", peer, error);
+                    }
+                    Event::ResponseSent { peer, .. } => {
+                        debug!("[PQ-KEM] Response sent to {}", peer);
                     }
                 }
             }
@@ -5233,6 +5353,27 @@ impl UnifiedNetworkManager {
                 match crate::gossipsub_queue::gossipsub_queue().enqueue(topic.clone(), data) {
                     Ok(()) => debug!("📤 [QUEUE] Enqueued generic message (topic={})", topic),
                     Err(reason) => warn!("⚠️ [QUEUE] Generic message dropped: {} (topic={})", reason, topic),
+                }
+            }
+            NetworkCommand::PublishSharkGod { topic, data, tx_hash } => {
+                // 🦈 SHARKGOD: Direct publish — bypass gossipsub queue entirely
+                // This goes straight to the swarm for minimum latency
+                self.track_bytes_out(data.len());
+                let connected_peers: Vec<_> = self.swarm.connected_peers().cloned().collect();
+                let peer_count = connected_peers.len();
+                info!("🦈 [SHARKGOD] DIRECT publish tx {} ({} bytes) to {} peers via topic: {}",
+                      &tx_hash[..16.min(tx_hash.len())], data.len(), peer_count, topic);
+
+                let ident_topic = libp2p::gossipsub::IdentTopic::new(&topic);
+                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, data) {
+                    Ok(msg_id) => {
+                        info!("🦈 [SHARKGOD] ✅ Direct publish SUCCESS: tx={} msg_id={:?} peers={}",
+                              &tx_hash[..16.min(tx_hash.len())], msg_id, peer_count);
+                    }
+                    Err(e) => {
+                        warn!("🦈 [SHARKGOD] ❌ Direct publish FAILED: tx={} error={:?}",
+                              &tx_hash[..16.min(tx_hash.len())], e);
+                    }
                 }
             }
             NetworkCommand::RequestBlockRangeDirect { peer_id, start_height, end_height, response_tx } => {

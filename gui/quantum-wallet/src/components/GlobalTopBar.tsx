@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Search, Loader, Zap, Gift, Hash, Blocks, User, X, Copy, Check, CheckCircle, Shield } from 'lucide-react';
+import { Search, Loader, Zap, Gift, Hash, Blocks, User, X, Copy, Check, CheckCircle, Shield, Play } from 'lucide-react';
 import { qnkAPI, type MiningRewardEvent } from '../services/api';
 import { TICKER_SYMBOL } from '../constants/ticker';
 import NetworkSelector from './NetworkSelector';
@@ -27,6 +27,7 @@ export default function GlobalTopBar({ authenticated = false }: GlobalTopBarProp
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [miningHashRate, setMiningHashRate] = useState(0);
   const [isMining, setIsMining] = useState(false);
+  const [showVideoModal, setShowVideoModal] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const walletAddress = localStorage.getItem('walletAddress') || '';
@@ -369,6 +370,15 @@ export default function GlobalTopBar({ authenticated = false }: GlobalTopBarProp
                 <span className="text-amber-300 text-sm font-semibold">Bounty Campaign</span>
               </motion.a>
 
+              <motion.button
+                onClick={() => setShowVideoModal(true)}
+                whileHover={{ scale: 1.05 }}
+                className="flex items-center gap-2 bg-gradient-to-r from-red-500/20 to-pink-500/20 border border-red-500/40 rounded-lg px-3 py-1.5 cursor-pointer transition-all hover:from-red-500/30 hover:to-pink-500/30"
+              >
+                <Play className="w-4 h-4 text-red-400" />
+                <span className="text-red-300 text-sm font-semibold">Video</span>
+              </motion.button>
+
               {authenticated && isMining && miningHashRate > 0 && (
                 <motion.div
                   initial={{ opacity: 0, x: 20 }}
@@ -543,6 +553,42 @@ export default function GlobalTopBar({ authenticated = false }: GlobalTopBarProp
                   </div>
                 </div>
               )}
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Video Modal */}
+      <AnimatePresence>
+        {showVideoModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[200] flex items-center justify-center bg-black/80 backdrop-blur-sm"
+            onClick={() => setShowVideoModal(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.8, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.8, opacity: 0 }}
+              transition={{ type: 'spring', damping: 25, stiffness: 300 }}
+              className="relative w-[90vw] max-w-4xl aspect-video bg-black rounded-2xl overflow-hidden border border-red-500/30 shadow-2xl shadow-red-500/10"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button
+                onClick={() => setShowVideoModal(false)}
+                className="absolute top-3 right-3 z-10 w-8 h-8 flex items-center justify-center rounded-full bg-black/60 hover:bg-black/80 text-white transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+              <iframe
+                src="https://www.youtube.com/embed/EfDvMe0apTg?autoplay=1&rel=0"
+                title="Quillon Video"
+                className="w-full h-full"
+                allow="autoplay; encrypted-media; picture-in-picture"
+                allowFullScreen
+              />
             </motion.div>
           </motion.div>
         )}
