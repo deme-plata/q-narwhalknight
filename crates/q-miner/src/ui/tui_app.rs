@@ -235,6 +235,15 @@ pub struct MinerTuiApp {
     // v9.8.4: Animated update overlay (rainbow progress bar + success modal)
     pub update_animation: super::tui_views::update_animation::UpdateAnimation,
 
+    // v9.8.5: Starship sync animation (rocket launch + orbital visualization)
+    pub starship_animation: super::tui_views::starship_animation::StarshipAnimation,
+
+    // v9.8.6: Water robots animation (quantum marine creatures on important events)
+    pub water_robots: super::tui_views::water_robots_animation::WaterRobotsAnimation,
+
+    // v9.9.1: Command Center — network tab with radar, swarm ocean, topology
+    pub command_center: super::tui_views::command_center::CommandCenterState,
+
     // v9.1.0: Compute Power Layer stats for TUI cards
     pub simd_tier: String,
     pub simd_batch_size: usize,
@@ -293,6 +302,9 @@ impl MinerTuiApp {
             update_error: None,
             updater: None,
             update_animation: super::tui_views::update_animation::UpdateAnimation::new(),
+            starship_animation: super::tui_views::starship_animation::StarshipAnimation::new(),
+            water_robots: super::tui_views::water_robots_animation::WaterRobotsAnimation::new(),
+            command_center: super::tui_views::command_center::CommandCenterState::new(),
             simd_tier: {
                 #[cfg(target_arch = "x86_64")]
                 {
@@ -328,6 +340,19 @@ impl MinerTuiApp {
     pub fn tick(&mut self) {
         // v9.8.4: Advance update animation frame
         self.update_animation.tick();
+        // v9.8.5: Advance starship sync animation
+        self.starship_animation.tick();
+        // v9.8.6: Advance water robots animation
+        self.water_robots.tick();
+
+        // v9.9.1: Advance command center (radar sweep + ocean)
+        if let Some(ref state) = self.state {
+            let peer_count = state.p2p_peer_count.load(std::sync::atomic::Ordering::Relaxed);
+            let connected = state.p2p_connected.load(std::sync::atomic::Ordering::Relaxed);
+            self.command_center.tick(peer_count, connected);
+        } else {
+            self.command_center.tick(0, false);
+        }
 
         // Update hashrate history
         let khs = self.current_hashrate_khs();
@@ -423,6 +448,10 @@ impl MinerTuiApp {
                 if reward_qnk > 0.0 {
                     self.current_block_reward = reward_qnk;
                 }
+                // v9.8.6: Trigger water robot on block found
+                self.water_robots.trigger(
+                    super::tui_views::water_robots_animation::WaterRobotEvent::BlockFound { height: block_height }
+                );
                 self.add_log(LogEntry {
                     timestamp: now,
                     level: LogLevel::Success,
@@ -465,6 +494,10 @@ impl MinerTuiApp {
                 self.current_block_height = block_height;
                 if reward_qnk > 0.0 {
                     self.current_block_reward = reward_qnk;
+                    // v9.8.6: Trigger water robot on mining reward
+                    self.water_robots.trigger(
+                        super::tui_views::water_robots_animation::WaterRobotEvent::RewardReceived { amount: reward_qnk }
+                    );
                 }
                 self.add_log(LogEntry {
                     timestamp: now,
@@ -533,6 +566,12 @@ impl MinerTuiApp {
             }
             DiagnosticEvent::UpdateAvailable { min_miner_version } => {
                 self.diagnostics.min_miner_version = Some(min_miner_version.clone());
+                // v9.8.6: Trigger water robot on update available
+                self.water_robots.trigger(
+                    super::tui_views::water_robots_animation::WaterRobotEvent::UpdateAvailable {
+                        version: min_miner_version.clone()
+                    }
+                );
                 self.add_log(LogEntry {
                     timestamp: now,
                     level: LogLevel::Warn,
@@ -554,9 +593,21 @@ impl MinerTuiApp {
                             sync_info.sync_speed_bps, sync_info.blocks_behind),
                     });
                 }
+                // v9.8.5: Feed sync telemetry to starship animation
+                self.starship_animation.set_phase(&sync_info.phase);
+                self.starship_animation.sync_progress = sync_info.sync_progress;
+                self.starship_animation.sync_speed = sync_info.sync_speed_bps;
+                self.starship_animation.local_height = sync_info.local_height;
+                self.starship_animation.network_height = sync_info.network_height;
+                self.starship_animation.blocks_behind = sync_info.blocks_behind;
+                self.starship_animation.peer_count = sync_info.peer_count;
+                self.starship_animation.eta_secs = sync_info.eta_secs;
+                self.starship_animation.mission_elapsed = sync_info.mission_elapsed_secs;
+                self.starship_animation.orbit_stable = sync_info.orbit_stable;
                 self.sync_info = Some(sync_info);
             }
             DiagnosticEvent::ServerSyncComplete => {
+                self.starship_animation.set_phase("StationKeeping");
                 self.sync_info = None;
                 self.add_log(LogEntry {
                     timestamp: now,
@@ -855,14 +906,28 @@ fn handle_key_press(app: &mut MinerTuiApp, code: KeyCode, modifiers: KeyModifier
             app.show_help = !app.show_help;
         }
 
-        // Re-run diagnostics
+        // v9.9.1: Command Center keys (only when on Network tab #3)
+        KeyCode::Char('r') | KeyCode::Char('R') if app.current_tab == 3 => {
+            app.command_center.handle_key('r');
+        }
+        KeyCode::Char('s') | KeyCode::Char('S') if app.current_tab == 3 => {
+            app.command_center.handle_key('s');
+        }
+        KeyCode::Char('t') | KeyCode::Char('T') if app.current_tab == 3 => {
+            app.command_center.handle_key('t');
+        }
+        KeyCode::Char('p') | KeyCode::Char('P') if app.current_tab == 3 => {
+            app.command_center.handle_key('p');
+        }
+
+        // Re-run diagnostics (only when NOT on tab 3)
         KeyCode::Char('r') | KeyCode::Char('R') => {
             if let Some(ref state) = app.state {
                 app.diagnostics.run_checks(state);
             }
         }
 
-        // Throttle toggle
+        // Throttle toggle (only when NOT on tab 3)
         KeyCode::Char('t') | KeyCode::Char('T') => {
             if let Some(ref state) = app.state {
                 let mut mode = state.throttle_mode.write();
@@ -1163,6 +1228,16 @@ fn draw_ui(f: &mut Frame, app: &MinerTuiApp) {
 
     if app.show_help {
         draw_help_overlay(f, size);
+    }
+
+    // v9.8.5: Starship sync animation overlay (draws on top of sync dashboard)
+    if app.starship_animation.is_visible() {
+        app.starship_animation.render(f.buffer_mut());
+    }
+
+    // v9.8.6: Water robots animation overlay (draws on important events)
+    if app.water_robots.is_visible() {
+        app.water_robots.render(f.buffer_mut());
     }
 
     // v9.8.4: Update animation overlay (draws on top of everything)
