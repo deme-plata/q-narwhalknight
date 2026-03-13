@@ -1,3 +1,4 @@
+pub mod auto_updater;
 pub mod config;
 pub mod cpu;
 pub mod gpu;

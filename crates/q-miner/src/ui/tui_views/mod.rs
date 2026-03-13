@@ -10,6 +10,10 @@ pub mod events_view;
 pub mod settings_view;
 #[cfg(feature = "tui")]
 pub mod wallet_view;
+#[cfg(feature = "tui")]
+pub mod update_animation;
+#[cfg(feature = "tui")]
+pub mod q_animation;
 
 #[cfg(feature = "tui")]
 use ratatui::Frame;

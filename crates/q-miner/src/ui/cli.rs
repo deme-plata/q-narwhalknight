@@ -25,7 +25,7 @@ impl CLIInterface {
         info!("🖥️  Starting interactive CLI interface");
         
         // TODO: Implement interactive CLI
-        println!("{}", style("📊 Q-NarwhalKnight Miner").green().bold());
+        println!("{}", style("📊 Quillon Miner").green().bold());
         println!("Interactive mode not yet implemented");
         Ok(())
     }

@@ -91,7 +91,7 @@ impl PoolDiscovery {
         Self {
             known_pools: vec![
                 PoolInfo {
-                    name: "Q-NarwhalKnight Official Pool".to_string(),
+                    name: "Quillon Official Pool".to_string(),
                     url: "stratum+tor://pool.qnarwhal.onion:4444".to_string(),
                     location: "Anonymous".to_string(),
                     fee_percentage: 1.0,
@@ -131,7 +131,7 @@ impl PoolDiscovery {
     }
     
     pub async fn discover_pools(&mut self) -> Result<Vec<PoolInfo>> {
-        info!("🔍 Discovering Q-NarwhalKnight mining pools...");
+        info!("🔍 Discovering Quillon mining pools...");
         
         // In production, this would query the network for active pools
         // For now, return known pools with updated stats

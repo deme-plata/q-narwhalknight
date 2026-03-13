@@ -176,7 +176,7 @@ impl PoolClient {
         let subscribe_req = StratumRequest {
             id: self.next_id(),
             method: "mining.subscribe".to_string(),
-            params: serde_json::json!(["QNK-Miner/1.0", null]),
+            params: serde_json::json!(["QUG-Miner/1.0", null]),
         };
         let msg = serde_json::to_string(&subscribe_req)? + "\n";
         writer.write_all(msg.as_bytes()).await?;

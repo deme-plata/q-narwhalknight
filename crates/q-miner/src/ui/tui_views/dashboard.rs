@@ -21,6 +21,10 @@ pub fn draw_dashboard(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
         return;
     }
 
+    // v9.9.0: Determine if update banner should show
+    let has_update = app.update_version.is_some();
+    let update_banner_height: u16 = if has_update { 1 } else { 0 };
+
     // v8.5.5: Dynamic thread panel height — wraps to multiple rows for 192/384+ threads
     let thread_count = app.state.as_ref().map(|s| s.num_threads).unwrap_or(0);
     let thread_panel_width = (area.width / 2).saturating_sub(4) as usize;
@@ -28,24 +32,65 @@ pub fn draw_dashboard(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
     let thread_rows = if thread_count > 0 { (thread_count + dots_per_row - 1) / dots_per_row } else { 1 };
     let thread_panel_height = (thread_rows as u16 + 3).max(5).min(14);
 
+    let mut constraints = Vec::new();
+    if has_update {
+        constraints.push(Constraint::Length(update_banner_height));
+    }
+    constraints.extend_from_slice(&[
+        Constraint::Length(5),                    // Hashrate sparkline
+        Constraint::Length(5),                    // Compute Power Layer cards
+        Constraint::Length(5),                    // Physics metrics row
+        Constraint::Length(thread_panel_height),  // Thread dots + block info (dynamic)
+        Constraint::Length(3),                    // Connection status bar
+        Constraint::Min(3),                       // Mini-log
+    ]);
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(5),                    // Hashrate sparkline
-            Constraint::Length(5),                    // Compute Power Layer cards
-            Constraint::Length(5),                    // Physics metrics row
-            Constraint::Length(thread_panel_height),  // Thread dots + block info (dynamic)
-            Constraint::Length(3),                    // Connection status bar
-            Constraint::Min(3),                       // Mini-log
-        ])
+        .constraints(constraints)
         .split(area);
 
-    draw_hashrate_sparkline(f, chunks[0], app);
-    draw_compute_power_cards(f, chunks[1], app);
-    draw_physics_metrics(f, chunks[2], app);
-    draw_thread_and_block_info(f, chunks[3], app);
-    draw_connection_bar(f, chunks[4], app);
-    draw_mini_log(f, chunks[5], app);
+    let offset = if has_update { 1 } else { 0 };
+
+    if has_update {
+        draw_update_banner(f, chunks[0], app);
+    }
+
+    draw_hashrate_sparkline(f, chunks[offset], app);
+    draw_compute_power_cards(f, chunks[offset + 1], app);
+    draw_physics_metrics(f, chunks[offset + 2], app);
+    draw_thread_and_block_info(f, chunks[offset + 3], app);
+    draw_connection_bar(f, chunks[offset + 4], app);
+    draw_mini_log(f, chunks[offset + 5], app);
+}
+
+/// v9.9.0: Update banner — shows download progress or "press [U] to update"
+#[cfg(feature = "tui")]
+fn draw_update_banner(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
+    let version = app.update_version.as_deref().unwrap_or("?");
+
+    let (text, style) = if let Some(ref err) = app.update_error {
+        if err == "__APPLY__" {
+            (format!(" Applying v{}... ", version), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        } else {
+            (format!(" Update v{} error: {} ", version, err), Style::default().fg(Color::Red))
+        }
+    } else if app.update_ready {
+        (format!(" Update v{} ready — press [U] to apply and restart ", version), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+    } else {
+        let (down, total) = app.update_progress;
+        if total > 0 {
+            let pct = (down as f64 / total as f64 * 100.0).min(100.0);
+            let down_mb = down as f64 / 1_048_576.0;
+            let total_mb = total as f64 / 1_048_576.0;
+            (format!(" Downloading v{}: {:.1}/{:.1} MB ({:.0}%) ", version, down_mb, total_mb, pct), Style::default().fg(Color::Yellow))
+        } else {
+            (format!(" Downloading v{}... ", version), Style::default().fg(Color::Yellow))
+        }
+    };
+
+    let banner = Paragraph::new(Line::from(vec![Span::styled(text, style)]));
+    f.render_widget(banner, area);
 }
 
 /// v9.0.4: Full-screen Starship sync dashboard — shows when node is catching up

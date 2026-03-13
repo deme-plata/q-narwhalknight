@@ -225,6 +225,16 @@ pub struct MinerTuiApp {
     // v9.0.4: Starship sync telemetry for TUI
     pub sync_info: Option<StarshipSyncInfo>,
 
+    // v9.9.0: Auto-update state for TUI banner
+    pub update_version: Option<String>,
+    pub update_progress: (u64, u64),   // (bytes_downloaded, bytes_total)
+    pub update_ready: bool,            // true = downloaded and verified, waiting for [U]
+    pub update_error: Option<String>,
+    pub updater: Option<Arc<crate::auto_updater::MinerAutoUpdater>>,
+
+    // v9.8.4: Animated update overlay (rainbow progress bar + success modal)
+    pub update_animation: super::tui_views::update_animation::UpdateAnimation,
+
     // v9.1.0: Compute Power Layer stats for TUI cards
     pub simd_tier: String,
     pub simd_batch_size: usize,
@@ -277,6 +287,12 @@ impl MinerTuiApp {
             total_api_requests: 0,
             total_api_failures: 0,
             sync_info: None,
+            update_version: None,
+            update_progress: (0, 0),
+            update_ready: false,
+            update_error: None,
+            updater: None,
+            update_animation: super::tui_views::update_animation::UpdateAnimation::new(),
             simd_tier: {
                 #[cfg(target_arch = "x86_64")]
                 {
@@ -310,6 +326,9 @@ impl MinerTuiApp {
     }
 
     pub fn tick(&mut self) {
+        // v9.8.4: Advance update animation frame
+        self.update_animation.tick();
+
         // Update hashrate history
         let khs = self.current_hashrate_khs();
         self.hashrate_history.push_back(khs);
@@ -407,7 +426,7 @@ impl MinerTuiApp {
                 self.add_log(LogEntry {
                     timestamp: now,
                     level: LogLevel::Success,
-                    message: format!("Solution accepted! {:.6} QNK at block #{}", reward_qnk, block_height),
+                    message: format!("Solution accepted! {:.6} QUG at block #{}", reward_qnk, block_height),
                 });
             }
             DiagnosticEvent::SolutionFound { thread_id, block_height, nonce } => {
@@ -450,7 +469,7 @@ impl MinerTuiApp {
                 self.add_log(LogEntry {
                     timestamp: now,
                     level: LogLevel::Success,
-                    message: format!("Mining reward: {:.8} QNK at block #{}", reward_qnk, block_height),
+                    message: format!("Mining reward: {:.8} QUG at block #{}", reward_qnk, block_height),
                 });
             }
             DiagnosticEvent::BalanceUpdated { new_balance } => {
@@ -585,6 +604,46 @@ impl MinerTuiApp {
                     message: format!("Mode switch → {} ({})", target_mode, reason.unwrap_or_default()),
                 });
             }
+            DiagnosticEvent::UpdateDownloading { version, bytes_downloaded, bytes_total } => {
+                self.update_version = Some(version.clone());
+                self.update_progress = (bytes_downloaded, bytes_total);
+                self.update_ready = false;
+                self.update_error = None;
+                // v9.8.4: Feed animated overlay
+                let progress = if bytes_total > 0 { bytes_downloaded as f32 / bytes_total as f32 } else { 0.0 };
+                self.update_animation.set_downloading(version, progress, bytes_downloaded, bytes_total);
+            }
+            DiagnosticEvent::UpdateReadyToApply { version } => {
+                self.update_version = Some(version.clone());
+                self.update_ready = true;
+                self.update_error = None;
+                // v9.8.4: Show success modal
+                self.update_animation.set_success(version.clone());
+                self.add_log(LogEntry {
+                    timestamp: now,
+                    level: LogLevel::Success,
+                    message: format!("Update v{} ready — press [U] to apply", version),
+                });
+            }
+            DiagnosticEvent::UpdateApplying { version } => {
+                // v9.8.4: Show applying animation
+                self.update_animation.set_applying(version.clone());
+                self.add_log(LogEntry {
+                    timestamp: now,
+                    level: LogLevel::Info,
+                    message: format!("Applying update v{}...", version),
+                });
+            }
+            DiagnosticEvent::UpdateError { version, message } => {
+                self.update_error = Some(message.clone());
+                // v9.8.4: Show error modal
+                self.update_animation.set_error(version.clone(), message.clone());
+                self.add_log(LogEntry {
+                    timestamp: now,
+                    level: LogLevel::Error,
+                    message: format!("Update v{} failed: {}", version, message),
+                });
+            }
         }
     }
 
@@ -610,6 +669,7 @@ pub async fn run_miner_tui(
     state: Arc<SharedMinerState>,
     mut event_rx: mpsc::UnboundedReceiver<DiagnosticEvent>,
     mut log_rx: mpsc::UnboundedReceiver<LogEntry>,
+    auto_updater: Option<Arc<crate::auto_updater::MinerAutoUpdater>>,
 ) -> Result<()> {
     // Windows: Enable VT processing so ANSI escape sequences work in cmd.exe/PowerShell.
     // Without this, EnterAlternateScreen silently fails and the TUI never appears.
@@ -645,6 +705,7 @@ pub async fn run_miner_tui(
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = MinerTuiApp::new(Some(state.clone()));
+    app.updater = auto_updater;
 
     // Initial diagnostics run
     app.diagnostics.run_checks(&state);
@@ -706,6 +767,24 @@ pub async fn run_miner_tui(
         DisableMouseCapture
     )?;
     terminal.show_cursor()?;
+
+    // v9.9.0: If user pressed [U], apply update and restart after terminal is restored
+    if app.update_error.as_deref() == Some("__APPLY__") {
+        if let Some(ref version) = app.update_version {
+            let tmp_path = crate::auto_updater::MinerAutoUpdater::update_tmp_path();
+            eprintln!("Applying miner update v{}...", version);
+            match crate::auto_updater::MinerAutoUpdater::apply_update(&tmp_path, version) {
+                Ok(()) => {
+                    eprintln!("Update applied successfully. Restarting...");
+                    crate::auto_updater::MinerAutoUpdater::restart(); // does not return
+                }
+                Err(e) => {
+                    eprintln!("Update failed: {}", e);
+                    // Fall through to normal shutdown
+                }
+            }
+        }
+    }
 
     // Signal shutdown
     state.is_running.store(false, Ordering::SeqCst);
@@ -790,6 +869,27 @@ fn handle_key_press(app: &mut MinerTuiApp, code: KeyCode, modifiers: KeyModifier
                 let new_mode = mode.next();
                 *mode = new_mode;
                 state.send_event(DiagnosticEvent::ThrottleChanged { mode: new_mode });
+            }
+        }
+
+        // v9.9.0: Apply update — [U] key
+        KeyCode::Char('u') | KeyCode::Char('U') if app.update_ready => {
+            if let Some(ref version) = app.update_version.clone() {
+                let tmp_path = crate::auto_updater::MinerAutoUpdater::update_tmp_path();
+                if tmp_path.exists() {
+                    app.add_log(LogEntry {
+                        timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        level: LogLevel::Info,
+                        message: format!("Applying update v{}...", version),
+                    });
+                    if let Some(ref state) = app.state {
+                        state.send_event(DiagnosticEvent::UpdateApplying { version: version.clone() });
+                    }
+                    // We need to restore the terminal before restarting
+                    app.running = false;
+                    // Store that we should apply update after terminal restore
+                    app.update_error = Some("__APPLY__".to_string());
+                }
             }
         }
 
@@ -1064,6 +1164,11 @@ fn draw_ui(f: &mut Frame, app: &MinerTuiApp) {
     if app.show_help {
         draw_help_overlay(f, size);
     }
+
+    // v9.8.4: Update animation overlay (draws on top of everything)
+    if app.update_animation.is_visible() {
+        app.update_animation.render(f.buffer_mut());
+    }
 }
 
 #[cfg(feature = "tui")]
@@ -1080,7 +1185,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
     let status_color = if is_paused { Color::Yellow } else { Color::Green };
 
     let title = format!(
-        " Q-NarwhalKnight Miner v{} --- {} --- Uptime: {}h {:02}m ",
+        " Quillon Miner v{} --- {} --- Uptime: {}h {:02}m",
         env!("CARGO_PKG_VERSION"), status, hrs, mins
     );
 

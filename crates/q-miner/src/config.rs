@@ -303,7 +303,7 @@ impl MinerConfig {
     pub async fn setup_wizard() -> Result<Self> {
         use dialoguer::{Input, Select, Confirm};
         
-        println!("🧙 Q-NarwhalKnight Miner Setup Wizard");
+        println!("🧙 Quillon Miner Setup Wizard");
         println!("=====================================");
         
         // Mining mode selection
@@ -329,7 +329,7 @@ impl MinerConfig {
         
         // Wallet configuration
         let wallet_address: String = Input::new()
-            .with_prompt("Enter your Q-NarwhalKnight wallet address")
+            .with_prompt("Enter your Quillon wallet address")
             .interact_text()?;
         
         // Pool configuration (if pool mode)

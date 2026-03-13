@@ -29,7 +29,7 @@ use q_miner::shared_state::{SharedMinerState, ThreadState, ThreadStatus, Diagnos
 // Simplified command-line arguments
 #[derive(Parser)]
 #[command(name = "q-miner")]
-#[command(about = "Q-NarwhalKnight High-Performance Miner — supports Tor & SOCKS5/HTTP proxy routing")]
+#[command(about = "Quillon-NarwhalKnight-Graph High-Performance Miner — supports Tor & SOCKS5/HTTP proxy routing")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
 struct Args {
     /// Mining mode: solo, pool, decentralized, benchmark
@@ -123,6 +123,10 @@ struct Args {
     #[cfg(feature = "p2p")]
     #[arg(long, default_value = "0")]
     p2p_port: u16,
+
+    /// Disable automatic update checks and downloads.
+    #[arg(long)]
+    no_auto_update: bool,
 }
 
 // Hardware info structure with CPU optimization details
@@ -759,7 +763,7 @@ async fn main() -> Result<()> {
             args.intensity = 2;
 
             eprintln!();
-            eprintln!("\x1b[1;36m   Q-NarwhalKnight Miner v{}\x1b[0m", env!("CARGO_PKG_VERSION"));
+            eprintln!("\x1b[1;36m   Quillon Miner v{}\x1b[0m", env!("CARGO_PKG_VERSION"));
             eprintln!("\x1b[2m   Quantum-resistant solo mining — zero configuration required\x1b[0m");
             eprintln!();
             eprintln!("\x1b[38;5;245m   Your browser will open to link your wallet.\x1b[0m");
@@ -975,7 +979,7 @@ async fn main() -> Result<()> {
                 let worker_name = args.worker_name.clone().unwrap_or_else(|| {
                     format!("worker_{:08x}", rand::random::<u32>())
                 });
-                info!("⛏️  Starting Q-NarwhalKnight POOL mining...");
+                info!("⛏️  Starting Quillon-NarwhalKnight-Graph POOL mining...");
                 info!("💰 Mining to wallet: {}", wallet);
                 info!("🏊 Pool URL: {}", pool_url);
                 info!("👷 Worker name: {}", worker_name);
@@ -985,7 +989,7 @@ async fn main() -> Result<()> {
                 let worker_name = args.worker_name.clone().unwrap_or_else(|| {
                     format!("worker_{:08x}", rand::random::<u32>())
                 });
-                info!("🌐 Starting Q-NarwhalKnight DECENTRALIZED POOL mining...");
+                info!("🌐 Starting Quillon-NarwhalKnight-Graph DECENTRALIZED POOL mining...");
                 info!("💰 Mining to wallet: {}", wallet);
                 info!("👷 Worker name: {}", worker_name);
                 info!("📡 Bootstrap nodes: {}", args.bootstrap_nodes);
@@ -1013,7 +1017,7 @@ async fn main() -> Result<()> {
                     eprintln!("   For solo mining, use: --server https://quillon.xyz");
                     std::process::exit(1);
                 }
-                info!("⛏️  Starting Q-NarwhalKnight SOLO mining...");
+                info!("⛏️  Starting Quillon-NarwhalKnight-Graph SOLO mining...");
                 info!("💰 Mining to wallet: {}", wallet);
                 info!("🌐 Primary server: {}", args.server);
                 info!("🔄 Fallback server: {}", FALLBACK_BOOTSTRAP_URL);
@@ -1032,7 +1036,7 @@ async fn main() -> Result<()> {
                     let (no_p2p_flag, p2p_port_val) = (args.no_p2p, args.p2p_port);
                     #[cfg(not(feature = "p2p"))]
                     let (no_p2p_flag, p2p_port_val) = (true, 0u16);
-                    let _ = run_mining(cpu_threads, args.intensity, args.gpu, &wallet, &args.server, args.miner_name.as_deref(), enable_tui, args.bandwidth_limit, proxy_url.clone(), no_p2p_flag, p2p_port_val, tui_rx).await;
+                    let _ = run_mining(cpu_threads, args.intensity, args.gpu, &wallet, &args.server, args.miner_name.as_deref(), enable_tui, args.bandwidth_limit, proxy_url.clone(), no_p2p_flag, p2p_port_val, args.no_auto_update, tui_rx).await;
                 }
                 #[cfg(not(feature = "tui"))]
                 {
@@ -1040,7 +1044,7 @@ async fn main() -> Result<()> {
                     let (no_p2p_flag, p2p_port_val) = (args.no_p2p, args.p2p_port);
                     #[cfg(not(feature = "p2p"))]
                     let (no_p2p_flag, p2p_port_val) = (true, 0u16);
-                    let _ = run_mining(cpu_threads, args.intensity, args.gpu, &wallet, &args.server, args.miner_name.as_deref(), false, args.bandwidth_limit, proxy_url.clone(), no_p2p_flag, p2p_port_val, ()).await;
+                    let _ = run_mining(cpu_threads, args.intensity, args.gpu, &wallet, &args.server, args.miner_name.as_deref(), false, args.bandwidth_limit, proxy_url.clone(), no_p2p_flag, p2p_port_val, args.no_auto_update, ()).await;
                 }
             }
 
@@ -1163,7 +1167,7 @@ async fn run_benchmark(threads: usize, intensity: u8, duration: u64) -> Result<(
     info!("   Hash Rate: {:.2} H/s", hash_rate);
     info!("   Per Thread: {:.2} H/s", hash_rate / threads as f64);
     
-    println!("\n{}", style("🎯 Q-NarwhalKnight Mining Benchmark Complete!").green().bold());
+    println!("\n{}", style("🎯 Quillon Mining Benchmark Complete!").green().bold());
     println!("📊 Final Hash Rate: {:.2} H/s ({:.2} MH/s)", hash_rate, hash_rate / 1_000_000.0);
     
     Ok(())
@@ -1181,6 +1185,7 @@ async fn run_mining(
     proxy_url: Option<String>,
     no_p2p: bool,
     p2p_port: u16,
+    no_auto_update: bool,
     #[cfg(feature = "tui")]
     tui_log_rx: Option<tokio::sync::mpsc::UnboundedReceiver<q_miner::ui::tui_app::LogEntry>>,
     #[cfg(not(feature = "tui"))]
@@ -1248,6 +1253,22 @@ async fn run_mining(
             }
         });
     }
+
+    // v9.9.0: Auto-updater — background task checks for new miner versions
+    let auto_updater = if !no_auto_update {
+        let updater = Arc::new(q_miner::auto_updater::MinerAutoUpdater::new(
+            server_url.clone(),
+            shared_state.event_tx.clone(),
+            proxy_url.as_deref(),
+        ));
+        let updater_clone = updater.clone();
+        tokio::spawn(async move { updater_clone.run_update_loop().await });
+        info!("Auto-updater enabled (checks every 5 min)");
+        Some(updater)
+    } else {
+        info!("Auto-updater disabled (--no-auto-update)");
+        None
+    };
 
     // v9.1.7: P2P mining network — gossipsub challenge relay + solution broadcast
     // Spawned before mining threads so channels are ready when threads start
@@ -1488,7 +1509,7 @@ async fn run_mining(
         info!("🚀 GPU mining would be enabled (placeholder)");
     }
 
-    info!("✅ Q-NarwhalKnight miner started successfully!");
+    info!("✅ Quillon miner started successfully!");
     info!("🎧 Connected to SSE stream for real-time block updates");
     info!("🔗 Miner-link relay active — connect your wallet for real-time monitoring");
 
@@ -1504,7 +1525,7 @@ async fn run_mining(
             let _ = std::io::stdout().flush();
             // Brief yield so Windows console can finish rendering
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            q_miner::ui::tui_app::run_miner_tui(shared_state, event_rx, log_rx).await?;
+            q_miner::ui::tui_app::run_miner_tui(shared_state, event_rx, log_rx, auto_updater.clone()).await?;
         } else {
             info!("Press Ctrl+C to stop mining...");
             signal::ctrl_c().await?;
@@ -1532,7 +1553,7 @@ async fn run_mining(
     if let Some(h) = ml_handle { h.abort(); }
 
     let total_hashes = hash_counter.load(Ordering::Relaxed);
-    info!("👋 Q-NarwhalKnight miner stopped. Total hashes: {}", total_hashes);
+    info!("👋 Quillon miner stopped. Total hashes: {}", total_hashes);
 
     Ok(())
 }
@@ -1771,7 +1792,7 @@ async fn run_pool_mining(
         }
     });
 
-    info!("✅ Q-NarwhalKnight pool miner started successfully!");
+    info!("✅ Quillon pool miner started successfully!");
     info!("Press Ctrl+C to stop mining...");
 
     // Wait for shutdown signal
@@ -1788,7 +1809,7 @@ async fn run_pool_mining(
     stratum_handle.abort();
 
     let total_hashes = hash_counter.load(Ordering::Relaxed);
-    info!("👋 Q-NarwhalKnight pool miner stopped. Total hashes: {}", total_hashes);
+    info!("👋 Quillon pool miner stopped. Total hashes: {}", total_hashes);
 
     Ok(())
 }
@@ -2218,7 +2239,7 @@ fn mining_thread(
                     block_height: challenge.block_height,
                     latency_ms: latency_us / 1000,
                 });
-                info!("📋 Thread {} fetched challenge: block #{}, reward: {} QNK",
+                info!("📋 Thread {} fetched challenge: block #{}, reward: {} QUG",
                      thread_id, challenge.block_height, challenge.block_reward);
                 if let Some(ref notice) = challenge.server_notice {
                     if !notice.is_empty() {
@@ -2634,7 +2655,7 @@ fn mining_thread(
                                 .and_then(|v| v.as_f64())
                                 .unwrap_or(0.0);
                             if reward_qnk > 0.0 {
-                                info!("✅ Solution accepted! Earned {} QNK", reward_qnk);
+                                info!("✅ Solution accepted! Earned {} QUG", reward_qnk);
                             } else {
                                 info!("✅ Solution accepted at block #{}", block_height);
                             }
@@ -3114,7 +3135,7 @@ async fn decentralized_sse_listener(
                                 if miner_address == wallet {
                                     let reward = data.get("reward_qnk").and_then(|v| v.as_f64()).unwrap_or(0.0);
                                     let height = data.get("block_height").and_then(|v| v.as_u64()).unwrap_or(0);
-                                    info!("💎 REWARD: {:.8} QNK at block #{}", reward, height);
+                                    info!("💎 REWARD: {:.8} QUG at block #{}", reward, height);
                                 }
                             }
                         }

@@ -467,6 +467,15 @@ pub struct VersionInfo {
     /// v8.5.0: Download URL for latest node binary
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_node_download_url: Option<String>,
+    /// v9.9.0: Latest miner binary version available in downloads/
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_miner_version: Option<String>,
+    /// v9.9.0: SHA-256 of latest miner binary (for auto-update verification)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_miner_sha256: Option<String>,
+    /// v9.9.0: Download URL for latest miner binary
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_miner_download_url: Option<String>,
 }
 
 /// Scan the downloads directory for slint-wallet-v{X.Y.Z} binaries and return the highest version + SHA-256.
@@ -548,6 +557,45 @@ fn detect_latest_node_version() -> Option<(String, Option<String>)> {
     })
 }
 
+/// v9.9.0: Scan downloads/ for q-miner-v{X.Y.Z} binaries and return the highest version + SHA-256.
+fn detect_latest_miner_version() -> Option<(String, Option<String>)> {
+    fn scan_dir(dir: &std::path::Path, best: &mut Option<(u64, u64, u64, String, std::path::PathBuf)>) {
+        let Ok(read_dir) = std::fs::read_dir(dir) else { return };
+        for entry in read_dir.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            let Some(stripped) = name_str.strip_prefix("q-miner-v") else { continue };
+            let version_part = stripped.strip_suffix(".exe").unwrap_or(stripped);
+            let parts: Vec<&str> = version_part.split('.').collect();
+            if parts.len() != 3 { continue; }
+            let (Ok(major), Ok(minor), Ok(patch)) = (
+                parts[0].parse::<u64>(),
+                parts[1].parse::<u64>(),
+                parts[2].parse::<u64>(),
+            ) else { continue };
+            match best {
+                Some((bm, bn, bp, _, _)) if (major, minor, patch) <= (*bm, *bn, *bp) => {}
+                _ => { *best = Some((major, minor, patch, version_part.to_string(), entry.path())); }
+            }
+        }
+    }
+
+    let mut best: Option<(u64, u64, u64, String, std::path::PathBuf)> = None;
+    scan_dir(std::path::Path::new("gui/quantum-wallet/dist-final/downloads"), &mut best);
+    if best.is_none() {
+        scan_dir(std::path::Path::new("/opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads"), &mut best);
+    }
+    best.map(|(_, _, _, version, path)| {
+        let sha256 = std::fs::read(&path).ok().map(|data| {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&data);
+            format!("{:x}", hasher.finalize())
+        });
+        (version, sha256)
+    })
+}
+
 pub async fn version_info() -> Result<Json<ApiResponse<VersionInfo>>, StatusCode> {
     let (latest_node_version, latest_node_sha256, latest_node_download_url) =
         match detect_latest_node_version() {
@@ -562,6 +610,15 @@ pub async fn version_info() -> Result<Json<ApiResponse<VersionInfo>>, StatusCode
         Some((version, sha256)) => (Some(version), sha256),
         None => (None, None),
     };
+
+    let (latest_miner_version, latest_miner_sha256, latest_miner_download_url) =
+        match detect_latest_miner_version() {
+            Some((version, sha256)) => {
+                let url = format!("https://dl.quillon.xyz/downloads/q-miner-v{}", version);
+                (Some(version), sha256, Some(url))
+            }
+            None => (None, None, None),
+        };
 
     let info = VersionInfo {
         binary_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -581,6 +638,9 @@ pub async fn version_info() -> Result<Json<ApiResponse<VersionInfo>>, StatusCode
         latest_node_version,
         latest_node_sha256,
         latest_node_download_url,
+        latest_miner_version,
+        latest_miner_sha256,
+        latest_miner_download_url,
     };
 
     Ok(Json(ApiResponse::success(info)))

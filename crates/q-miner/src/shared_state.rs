@@ -120,6 +120,12 @@ pub enum DiagnosticEvent {
         pool_url: Option<String>,
         reason: Option<String>,
     },
+
+    // v9.9.0: Auto-update events
+    UpdateDownloading { version: String, bytes_downloaded: u64, bytes_total: u64 },
+    UpdateReadyToApply { version: String },
+    UpdateApplying { version: String },
+    UpdateError { version: String, message: String },
 }
 
 /// v9.0.4: Starship sync telemetry — rich sync progress for TUI

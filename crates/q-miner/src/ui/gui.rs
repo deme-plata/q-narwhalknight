@@ -34,7 +34,7 @@ impl GuiApplication {
     }
     
     pub async fn run() -> Result<()> {
-        info!("🖥️ Starting Q-NarwhalKnight Miner GUI");
+        info!("🖥️ Starting Quillon Miner GUI");
         
         let options = eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
@@ -45,7 +45,7 @@ impl GuiApplication {
         };
         
         eframe::run_native(
-            "Q-NarwhalKnight Miner",
+            "Quillon Miner",
             options,
             Box::new(|_cc| {
                 // Initialize app
@@ -118,7 +118,7 @@ impl eframe::App for GuiApplication {
         
         // Main content area
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading(RichText::new("⚛️ Q-NarwhalKnight Miner").size(24.0).color(Color32::LIGHT_BLUE));
+            ui.heading(RichText::new("⚛️ Quillon Miner").size(24.0).color(Color32::LIGHT_BLUE));
             ui.add_space(10.0);
             
             // Status row
@@ -157,9 +157,9 @@ impl eframe::App for GuiApplication {
                         
                         // Earnings section
                         ui.label(RichText::new("💰 Earnings").size(14.0).color(Color32::GREEN));
-                        ui.label("Daily Est.: 0.0245 QNK");
-                        ui.label("Monthly Est.: 0.7350 QNK");
-                        ui.label("Total Earned: 1.2847 QNK");
+                        ui.label("Daily Est.: 0.0245 QUG");
+                        ui.label("Monthly Est.: 0.7350 QUG");
+                        ui.label("Total Earned: 1.2847 QUG");
                     });
                 });
                 
@@ -202,7 +202,7 @@ impl eframe::App for GuiApplication {
                 ui.colored_label(Color32::YELLOW, "67°C");
                 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label("⚛️ Q-NarwhalKnight Miner v1.0.0");
+                    ui.label("⚛️ Quillon Miner v1.0.0");
                 });
             });
         });
@@ -256,7 +256,7 @@ impl eframe::App for GuiApplication {
                 .show(ctx, |ui| {
                     ui.vertical_centered(|ui| {
                         ui.add_space(20.0);
-                        ui.heading(RichText::new("⚛️ Q-NarwhalKnight Miner").size(20.0));
+                        ui.heading(RichText::new("⚛️ Quillon Miner").size(20.0));
                         ui.label("Version 1.0.0");
                         ui.add_space(10.0);
                         
