@@ -49,7 +49,7 @@ q-storage = { path = "../q-storage" }
 
 [dev-dependencies]
 tokio-test = "0.4"
-criterion = "0.5"
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 
 # Benchmark disabled until implemented
 # [[bench]]

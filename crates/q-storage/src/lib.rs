@@ -263,6 +263,10 @@ pub mod nemo_executor;  // NEMO-style executor for high contention (+42% over Bl
 #[cfg(not(target_os = "windows"))]
 pub mod async_pipeline;  // Async storage pipeline (70% overhead reduction)
 
+// ========== v10.0.0: 3-Stage Sync Pipeline (Phase 4 Optimization) ==========
+#[cfg(not(target_os = "windows"))]
+pub mod sync_pipeline;  // Receive → Validate → Store pipeline (~50% sync throughput increase)
+
 // ========== v1.8.0-HOHMANN: Project APOLLO Phase 3 - Staged Sync ==========
 pub mod staged_sync;       // Header-first sync (ORBITAL INSERTION) - 10-50x faster initial sync
 pub mod checkpoint_jumps;  // Gravity wells for checkpoint-based fast sync

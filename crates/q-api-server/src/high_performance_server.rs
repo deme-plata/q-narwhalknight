@@ -37,6 +37,8 @@ pub struct HighPerformanceServer {
     max_port_attempts: u16,
     /// v9.1.2: HTTP/1.1 keepalive idle timeout (seconds)
     http_keepalive_timeout_secs: u64,
+    /// v9.8.4: Hard cap on concurrent connections (env: MAX_HTTP_CONNECTIONS)
+    max_connections: usize,
 }
 
 impl HighPerformanceServer {
@@ -54,6 +56,8 @@ impl HighPerformanceServer {
             auto_port_detection: true,         // v1.0.53: Enable by default
             max_port_attempts: 10,             // Try up to 10 ports
             http_keepalive_timeout_secs: 30,   // v9.1.2: Close idle connections after 30s
+            max_connections: std::env::var("MAX_HTTP_CONNECTIONS")
+                .ok().and_then(|v| v.parse().ok()).unwrap_or(8192),
         }
     }
 
@@ -95,6 +99,7 @@ impl HighPerformanceServer {
         );
         info!("   TCP backlog: {} pending connections", self.tcp_backlog);
         info!("   HTTP/1.1 keepalive timeout: {}s (idle connections auto-close)", self.http_keepalive_timeout_secs);
+        info!("   Max connections: {} (env: MAX_HTTP_CONNECTIONS)", self.max_connections);
         info!("   Target throughput: 1,000,000+ TPS");
         if self.auto_port_detection {
             info!("   Auto port detection: ENABLED (will try up to {} ports)", self.max_port_attempts);
@@ -192,6 +197,9 @@ impl HighPerformanceServer {
             }
         });
 
+        // v9.8.4: Capture max_connections for the accept loop
+        let max_connections = self.max_connections;
+
         // Accept loop
         loop {
             tokio::select! {
@@ -204,6 +212,14 @@ impl HighPerformanceServer {
                             continue;
                         }
                     };
+
+                    // v9.8.4: Hard connection cap — reject if above limit
+                    let current = active_connections.load(Ordering::Relaxed);
+                    if current >= max_connections {
+                        warn!("🚫 Connection limit reached ({}/{}), rejecting {}", current, max_connections, remote_addr);
+                        drop(stream);
+                        continue;
+                    }
 
                     let io = TokioIo::new(stream);
                     let app = app.clone();

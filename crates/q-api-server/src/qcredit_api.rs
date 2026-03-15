@@ -14,7 +14,19 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::AppState;
-use q_api_server::wallet_auth::AuthenticatedWallet;
+use q_types::Address;
+
+/// Parse a wallet hex string (with or without "qnk" prefix) into Address
+fn parse_wallet(wallet: &str) -> Result<Address, String> {
+    let hex_part = if wallet.starts_with("qnk") { &wallet[3..] } else { wallet };
+    let bytes = hex::decode(hex_part).map_err(|_| "Invalid wallet address hex".to_string())?;
+    if bytes.len() != 32 {
+        return Err("Wallet address must be 32 bytes".to_string());
+    }
+    let mut addr = [0u8; 32];
+    addr.copy_from_slice(&bytes);
+    Ok(addr)
+}
 
 // ============ REQUEST/RESPONSE TYPES ============
 
@@ -118,12 +130,20 @@ pub async fn get_tiers(
     }).collect())))
 }
 
-/// GET /api/v1/qcredit/position — user positions + pending yield
+/// GET /api/v1/qcredit/position?wallet=<hex> — user positions + pending yield
 pub async fn get_position(
-    auth: AuthenticatedWallet,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<PositionResponse>>, StatusCode> {
-    let wallet_hex = hex::encode(auth.address);
+    let wallet_str = match params.get("wallet") {
+        Some(w) => w.clone(),
+        None => return Ok(Json(ApiResponse::error("Missing 'wallet' query parameter".into()))),
+    };
+    let address = match parse_wallet(&wallet_str) {
+        Ok(a) => a,
+        Err(e) => return Ok(Json(ApiResponse::error(e))),
+    };
+    let wallet_hex = hex::encode(address);
     let now = chrono::Utc::now().timestamp() as u64;
     let vault = state.qcredit_vault.read().await;
     let positions_with_yield = vault.get_positions_with_yield(&wallet_hex, now);
@@ -162,11 +182,14 @@ pub async fn get_position(
 
 /// POST /api/v1/qcredit/lock — lock QUG, mint QCREDIT
 pub async fn lock_qug(
-    auth: AuthenticatedWallet,
     State(state): State<Arc<AppState>>,
     Json(req): Json<LockRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    let wallet_hex = hex::encode(auth.address);
+    let address = match parse_wallet(&req.wallet) {
+        Ok(a) => a,
+        Err(e) => return Ok(Json(ApiResponse::error(e))),
+    };
+    let wallet_hex = hex::encode(address);
     let now = chrono::Utc::now().timestamp() as u64;
 
     // Parse amount (human-readable to 24-decimal base units)
@@ -185,7 +208,7 @@ pub async fn lock_qug(
     // Check QUG balance (wallet_balances stores Amount = u128)
     {
         let balances = state.wallet_balances.read().await;
-        let bal = balances.get(&auth.address).copied().unwrap_or(0);
+        let bal = balances.get(&address).copied().unwrap_or(0);
         if bal < amount_raw {
             return Ok(Json(ApiResponse::error(
                 format!("Insufficient QUG balance: have {}, need {}", format_qug(bal), format_qug(amount_raw))
@@ -196,7 +219,7 @@ pub async fn lock_qug(
     // Deduct QUG from wallet
     {
         let mut balances = state.wallet_balances.write().await;
-        let entry = balances.entry(auth.address).or_insert(0);
+        let entry = balances.entry(address).or_insert(0);
         *entry = entry.saturating_sub(amount_raw);
     }
 
@@ -208,7 +231,7 @@ pub async fn lock_qug(
             Err(e) => {
                 // Refund QUG on failure
                 let mut balances = state.wallet_balances.write().await;
-                let entry = balances.entry(auth.address).or_insert(0);
+                let entry = balances.entry(address).or_insert(0);
                 *entry = entry.saturating_add(amount_raw);
                 return Ok(Json(ApiResponse::error(e)));
             }
@@ -218,7 +241,7 @@ pub async fn lock_qug(
     // Mint QCREDIT to wallet token balance
     {
         let mut token_balances = state.token_balances.write().await;
-        let key = (auth.address, QCREDIT_TOKEN_ADDRESS);
+        let key = (address, QCREDIT_TOKEN_ADDRESS);
         let entry = token_balances.entry(key).or_insert(0);
         *entry = entry.saturating_add(amount_raw);
     }
@@ -227,14 +250,14 @@ pub async fn lock_qug(
     if let Err(e) = persist_vault(&state).await {
         warn!("Failed to persist QCREDIT vault: {}", e);
     }
-    let _ = state.storage_engine.save_token_balance(&auth.address, &QCREDIT_TOKEN_ADDRESS, {
+    let _ = state.storage_engine.save_token_balance(&address, &QCREDIT_TOKEN_ADDRESS, {
         let tb = state.token_balances.read().await;
-        tb.get(&(auth.address, QCREDIT_TOKEN_ADDRESS)).copied().unwrap_or(0)
+        tb.get(&(address, QCREDIT_TOKEN_ADDRESS)).copied().unwrap_or(0)
     }).await;
     // v9.5.1: Persist QUG balance after deduction
-    let _ = state.storage_engine.save_wallet_balance(&auth.address, {
+    let _ = state.storage_engine.save_wallet_balance(&address, {
         let wb = state.wallet_balances.read().await;
-        wb.get(&auth.address).copied().unwrap_or(0)
+        wb.get(&address).copied().unwrap_or(0)
     }).await;
 
     info!(
@@ -253,11 +276,14 @@ pub async fn lock_qug(
 
 /// POST /api/v1/qcredit/unlock — burn QCREDIT, return QUG + yield
 pub async fn unlock_position(
-    auth: AuthenticatedWallet,
     State(state): State<Arc<AppState>>,
     Json(req): Json<UnlockRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    let wallet_hex = hex::encode(auth.address);
+    let address = match parse_wallet(&req.wallet) {
+        Ok(a) => a,
+        Err(e) => return Ok(Json(ApiResponse::error(e))),
+    };
+    let wallet_hex = hex::encode(address);
     let now = chrono::Utc::now().timestamp() as u64;
 
     let (qug_returned, yield_claimed) = {
@@ -271,7 +297,7 @@ pub async fn unlock_position(
     // Burn QCREDIT from token balance
     {
         let mut token_balances = state.token_balances.write().await;
-        let key = (auth.address, QCREDIT_TOKEN_ADDRESS);
+        let key = (address, QCREDIT_TOKEN_ADDRESS);
         let entry = token_balances.entry(key).or_insert(0);
         *entry = entry.saturating_sub(qug_returned);
     }
@@ -279,7 +305,7 @@ pub async fn unlock_position(
     // Credit QUG back + yield
     {
         let mut balances = state.wallet_balances.write().await;
-        let entry = balances.entry(auth.address).or_insert(0);
+        let entry = balances.entry(address).or_insert(0);
         *entry = entry.saturating_add(qug_returned.saturating_add(yield_claimed));
     }
 
@@ -288,14 +314,14 @@ pub async fn unlock_position(
         warn!("Failed to persist QCREDIT vault: {}", e);
     }
     // v9.5.1: Persist QCREDIT token balance after burn
-    let _ = state.storage_engine.save_token_balance(&auth.address, &QCREDIT_TOKEN_ADDRESS, {
+    let _ = state.storage_engine.save_token_balance(&address, &QCREDIT_TOKEN_ADDRESS, {
         let tb = state.token_balances.read().await;
-        tb.get(&(auth.address, QCREDIT_TOKEN_ADDRESS)).copied().unwrap_or(0)
+        tb.get(&(address, QCREDIT_TOKEN_ADDRESS)).copied().unwrap_or(0)
     }).await;
     // v9.5.1: Persist QUG balance after credit
-    let _ = state.storage_engine.save_wallet_balance(&auth.address, {
+    let _ = state.storage_engine.save_wallet_balance(&address, {
         let wb = state.wallet_balances.read().await;
-        wb.get(&auth.address).copied().unwrap_or(0)
+        wb.get(&address).copied().unwrap_or(0)
     }).await;
 
     info!(
@@ -312,11 +338,14 @@ pub async fn unlock_position(
 
 /// POST /api/v1/qcredit/claim — claim accrued yield without unlocking
 pub async fn claim_yield(
-    auth: AuthenticatedWallet,
     State(state): State<Arc<AppState>>,
     Json(req): Json<ClaimRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    let wallet_hex = hex::encode(auth.address);
+    let address = match parse_wallet(&req.wallet) {
+        Ok(a) => a,
+        Err(e) => return Ok(Json(ApiResponse::error(e))),
+    };
+    let wallet_hex = hex::encode(address);
     let now = chrono::Utc::now().timestamp() as u64;
 
     let yield_amount = {
@@ -330,7 +359,7 @@ pub async fn claim_yield(
     // Credit yield as QUG
     {
         let mut balances = state.wallet_balances.write().await;
-        let entry = balances.entry(auth.address).or_insert(0);
+        let entry = balances.entry(address).or_insert(0);
         *entry = entry.saturating_add(yield_amount);
     }
 
@@ -339,9 +368,9 @@ pub async fn claim_yield(
         warn!("Failed to persist QCREDIT vault: {}", e);
     }
     // v9.5.1: Persist QUG balance after yield credit
-    let _ = state.storage_engine.save_wallet_balance(&auth.address, {
+    let _ = state.storage_engine.save_wallet_balance(&address, {
         let wb = state.wallet_balances.read().await;
-        wb.get(&auth.address).copied().unwrap_or(0)
+        wb.get(&address).copied().unwrap_or(0)
     }).await;
 
     info!(

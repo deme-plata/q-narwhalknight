@@ -173,6 +173,11 @@ pub struct BlockProducer {
     /// When present, coinbase miner rewards are split proportionally across all
     /// miners in the PPLNS window instead of per-solution.
     mining_pool: Option<Arc<q_mining_pool::MiningPool>>,
+
+    /// 🌐 v10.0.0: Distributed PPLNS proportions from CRDT coordinator
+    /// When present and non-empty, used INSTEAD of local mining_pool PPLNS.
+    /// Contains raw proportions (wallet_hex, proportion) summing to 1.0.
+    distributed_pplns: Option<Arc<tokio::sync::RwLock<Option<Vec<(String, f64)>>>>>,
 }
 
 /// 💰 v8.7.0: Entry for distributed operator fee splitting
@@ -242,6 +247,7 @@ impl BlockProducer {
             admin_wallet_hex: Arc::new(std::sync::RwLock::new(String::new())), // v8.6.1: empty = use founder
             distributed_operators: Arc::new(std::sync::RwLock::new(Vec::new())), // v8.7.0: distributed fee
             mining_pool: None, // v9.1.2: PPLNS pool (use set_mining_pool to enable)
+            distributed_pplns: None, // v10.0.0: distributed PPLNS (use set_distributed_pplns to enable)
         }
     }
 
@@ -278,6 +284,7 @@ impl BlockProducer {
             admin_wallet_hex: Arc::new(std::sync::RwLock::new(String::new())), // v8.6.1: empty = use founder
             distributed_operators: Arc::new(std::sync::RwLock::new(Vec::new())), // v8.7.0: distributed fee
             mining_pool: None, // v9.1.2: PPLNS pool (use set_mining_pool to enable)
+            distributed_pplns: None, // v10.0.0: distributed PPLNS (use set_distributed_pplns to enable)
         }
     }
 
@@ -325,6 +332,7 @@ impl BlockProducer {
             admin_wallet_hex: Arc::new(std::sync::RwLock::new(String::new())), // v8.6.1: empty = use founder
             distributed_operators: Arc::new(std::sync::RwLock::new(Vec::new())), // v8.7.0: distributed fee
             mining_pool: None, // v9.1.2: PPLNS pool (use set_mining_pool to enable)
+            distributed_pplns: None, // v10.0.0: distributed PPLNS (use set_distributed_pplns to enable)
         })
     }
 
@@ -344,6 +352,11 @@ impl BlockProducer {
     /// 🏊 v9.1.2: Set mining pool for PPLNS reward distribution
     pub fn set_mining_pool(&mut self, pool: Arc<q_mining_pool::MiningPool>) {
         self.mining_pool = Some(pool);
+    }
+
+    /// 🌐 v10.0.0: Set distributed PPLNS proportions source
+    pub fn set_distributed_pplns(&mut self, proportions: Arc<tokio::sync::RwLock<Option<Vec<(String, f64)>>>>) {
+        self.distributed_pplns = Some(proportions);
     }
 
     /// 💰 v8.7.0: Set distributed operators for fee splitting
@@ -1491,9 +1504,23 @@ impl BlockProducer {
         // Transaction 3-N: Miner rewards
         let miner_total = total_reward.saturating_sub(dev_fee_amount);
 
+        // v10.0.0: Check distributed PPLNS FIRST (CRDT state from all nodes).
+        // If present and non-empty, use distributed proportions for coinbase.
+        // Otherwise fall through to local PPLNS (existing behavior).
+        let distributed_proportions: Option<Vec<(String, f64)>> = if let Some(ref dist_pplns) = self.distributed_pplns {
+            // try_read to avoid blocking block production
+            match dist_pplns.try_read() {
+                Ok(guard) => guard.clone(),
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+
         // v9.1.2: PPLNS pool mode — distribute miner rewards proportionally
-        let used_pplns = if let Some(ref pool) = self.mining_pool {
-            if let Some(proportions) = pool.get_pplns_proportions() {
+        // v10.0.0: distributed_proportions takes priority over local pool
+        let used_pplns = if let Some(ref proportions) = distributed_proportions {
+            if !proportions.is_empty() {
                 let pplns_miner_count = proportions.len();
                 for (idx, (wallet_hex, proportion)) in proportions.iter().enumerate() {
                     let amount = (miner_total as f64 * proportion) as u128;
@@ -1566,7 +1593,82 @@ impl BlockProducer {
                     }
                 }
 
-                info!("🏊 Block #{}: PPLNS distributed {:.6} QUG among {} miners",
+                info!("🌐 Block #{}: Distributed PPLNS — {:.6} QUG among {} miners (CRDT)",
+                    block_height, miner_total as f64 / 1e24, pplns_miner_count);
+                true
+            } else { false }
+        } else if let Some(ref pool) = self.mining_pool {
+            // v9.1.2: Fallback to LOCAL pool PPLNS if no distributed proportions
+            if let Some(local_proportions) = pool.get_pplns_proportions() {
+                let pplns_miner_count = local_proportions.len();
+                for (idx, (wallet_hex, proportion)) in local_proportions.iter().enumerate() {
+                    let amount = (miner_total as f64 * proportion) as u128;
+                    if amount == 0 { continue; }
+
+                    let mut wallet_bytes = [0u8; 32];
+                    if let Ok(bytes) = hex::decode(wallet_hex) {
+                        if bytes.len() == 32 {
+                            wallet_bytes.copy_from_slice(&bytes);
+                        } else { continue; }
+                    } else { continue; }
+
+                    let miner_tx_id = {
+                        let mut hasher = Sha256::new();
+                        hasher.update(b"PPLNS_REWARD");
+                        hasher.update(&wallet_bytes);
+                        hasher.update(&(idx as u64).to_le_bytes());
+                        hasher.update(&block_height.to_le_bytes());
+                        let hash = hasher.finalize();
+                        let mut tx_id = [0u8; 32];
+                        tx_id.copy_from_slice(&hash);
+                        tx_id
+                    };
+
+                    transactions.push(Transaction {
+                        id: miner_tx_id,
+                        from: coinbase_from,
+                        to: wallet_bytes,
+                        amount,
+                        fee: 0,
+                        nonce: idx as u64,
+                        signature: vec![0xC0, 0x1B, 0xA5, 0xE],
+                        timestamp,
+                        data: format!("PPLNS mining reward ({:.1}%)", proportion * 100.0).into_bytes(),
+                        token_type: TokenType::QUG,
+                        fee_token_type: TokenType::QUGUSD,
+                        tx_type: TransactionType::Coinbase,
+                        pqc_signature: None,
+                        signature_phase: TxSignaturePhase::Phase0Ed25519,
+                        pqc_public_key: None,
+                        zk_proof_bundle: None,
+                        privacy_level: TransactionPrivacyLevel::Transparent,
+                        bulletproof: None,
+                        nullifier: None,
+                        memo: None,
+                    });
+
+                    if let Some(ref emitter) = self.event_emitter {
+                        let reward_qnk = amount as f64 / 1e24;
+                        let origin_node_id = self.local_peer_id.clone();
+                        let origin_node_name = self.node_name.clone();
+                        let _ = emitter
+                            .emit_mining_reward(
+                                wallet_hex.clone(),
+                                reward_qnk,
+                                idx as u64,
+                                block_height,
+                                format!("pplns_{:.1}pct", proportion * 100.0),
+                                0.0,
+                                None,
+                                Some(format!("PPLNS-{:.1}%", proportion * 100.0)),
+                                origin_node_id,
+                                origin_node_name,
+                            )
+                            .await;
+                    }
+                }
+
+                info!("🏊 Block #{}: Local PPLNS distributed {:.6} QUG among {} miners",
                     block_height, miner_total as f64 / 1e24, pplns_miner_count);
                 true
             } else { false }

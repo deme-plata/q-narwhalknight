@@ -811,9 +811,15 @@ pub async fn sse_events(
     let state_clone = state.clone();
     let wallet_filter_clone = wallet_filter.clone();
 
+    // v9.8.4: Max SSE connection lifetime — prevents unbounded accumulation
+    let max_sse_lifetime_secs: u64 = std::env::var("MAX_SSE_LIFETIME_SECS")
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(600); // 10 minutes default
+    let connection_start = std::time::Instant::now();
+    let max_sse_lifetime = std::time::Duration::from_secs(max_sse_lifetime_secs);
+
     let stream = futures_util::stream::unfold(
-        (rx, wallet_filter, Some(state_clone), wallet_filter_clone, headers_only, miner_mode),
-        move |(mut rx, filter, state_opt, wallet_filter_for_initial, headers_only, miner_mode)| async move {
+        (rx, wallet_filter, Some(state_clone), wallet_filter_clone, headers_only, miner_mode, connection_start, max_sse_lifetime),
+        move |(mut rx, filter, state_opt, wallet_filter_for_initial, headers_only, miner_mode, connection_start, max_sse_lifetime)| async move {
             // CRITICAL FIX: Send initial balance event on SSE connection
             // This eliminates the "wait minutes for balance" issue
             if let (Some(state), Some(ref wallet_filter_value)) =
@@ -868,7 +874,7 @@ pub async fn sse_events(
                     // Set state_opt to None so we don't send initial balance again
                     return Some((
                         Ok(Event::default().event("balance-updated").data(json)),
-                        (rx, filter, None, None, headers_only, miner_mode),
+                        (rx, filter, None, None, headers_only, miner_mode, connection_start, max_sse_lifetime),
                     ));
                 }
             }
@@ -878,6 +884,12 @@ pub async fn sse_events(
             // Without timeout, rx.recv() blocks forever and CLOSE-WAIT sockets accumulate
             // because the stream never yields for Axum to attempt a keepalive write.
             loop {
+                // v9.8.4: Enforce max SSE connection lifetime to prevent unbounded accumulation.
+                // Miners auto-reconnect per SSE spec.
+                if connection_start.elapsed() > max_sse_lifetime {
+                    debug!("📡 SSE connection exceeded {}s lifetime, closing for reconnect", max_sse_lifetime.as_secs());
+                    return None;
+                }
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(30),
                     rx.recv()
@@ -941,12 +953,12 @@ pub async fn sse_events(
                                 );
                                 return Some((
                                     Ok(Event::default().event(event_name).data(json)),
-                                    (rx, filter, None, None, headers_only, miner_mode),
+                                    (rx, filter, None, None, headers_only, miner_mode, connection_start, max_sse_lifetime),
                                 ));
                             }
                             Err(e) => {
                                 error!("Failed to serialize event: {}", e);
-                                return Some((Err(axum::Error::new(e)), (rx, filter, None, None, headers_only, miner_mode)));
+                                return Some((Err(axum::Error::new(e)), (rx, filter, None, None, headers_only, miner_mode, connection_start, max_sse_lifetime)));
                             }
                         }
                     }
@@ -958,7 +970,7 @@ pub async fn sse_events(
                                     Ok(Event::default()
                                         .event("sse-lag")
                                         .data(format!("{{\"lagged_events\": {}}}", n))),
-                                    (rx, filter, None, None, headers_only, miner_mode),
+                                    (rx, filter, None, None, headers_only, miner_mode, connection_start, max_sse_lifetime),
                                 ))
                             }
                             tokio::sync::broadcast::error::RecvError::Closed => {
@@ -973,7 +985,7 @@ pub async fn sse_events(
                         // will fail and Axum will drop this stream, cleaning up the CLOSE-WAIT.
                         return Some((
                             Ok(Event::default().comment("heartbeat")),
-                            (rx, filter, None, None, headers_only, miner_mode),
+                            (rx, filter, None, None, headers_only, miner_mode, connection_start, max_sse_lifetime),
                         ));
                     }
                 }

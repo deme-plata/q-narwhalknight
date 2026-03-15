@@ -3251,17 +3251,18 @@ export async function getQCreditTiers(baseUrl?: string): Promise<QCreditTier[]> 
 
 export async function getQCreditPosition(authHeaders: Record<string, string>, baseUrl?: string): Promise<QCreditPositionResponse> {
   const url = baseUrl || getConnectionInfo().apiBaseUrl;
-  const resp = await fetch(`${url}/api/v1/qcredit/position`, { headers: authHeaders });
+  const wallet = localStorage.getItem('walletAddress') || '';
+  const resp = await fetch(`${url}/api/v1/qcredit/position?wallet=${encodeURIComponent(wallet)}`);
   const data = await resp.json();
   if (!data.success) throw new Error(data.error || 'Failed to get QCREDIT position');
   return data.data;
 }
 
-export async function lockQCredit(wallet: string, amount: string, tier: string, authHeaders: Record<string, string>, baseUrl?: string): Promise<any> {
+export async function lockQCredit(wallet: string, amount: string, tier: string, authHeaders?: Record<string, string>, baseUrl?: string): Promise<any> {
   const url = baseUrl || getConnectionInfo().apiBaseUrl;
   const resp = await fetch(`${url}/api/v1/qcredit/lock`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ wallet, amount, tier }),
   });
   const data = await resp.json();
@@ -3269,11 +3270,11 @@ export async function lockQCredit(wallet: string, amount: string, tier: string, 
   return data.data;
 }
 
-export async function unlockQCredit(wallet: string, position_index: number, authHeaders: Record<string, string>, baseUrl?: string): Promise<any> {
+export async function unlockQCredit(wallet: string, position_index: number, authHeaders?: Record<string, string>, baseUrl?: string): Promise<any> {
   const url = baseUrl || getConnectionInfo().apiBaseUrl;
   const resp = await fetch(`${url}/api/v1/qcredit/unlock`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ wallet, position_index }),
   });
   const data = await resp.json();
@@ -3281,11 +3282,11 @@ export async function unlockQCredit(wallet: string, position_index: number, auth
   return data.data;
 }
 
-export async function claimQCreditYield(wallet: string, position_index: number, authHeaders: Record<string, string>, baseUrl?: string): Promise<any> {
+export async function claimQCreditYield(wallet: string, position_index: number, authHeaders?: Record<string, string>, baseUrl?: string): Promise<any> {
   const url = baseUrl || getConnectionInfo().apiBaseUrl;
   const resp = await fetch(`${url}/api/v1/qcredit/claim`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ wallet, position_index }),
   });
   const data = await resp.json();

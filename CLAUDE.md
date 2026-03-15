@@ -51,7 +51,8 @@ This guide explains how to set up distributed development with multiple Claude C
 - **Service**: `systemd` service at `/etc/systemd/system/q-api-server.service`
 - **Binary**: `/opt/orobit/shared/q-narwhalknight/q-api-server-v889` (name in systemd service)
 - **Working Directory**: `/opt/orobit/shared/q-narwhalknight`
-- **Nginx Root**: `/home/orobit/q-narwhalknight/dist-final/` (DIFFERENT from Beta!)
+- **Reverse Proxy**: q-flux (NOT nginx, NOT Caddy — nginx is DISABLED on Epsilon)
+- **Static Files Root**: `/home/orobit/q-narwhalknight/dist-final/` (DIFFERENT from Beta!)
 - **Peer ID**: `12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM`
 - **⚠️ CRITICAL: ALWAYS use /home paths on Epsilon, NEVER /tmp or /root!**
   - `/tmp` is on a tiny 40GB root partition (always near full)
@@ -1015,7 +1016,7 @@ docker exec q-test-v${VERSION} curl -s localhost:8080/api/v1/status
    - Users rely on downloading binaries with specific version names
 
    **⚠️ CRITICAL: quillon.xyz DNS → Epsilon (89.149.241.126), NOT Beta!**
-   Downloads are served by Epsilon's nginx. Files on Beta are NOT accessible to users.
+   Downloads are served by Epsilon's q-flux. Files on Beta are NOT accessible to users.
    **After EVERY build, copy binaries to BOTH Beta AND Epsilon:**
 
      ```bash

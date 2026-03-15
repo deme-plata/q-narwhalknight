@@ -196,6 +196,11 @@ pub enum ProducerCommand {
         pool: Arc<q_mining_pool::MiningPool>,
     },
 
+    /// 🌐 v10.0.0: Set distributed PPLNS proportions source
+    SetDistributedPplns {
+        proportions: Arc<tokio::sync::RwLock<Option<Vec<(String, f64)>>>>,
+    },
+
     /// 📊 v9.3.1: K-parameter gauge — dynamically tune max solutions per block
     SetMaxSolutionsPerBlock { max_solutions: usize },
 
@@ -435,6 +440,11 @@ impl LockFreeProducer {
                 ProducerCommand::SetMiningPool { pool } => {
                     producer.set_mining_pool(pool);
                     info!("🏊 Producer #{}: Mining pool set for PPLNS reward distribution", producer_id);
+                }
+
+                ProducerCommand::SetDistributedPplns { proportions } => {
+                    producer.set_distributed_pplns(proportions);
+                    info!("🌐 Producer #{}: Distributed PPLNS proportions set", producer_id);
                 }
 
                 ProducerCommand::SetMaxSolutionsPerBlock { max_solutions } => {
@@ -716,6 +726,11 @@ impl LockFreeProducer {
                 ProducerCommand::SetMiningPool { pool } => {
                     producer.set_mining_pool(pool);
                     info!("🏊 Producer #{}: Mining pool set for PPLNS (storage loop)", producer_id);
+                }
+
+                ProducerCommand::SetDistributedPplns { proportions } => {
+                    producer.set_distributed_pplns(proportions);
+                    info!("🌐 Producer #{}: Distributed PPLNS proportions set (storage loop)", producer_id);
                 }
 
                 ProducerCommand::SetMaxSolutionsPerBlock { max_solutions } => {
@@ -1202,6 +1217,11 @@ impl LockFreeProducer {
     /// 🏊 v9.1.2: Set mining pool for PPLNS reward distribution
     pub fn set_mining_pool(&self, pool: Arc<q_mining_pool::MiningPool>) {
         let _ = self.command_tx.try_send(ProducerCommand::SetMiningPool { pool });
+    }
+
+    /// 🌐 v10.0.2: Set distributed PPLNS proportions for multi-node mining
+    pub fn set_distributed_pplns(&self, proportions: Arc<tokio::sync::RwLock<Option<Vec<(String, f64)>>>>) {
+        let _ = self.command_tx.try_send(ProducerCommand::SetDistributedPplns { proportions });
     }
 
     /// 📊 v9.3.1: Set max solutions per block (K-parameter dynamic tuning)
@@ -2267,6 +2287,14 @@ impl LockFreeProducerPool {
             producer.set_mining_pool(pool.clone());
         }
         info!("🏊 Mining pool set for PPLNS distribution across all {} producers", self.num_producers);
+    }
+
+    /// 🌐 v10.0.2: Set distributed PPLNS proportions across all producers
+    pub fn set_distributed_pplns(&self, proportions: Arc<tokio::sync::RwLock<Option<Vec<(String, f64)>>>>) {
+        for producer in &self.producers {
+            producer.set_distributed_pplns(proportions.clone());
+        }
+        info!("🌐 Distributed PPLNS set across all {} producers", self.num_producers);
     }
 
     /// 📊 v9.3.1: Set max solutions per block across all producers (K-parameter tuning)

@@ -44,7 +44,7 @@ const HASHRATE_HISTORY_SIZE: usize = 120;
 const LATENCY_HISTORY_SIZE: usize = 60;
 const BANDWIDTH_HISTORY_SIZE: usize = 60; // 60 ticks of bandwidth samples
 const MAX_LOG_ENTRIES: usize = 1000;
-const TAB_COUNT: usize = 6;
+const TAB_COUNT: usize = 7;
 
 // ═══════════════════════════════════════════════════════════════════
 // Log entry types for the TUI log viewer
@@ -238,8 +238,9 @@ pub struct MinerTuiApp {
     // v9.8.5: Starship sync animation (rocket launch + orbital visualization)
     pub starship_animation: super::tui_views::starship_animation::StarshipAnimation,
 
-    // v9.8.6: Water robots animation (quantum marine creatures on important events)
-    pub water_robots: super::tui_views::water_robots_animation::WaterRobotsAnimation,
+    // v9.9.0: Q animation — fullscreen glowing Q logo overlay (Apple-style)
+    pub q_animation: super::tui_views::q_animation::QAnimation,
+
 
     // v9.9.1: Command Center — network tab with radar, swarm ocean, topology
     pub command_center: super::tui_views::command_center::CommandCenterState,
@@ -303,7 +304,7 @@ impl MinerTuiApp {
             updater: None,
             update_animation: super::tui_views::update_animation::UpdateAnimation::new(),
             starship_animation: super::tui_views::starship_animation::StarshipAnimation::new(),
-            water_robots: super::tui_views::water_robots_animation::WaterRobotsAnimation::new(),
+            q_animation: super::tui_views::q_animation::QAnimation::new(),
             command_center: super::tui_views::command_center::CommandCenterState::new(),
             simd_tier: {
                 #[cfg(target_arch = "x86_64")]
@@ -342,9 +343,8 @@ impl MinerTuiApp {
         self.update_animation.tick();
         // v9.8.5: Advance starship sync animation
         self.starship_animation.tick();
-        // v9.8.6: Advance water robots animation
-        self.water_robots.tick();
-
+        // v9.9.0: Advance Q animation
+        self.q_animation.tick();
         // v9.9.1: Advance command center (radar sweep + ocean)
         if let Some(ref state) = self.state {
             let peer_count = state.p2p_peer_count.load(std::sync::atomic::Ordering::Relaxed);
@@ -448,10 +448,11 @@ impl MinerTuiApp {
                 if reward_qnk > 0.0 {
                     self.current_block_reward = reward_qnk;
                 }
-                // v9.8.6: Trigger water robot on block found
-                self.water_robots.trigger(
-                    super::tui_views::water_robots_animation::WaterRobotEvent::BlockFound { height: block_height }
-                );
+                // v9.9.0: Q animation trigger on block acceptance
+                self.q_animation.trigger();
+                // v9.9.1: Command Center — block event + radar ping
+                self.command_center.spawn_block_event();
+                self.command_center.radar.ping();
                 self.add_log(LogEntry {
                     timestamp: now,
                     level: LogLevel::Success,
@@ -459,6 +460,8 @@ impl MinerTuiApp {
                 });
             }
             DiagnosticEvent::SolutionFound { thread_id, block_height, nonce } => {
+                // v9.9.1: Command Center — solution particles from narwhal
+                self.command_center.spawn_solution_event();
                 self.add_log(LogEntry {
                     timestamp: now,
                     level: LogLevel::Info,
@@ -494,10 +497,8 @@ impl MinerTuiApp {
                 self.current_block_height = block_height;
                 if reward_qnk > 0.0 {
                     self.current_block_reward = reward_qnk;
-                    // v9.8.6: Trigger water robot on mining reward
-                    self.water_robots.trigger(
-                        super::tui_views::water_robots_animation::WaterRobotEvent::RewardReceived { amount: reward_qnk }
-                    );
+                    // v9.9.0: Q animation trigger on mining reward
+                    self.q_animation.trigger();
                 }
                 self.add_log(LogEntry {
                     timestamp: now,
@@ -566,12 +567,6 @@ impl MinerTuiApp {
             }
             DiagnosticEvent::UpdateAvailable { min_miner_version } => {
                 self.diagnostics.min_miner_version = Some(min_miner_version.clone());
-                // v9.8.6: Trigger water robot on update available
-                self.water_robots.trigger(
-                    super::tui_views::water_robots_animation::WaterRobotEvent::UpdateAvailable {
-                        version: min_miner_version.clone()
-                    }
-                );
                 self.add_log(LogEntry {
                     timestamp: now,
                     level: LogLevel::Warn,
@@ -856,13 +851,13 @@ fn handle_key_press(app: &mut MinerTuiApp, code: KeyCode, modifiers: KeyModifier
         KeyCode::BackTab if !app.wallet_send_mode => app.prev_tab(),
         KeyCode::Right if !app.wallet_send_mode => app.next_tab(),
         KeyCode::Left if !app.wallet_send_mode => app.prev_tab(),
-        KeyCode::F(n) if n >= 1 && n <= 6 => { app.current_tab = (n as usize) - 1; }
+        KeyCode::F(n) if n >= 1 && n <= 7 => { app.current_tab = (n as usize) - 1; }
 
-        // Events tab log filters (only when on Events tab)
-        KeyCode::Char('1') if app.current_tab == 4 => app.log_filter = 0,
-        KeyCode::Char('2') if app.current_tab == 4 => app.log_filter = 1,
-        KeyCode::Char('3') if app.current_tab == 4 => app.log_filter = 2,
-        KeyCode::Char('4') if app.current_tab == 4 => app.log_filter = 3,
+        // Events tab log filters (only when on Events tab #5)
+        KeyCode::Char('1') if app.current_tab == 5 => app.log_filter = 0,
+        KeyCode::Char('2') if app.current_tab == 5 => app.log_filter = 1,
+        KeyCode::Char('3') if app.current_tab == 5 => app.log_filter = 2,
+        KeyCode::Char('4') if app.current_tab == 5 => app.log_filter = 3,
 
         // Wallet tab: password setting mode
         _ if app.current_tab == 1 && app.wallet_password_setting => {
@@ -906,28 +901,28 @@ fn handle_key_press(app: &mut MinerTuiApp, code: KeyCode, modifiers: KeyModifier
             app.show_help = !app.show_help;
         }
 
-        // v9.9.1: Command Center keys (only when on Network tab #3)
-        KeyCode::Char('r') | KeyCode::Char('R') if app.current_tab == 3 => {
+        // v9.9.1: Command Center keys (only when on Ocean tab #4)
+        KeyCode::Char('r') | KeyCode::Char('R') if app.current_tab == 4 => {
             app.command_center.handle_key('r');
         }
-        KeyCode::Char('s') | KeyCode::Char('S') if app.current_tab == 3 => {
+        KeyCode::Char('s') | KeyCode::Char('S') if app.current_tab == 4 => {
             app.command_center.handle_key('s');
         }
-        KeyCode::Char('t') | KeyCode::Char('T') if app.current_tab == 3 => {
+        KeyCode::Char('t') | KeyCode::Char('T') if app.current_tab == 4 => {
             app.command_center.handle_key('t');
         }
-        KeyCode::Char('p') | KeyCode::Char('P') if app.current_tab == 3 => {
+        KeyCode::Char('p') | KeyCode::Char('P') if app.current_tab == 4 => {
             app.command_center.handle_key('p');
         }
 
-        // Re-run diagnostics (only when NOT on tab 3)
+        // Re-run diagnostics (only when NOT on Ocean tab)
         KeyCode::Char('r') | KeyCode::Char('R') => {
             if let Some(ref state) = app.state {
                 app.diagnostics.run_checks(state);
             }
         }
 
-        // Throttle toggle (only when NOT on tab 3)
+        // Throttle toggle (only when NOT on Ocean tab)
         KeyCode::Char('t') | KeyCode::Char('T') => {
             if let Some(ref state) = app.state {
                 let mut mode = state.throttle_mode.write();
@@ -995,34 +990,34 @@ fn handle_key_press(app: &mut MinerTuiApp, code: KeyCode, modifiers: KeyModifier
             }
         }
 
-        // Scroll (Events tab)
+        // Scroll (Events tab #5)
         KeyCode::Up => {
-            if app.current_tab == 4 {
+            if app.current_tab == 5 {
                 app.log_scroll_offset = app.log_scroll_offset.saturating_add(1);
             }
         }
         KeyCode::Down => {
-            if app.current_tab == 4 {
+            if app.current_tab == 5 {
                 app.log_scroll_offset = app.log_scroll_offset.saturating_sub(1);
             }
         }
         KeyCode::PageUp => {
-            if app.current_tab == 4 {
+            if app.current_tab == 5 {
                 app.log_scroll_offset = app.log_scroll_offset.saturating_add(10);
             }
         }
         KeyCode::PageDown => {
-            if app.current_tab == 4 {
+            if app.current_tab == 5 {
                 app.log_scroll_offset = app.log_scroll_offset.saturating_sub(10);
             }
         }
         KeyCode::Home => {
-            if app.current_tab == 4 {
+            if app.current_tab == 5 {
                 app.log_scroll_offset = app.logs.len(); // Scroll to top
             }
         }
         KeyCode::End => {
-            if app.current_tab == 4 {
+            if app.current_tab == 5 {
                 app.log_scroll_offset = 0; // Auto-scroll (latest)
             }
         }
@@ -1235,9 +1230,9 @@ fn draw_ui(f: &mut Frame, app: &MinerTuiApp) {
         app.starship_animation.render(f.buffer_mut());
     }
 
-    // v9.8.6: Water robots animation overlay (draws on important events)
-    if app.water_robots.is_visible() {
-        app.water_robots.render(f.buffer_mut());
+    // v9.9.0: Q animation overlay (fullscreen glowing Q logo)
+    if app.q_animation.is_active() {
+        app.q_animation.apply_overlay(f.buffer_mut());
     }
 
     // v9.8.4: Update animation overlay (draws on top of everything)
@@ -1264,7 +1259,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
         env!("CARGO_PKG_VERSION"), status, hrs, mins
     );
 
-    let tab_titles = vec!["Dashboard", "Wallet", "Diagnostics", "Network", "Events", "Settings"];
+    let tab_titles = vec!["Dashboard", "Wallet", "Diagnostics", "Network", "Ocean", "Events", "Settings"];
     let tabs = Tabs::new(tab_titles)
         .block(
             Block::default()

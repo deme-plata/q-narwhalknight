@@ -209,6 +209,30 @@ async fn worker_loop(
     let streaming_body_threshold = config.limits.streaming_body_threshold;
     let static_config = Arc::new(config.static_files.clone());
 
+    // Build h1-only TLS config for libp2p WebSocket proxy port.
+    // Browser js-libp2p needs HTTP/1.1 for WebSocket upgrade — h2 ALPN breaks it.
+    let libp2p_ws_tls: Option<Arc<rustls::ServerConfig>> = if config.libp2p_ws.enabled {
+        match acceptor::build_tls_config_h1_only(&config.tls) {
+            Ok(cfg) => {
+                if worker_id == 0 {
+                    tracing::info!(
+                        port = config.libp2p_ws.port,
+                        backend = %config.libp2p_ws.backend,
+                        "LibP2P WS proxy enabled: port {} → {}",
+                        config.libp2p_ws.port, config.libp2p_ws.backend,
+                    );
+                }
+                Some(cfg)
+            }
+            Err(e) => {
+                tracing::error!("Failed to build libp2p WS TLS config: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // In-memory file cache with pre-compressed gzip variants.
     // Shared across all connections on this worker. Each worker gets its own
     // cache instance (no cross-thread contention), populated on first access.
@@ -407,13 +431,28 @@ async fn worker_loop(
             }
         }
 
-        // Determine if this is a TLS port (443) or plain HTTP (80)
+        // Determine if this is a TLS port (443/9443) or plain HTTP (80)
         let local_port = tcp_stream.local_addr().map(|a| a.port()).unwrap_or(443);
-        let is_tls = local_port == 443;
+        let is_tls = local_port != 80; // All ports except 80 are TLS
+        let is_libp2p_ws = config.libp2p_ws.enabled && local_port == config.libp2p_ws.port;
+        let libp2p_ws_backend = if is_libp2p_ws {
+            Some(config.libp2p_ws.backend.clone())
+        } else {
+            None
+        };
 
         // Hot-reload: load current TLS config per connection (read lock, ~10ns).
         // If certs were reloaded via admin API, new connections get the new config.
-        let tls_acceptor = TlsAcceptor::from(shared_tls.load());
+        // LibP2P WS port uses h1-only TLS config (no h2 ALPN).
+        let tls_acceptor = if is_libp2p_ws {
+            if let Some(ref h1_cfg) = libp2p_ws_tls {
+                TlsAcceptor::from(h1_cfg.clone())
+            } else {
+                TlsAcceptor::from(shared_tls.load())
+            }
+        } else {
+            TlsAcceptor::from(shared_tls.load())
+        };
         let metrics = metrics.clone();
         let ip_tracker = ip_tracker.clone();
         let active_conns = active_conns.clone();
@@ -428,6 +467,61 @@ async fn worker_loop(
         let challenge_store = challenge_store.clone();
 
         tokio::spawn(async move {
+            // ── LibP2P WebSocket proxy: separate path ──────────────────────
+            // LibP2P connections are long-lived (hours). They MUST NOT:
+            //  1. Be subject to MAX_CONN_LIFETIME timeout (would kill after 5min)
+            //  2. Hold a handler semaphore permit (wastes capacity)
+            // Handle them first, before semaphore acquisition.
+            if is_libp2p_ws && is_tls {
+                let tls_result = tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    tls_acceptor.accept(tcp_stream),
+                ).await;
+
+                match tls_result {
+                    Ok(Ok(tls_stream)) => {
+                        metrics.tls_handshake_ok();
+                        if let Some(ref backend_addr) = libp2p_ws_backend {
+                            match tokio::net::TcpStream::connect(backend_addr).await {
+                                Ok(backend_stream) => {
+                                    tracing::info!(client = %client_addr,
+                                        "LibP2P WS proxy established (no timeout)");
+                                    // Use 64KB buffers for better throughput on
+                                    // gossipsub messages (~70KB blocks)
+                                    let (client_read, client_write) = tokio::io::split(tls_stream);
+                                    let (backend_read, backend_write) = tokio::io::split(backend_stream);
+                                    let mut cr = tokio::io::BufReader::with_capacity(65536, client_read);
+                                    let mut bw = tokio::io::BufWriter::with_capacity(65536, backend_write);
+                                    let mut br = tokio::io::BufReader::with_capacity(65536, backend_read);
+                                    let mut cw = tokio::io::BufWriter::with_capacity(65536, client_write);
+                                    // No timeout — libp2p connections are long-lived
+                                    let _ = tokio::select! {
+                                        r = tokio::io::copy(&mut cr, &mut bw) => r,
+                                        r = tokio::io::copy(&mut br, &mut cw) => r,
+                                    };
+                                }
+                                Err(e) => {
+                                    tracing::warn!(client = %client_addr, backend = ?backend_addr,
+                                        "LibP2P WS backend connect failed: {}", e);
+                                }
+                            }
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        metrics.tls_handshake_fail();
+                        tracing::debug!(client = %client_addr, "LibP2P WS TLS handshake failed: {}", e);
+                    }
+                    Err(_) => {
+                        metrics.tls_handshake_fail();
+                        tracing::debug!(client = %client_addr, "LibP2P WS TLS handshake timeout");
+                    }
+                }
+                // Single cleanup for the libp2p path
+                cleanup_conn(&ip_tracker, client_ip, &active_conns, &metrics);
+                return;
+            }
+
+            // ── Normal HTTP/H2 path ────────────────────────────────────────
             // Acquire semaphore permit — backpressure if too many concurrent handlers.
             // try_acquire: if no permits, drop connection immediately with 503.
             let _permit = match semaphore.try_acquire() {

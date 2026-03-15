@@ -64,7 +64,8 @@ struct Args {
     #[arg(long, default_value = "30")]
     duration: u64,
 
-    /// API server URL (e.g., http://185.182.185.227:8080)
+    /// API server URL(s) — comma-separated for multi-server failover
+    /// e.g., http://185.182.185.227:8080,http://5.79.79.158:8080
     #[arg(short, long, default_value = "http://localhost:8080")]
     server: String,
 
@@ -118,6 +119,11 @@ struct Args {
     #[cfg(feature = "p2p")]
     #[arg(long)]
     no_p2p: bool,
+
+    /// Force P2P even when --bandwidth-limit would auto-disable it.
+    #[cfg(feature = "p2p")]
+    #[arg(long)]
+    force_p2p: bool,
 
     /// P2P listen port (0 = random OS-assigned port, default).
     #[cfg(feature = "p2p")]
@@ -367,6 +373,200 @@ fn normalize_server_url(url: &str) -> String {
 /// Default fallback bootstrap server
 const FALLBACK_BOOTSTRAP_URL: &str = "https://quillon.xyz";
 
+// ═══════════════════════════════════════════════════════════════════
+// v10.0.0: Multi-Server Failover — "Any Node Mines" Resilience
+// Tracks health/latency of multiple servers, auto-elects primary.
+// ═══════════════════════════════════════════════════════════════════
+
+/// Parse --server argument into list of normalized URLs.
+/// Supports comma-separated: "http://a:8080,http://b:8080"
+/// Single URL is backward-compatible (produces a 1-element vec).
+fn parse_server_list(server_arg: &str) -> Vec<String> {
+    server_arg
+        .split(',')
+        .map(|s| normalize_server_url(s.trim()))
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Multi-server health tracker with automatic primary election.
+/// Thread-safe (all fields are atomic), designed for concurrent access
+/// from mining threads, SSE listener, and health check task.
+pub struct ServerSelector {
+    /// Normalized server URLs
+    servers: Vec<String>,
+    /// Per-server health flag (true = healthy)
+    health: Vec<AtomicBool>,
+    /// Per-server latency in milliseconds (u64::MAX = unknown)
+    latency_ms: Vec<AtomicU64>,
+    /// Index of current primary server
+    primary_idx: AtomicUsize,
+}
+
+impl ServerSelector {
+    fn new(servers: Vec<String>) -> Arc<Self> {
+        let count = servers.len();
+        let health: Vec<AtomicBool> = (0..count).map(|_| AtomicBool::new(true)).collect();
+        let latency_ms: Vec<AtomicU64> = (0..count).map(|_| AtomicU64::new(u64::MAX)).collect();
+        Arc::new(Self {
+            servers,
+            health,
+            latency_ms,
+            primary_idx: AtomicUsize::new(0),
+        })
+    }
+
+    /// Get current primary server URL.
+    fn get_primary(&self) -> &str {
+        &self.servers[self.primary_idx.load(Ordering::Relaxed)]
+    }
+
+    /// Get all healthy server URLs in order: primary first, then others by latency.
+    fn get_all_healthy(&self) -> Vec<&str> {
+        let primary = self.primary_idx.load(Ordering::Relaxed);
+        let mut result = Vec::with_capacity(self.servers.len() + 1);
+
+        // Primary first (even if unhealthy — caller should try it)
+        if primary < self.servers.len() {
+            result.push(self.servers[primary].as_str());
+        }
+
+        // Other healthy servers sorted by latency
+        let mut others: Vec<(usize, u64)> = (0..self.servers.len())
+            .filter(|&i| i != primary && self.health[i].load(Ordering::Relaxed))
+            .map(|i| (i, self.latency_ms[i].load(Ordering::Relaxed)))
+            .collect();
+        others.sort_by_key(|&(_, lat)| lat);
+
+        for (idx, _) in others {
+            result.push(self.servers[idx].as_str());
+        }
+
+        // Always include FALLBACK_BOOTSTRAP_URL as last resort
+        if !self.servers.iter().any(|s| s == FALLBACK_BOOTSTRAP_URL) {
+            result.push(FALLBACK_BOOTSTRAP_URL);
+        }
+
+        result
+    }
+
+    fn mark_unhealthy(&self, url: &str) {
+        if let Some(idx) = self.servers.iter().position(|s| s == url) {
+            self.health[idx].store(false, Ordering::Relaxed);
+        }
+    }
+
+    fn mark_healthy(&self, url: &str, latency: u64) {
+        if let Some(idx) = self.servers.iter().position(|s| s == url) {
+            self.health[idx].store(true, Ordering::Relaxed);
+            self.latency_ms[idx].store(latency, Ordering::Relaxed);
+        }
+    }
+
+    /// Re-elect primary: pick the healthy server with lowest latency.
+    fn auto_elect_primary(&self) {
+        let mut best_idx = self.primary_idx.load(Ordering::Relaxed);
+        let mut best_lat = u64::MAX;
+
+        for i in 0..self.servers.len() {
+            if self.health[i].load(Ordering::Relaxed) {
+                let lat = self.latency_ms[i].load(Ordering::Relaxed);
+                if lat < best_lat {
+                    best_lat = lat;
+                    best_idx = i;
+                }
+            }
+        }
+
+        let old = self.primary_idx.swap(best_idx, Ordering::Relaxed);
+        if old != best_idx {
+            info!("🔄 Server failover: {} → {} (latency: {}ms)",
+                self.servers[old], self.servers[best_idx], best_lat);
+        }
+    }
+
+    fn server_count(&self) -> usize {
+        self.servers.len()
+    }
+}
+
+/// Spawn health check task that pings each server every 15 seconds.
+fn spawn_health_checker(
+    selector: Arc<ServerSelector>,
+    client: reqwest::Client,
+    is_running: Arc<AtomicBool>,
+) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+        loop {
+            interval.tick().await;
+            if !is_running.load(Ordering::Relaxed) {
+                break;
+            }
+
+            for i in 0..selector.server_count() {
+                let url = format!("{}/api/v1/status", selector.servers[i]);
+                let start = std::time::Instant::now();
+                match client
+                    .get(&url)
+                    .timeout(std::time::Duration::from_secs(8))
+                    .send()
+                    .await
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        let latency = start.elapsed().as_millis() as u64;
+                        selector.mark_healthy(&selector.servers[i], latency);
+                    }
+                    _ => {
+                        selector.mark_unhealthy(&selector.servers[i]);
+                    }
+                }
+            }
+
+            selector.auto_elect_primary();
+        }
+    });
+}
+
+/// Try an HTTP GET request against ALL healthy servers in order.
+/// Returns (response_body, actual_url_used) on first success.
+async fn fetch_with_failover(
+    client: &reqwest::Client,
+    selector: &ServerSelector,
+    path: &str,
+) -> Result<(String, String)> {
+    let servers = selector.get_all_healthy();
+
+    for base_url in &servers {
+        let url = format!("{}{}", base_url, path);
+        match client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                let body = resp.text().await.unwrap_or_default();
+                track_download(body.len());
+                return Ok((body, base_url.to_string()));
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                track_api_failure();
+                debug!("Server {} returned HTTP {} for {} — trying next", base_url, status, path);
+                selector.mark_unhealthy(base_url);
+            }
+            Err(e) => {
+                track_api_failure();
+                debug!("Server {} unreachable ({}) — trying next", base_url, e);
+                selector.mark_unhealthy(base_url);
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!("All {} servers failed for {}", servers.len(), path))
+}
+
 /// Build a reqwest HTTP client with optional proxy support.
 /// Used by all HTTP client creation points (solo mining, decentralized pool, diagnostics).
 fn build_http_client(proxy_url: Option<&str>, timeout_secs: u64) -> anyhow::Result<reqwest::Client> {
@@ -491,7 +691,7 @@ fn track_download(bytes: usize) {
 
 /// Track an upload (request body bytes sent).
 #[inline]
-fn track_upload(bytes: usize) {
+pub fn track_upload(bytes: usize) {
     GLOBAL_BYTES_UPLOADED.fetch_add(bytes as u64, std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -513,6 +713,7 @@ fn get_mode_switch_pool_url() -> &'static parking_lot::Mutex<Option<String>> {
 
 /// Try an HTTP GET request against the primary server, falling back to bootstrap1.quillon.xyz
 /// Returns (response_body, actual_url_used) on success.
+/// NOTE: Legacy function kept for backward compatibility. New code should use fetch_with_failover().
 async fn fetch_with_fallback(
     client: &reqwest::Client,
     primary_base: &str,
@@ -526,10 +727,15 @@ async fn fetch_with_fallback(
             Ok((body, primary_base.to_string()))
         }
         Ok(resp) => {
+            let status = resp.status();
             track_api_failure();
-            debug!("Primary returned HTTP {} — using backup node {}", resp.status(), FALLBACK_BOOTSTRAP_URL);
+            debug!("Primary returned HTTP {} — using backup node {}", status, FALLBACK_BOOTSTRAP_URL);
             let fallback_url = format!("{}{}", FALLBACK_BOOTSTRAP_URL, path);
             let resp = client.get(&fallback_url).timeout(std::time::Duration::from_secs(10)).send().await?;
+            if !resp.status().is_success() {
+                let fb_status = resp.status();
+                return Err(anyhow::anyhow!("Primary HTTP {}, fallback HTTP {} — server may be syncing", status, fb_status));
+            }
             let body = resp.text().await.unwrap_or_default();
             track_download(body.len());
             Ok((body, FALLBACK_BOOTSTRAP_URL.to_string()))
@@ -539,6 +745,9 @@ async fn fetch_with_fallback(
             debug!("Primary {} unreachable ({}) — using backup node {}", primary_base, e, FALLBACK_BOOTSTRAP_URL);
             let fallback_url = format!("{}{}", FALLBACK_BOOTSTRAP_URL, path);
             let resp = client.get(&fallback_url).timeout(std::time::Duration::from_secs(10)).send().await?;
+            if !resp.status().is_success() {
+                return Err(anyhow::anyhow!("Primary unreachable, fallback HTTP {} — server may be syncing", resp.status()));
+            }
             let body = resp.text().await.unwrap_or_default();
             track_download(body.len());
             Ok((body, FALLBACK_BOOTSTRAP_URL.to_string()))
@@ -548,6 +757,41 @@ async fn fetch_with_fallback(
 
 /// Fallback wallet: when device login fails, mine to the master wallet.
 const WINDOWS_DEFAULT_WALLET: &str = "qnkefca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+
+/// v9.8.4: Saved wallet persistence — once you login, you never have to again.
+/// Stores wallet address in ~/.quillon/miner-wallet.txt (or next to the binary on Windows).
+fn saved_wallet_path() -> std::path::PathBuf {
+    if cfg!(target_os = "windows") {
+        // Windows: save next to the binary
+        if let Ok(exe) = std::env::current_exe() {
+            return exe.with_file_name("quillon-wallet.txt");
+        }
+    }
+    // Unix: ~/.quillon/miner-wallet.txt
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let dir = std::path::PathBuf::from(home).join(".quillon");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("miner-wallet.txt")
+}
+
+fn load_saved_wallet() -> Option<String> {
+    let path = saved_wallet_path();
+    let contents = std::fs::read_to_string(&path).ok()?;
+    let wallet = contents.trim().to_string();
+    // Validate: must start with "qnk" and be 66+ chars
+    if wallet.starts_with("qnk") && wallet.len() >= 66 {
+        Some(wallet)
+    } else {
+        None
+    }
+}
+
+fn save_wallet(wallet: &str) {
+    let path = saved_wallet_path();
+    if let Err(e) = std::fs::write(&path, wallet) {
+        eprintln!("\x1b[33m   ! Could not save wallet: {}\x1b[0m", e);
+    }
+}
 
 /// Open a URL in the user's default browser
 fn open_browser(url: &str) -> bool {
@@ -648,8 +892,9 @@ async fn device_login_flow(server_url: &str, proxy_url: Option<&str>) -> Result<
 
     // Step 3: Poll until user completes login OR presses Enter to skip
     let poll_url = format!("{}/api/v1/miner/device-login/{}", connected_url, device_code);
-    let max_wait = std::time::Duration::from_secs(600); // 10 min
+    let max_wait = std::time::Duration::from_secs(300); // 5 min (was 10)
     let start = std::time::Instant::now();
+    let mut consecutive_errors: u32 = 0;
 
     // Spawn a stdin listener — if user presses Enter, we get a signal
     let (skip_tx, mut skip_rx) = tokio::sync::oneshot::channel::<()>();
@@ -662,16 +907,36 @@ async fn device_login_flow(server_url: &str, proxy_url: Option<&str>) -> Result<
     loop {
         // Check timeout
         if start.elapsed() >= max_wait {
-            return Err(anyhow::anyhow!("Login timed out after 10 minutes"));
+            return Err(anyhow::anyhow!("Login timed out — starting with default wallet"));
+        }
+
+        // v9.8.4: Auto-skip after 5 consecutive server errors (502/503/timeout)
+        if consecutive_errors >= 5 {
+            eprint!("\r\x1b[2K");
+            return Err(anyhow::anyhow!("Server unavailable — starting with default wallet"));
         }
 
         // Race: poll server vs user pressing Enter
         tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_secs(3)) => {
                 // Poll the server
-                let poll_resp = match client.get(&poll_url).send().await {
-                    Ok(r) => r.json::<serde_json::Value>().await.unwrap_or_default(),
-                    Err(_) => continue,
+                let poll_resp = match client.get(&poll_url).timeout(std::time::Duration::from_secs(8)).send().await {
+                    Ok(r) => {
+                        // v9.8.4: Check HTTP status before parsing JSON
+                        if !r.status().is_success() {
+                            consecutive_errors += 1;
+                            let elapsed = start.elapsed().as_secs();
+                            eprint!("\r\x1b[2K\x1b[33m   Server returned {} — retrying ({}/5)...\x1b[0m", r.status(), consecutive_errors);
+                            let _ = r.text().await; // drain body
+                            continue;
+                        }
+                        consecutive_errors = 0;
+                        r.json::<serde_json::Value>().await.unwrap_or_default()
+                    }
+                    Err(_) => {
+                        consecutive_errors += 1;
+                        continue;
+                    }
                 };
 
                 if let Some(data) = poll_resp.get("data") {
@@ -755,6 +1020,7 @@ async fn main() -> Result<()> {
     // Zero-config: When launched without explicit flags, use device login flow.
     // Opens browser for user to log in → miner gets wallet → starts mining.
     // No --wallet needed — just double-click the exe!
+    // v9.8.4: Saved wallet persistence — login once, mine forever.
     {
         let has_explicit_args = std::env::args().count() > 1;
         if !has_explicit_args {
@@ -766,37 +1032,55 @@ async fn main() -> Result<()> {
             eprintln!("\x1b[1;36m   Quillon Miner v{}\x1b[0m", env!("CARGO_PKG_VERSION"));
             eprintln!("\x1b[2m   Quantum-resistant solo mining — zero configuration required\x1b[0m");
             eprintln!();
-            eprintln!("\x1b[38;5;245m   Your browser will open to link your wallet.\x1b[0m");
-            eprintln!("\x1b[38;5;245m   Or press Enter to start mining immediately.\x1b[0m");
-            eprintln!();
 
-            // Try device login flow — retries server, waits for user, Enter to skip
-            match device_login_flow(&args.server, early_proxy_url.as_deref()).await {
-                Ok(wallet) => {
-                    let short = if wallet.len() > 17 {
-                        format!("{}...{}", &wallet[..11], &wallet[wallet.len()-6..])
-                    } else {
-                        wallet.clone()
-                    };
-                    eprintln!("\x1b[1;32m   ✓ Wallet linked: {}\x1b[0m", short);
-                    eprintln!();
-                    args.wallet = Some(wallet);
-                }
-                Err(e) => {
-                    let msg = e.to_string();
-                    if !msg.contains("User skipped") {
-                        eprintln!("\x1b[33m   ! {}\x1b[0m", msg);
+            // v9.8.4: Check for saved wallet from a previous login
+            if let Some(saved) = load_saved_wallet() {
+                let short = if saved.len() > 17 {
+                    format!("{}...{}", &saved[..11], &saved[saved.len()-6..])
+                } else {
+                    saved.clone()
+                };
+                eprintln!("\x1b[1;32m   ✓ Wallet loaded: {}\x1b[0m", short);
+                eprintln!("\x1b[2m   (saved from previous login — delete ~/.quillon/miner-wallet.txt to reset)\x1b[0m");
+                eprintln!();
+                args.wallet = Some(saved);
+            } else {
+                eprintln!("\x1b[38;5;245m   Your browser will open to link your wallet.\x1b[0m");
+                eprintln!("\x1b[38;5;245m   Or press Enter to start mining immediately.\x1b[0m");
+                eprintln!();
+
+                // Try device login flow — retries server, waits for user, Enter to skip
+                match device_login_flow(&args.server, early_proxy_url.as_deref()).await {
+                    Ok(wallet) => {
+                        let short = if wallet.len() > 17 {
+                            format!("{}...{}", &wallet[..11], &wallet[wallet.len()-6..])
+                        } else {
+                            wallet.clone()
+                        };
+                        eprintln!("\x1b[1;32m   ✓ Wallet linked: {}\x1b[0m", short);
+                        eprintln!();
+                        save_wallet(&wallet);
+                        args.wallet = Some(wallet);
                     }
-                    eprintln!("\x1b[2m   Mining to community pool — use --wallet <addr> for your own\x1b[0m");
-                    eprintln!();
-                    args.wallet = Some(WINDOWS_DEFAULT_WALLET.to_string());
+                    Err(e) => {
+                        let msg = e.to_string();
+                        if !msg.contains("User skipped") {
+                            eprintln!("\x1b[33m   ! {}\x1b[0m", msg);
+                        }
+                        eprintln!("\x1b[2m   Mining to community pool — use --wallet <addr> for your own\x1b[0m");
+                        eprintln!();
+                        args.wallet = Some(WINDOWS_DEFAULT_WALLET.to_string());
+                    }
                 }
             }
         }
     }
 
-    // Normalize server URL once upfront — strips trailing slashes, adds scheme if missing
-    args.server = normalize_server_url(&args.server);
+    // v10.0.0: Parse comma-separated server list for multi-server failover
+    // Single URL is backward-compatible (produces a 1-element list).
+    let server_list = parse_server_list(&args.server);
+    // Keep first server as the canonical --server value for backward compat
+    args.server = server_list[0].clone();
 
     // Proxy URL was resolved early (before device login). Reuse it.
     let proxy_url = early_proxy_url;
@@ -1019,7 +1303,14 @@ async fn main() -> Result<()> {
                 }
                 info!("⛏️  Starting Quillon-NarwhalKnight-Graph SOLO mining...");
                 info!("💰 Mining to wallet: {}", wallet);
-                info!("🌐 Primary server: {}", args.server);
+                if server_list.len() > 1 {
+                    info!("🌐 Servers ({} configured, multi-failover active):", server_list.len());
+                    for (i, srv) in server_list.iter().enumerate() {
+                        info!("   [{}] {}{}", i, srv, if i == 0 { " (primary)" } else { "" });
+                    }
+                } else {
+                    info!("🌐 Primary server: {}", args.server);
+                }
                 info!("🔄 Fallback server: {}", FALLBACK_BOOTSTRAP_URL);
                 if let Some(ref name) = args.miner_name {
                     info!("🏷️  Miner name: {}", name);
@@ -1032,19 +1323,27 @@ async fn main() -> Result<()> {
                     // TUI log receiver is only available on the first iteration
                     let tui_rx = tui_log_rx_opt.take().flatten();
                     let enable_tui = use_tui && tui_rx.is_some();
+                    // v10.0.2: Auto-disable P2P when --bandwidth-limit is set (unless --force-p2p)
                     #[cfg(feature = "p2p")]
-                    let (no_p2p_flag, p2p_port_val) = (args.no_p2p, args.p2p_port);
+                    let (no_p2p_flag, p2p_port_val) = {
+                        let auto_disable = args.bandwidth_limit > 0 && !args.force_p2p;
+                        (args.no_p2p || auto_disable, args.p2p_port)
+                    };
                     #[cfg(not(feature = "p2p"))]
                     let (no_p2p_flag, p2p_port_val) = (true, 0u16);
-                    let _ = run_mining(cpu_threads, args.intensity, args.gpu, &wallet, &args.server, args.miner_name.as_deref(), enable_tui, args.bandwidth_limit, proxy_url.clone(), no_p2p_flag, p2p_port_val, args.no_auto_update, tui_rx).await;
+                    let _ = run_mining(cpu_threads, args.intensity, args.gpu, &wallet, &args.server, args.miner_name.as_deref(), enable_tui, args.bandwidth_limit, proxy_url.clone(), no_p2p_flag, p2p_port_val, args.no_auto_update, server_list.clone(), tui_rx).await;
                 }
                 #[cfg(not(feature = "tui"))]
                 {
+                    // v10.0.2: Auto-disable P2P when --bandwidth-limit is set (unless --force-p2p)
                     #[cfg(feature = "p2p")]
-                    let (no_p2p_flag, p2p_port_val) = (args.no_p2p, args.p2p_port);
+                    let (no_p2p_flag, p2p_port_val) = {
+                        let auto_disable = args.bandwidth_limit > 0 && !args.force_p2p;
+                        (args.no_p2p || auto_disable, args.p2p_port)
+                    };
                     #[cfg(not(feature = "p2p"))]
                     let (no_p2p_flag, p2p_port_val) = (true, 0u16);
-                    let _ = run_mining(cpu_threads, args.intensity, args.gpu, &wallet, &args.server, args.miner_name.as_deref(), false, args.bandwidth_limit, proxy_url.clone(), no_p2p_flag, p2p_port_val, args.no_auto_update, ()).await;
+                    let _ = run_mining(cpu_threads, args.intensity, args.gpu, &wallet, &args.server, args.miner_name.as_deref(), false, args.bandwidth_limit, proxy_url.clone(), no_p2p_flag, p2p_port_val, args.no_auto_update, server_list.clone(), ()).await;
                 }
             }
 
@@ -1186,6 +1485,7 @@ async fn run_mining(
     no_p2p: bool,
     p2p_port: u16,
     no_auto_update: bool,
+    server_list: Vec<String>,
     #[cfg(feature = "tui")]
     tui_log_rx: Option<tokio::sync::mpsc::UnboundedReceiver<q_miner::ui::tui_app::LogEntry>>,
     #[cfg(not(feature = "tui"))]
@@ -1200,6 +1500,21 @@ async fn run_mining(
     let miner_id = format!("{:016x}", rand::random::<u64>());
     let miner_name = miner_name.map(|s| s.to_string());
     info!("🆔 Miner ID: {}", miner_id);
+
+    // v10.0.0: Multi-server failover — create ServerSelector from parsed server list
+    let server_selector = ServerSelector::new(server_list);
+    {
+        let health_client = build_http_client_safe(proxy_url.as_deref(), 10);
+        spawn_health_checker(
+            Arc::clone(&server_selector),
+            health_client,
+            is_running.clone(),
+        );
+        if server_selector.server_count() > 1 {
+            info!("🔄 Multi-server health checker started ({} servers, 15s interval)",
+                server_selector.server_count());
+        }
+    }
 
     // CRITICAL FIX: Shared signal for when a new block is produced
     // All mining threads will check this and immediately fetch new challenge
@@ -1289,15 +1604,8 @@ async fn run_mining(
             Ok(p2p) => {
                 let crx = p2p.challenge_receiver();
                 let stx = p2p.solution_sender();
-                // Forward P2P block signals → new_block_signal AtomicU64 (same as SSE)
-                let p2p_block_rx = p2p.block_signal_receiver();
-                let p2p_nbs = new_block_signal.clone();
-                tokio::spawn(async move {
-                    let mut rx = p2p_block_rx;
-                    while let Ok(_height) = rx.recv().await {
-                        p2p_nbs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-                });
+                // v10.0.2: Removed P2P block signal forwarding — miners get block signals
+                // via SSE only. Blocks topic no longer subscribed (saves ~10 KB/s inbound).
                 let handle = tokio::spawn(p2p.run());
                 info!("P2P mining network started (port {})", p2p_port);
                 (Some(crx), Some(stx), Some(handle))
@@ -1308,7 +1616,11 @@ async fn run_mining(
             }
         }
     } else {
-        info!("P2P disabled (--no-p2p) — using HTTP only");
+        if bandwidth_limit > 0 {
+            info!("P2P auto-disabled (--bandwidth-limit {} KB/s) — HTTP-only mode (use --force-p2p to override)", bandwidth_limit);
+        } else {
+            info!("P2P disabled (--no-p2p) — using HTTP only");
+        }
         (None, None, None)
     };
     #[cfg(not(feature = "p2p"))]
@@ -1316,7 +1628,40 @@ async fn run_mining(
 
     info!("🔥 Starting {} CPU mining threads (dedicated OS threads)", threads);
     if bandwidth_limit > 0 {
-        info!("📡 Network bandwidth limit: {} KB/s (challenge refresh slowed, submit throttled)", bandwidth_limit);
+        let profile = match bandwidth_limit {
+            50.. => "optimized (P2P on, balance poll 30s)",
+            10..=49 => "low-bandwidth (P2P off, balance poll 60s)",
+            _ => "ultra-low (P2P off, poll-only 120s)",
+        };
+        // If P2P was force-enabled, override the profile description
+        let p2p_note = if !no_p2p { " [P2P force-enabled]" } else { "" };
+        info!("📡 Bandwidth limit: {} KB/s — profile: {}{}", bandwidth_limit, profile, p2p_note);
+    }
+
+    // v10.0.2: Centralized solution submitter — all threads send solutions to one channel.
+    // Deduplicates by hash and submits exactly once via HTTP + P2P.
+    let (solution_submit_tx, solution_submit_rx) = tokio::sync::mpsc::unbounded_channel::<q_miner::solution_submitter::SolutionMessage>();
+    {
+        let submit_client = build_http_client_safe(proxy_url.as_deref(), 15);
+        let submit_primary_url = normalize_server_url(&server_url);
+        let submit_fallback_url = FALLBACK_BOOTSTRAP_URL.to_string();
+        #[cfg(feature = "p2p")]
+        let submit_p2p_tx = p2p_solution_tx.as_ref().cloned();
+        #[cfg(not(feature = "p2p"))]
+        let submit_p2p_tx: Option<tokio::sync::mpsc::UnboundedSender<q_types::mining_solution::P2PMiningSubmission>> = None;
+        let submitter = q_miner::solution_submitter::SolutionSubmitter::new(
+            solution_submit_rx,
+            submit_client,
+            submit_primary_url,
+            submit_fallback_url,
+            submit_p2p_tx,
+            shared_state.event_tx.clone(),
+            solutions_found.clone(),
+            blocks_mined.clone(),
+            shared_state.bytes_uploaded.clone(),
+        );
+        tokio::spawn(submitter.run());
+        info!("📤 Centralized solution submitter started (dedup + single HTTP/P2P submit)");
     }
 
     // PERF: Capture tokio Handle so mining threads can dispatch async I/O
@@ -1330,9 +1675,8 @@ async fn run_mining(
     let shared_challenge: Arc<parking_lot::RwLock<Option<(MiningChallenge, std::time::Instant)>>> =
         Arc::new(parking_lot::RwLock::new(None));
 
-    // Wrap P2P channel in Arc for sharing across mining threads
+    // Wrap P2P challenge channel in Arc for sharing across mining threads (thread 0 only)
     let p2p_challenge_rx = p2p_challenge_rx.map(|rx| Arc::new(parking_lot::Mutex::new(rx)));
-    let p2p_solution_tx = p2p_solution_tx.map(Arc::new);
 
     // PERF: Use std::thread::spawn instead of tokio::spawn for mining threads.
     // Mining is 100% CPU-bound — tokio's work-stealing scheduler adds overhead
@@ -1359,7 +1703,9 @@ async fn run_mining(
 
             // v9.1.7: P2P channels — only thread 0 gets the challenge receiver
             let thread_p2p_challenge_rx = if thread_id == 0 { p2p_challenge_rx.clone() } else { None };
-            let thread_p2p_solution_tx = p2p_solution_tx.clone();
+
+            // v10.0.2: Centralized solution submitter channel (replaces per-thread HTTP+P2P)
+            let thread_solution_tx = solution_submit_tx.clone();
 
             let bw_limit = bandwidth_limit;
             let thread_proxy_url = proxy_url.clone();
@@ -1383,7 +1729,7 @@ async fn run_mining(
                         thread_state, event_tx, throttle_mode, challenge_latency, using_fallback,
                         bw_limit, shared_state_solutions, shared_state_blocks,
                         thread_proxy_url, shared_challenge,
-                        thread_p2p_challenge_rx, thread_p2p_solution_tx,
+                        thread_p2p_challenge_rx, thread_solution_tx,
                     )
                 })
                 .expect("Failed to spawn mining thread")
@@ -1421,18 +1767,25 @@ async fn run_mining(
     };
 
     // v8.6.5: Periodic balance polling — ensures wallet tab always shows latest balance
-    // SSE events are primary, this is a fallback that polls every 15s
+    // SSE events are primary, this is a fallback that polls periodically
     // v9.2.6: "Mercedes" smoothing — polling yields to SSE when SSE pushed within 10s
+    // v10.0.2: Bandwidth-aware polling intervals
     let bal_wallet = wallet.clone();
     let bal_server = server_url.clone();
     let bal_running = is_running.clone();
     let bal_event_tx = shared_state.event_tx.clone();
     let bal_proxy = proxy_url.clone();
     let bal_sse_epoch = shared_state.last_balance_sse_epoch.clone();
+    let bal_poll_secs = match bandwidth_limit {
+        0 => 15,        // Unlimited: 15s
+        50.. => 30,     // ≥50 KB/s: 30s
+        10..=49 => 60,  // ≥10 KB/s: 60s
+        _ => 120,       // <10 KB/s: 120s
+    };
     tokio::spawn(async move {
         // Wait 5s before first poll (let SSE connect first)
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(15));
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(bal_poll_secs));
         let client = {
             let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10));
             if let Some(ref proxy) = bal_proxy {
@@ -2143,13 +2496,14 @@ fn mining_thread(
     challenge_latency: Arc<AtomicU64>,
     _using_fallback: Arc<AtomicBool>,
     bandwidth_limit_kbps: u32,
-    shared_state_solutions: Arc<AtomicU64>,
-    shared_state_blocks: Arc<AtomicU64>,
+    _shared_state_solutions: Arc<AtomicU64>,
+    _shared_state_blocks: Arc<AtomicU64>,
     proxy_url: Option<String>,
     shared_challenge: Arc<parking_lot::RwLock<Option<(MiningChallenge, std::time::Instant)>>>,
-    // v9.1.7: P2P channels — challenge receiver (thread 0 only), solution sender (all threads)
+    // v9.1.7: P2P challenge receiver (thread 0 only)
     p2p_challenge_rx: Option<Arc<parking_lot::Mutex<tokio::sync::broadcast::Receiver<q_types::mining_solution::NetworkChallenge>>>>,
-    p2p_solution_tx: Option<Arc<tokio::sync::mpsc::UnboundedSender<q_types::mining_solution::P2PMiningSubmission>>>,
+    // v10.0.2: Centralized solution submitter channel (replaces per-thread HTTP+P2P)
+    solution_tx: tokio::sync::mpsc::UnboundedSender<q_miner::solution_submitter::SolutionMessage>,
 ) {
     let _ = event_tx.send(DiagnosticEvent::ThreadStarted { thread_id });
     // OPTIMIZATION: Pin thread to specific CPU core for cache locality on multi-socket systems
@@ -2184,6 +2538,7 @@ fn mining_thread(
             info!("⏸️  Thread {} waiting: Server syncing ({} blocks behind, phase: {})",
                 thread_id, sync_info.blocks_behind, sync_info.phase);
             info!("   Mining will start automatically when sync is complete");
+            let mut sync_check_errors: u32 = 0;
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(5));
                 if !is_running.load(Ordering::Relaxed) {
@@ -2197,6 +2552,7 @@ fn mining_thread(
                         break;
                     }
                     Ok((true, ref info)) => {
+                        sync_check_errors = 0;
                         thread_state.set_status(ThreadStatus::WaitingForSync { blocks_behind: info.blocks_behind });
                         let _ = event_tx.send(DiagnosticEvent::ServerSyncing { sync_info: info.clone() });
                         if info.blocks_behind % 100 < 5 || info.blocks_behind < 50 {
@@ -2204,7 +2560,14 @@ fn mining_thread(
                                 thread_id, info.blocks_behind, info.sync_progress, info.sync_speed_bps, info.phase);
                         }
                     }
-                    Err(_) => {}
+                    Err(_) => {
+                        // v9.8.4: Don't get stuck forever if sync-check keeps failing (502/503)
+                        sync_check_errors += 1;
+                        if sync_check_errors >= 6 {
+                            info!("⚠️  Thread {} sync check unavailable — proceeding to mine anyway", thread_id);
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -2333,13 +2696,18 @@ fn mining_thread(
     //   Light/Heavy: 50s (delay is in the hash loop, not the fetch interval)
     //   --bandwidth_limit: overrides to max(120s, 500/limit)
     // Thread 0 debounce on block signal: 2s minimum between fetches
+    // v10.0.2: Bandwidth-aware challenge refresh intervals
     let get_challenge_refresh_interval = |throttle: &Arc<parking_lot::RwLock<MinerThrottleMode>>, bw_limit: u32| -> std::time::Duration {
         if thread_id != 0 {
             // Non-zero threads: check shared cache every 2s, never hit API
             return std::time::Duration::from_secs(2);
         }
         if bw_limit > 0 {
-            let secs = (120u64).max(500 / (bw_limit as u64).max(1));
+            let secs = match bw_limit {
+                50.. => 50,    // ≥50 KB/s: normal refresh
+                10..=49 => 120, // 10-49 KB/s: slow refresh
+                _ => 300,      // <10 KB/s: ultra-slow (5 min)
+            };
             return std::time::Duration::from_secs(secs);
         }
         let mode = *throttle.read();
@@ -2349,11 +2717,6 @@ fn mining_thread(
     // Debounce: don't re-fetch challenge within 2s of last fetch (avoids burst on rapid blocks)
     let fetch_debounce = std::time::Duration::from_secs(2);
 
-    // Track last solution submission time for bandwidth throttling
-    let mut last_submit_time = std::time::Instant::now();
-    // v8.6.0: Don't sleep the mining thread for bandwidth limiting — it kills hashrate.
-    // Bandwidth limiting should be done at the network layer, not by blocking the hot loop.
-    let min_submit_interval = std::time::Duration::from_millis(0);
     let mut last_known_block_signal = new_block_signal.load(Ordering::Relaxed);
 
     // Seed the shared cache with our initial challenge (thread 0 only)
@@ -2575,14 +2938,6 @@ fn mining_thread(
                 if hash < target {
                     // Found a solution — set nonce for the submission block below
                     nonce = result_nonce;
-                // Bandwidth throttle: wait if submitting too fast
-                if !min_submit_interval.is_zero() {
-                    let elapsed = last_submit_time.elapsed();
-                    if elapsed < min_submit_interval {
-                        std::thread::sleep(min_submit_interval - elapsed);
-                    }
-                }
-                last_submit_time = std::time::Instant::now();
 
                 thread_state.solutions_found.fetch_add(1, Ordering::Relaxed);
                 let _ = event_tx.send(DiagnosticEvent::SolutionFound {
@@ -2596,7 +2951,7 @@ fn mining_thread(
                 // Read hashrate from atomic (lock-free, no async needed)
                 let hashrate_khs = f64::from_bits(current_hashrate_khs.load(Ordering::Relaxed));
 
-                let solution = serde_json::json!({
+                let solution_json = serde_json::json!({
                     "miner_address": wallet,
                     "nonce": nonce,
                     "hash": hex::encode(hash),
@@ -2608,14 +2963,14 @@ fn mining_thread(
                     "miner_version": env!("CARGO_PKG_VERSION")
                 });
 
-                // v9.1.7: P2P solution broadcast (non-blocking, parallel with HTTP)
-                if let Some(ref p2p_tx) = p2p_solution_tx {
+                // v10.0.2: Build P2P submission payload (if P2P compiled in)
+                let p2p_sub = {
                     let mut wallet_bytes = [0u8; 32];
                     if let Ok(decoded) = hex::decode(wallet.trim_start_matches("qnk")) {
                         let len = decoded.len().min(32);
                         wallet_bytes[..len].copy_from_slice(&decoded[..len]);
                     }
-                    let p2p_sub = q_types::mining_solution::P2PMiningSubmission::new(
+                    Some(q_types::mining_solution::P2PMiningSubmission::new(
                         wallet_bytes,
                         hash,
                         target,
@@ -2624,102 +2979,16 @@ fn mining_thread(
                         nonce,
                         current_challenge.vdf_iterations,
                         miner_id.clone(),
-                    );
-                    let _ = p2p_tx.send(p2p_sub);
-                }
+                    ))
+                };
 
-                // Submit solution via tokio (non-blocking — spawns onto tokio runtime)
-                let normalized_url = normalize_server_url(api_url);
-                let submit_url = format!("{}/api/v1/mining/submit", normalized_url);
-                let fallback_submit_url = format!("{}/api/v1/mining/submit", FALLBACK_BOOTSTRAP_URL);
-                let client_clone = client.clone();
-                // v8.6.6: Track upload bandwidth for solution payload (~500 bytes)
-                track_upload(solution.to_string().len());
-                let submit_event_tx = event_tx.clone();
-                let submit_solutions = shared_state_solutions.clone();
-                let submit_blocks = shared_state_blocks.clone();
-                let submit_block_height = current_challenge.block_height;
-                tokio_handle.spawn(async move {
-                    let try_submit = |url: String, sol: serde_json::Value, cl: reqwest::Client| async move {
-                        cl.post(&url)
-                            .json(&sol)
-                            .timeout(std::time::Duration::from_secs(10))
-                            .send()
-                            .await
-                    };
-
-                    // Helper: process a successful response, increment counters, send TUI events
-                    let process_success = |result: &serde_json::Value, event_tx: &tokio::sync::mpsc::UnboundedSender<DiagnosticEvent>, solutions: &Arc<AtomicU64>, blocks: &Arc<AtomicU64>, block_height: u64| {
-                        if let Some(data) = result.get("data") {
-                            let reward_qnk = data.get("reward_qnk")
-                                .and_then(|v| v.as_f64())
-                                .unwrap_or(0.0);
-                            if reward_qnk > 0.0 {
-                                info!("✅ Solution accepted! Earned {} QUG", reward_qnk);
-                            } else {
-                                info!("✅ Solution accepted at block #{}", block_height);
-                            }
-                            // Increment global counters so TUI/MinerLink see real values
-                            solutions.fetch_add(1, Ordering::Relaxed);
-                            blocks.fetch_add(1, Ordering::Relaxed);
-                            let _ = event_tx.send(DiagnosticEvent::SolutionAccepted {
-                                block_height,
-                                reward_qnk,
-                            });
-                            // v2.7.0: Show update notification if server requires newer miner
-                            if data.get("update_available").and_then(|v| v.as_bool()).unwrap_or(false) {
-                                warn!("╔══════════════════════════════════════════════════╗");
-                                warn!("║  📦 MINER UPDATE AVAILABLE                       ║");
-                                warn!("║  Your miner v{} may be outdated.              ", env!("CARGO_PKG_VERSION"));
-                                warn!("║  Download: https://dl.quillon.xyz/downloads/      ║");
-                                warn!("╚══════════════════════════════════════════════════╝");
-                            }
-                            // Show server notices (e.g. "use https://quillon.xyz")
-                            if let Some(notice) = data.get("server_notice").and_then(|v| v.as_str()) {
-                                if !notice.is_empty() {
-                                    warn!("[SERVER] {}", notice);
-                                }
-                            }
-                        }
-                    };
-
-                    match try_submit(submit_url, solution.clone(), client_clone.clone()).await {
-                        Ok(resp) if resp.status().is_success() => {
-                            if let Ok(result) = resp.json::<serde_json::Value>().await {
-                                process_success(&result, &submit_event_tx, &submit_solutions, &submit_blocks, submit_block_height);
-                            }
-                        }
-                        Ok(resp) => {
-                            // v8.9.3: Don't scare miners — try fallback quietly
-                            let status = resp.status();
-                            debug!("Primary returned HTTP {} — routing to backup node...", status);
-                            match try_submit(fallback_submit_url, solution, client_clone).await {
-                                Ok(resp2) if resp2.status().is_success() => {
-                                    if let Ok(result) = resp2.json::<serde_json::Value>().await {
-                                        process_success(&result, &submit_event_tx, &submit_solutions, &submit_blocks, submit_block_height);
-                                        info!("✅ Solution processed via backup node");
-                                    }
-                                }
-                                _ => {
-                                    debug!("Both nodes busy — solution will be re-submitted shortly");
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            debug!("Primary unreachable ({}) — routing to backup node...", e);
-                            match try_submit(fallback_submit_url, solution, client_clone).await {
-                                Ok(resp2) if resp2.status().is_success() => {
-                                    if let Ok(result) = resp2.json::<serde_json::Value>().await {
-                                        process_success(&result, &submit_event_tx, &submit_solutions, &submit_blocks, submit_block_height);
-                                        info!("✅ Solution processed via backup node");
-                                    }
-                                }
-                                _ => {
-                                    warn!("⚠️ Network temporarily unreachable — mining continues, solutions queued");
-                                }
-                            }
-                        }
-                    }
+                // v10.0.2: Send to centralized submitter (deduplicates across threads)
+                let _ = solution_tx.send(q_miner::solution_submitter::SolutionMessage {
+                    solution_json,
+                    solution_hash: hash,
+                    block_height: current_challenge.block_height,
+                    nonce,
+                    p2p_submission: p2p_sub,
                 });
                     // Only submit once per batch — break inner loop after a solution
                     break;

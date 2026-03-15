@@ -1303,6 +1303,43 @@ pub async fn network_supply(
     Ok(Json(ApiResponse::success(supply_stats)))
 }
 
+/// v9.9.2: Plain-text total supply for CMC/CoinGecko listing
+/// GET /api/v1/totalsupply — returns ONLY a numerical value (e.g. "1234.5678")
+pub async fn total_supply_plain(
+    State(state): State<Arc<AppState>>,
+) -> String {
+    const QUG_DIVISOR: f64 = 1_000_000_000_000_000_000_000_000.0;
+    let emission_total: u128 = match state.balance_consensus_engine.get_emission_summary().await {
+        Ok(summary) => summary.total_supply,
+        Err(_) => 0u128,
+    };
+    let wallet_total: u128 = *state.total_minted_supply.read().await;
+    let total = std::cmp::max(emission_total, wallet_total) as f64 / QUG_DIVISOR;
+    format!("{:.8}", total)
+}
+
+/// v9.9.2: Plain-text circulating supply for CMC/CoinGecko listing
+/// GET /api/v1/circulatingsupply — returns ONLY a numerical value
+/// Circulating = total mined (no locked/burned tokens subtracted for now)
+pub async fn circulating_supply_plain(
+    State(state): State<Arc<AppState>>,
+) -> String {
+    const QUG_DIVISOR: f64 = 1_000_000_000_000_000_000_000_000.0;
+    let emission_total: u128 = match state.balance_consensus_engine.get_emission_summary().await {
+        Ok(summary) => summary.total_supply,
+        Err(_) => 0u128,
+    };
+    let wallet_total: u128 = *state.total_minted_supply.read().await;
+    let total_mined = std::cmp::max(emission_total, wallet_total);
+    // Subtract QCREDIT locked supply (locked QUG is not circulating)
+    let locked: u128 = {
+        let vault = state.qcredit_vault.read().await;
+        vault.status().total_locked
+    };
+    let circulating = total_mined.saturating_sub(locked) as f64 / QUG_DIVISOR;
+    format!("{:.8}", circulating)
+}
+
 /// v6.2.4: Emission analytics endpoint - daily emission history & summary
 /// GET /api/v1/emission/stats?days=30
 pub async fn get_emission_stats(
@@ -7382,26 +7419,27 @@ pub async fn get_mesh_peers(
         vec![]
     };
 
-    // v1.0.3: Fallback — if turbo_sync registry is empty but libp2p has connections,
-    // show connected peers from node_status (gossipsub queue congestion can cause
-    // peer-height messages to be dropped while libp2p connections remain healthy)
-    if peers.is_empty() {
-        let libp2p_peer_count = if let Some(ref pc) = state.libp2p_peer_count {
-            pc.load(std::sync::atomic::Ordering::Relaxed)
-        } else {
-            let status = state.node_status.read().await;
-            status.connected_peers as usize
-        };
-        if libp2p_peer_count > 0 {
-            for i in 0..libp2p_peer_count {
-                peers.push(serde_json::json!({
-                    "peer_id": format!("libp2p-peer-{}", i + 1),
-                    "height": local_height,
-                    "sync_progress": 100.0,
-                    "sync_status": "synced",
-                    "is_real_data": false
-                }));
-            }
+    // v1.0.4: Supplement turbo_sync peers with remaining libp2p connections.
+    // turbo_sync only tracks peers that sent height announcements, but libp2p
+    // has many more connected peers (gossipsub mesh, DHT, etc.).
+    // Show them all so the dropdown count matches the "Active Peers" count.
+    let libp2p_peer_count = if let Some(ref pc) = state.libp2p_peer_count {
+        pc.load(std::sync::atomic::Ordering::Relaxed)
+    } else {
+        let status = state.node_status.read().await;
+        status.connected_peers as usize
+    };
+
+    if libp2p_peer_count > peers.len() {
+        let remaining = libp2p_peer_count - peers.len();
+        for i in 0..remaining {
+            peers.push(serde_json::json!({
+                "peer_id": format!("peer-{:03}", i + 1),
+                "height": local_height,
+                "sync_progress": 100.0,
+                "sync_status": "connected",
+                "is_real_data": false
+            }));
         }
     }
 

@@ -1541,6 +1541,11 @@ pub struct AppState {
     // Used to send pool messages to P2P network via gossipsub
     pub distributed_pool_outbound_tx: Option<tokio::sync::mpsc::Sender<q_mining_pool::distributed::coordinator::OutboundMessage>>,
 
+    // 🏊 v10.0.0: Distributed PPLNS proportions for block producer coinbase distribution
+    // Periodically synced from the distributed coordinator's CRDT state.
+    // When present and non-empty, block producer uses these instead of local-only PPLNS.
+    pub distributed_pplns_proportions: Arc<tokio::sync::RwLock<Option<Vec<(String, f64)>>>>,
+
     // 📊 v5.7.0: Pool hashrate history ring buffer (last 24h, sampled every 60s)
     pub pool_hashrate_history: Arc<tokio::sync::RwLock<Vec<pool_api::HashrateEntry>>>,
 
@@ -3071,6 +3076,7 @@ impl AppState {
             // 🌐 v2.3.0-beta: Decentralized Mining Pool (initialized in main.rs)
             distributed_pool_coordinator: None,
             distributed_pool_outbound_tx: None,
+            distributed_pplns_proportions: Arc::new(tokio::sync::RwLock::new(None)),
             pool_hashrate_history: Arc::new(tokio::sync::RwLock::new(Vec::new())),
 
             // 💰 v2.4.8-beta: Dollar Cost Averaging (DCA) Storage
@@ -4531,6 +4537,7 @@ impl AppState {
             // 🌐 v2.3.0-beta: Decentralized Mining Pool (initialized in main.rs)
             distributed_pool_coordinator: None,
             distributed_pool_outbound_tx: None,
+            distributed_pplns_proportions: Arc::new(tokio::sync::RwLock::new(None)),
             pool_hashrate_history: Arc::new(tokio::sync::RwLock::new(Vec::new())),
 
             // 💰 v2.4.8-beta: Dollar Cost Averaging (DCA) Storage

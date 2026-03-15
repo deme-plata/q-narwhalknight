@@ -14,7 +14,7 @@ export default function ThemeChooserModal({ isOpen, onClose }: ThemeChooserModal
   const [selectedTheme, setSelectedTheme] = useState<BorderTheme>(() => {
     const stored = localStorage.getItem('borderTheme');
     if (stored && THEME_LIST.some(t => t.id === stored)) return stored as BorderTheme;
-    return 'purple';
+    return 'frameless';
   });
 
   const [previewTheme, setPreviewTheme] = useState<BorderTheme | null>(null);

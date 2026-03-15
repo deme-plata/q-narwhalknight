@@ -61,7 +61,7 @@ interface PeerInfo {
   peerId: string;
   fullPeerId: string;
   height: number;
-  syncStatus: 'synced' | 'syncing' | 'behind' | 'ahead';
+  syncStatus: 'synced' | 'syncing' | 'behind' | 'ahead' | 'connected';
   syncProgress?: number; // 0-100 percentage
   blocksBehind: number;
   lastSeen: Date;
@@ -2676,8 +2676,9 @@ export default function ExplorerScreen() {
             const blocksBehind = Math.max(0, refHeight - peerHeight);
 
             // v8.5.1: Smarter sync status — use blocks behind for better labels
-            let syncStatus: 'synced' | 'syncing' | 'behind' | 'ahead' = 'synced';
-            if (peer.sync_status === 'syncing') syncStatus = 'syncing';
+            let syncStatus: 'synced' | 'syncing' | 'behind' | 'ahead' | 'connected' = 'synced';
+            if (peer.sync_status === 'connected') syncStatus = 'connected';
+            else if (peer.sync_status === 'syncing') syncStatus = 'syncing';
             else if (peer.sync_status === 'behind') syncStatus = blocksBehind > 500 ? 'behind' : 'syncing';
             else if (peerHeight > refHeight) syncStatus = 'ahead';
 
@@ -3064,7 +3065,7 @@ export default function ExplorerScreen() {
                     )}
 
                     {/* Peer List */}
-                    <div className="max-h-72 overflow-y-auto custom-scrollbar">
+                    <div className="max-h-80 overflow-y-auto custom-scrollbar">
                       {connectedPeers.length === 0 ? (
                         <div className="px-4 py-8 text-center">
                           <WifiOff className="w-8 h-8 text-gray-500 mx-auto mb-2" />
@@ -3073,7 +3074,8 @@ export default function ExplorerScreen() {
                         </div>
                       ) : (
                         <div className="divide-y divide-quantum-purple/10">
-                          {connectedPeers.map((peer, index) => (
+                          {/* Detailed peers (with real data) shown first */}
+                          {connectedPeers.filter(p => p.isRealData).map((peer, index) => (
                             <motion.div
                               key={peer.peerId}
                               initial={{ opacity: 0, x: -20 }}
@@ -3139,6 +3141,35 @@ export default function ExplorerScreen() {
                               )}
                             </motion.div>
                           ))}
+
+                          {/* Compact summary for remaining connected peers (no detailed metadata) */}
+                          {(() => {
+                            const connectedOnly = connectedPeers.filter(p => !p.isRealData);
+                            if (connectedOnly.length === 0) return null;
+                            return (
+                              <div className="px-4 py-3 bg-blue-500/5 border-t border-blue-500/20">
+                                <div className="flex items-center justify-between">
+                                  <div className="flex items-center gap-2">
+                                    <div className="flex -space-x-1">
+                                      {[...Array(Math.min(5, connectedOnly.length))].map((_, i) => (
+                                        <div key={i} className="w-2 h-2 rounded-full bg-blue-400/70 ring-1 ring-quantum-dark" />
+                                      ))}
+                                      {connectedOnly.length > 5 && (
+                                        <div className="w-2 h-2 rounded-full bg-blue-400/40 ring-1 ring-quantum-dark" />
+                                      )}
+                                    </div>
+                                    <span className="text-xs text-blue-300/80">
+                                      +{connectedOnly.length} gossipsub peers
+                                    </span>
+                                  </div>
+                                  <span className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-blue-500/20 text-blue-300">
+                                    <Wifi className="w-2.5 h-2.5" />
+                                    connected
+                                  </span>
+                                </div>
+                              </div>
+                            );
+                          })()}
                         </div>
                       )}
                     </div>
@@ -4466,25 +4497,36 @@ export default function ExplorerScreen() {
               {connectedPeers.length === 0 ? (
                 <div className="text-xs text-gray-500 text-center py-3">No peers connected</div>
               ) : (
-                connectedPeers.map((peer, i) => (
-                  <div key={i} className="flex items-center justify-between text-xs">
-                    <div className="flex items-center gap-1.5 min-w-0">
-                      <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
-                        peer.syncStatus === 'synced' ? 'bg-quantum-green' :
-                        peer.syncStatus === 'syncing' ? 'bg-yellow-400' : 'bg-red-400'
-                      }`} />
-                      <span className="font-mono text-gray-300 truncate">{peer.peerId}</span>
+                <>
+                  {connectedPeers.filter(p => p.isRealData).map((peer, i) => (
+                    <div key={i} className="flex items-center justify-between text-xs">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                          peer.syncStatus === 'synced' ? 'bg-quantum-green' :
+                          peer.syncStatus === 'syncing' ? 'bg-yellow-400' : 'bg-red-400'
+                        }`} />
+                        <span className="font-mono text-gray-300 truncate">{peer.peerId}</span>
+                      </div>
+                      <div className="flex items-center gap-2 flex-shrink-0">
+                        <span className="font-mono text-gray-400">{peer.height.toLocaleString()}</span>
+                        <span className={`text-[9px] px-1 py-0.5 rounded ${
+                          peer.syncStatus === 'synced' ? 'bg-quantum-green/20 text-quantum-green' :
+                          peer.syncStatus === 'syncing' ? 'bg-yellow-400/20 text-yellow-300' :
+                          'bg-red-400/20 text-red-300'
+                        }`}>{peer.syncStatus}</span>
+                      </div>
                     </div>
-                    <div className="flex items-center gap-2 flex-shrink-0">
-                      <span className="font-mono text-gray-400">{peer.height.toLocaleString()}</span>
-                      <span className={`text-[9px] px-1 py-0.5 rounded ${
-                        peer.syncStatus === 'synced' ? 'bg-quantum-green/20 text-quantum-green' :
-                        peer.syncStatus === 'syncing' ? 'bg-yellow-400/20 text-yellow-300' :
-                        'bg-red-400/20 text-red-300'
-                      }`}>{peer.syncStatus}</span>
+                  ))}
+                  {connectedPeers.filter(p => !p.isRealData).length > 0 && (
+                    <div className="flex items-center justify-between text-xs pt-1 border-t border-quantum-purple/10">
+                      <div className="flex items-center gap-1.5">
+                        <div className="w-1.5 h-1.5 rounded-full bg-blue-400/70" />
+                        <span className="text-blue-300/70">+{connectedPeers.filter(p => !p.isRealData).length} gossipsub peers</span>
+                      </div>
+                      <span className="text-[9px] px-1 py-0.5 rounded bg-blue-500/20 text-blue-300">connected</span>
                     </div>
-                  </div>
-                ))
+                  )}
+                </>
               )}
             </div>
           </div>
@@ -5029,6 +5071,7 @@ export default function ExplorerScreen() {
                                 peer.syncStatus === 'synced' ? 'bg-quantum-green animate-pulse' :
                                 peer.syncStatus === 'syncing' ? 'bg-yellow-400 animate-pulse' :
                                 peer.syncStatus === 'ahead' ? 'bg-quantum-cyan animate-pulse' :
+                                peer.syncStatus === 'connected' ? 'bg-blue-400 animate-pulse' :
                                 'bg-red-400'
                               }`} />
                               <span className="font-mono text-xs text-gray-300 truncate max-w-[140px]">{peer.peerId}</span>
@@ -5047,6 +5090,7 @@ export default function ExplorerScreen() {
                               peer.syncStatus === 'synced' ? 'bg-quantum-green/20 text-quantum-green' :
                               peer.syncStatus === 'syncing' ? 'bg-yellow-400/20 text-yellow-300' :
                               peer.syncStatus === 'ahead' ? 'bg-quantum-cyan/20 text-quantum-cyan' :
+                              peer.syncStatus === 'connected' ? 'bg-blue-500/20 text-blue-300' :
                               'bg-red-400/20 text-red-300'
                             }`}>
                               {peer.syncStatus}
@@ -5058,6 +5102,7 @@ export default function ExplorerScreen() {
                                 className={`h-full rounded-full transition-all duration-300 ${
                                   peer.syncStatus === 'synced' ? 'bg-quantum-green' :
                                   peer.syncStatus === 'syncing' ? 'bg-yellow-400' :
+                                  peer.syncStatus === 'connected' ? 'bg-blue-400' :
                                   'bg-red-400'
                                 }`}
                                 style={{ width: `${peer.syncProgress ?? 100}%` }}
@@ -5083,10 +5128,14 @@ export default function ExplorerScreen() {
                 )}
 
                 {/* Network Summary */}
-                <div className="mt-4 grid grid-cols-3 gap-3">
+                <div className="mt-4 grid grid-cols-4 gap-3">
                   <div className="bg-quantum-dark/50 rounded-lg border border-quantum-purple/10 p-3 text-center">
                     <div className="text-lg font-bold text-quantum-green font-mono">{connectedPeers.filter(p => p.syncStatus === 'synced').length}</div>
                     <div className="text-xs text-gray-500">Fully Synced</div>
+                  </div>
+                  <div className="bg-quantum-dark/50 rounded-lg border border-quantum-purple/10 p-3 text-center">
+                    <div className="text-lg font-bold text-blue-400 font-mono">{connectedPeers.filter(p => p.syncStatus === 'connected').length}</div>
+                    <div className="text-xs text-gray-500">Connected</div>
                   </div>
                   <div className="bg-quantum-dark/50 rounded-lg border border-quantum-purple/10 p-3 text-center">
                     <div className="text-lg font-bold text-yellow-300 font-mono">{connectedPeers.filter(p => p.syncStatus === 'syncing').length}</div>

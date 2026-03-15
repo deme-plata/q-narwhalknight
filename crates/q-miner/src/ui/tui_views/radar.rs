@@ -38,16 +38,17 @@ struct PeerBlip {
 
 #[cfg(feature = "tui")]
 pub struct RadarDisplay {
-    tick: u32,
+    pub tick: u32,
     peer_blips: Vec<PeerBlip>,
     sweep_angle: f64,
     zoom_level: u8,
+    ping_radius: f64,  // expanding ping ring (0.0 = no ping, >0 = active)
 }
 
 #[cfg(feature = "tui")]
 impl RadarDisplay {
     pub fn new() -> Self {
-        Self { tick: 0, peer_blips: Vec::new(), sweep_angle: 0.0, zoom_level: 1 }
+        Self { tick: 0, peer_blips: Vec::new(), sweep_angle: 0.0, zoom_level: 1, ping_radius: 0.0 }
     }
 
     /// Advance sweep angle, decay fades, illuminate blips near sweep.
@@ -60,6 +61,16 @@ impl RadarDisplay {
             if d > PI { d = TWO_PI - d; }
             if d < ILLUMINATE_THRESHOLD { blip.fade = 1.0; }
         }
+        // Decay ping ring
+        if self.ping_radius > 0.0 {
+            self.ping_radius += 0.15;
+            if self.ping_radius > 1.2 { self.ping_radius = 0.0; }
+        }
+    }
+
+    /// Trigger a sonar ping animation (expanding ring from center).
+    pub fn ping(&mut self) {
+        self.ping_radius = 0.05;
     }
 
     /// Update blips from network state. Synthetic peers based on peer_count.
@@ -109,6 +120,7 @@ impl RadarDisplay {
         self.draw_rings(buf, inner, cx, cy, rad);
         self.draw_crosshairs(buf, inner, cx, cy, rad);
         self.draw_sweep(buf, inner, cx, cy, rad);
+        self.draw_ping(buf, inner, cx, cy, rad);
         self.draw_blips(buf, inner, cx, cy, rad);
         self.draw_center(buf, cx, cy);
         self.draw_zoom(buf, inner);
@@ -129,6 +141,7 @@ impl RadarDisplay {
     }
 
     fn draw_rings(&self, buf: &mut Buffer, inner: Rect, cx: u16, cy: u16, rad: f64) {
+        let labels = ["50ms", "100ms", "150ms"];
         for ring in 1..=RING_COUNT {
             let r = rad * ring as f64 / (RING_COUNT + 1) as f64;
             let steps = ((r * ASPECT * 4.0) as usize).max(24);
@@ -136,6 +149,17 @@ impl RadarDisplay {
                 let th = TWO_PI * s as f64 / steps as f64;
                 let (px, py) = polar_to_cell(cx, cy, r, th);
                 if hit(inner, px, py) { put(buf, px as u16, py as u16, '.', Color::DarkGray); }
+            }
+            // Distance label on right side of ring
+            if ring <= labels.len() {
+                let lbl = labels[ring - 1];
+                let lx = (cx as f64 + r * ASPECT + 1.0).round() as i32;
+                for (i, c) in lbl.chars().enumerate() {
+                    let x = lx + i as i32;
+                    if hit(inner, x, cy as i32) {
+                        put(buf, x as u16, cy, c, Color::Rgb(60, 60, 60));
+                    }
+                }
             }
         }
     }
@@ -183,6 +207,20 @@ impl RadarDisplay {
                 );
                 if !hit(inner, px, py) { break; }
                 put(buf, px as u16, py as u16, '.', Color::Rgb(0, dim, 0));
+            }
+        }
+    }
+
+    fn draw_ping(&self, buf: &mut Buffer, inner: Rect, cx: u16, cy: u16, rad: f64) {
+        if self.ping_radius <= 0.0 { return; }
+        let r = self.ping_radius * rad;
+        let brightness = ((1.0 - self.ping_radius) * 200.0) as u8;
+        let steps = ((r * ASPECT * 4.0) as usize).max(16);
+        for s in 0..steps {
+            let th = TWO_PI * s as f64 / steps as f64;
+            let (px, py) = polar_to_cell(cx, cy, r, th);
+            if hit(inner, px, py) {
+                put(buf, px as u16, py as u16, 'o', Color::Rgb(0, brightness, brightness));
             }
         }
     }

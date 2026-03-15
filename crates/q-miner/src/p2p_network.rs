@@ -51,6 +51,7 @@ fn mining_solutions_topic(network_id: &str) -> String {
     format!("{}/mining-solutions", gossipsub_topic_prefix(network_id))
 }
 
+#[allow(dead_code)]
 fn blocks_topic(network_id: &str) -> String {
     format!("{}/blocks", gossipsub_topic_prefix(network_id))
 }
@@ -128,13 +129,17 @@ impl MinerP2PNetwork {
         let local_peer_id = PeerId::from(local_key.public());
         info!("P2P miner peer ID: {}", local_peer_id);
 
-        // Build gossipsub with miner-optimized settings
+        // v10.0.2: Miner-optimized gossipsub — minimal mesh, no flood publish.
+        // Miners are leaf nodes, not routers. 2 mesh peers is sufficient for
+        // challenge relay. HTTP is the reliable path for solution submission
+        // (bootstrap nodes already drop P2P mining gossip via Q_SKIP_MINING_GOSSIP=1).
+        // flood_publish=false reduces per-publish bandwidth from ALL 80+ peers to mesh only (2).
         let gossipsub_config = gossipsub::ConfigBuilder::default()
-            .heartbeat_interval(Duration::from_secs(1))
-            .mesh_n(4)
-            .mesh_n_low(2)
-            .mesh_n_high(6)
-            .flood_publish(true) // Solutions must reach all peers
+            .heartbeat_interval(Duration::from_secs(5)) // 5x reduction (was 1s)
+            .mesh_n(2)       // Minimal mesh (was 4)
+            .mesh_n_low(1)   // Allow 1 peer minimum (was 2)
+            .mesh_n_high(4)  // Cap at 4 (was 6)
+            .flood_publish(false) // Mesh-only publish (was true → ALL peers)
             .max_transmit_size(1_048_576) // 1 MB
             .validation_mode(gossipsub::ValidationMode::Permissive)
             .build()
@@ -185,22 +190,20 @@ impl MinerP2PNetwork {
             .context("Invalid listen address")?;
         swarm.listen_on(listen_addr)?;
 
-        // Subscribe to mining topics
+        // Subscribe to mining topics only (no blocks — miners get block signals via SSE).
+        // v10.0.2: Removed blocks topic subscription — saves ~10 KB/s inbound bandwidth
+        // since full blocks (10-100KB each, 1/sec) are unnecessary for miners.
         let challenges_topic = gossipsub::IdentTopic::new(mining_challenges_topic(&config.network_id));
         let solutions_topic = gossipsub::IdentTopic::new(mining_solutions_topic(&config.network_id));
-        let blocks_topic_id = gossipsub::IdentTopic::new(blocks_topic(&config.network_id));
 
         swarm.behaviour_mut().gossipsub.subscribe(&challenges_topic)
             .map_err(|e| anyhow::anyhow!("Subscribe challenges: {}", e))?;
         swarm.behaviour_mut().gossipsub.subscribe(&solutions_topic)
             .map_err(|e| anyhow::anyhow!("Subscribe solutions: {}", e))?;
-        swarm.behaviour_mut().gossipsub.subscribe(&blocks_topic_id)
-            .map_err(|e| anyhow::anyhow!("Subscribe blocks: {}", e))?;
 
-        info!("P2P subscribed to: {}, {}, {}",
+        info!("P2P subscribed to: {}, {} (blocks topic skipped — SSE provides block signals)",
             mining_challenges_topic(&config.network_id),
-            mining_solutions_topic(&config.network_id),
-            blocks_topic(&config.network_id));
+            mining_solutions_topic(&config.network_id));
 
         // Parse bootstrap peers
         let mut bootstrap_peers: Vec<String> = config.bootstrap_peers;
@@ -384,8 +387,8 @@ impl MinerP2PNetwork {
         } else if topic_str == mining_solutions_topic(&self.network_id) {
             // We don't need to process other miners' solutions — just log
             debug!("P2P: received mining solution ({} bytes)", data.len());
-        } else if topic_str == blocks_topic(&self.network_id) {
-            self.handle_block_message(data);
+        } else {
+            debug!("P2P: ignoring message on topic {} ({} bytes)", topic_str, data.len());
         }
     }
 
@@ -444,6 +447,9 @@ impl MinerP2PNetwork {
         let _ = self.challenge_tx.send(challenge);
     }
 
+    // v10.0.2: Block messages no longer received (blocks topic unsubscribed).
+    // Kept for potential future re-enablement.
+    #[allow(dead_code)]
     fn handle_block_message(&mut self, data: &[u8]) {
         // Extract height from the block message. We don't need the full block —
         // just the height field to signal mining threads to refresh.

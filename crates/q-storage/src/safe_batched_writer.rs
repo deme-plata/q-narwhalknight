@@ -10,8 +10,9 @@
 /// - "150-250 BPS realistic for Phase 1A" (DeepSeek)
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 #[cfg(not(target_os = "windows"))]
 use rocksdb::{WriteBatch, WriteOptions, DB};
@@ -65,6 +66,59 @@ pub struct BatchMetrics {
     pub bytes_triggers: u64,         // How many times bytes trigger fired
 }
 
+// ============================================================================
+// v10.0.0: Async WAL Syncer (Phase 3 Optimization)
+// Background thread handles fsync asynchronously, overlapping with next batch.
+// Per peer review TR-2026-004: background thread with SyncWAL() (not raw io_uring).
+// ============================================================================
+
+struct WalSyncRequest {
+    db: Arc<DB>,
+    reply: oneshot::Sender<Result<Duration>>,
+}
+
+struct AsyncWalSyncer {
+    tx: mpsc::Sender<WalSyncRequest>,
+}
+
+impl AsyncWalSyncer {
+    fn spawn(shutdown: Arc<AtomicBool>) -> Self {
+        let (tx, mut rx) = mpsc::channel::<WalSyncRequest>(4);
+        tokio::spawn(async move {
+            debug!("🔄 [ASYNC-WAL] Background syncer started");
+            while let Some(req) = rx.recv().await {
+                if shutdown.load(AtomicOrdering::Relaxed) { break; }
+                let db = req.db;
+                let result = tokio::task::spawn_blocking(move || {
+                    let start = Instant::now();
+                    let mut sync_opts = WriteOptions::default();
+                    sync_opts.set_sync(true);
+                    sync_opts.disable_wal(false);
+                    let empty_batch = WriteBatch::default();
+                    db.write_opt(empty_batch, &sync_opts)
+                        .map_err(|e| anyhow::anyhow!("WAL sync failed: {}", e))?;
+                    Ok::<Duration, anyhow::Error>(start.elapsed())
+                }).await;
+                let reply_result = match result {
+                    Ok(Ok(d)) => Ok(d),
+                    Ok(Err(e)) => Err(e),
+                    Err(e) => Err(anyhow::anyhow!("spawn_blocking join error: {}", e)),
+                };
+                let _ = req.reply.send(reply_result);
+            }
+            debug!("🔄 [ASYNC-WAL] Background syncer stopped");
+        });
+        Self { tx }
+    }
+
+    async fn request_sync(&self, db: Arc<DB>) -> Result<oneshot::Receiver<Result<Duration>>> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx.send(WalSyncRequest { db, reply: reply_tx }).await
+            .map_err(|_| anyhow::anyhow!("WAL syncer channel closed"))?;
+        Ok(reply_rx)
+    }
+}
+
 /// Safe batched writer with bounded queues and height ordering
 ///
 /// Key safety features:
@@ -73,12 +127,16 @@ pub struct BatchMetrics {
 /// - Three safety triggers: min(count, time, bytes)
 /// - Retry logic with exponential backoff
 /// - Block integrity verification
+/// - v10.0.0: Async WAL sync (overlaps fsync with batch preparation)
 pub struct SafeBatchedWriter {
     db: Arc<DB>,
     config: BatchConfig,
     queue_rx: mpsc::Receiver<QBlock>,
     reorder_buffer: OrderedBlockBuffer,
     metrics: Arc<std::sync::Mutex<BatchMetrics>>,
+    wal_syncer: AsyncWalSyncer,
+    pending_sync: Option<oneshot::Receiver<Result<Duration>>>,
+    shutdown: Arc<AtomicBool>,
 }
 
 impl SafeBatchedWriter {
@@ -93,12 +151,18 @@ impl SafeBatchedWriter {
         // Bounded channel (1024 blocks = ~600 KB)
         let (tx, rx) = mpsc::channel::<QBlock>(1024);
 
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let wal_syncer = AsyncWalSyncer::spawn(shutdown.clone());
+
         let writer = Self {
             db,
             config: config.clone(),
             queue_rx: rx,
             reorder_buffer: OrderedBlockBuffer::new(start_height, config.max_reorder_gap),
             metrics: Arc::new(std::sync::Mutex::new(BatchMetrics::default())),
+            wal_syncer,
+            pending_sync: None,
+            shutdown,
         };
 
         (writer, tx)
@@ -225,22 +289,24 @@ impl SafeBatchedWriter {
             self.flush_batch(&mut batch, block_count, wal_bytes_estimate).await?;
         }
 
+        // v10.0.0: Wait for any pending async sync to complete before shutdown
+        if let Some(pending) = self.pending_sync.take() {
+            if let Ok(Ok(d)) = pending.await {
+                debug!("🔄 [ASYNC-WAL] Final sync completed in {:?}", d);
+            }
+        }
+        self.shutdown.store(true, AtomicOrdering::Relaxed);
+
         let metrics = self.metrics.lock().unwrap();
         info!("✅ SafeBatchedWriter stopped (flushed {} blocks in {} batches)",
               metrics.blocks_flushed_total, metrics.batches_flushed_total);
         Ok(())
     }
 
-    /// Flush batch with spawn_blocking (LAMINAR 2.3: COMBUSTION CHAMBER)
+    /// Flush batch with overlapped async WAL sync (v10.0.0 Phase 3)
     ///
-    /// 🚀 v1.7.0-LAMINAR: CRITICAL FIX - Use spawn_blocking to prevent Tokio executor starvation
-    /// BEFORE: RocksDB write_opt() called directly on async executor (BLOCKS other tasks!)
-    /// AFTER:  RocksDB operations moved to dedicated blocking thread pool
-    ///
-    /// Why this matters:
-    /// - RocksDB write_opt() can block 2-50ms depending on disk and data size
-    /// - Blocking the Tokio executor starves other async tasks
-    /// - This caused the infamous "23-minute sync stall" bug
+    /// BEFORE: write → fsync (BLOCKS 2-10ms) → prepare next batch
+    /// AFTER:  wait_prev_sync → write → trigger_async_fsync → prepare next batch (OVERLAPPED)
     async fn flush_batch(
         &mut self,
         batch: &mut WriteBatch,
@@ -249,69 +315,78 @@ impl SafeBatchedWriter {
     ) -> Result<()> {
         let start = Instant::now();
 
-        // ChatGPT: "Don't clone WriteBatch—move it"
-        // Swap out the batch to take ownership
+        // Step 0: Wait for previous async sync to complete (backpressure)
+        if let Some(pending) = self.pending_sync.take() {
+            match pending.await {
+                Ok(Ok(sync_duration)) => {
+                    debug!("🔄 [ASYNC-WAL] Previous sync completed in {:?}", sync_duration);
+                }
+                Ok(Err(e)) => {
+                    warn!("⚠️ [ASYNC-WAL] Previous sync failed: {} — synchronous fallback", e);
+                    self.metrics.lock().unwrap().sync_failures += 1;
+                    self.sync_wal_blocking().await?;
+                }
+                Err(_) => {
+                    warn!("⚠️ [ASYNC-WAL] Previous sync channel dropped — synchronous fallback");
+                    self.metrics.lock().unwrap().sync_failures += 1;
+                    self.sync_wal_blocking().await?;
+                }
+            }
+        }
+
+        // Step 1: Write batch to WAL (unsynced, fast ~0.1-1ms)
         let mut to_flush = WriteBatch::default();
         std::mem::swap(batch, &mut to_flush);
-
-        // Clone Arc<DB> for move into spawn_blocking
         let db = self.db.clone();
         let block_count_copy = block_count;
-        let wal_bytes_copy = wal_bytes;
 
-        // 🚀 v1.7.0-LAMINAR (COMBUSTION CHAMBER): All RocksDB ops in single spawn_blocking
-        // This is the key optimization: ONE spawn_blocking call for BOTH operations
-        // Instead of: spawn_blocking(write) + spawn_blocking(sync) = 2x overhead
-        // We do:      spawn_blocking(write + sync) = 1x overhead
-        let flush_result = tokio::task::spawn_blocking(move || {
-            let blocking_start = std::time::Instant::now();
-
-            // Step 1: Write batch to WAL (unsynced, fast ~0.1-1ms)
+        tokio::task::spawn_blocking(move || {
             let mut write_opts = WriteOptions::default();
-            write_opts.set_sync(false);  // Don't fsync yet
-            write_opts.disable_wal(false);  // Keep WAL enabled!
-
+            write_opts.set_sync(false);
+            write_opts.disable_wal(false);
             db.write_opt(to_flush, &write_opts)
                 .map_err(|e| anyhow::anyhow!("Failed to write batch to WAL: {}", e))?;
-
-            // Step 2: Sync WAL to disk (single fsync for entire batch ~2-10ms)
-            // RocksDB doesn't expose sync_wal directly, so we use write with sync=true
-            let mut sync_opts = WriteOptions::default();
-            sync_opts.set_sync(true);  // This triggers fsync
-            sync_opts.disable_wal(false);
-
-            // Write empty batch with sync=true to trigger WAL sync
-            let empty_batch = WriteBatch::default();
-            db.write_opt(empty_batch, &sync_opts)
-                .map_err(|e| anyhow::anyhow!("Failed to sync WAL: {}", e))?;
-
-            debug!(
-                "🔥 [LAMINAR] spawn_blocking flush: {} blocks in {:?}",
-                block_count_copy,
-                blocking_start.elapsed()
-            );
-
-            Ok::<(usize, usize), anyhow::Error>((block_count_copy, wal_bytes_copy))
+            debug!("🔥 [LAMINAR] spawn_blocking write (no sync): {} blocks", block_count_copy);
+            Ok::<(), anyhow::Error>(())
         })
         .await
         .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {}", e))??;
 
-        let duration = start.elapsed();
-
-        // Update metrics
-        {
-            let mut metrics = self.metrics.lock().unwrap();
-            metrics.blocks_flushed_total += flush_result.0 as u64;
-            metrics.batches_flushed_total += 1;
+        // Step 2: Trigger async WAL sync (returns immediately, fsync overlaps next batch)
+        match self.wal_syncer.request_sync(self.db.clone()).await {
+            Ok(reply_rx) => { self.pending_sync = Some(reply_rx); }
+            Err(e) => {
+                warn!("⚠️ [ASYNC-WAL] Syncer unavailable: {} — synchronous fallback", e);
+                self.sync_wal_blocking().await?;
+            }
         }
 
+        let duration = start.elapsed();
+        {
+            let mut metrics = self.metrics.lock().unwrap();
+            metrics.blocks_flushed_total += block_count as u64;
+            metrics.batches_flushed_total += 1;
+        }
         info!(
-            "✅ [LAMINAR] Flushed batch: {} blocks, {} KiB WAL, {}ms",
-            block_count,
-            wal_bytes / 1024,
-            duration.as_millis()
+            "✅ [LAMINAR+ASYNC] Flushed batch: {} blocks, {} KiB WAL, {}ms (sync overlapped)",
+            block_count, wal_bytes / 1024, duration.as_millis()
         );
+        Ok(())
+    }
 
+    /// Synchronous WAL sync fallback
+    async fn sync_wal_blocking(&self) -> Result<()> {
+        let db = self.db.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut sync_opts = WriteOptions::default();
+            sync_opts.set_sync(true);
+            sync_opts.disable_wal(false);
+            let empty_batch = WriteBatch::default();
+            db.write_opt(empty_batch, &sync_opts)
+                .map_err(|e| anyhow::anyhow!("Synchronous WAL sync failed: {}", e))
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {}", e))??;
         Ok(())
     }
 

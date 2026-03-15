@@ -182,6 +182,18 @@ pub fn build_tls_config(tls: &TlsConfig) -> Result<Arc<ServerConfig>> {
     Ok(Arc::new(config))
 }
 
+/// Build a TLS config that only advertises HTTP/1.1 (no h2).
+/// Used for the libp2p WebSocket proxy port where the browser must use
+/// HTTP/1.1 for the WebSocket upgrade handshake.
+pub fn build_tls_config_h1_only(tls: &TlsConfig) -> Result<Arc<ServerConfig>> {
+    let base = build_tls_config(tls)?;
+    // Clone the config and override ALPN to h1-only
+    let mut config = ServerConfig::clone(&base);
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    tracing::info!("LibP2P WS TLS config: ALPN [http/1.1] only (no h2)");
+    Ok(Arc::new(config))
+}
+
 /// Create a TCP listener with SO_REUSEPORT + SO_REUSEADDR.
 /// With SO_REUSEPORT, multiple workers can bind to the same port and the kernel
 /// distributes incoming connections across them (no thundering herd).

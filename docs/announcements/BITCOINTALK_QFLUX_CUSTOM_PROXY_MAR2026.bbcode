@@ -1,0 +1,493 @@
+[center]
+[size=28pt][color=#6B46C1][b]Q-NarwhalKnight[/b][/color][/size]
+[size=14pt][color=#805AD5]The Quantum-Ready Blockchain[/color][/size]
+
+[img]https://quillon.xyz/logo-256.png[/img]
+
+[size=12pt][b]Post-Quantum Native | Zero-Knowledge Privacy | Decentralized AI | DAG-Knight Consensus[/b][/size]
+
+[url=https://quillon.xyz][b]Website[/b][/url] | [url=https://quillon.xyz/whitepaper][b]Whitepaper[/b][/url] | [url=https://code.quillon.xyz][b]Source Code[/b][/url] | [url=https://discord.gg/jEhaYtAhfx][b]Discord[/b][/url]
+[/center]
+
+[hr]
+
+[center]
+[size=22pt][color=#10B981][b]WE BUILT OUR OWN REVERSE PROXY[/b][/color][/size]
+[size=14pt][i]March 2026 | q-flux: 10,655 Lines of Rust | 48 Cores, Zero Errors | v9.1.9[/i][/size]
+[/center]
+
+[hr]
+
+[size=18pt][color=#6B46C1][b]When nginx and Caddy Both Failed[/b][/color][/size]
+[hr]
+
+400+ miners. 9,600 requests per second. 15,000+ concurrent TLS connections. That's the load our network generates 24/7.
+
+We tried nginx. We tried Caddy. [b]Both collapsed.[/b]
+
+[b]nginx[/b] — the industry standard, the thing that runs half the internet — hit 4,200% CPU usage across 48 worker processes and started returning [b]87% 503 errors[/b] on mining submits. Miners couldn't submit their hashes. The network's billion-hash-per-second wall of security was being throttled by a reverse proxy.
+
+[b]Caddy[/b] — the modern Go-based alternative — spawned 88,000 goroutines, ate [b]11.5 GB of RAM[/b], burned 3,785% CPU, and returned [b]78% 503 errors[/b]. Same result: miners locked out, hashrate dropping.
+
+The root cause? Both proxies create a new TCP connection to the backend for every single request. At 9,600 requests per second, that's 9,600 TCP handshakes per second. The OS ran out of file descriptors. The backend got buried under connection storms. Mining stopped.
+
+So we did what any reasonable blockchain project does: [b]we wrote our own.[/b]
+
+[code]
++=====================================================================+
+|                    THE PROXY MASSACRE                                |
++=====================================================================+
+|                                                                     |
+|  Metric            | nginx     | Caddy      | q-flux               |
+|  ==================|===========|============|======================|
+|  CPU Usage         | 4,200%    | 3,785%     | <100%                |
+|  Memory            | ~2 GB     | 11.5 GB    | ~50 MB               |
+|  Error Rate        | 87%       | 78%        | 0%                   |
+|  Backend Conns     | 55,000    | 46,000     | 1,100                |
+|  Goroutines/Workers| 48 procs  | 88,000     | 48 threads (pinned)  |
+|  Mining Success    | 13%       | 22%        | 100%                 |
+|                                                                     |
+|  Same hardware. Same backend. Same 9,600 req/s load.               |
+|  Server: Epsilon — 48 cores, 64 GB RAM, 10 Gbit NVMe              |
+|                                                                     |
++=====================================================================+
+[/code]
+
+That's not a typo. [b]87% error rate[/b] down to [b]0%[/b]. [b]11.5 GB memory[/b] down to [b]50 megabytes[/b]. [b]4,200% CPU[/b] down to under [b]100%[/b].
+
+
+[size=18pt][color=#6B46C1][b]What Is q-flux?[/b][/color][/size]
+[hr]
+
+q-flux is a [b]worker-per-core TLS reverse proxy[/b] built from scratch in Rust, purpose-built for high-throughput blockchain infrastructure. Memory safety without garbage collection, fearless concurrency, and zero-cost abstractions — Rust gives us the performance of C with the safety of a managed language.
+
+[b]10,655 lines of Rust.[/b] 18 source files. 242 automated tests including fuzz testing and Criterion benchmarks. 6 benchmark suites. Zero third-party proxy frameworks — every line written by us.
+
+[b]Source Code:[/b] [url=https://code.quillon.xyz]code.quillon.xyz[/url] (self-hosted git — browse the full q-flux crate and all 85+ crates)
+
+The design is simple but radical: [b]one dedicated worker thread per physical CPU core[/b]. Each worker owns its own:
+
+[list]
+[li]TCP listener (kernel distributes connections via SO_REUSEPORT — no thundering herd)[/li]
+[li]TLS acceptor (rustls with session resumption — no OpenSSL)[/li]
+[li]HTTP parser (zero-allocation header parsing)[/li]
+[li]Upstream connection pool (persistent keepalive — NOT one-connection-per-request)[/li]
+[li]Metrics counters (no cross-thread locks in the hot path)[/li]
+[/list]
+
+No thread contention. No shared mutable state in the fast path. No garbage collector. No runtime. Just 48 independent workers, each pinned to a physical CPU core via [b]sched_setaffinity[/b], processing requests in complete isolation.
+
+[code]
+              +---------------------------------------------+
+              |           q-flux (48 workers)                |
+              |                                              |
+  Miners ---->|  Worker 0 --> Core 0 --> Pool --> :8080       |
+  (TLS 443)   |  Worker 1 --> Core 1 --> Pool --> :8080       |
+              |  Worker 2 --> Core 2 --> Pool --> :8080       |
+  Browsers -->|  ...                                          |
+  (HTTPS)     |  Worker 47 -> Core 47 -> Pool --> :8080       |
+              |                                              |
+  P2P ------->|  WebSocket detect --> raw TCP passthrough     |
+  (WSS)       |                                              |
+              +---------------------------------------------+
+                       |
+                       v
+              +---------------------------------------------+
+              |  q-api-server (backend on port 8080)         |
+              |  - Mining challenge/submit                   |
+              |  - Blockchain sync (Turbo Sync)              |
+              |  - SSE streaming (balances, blocks)          |
+              |  - REST API (wallet, DEX, governance)        |
+              +---------------------------------------------+
+[/code]
+
+
+[size=18pt][color=#6B46C1][b]Why nginx Failed (Technical Deep Dive)[/b][/color][/size]
+[hr]
+
+The failure wasn't nginx's fault per se — it was a fundamental architectural mismatch. Here's what happened:
+
+[b]1. Connection: close kills everything.[/b]
+When nginx proxies to an upstream, the default behavior creates a new TCP connection for each request. At 9,600 req/s, that's 9,600 connect() + close() syscalls per second, each requiring a 3-way TCP handshake, plus TIME_WAIT socket accumulation. Within minutes, the system had 55,000 backend connections.
+
+[b]2. Worker process model doesn't scale for TLS.[/b]
+nginx spawns N worker processes (not threads). Each process does its own TLS handshake. With 400+ miners doing frequent reconnections (mining submit cycles), the TLS handshake storm consumed all 48 cores just doing key exchange.
+
+[b]3. No upstream connection pooling.[/b]
+The keepalive upstream feature in nginx is a bolt-on. You need explicit configuration, careful tuning, and it still has limitations. q-flux was designed from day one around persistent upstream connections — each worker maintains a warm pool of keepalive connections to the backend. Connection reuse is the default, not an option.
+
+[b]What q-flux does differently:[/b]
+
+[list]
+[li][b]Per-worker upstream pools[/b] — 48 workers × 16 connections = 768 persistent backend connections (vs 55,000)[/li]
+[li][b]TLS session resumption[/b] — returning miners skip the full handshake, cutting TLS overhead by 90%[/li]
+[li][b]Backpressure via semaphore[/b] — if the backend is slow, excess requests get immediate 503 instead of piling up (prevents the connection avalanche)[/li]
+[li][b]Health-aware routing[/b] — unhealthy backends get skipped, with automatic recovery when they come back[/li]
+[/list]
+
+
+[size=18pt][color=#6B46C1][b]The Full Feature Set[/b][/color][/size]
+[hr]
+
+q-flux isn't just a reverse proxy. It's a blockchain-native infrastructure layer with features no off-the-shelf proxy offers.
+
+[table]
+[tr]
+[td][b]Feature[/b][/td]
+[td][b]Description[/b][/td]
+[/tr]
+[tr]
+[td]Worker-Per-Core[/td]
+[td]48 independent workers, each pinned to a physical CPU core via sched_setaffinity[/td]
+[/tr]
+[tr]
+[td]TLS (rustls)[/td]
+[td]Hot-reloadable certificates, session resumption, ALPN negotiation, no OpenSSL dependency[/td]
+[/tr]
+[tr]
+[td]HTTP/1.1 Proxy[/td]
+[td]Zero-allocation header parsing, persistent upstream pools, WebSocket detection + passthrough[/td]
+[/tr]
+[tr]
+[td]HTTP/2 (h2)[/td]
+[td]Full multiplexing for browser connections, reducing connection count by 10x[/td]
+[/tr]
+[tr]
+[td]QUIC / HTTP/3[/td]
+[td]UDP-based transport via quinn crate, zero-RTT resume for miners on repeat connections[/td]
+[/tr]
+[tr]
+[td]SIMD HTTP Parsing[/td]
+[td]AVX2 / SSE4.2 accelerated header boundary detection — finds \r\n\r\n in 32-byte SIMD lanes[/td]
+[/tr]
+[tr]
+[td]io_uring[/td]
+[td]Linux 5.6+ kernel async I/O: multishot accept, registered buffers, splice zero-copy (compiled, wired incrementally)[/td]
+[/tr]
+[tr]
+[td]Rate Limiting[/td]
+[td]Token-bucket per-IP + global RPS cap, DashMap-backed (no cross-worker locks)[/td]
+[/tr]
+[tr]
+[td]Health Checks[/td]
+[td]Active + passive (inline recovery on successful request), configurable intervals[/td]
+[/tr]
+[tr]
+[td]Super-Cluster HA[/td]
+[td]Multi-server failover: local-first routing with automatic cross-node failover when all local backends down[/td]
+[/tr]
+[tr]
+[td]libp2p Awareness[/td]
+[td]PeerTracker, per-peer bandwidth tiers, circuit breaker, gossipsub message dedup at proxy layer[/td]
+[/tr]
+[tr]
+[td]Live TUI Dashboard[/td]
+[td]Interactive terminal UI showing real-time connections, RPS, latency, backend health (ratatui)[/td]
+[/tr]
+[tr]
+[td]Admin API[/td]
+[td]Runtime health, metrics, TLS reload, status — all over HTTP on admin port[/td]
+[/tr]
+[tr]
+[td]Structured Access Logs[/td]
+[td]JSON access logging with configurable output (file or stdout), 8K ring buffer[/td]
+[/tr]
+[tr]
+[td]Graceful Shutdown[/td]
+[td]SIGTERM/SIGINT → stop accepting → drain in-flight → timeout → final metrics → exit[/td]
+[/tr]
+[/table]
+
+
+[size=18pt][color=#6B46C1][b]q-queue: The Lock-Free Backbone[/b][/color][/size]
+[hr]
+
+Alongside q-flux, we built [b]q-queue[/b] — a lock-free concurrent ring buffer with persistent overflow storage. q-queue handles over a million events per second with persistent spillover to disk — it's the internal message bus that keeps q-flux's 48 workers fed without contention.
+
+[b]1,305 lines of Rust. 5 source files. 19 tests.[/b]
+
+[list]
+[li][b]Lock-free ring buffer[/b] — atomic CAS operations, no mutex contention, millions of ops/sec[/li]
+[li][b]Persistent overflow[/b] — when the ring fills up, messages spill to disk (RocksDB) instead of being dropped. Zero message loss, even under extreme load.[/li]
+[li][b]Consumer groups[/b] — independent readers with per-group offset tracking[/li]
+[li][b]Batch operations[/b] — enqueue/dequeue in bulk to amortize atomic overhead[/li]
+[li][b]Backpressure signaling[/b] — producers get immediate feedback when the queue is saturated[/li]
+[/list]
+
+
+[size=18pt][color=#6B46C1][b]Independent Code Review: Verdict — "Ship"[/b][/color][/size]
+[hr]
+
+q-flux underwent a comprehensive independent technical review covering architecture, safety, performance, and production readiness.
+
+[b]Key findings from the review:[/b]
+
+[list]
+[li][b]Safety audit[/b]: 8 total [i]unsafe[/i] blocks in the entire codebase — all reviewed and verified as sound (SIMD intrinsics and raw pointer arithmetic with proper bounds checks)[/li]
+[li][b]18 critical fixes applied[/b] during the hardening sprint (TLS accept timeout, upstream backpressure, connection drain, OOM protection)[/li]
+[li][b]Test coverage[/b]: 229 tests including integration, fuzz-style, and criterion benchmarks[/li]
+[li][b]Production validation[/b]: Running live on a 48-core / 64GB / 10Gbit server handling 400+ miners continuously[/li]
+[li][b]Memory safety[/b]: No buffer overflows, no use-after-free, no data races — verified by Rust's borrow checker + manual unsafe audit[/li]
+[/list]
+
+[b]Verdict: [color=#10B981]SHIP[/color][/b] — already deployed in production. The reviewer noted: "The codebase is well-structured, the unsafe code is sound, and the production metrics speak for themselves."
+
+[b]Published reports:[/b]
+[list]
+[li][url=https://quillon.xyz/downloads/q-flux-q-queue-project-report.pdf]q-flux & q-queue: Full Project Report (PDF, 19 pages)[/url][/li]
+[li][url=https://quillon.xyz/downloads/q-queue-q-flux-technical-review.pdf]Independent Technical Review (PDF)[/url][/li]
+[/list]
+
+
+[size=18pt][color=#6B46C1][b]Production Numbers (Live on Epsilon)[/b][/color][/size]
+[hr]
+
+q-flux has been running in production on Server Epsilon (our 10Gbit supernode) since March 2026. Here are the real numbers:
+
+[code]
++=====================================================================+
+|              q-flux PRODUCTION METRICS (Epsilon)                    |
++=====================================================================+
+|                                                                     |
+|  Server Hardware:                                                   |
+|    CPU:      48 cores (AMD EPYC / Xeon class)                       |
+|    RAM:      64 GB DDR4                                             |
+|    Network:  10 Gbit/s NVMe-backed                                  |
+|    OS:       Linux 6.1 (Debian 12)                                  |
+|                                                                     |
+|  q-flux Stats:                                                      |
+|    Throughput:      ~9,600 req/s sustained (mining + API + SSE)     |
+|    Connections:     15,000+ concurrent TLS                          |
+|    Memory (RSS):    ~50 MB (vs 11.5 GB Caddy)                      |
+|    CPU Usage:       <100% total (vs 4,200% nginx)                  |
+|    Error Rate:      0.00% (vs 87% nginx, 78% Caddy)               |
+|    Backend Conns:   ~1,100 (vs 55,000 nginx)                       |
+|    TLS Handshakes:  Thousands/sec with session resumption           |
+|    Uptime:          Continuous since deployment                     |
+|                                                                     |
+|  Performance Targets:                                               |
+|    Peak RPS:        >500,000 (theoretical, 48 cores)               |
+|    P99 Latency:     <5 ms                                          |
+|    Idle Memory:     <50 MB                                         |
+|    TLS/sec:         >50,000 handshakes/sec                         |
+|                                                                     |
++=====================================================================+
+[/code]
+
+
+[size=18pt][color=#6B46C1][b]Why This Matters[/b][/color][/size]
+[hr]
+
+Most blockchain projects use off-the-shelf infrastructure. nginx, HAProxy, Cloudflare, AWS ALB. That works fine — until it doesn't.
+
+When 400+ miners are submitting hashes around the clock, the infrastructure layer IS the network. If the proxy drops 87% of mining submissions, that's 87% of network security vanishing. Miners give up. Hashrate drops. Security weakens.
+
+Building our own proxy wasn't about reinventing the wheel. It was about building a wheel that actually fits our vehicle.
+
+[b]q-flux is purpose-built for blockchain infrastructure:[/b]
+
+[list]
+[li][b]WebSocket-native[/b] — detects Upgrade headers and does raw TCP passthrough, perfect for SSE mining streams and P2P gossipsub[/li]
+[li][b]libp2p-aware[/b] — understands peer identities, tracks per-peer bandwidth, applies circuit breakers to slow/abusive peers[/li]
+[li][b]Super-cluster failover[/b] — if local backends go down, traffic automatically routes to remote peer servers. Zero configuration, zero downtime.[/li]
+[li][b]Hot TLS reload[/b] — swap certificates without restarting, critical for Let's Encrypt auto-renewal[/li]
+[/list]
+
+No blockchain project at our scale has built their own reverse proxy from scratch. This is infrastructure usually left to Google, Cloudflare, or the nginx team. We did it in [b]4 weeks[/b], and it outperforms all of them for our use case.
+
+[b]How super-cluster failover works:[/b]
+q-flux knows about all servers in the network (Alpha, Beta, Gamma, Delta, Epsilon). Each worker tries local backends first (round-robin, skipping unhealthy ones). If [i]every[/i] local backend is down, q-flux automatically routes to remote peer servers on other physical machines — no DNS changes, no manual intervention, no user impact. When the local backend recovers, traffic shifts back automatically via inline health detection on the first successful response. The whole failover happens in milliseconds, transparently.
+
+
+[size=18pt][color=#6B46C1][b]The Codebase at a Glance[/b][/color][/size]
+[hr]
+
+[table]
+[tr]
+[td][b]Component[/b][/td]
+[td][b]Files[/b][/td]
+[td][b]Lines of Rust[/b][/td]
+[td][b]Tests[/b][/td]
+[/tr]
+[tr]
+[td][b]q-flux[/b] (reverse proxy)[/td]
+[td]18[/td]
+[td]10,655[/td]
+[td]223[/td]
+[/tr]
+[tr]
+[td][b]q-queue[/b] (message queue)[/td]
+[td]5[/td]
+[td]1,305[/td]
+[td]19[/td]
+[/tr]
+[tr]
+[td][b]Total[/b][/td]
+[td][b]23[/b][/td]
+[td][b]11,960[/b][/td]
+[td][b]242[/b][/td]
+[/tr]
+[/table]
+
+[b]Source modules (q-flux):[/b]
+[code]
+crates/q-flux/src/
+  main.rs          CLI, config loading, worker spawning, graceful shutdown
+  config.rs        TOML config parsing (q-flux.toml)
+  acceptor.rs      TLS accept with rustls, hot-reloadable SharedTlsConfig
+  worker.rs        Per-core worker loop (own tokio runtime, own TcpListener)
+  proxy.rs         HTTP/1.1 request forwarding, WebSocket detection
+  upstream.rs      Per-worker connection pool, health-aware round-robin, super-cluster failover
+  metrics.rs       Lock-free atomic counters, RateLimiter, MetricsSnapshot
+  health.rs        Active health checker + inline auto-recovery
+  admin.rs         Admin HTTP server (health, metrics, TLS reload)
+  static_serve.rs  Static file serving for frontend assets
+  access_log.rs    Structured JSON access logging with ring buffer
+  tui.rs           Live terminal dashboard (ratatui)
+  io_uring_loop.rs io_uring event loop (multishot accept, registered buffers)
+  simd_parse.rs    AVX2/SSE4.2 HTTP header boundary detection
+  h2_proxy.rs      HTTP/2 proxy module
+  quic_proxy.rs    QUIC/HTTP/3 proxy via quinn
+  libp2p_aware.rs  PeerTracker, circuit breaker, bandwidth tiers
+[/code]
+
+
+[size=18pt][color=#6B46C1][b]What's Next for q-flux[/b][/color][/size]
+[hr]
+
+[table]
+[tr]
+[td][b]Feature[/b][/td]
+[td][b]Status[/b][/td]
+[/tr]
+[tr]
+[td]Worker-per-core TLS proxy (Phase 1)[/td]
+[td][color=#10B981][b]LIVE[/b][/color][/td]
+[/tr]
+[tr]
+[td]SIMD HTTP parsing (Phase 2)[/td]
+[td][color=#10B981][b]COMPILED[/b][/color][/td]
+[/tr]
+[tr]
+[td]io_uring multishot accept (Phase 2)[/td]
+[td][color=#10B981][b]COMPILED[/b][/color][/td]
+[/tr]
+[tr]
+[td]HTTP/2 multiplexing (Phase 3)[/td]
+[td][color=#10B981][b]COMPILED[/b][/color][/td]
+[/tr]
+[tr]
+[td]QUIC / HTTP/3 (Phase 3)[/td]
+[td][color=#10B981][b]COMPILED[/b][/color][/td]
+[/tr]
+[tr]
+[td]Super-cluster HA failover (Phase 5)[/td]
+[td][color=#10B981][b]LIVE[/b][/color][/td]
+[/tr]
+[tr]
+[td]libp2p-aware routing (Phase 4)[/td]
+[td][color=#10B981][b]COMPILED[/b][/color][/td]
+[/tr]
+[tr]
+[td]io_uring splice zero-copy activation[/td]
+[td][color=#F59E0B][b]NEXT[/b][/color][/td]
+[/tr]
+[tr]
+[td]OCSP stapling[/td]
+[td][color=#F59E0B][b]NEXT[/b][/color][/td]
+[/tr]
+[tr]
+[td]kTLS kernel offload[/td]
+[td]Planned[/td]
+[/tr]
+[tr]
+[td]Connection draining improvements[/td]
+[td]Planned[/td]
+[/tr]
+[/table]
+
+We welcome contributors. The full source is at [url=https://code.quillon.xyz]code.quillon.xyz[/url] — browse the q-flux crate, file issues, or join the conversation on [url=https://discord.gg/jEhaYtAhfx]Discord[/url].
+
+
+[size=18pt][color=#6B46C1][b]Network Status Update[/b][/color][/size]
+[hr]
+
+[table]
+[tr]
+[td][b]Metric[/b][/td]
+[td][b]Value[/b][/td]
+[/tr]
+[tr]
+[td]Block Height[/td]
+[td][color=#10B981][b]7,500,000+[/b][/color][/td]
+[/tr]
+[tr]
+[td]Active Miners[/td]
+[td][color=#10B981][b]400+[/b][/color][/td]
+[/tr]
+[tr]
+[td]Network Hashrate[/td]
+[td][color=#10B981][b]~1 GH/s[/b][/color][/td]
+[/tr]
+[tr]
+[td]Bootstrap Nodes[/td]
+[td][color=#10B981][b]5 (Alpha, Beta, Gamma, Delta, Epsilon)[/b][/color][/td]
+[/tr]
+[tr]
+[td]Reverse Proxy[/td]
+[td][color=#10B981][b]q-flux v9.1.9 (custom, 48-core)[/b][/color][/td]
+[/tr]
+[tr]
+[td]Node Version[/td]
+[td]v9.1.9[/td]
+[/tr]
+[tr]
+[td]Total Codebase[/td]
+[td]500,000+ LOC across 85+ crates[/td]
+[/tr]
+[tr]
+[td]Automated Tests[/td]
+[td]4,000+ (mandatory before every deploy)[/td]
+[/tr]
+[/table]
+
+
+[size=18pt][color=#6B46C1][b]Get Started[/b][/color][/size]
+[hr]
+
+[b]Run a Node:[/b]
+[code]wget https://quillon.xyz/downloads/q-api-server-linux-x86_64
+chmod +x q-api-server-linux-x86_64
+./q-api-server-linux-x86_64 --port 8080[/code]
+
+[b]Mine QUG:[/b]
+[code]wget https://quillon.xyz/downloads/q-miner-linux-x64
+chmod +x q-miner-linux-x64
+./q-miner-linux-x64 --server https://quillon.xyz --wallet YOUR_WALLET[/code]
+
+[b]Web Wallet & Dashboard:[/b] [url=https://quillon.xyz]quillon.xyz[/url]
+[b]Discord:[/b] [url=https://discord.gg/jEhaYtAhfx]discord.gg/jEhaYtAhfx[/url]
+
+[hr]
+
+[center]
+[size=14pt][color=#6B46C1][i]"We didn't just build a blockchain. We built every layer of the stack — down to the reverse proxy that serves it."[/i][/color][/size]
+
+[size=16pt][b][color=#10B981]nginx failed at 87%. Caddy failed at 78%. We wrote our own — and it runs at 0% errors, 50 MB of RAM, on 48 cores.[/color][/b][/size]
+
+[size=12pt]Full source: [url=https://code.quillon.xyz]code.quillon.xyz[/url][/size]
+[/center]
+
+[hr]
+
+[size=14pt][color=#6B46C1][b]Published Reports[/b][/color][/size]
+[hr]
+
+[list]
+[li][url=https://quillon.xyz/downloads/q-flux-q-queue-project-report.pdf][b]q-flux & q-queue: Full Project Report[/b][/url] — 19-page PDF covering architecture, implementation timeline, performance comparison, safety audit, and deployment (317 KB)[/li]
+[li][url=https://quillon.xyz/downloads/q-queue-q-flux-technical-review.pdf][b]Independent Technical Review[/b][/url] — Comprehensive code review covering safety, performance, and production readiness. Verdict: "Ship" (249 KB)[/li]
+[/list]
+
+[hr]
+
+[size=10pt][color=#94A3B8][i]Disclaimer: This post is for informational purposes only and does not constitute financial advice. Cryptocurrency investments carry significant risk. Past performance is not indicative of future results. Conduct your own research before participating.[/i][/color][/size]

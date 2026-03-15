@@ -150,7 +150,7 @@ function getStoredTheme(): BorderTheme {
   if (stored && THEME_LIST.some(t => t.id === stored)) {
     return stored as BorderTheme;
   }
-  return 'purple';
+  return 'frameless';
 }
 
 /** Apply theme CSS variables + font to the document root */

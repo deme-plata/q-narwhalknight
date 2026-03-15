@@ -241,20 +241,92 @@ fn draw_topology(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
     let pc = app.state.as_ref()
         .map(|s| s.p2p_peer_count.load(Ordering::Relaxed)).unwrap_or(0);
     let g = Style::default().fg(Color::DarkGray);
+    let green = Style::default().fg(Color::Green);
+    let yellow = Style::default().fg(Color::Yellow);
+    let cyan = Style::default().fg(Color::Cyan);
+    let dim = Style::default().fg(Color::Rgb(60, 80, 100));
+
+    // Animated data flow dots on edges
+    let tick = app.command_center.radar.tick; // borrow tick for animation
+    let dot_pos = (tick % 8) as usize;
+    let flow_chars = ['.', '.', '*', '.', '.', '.', '.', '.'];
+
+    // Build edge strings with animated dot
+    let mut edge1 = String::from("           ");
+    for i in 0..4 { edge1.push(if i == dot_pos % 4 { '*' } else { '-' }); }
+    let mut edge2 = String::from("           |    \\          |       ");
+    let mut edge3 = String::from("           |     \\         |       ");
+
     let lines = vec![
         Line::from(""),
-        Line::from(Span::styled("  P2P Topology Graph",
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD))),
+        Line::from(vec![
+            Span::styled("  ", g),
+            Span::styled("MESH TOPOLOGY", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled("  —  Real-time P2P Network Graph", dim),
+        ]),
         Line::from(""),
-        Line::from(Span::styled("       [Epsilon 10G]----[Beta 100M]", Style::default().fg(Color::Green))),
-        Line::from(Span::styled("           |    \\          |       ", g)),
-        Line::from(Span::styled("           |     \\         |       ", g)),
-        Line::from(Span::styled("       [Gamma 1G]----[Delta 1G]   ", Style::default().fg(Color::Yellow))),
+        Line::from(vec![
+            Span::styled("          ", g),
+            Span::styled("[Epsilon", green),
+            Span::styled(" 10G", cyan),
+            Span::styled("]", green),
+            Span::styled(
+                format!("{}",
+                    (0..8).map(|i| if i == dot_pos % 8 { '*' } else { '-' }).collect::<String>()),
+                Style::default().fg(Color::Rgb(0, 180, 80))),
+            Span::styled("[Beta", green),
+            Span::styled(" 100M", cyan),
+            Span::styled("]", green),
+        ]),
+        Line::from(vec![
+            Span::styled("           |  ", g),
+            Span::styled(if dot_pos % 3 == 0 { "*" } else { "\\" }, Style::default().fg(Color::Rgb(0, 120, 60))),
+            Span::styled("            |       ", g),
+        ]),
+        Line::from(vec![
+            Span::styled("           |   ", g),
+            Span::styled(if dot_pos % 3 == 1 { "*" } else { "\\" }, Style::default().fg(Color::Rgb(0, 120, 60))),
+            Span::styled("           |       ", g),
+        ]),
+        Line::from(vec![
+            Span::styled("          ", g),
+            Span::styled("[Gamma", yellow),
+            Span::styled("  1G", cyan),
+            Span::styled("]", yellow),
+            Span::styled(
+                format!("{}",
+                    (0..8).map(|i| if i == (dot_pos + 4) % 8 { '*' } else { '-' }).collect::<String>()),
+                Style::default().fg(Color::Rgb(180, 180, 0))),
+            Span::styled("[Delta", yellow),
+            Span::styled("  1G", cyan),
+            Span::styled("]", yellow),
+        ]),
         Line::from(Span::styled("           |                       ", g)),
-        Line::from(Span::styled("       [Alpha 1G]  (canary)        ", g)),
+        Line::from(vec![
+            Span::styled("          ", g),
+            Span::styled("[Alpha", dim),
+            Span::styled("  1G", dim),
+            Span::styled("]", dim),
+            Span::styled("  (canary)", Style::default().fg(Color::Rgb(80, 80, 80))),
+        ]),
         Line::from(""),
-        Line::from(Span::styled(format!("  Connected peers: {}", pc), Style::default().fg(Color::Cyan))),
-        Line::from(Span::styled("  [P] Back to overview", g)),
+        Line::from(vec![
+            Span::styled("  Connected: ", g),
+            Span::styled(format!("{}", pc), cyan),
+            Span::styled("  |  ", g),
+            Span::styled(if pc >= 3 { "MESH HEALTHY" } else if pc >= 1 { "PARTIAL MESH" } else { "DISCONNECTED" },
+                if pc >= 3 { green } else if pc >= 1 { yellow } else { Style::default().fg(Color::Red) }),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Legend: ", g),
+            Span::styled("*", Style::default().fg(Color::Rgb(0, 180, 80))),
+            Span::styled(" = data flow   ", g),
+            Span::styled("----", g),
+            Span::styled(" = connection   ", g),
+            Span::styled("[P]", cyan),
+            Span::styled(" = back to overview", g),
+        ]),
     ];
     let block = Block::default()
         .borders(Borders::ALL).border_style(g)

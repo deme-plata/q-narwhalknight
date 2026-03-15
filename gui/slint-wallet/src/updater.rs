@@ -192,7 +192,7 @@ impl Updater {
                 });
                 return Err(anyhow!(msg));
             }
-            tracing::info!("✅ [UPDATE] SHA-256 verified: {}...", &actual[..16]);
+            eprintln!("✅ [UPDATE] SHA-256 verified: {}...", &actual[..16]);
         } else {
             // v8.6.5: Refuse updates without checksum — prevents blind binary replacement
             let _ = tokio::fs::remove_file(&temp_path).await;

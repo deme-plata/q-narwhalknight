@@ -27,7 +27,47 @@ pub struct FluxConfig {
     /// ACME certificate automation (Issue #021).
     #[serde(default)]
     pub acme: AcmeConfig,
+    /// LibP2P WebSocket proxy: browser js-libp2p connects via WSS on a dedicated
+    /// port (e.g. 9443), and q-flux does TLS termination + raw TCP proxy to the
+    /// libp2p WebSocket listener (e.g. 127.0.0.1:9002). No HTTP parsing — just
+    /// bidirectional byte passthrough after TLS.
+    #[serde(default)]
+    pub libp2p_ws: Libp2pWsConfig,
 }
+
+/// LibP2P WebSocket proxy configuration.
+///
+/// When enabled, connections arriving on the configured port are TLS-terminated
+/// and then raw-proxied (bidirectional byte copy) to the libp2p WebSocket
+/// listener backend. This avoids HTTP/2 ALPN negotiation issues — the browser
+/// needs HTTP/1.1 for the WebSocket upgrade handshake, and the libp2p backend
+/// handles the upgrade itself.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Libp2pWsConfig {
+    /// Enable the libp2p WebSocket proxy. Default: false.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Port that browser js-libp2p connects to (e.g. 9443).
+    /// Must also be listed in server.listen.
+    #[serde(default = "default_libp2p_ws_port")]
+    pub port: u16,
+    /// Backend address of the libp2p WebSocket listener (e.g. "127.0.0.1:9002").
+    #[serde(default = "default_libp2p_ws_backend")]
+    pub backend: String,
+}
+
+impl Default for Libp2pWsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: 9443,
+            backend: "127.0.0.1:9002".to_string(),
+        }
+    }
+}
+
+fn default_libp2p_ws_port() -> u16 { 9443 }
+fn default_libp2p_ws_backend() -> String { "127.0.0.1:9002".to_string() }
 
 /// io_uring and splice(2) zero-copy configuration.
 ///

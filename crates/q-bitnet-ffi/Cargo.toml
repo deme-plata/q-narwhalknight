@@ -41,7 +41,7 @@ bindgen = { version = "0.69", optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
-criterion = "0.5"
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 
 # Benchmarks will be added once the core implementation is stable
 # [[bench]]

@@ -932,10 +932,33 @@ impl DistributedPoolCoordinator {
         pplns.state_hash()
     }
 
-    /// Get worker statistics
+    /// Get worker statistics (wallet, difficulty, proportion)
     pub async fn worker_stats(&self) -> Vec<(String, f64, f64)> {
         let pplns = self.pplns.read().await;
         pplns.worker_stats()
+    }
+
+    /// v10.0.0: Get distributed PPLNS proportions for block producer coinbase distribution.
+    /// Returns raw proportions (summing to 1.0) — NO fee deduction here.
+    /// Block producer's existing fee logic handles dev/pool fees.
+    /// Returns None if no shares in the CRDT window.
+    pub async fn get_distributed_pplns_proportions(&self) -> Option<Vec<(String, f64)>> {
+        let stats = self.worker_stats().await;
+        if stats.is_empty() {
+            return None;
+        }
+        // worker_stats returns (wallet, difficulty, proportion) — extract (wallet, proportion)
+        let proportions: Vec<(String, f64)> = stats
+            .into_iter()
+            .filter(|(_, _, proportion)| *proportion > 0.0)
+            .map(|(wallet, _, proportion)| (wallet, proportion))
+            .collect();
+
+        if proportions.is_empty() {
+            None
+        } else {
+            Some(proportions)
+        }
     }
 
     /// Get known pool nodes

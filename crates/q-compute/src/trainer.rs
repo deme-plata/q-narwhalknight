@@ -536,6 +536,7 @@ impl Trainer {
         #[cfg(target_os = "windows")]
         {
             info!("🎮 [F2] Windows: Large pages require SeLockMemoryPrivilege — skipping auto-apply");
+            return false;
         }
 
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]

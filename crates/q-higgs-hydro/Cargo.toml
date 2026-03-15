@@ -38,7 +38,7 @@ q-robot-control = { path = "../q-robot-control" }
 chrono = "0.4"
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 proptest = "1.4"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures = "0.3"

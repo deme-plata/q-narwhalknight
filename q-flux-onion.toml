@@ -1,0 +1,31 @@
+# q-flux config for Tor .onion hidden service
+# Listens on 127.0.0.1:8089 (Tor routes .onion traffic here)
+# plain_http = true — Tor provides end-to-end encryption, no TLS needed
+
+[server]
+listen = ["127.0.0.1:8089"]
+workers = 2  # .onion traffic is low volume
+plain_http = true
+
+[tls]
+# Required by config parser but NOT used when plain_http = true
+cert = "/etc/caddy/certs/quillon.xyz/fullchain.pem"
+key = "/etc/caddy/certs/quillon.xyz/privkey.pem"
+
+[upstream]
+backends = ["127.0.0.1:8080"]
+max_conns_per_worker = 16
+keepalive_timeout = "30s"
+connect_timeout = "5s"
+response_timeout = "60s"
+
+[static_files]
+root = "/opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final"
+
+[limits]
+max_connections = 10000
+max_conns_per_ip = 100
+request_body_limit = 26214400  # 25MB
+
+[logging]
+level = "info"

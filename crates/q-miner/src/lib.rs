@@ -7,6 +7,7 @@ pub mod network;
 #[cfg(feature = "p2p")]
 pub mod p2p_network;
 pub mod shared_state;
+pub mod solution_submitter;
 pub mod diagnostics;
 pub mod ui;
 pub mod utils;

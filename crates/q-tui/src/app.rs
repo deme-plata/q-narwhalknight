@@ -100,6 +100,18 @@ pub struct App {
     pub bounty_mainnet_address: String,
     pub bounty_input_field: BountyInputField,
     pub bounty_status_message: String,
+
+    /// v9.8.4: Auto-update animation overlay (rainbow progress bar + success modal)
+    pub update_animation: crate::ui::update_animation::UpdateAnimation,
+
+    /// v9.8.5: Starship sync animation (rocket launch + orbital visualization)
+    pub starship_animation: crate::ui::starship_animation::StarshipAnimation,
+
+    /// v9.8.6: Water robots animation (quantum marine creatures on important events)
+    pub water_robots: crate::ui::water_robots_animation::WaterRobotsAnimation,
+
+    /// v9.9.0: Command Center — radar, ocean, topology for network view
+    pub command_center: crate::ui::command_center::CommandCenterState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +146,10 @@ impl App {
             bounty_mainnet_address: String::new(),
             bounty_input_field: BountyInputField::TestnetAddress,
             bounty_status_message: String::new(),
+            update_animation: crate::ui::update_animation::UpdateAnimation::new(),
+            starship_animation: crate::ui::starship_animation::StarshipAnimation::new(),
+            water_robots: crate::ui::water_robots_animation::WaterRobotsAnimation::new(),
+            command_center: crate::ui::command_center::CommandCenterState::new(),
         }
     }
 
@@ -163,6 +179,10 @@ impl App {
             bounty_mainnet_address: String::new(),
             bounty_input_field: BountyInputField::TestnetAddress,
             bounty_status_message: String::new(),
+            update_animation: crate::ui::update_animation::UpdateAnimation::new(),
+            starship_animation: crate::ui::starship_animation::StarshipAnimation::new(),
+            water_robots: crate::ui::water_robots_animation::WaterRobotsAnimation::new(),
+            command_center: crate::ui::command_center::CommandCenterState::new(),
         }
     }
 
@@ -185,6 +205,24 @@ impl App {
 
     /// Handle keyboard events
     pub fn handle_key_event(&mut self, key: KeyEvent) -> bool {
+        // v9.9.0: Command Center panel keys when in Network view
+        if self.view_mode == ViewMode::Network {
+            match key.code {
+                KeyCode::Char(c @ ('r' | 'R' | 'o' | 'O' | 'v' | 'V')) => {
+                    if self.command_center.handle_key(c) {
+                        return false;
+                    }
+                }
+                KeyCode::Esc => {
+                    if self.command_center.focused_panel != crate::ui::command_center::Panel::Overview {
+                        self.command_center.back_to_overview();
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+
         match key.code {
             KeyCode::Char('q') | KeyCode::Char('Q') => {
                 self.should_quit = true;
@@ -344,6 +382,23 @@ impl App {
 
     /// Called on every tick (250ms)
     pub fn on_tick(&mut self) {
+        // v9.8.4: Advance update animation frame
+        self.update_animation.tick();
+        // v9.8.5: Advance starship sync animation
+        self.starship_animation.tick();
+        // v9.8.6: Advance water robots animation
+        self.water_robots.tick();
+
+        // v9.9.0: Advance Command Center animations (radar sweep, ocean creatures)
+        {
+            let (pc, connected) = if let Ok(m) = self.metrics.read() {
+                (m.peer_count as u32, m.peer_count > 0)
+            } else {
+                (0, false)
+            };
+            self.command_center.tick(pc, connected);
+        }
+
         if let Ok(metrics) = self.metrics.read() {
             // Update TPS history
             if let Ok(mut history) = self.tps_history.write() {

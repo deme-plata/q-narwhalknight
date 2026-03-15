@@ -52,6 +52,8 @@ hex = { workspace = true }
 default = ["advanced-crypto"]
 # ✨ v1.0.58-beta: Enable Genus-2 VDF for quantum-resistant anchor election
 advanced-crypto = ["q-crypto-advanced"]
+# v10.0.0: SIMD-accelerated bitfield DAG operations (Phase 2 optimization)
+simd-dag = []
 
 [dev-dependencies]
 proptest = { workspace = true }

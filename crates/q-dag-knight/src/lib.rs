@@ -29,6 +29,10 @@ pub mod vertex_creator;
 #[cfg(feature = "advanced-crypto")]
 pub mod genus2_vdf_integration;
 
+// v10.0.0: SIMD-accelerated bitfield DAG operations (Phase 2 optimization)
+#[cfg(feature = "simd-dag")]
+pub mod simd_sets;
+
 pub use anchor_election::{AnchorElectionResult, QuantumAnchorElection};
 pub use commit_logic::CommitProtocol;
 pub use homological_consensus::{
@@ -47,6 +51,12 @@ pub use vertex_creator::{Vertex, VertexCreator, VertexCreatorConfig};
 pub use genus2_vdf_integration::{
     Genus2VDFEngine, Genus2VDFConfig, Genus2VDFResult, Genus2SecurityLevel, Genus2BatchVerifier,
 };
+
+// v10.0.0: SIMD-accelerated bitfield DAG exports
+#[cfg(feature = "simd-dag")]
+pub use simd_sets::{VertexBitfield, BitfieldDag, BitfieldDagStats};
+#[cfg(feature = "simd-dag")]
+pub use ordering_rules::SimdOrderingEngine;
 
 // Re-export types from q-types for easier access
 pub use q_types::{Block, BullsharkCert, NarwhalPayload};

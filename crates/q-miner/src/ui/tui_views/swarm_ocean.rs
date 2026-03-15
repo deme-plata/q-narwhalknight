@@ -241,14 +241,22 @@ impl SwarmOcean {
 
         // Sync creature count to peer_count (+1 for our narwhal)
         let target = (peer_count as usize).saturating_add(1);
+        let known_names = ["Epsilon", "Beta", "Gamma", "Delta", "Alpha",
+                           "Relay-1", "Relay-2", "Relay-3"];
+        let known_kinds = [
+            CreatureKind::Whale, CreatureKind::Shark, CreatureKind::Dolphin,
+            CreatureKind::Dolphin, CreatureKind::Fish, CreatureKind::Fish,
+            CreatureKind::Fish, CreatureKind::Fish,
+        ];
         while self.creatures.len() < target {
+            let idx = self.creatures.len() - 1; // -1 because narwhal is index 0
             let s = splitmix(self.rng_state.wrapping_add(self.creatures.len() as u64 * 7));
-            let kind = CreatureKind::random_peer(s);
+            let kind = if idx < known_kinds.len() { known_kinds[idx] } else { CreatureKind::random_peer(s) };
+            let name = if idx < known_names.len() { known_names[idx].to_string() } else { format!("Peer {}", idx) };
             let x = 5.0 + (s % 65) as f32;
             let y = 3.0 + (splitmix(s) % 10) as f32;
             let vx_mag = 0.2 + (s % 5) as f32 * 0.08;
             let vx = if s % 2 == 0 { vx_mag } else { -vx_mag };
-            let name = format!("Peer {}", self.creatures.len());
             self.creatures.push(SwarmCreature::new(kind, name, x, y, vx));
         }
         while self.creatures.len() > target && self.creatures.len() > 1 {
@@ -342,6 +350,32 @@ impl SwarmOcean {
                         if let Some(cell) = buf.cell_mut(Position::new(lx, label_y)) {
                             cell.set_char(ch).set_fg(lc).set_bg(WAVE_BG);
                         }
+                    }
+                }
+            }
+        }
+
+        // 2b) Bubble trails behind larger creatures
+        let bubble_chars = ['o', '.', '*', '`'];
+        for creature in &self.creatures {
+            let is_large = matches!(creature.kind, CreatureKind::Narwhal | CreatureKind::Whale | CreatureKind::Dolphin);
+            if !is_large { continue; }
+            let cx = creature.x.clamp(0.0, w - 1.0);
+            let bob = (creature.bob_phase as f64).sin() as f32 * 0.8;
+            let cy = (creature.y + bob).clamp(0.0, h - 2.0);
+            // Trail behind the creature (opposite to facing direction)
+            let trail_dir: f32 = if creature.facing_right { -1.0 } else { 1.0 };
+            let sprite_len = creature.kind.sprite_right().len() as f32;
+            for b in 0..3 {
+                let bx = cx + trail_dir * (sprite_len + 1.0 + b as f32 * 2.0);
+                let by = cy + ((self.tick as f32 * 0.3 + b as f32).sin() * 0.5);
+                let px = left + bx.clamp(0.0, w - 1.0) as u16;
+                let py = top + by.clamp(0.0, h - 1.0) as u16;
+                if px >= left && px < right && py >= top && py < bottom {
+                    let bc = bubble_chars[((self.tick as usize + b) / 2) % bubble_chars.len()];
+                    let dim = 80u8.saturating_sub(b as u8 * 20);
+                    if let Some(cell) = buf.cell_mut(Position::new(px, py)) {
+                        cell.set_char(bc).set_fg(Color::Rgb(dim, dim + 40, dim + 80)).set_bg(WAVE_BG);
                     }
                 }
             }
