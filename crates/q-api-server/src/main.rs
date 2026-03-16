@@ -487,6 +487,8 @@ const QUG_DISPLAY_DIVISOR: f64 = 1_000_000_000_000_000_000_000_000.0; // 10^24
 /// v5.1.0: HTTP bootstrap endpoints for fallback block/status fetching
 /// Tries each in order until one responds. Multiple servers for redundancy.
 const HTTP_BOOTSTRAP_PEERS: &[&str] = &[
+    "https://quillon.xyz",          // HTTPS via q-flux (works behind NAT/firewalls on port 443)
+    "http://89.149.241.126:8080",   // Server Epsilon (10Gbit supernode)
     "http://5.79.79.158:8080",      // Server Delta (primary - 1Gbit fastest)
     "http://109.205.176.60:8080",   // Server Gamma (secondary - 1Gbit)
     "http://185.182.185.227:8080",  // Server Beta (tertiary - 100Mbit)
@@ -1988,6 +1990,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     // Our crates: debug level for detailed logs
                     // Third-party AI/ML libs: warn level to suppress verbose tensor/byte array output
                     "q_api_server=debug,\
+                         q_storage=info,\
                          q_network=debug,\
                          tower_http=debug,\
                          candle=warn,\
@@ -12148,9 +12151,15 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                                                         warn!("   Activating HTTP gap-fill...");
 
                                                                         // v5.1.0: Try multiple bootstrap peers for HTTP gap-fill
+                                                                        // v10.0.3: Use timeout client for NAT/firewall compatibility
+                                                                        let gapfill_client = reqwest::Client::builder()
+                                                                            .timeout(std::time::Duration::from_secs(8))
+                                                                            .connect_timeout(std::time::Duration::from_secs(4))
+                                                                            .build()
+                                                                            .unwrap_or_else(|_| reqwest::Client::new());
                                                                         let mut bootstrap_peer = HTTP_BOOTSTRAP_PEERS[0];
                                                                         for candidate in HTTP_BOOTSTRAP_PEERS {
-                                                                            if let Ok(resp) = reqwest::get(format!("{}/api/v1/node/status", candidate)).await {
+                                                                            if let Ok(resp) = gapfill_client.get(format!("{}/api/v1/node/status", candidate)).send().await {
                                                                                 if resp.status().is_success() {
                                                                                     bootstrap_peer = candidate;
                                                                                     break;
@@ -12165,7 +12174,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                                                         {
                                                                             let url = format!("{}/api/v1/blocks/{}", bootstrap_peer, height);
 
-                                                                            match reqwest::get(&url)
+                                                                            match gapfill_client.get(&url).send()
                                                                                 .await
                                                                             {
                                                                                 Ok(response)
@@ -18797,9 +18806,15 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     }
                     warn!("⚠️  Fast sync didn't deliver blocks, falling back to HTTP...");
                     // v5.1.0: Try multiple bootstrap peers for HTTP fallback
+                    // v10.0.3: Use timeout client (prevents hanging on blocked ports behind NAT/firewalls)
+                    let http_fallback_client = reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(8))
+                        .connect_timeout(std::time::Duration::from_secs(4))
+                        .build()
+                        .unwrap_or_else(|_| reqwest::Client::new());
                     let mut bootstrap_peer = HTTP_BOOTSTRAP_PEERS[0];
                     for candidate in HTTP_BOOTSTRAP_PEERS {
-                        if let Ok(resp) = reqwest::get(format!("{}/api/v1/node/status", candidate)).await {
+                        if let Ok(resp) = http_fallback_client.get(format!("{}/api/v1/node/status", candidate)).send().await {
                             if resp.status().is_success() {
                                 bootstrap_peer = candidate;
                                 break;
@@ -18816,7 +18831,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     for block_height in next_block_needed..(next_block_needed + batch_size) {
                         let url = format!("{}/api/v1/blocks/{}", bootstrap_peer, block_height);
 
-                        match reqwest::get(&url).await {
+                        match http_fallback_client.get(&url).send().await {
                             Ok(response) if response.status().is_success() => {
                                 match response.json::<serde_json::Value>().await {
                                     Ok(json) if json["success"].as_bool().unwrap_or(false) => {

@@ -200,6 +200,10 @@ use q_types::QBlock;
 pub const HARDCODED_BOOTSTRAP_PEERS: &[&str] = &[
     // v8.7.4: Server Epsilon - 10Gbit SUPERNODE (fastest sync, 64GB RAM, 2x Xeon Gold, NVMe)
     "/ip4/89.149.241.126/tcp/9001/p2p/12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM",
+    // v10.0.3: WSS via port 443 — works through ANY firewall/ISP (q-flux proxies WS→libp2p 9002)
+    "/dns4/quillon.xyz/tcp/443/wss/p2p/12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM",
+    // WSS via port 9443 — dedicated libp2p WebSocket port (fallback if 443 detection fails)
+    "/dns4/quillon.xyz/tcp/9443/wss/p2p/12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM",
     // Server Delta - 1Gbit (second fastest)
     "/ip4/5.79.79.158/tcp/9001/p2p/12D3KooWLJJRvqo6mBoHLpgxVbGKfW3Jv39ziU4kz1adKFv93JbK",
     // Server Gamma - 1Gbit
@@ -213,7 +217,9 @@ pub const HARDCODED_BOOTSTRAP_PEERS: &[&str] = &[
 /// Also used to discover correct P2P port when it differs from hardcoded 9001
 /// v8.6.5: Delta 1Gbit first for fastest HTTP discovery and state sync
 pub const BOOTSTRAP_HTTP_ENDPOINTS: &[&str] = &[
-    // v8.7.4: Epsilon 10Gbit SUPERNODE first — fastest HTTP discovery and state sync
+    // v10.0.3: HTTPS first — works through any NAT/firewall on port 443
+    "https://quillon.xyz",          // Epsilon via q-flux (HTTPS, port 443)
+    // v8.7.4: Direct HTTP endpoints (for servers on unrestricted networks)
     "http://89.149.241.126:8080",   // Epsilon - 10Gbit SUPERNODE
     "http://5.79.79.158:8080",      // Delta - 1Gbit
     "http://109.205.176.60:8080",   // Gamma - 1Gbit
@@ -3422,19 +3428,23 @@ impl UnifiedNetworkManager {
                                 // peer_height in its block-pack response while returning 0 blocks.
                                 if response.peer_height > 0 {
                                     let current = self.known_network_height.load(std::sync::atomic::Ordering::Relaxed);
-                                    // v9.1.0: When node is freshly syncing (low height), allow
-                                    // much larger jumps. A node at height 7K rejecting peers at
-                                    // 7.4M would never catch up. Use 10M minimum headroom for
-                                    // fresh nodes, then tighten to 5x/+50K for synced nodes.
-                                    let max_reasonable = if current < 100_000 {
-                                        10_000_000_u64 // Fresh node: accept any height up to 10M
+                                    // v9.1.0 / v10.0.3: For fresh nodes (current < 100K), accept
+                                    // any peer height — no cap. A fresh node has no reference to
+                                    // judge "too high" and hardcoded caps break when chain exceeds them.
+                                    // For synced nodes: tighten to 5x/+50K to reject cross-chain poisoning.
+                                    let reject = if current >= 100_000 {
+                                        let max_reasonable = (current * 5).max(current + 50_000);
+                                        if response.peer_height > max_reasonable {
+                                            warn!("🚫 [BLOCK-PACK] Rejecting suspicious peer_height {} from {} (known: {}, max: {})",
+                                                  response.peer_height, peer, current, max_reasonable);
+                                            true
+                                        } else {
+                                            false
+                                        }
                                     } else {
-                                        (current * 5).max(current + 50_000)
+                                        false // Fresh node: no cap
                                     };
-                                    if response.peer_height > max_reasonable {
-                                        warn!("🚫 [BLOCK-PACK] Rejecting suspicious peer_height {} from {} (known: {}, max: {})",
-                                              response.peer_height, peer, current, max_reasonable);
-                                    } else if response.peer_height > current {
+                                    if !reject && response.peer_height > current {
                                         self.known_network_height.store(response.peer_height, std::sync::atomic::Ordering::Relaxed);
                                     }
                                 }

@@ -3193,17 +3193,17 @@ impl TurboSyncManager {
             } else {
                 our_height
             };
-            // Allow 3x reference or reference + 500K (whichever is larger)
-            // For fresh nodes (reference=0): allow anything up to 10M blocks (generous first-sync)
-            let max_reasonable = if reference_height < 1_000 {
-                10_000_000 // Fresh start: accept peers up to 10M
-            } else {
-                (reference_height * 3).max(reference_height + 500_000)
-            };
-            if highest_block > max_reasonable {
-                warn!("🚫 [PEER REGISTRY] Rejecting suspicious height {} from peer {} (ref: {}, our: {}, peers: {}, max: {})",
-                    highest_block, peer_id, reference_height, our_height, peer_count, max_reasonable);
-                return;
+            // For established nodes: allow 3x reference or reference + 500K (whichever is larger)
+            // For fresh nodes (reference < 1000): NO cap — accept any height.
+            // A fresh node has no reference point to judge "too high" and capping
+            // caused a total sync failure when chain exceeded the hardcoded limit.
+            if reference_height >= 1_000 {
+                let max_reasonable = (reference_height * 3).max(reference_height + 500_000);
+                if highest_block > max_reasonable {
+                    warn!("🚫 [PEER REGISTRY] Rejecting suspicious height {} from peer {} (ref: {}, our: {}, peers: {}, max: {})",
+                        highest_block, peer_id, reference_height, our_height, peer_count, max_reasonable);
+                    return;
+                }
             }
         }
 
