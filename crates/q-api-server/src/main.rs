@@ -7386,6 +7386,28 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     }
 
     // ========================================
+    // v1.0.3: WETH ↔ QUG Bridge Deposit Monitor
+    // Polls pending deposits every 15s, checks Reth confirmations,
+    // triggers committee attestation, credits QUG on completion.
+    // ========================================
+    {
+        let monitor_state = app_state.clone();
+        tokio::spawn(async move {
+            let interval_secs = q_api_server::bridge_safety::DEPOSIT_MONITOR_INTERVAL_SECS;
+            info!("🌉 [WETH BRIDGE] Deposit monitor started (interval: {}s)", interval_secs);
+            let mut interval = tokio::time::interval(
+                std::time::Duration::from_secs(interval_secs),
+            );
+            loop {
+                interval.tick().await;
+                q_api_server::ethereum_bridge_api::weth_deposit_monitor_tick(
+                    &monitor_state
+                ).await;
+            }
+        });
+    }
+
+    // ========================================
     // 🔐 v4.2.0-beta: VAULT RWA TOKEN - Register as built-in token
     // Physical hardware wallet token owned by BANK_MASTER_ACCOUNT
     // Persists across testnet phase transitions like QUG and QUGUSD
@@ -9580,18 +9602,28 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                     let ed_key = registry.get_ed25519(&sig.validator);
 
                                     if pq_key_dil.is_none() && pq_key_sqi.is_none() {
-                                        // v9.7.0 HARDENED: No PQC key available — REJECT, don't skip!
-                                        error!("❌ [PQC] REJECTING sig {}: No PQC key (Dilithium5 or SQIsign) for validator {} — unverifiable",
-                                               idx, hex::encode(&sig.validator[..4]));
-                                        pqc_failures += 1;
+                                        // v10.0.4: Allow Ed25519 fallback for Phase0 signatures
+                                        // v9.7.0 was too aggressive — rejected blocks from validators
+                                        // that only have Ed25519 keys (Phase0). This caused mining stalls
+                                        // because ALL incoming blocks were rejected.
+                                        if ed_key.is_some() {
+                                            // Ed25519 key available — let verify_spectral_signature_extended handle it
+                                            debug!("⚠️ [PQC] No PQC key for validator {} — falling back to Ed25519 (Phase0)",
+                                                   hex::encode(&sig.validator[..4]));
+                                        } else {
+                                            // No key at all — truly unverifiable
+                                            error!("❌ [PQC] REJECTING sig {}: No PQC key AND no Ed25519 key for validator {} — unverifiable",
+                                                   idx, hex::encode(&sig.validator[..4]));
+                                            pqc_failures += 1;
 
-                                        // If majority unverifiable, reject entire block immediately
-                                        if pqc_failures > total_sigs / 2 {
-                                            error!("🚨 [PQC] BLOCK {} REJECTED: {}/{} signatures unverifiable (>50% threshold)",
-                                                   block_height, pqc_failures, total_sigs);
-                                            continue 'gossip_loop; // Reject block — skip to next gossipsub message
+                                            // If majority unverifiable, reject entire block immediately
+                                            if pqc_failures > total_sigs / 2 {
+                                                error!("🚨 [PQC] BLOCK {} REJECTED: {}/{} signatures unverifiable (>50% threshold)",
+                                                       block_height, pqc_failures, total_sigs);
+                                                continue 'gossip_loop;
+                                            }
+                                            continue;
                                         }
-                                        continue;
                                     }
 
                                     // Verify with available keys (extended verification supports all key types)
@@ -15145,6 +15177,15 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     };
 
                     if should_produce {
+                        // v1.0.3: SINGLE-PRODUCER GUARD — Only 1 shard produces blocks at a time.
+                        // ROOT CAUSE of 45-hour mining stall: All 8 shards could enter the 120s
+                        // production timeout simultaneously (200ms CAS spacing → all 8 enter within
+                        // 1.6s). Each blocked shard can't drain its channel → all 6250-capacity
+                        // channels fill within minutes → permanent 503 errors.
+                        // FIX: Semaphore(1) ensures 7 shards keep draining while 1 produces.
+                        static PRODUCTION_SEMAPHORE: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+                        let production_sem = PRODUCTION_SEMAPHORE.get_or_init(|| tokio::sync::Semaphore::new(1));
+                        if let Ok(_production_permit) = production_sem.try_acquire() {
                         // v9.8.3: MASTER TIMEOUT on entire block production path.
                         // ROOT CAUSE FIX: Multiple .await calls on RwLocks had NO timeouts.
                         // When multiple shards entered production simultaneously, they could ALL hang
@@ -16531,6 +16572,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             error!("🚨 [MASTER TIMEOUT] Block production path took >120s on Shard {} — FORCE RESUMING mining!", shard_id);
                             error!("   This prevents permanent mining stall from lock contention (v9.8.3 fix)");
                         }
+                        } else {
+                            // v1.0.3: Another shard is already producing — don't block, keep draining
+                            debug!("[Shard {}] Skipping block production — another shard holds production permit", shard_id);
+                        } // Close production semaphore if-let
                     } // Close `if should_produce {` block
 
                     // Clear batch and update metrics
@@ -21774,6 +21819,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/ethereum/swap/:id/refund", post(q_api_server::ethereum_bridge_api::refund_eth_swap))
         .route("/api/v1/ethereum/swaps", get(q_api_server::ethereum_bridge_api::list_eth_swaps))
         .route("/api/v1/ethereum/bridge/send", post(q_api_server::ethereum_bridge_api::send_eth))
+        // v1.0.3: WETH ↔ QUG MetaMask bridge deposit endpoints
+        .route("/api/v1/ethereum/bridge/deposit-address", get(q_api_server::ethereum_bridge_api::get_bridge_deposit_address))
+        .route("/api/v1/ethereum/bridge/deposit", post(q_api_server::ethereum_bridge_api::register_weth_deposit))
+        .route("/api/v1/ethereum/bridge/deposit/:id/status", get(q_api_server::ethereum_bridge_api::get_deposit_status))
+        .route("/api/v1/ethereum/bridge/rate", get(q_api_server::ethereum_bridge_api::get_bridge_rate))
         // v7.2.5: Aggregate bridge status + operations endpoints
         .route("/api/v1/bridge/status", get(bridge_status_handler))
         .route("/api/v1/bridge/operations/:wallet", get(bridge_operations_handler))
