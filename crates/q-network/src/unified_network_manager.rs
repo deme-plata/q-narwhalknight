@@ -1199,6 +1199,10 @@ pub struct UnifiedNetworkManager {
     p2p_bytes_out: Option<Arc<std::sync::atomic::AtomicU64>>,
     /// v9.7.0: Post-quantum session manager — tracks Kyber1024 key exchanges per peer
     pq_session_manager: Arc<crate::pq_handshake::PQSessionManager>,
+    /// v10.0.4: Track WebSocket (browser) peers for explicit gossipsub delivery
+    /// Browser peers connect via WSS and need guaranteed block delivery.
+    /// add_explicit_peer() ensures gossipsub always sends messages to them.
+    websocket_peers: HashSet<PeerId>,
 }
 
 // SAFETY: UnifiedNetworkManager is Sync because:
@@ -2322,6 +2326,7 @@ impl UnifiedNetworkManager {
             slow_peer_strikes: DashMap::new(),
             p2p_bytes_out: None,
             pq_session_manager: Arc::new(crate::pq_handshake::PQSessionManager::new()),
+            websocket_peers: HashSet::new(),
         })
     }
 
@@ -2781,8 +2786,17 @@ impl UnifiedNetworkManager {
                     let is_websocket = endpoint_str.contains("/ws") || endpoint_str.contains("websocket");
 
                     if is_websocket {
-                        info!("🌐 [BROWSER CLIENT] Detected WebSocket connection - skipping handshake validation");
+                        info!("🌐 [BROWSER CLIENT] Detected WebSocket connection from peer {}", peer_id);
                         info!("   Browser clients use gossipsub directly without custom handshake protocol");
+
+                        // v10.0.4: Add browser peers as explicit gossipsub peers
+                        // This guarantees they receive ALL messages on subscribed topics,
+                        // regardless of mesh membership. Without this, browser peers
+                        // rely on IHAVE/IWANT gossip which may not work reliably
+                        // between Rust libp2p and js-libp2p implementations.
+                        self.swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                        self.websocket_peers.insert(peer_id);
+                        info!("🌐 [BROWSER CLIENT] Added as explicit gossipsub peer - guaranteed block delivery");
                     } else {
                         // 🤝 v1.0.15.1-beta: Initiate protocol handshake with new peer (node-to-node only)
                         let validator = self.handshake_validator.read().await;
@@ -2831,6 +2845,12 @@ impl UnifiedNetworkManager {
                         self.connected_peer_count.store(peer_count, std::sync::atomic::Ordering::SeqCst);
 
                         info!("👋 [DISCONNECTION] Connection closed with peer: {} (remaining peers: {})", peer_id, peer_count);
+
+                        // v10.0.4: Remove WebSocket peer from explicit gossipsub peers
+                        if self.websocket_peers.remove(&peer_id) {
+                            self.swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
+                            info!("🌐 [BROWSER CLIENT] Removed explicit gossipsub peer: {}", peer_id);
+                        }
 
                         // 🔧 v0.6.8-beta: Automatic reconnection for bootstrap peers
                         // Server Alpha was disconnecting from Server Beta after 41 seconds, causing turbo sync failure.
@@ -4854,6 +4874,10 @@ impl UnifiedNetworkManager {
                             debug!("🤝 [HANDSHAKE] Sent handshake request {:?} to {}", request_id, peer_id);
                         } else {
                             info!("🌐 [BROWSER CLIENT] WebSocket connection - skipping handshake");
+                            // v10.0.4: Add browser peers as explicit gossipsub peers
+                            self.swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                            self.websocket_peers.insert(peer_id);
+                            info!("🌐 [BROWSER CLIENT] Added as explicit gossipsub peer - guaranteed block delivery");
                         }
 
                         let mut peers = self.discovered_peers.write().await;
@@ -4879,6 +4903,12 @@ impl UnifiedNetworkManager {
 
                         // Update atomic counter
                         self.connected_peer_count.store(peer_count, std::sync::atomic::Ordering::SeqCst);
+
+                        // v10.0.4: Remove WebSocket peer from explicit gossipsub peers
+                        if self.websocket_peers.remove(&peer_id) {
+                            self.swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
+                            info!("🌐 [BROWSER CLIENT] Removed explicit gossipsub peer: {}", peer_id);
+                        }
 
                         info!("👋 Connection closed: {} (remaining peers: {})", peer_id, peer_count);
 

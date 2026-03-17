@@ -521,16 +521,12 @@ export function useRealtimeBlocks(): UseRealtimeBlocksResult {
 
   // Track if we've already subscribed to prevent re-subscription loops
   const hasSubscribedRef = useRef(false)
-  const httpFallbackRef = useRef<NodeJS.Timeout | null>(null)
-  const lastHttpBlockHeight = useRef<number>(0)
   const lastP2PBlockTime = useRef<number>(0) // Track last P2P block time
   const p2pBlockCount = useRef<number>(0) // Count P2P blocks received
 
-  /**
-   * HTTP Fallback: Fetch recent blocks from API
-   * Used when gossipsub isn't receiving messages
-   */
-  const fetchBlocksViaHttp = useCallback(async () => {
+  // v10.0.4: HTTP fallback removed — kept as dead code reference
+  const lastHttpBlockHeight = useRef<number>(0)
+  const _fetchBlocksViaHttp = useCallback(async () => {
     console.log('🌐 [HTTP FALLBACK] Fetching blocks from API...')
     try {
       // Fetch recent blocks from API (correct endpoint is /api/v1/blocks/recent)
@@ -618,9 +614,36 @@ export function useRealtimeBlocks(): UseRealtimeBlocksResult {
           lastHttpBlockHeight.current = maxHeight
         }
 
-        // Add blocks to history (each block in its own try/catch so one failure doesn't block others)
-        newBlocks.forEach(block => {
+        // Add blocks to history WITH verification (same as P2P path)
+        for (const block of newBlocks) {
           try {
+            // Run light client verification on HTTP-fetched blocks
+            let verificationResult: VerificationResult | undefined
+            try {
+              const startVerify = performance.now()
+              verificationResult = await verifyBlock(block)
+              const verifyTime = performance.now() - startVerify
+              verificationResult.verificationTimeMs = verifyTime
+
+              setVerificationStats(prev => ({
+                ...prev,
+                blocksVerified: prev.blocksVerified + 1,
+                blocksValid: prev.blocksValid + (verificationResult?.valid ? 1 : 0),
+                blocksInvalid: prev.blocksInvalid + (verificationResult?.valid ? 0 : 1),
+              }))
+
+              const emoji = verificationResult.valid ? '✅' : '⚠️'
+              console.log(`${emoji} [HTTP VERIFY] Block #${block.header.height}: ${verificationResult.summary} (${verifyTime.toFixed(1)}ms)`)
+              recordVerification(verificationResult.valid)
+            } catch (verifyError) {
+              console.warn('[HTTP VERIFY] Error verifying block:', verifyError)
+            }
+
+            const verifiedBlock: VerifiedBlock = {
+              ...block,
+              verification: verificationResult,
+            }
+
             setLatestBlock(block)
             setLatestBlockSummary(createBlockSummary(block))
             setBlockHistory(prev => {
@@ -628,13 +651,13 @@ export function useRealtimeBlocks(): UseRealtimeBlocksResult {
               if (prev.some(b => b.header.height === block.header.height)) {
                 return prev
               }
-              const newHistory = [block, ...prev]
+              const newHistory = [verifiedBlock, ...prev]
               return newHistory.slice(0, MAX_BLOCK_HISTORY)
             })
           } catch (blockErr) {
             console.warn(`[HTTP FALLBACK] Error processing block ${block?.header?.height}:`, blockErr)
           }
-        })
+        }
       }
     } catch (err) {
       console.warn('[HTTP FALLBACK] Failed to fetch blocks:', err)
@@ -661,49 +684,9 @@ export function useRealtimeBlocks(): UseRealtimeBlocksResult {
     }
   }, [isReady, subscribe])
 
-  /**
-   * HTTP Fallback: Start polling ONLY if no P2P blocks received
-   * P2P is primary, HTTP is backup
-   */
-  useEffect(() => {
-    // Wait 5 seconds before starting HTTP fallback to give P2P time to connect
-    const HTTP_FALLBACK_DELAY = 5000
-    const HTTP_POLL_INTERVAL = 3000
-    const P2P_TIMEOUT = 10000 // Consider P2P dead if no block for 10 seconds
-
-    console.log('⏳ [HTTP FALLBACK] Waiting 5s for P2P to connect before starting fallback...')
-
-    const startHttpFallback = () => {
-      // Only fetch via HTTP if P2P isn't delivering blocks
-      const timeSinceLastP2P = Date.now() - lastP2PBlockTime.current
-      const p2pIsWorking = lastP2PBlockTime.current > 0 && timeSinceLastP2P < P2P_TIMEOUT
-
-      if (p2pIsWorking) {
-        console.log(`✅ [HTTP FALLBACK] P2P is active (last block ${Math.round(timeSinceLastP2P / 1000)}s ago, ${p2pBlockCount.current} total) - skipping HTTP`)
-        return
-      }
-
-      console.log(`🌐 [HTTP FALLBACK] P2P inactive (${p2pBlockCount.current} blocks received, last ${timeSinceLastP2P > 0 ? Math.round(timeSinceLastP2P / 1000) + 's ago' : 'never'}) - using HTTP`)
-      fetchBlocksViaHttp()
-    }
-
-    // Initial delay before starting fallback
-    const delayTimeout = setTimeout(() => {
-      console.log('🔄 [HTTP FALLBACK] Initial delay complete, checking P2P status...')
-      startHttpFallback()
-
-      // Poll periodically, but only fetch if P2P is inactive
-      httpFallbackRef.current = setInterval(startHttpFallback, HTTP_POLL_INTERVAL)
-    }, HTTP_FALLBACK_DELAY)
-
-    return () => {
-      clearTimeout(delayTimeout)
-      if (httpFallbackRef.current) {
-        clearInterval(httpFallbackRef.current)
-        httpFallbackRef.current = null
-      }
-    }
-  }, [fetchBlocksViaHttp])
+  // v10.0.4: HTTP fallback REMOVED — P2P-only block delivery
+  // Server now adds browser peers as explicit gossipsub peers,
+  // guaranteeing block delivery via gossipsub mesh.
 
   return {
     latestBlock,
