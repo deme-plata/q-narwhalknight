@@ -248,7 +248,7 @@ impl Config {
 
             // Default bootstrap URL - Q-NarwhalKnight Testnet Masternode
             let bootstrap_url = env::var("Q_BOOTSTRAP_URL")
-                .unwrap_or_else(|_| "http://185.182.185.227:8080".to_string());
+                .unwrap_or_else(|_| "https://quillon.xyz".to_string());
 
             info!(
                 "🔍 Attempting automatic bootstrap discovery from {}",
@@ -268,7 +268,8 @@ impl Config {
                         config.bootstrap_peers = peers;
                     } else {
                         warn!("⚠️  No bootstrap peers discovered from {}", bootstrap_url);
-                        warn!("⚠️  Falling back to mDNS local discovery only");
+                        warn!("⚠️  Using hardcoded fallback bootstrap peers");
+                        config.bootstrap_peers = Self::hardcoded_bootstrap_peers();
                     }
                 }
                 Err(e) => {
@@ -276,7 +277,8 @@ impl Config {
                         "⚠️  Failed to fetch bootstrap peers from {}: {}",
                         bootstrap_url, e
                     );
-                    warn!("⚠️  Falling back to mDNS local discovery only");
+                    warn!("⚠️  Using hardcoded fallback bootstrap peers");
+                    config.bootstrap_peers = Self::hardcoded_bootstrap_peers();
                 }
             }
         }
@@ -375,6 +377,28 @@ impl Config {
         }
 
         Ok(config)
+    }
+
+    /// v10.0.8: Hardcoded fallback bootstrap peers for when HTTP discovery fails.
+    /// This is critical for Windows where:
+    /// 1. HTTPS may fail due to TLS backend issues (native-tls/schannel)
+    /// 2. mDNS is disabled on Windows
+    /// Without these fallbacks, Windows nodes get zero peers and never sync.
+    fn hardcoded_bootstrap_peers() -> Vec<String> {
+        use tracing::info;
+        let peers = vec![
+            // Epsilon (10Gbit SUPERNODE — primary sync target)
+            "/ip4/89.149.241.126/tcp/9001/p2p/12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM".to_string(),
+            // Beta (production bootstrap)
+            "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH".to_string(),
+            // Gamma (backup bootstrap)
+            "/ip4/109.205.176.60/tcp/9001/p2p/12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH".to_string(),
+        ];
+        info!("📡 Loaded {} hardcoded fallback bootstrap peers", peers.len());
+        for peer in &peers {
+            info!("   📡 {}", peer);
+        }
+        peers
     }
 
     /// Fetch bootstrap peers from a remote API endpoint

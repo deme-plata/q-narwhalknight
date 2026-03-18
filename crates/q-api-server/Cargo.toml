@@ -81,7 +81,10 @@ uuid = { workspace = true }
 bincode = { workspace = true }
 
 # HTTP client for automatic bootstrap discovery
-reqwest = { version = "0.12", features = ["blocking", "json", "stream"] }
+# v10.0.8: default-features=false + rustls-tls to avoid native-tls (schannel) on Windows.
+# MinGW cross-compiled binaries with native-tls fail HTTPS cert validation on some Windows
+# installs, causing bootstrap peer discovery to silently fail → zero peers → no sync.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "stream", "rustls-tls"] }
 
 # v7.3.2: Quillon Mail - DNS resolver for MX/SPF/DKIM lookups
 hickory-resolver = "0.24"
