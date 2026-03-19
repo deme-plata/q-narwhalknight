@@ -57,6 +57,9 @@ pqcrypto-traits = { workspace = true }
 # Prometheus metrics
 prometheus = { workspace = true }
 
+# v10.0.9: TOML parsing for Arti config (set memory quota)
+toml = { workspace = true }
+
 # Binary serialization for caching
 bincode = "1.3"
 

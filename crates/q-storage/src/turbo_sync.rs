@@ -1013,18 +1013,18 @@ impl Default for TurboSyncConfig {
                         sys.refresh_memory();
                         (sys.total_memory() / (1024 * 1024)) as usize
                     };
-                    // v1.0.2: Increased parallel streams for faster sync throughput
-                    // RSS backpressure (with reduced max wait) still prevents OOM
-                    // v9.2.0: Reduced medium tier from 16→6 streams — was causing 14.4GB RSS on 16GB nodes
-                    // Each stream: ~1000 blocks × 75KB = 75MB in-flight + deserialization overhead
-                    // 16 streams = 1.2GB in-flight — too much on 16GB with RocksDB cache + memtables
+                    // v10.0.9: MAJOR REDUCTION — users reporting 55GB RSS on 64GB machines.
+                    // Root cause: streams × chunk_size × ~150KB/block (with deser overhead) = in-flight RAM.
+                    // Old: 32 streams × 5000 chunks = 160K blocks × 150KB = 24GB in-flight alone!
+                    // New: 8 streams × 2000 chunks = 16K blocks × 150KB = 2.4GB in-flight.
+                    // Combined with reduced RocksDB cache, total peak RAM should be <8GB.
                     match ram_mb {
-                        0..=3999     => 2,    // micro: 2 streams (was 4)
-                        4000..=7999  => 4,    // small: 4 streams (was 8)
-                        8000..=15999 => 6,    // v9.2.0: 6 streams (was 16 — OOM on 16GB)
-                        16000..=31999 => 16,  // large: 16 streams (was 32)
-                        32000..=63999 => 32,  // xlarge: 32 streams (was 48)
-                        _            => 48,   // xxlarge 64GB+: 48 streams (was 64)
+                        0..=3999     => 2,    // micro: 2 streams
+                        4000..=7999  => 3,    // small: 3 streams (was 4)
+                        8000..=15999 => 4,    // medium: 4 streams (was 6)
+                        16000..=31999 => 6,   // large: 6 streams (was 16)
+                        32000..=63999 => 8,   // xlarge: 8 streams (was 32)
+                        _            => 10,   // xxlarge 64GB+: 10 streams (was 48)
                     }
                 }),
             // v8.0.7: P2P-aware chunk size — capped at 500 regardless of local RAM
@@ -1040,13 +1040,14 @@ impl Default for TurboSyncConfig {
                         sys.refresh_memory();
                         (sys.total_memory() / (1024 * 1024)) as u64
                     };
-                    // v1.0.2: Larger chunk sizes — amortize RTT overhead per block
-                    // Each round-trip is ~2-5s regardless of chunk size, so bigger = better BPS
+                    // v10.0.9: Reduced chunk sizes to cut in-flight memory.
+                    // Sync speed is limited by the SERVING peer (Gamma 7.8GB serves ~500/5s).
+                    // Larger chunks just timeout on slow peers. 500-1000 is the sweet spot.
                     match ram_mb {
-                        0..=3999     => 250,   // micro: 250 blocks/chunk
-                        4000..=7999  => 1000,  // small: 1000 blocks/chunk (was 500)
-                        8000..=15999 => 2000,  // medium: 2000 blocks/chunk (was 1000)
-                        _            => 5000,  // large+: 5000 blocks/chunk (was 2000)
+                        0..=3999     => 200,   // micro: 200 blocks/chunk
+                        4000..=7999  => 500,   // small: 500 blocks/chunk (was 1000)
+                        8000..=15999 => 500,   // medium: 500 blocks/chunk (was 2000)
+                        _            => 1000,  // large+: 1000 blocks/chunk (was 5000)
                     }
                 }),
             compression_level: std::env::var("Q_TURBO_COMPRESSION_LEVEL")
@@ -3195,13 +3196,27 @@ impl TurboSyncManager {
             };
             // For established nodes: allow 3x reference or reference + 500K (whichever is larger)
             // For fresh nodes (reference < 1000): NO cap — accept any height.
-            // A fresh node has no reference point to judge "too high" and capping
-            // caused a total sync failure when chain exceeded the hardcoded limit.
+            // v10.0.6: For syncing nodes (reference < network height by >500K), use relaxed cap.
+            // A fresh/syncing node can't judge "too high" when it's millions behind the chain tip.
+            // The old 500K cap caused total sync stalls when chain was at 10M+ and node at 26K.
             if reference_height >= 1_000 {
-                let max_reasonable = (reference_height * 3).max(reference_height + 500_000);
+                // v10.0.6: Check if we're in initial sync (far behind network).
+                // If the gap between announced height and our height is huge AND we have few peers,
+                // this is likely initial sync, not a malicious peer. Use much more relaxed cap.
+                let gap = highest_block.saturating_sub(our_height);
+                let is_initial_sync = gap > 500_000 && peer_count <= 5;
+
+                let max_reasonable = if is_initial_sync {
+                    // During initial sync: accept heights up to 100x our height or +50M (whichever larger)
+                    // This allows a node at 26K to accept peers at 10M+
+                    (reference_height * 100).max(reference_height + 50_000_000)
+                } else {
+                    // Normal operation: conservative 3x or +500K cap
+                    (reference_height * 3).max(reference_height + 500_000)
+                };
                 if highest_block > max_reasonable {
-                    warn!("🚫 [PEER REGISTRY] Rejecting suspicious height {} from peer {} (ref: {}, our: {}, peers: {}, max: {})",
-                        highest_block, peer_id, reference_height, our_height, peer_count, max_reasonable);
+                    warn!("🚫 [PEER REGISTRY] Rejecting suspicious height {} from peer {} (ref: {}, our: {}, peers: {}, max: {}, initial_sync: {})",
+                        highest_block, peer_id, reference_height, our_height, peer_count, max_reasonable, is_initial_sync);
                     return;
                 }
             }

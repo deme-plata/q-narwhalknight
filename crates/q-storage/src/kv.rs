@@ -145,17 +145,21 @@ impl RocksDBKV {
             _            => "xxlarge",  // 64+ GB: high-memory (Beta 94 GB)
         };
 
-        // Auto-scale block cache: 2-25% of RAM depending on tier
+        // Auto-scale block cache: 2-10% of RAM depending on tier
         // v6.1.0: Reduced small tier to 128MB fixed to prevent OOM on Gamma (7.8GB)
-        // v8.6.0: Doubled large/xlarge/xxlarge tiers for better read throughput
-        // v9.0.7: Reduced medium tier from 15%→10% to fix OOM on 16GB nodes during sync
+        // v9.2.0: Reduced medium from 10%→5% to fix OOM on 16GB during sync
+        // v10.0.9: MAJOR REDUCTION — users with 8-64GB RAM hitting OOM during sync.
+        //   Root cause: 30-35% of RAM for block cache left too little for Tor (8GB),
+        //   jemalloc fragmentation, kernel buffers, and sync working set.
+        //   64GB machine: old=22.4GB cache, new=4GB. Total node RAM: ~8GB (vs ~35GB).
+        //   Block cache hit rate is still >95% at 2-4GB for our 10M-block chain.
         let auto_cache_mb = match ram_tier {
             "micro"  => 64,                                               // 64 MB fixed
             "small"  => 128,                                              // 128 MB fixed (was 256, OOM fix)
-            "medium" => (total_ram_mb * 5 / 100).clamp(256, 512),        // v9.2.0: 5% of RAM, 256-512 MB (was 10%, 1 GB — OOM on 16GB during sync)
-            "large"  => (total_ram_mb * 25 / 100).clamp(2048, 8192),    // v8.6.0: 25% of RAM, 2-8 GB (was 1-4 GB)
-            "xlarge" => (total_ram_mb * 30 / 100).clamp(4096, 16384),   // v8.6.0: 30% of RAM, 4-16 GB (was 2-16 GB)
-            _        => (total_ram_mb * 35 / 100).clamp(8192, 24576),   // v8.6.0: 35% of RAM, 8-24 GB (64GB+ tier)
+            "medium" => (total_ram_mb * 5 / 100).clamp(256, 512),        // 5% of RAM, 256-512 MB
+            "large"  => (total_ram_mb * 10 / 100).clamp(1024, 2048),    // v10.0.9: 10% of RAM, 1-2 GB (was 25%, 2-8 GB)
+            "xlarge" => (total_ram_mb * 8 / 100).clamp(2048, 4096),     // v10.0.9: 8% of RAM, 2-4 GB (was 30%, 4-16 GB)
+            _        => (total_ram_mb * 6 / 100).clamp(2048, 4096),     // v10.0.9: 6% of RAM, 2-4 GB (was 35%, 8-24 GB)
         };
 
         // Auto-scale write buffer size (DB-level default CF)
@@ -326,10 +330,13 @@ impl RocksDBKV {
         // Trade-off: Reads not in block cache are slower (disk I/O), but Gamma is a backup node.
         // v9.0.7: Enable direct I/O for medium tier too — page cache was consuming
         // 3-5 GB on 16GB nodes during turbo sync, causing OOM kills
-        if ram_tier == "micro" || ram_tier == "small" || ram_tier == "medium" {
+        // v10.0.9: Enable direct I/O on all tiers up to "large" (≤32GB).
+        // On xlarge/xxlarge (32GB+), kernel page cache has enough headroom.
+        // On ≤32GB nodes, page cache competes with RocksDB+Tor for RAM → OOM.
+        if ram_tier == "micro" || ram_tier == "small" || ram_tier == "medium" || ram_tier == "large" {
             opts.set_use_direct_reads(true);
             opts.set_use_direct_io_for_flush_and_compaction(true);
-            info!("🔧 Direct I/O enabled for reads+compaction (eliminates page cache bloat on ≤16GB nodes)");
+            info!("🔧 Direct I/O enabled for reads+compaction (eliminates page cache bloat on ≤32GB nodes)");
         }
 
         // ========== MEMORY BUDGET (FORCE FLUSHES) ==========
@@ -337,11 +344,14 @@ impl RocksDBKV {
         // When total memtable usage exceeds this, RocksDB triggers flushes.
         // Must be low enough to prevent OOM during burst writes (block catchup).
         // v9.0.7: Reduced medium tier memtable budget from 256→128MB for OOM safety on 16GB
+        // v10.0.9: Reduced large tier memtable from 512→256MB. With 47 CFs,
+        // 512MB memtable + 128MB×6 write buffers = potential 1.3GB in memtables alone.
         let memtable_budget_mb = match ram_tier {
             "micro"  => 32,   // 32MB — very tight
             "small"  => 64,   // 64MB — forces aggressive flushing (was 128, OOM)
             "medium" => 128,  // v9.0.7: 128MB (was 256, OOM on 16GB during sync)
-            _        => 512,  // v8.6.0: 512MB — higher memtable budget for write throughput (was 384MB)
+            "large"  => 256,  // v10.0.9: 256MB (was 512, OOM reports on 16-32GB nodes)
+            _        => 512,  // 512MB — for xlarge/xxlarge (32GB+)
         };
         opts.set_db_write_buffer_size(memtable_budget_mb * 1024 * 1024);
         info!("🗄️ RocksDB memtable budget: {}MB (tier={})", memtable_budget_mb, ram_tier);

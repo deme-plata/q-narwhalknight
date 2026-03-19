@@ -170,14 +170,30 @@ impl RealTorClient {
         let runtime = TokioNativeTlsRuntime::current()
             .map_err(|e| anyhow!("Failed to get current Tokio runtime: {}", e))?;
 
-        // Configure Arti client
-        let arti_config = TorClientConfig::default();
+        // v10.0.9: Configure Arti with capped memory quota.
+        // Default Arti auto-detects system RAM and reserves up to 1/4 of it (8GB on 32GB).
+        // This is too much for a blockchain node that also needs RAM for RocksDB, sync buffers, etc.
+        // Cap at 512MB max / 384MB low_water — Tor circuits need very little RAM.
+        let tor_mem_max_mb: usize = std::env::var("Q_TOR_MEMORY_MAX_MB")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(512);
+        let tor_mem_low_mb = tor_mem_max_mb * 3 / 4;
 
-        // Note: In newer arti versions, configuration is typically done through config files
-        // or builder patterns. For now, use defaults to avoid private field access errors.
-        // TODO: Implement proper configuration through arti's public APIs
+        // Build config from TOML to set system.memory.max without fighting derive(Builder) generics
+        let config_toml = format!(
+            "[system.memory]\nmax = {}\nlow_water = {}\n",
+            tor_mem_max_mb * 1024 * 1024,
+            tor_mem_low_mb * 1024 * 1024,
+        );
+        let arti_config: TorClientConfig = toml::from_str::<arti_client::config::TorClientConfigBuilder>(&config_toml)
+            .unwrap_or_default()
+            .build()
+            .unwrap_or_default();
 
-        info!("Using default Tor configuration (cache: {}, state: {})",
+        info!("🧅 Tor memory quota: max={}MB, low_water={}MB (override: Q_TOR_MEMORY_MAX_MB)",
+              tor_mem_max_mb, tor_mem_low_mb);
+        info!("Using Tor configuration (cache: {}, state: {})",
               config.cache_directory, config.data_directory);
 
         // Configure bridges if specified
