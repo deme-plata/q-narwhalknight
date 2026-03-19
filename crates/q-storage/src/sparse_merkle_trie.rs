@@ -260,6 +260,9 @@ pub struct SparseMerkleTrie {
     cf_name: String,
     /// Number of trie levels (256 for 32-byte keys)
     depth: usize,
+    /// v10.0.9: Maximum cache entries before eviction (prevents 20GB+ memory leak during sync)
+    /// When exceeded, cache is cleared — nodes reload from RocksDB on demand.
+    max_cache_entries: usize,
 }
 
 impl SparseMerkleTrie {
@@ -272,6 +275,7 @@ impl SparseMerkleTrie {
             db: None,
             cf_name: CF_STATE_TRIE.to_string(),
             depth: 256,
+            max_cache_entries: 100_000, // ~14MB — sufficient for hot path nodes
         }
     }
 
@@ -287,6 +291,7 @@ impl SparseMerkleTrie {
             db: Some(db),
             cf_name: cf_name.to_string(),
             depth: 256,
+            max_cache_entries: 100_000, // ~14MB — sufficient for hot path nodes
         }
     }
 
@@ -374,9 +379,17 @@ impl SparseMerkleTrie {
             return EMPTY_HASH;
         }
 
-        // Store in cache
+        // Store in cache, with eviction when over limit
         {
             let mut cache = self.cache.write().unwrap();
+            // v10.0.9: Evict cache when it grows too large to prevent 20GB+ memory leak.
+            // During sync, millions of trie operations create orphaned nodes that accumulate.
+            // Nodes are persisted in RocksDB, so clearing the cache only costs a disk read on miss.
+            if cache.len() >= self.max_cache_entries {
+                warn!("🧹 [SMT] Cache eviction: {} entries exceeded {} limit, clearing",
+                      cache.len(), self.max_cache_entries);
+                cache.clear();
+            }
             cache.insert(hash, node.clone());
         }
 
