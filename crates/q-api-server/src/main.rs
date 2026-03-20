@@ -13028,7 +13028,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                     q_api_server::streaming::StreamEvent::MiningStats {
                                         miner_address: stats_update.miner_address.clone(),
                                         total_rewards: current_balance,
-                                        total_blocks_found: miner_stat.total_solutions,
+                                        total_blocks_found: miner_stat.blocks_found,
                                         current_balance,
                                         avg_hash_rate: miner_stat.last_hashrate, // v3.5.6-beta: Already in H/s
                                         miner_id: miner_id_for_sse,
@@ -15712,15 +15712,27 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                     info!("📝 [v10.0.6] Block {} — acquiring mining_stats write lock...", new_block.header.height);
                                     match tokio::time::timeout(std::time::Duration::from_secs(3), mining_stats_arc.write()).await {
                                         Ok(mut mining_stats) => {
-                                            let reward_per_solution = q_api_server::handlers::calculate_block_reward(new_block.header.height);
+                                            let total_reward = q_api_server::handlers::calculate_block_reward(new_block.header.height);
+                                            let solution_count = new_block.mining_solutions.len().max(1) as u128;
+                                            let reward_per_solution = total_reward / solution_count;
+                                            // v10.1.1: Track unique miners per block — each miner gets blocks_found += 1
+                                            // regardless of how many solutions they contributed to this block
+                                            let mut credited_miners = std::collections::HashSet::new();
                                             for solution in &new_block.mining_solutions {
                                                 let miner_address_hex = hex::encode(solution.miner_address);
                                                 let worker_id = solution.miner_id.clone()
                                                     .or_else(|| solution.worker_name.clone())
                                                     .unwrap_or_else(|| "default".to_string());
-                                                mining_stats.record_block_found(&miner_address_hex, &worker_id, reward_per_solution as u128);
+                                                let miner_key = format!("{}:{}", miner_address_hex, worker_id);
+                                                if credited_miners.insert(miner_key) {
+                                                    // First solution from this miner in this block — count as 1 block found
+                                                    mining_stats.record_block_found(&miner_address_hex, &worker_id, reward_per_solution as u128);
+                                                } else {
+                                                    // Additional solution from same miner — add reward but don't increment blocks_found
+                                                    mining_stats.record_solution_reward(&miner_address_hex, &worker_id, reward_per_solution as u128);
+                                                }
                                             }
-                                            info!("📝 [v10.0.6] Block {} — mining stats recorded OK", new_block.header.height);
+                                            info!("📝 [v10.1.1] Block {} — {} miners credited ({} solutions)", new_block.header.height, credited_miners.len(), new_block.mining_solutions.len());
                                         }
                                         Err(_) => {
                                             warn!("⏱️ [v10.0.6] mining_stats.write() TIMED OUT 3s for block {} — skipping stats (non-fatal)", new_block.header.height);
@@ -17198,22 +17210,33 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 // 🏆 v3.5.7-beta: Record blocks found per miner/worker
                                 if let Some(ref mining_stats_arc) = app_state_block_producer.mining_statistics {
                                     let mut mining_stats = mining_stats_arc.write().await;
-                                    let reward_per_solution = q_api_server::handlers::calculate_block_reward(new_block.header.height);
-
+                                    let total_reward = q_api_server::handlers::calculate_block_reward(new_block.header.height);
+                                    let solution_count = new_block.mining_solutions.len().max(1) as u128;
+                                    let reward_per_solution = total_reward / solution_count;
+                                    // v10.1.1: Track unique miners — 1 block_found per miner per block
+                                    let mut credited_miners = std::collections::HashSet::new();
                                     for solution in &new_block.mining_solutions {
                                         let miner_address_hex = hex::encode(solution.miner_address);
                                         let worker_id = solution.miner_id.clone()
                                             .or_else(|| solution.worker_name.clone())
                                             .unwrap_or_else(|| "default".to_string());
-
-                                        mining_stats.record_block_found(
-                                            &miner_address_hex,
-                                            &worker_id,
-                                            reward_per_solution as u128,
-                                        );
+                                        let miner_key = format!("{}:{}", miner_address_hex, worker_id);
+                                        if credited_miners.insert(miner_key) {
+                                            mining_stats.record_block_found(
+                                                &miner_address_hex,
+                                                &worker_id,
+                                                reward_per_solution as u128,
+                                            );
+                                        } else {
+                                            mining_stats.record_solution_reward(
+                                                &miner_address_hex,
+                                                &worker_id,
+                                                reward_per_solution as u128,
+                                            );
+                                        }
                                     }
-                                    info!("🏆 [v3.5.7-beta TIME-BASED] Recorded {} blocks found for miners",
-                                          new_block.mining_solutions.len());
+                                    info!("🏆 [v10.1.1 TIME-BASED] {} miners credited ({} solutions)",
+                                          credited_miners.len(), new_block.mining_solutions.len());
                                 }
 
                                 // 🚨 v1.0.2 FIX #3: Update emergency fallback tracking

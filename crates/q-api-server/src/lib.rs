@@ -975,6 +975,22 @@ impl MiningStatistics {
         }
     }
 
+    /// v10.1.1: Record additional solution reward without incrementing blocks_found
+    /// Used when a miner has multiple solutions in the same block
+    pub fn record_solution_reward(&mut self, miner_address: &str, worker_id: &str, reward_amount: u128) {
+        let key = format!("{}:{}", miner_address, worker_id);
+        if let Some(stats) = self.active_miners.get_mut(&key) {
+            stats.rewards_earned += reward_amount;
+        } else {
+            for (k, stats) in self.active_miners.iter_mut() {
+                if k.starts_with(miner_address) {
+                    stats.rewards_earned += reward_amount;
+                    return;
+                }
+            }
+        }
+    }
+
     /// v3.3.4-beta: Get all miners for a given wallet address (across all workers)
     pub fn get_miners_for_address(&self, address: &str) -> Vec<&MinerStats> {
         self.active_miners
