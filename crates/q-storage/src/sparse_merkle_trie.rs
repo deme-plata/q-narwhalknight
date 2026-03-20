@@ -275,7 +275,7 @@ impl SparseMerkleTrie {
             db: None,
             cf_name: CF_STATE_TRIE.to_string(),
             depth: 256,
-            max_cache_entries: 100_000, // ~14MB — sufficient for hot path nodes
+            max_cache_entries: 500_000, // ~70MB — balances sync speed vs memory (evicts every ~27K blocks)
         }
     }
 
@@ -291,7 +291,7 @@ impl SparseMerkleTrie {
             db: Some(db),
             cf_name: cf_name.to_string(),
             depth: 256,
-            max_cache_entries: 100_000, // ~14MB — sufficient for hot path nodes
+            max_cache_entries: 500_000, // ~70MB — balances sync speed vs memory (evicts every ~27K blocks)
         }
     }
 
