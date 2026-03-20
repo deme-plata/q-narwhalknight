@@ -1235,18 +1235,30 @@ pub async fn network_supply(
     let (estimated_hashrate, active_miner_count) = if let Some(ref mining_stats_arc) = state.mining_statistics {
         let mut mining_stats = mining_stats_arc.write().await;
         // v3.5.6-beta: calculate_network_hashrate() now returns H/s directly (not KH/s)
-        let network_hashrate_hs = mining_stats.calculate_network_hashrate();
+        let local_hashrate_hs = mining_stats.calculate_network_hashrate();
         let miner_count = mining_stats.active_miner_count();
-        if network_hashrate_hs > 0.0 {
-            // Already in H/s, no conversion needed
-            (network_hashrate_hs as u64, miner_count)
+        // v10.1.1: Include P2P peer compute power — matches mining challenge endpoint
+        // Without this, explorer showed only local miners' hashrate while miners saw
+        // the full network hashrate (local + P2P peers), causing a discrepancy
+        let peer_hashrate: f64 = q_storage::PEER_COMPUTE_POWER.iter().map(|e| e.value().0).sum();
+        let peer_count = q_storage::PEER_COMPUTE_POWER.len();
+        let total_hashrate = local_hashrate_hs + peer_hashrate;
+        let total_miners = miner_count + peer_count;
+        if total_hashrate > 0.0 {
+            (total_hashrate as u64, total_miners)
         } else {
             // No active miners, fallback to peer estimate
             (connected_peers * 100_000, miner_count)
         }
     } else {
-        // Mining statistics not initialized, fallback
-        (connected_peers * 100_000, 0)
+        // Mining statistics not initialized, check P2P peer compute power
+        let peer_hashrate: f64 = q_storage::PEER_COMPUTE_POWER.iter().map(|e| e.value().0).sum();
+        let peer_count = q_storage::PEER_COMPUTE_POWER.len();
+        if peer_hashrate > 0.0 {
+            (peer_hashrate as u64, peer_count)
+        } else {
+            (connected_peers * 100_000, 0)
+        }
     };
 
     // Calculate circulating supply percentage
@@ -5524,20 +5536,20 @@ pub async fn hashpower_security_metrics(
     // 3. Security bits based on actual cumulative work, not theoretical max
 
     // Try to get REAL hashrate from mining statistics
-    let real_hashrate: u64 = if let Some(ref mining_stats) = state.mining_statistics {
-        if let Ok(mut stats) = mining_stats.try_write() {
-            // v3.5.6-beta: calculate_network_hashrate() now returns H/s directly
-            let network_hashrate_hs = stats.calculate_network_hashrate();
-            if network_hashrate_hs > 0.0 {
-                network_hashrate_hs as u64
+    // v10.1.1: Include P2P peer compute power to match mining challenge endpoint
+    let real_hashrate: u64 = {
+        let local_hr: f64 = if let Some(ref mining_stats) = state.mining_statistics {
+            if let Ok(mut stats) = mining_stats.try_write() {
+                stats.calculate_network_hashrate()
             } else {
-                0
+                0.0
             }
         } else {
-            0
-        }
-    } else {
-        0
+            0.0
+        };
+        let peer_hr: f64 = q_storage::PEER_COMPUTE_POWER.iter().map(|e| e.value().0).sum();
+        let total = local_hr + peer_hr;
+        if total > 0.0 { total as u64 } else { 0 }
     };
 
     // v1.4.5-beta: Get active miner count for better estimation
@@ -8800,38 +8812,28 @@ pub async fn submit_mining_solution(
                     }
                 }
                 if !queued {
-                    // v9.0.4: Increased from 50ms → 2000ms. The 50ms timeout was set for
-                    // nginx connection pileup prevention (3000 req/s × 0.5s = 1500 conns).
-                    // With Caddy Connection:close, pileup is prevented at the TLS layer.
-                    // 2s wait allows batch processor to drain 1-2 cycles (each ~50-65s for
-                    // 500 submissions), dramatically reducing 503 errors under heavy load.
-                    // Miners already have 10s HTTP timeout, so 2s wait is acceptable.
-                    match tokio::time::timeout(
-                        std::time::Duration::from_millis(2000),
-                        txs[idx].send(submission.clone()),
-                    ).await {
-                        Ok(Ok(())) => {
-                            // Successfully queued after waiting
-                            queued = true;
-                        }
-                        Ok(Err(_)) => {
-                            // Channel closed
-                            warn!("❌ Mining shard {} channel closed during wait", idx);
-                        }
-                        Err(_timeout) => {
-                            // 2s timeout expired — return 503 for reverse proxy failover
-                            static LAST_CAPACITY_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                            let now_secs = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs();
-                            let prev = LAST_CAPACITY_LOG.load(std::sync::atomic::Ordering::Relaxed);
-                            if now_secs >= prev + 10 && LAST_CAPACITY_LOG.compare_exchange(prev, now_secs, std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed).is_ok() {
-                                warn!("🚨 All {} mining shards full for 2s — returning 503", shard_count);
-                            }
-                            return Err(StatusCode::SERVICE_UNAVAILABLE);
-                        }
+                    // v10.0.5: CRITICAL FIX — Return 503 IMMEDIATELY when all shards full.
+                    // ROOT CAUSE OF PERMANENT MINING STALL:
+                    //   v1.0.4 used send().await with 2s timeout. With hundreds of miners,
+                    //   ALL tokio worker threads blocked on this .await for 2s each.
+                    //   Shard consumer tasks need a worker thread to run recv().await,
+                    //   but none were available → channels never drained → deadlock.
+                    //
+                    // FIX: Never block on channel send. Return 503 immediately so:
+                    //   1. Tokio worker threads are freed instantly
+                    //   2. Shard consumers get CPU time to drain channels
+                    //   3. Miners retry (they have 10s HTTP timeout)
+                    //   4. q-flux/nginx can failover to other servers
+                    static LAST_CAPACITY_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                    let now_secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let prev = LAST_CAPACITY_LOG.load(std::sync::atomic::Ordering::Relaxed);
+                    if now_secs >= prev + 10 && LAST_CAPACITY_LOG.compare_exchange(prev, now_secs, std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed).is_ok() {
+                        warn!("🚨 All {} mining shards full — returning 503 immediately (v10.0.5 anti-deadlock)", shard_count);
                     }
+                    return Err(StatusCode::SERVICE_UNAVAILABLE);
                 }
                 queued
             }
@@ -9862,6 +9864,10 @@ pub async fn execute_swap(
     let from_is_index_fund = from_upper.starts_with("INDEX-FUND-") || from_upper == "QNK10" || from_upper == "DEFI5";
     let to_is_index_fund = to_upper.starts_with("INDEX-FUND-") || to_upper == "QNK10" || to_upper == "DEFI5";
 
+    // v1.0.2: Determine if tokens are bridge tokens (wZEC, wBTC, wETH, wIRON)
+    let from_is_bridge = matches!(from_upper.as_str(), "WZEC" | "WBTC" | "WETH" | "WIRON");
+    let to_is_bridge = matches!(to_upper.as_str(), "WZEC" | "WBTC" | "WETH" | "WIRON");
+
     // Resolve token addresses for non-native tokens (QUGUSD gets special address)
     let from_token_addr = if from_is_native {
         [0u8; 32]
@@ -9993,6 +9999,40 @@ pub async fn execute_swap(
                     return Ok(Json(ApiResponse::error(format!(
                         "Insufficient QUGUSD balance. Required: {:.6} QUGUSD, Available: {:.6} QUGUSD",
                         required_qugusd, available_qugusd
+                    ))));
+                }
+            }
+        } else if from_is_bridge {
+            // v1.0.2: Bridge token balance check
+            // Bridge tokens are stored in native base units (8-dec for wZEC/wBTC/wIRON, 18-dec for wETH)
+            // Frontend sends amount_in in 24-decimal format — convert to native for comparison
+            let balance_key = (wallet_addr, from_token_addr);
+            let native_balance = token_balances.get(&balance_key).copied().unwrap_or(0);
+            let (_, bridge_sym, bridge_decimals) = q_types::bridge_token_info(&from_token_addr)
+                .unwrap_or(("Bridge Token", "BRIDGE", 8));
+            let scale_factor = 10u128.pow(24 - bridge_decimals as u32);
+            let balance_24dec = native_balance.saturating_mul(scale_factor);
+            let amount_in_u128 = request.amount_in as u128;
+
+            debug!(
+                "🌉 [SWAP v1.0.2] Bridge balance check: {} native={} ({}-dec), as 24-dec={}, required 24-dec={}",
+                bridge_sym, native_balance, bridge_decimals, balance_24dec, amount_in_u128
+            );
+
+            if balance_24dec < amount_in_u128 {
+                let tolerance = amount_in_u128 / 1_000_000;
+                let min_tolerance: u128 = 1_000_000_000_000_000_000;
+                let effective_tolerance = tolerance.max(min_tolerance);
+
+                if balance_24dec + effective_tolerance >= amount_in_u128 {
+                    debug!("🔍 [SWAP] Allowing bridge token swap within tolerance");
+                } else {
+                    let divisor = 10f64.powi(bridge_decimals as i32);
+                    let required_display = amount_in_u128 as f64 / 1e24;
+                    let available_display = native_balance as f64 / divisor;
+                    return Ok(Json(ApiResponse::error(format!(
+                        "Insufficient {} balance. Required: {:.8}, Available: {:.8}",
+                        bridge_sym, required_display, available_display
                     ))));
                 }
             }
@@ -10967,6 +11007,9 @@ pub async fn execute_swap(
         let ft = request.from_token.to_uppercase();
         if ft == "QUG" || ft == "QUGUSD" {
             24
+        } else if from_is_bridge {
+            // v1.0.2: Bridge tokens have known decimals from bridge_token_info
+            q_types::bridge_token_info(&from_token_addr).map(|(_, _, d)| d).unwrap_or(8)
         } else {
             let clean = request.from_token.trim_start_matches("qnk").trim_start_matches("0x");
             let mut dec = 8u8;
@@ -10991,6 +11034,9 @@ pub async fn execute_swap(
         let tt = request.to_token.to_uppercase();
         if tt == "QUG" || tt == "QUGUSD" {
             24
+        } else if to_is_bridge {
+            // v1.0.2: Bridge tokens have known decimals from bridge_token_info
+            q_types::bridge_token_info(&to_token_addr).map(|(_, _, d)| d).unwrap_or(8)
         } else {
             let clean = request.to_token.trim_start_matches("qnk").trim_start_matches("0x");
             let mut dec = 8u8;
@@ -11099,6 +11145,31 @@ pub async fn execute_swap(
                 warn!("⚠️ [INDEX v4.0.9] Failed to persist deducted index fund balance: {}", e);
             }
             token_balances = state.token_balances.write().await;
+        } else if from_is_bridge {
+            // v1.0.2: Deducting bridge token (wZEC, wBTC, wETH, wIRON)
+            // Bridge tokens are stored in native base units (8-dec or 18-dec).
+            // Frontend sends amount_in in 24-decimal. Convert to native for debit.
+            let (_, bridge_sym, bridge_decimals) = q_types::bridge_token_info(&from_token_addr)
+                .unwrap_or(("Bridge Token", "BRIDGE", 8));
+            let scale_factor = 10u128.pow(24 - bridge_decimals as u32);
+            let debit_native = (request.amount_in as u128) / scale_factor;
+
+            let from_key = (wallet_addr, from_token_addr);
+            let old_balance = token_balances.get(&from_key).copied().unwrap_or(0);
+            let new_balance = old_balance.saturating_sub(debit_native);
+            token_balances.insert(from_key, new_balance);
+
+            let divisor = 10f64.powi(bridge_decimals as i32);
+            info!("💸 [SWAP v1.0.2] Deducted {:.8} {} from user (native: {} → {}, {}-dec)",
+                debit_native as f64 / divisor, bridge_sym,
+                old_balance, new_balance, bridge_decimals);
+
+            // Persist to storage
+            drop(token_balances);
+            if let Err(e) = state.storage_engine.save_token_balance(&wallet_addr, &from_token_addr, new_balance).await {
+                warn!("⚠️ [SWAP v1.0.2] Failed to persist deducted bridge token balance: {}", e);
+            }
+            token_balances = state.token_balances.write().await;
         } else {
             // Deducting custom token
             if let Ok(from_token_bytes) = hex::decode(request.from_token.trim_start_matches("qnk").trim_start_matches("0x")) {
@@ -11196,6 +11267,29 @@ pub async fn execute_swap(
             drop(token_balances);
             if let Err(e) = state.storage_engine.save_token_balance(&wallet_addr, &to_token_addr, new_balance).await {
                 warn!("⚠️ [INDEX v4.0.9] Failed to persist credited index fund balance: {}", e);
+            }
+        } else if to_is_bridge {
+            // v1.0.2: Credit bridge token (wZEC, wBTC, wETH, wIRON)
+            // AMM output (final_amount_out) is in 24-decimal. Convert to native base units for storage.
+            let (_, bridge_sym, bridge_decimals) = q_types::bridge_token_info(&to_token_addr)
+                .unwrap_or(("Bridge Token", "BRIDGE", 8));
+            let scale_factor = 10u128.pow(24 - bridge_decimals as u32);
+            let credit_native = (final_amount_out as u128) / scale_factor;
+
+            let to_key = (wallet_addr, to_token_addr);
+            let old_balance = token_balances.get(&to_key).copied().unwrap_or(0);
+            let new_balance = old_balance.saturating_add(credit_native);
+            token_balances.insert(to_key, new_balance);
+
+            let divisor = 10f64.powi(bridge_decimals as i32);
+            info!("💰 [SWAP v1.0.2] Credited {:.8} {} to user (native: {} → {}, {}-dec)",
+                credit_native as f64 / divisor, bridge_sym,
+                old_balance, new_balance, bridge_decimals);
+
+            // Persist to storage
+            drop(token_balances);
+            if let Err(e) = state.storage_engine.save_token_balance(&wallet_addr, &to_token_addr, new_balance).await {
+                warn!("⚠️ [SWAP v1.0.2] Failed to persist credited bridge token balance: {}", e);
             }
         } else {
             // Crediting custom token
@@ -11957,6 +12051,15 @@ async fn resolve_token_address(state: &Arc<AppState>, token_id: &str) -> Result<
     // v2.4.6: Use standard QUGUSD_TOKEN_ADDRESS for consistency
     if token_id.eq_ignore_ascii_case("QUGUSD") || token_id.eq_ignore_ascii_case("QUGUSD-STABLE") {
         return Ok(q_types::QUGUSD_TOKEN_ADDRESS);
+    }
+
+    // v1.0.2: Bridge token resolution (wZEC, wBTC, wETH, wIRON)
+    match token_id.to_uppercase().as_str() {
+        "WZEC" => return Ok(q_types::WZEC_TOKEN_ADDRESS),
+        "WBTC" => return Ok(q_types::WBTC_TOKEN_ADDRESS),
+        "WETH" => return Ok(q_types::WETH_TOKEN_ADDRESS),
+        "WIRON" => return Ok(q_types::WIRON_TOKEN_ADDRESS),
+        _ => {}
     }
 
     // 🆕 v2.2.1: Special handling for Index Fund tokens (QNK10, DEFI5, etc.)

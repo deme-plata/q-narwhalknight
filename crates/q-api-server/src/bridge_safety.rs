@@ -53,6 +53,30 @@ pub const SWAP_EXPIRY_SECS: u64 = 43200; // 12 hours (matches HTLC timelock)
 pub const SWAP_SCAN_INTERVAL_SECS: u64 = 60;
 
 // ============================================================================
+// WETH ERC-20 Bridge Constants (MetaMask integration)
+// ============================================================================
+
+/// WETH contract address on Ethereum mainnet
+pub const WETH_CONTRACT: &str = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
+
+/// ERC-20 Transfer event topic: keccak256("Transfer(address,address,uint256)")
+pub const ERC20_TRANSFER_TOPIC: &str =
+    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+
+/// Bridge deposit address — WETH sent here triggers QUG credit
+/// This is the bridge committee multisig address on Ethereum
+pub const BRIDGE_DEPOSIT_ADDRESS: &str = "0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18";
+
+/// Minimum WETH deposit (0.001 WETH in wei)
+pub const WETH_MIN_DEPOSIT_WEI: u128 = 1_000_000_000_000_000;
+
+/// Maximum WETH deposit (1.0 WETH in wei)
+pub const WETH_MAX_DEPOSIT_WEI: u128 = 1_000_000_000_000_000_000;
+
+/// Deposit monitor poll interval (seconds)
+pub const DEPOSIT_MONITOR_INTERVAL_SECS: u64 = 15;
+
+// ============================================================================
 // Multi-Node Bridge Attestation (Issue #016)
 // ============================================================================
 //
@@ -281,6 +305,72 @@ pub enum DepositStatus {
     /// Deposit expired (no deposit within timelock)
     Expired,
     /// Deposit verification failed
+    Failed(String),
+}
+
+/// Result of WETH ERC-20 deposit verification
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum WethDepositVerification {
+    /// WETH Transfer verified on-chain
+    Verified {
+        tx_hash: String,
+        sender: String,
+        amount_wei: u128,
+        confirmations: u32,
+        /// true if confirmations >= ETH_MIN_CONFIRMATIONS
+        confirmed: bool,
+    },
+    /// Transaction not found on-chain (may be pending)
+    NotFound,
+    /// Verification failed (invalid logs, wrong recipient, etc.)
+    Failed(String),
+    /// RPC error (Reth unreachable)
+    RpcError(String),
+    /// Bridge frozen
+    Frozen,
+}
+
+/// Tracked WETH bridge deposit (MetaMask → QUG flow)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WethBridgeDeposit {
+    /// Unique deposit ID
+    pub deposit_id: String,
+    /// Ethereum transaction hash (from MetaMask)
+    pub eth_tx_hash: String,
+    /// Sender's Ethereum address
+    pub sender_eth_address: String,
+    /// Recipient QNK wallet address (hex)
+    pub recipient_qnk_wallet: String,
+    /// WETH amount in wei
+    pub amount_wei: u128,
+    /// Equivalent QUG amount in base units (24 decimals)
+    pub qug_amount: u128,
+    /// Current confirmations on Ethereum
+    pub confirmations: u32,
+    /// Committee attestations received
+    pub attestations: u32,
+    /// Required attestations (7 of 11)
+    pub required_attestations: u32,
+    /// Deposit status
+    pub status: WethDepositStatus,
+    /// When deposit was registered
+    pub created_at: DateTime<Utc>,
+    /// Last status update
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Status of a WETH bridge deposit
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WethDepositStatus {
+    /// Registered, awaiting on-chain confirmation
+    Pending,
+    /// Enough confirmations, awaiting committee attestation
+    Confirming,
+    /// Committee quorum reached, crediting QUG
+    Attesting,
+    /// QUG credited successfully
+    Completed,
+    /// Deposit failed or expired
     Failed(String),
 }
 
@@ -804,6 +894,268 @@ impl BridgeSafetyController {
             DepositVerificationResult::Pending {
                 confirmations,
                 txid: txid.to_string(),
+            }
+        }
+    }
+
+    // ========================================================================
+    // WETH ERC-20 Deposit Verification (MetaMask → Bridge)
+    // ========================================================================
+
+    /// Verify a WETH ERC-20 deposit by parsing Transfer event logs from the
+    /// transaction receipt. Validates:
+    /// - Transaction is to WETH contract address
+    /// - Contains Transfer event with correct topics
+    /// - `to` field matches bridge deposit address
+    /// - `value` matches expected amount
+    /// - Has 12+ confirmations
+    pub async fn verify_weth_erc20_deposit(
+        &self,
+        tx_hash: &str,
+        expected_amount: u128,
+        expected_sender: Option<&str>,
+    ) -> WethDepositVerification {
+        if self.is_frozen() {
+            return WethDepositVerification::Frozen;
+        }
+
+        let config = self.rpc_endpoints.read().await;
+        let rpc_url = match &config.eth_rpc_url {
+            Some(url) => url.clone(),
+            None => {
+                return WethDepositVerification::RpcError(
+                    "ETH_RPC_URL not configured".to_string(),
+                );
+            }
+        };
+        drop(config);
+
+        let client = reqwest::Client::new();
+
+        // Step 1: Get transaction receipt
+        let receipt_body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "eth_getTransactionReceipt",
+            "params": [tx_hash]
+        });
+
+        let receipt_resp = match client
+            .post(&rpc_url)
+            .json(&receipt_body)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                return WethDepositVerification::RpcError(
+                    format!("ETH RPC request failed: {}", e),
+                );
+            }
+        };
+
+        let receipt_json: serde_json::Value = match receipt_resp.json().await {
+            Ok(j) => j,
+            Err(e) => {
+                return WethDepositVerification::RpcError(
+                    format!("Failed to parse ETH receipt: {}", e),
+                );
+            }
+        };
+
+        let result = &receipt_json["result"];
+        if result.is_null() {
+            return WethDepositVerification::NotFound;
+        }
+
+        // Check transaction status
+        let status = result["status"].as_str().unwrap_or("0x0");
+        if status != "0x1" {
+            return WethDepositVerification::Failed(
+                "Transaction reverted (status != 0x1)".to_string(),
+            );
+        }
+
+        // Step 2: Parse logs for WETH Transfer event
+        let logs = match result["logs"].as_array() {
+            Some(l) => l,
+            None => {
+                return WethDepositVerification::Failed(
+                    "No logs in transaction receipt".to_string(),
+                );
+            }
+        };
+
+        let weth_lower = WETH_CONTRACT.to_lowercase();
+        let transfer_topic_lower = ERC20_TRANSFER_TOPIC.to_lowercase();
+        let bridge_addr_lower = BRIDGE_DEPOSIT_ADDRESS.to_lowercase();
+
+        let mut found_transfer = false;
+        let mut actual_sender = String::new();
+        let mut actual_amount: u128 = 0;
+
+        for log in logs {
+            // Check contract address is WETH
+            let log_address = log["address"].as_str().unwrap_or("").to_lowercase();
+            if log_address != weth_lower {
+                continue;
+            }
+
+            // Check topics[0] is Transfer event
+            let topics = match log["topics"].as_array() {
+                Some(t) if t.len() >= 3 => t,
+                _ => continue,
+            };
+
+            let event_sig = topics[0].as_str().unwrap_or("").to_lowercase();
+            if event_sig != transfer_topic_lower {
+                continue;
+            }
+
+            // topics[1] = from (zero-padded 32 bytes, last 20 bytes are address)
+            let from_topic = topics[1].as_str().unwrap_or("");
+            let from_addr = format!("0x{}", &from_topic[from_topic.len().saturating_sub(40)..]);
+
+            // topics[2] = to (zero-padded 32 bytes, last 20 bytes are address)
+            let to_topic = topics[2].as_str().unwrap_or("");
+            let to_addr = format!("0x{}", &to_topic[to_topic.len().saturating_sub(40)..]);
+
+            // Validate `to` matches bridge deposit address
+            if to_addr.to_lowercase() != bridge_addr_lower {
+                continue;
+            }
+
+            // Parse value from data field (hex u256, but we only need u128)
+            let data = log["data"].as_str().unwrap_or("0x0");
+            let data_clean = data.trim_start_matches("0x");
+            actual_amount = u128::from_str_radix(data_clean, 16).unwrap_or(0);
+            actual_sender = from_addr;
+            found_transfer = true;
+            break;
+        }
+
+        if !found_transfer {
+            return WethDepositVerification::Failed(
+                format!(
+                    "No WETH Transfer event to bridge address {} found in tx logs",
+                    BRIDGE_DEPOSIT_ADDRESS
+                ),
+            );
+        }
+
+        // Step 3: Validate sender if specified
+        if let Some(expected) = expected_sender {
+            if actual_sender.to_lowercase() != expected.to_lowercase() {
+                return WethDepositVerification::Failed(
+                    format!(
+                        "Sender mismatch: expected {}, got {}",
+                        expected, actual_sender
+                    ),
+                );
+            }
+        }
+
+        // Step 4: Validate amount (allow ±0.1% tolerance for gas/rounding)
+        if actual_amount == 0 {
+            return WethDepositVerification::Failed("Transfer amount is zero".to_string());
+        }
+
+        if actual_amount < WETH_MIN_DEPOSIT_WEI {
+            return WethDepositVerification::Failed(
+                format!(
+                    "Amount {} wei below minimum {} wei (0.001 WETH)",
+                    actual_amount, WETH_MIN_DEPOSIT_WEI
+                ),
+            );
+        }
+
+        if actual_amount > WETH_MAX_DEPOSIT_WEI {
+            return WethDepositVerification::Failed(
+                format!(
+                    "Amount {} wei exceeds maximum {} wei (1.0 WETH)",
+                    actual_amount, WETH_MAX_DEPOSIT_WEI
+                ),
+            );
+        }
+
+        // Step 5: Get confirmations
+        let tx_block_hex = result["blockNumber"].as_str().unwrap_or("0x0");
+        let tx_block = u64::from_str_radix(tx_block_hex.trim_start_matches("0x"), 16)
+            .unwrap_or(0);
+
+        let block_body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "eth_blockNumber",
+            "params": []
+        });
+
+        let current_block = match client
+            .post(&rpc_url)
+            .json(&block_body)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+        {
+            Ok(r) => {
+                let block_json: serde_json::Value = r.json().await.unwrap_or_default();
+                let hex = block_json["result"].as_str().unwrap_or("0x0");
+                u64::from_str_radix(hex.trim_start_matches("0x"), 16).unwrap_or(0)
+            }
+            Err(e) => {
+                return WethDepositVerification::RpcError(
+                    format!("Failed to get current block number: {}", e),
+                );
+            }
+        };
+
+        let confirmations = if current_block >= tx_block {
+            (current_block - tx_block) as u32
+        } else {
+            0
+        };
+
+        WethDepositVerification::Verified {
+            tx_hash: tx_hash.to_string(),
+            sender: actual_sender,
+            amount_wei: actual_amount,
+            confirmations,
+            confirmed: confirmations >= ETH_MIN_CONFIRMATIONS,
+        }
+    }
+
+    // ========================================================================
+    // Replay Protection (Ethereum tx_hash deduplication)
+    // ========================================================================
+
+    /// Check if an Ethereum tx hash has already been claimed for a bridge deposit.
+    /// Uses atomic swap storage with prefix `bridge_eth_txid_` to persist across restarts.
+    pub async fn is_txid_already_claimed(
+        &self,
+        storage: &q_storage::StorageEngine,
+        tx_hash: &str,
+    ) -> bool {
+        let key = format!("bridge_eth_txid_{}", tx_hash.to_lowercase());
+        storage.get_atomic_swap(&key).await.unwrap_or(None).is_some()
+    }
+
+    /// Mark an Ethereum tx hash as claimed. Must be called AFTER QUG credit succeeds.
+    pub async fn mark_txid_claimed(
+        &self,
+        storage: &q_storage::StorageEngine,
+        tx_hash: &str,
+        deposit_id: &str,
+    ) {
+        let key = format!("bridge_eth_txid_{}", tx_hash.to_lowercase());
+        let value = serde_json::json!({
+            "deposit_id": deposit_id,
+            "claimed_at": Utc::now().to_rfc3339(),
+            "tx_hash": tx_hash,
+        });
+        if let Ok(bytes) = serde_json::to_vec(&value) {
+            if let Err(e) = storage.save_atomic_swap(&key, &bytes).await {
+                error!("Failed to mark tx {} as claimed: {}", tx_hash, e);
             }
         }
     }

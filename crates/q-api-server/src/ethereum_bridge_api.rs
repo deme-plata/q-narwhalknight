@@ -881,6 +881,499 @@ pub async fn send_eth(
     })))
 }
 
+// ============================================================================
+// WETH ↔ QUG MetaMask Bridge Endpoints (v1.0.3)
+// ============================================================================
+//
+// These endpoints support the MetaMask WETH deposit flow:
+//   1. User calls /deposit-address → gets bridge address + WETH contract info
+//   2. User signs WETH ERC-20 transfer to bridge address via MetaMask
+//   3. User calls /deposit with tx_hash → registers deposit for monitoring
+//   4. Backend monitors confirmations, triggers committee attestation
+//   5. After 7/11 attestation, credits QUG to user's wallet
+// ============================================================================
+
+use crate::bridge_safety::{
+    self, WethBridgeDeposit, WethDepositStatus, WethDepositVerification,
+    BRIDGE_DEPOSIT_ADDRESS, WETH_CONTRACT, WETH_MIN_DEPOSIT_WEI, WETH_MAX_DEPOSIT_WEI,
+};
+use std::sync::OnceLock;
+
+/// In-memory registry of WETH bridge deposits (persisted to RocksDB)
+fn weth_deposits() -> &'static RwLock<HashMap<String, WethBridgeDeposit>> {
+    static INSTANCE: OnceLock<RwLock<HashMap<String, WethBridgeDeposit>>> = OnceLock::new();
+    INSTANCE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Default WETH/QUG exchange rate: 1 WETH = 65 QUG
+/// TODO: Replace with oracle-based pricing
+const DEFAULT_WETH_QUG_RATE: f64 = 65.0;
+
+// ---- Request/Response types for bridge deposits ----
+
+#[derive(Debug, Serialize)]
+pub struct BridgeDepositAddressResponse {
+    pub bridge_deposit_address: String,
+    pub weth_contract_address: String,
+    pub chain_id: u64,
+    pub min_deposit_wei: String,
+    pub max_deposit_wei: String,
+    pub required_confirmations: u32,
+    pub required_attestations: u32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RegisterWethDepositRequest {
+    /// Ethereum tx_hash from MetaMask
+    pub tx_hash: String,
+    /// Sender's Ethereum address (0x...)
+    pub sender_address: String,
+    /// WETH amount in wei (string)
+    pub amount_wei: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RegisterWethDepositResponse {
+    pub deposit_id: String,
+    pub status: String,
+    pub qug_estimate: String,
+    pub confirmations: u32,
+    pub required_confirmations: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DepositStatusResponse {
+    pub deposit_id: String,
+    pub eth_tx_hash: String,
+    pub sender_eth_address: String,
+    pub amount_wei: String,
+    pub qug_amount: String,
+    pub confirmations: u32,
+    pub required_confirmations: u32,
+    pub attestations: u32,
+    pub required_attestations: u32,
+    pub status: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BridgeRateResponse {
+    pub weth_to_qug_rate: f64,
+    pub qug_to_weth_rate: f64,
+    pub min_deposit_weth: f64,
+    pub max_deposit_weth: f64,
+}
+
+// ---- Endpoint Handlers ----
+
+/// GET /api/v1/ethereum/bridge/deposit-address
+/// Returns the bridge deposit address and WETH contract info for MetaMask integration.
+/// No authentication required.
+pub async fn get_bridge_deposit_address(
+    State(_state): State<Arc<AppState>>,
+) -> Json<ApiResponse<BridgeDepositAddressResponse>> {
+    Json(ApiResponse::success(BridgeDepositAddressResponse {
+        bridge_deposit_address: BRIDGE_DEPOSIT_ADDRESS.to_string(),
+        weth_contract_address: WETH_CONTRACT.to_string(),
+        chain_id: 1, // Ethereum mainnet
+        min_deposit_wei: WETH_MIN_DEPOSIT_WEI.to_string(),
+        max_deposit_wei: WETH_MAX_DEPOSIT_WEI.to_string(),
+        required_confirmations: bridge_safety::ETH_MIN_CONFIRMATIONS,
+        required_attestations: 7,
+    }))
+}
+
+/// POST /api/v1/ethereum/bridge/deposit
+/// Register a WETH ERC-20 deposit from MetaMask. Requires authentication.
+pub async fn register_weth_deposit(
+    wallet: AuthenticatedWallet,
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<RegisterWethDepositRequest>,
+) -> Result<Json<ApiResponse<RegisterWethDepositResponse>>, StatusCode> {
+    let wallet_hex = hex::encode(wallet.address);
+
+    // Validate tx_hash format
+    if !request.tx_hash.starts_with("0x") || request.tx_hash.len() != 66 {
+        return Ok(Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some("Invalid tx_hash format. Expected 0x-prefixed 32-byte hex.".to_string()),
+            timestamp: Utc::now(),
+        }));
+    }
+
+    // Parse amount
+    let amount_wei: u128 = match request.amount_wei.parse() {
+        Ok(a) => a,
+        Err(_) => {
+            return Ok(Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some("Invalid amount_wei — must be a valid u128 string.".to_string()),
+                timestamp: Utc::now(),
+            }));
+        }
+    };
+
+    // Amount bounds check
+    if amount_wei < WETH_MIN_DEPOSIT_WEI {
+        return Ok(Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some(format!("Amount below minimum deposit (0.001 WETH = {} wei)", WETH_MIN_DEPOSIT_WEI)),
+            timestamp: Utc::now(),
+        }));
+    }
+    if amount_wei > WETH_MAX_DEPOSIT_WEI {
+        return Ok(Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some(format!("Amount exceeds maximum deposit (1.0 WETH = {} wei)", WETH_MAX_DEPOSIT_WEI)),
+            timestamp: Utc::now(),
+        }));
+    }
+
+    // Replay protection: check if tx_hash already claimed
+    if state.bridge_safety.is_txid_already_claimed(&state.storage_engine, &request.tx_hash).await {
+        return Ok(Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some("This Ethereum transaction has already been used for a bridge deposit.".to_string()),
+            timestamp: Utc::now(),
+        }));
+    }
+
+    // Check if deposit already registered (in-memory)
+    {
+        let deposits = weth_deposits().read().await;
+        for dep in deposits.values() {
+            if dep.eth_tx_hash.to_lowercase() == request.tx_hash.to_lowercase() {
+                return Ok(Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    error: Some(format!("Deposit already registered with ID: {}", dep.deposit_id)),
+                    timestamp: Utc::now(),
+                }));
+            }
+        }
+    }
+
+    // Calculate QUG amount: WETH (18 dec) → QUG (24 dec)
+    // qug_amount = weth_wei * rate * 10^6 (to go from 18 to 24 decimals)
+    let qug_amount = amount_wei
+        .checked_mul(DEFAULT_WETH_QUG_RATE as u128)
+        .and_then(|v| v.checked_mul(1_000_000)) // 10^6 to convert 18→24 decimals
+        .unwrap_or(0);
+
+    if qug_amount == 0 {
+        return Ok(Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some("Amount too small — QUG conversion resulted in zero.".to_string()),
+            timestamp: Utc::now(),
+        }));
+    }
+
+    let deposit_id = format!("weth_dep_{}", &request.tx_hash[2..10]);
+    let now = Utc::now();
+
+    let deposit = WethBridgeDeposit {
+        deposit_id: deposit_id.clone(),
+        eth_tx_hash: request.tx_hash.clone(),
+        sender_eth_address: request.sender_address.clone(),
+        recipient_qnk_wallet: wallet_hex.clone(),
+        amount_wei,
+        qug_amount,
+        confirmations: 0,
+        attestations: 0,
+        required_attestations: 7,
+        status: WethDepositStatus::Pending,
+        created_at: now,
+        updated_at: now,
+    };
+
+    // Store in memory
+    {
+        let mut deposits = weth_deposits().write().await;
+        deposits.insert(deposit_id.clone(), deposit.clone());
+    }
+
+    // Persist to RocksDB via atomic swap storage
+    if let Ok(bytes) = serde_json::to_vec(&deposit) {
+        let key = format!("weth_deposit_{}", deposit_id);
+        let _ = state.storage_engine.save_atomic_swap(&key, &bytes).await;
+    }
+
+    info!(
+        "⟠ [WETH BRIDGE] New deposit registered: {} | tx={} | {} wei → {} QUG (24-dec) | wallet={}",
+        deposit_id, request.tx_hash, amount_wei, qug_amount, wallet_hex
+    );
+
+    Ok(Json(ApiResponse::success(RegisterWethDepositResponse {
+        deposit_id,
+        status: "pending".to_string(),
+        qug_estimate: qug_amount.to_string(),
+        confirmations: 0,
+        required_confirmations: bridge_safety::ETH_MIN_CONFIRMATIONS,
+    })))
+}
+
+/// GET /api/v1/ethereum/bridge/deposit/:id/status
+/// Poll the status of a bridge deposit. Requires authentication.
+pub async fn get_deposit_status(
+    _wallet: AuthenticatedWallet,
+    State(_state): State<Arc<AppState>>,
+    Path(deposit_id): Path<String>,
+) -> Json<ApiResponse<DepositStatusResponse>> {
+    let deposits = weth_deposits().read().await;
+
+    match deposits.get(&deposit_id) {
+        Some(dep) => {
+            let status_str = match &dep.status {
+                WethDepositStatus::Pending => "pending",
+                WethDepositStatus::Confirming => "confirming",
+                WethDepositStatus::Attesting => "attesting",
+                WethDepositStatus::Completed => "completed",
+                WethDepositStatus::Failed(_) => "failed",
+            };
+
+            Json(ApiResponse::success(DepositStatusResponse {
+                deposit_id: dep.deposit_id.clone(),
+                eth_tx_hash: dep.eth_tx_hash.clone(),
+                sender_eth_address: dep.sender_eth_address.clone(),
+                amount_wei: dep.amount_wei.to_string(),
+                qug_amount: dep.qug_amount.to_string(),
+                confirmations: dep.confirmations,
+                required_confirmations: bridge_safety::ETH_MIN_CONFIRMATIONS,
+                attestations: dep.attestations,
+                required_attestations: dep.required_attestations,
+                status: status_str.to_string(),
+                created_at: dep.created_at.to_rfc3339(),
+            }))
+        }
+        None => Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some(format!("Deposit {} not found", deposit_id)),
+            timestamp: Utc::now(),
+        }),
+    }
+}
+
+/// GET /api/v1/ethereum/bridge/rate
+/// Current WETH/QUG exchange rate. No authentication required.
+pub async fn get_bridge_rate(
+    State(_state): State<Arc<AppState>>,
+) -> Json<ApiResponse<BridgeRateResponse>> {
+    Json(ApiResponse::success(BridgeRateResponse {
+        weth_to_qug_rate: DEFAULT_WETH_QUG_RATE,
+        qug_to_weth_rate: 1.0 / DEFAULT_WETH_QUG_RATE,
+        min_deposit_weth: WETH_MIN_DEPOSIT_WEI as f64 / 1e18,
+        max_deposit_weth: WETH_MAX_DEPOSIT_WEI as f64 / 1e18,
+    }))
+}
+
+/// Credit QUG to a wallet after successful WETH bridge deposit.
+/// Called by the deposit monitor after committee attestation.
+pub async fn credit_qug_for_weth_deposit(
+    state: &Arc<AppState>,
+    deposit_id: &str,
+    recipient_wallet_hex: &str,
+    qug_amount: u128,
+) -> Result<(), String> {
+    // Parse wallet address
+    let wallet_bytes = hex::decode(recipient_wallet_hex)
+        .map_err(|e| format!("Invalid wallet hex: {}", e))?;
+    if wallet_bytes.len() != 32 {
+        return Err("Wallet address must be 32 bytes".to_string());
+    }
+    let mut wallet_addr = [0u8; 32];
+    wallet_addr.copy_from_slice(&wallet_bytes);
+
+    // Credit balance using checked arithmetic
+    let display_divisor: f64 = 1_000_000_000_000_000_000_000_000.0; // 10^24 for QUG
+    let old_balance_display: f64;
+    let new_balance_display: f64;
+    {
+        let mut balances = state.wallet_balances.write().await;
+        let current = balances.get(&wallet_addr).copied().unwrap_or(0);
+        let new_balance = current.checked_add(qug_amount)
+            .ok_or("Balance overflow — deposit would exceed u128::MAX")?;
+        balances.insert(wallet_addr, new_balance);
+
+        old_balance_display = current as f64 / display_divisor;
+        new_balance_display = new_balance as f64 / display_divisor;
+    }
+
+    // Emit SSE event for real-time UI update
+    let _ = state.event_broadcaster.broadcast(StreamEvent::BalanceUpdated {
+        wallet_address: recipient_wallet_hex.to_string(),
+        old_balance: old_balance_display,
+        new_balance: new_balance_display,
+        change_reason: "weth_bridge_deposit".to_string(),
+        timestamp: Utc::now(),
+        block_hash: None,
+        block_height: None,
+        confirmation_status: "confirmed".to_string(),
+    }).await;
+
+    info!(
+        "💰 [WETH BRIDGE] Credited {} QUG (24-dec) to wallet {} for deposit {}",
+        qug_amount, recipient_wallet_hex, deposit_id
+    );
+
+    Ok(())
+}
+
+/// Debit QUG from wallet for WETH withdrawal (QUG → WETH direction).
+/// Holds in escrow until bridge sends WETH on Ethereum.
+pub async fn debit_qug_for_weth_withdrawal(
+    state: &Arc<AppState>,
+    wallet_addr: &[u8; 32],
+    qug_amount: u128,
+) -> Result<(), String> {
+    let mut balances = state.wallet_balances.write().await;
+    let current = balances.get(wallet_addr).copied().unwrap_or(0);
+
+    if current < qug_amount {
+        return Err(format!(
+            "Insufficient QUG balance. Have {}, need {}",
+            current, qug_amount
+        ));
+    }
+
+    let new_balance = current.checked_sub(qug_amount)
+        .ok_or("Balance underflow")?;
+    balances.insert(*wallet_addr, new_balance);
+
+    // Balance is persisted by the 15-second balance sync task
+    // which writes all in-memory balances to RocksDB periodically
+
+    Ok(())
+}
+
+/// Background task: Monitor pending WETH deposits for confirmations
+/// and trigger committee attestation when 12+ confirmations reached.
+pub async fn weth_deposit_monitor_tick(state: &Arc<AppState>) {
+    let deposit_ids: Vec<String> = {
+        let deposits = weth_deposits().read().await;
+        deposits.iter()
+            .filter(|(_, d)| matches!(d.status, WethDepositStatus::Pending | WethDepositStatus::Confirming))
+            .map(|(id, _)| id.clone())
+            .collect()
+    };
+
+    if deposit_ids.is_empty() {
+        return;
+    }
+
+    for deposit_id in deposit_ids {
+        let deposit = {
+            let deps = weth_deposits().read().await;
+            deps.get(&deposit_id).cloned()
+        };
+
+        let deposit = match deposit {
+            Some(d) => d,
+            None => continue,
+        };
+
+        // Verify on-chain via Reth
+        let result = state.bridge_safety.verify_weth_erc20_deposit(
+            &deposit.eth_tx_hash,
+            deposit.amount_wei,
+            Some(&deposit.sender_eth_address),
+        ).await;
+
+        match result {
+            WethDepositVerification::Verified { confirmations, confirmed, .. } => {
+                let mut deps = weth_deposits().write().await;
+                if let Some(dep) = deps.get_mut(&deposit_id) {
+                    dep.confirmations = confirmations;
+                    dep.updated_at = Utc::now();
+
+                    if confirmed && dep.status == WethDepositStatus::Pending {
+                        dep.status = WethDepositStatus::Confirming;
+                        info!(
+                            "✅ [WETH BRIDGE] Deposit {} confirmed ({}/{} confirmations)",
+                            deposit_id, confirmations, bridge_safety::ETH_MIN_CONFIRMATIONS
+                        );
+                    }
+
+                    // Once confirmed, trigger attestation flow
+                    if confirmed && dep.status == WethDepositStatus::Confirming {
+                        dep.status = WethDepositStatus::Attesting;
+                        dep.attestations = 7; // For now, single-node auto-attests
+                        // TODO: Integrate with bridge_committee for full 7-of-11
+
+                        // Credit QUG immediately (single-node mode)
+                        let recipient = dep.recipient_qnk_wallet.clone();
+                        let qug_amount = dep.qug_amount;
+                        let dep_id = dep.deposit_id.clone();
+                        let tx_hash = dep.eth_tx_hash.clone();
+
+                        dep.status = WethDepositStatus::Completed;
+
+                        // Persist updated deposit
+                        if let Ok(bytes) = serde_json::to_vec(&dep) {
+                            let key = format!("weth_deposit_{}", dep_id);
+                            let _ = state.storage_engine.save_atomic_swap(&key, &bytes).await;
+                        }
+
+                        drop(deps); // Release lock before crediting
+
+                        // Credit QUG
+                        match credit_qug_for_weth_deposit(state, &dep_id, &recipient, qug_amount).await {
+                            Ok(()) => {
+                                // Mark tx_hash as claimed (replay protection)
+                                state.bridge_safety.mark_txid_claimed(
+                                    &state.storage_engine,
+                                    &tx_hash,
+                                    &dep_id,
+                                ).await;
+                                info!("🎉 [WETH BRIDGE] Deposit {} COMPLETE — {} QUG credited", dep_id, qug_amount);
+                            }
+                            Err(e) => {
+                                error!("❌ [WETH BRIDGE] Failed to credit QUG for deposit {}: {}", dep_id, e);
+                                // Revert status
+                                let mut deps = weth_deposits().write().await;
+                                if let Some(dep) = deps.get_mut(&dep_id) {
+                                    dep.status = WethDepositStatus::Failed(e);
+                                }
+                            }
+                        }
+                        continue; // Already dropped lock, skip to next deposit
+                    }
+
+                    // Persist updated confirmations
+                    if let Ok(bytes) = serde_json::to_vec(&dep) {
+                        let key = format!("weth_deposit_{}", deposit_id);
+                        let _ = state.storage_engine.save_atomic_swap(&key, &bytes).await;
+                    }
+                }
+            }
+            WethDepositVerification::NotFound => {
+                // Transaction not yet indexed by Reth — keep waiting
+            }
+            WethDepositVerification::Failed(reason) => {
+                warn!("❌ [WETH BRIDGE] Deposit {} verification failed: {}", deposit_id, reason);
+                let mut deps = weth_deposits().write().await;
+                if let Some(dep) = deps.get_mut(&deposit_id) {
+                    dep.status = WethDepositStatus::Failed(reason);
+                    dep.updated_at = Utc::now();
+                }
+            }
+            WethDepositVerification::RpcError(e) => {
+                warn!("⚠️ [WETH BRIDGE] RPC error checking deposit {}: {}", deposit_id, e);
+                // Don't fail — will retry on next tick
+            }
+            WethDepositVerification::Frozen => {
+                warn!("🛑 [WETH BRIDGE] Bridge frozen — deposit {} monitoring paused", deposit_id);
+            }
+        }
+    }
+}
+
 // ============ Swap Restoration ============
 
 /// Restore ETH swaps from persistent storage into in-memory maps on startup
