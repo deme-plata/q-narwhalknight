@@ -5,7 +5,7 @@
 //! and dissolving everything outside into darkness.
 //!
 //! The Q is defined mathematically (circle ring + diagonal tail) and scales
-//! to any terminal size. The effect runs ~8 seconds every 3 minutes or can
+//! to any terminal size. The effect runs ~10 seconds every 10 minutes or can
 //! be triggered manually (e.g., on block found).
 
 use ratatui::{
@@ -44,7 +44,7 @@ impl QAnimation {
             phase: Phase::Idle,
             frame: 0,
             idle_ticks: 0,
-            trigger_interval: 720, // 720 ticks * 250ms = 3 minutes
+            trigger_interval: 2400, // 2400 ticks * 250ms = 10 minutes
             seed: 0x517E_CA11_4E49_6874,
         }
     }

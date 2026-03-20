@@ -448,8 +448,7 @@ impl MinerTuiApp {
                 if reward_qnk > 0.0 {
                     self.current_block_reward = reward_qnk;
                 }
-                // v9.9.0: Q animation trigger on block acceptance
-                self.q_animation.trigger();
+                // v9.9.2: Q animation only fires on 10-minute timer (removed per-block trigger)
                 // v9.9.1: Command Center — block event + radar ping
                 self.command_center.spawn_block_event();
                 self.command_center.radar.ping();
@@ -497,8 +496,7 @@ impl MinerTuiApp {
                 self.current_block_height = block_height;
                 if reward_qnk > 0.0 {
                     self.current_block_reward = reward_qnk;
-                    // v9.9.0: Q animation trigger on mining reward
-                    self.q_animation.trigger();
+                    // v9.9.2: Q animation only fires on 10-minute timer (removed per-reward trigger)
                 }
                 self.add_log(LogEntry {
                     timestamp: now,

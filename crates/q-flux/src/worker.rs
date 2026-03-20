@@ -6,7 +6,7 @@ use dashmap::DashMap;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, Semaphore};
 use tokio_rustls::TlsAcceptor;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use futures::future::select_all;
 
@@ -42,6 +42,60 @@ const IP_TRACKER_GC_INTERVAL_SECS: u64 = 60;
 
 /// How often to clean up stale rate limiter buckets (seconds).
 const RATE_LIMITER_GC_INTERVAL_SECS: u64 = 300;
+
+/// Stream wrapper that yields pre-read bytes before delegating to the inner stream.
+/// Used when we peek at the first bytes of a TLS stream to detect WebSocket upgrades
+/// on port 443, then need to pass those bytes along with the stream to the HTTP proxy.
+struct PrefixedStream<S> {
+    prefix: Vec<u8>,
+    offset: usize,
+    inner: S,
+}
+
+impl<S> PrefixedStream<S> {
+    fn new(prefix: Vec<u8>, inner: S) -> Self {
+        Self { prefix, offset: 0, inner }
+    }
+}
+
+impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for PrefixedStream<S> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if self.offset < self.prefix.len() {
+            let remaining = &self.prefix[self.offset..];
+            let to_copy = remaining.len().min(buf.remaining());
+            buf.put_slice(&remaining[..to_copy]);
+            self.offset += to_copy;
+            return std::task::Poll::Ready(Ok(()));
+        }
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for PrefixedStream<S> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<Result<usize, std::io::Error>> {
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
 
 /// Spawn worker threads. Each worker:
 /// - Has its own TcpListener (SO_REUSEPORT gives it a fair share of connections)
@@ -440,6 +494,16 @@ async fn worker_loop(
         } else {
             None
         };
+        // Also proxy WebSocket upgrades on port 443 to libp2p backend?
+        let libp2p_ws_on_443 = !is_libp2p_ws
+            && is_tls
+            && config.libp2p_ws.enabled
+            && config.libp2p_ws.proxy_on_main_port;
+        let libp2p_443_backend = if libp2p_ws_on_443 {
+            Some(config.libp2p_ws.backend.clone())
+        } else {
+            None
+        };
 
         // Hot-reload: load current TLS config per connection (read lock, ~10ns).
         // If certs were reloaded via admin API, new connections get the new config.
@@ -517,6 +581,145 @@ async fn worker_loop(
                     }
                 }
                 // Single cleanup for the libp2p path
+                cleanup_conn(&ip_tracker, client_ip, &active_conns, &metrics);
+                return;
+            }
+
+            // ── LibP2P WebSocket via main HTTPS port (443) ──────────────────
+            // When proxy_on_main_port is enabled, detect WebSocket upgrade
+            // requests on port 443 and route them to the libp2p backend.
+            // This allows nodes behind restrictive NAT/firewalls to connect
+            // via the only port guaranteed to be open everywhere (443).
+            // Like port 9443, this path has NO timeout (libp2p is long-lived).
+            if libp2p_ws_on_443 {
+                let tls_result = tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    tls_acceptor.accept(tcp_stream),
+                ).await;
+
+                match tls_result {
+                    Ok(Ok(mut tls_stream)) => {
+                        metrics.tls_handshake_ok();
+                        let is_h2 = tls_stream.get_ref().1
+                            .alpn_protocol()
+                            .map(|p| p == b"h2")
+                            .unwrap_or(false);
+
+                        if !is_h2 {
+                            // Read first bytes to detect WebSocket upgrade header
+                            let mut peek = vec![0u8; 4096];
+                            match tokio::time::timeout(
+                                std::time::Duration::from_secs(5),
+                                tls_stream.read(&mut peek),
+                            ).await {
+                                Ok(Ok(n)) if n > 0 => {
+                                    if crate::simd_parse::is_websocket_upgrade(&peek[..n]) {
+                                        // WebSocket on 443 → tunnel to libp2p backend (no timeout)
+                                        if let Some(ref backend_addr) = libp2p_443_backend {
+                                            tracing::info!(client = %client_addr,
+                                                "LibP2P WS proxy via port 443 (no timeout)");
+                                            match tokio::net::TcpStream::connect(backend_addr.as_str()).await {
+                                                Ok(mut backend_stream) => {
+                                                    let _ = backend_stream.write_all(&peek[..n]).await;
+                                                    let (cr, cw) = tokio::io::split(tls_stream);
+                                                    let (br, bw) = tokio::io::split(backend_stream);
+                                                    let mut cr = tokio::io::BufReader::with_capacity(65536, cr);
+                                                    let mut bw = tokio::io::BufWriter::with_capacity(65536, bw);
+                                                    let mut br = tokio::io::BufReader::with_capacity(65536, br);
+                                                    let mut cw = tokio::io::BufWriter::with_capacity(65536, cw);
+                                                    let _ = tokio::select! {
+                                                        r = tokio::io::copy(&mut cr, &mut bw) => r,
+                                                        r = tokio::io::copy(&mut br, &mut cw) => r,
+                                                    };
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(client = %client_addr,
+                                                        "LibP2P WS (443) backend failed: {}", e);
+                                                }
+                                            }
+                                        }
+                                        cleanup_conn(&ip_tracker, client_ip, &active_conns, &metrics);
+                                        return;
+                                    }
+
+                                    // Not WebSocket — pass stream + peeked bytes to normal proxy
+                                    let prefixed = PrefixedStream::new(peek[..n].to_vec(), tls_stream);
+                                    let _permit = match semaphore.try_acquire() {
+                                        Ok(p) => p,
+                                        Err(_) => {
+                                            tracing::warn!(client = %client_addr, "Worker at capacity");
+                                            cleanup_conn(&ip_tracker, client_ip, &active_conns, &metrics);
+                                            return;
+                                        }
+                                    };
+                                    const MAX_CONN_443: std::time::Duration =
+                                        std::time::Duration::from_secs(300);
+                                    let handler = async {
+                                        let cache_ref = file_cache.as_deref();
+                                        match access_logger {
+                                            Some(ref logger) => {
+                                                proxy::handle_connection_logged(
+                                                    prefixed, client_addr, &upstream, &metrics,
+                                                    body_limit, streaming_body_threshold,
+                                                    &static_config, logger,
+                                                    &peer_tracker, &bandwidth_limiter,
+                                                    drain_rx.clone(), cache_ref,
+                                                ).await;
+                                            }
+                                            None => {
+                                                proxy::handle_connection(
+                                                    prefixed, client_addr, &upstream, &metrics,
+                                                    body_limit, streaming_body_threshold,
+                                                    &static_config,
+                                                    &peer_tracker, &bandwidth_limiter,
+                                                    drain_rx.clone(), cache_ref,
+                                                ).await;
+                                            }
+                                        }
+                                    };
+                                    let _ = tokio::time::timeout(MAX_CONN_443, handler).await;
+                                    cleanup_conn(&ip_tracker, client_ip, &active_conns, &metrics);
+                                    return;
+                                }
+                                _ => {
+                                    // Read failed — close connection
+                                    cleanup_conn(&ip_tracker, client_ip, &active_conns, &metrics);
+                                    return;
+                                }
+                            }
+                        }
+
+                        // H2 on port 443 — handle via H2 proxy
+                        let _permit = match semaphore.try_acquire() {
+                            Ok(p) => p,
+                            Err(_) => {
+                                tracing::warn!(client = %client_addr, "Worker at capacity");
+                                cleanup_conn(&ip_tracker, client_ip, &active_conns, &metrics);
+                                return;
+                            }
+                        };
+                        const MAX_CONN_H2: std::time::Duration =
+                            std::time::Duration::from_secs(300);
+                        let handler = async {
+                            h2_proxy::handle_h2_connection(
+                                tls_stream, client_addr, upstream.clone(),
+                                metrics.clone(), body_limit, static_config.clone(),
+                                access_logger.clone(),
+                            ).await;
+                        };
+                        let _ = tokio::time::timeout(MAX_CONN_H2, handler).await;
+                        cleanup_conn(&ip_tracker, client_ip, &active_conns, &metrics);
+                        return;
+                    }
+                    Ok(Err(e)) => {
+                        metrics.tls_handshake_fail();
+                        tracing::debug!(client = %client_addr, "TLS handshake failed (443 WS): {}", e);
+                    }
+                    Err(_) => {
+                        metrics.tls_handshake_fail();
+                        tracing::debug!(client = %client_addr, "TLS handshake timeout (443 WS)");
+                    }
+                }
                 cleanup_conn(&ip_tracker, client_ip, &active_conns, &metrics);
                 return;
             }

@@ -54,6 +54,12 @@ pub struct Libp2pWsConfig {
     /// Backend address of the libp2p WebSocket listener (e.g. "127.0.0.1:9002").
     #[serde(default = "default_libp2p_ws_backend")]
     pub backend: String,
+    /// Also proxy WebSocket upgrades arriving on the main HTTPS port (443) to
+    /// the libp2p backend. This allows nodes behind restrictive NAT/firewalls
+    /// to connect via port 443 (the only port guaranteed to be open).
+    /// Default: false.
+    #[serde(default)]
+    pub proxy_on_main_port: bool,
 }
 
 impl Default for Libp2pWsConfig {
@@ -62,6 +68,7 @@ impl Default for Libp2pWsConfig {
             enabled: false,
             port: 9443,
             backend: "127.0.0.1:9002".to_string(),
+            proxy_on_main_port: false,
         }
     }
 }

@@ -716,10 +716,13 @@ impl QTorClient {
         // 🧅 v1.3.2-beta: DOCKER-AWARE TOR BOOTSTRAP TIMING
         // Default: 120 seconds (enough for Docker containers where Tor takes 60-90s)
         // Can be configured via Q_TOR_BOOTSTRAP_TIMEOUT env var
+        // v10.0.3: Reduced default from 120s to 10s — most home users don't have Tor
+        // installed, so spending 2 minutes waiting is a terrible first-run experience.
+        // Server nodes should set Q_TOR_BOOTSTRAP_TIMEOUT=120 in their service file.
         let bootstrap_timeout_secs = std::env::var("Q_TOR_BOOTSTRAP_TIMEOUT")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(120);
+            .unwrap_or(10);
 
         let retry_interval_secs = std::env::var("Q_TOR_RETRY_INTERVAL")
             .ok()
