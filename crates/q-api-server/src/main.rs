@@ -9574,10 +9574,23 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             }
 
                             // ✨ v1.0.16-beta / v9.7.0 HARDENED: PQC SIGNATURE VERIFICATION
-                            // Never skip PQC verification — reject blocks with unverifiable signatures.
+                            // v10.0.6: Skip PQC verification during initial sync when we're far behind.
+                            // A syncing node doesn't have the validator key registry populated for
+                            // blocks at the chain tip (only has keys from synced blocks). Gossip blocks
+                            // will be re-validated when received via turbo sync. Without this skip,
+                            // every gossip block is rejected as "unverifiable" and PQC errors flood logs.
+                            let our_height_for_pqc = app_state_gossip.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
+                            let pqc_gap = block_height.saturating_sub(our_height_for_pqc);
+                            let skip_pqc_for_sync = pqc_gap > 1_000;
+
+                            if skip_pqc_for_sync {
+                                debug!("⏭️ [PQC] Skipping verification for gossip block {} (our height: {}, gap: {} — syncing)",
+                                       block_height, our_height_for_pqc, pqc_gap);
+                            }
+
                             // Tries Dilithium5 first, falls back to SQIsign. Ed25519 is optional (Phase0).
                             // If >50% of signatures lack a PQC key, the entire block is rejected.
-                            if !block.quantum_metadata.spectral_signatures.is_empty() {
+                            if !skip_pqc_for_sync && !block.quantum_metadata.spectral_signatures.is_empty() {
                                 debug!(
                                     "🔐 [PQC] Block {} has {} spectral signatures - verifying...",
                                     block_height,
@@ -14617,15 +14630,23 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             // v9.8.3: Wrap shard processor in catch_unwind to prevent silent task death
             loop {
             let panic_result = std::panic::AssertUnwindSafe(async {
-            info!("🚀 [Shard {}] Starting batch processor", shard_id);
+            info!("🚀 [Shard {}] Starting batch processor (v10.0.5 — VDF timeout + heartbeat)", shard_id);
             let mut processed_count = 0u64;
+            let mut batch_count = 0u64;
             let mut last_log = std::time::Instant::now();
+            let mut last_heartbeat = std::time::Instant::now();
             let mut batch_buffer: Vec<q_api_server::MiningSubmission> = Vec::with_capacity(2000);
             let mut last_batch_process = std::time::Instant::now();
             let mut last_batch_completed = std::time::Instant::now();
             let mut watchdog_warned = false;
 
             while let Some(submission) = mining_rx.recv().await {
+                // v10.0.5: Periodic heartbeat so we can see shards are alive in journal
+                if last_heartbeat.elapsed().as_secs() >= 60 {
+                    info!("💓 [Shard {}] alive — {} submissions processed in {} batches, channel pending ~{}",
+                          shard_id, processed_count, batch_count, mining_rx.len());
+                    last_heartbeat = std::time::Instant::now();
+                }
                 // v1.0.2: Fast drain when node is far behind — don't waste CPU on stale submissions
                 {
                     use std::sync::atomic::Ordering::Relaxed;
@@ -14683,42 +14704,61 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     // Expected: 50K ops / 48 cores = ~1042 ops/core → <50ms per batch.
                     let pre_verify_count = batch_buffer.len();
                     let verify_buffer = std::mem::take(&mut batch_buffer);
-                    let verified_result = tokio::task::spawn_blocking(move || {
-                        use rayon::prelude::*;
-                        let results: Vec<Option<q_api_server::MiningSubmission>> = verify_buffer
-                            .into_par_iter()
-                            .map(|submission| {
-                                // 1. VDF hash recomputation (100 blake3 iterations)
-                                if let Some(ref challenge_bytes) = submission.challenge_hash_bytes {
-                                    let mut hash_input = [0u8; 40];
-                                    hash_input[..32].copy_from_slice(challenge_bytes);
-                                    hash_input[32..].copy_from_slice(&submission.nonce.to_le_bytes());
-                                    let initial = blake3::hash(&hash_input);
-                                    let mut current = *initial.as_bytes();
-                                    for _ in 0..100 {
-                                        current = *blake3::hash(&current).as_bytes();
+                    // v10.0.5: Add 30s timeout to spawn_blocking VDF verification.
+                    // ROOT CAUSE FIX: If tokio blocking pool saturates or rayon deadlocks,
+                    // spawn_blocking never completes → shard consumer hangs permanently →
+                    // all channels fill → 100% 503 errors. With timeout, we lose one batch
+                    // but the consumer keeps draining.
+                    let verified_result = match tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        tokio::task::spawn_blocking(move || {
+                            use rayon::prelude::*;
+                            let results: Vec<Option<q_api_server::MiningSubmission>> = verify_buffer
+                                .into_par_iter()
+                                .map(|submission| {
+                                    // 1. VDF hash recomputation (100 blake3 iterations)
+                                    if let Some(ref challenge_bytes) = submission.challenge_hash_bytes {
+                                        let mut hash_input = [0u8; 40];
+                                        hash_input[..32].copy_from_slice(challenge_bytes);
+                                        hash_input[32..].copy_from_slice(&submission.nonce.to_le_bytes());
+                                        let initial = blake3::hash(&hash_input);
+                                        let mut current = *initial.as_bytes();
+                                        for _ in 0..100 {
+                                            current = *blake3::hash(&current).as_bytes();
+                                        }
+                                        if current != submission.hash {
+                                            return None; // drop fake hash
+                                        }
                                     }
-                                    if current != submission.hash {
-                                        return None; // drop fake hash
+                                    // 2. Difficulty verification
+                                    if !(submission.hash < submission.difficulty_target) {
+                                        return None; // drop below difficulty
                                     }
+                                    Some(submission)
+                                })
+                                .collect();
+                            let mut verified = Vec::with_capacity(results.len());
+                            let mut rejected = 0usize;
+                            for item in results {
+                                match item {
+                                    Some(sub) => verified.push(sub),
+                                    None => rejected += 1,
                                 }
-                                // 2. Difficulty verification
-                                if !(submission.hash < submission.difficulty_target) {
-                                    return None; // drop below difficulty
-                                }
-                                Some(submission)
-                            })
-                            .collect();
-                        let mut verified = Vec::with_capacity(results.len());
-                        let mut rejected = 0usize;
-                        for item in results {
-                            match item {
-                                Some(sub) => verified.push(sub),
-                                None => rejected += 1,
                             }
+                            (verified, rejected)
+                        }),
+                    ).await {
+                        Ok(Ok(result)) => result,
+                        Ok(Err(_join_err)) => {
+                            error!("🚨 [Shard {}] VDF spawn_blocking panicked! Dropping {} submissions", shard_id, pre_verify_count);
+                            (Vec::new(), pre_verify_count)
                         }
-                        (verified, rejected)
-                    }).await.unwrap_or_else(|_| (Vec::new(), pre_verify_count));
+                        Err(_timeout) => {
+                            error!("🚨 [Shard {}] VDF spawn_blocking TIMED OUT after 30s! Dropping {} submissions (v10.0.5 safety)", shard_id, pre_verify_count);
+                            error!("   This prevents permanent mining stall from blocking pool exhaustion");
+                            (Vec::new(), pre_verify_count)
+                        }
+                    };
                     batch_buffer = verified_result.0;
                     let rejected_count = verified_result.1;
                     if rejected_count > 0 {
@@ -15064,25 +15104,17 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             pool.record_http_share(share);
 
                             // v10.0.0: Forward share to distributed pool coordinator (P2P propagation)
-                            // Fire-and-forget: gated behind coordinator.is_some(), non-blocking spawn
-                            if let Some(ref coordinator) = app_state_mining.distributed_pool_coordinator {
-                                let dist_share = q_mining_pool::distributed::DistributedShare::new(
-                                    worker_id_for_dist,
-                                    difficulty,
-                                    submission.hash, // block_template_hash = solution hash (proves work)
-                                    block_height,
-                                    submission.nonce,
-                                    vec![],  // no extranonce for HTTP submissions
-                                    app_state_mining.node_id,
-                                );
-                                let coord = coordinator.clone();
-                                tokio::spawn(async move {
-                                    let coordinator = coord.read().await;
-                                    if let Err(e) = coordinator.submit_share(dist_share).await {
-                                        tracing::debug!("Distributed pool share forward failed: {}", e);
-                                    }
-                                });
-                            }
+                            // v10.0.6 CRITICAL FIX: DISABLED per-submission tokio::spawn
+                            // ROOT CAUSE OF MINING STALL: Each submission spawned a separate tokio task
+                            // doing coord.read().await + submit_share().await. With 8 shards × 2000
+                            // submissions/batch = 16000+ concurrent tasks all contending on the same
+                            // RwLock. This starved the tokio runtime, preventing shard consumers from
+                            // being scheduled. Result: all channels fill up, permanent 503 errors,
+                            // block production stops after initial burst.
+                            // FIX: Skip per-submission forwarding entirely. The 10s PPLNS sync task
+                            // already handles P2P share propagation via pool.get_pplns_window().
+                            // Individual share forwarding is redundant and catastrophically expensive.
+                            let _ = worker_id_for_dist; // suppress unused warning
                         }
                     }
 
@@ -15415,11 +15447,23 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                     continue; // Skip this block production cycle
                                 }
 
-                                let mut status = app_state_mining.node_status.write().await;
-                                status.current_height = new_block.header.height;
+                                // v10.0.6: Add 5s timeout — was hanging indefinitely on contended RwLock
+                                info!("📝 [v10.0.6 DEBUG] Block {} — acquiring node_status write lock...", new_block.header.height);
+                                match tokio::time::timeout(std::time::Duration::from_secs(5),
+                                    app_state_mining.node_status.write()
+                                ).await {
+                                    Ok(mut status) => {
+                                        status.current_height = new_block.header.height;
+                                        info!("📝 [v10.0.6 DEBUG] Block {} — node_status updated OK", new_block.header.height);
+                                    }
+                                    Err(_) => {
+                                        warn!("⏱️ [v10.0.6] node_status.write() TIMED OUT 5s for block {} — skipping status update", new_block.header.height);
+                                    }
+                                }
                             }
 
                             // Broadcast NewBlock event via SSE with enhanced data
+                            info!("📝 [v10.0.6] Block {} — broadcasting SSE NewBlock...", new_block.header.height);
                             let block_hash = new_block.calculate_hash();
                             let reward_per_solution =
                                 q_api_server::handlers::calculate_block_reward(
@@ -15475,6 +15519,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 );
                             }
 
+                            info!("📝 [v10.0.6] Block {} — starting block save...", new_block.header.height);
                             // ✅ v1.0.1-beta CRITICAL FIX: Store block THEN advance height
                             // Expert consensus (Kimi AI, DeepSeek, ChatGPT):
                             // - "Never advance height before confirming block is on disk"
@@ -15659,28 +15704,29 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
                             // Only advance height if save succeeded
                             if save_succeeded {
-                                info!("🎯 [v1.0.14-beta] EXECUTING height advancement (save_succeeded=true)");
+                                info!("🎯 [v10.0.6 DEBUG] Block {} — save_succeeded=true, advancing height", new_block.header.height);
 
                                 // 🏆 v3.5.7-beta: Record blocks found per miner/worker (solution-based path)
+                                // v10.0.6: Add 3s timeout — previously no timeout, could hang forever
                                 if let Some(ref mining_stats_arc) = app_state_mining.mining_statistics {
-                                    let mut mining_stats = mining_stats_arc.write().await;
-                                    let reward_per_solution = q_api_server::handlers::calculate_block_reward(new_block.header.height);
-
-                                    for solution in &new_block.mining_solutions {
-                                        let miner_address_hex = hex::encode(solution.miner_address);
-                                        let worker_id = solution.miner_id.clone()
-                                            .or_else(|| solution.worker_name.clone())
-                                            .unwrap_or_else(|| "default".to_string());
-
-                                        mining_stats.record_block_found(
-                                            &miner_address_hex,
-                                            &worker_id,
-                                            reward_per_solution as u128,
-                                        );
+                                    info!("📝 [v10.0.6] Block {} — acquiring mining_stats write lock...", new_block.header.height);
+                                    match tokio::time::timeout(std::time::Duration::from_secs(3), mining_stats_arc.write()).await {
+                                        Ok(mut mining_stats) => {
+                                            let reward_per_solution = q_api_server::handlers::calculate_block_reward(new_block.header.height);
+                                            for solution in &new_block.mining_solutions {
+                                                let miner_address_hex = hex::encode(solution.miner_address);
+                                                let worker_id = solution.miner_id.clone()
+                                                    .or_else(|| solution.worker_name.clone())
+                                                    .unwrap_or_else(|| "default".to_string());
+                                                mining_stats.record_block_found(&miner_address_hex, &worker_id, reward_per_solution as u128);
+                                            }
+                                            info!("📝 [v10.0.6] Block {} — mining stats recorded OK", new_block.header.height);
+                                        }
+                                        Err(_) => {
+                                            warn!("⏱️ [v10.0.6] mining_stats.write() TIMED OUT 3s for block {} — skipping stats (non-fatal)", new_block.header.height);
+                                        }
                                     }
-                                    info!("🏆 [v3.5.7-beta SOLUTION-BASED] Recorded {} blocks found for miners",
-                                          new_block.mining_solutions.len());
-                                }
+                                } // close if let Some(mining_stats_arc)
 
                                 // ✅ v1.0.14-beta CRITICAL FIX: Sync ALL producers after EVERY block save
                                 // Root cause: Only advancing single producer caused 7/8 producers stuck at stale heights
@@ -15731,7 +15777,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 }
 
                                 // 📊 v2.4.6: Index swap transactions for history and volume tracking
-                                // This populates CF_SWAP_HISTORY for transaction history queries
+                                info!("📝 [v10.0.6] Block {} — starting swap indexing...", new_block.header.height);
                                 let block_hash = new_block.calculate_hash();
                                 let block_timestamp = new_block.header.timestamp as i64;
                                 match app_state_mining
@@ -16076,8 +16122,12 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                         warn!("⚠️ Swap indexer failed for block {}: {}", new_block.header.height, e);
                                     }
                                 }
+                                info!("📝 [v10.0.6] Block {} — swap processing complete", new_block.header.height);
 
                                 // 🔧 v1.0.3-beta: Update atomic height for mining API
+                                info!("📝 [v10.0.6] Block {} — updating current_height_atomic {} → {}", new_block.header.height,
+                                    app_state_mining.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed),
+                                    new_block.header.height);
                                 app_state_mining.current_height_atomic.store(
                                     new_block.header.height,
                                     std::sync::atomic::Ordering::Relaxed,
@@ -16580,6 +16630,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
                     // Clear batch and update metrics
                     processed_count += batch_size as u64;
+                    batch_count += 1;
                     batch_buffer.clear();
                     last_batch_process = std::time::Instant::now();
                     // v8.0.5: Reset watchdog timer after successful batch
@@ -19136,11 +19187,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     }
                     100
                 } else if sync_gap <= 50 {
-                    // v8.2.0: Merged 3-10 and 10-50 tiers into one aggressive tier
+                    // v10.1.1: Same speed as far-behind — no reason to slow down near tip
                     if let Some(ref turbo_sync) = app_state_sync.turbo_sync {
                         turbo_sync.set_fully_synced(false);
                     }
-                    200
+                    100
                 } else {
                     if let Some(ref turbo_sync) = app_state_sync.turbo_sync {
                         turbo_sync.set_fully_synced(false);

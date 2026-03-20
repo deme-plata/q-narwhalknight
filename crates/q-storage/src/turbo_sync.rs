@@ -5891,12 +5891,14 @@ impl TurboSyncManager {
             info!("   Timeout: {:?} (endgame) vs {:?} (normal)", self.config.endgame_timeout, self.config.chunk_timeout);
             info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-            // v8.2.0: Use shorter timeout for small batches
+            // v10.1.1: Scale timeout with batch size — 3s was too aggressive for >100 blocks
             {
-                let endgame_timeout = if blocks_to_sync <= 100 {
-                    Duration::from_secs(2) // 100 blocks is tiny — 2s is plenty
+                let endgame_timeout = if blocks_to_sync <= 50 {
+                    Duration::from_secs(3) // 50 blocks is tiny — 3s is plenty
+                } else if blocks_to_sync <= 200 {
+                    Duration::from_secs(10) // 200 blocks — give it time
                 } else {
-                    self.config.endgame_timeout // 3s for larger endgame batches
+                    Duration::from_secs(30) // Large endgame — don't timeout prematurely
                 };
                 let mut timeout_calc = self.adaptive_timeout.write().await;
                 timeout_calc.set_endgame_mode(endgame_timeout);
