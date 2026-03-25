@@ -19,7 +19,7 @@ core_affinity = "0.8"
 sysinfo = "0.30"
 num_cpus = "1"
 parking_lot = "0.12"
-q-ai-inference = { path = "../q-ai-inference" }
+q-ai-inference = { path = "../q-ai-inference", default-features = false }
 # prometheus crate removed: metrics.rs is now self-contained (issue #028)
 # Crypto for tunnel handshake (X25519 key exchange + HKDF session key derivation)
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
