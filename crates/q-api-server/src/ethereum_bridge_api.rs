@@ -112,6 +112,15 @@ pub struct EthBridgeStatusResponse {
     pub reth_synced: bool,
     pub network: String,
     pub features: Vec<String>,
+    /// Sync progress fields (only present when syncing)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_current_block: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_target_block: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_progress_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_stage: Option<String>,
 }
 
 // ============ In-Memory Swap Storage ============
@@ -202,14 +211,98 @@ async fn get_reth_height() -> Option<u64> {
     u64::from_str_radix(hex_str.trim_start_matches("0x"), 16).ok()
 }
 
-/// Query Reth sync status
-async fn get_reth_sync_status() -> (bool, u64) {
-    match get_reth_height().await {
-        Some(height) => {
-            // Consider synced if height > 19M (approximate current Ethereum height)
-            (height > 19_000_000, height)
+/// Detailed Reth sync status
+struct RethSyncInfo {
+    synced: bool,
+    height: u64,
+    /// Execution stage current block (the bottleneck stage)
+    exec_current: Option<u64>,
+    /// Headers target (total chain height)
+    headers_target: Option<u64>,
+    /// Percentage (exec_current / headers_target)
+    progress_pct: Option<f64>,
+    /// Current stage name
+    stage: Option<String>,
+}
+
+/// Query Reth sync status with stage-level progress
+async fn get_reth_sync_status() -> RethSyncInfo {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return RethSyncInfo { synced: false, height: 0, exec_current: None, headers_target: None, progress_pct: None, stage: None },
+    };
+
+    // First try eth_blockNumber (works when fully synced)
+    let height = get_reth_height().await.unwrap_or(0);
+    if height > 19_000_000 {
+        return RethSyncInfo { synced: true, height, exec_current: None, headers_target: None, progress_pct: None, stage: None };
+    }
+
+    // Not synced — query eth_syncing for stage progress
+    let resp = client.post(RETH_RPC_URL)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "eth_syncing",
+            "params": [],
+            "id": 2
+        }))
+        .send()
+        .await;
+
+    let (exec_current, headers_target, progress_pct, stage) = match resp {
+        Ok(r) => {
+            if let Ok(body) = r.json::<serde_json::Value>().await {
+                // eth_syncing returns false when synced, or object with stages
+                if let Some(stages) = body["result"]["stages"].as_array() {
+                    let mut exec_block: u64 = 0;
+                    let mut headers_block: u64 = 0;
+                    let mut current_stage = String::new();
+                    for s in stages {
+                        let name = s["name"].as_str().unwrap_or("");
+                        let block_hex = s["block"].as_str().unwrap_or("0x0");
+                        let block = u64::from_str_radix(block_hex.trim_start_matches("0x"), 16).unwrap_or(0);
+                        if name == "Execution" {
+                            exec_block = block;
+                        }
+                        if name == "Headers" {
+                            headers_block = block;
+                        }
+                        // Track the slowest non-zero stage as "current"
+                        if block > 0 && (current_stage.is_empty() || block < exec_block) {
+                            if name == "Execution" {
+                                current_stage = name.to_string();
+                            }
+                        }
+                    }
+                    if current_stage.is_empty() {
+                        current_stage = "Execution".to_string();
+                    }
+                    let pct = if headers_block > 0 {
+                        (exec_block as f64 / headers_block as f64 * 100.0 * 100.0).round() / 100.0
+                    } else {
+                        0.0
+                    };
+                    (Some(exec_block), Some(headers_block), Some(pct), Some(current_stage))
+                } else {
+                    (None, None, None, None)
+                }
+            } else {
+                (None, None, None, None)
+            }
         }
-        None => (false, 0),
+        Err(_) => (None, None, None, None),
+    };
+
+    RethSyncInfo {
+        synced: false,
+        height,
+        exec_current,
+        headers_target,
+        progress_pct,
+        stage,
     }
 }
 
@@ -219,19 +312,23 @@ async fn get_reth_sync_status() -> (bool, u64) {
 pub async fn get_eth_bridge_status(
     State(_state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<EthBridgeStatusResponse>>, StatusCode> {
-    let (synced, height) = get_reth_sync_status().await;
+    let info = get_reth_sync_status().await;
 
     let response = EthBridgeStatusResponse {
-        bridge_enabled: height > 0,
+        bridge_enabled: info.synced,
         reth_rpc_url: RETH_RPC_URL.to_string(),
-        reth_height: height,
-        reth_synced: synced,
+        reth_height: info.height,
+        reth_synced: info.synced,
         network: "mainnet".to_string(),
         features: vec![
             "htlc-atomic-swap".to_string(),
             "erc20-bridge".to_string(),
             "wrapped-eth".to_string(),
         ],
+        sync_current_block: info.exec_current,
+        sync_target_block: info.headers_target,
+        sync_progress_pct: info.progress_pct,
+        sync_stage: info.stage,
     };
 
     Ok(Json(ApiResponse::success(response)))

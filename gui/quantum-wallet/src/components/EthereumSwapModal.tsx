@@ -450,15 +450,33 @@ const EthereumSwapModal = ({ isOpen, onClose, walletAddress }: EthereumSwapModal
           </div>
 
           {/* Bridge Status */}
-          <div className="px-5 py-2 flex items-center gap-2 text-xs">
-            <div className={`w-2 h-2 rounded-full ${bridgeStatus?.bridge_enabled ? 'bg-green-400 animate-pulse' : 'bg-red-400'}`} />
-            <span className="text-gray-400">
-              {bridgeStatus?.bridge_enabled ? 'Bridge Connected' : 'Bridge Offline'}
-            </span>
-            {bridgeStatus?.reth_synced === false && (
-              <span className="text-yellow-400 ml-1">(Reth syncing...)</span>
+          <div className="px-5 py-2 flex flex-col gap-1 text-xs">
+            <div className="flex items-center gap-2">
+              <div className={`w-2 h-2 rounded-full ${bridgeStatus?.bridge_enabled ? 'bg-green-400 animate-pulse' : bridgeStatus?.sync_progress_pct ? 'bg-yellow-400 animate-pulse' : 'bg-red-400'}`} />
+              <span className="text-gray-400">
+                {bridgeStatus?.bridge_enabled ? 'Bridge Connected' : bridgeStatus?.sync_progress_pct ? 'Reth Syncing' : 'Bridge Offline'}
+              </span>
+              {bridgeStatus?.sync_progress_pct != null && !bridgeStatus?.reth_synced && (
+                <span className="text-yellow-400 font-mono">
+                  {bridgeStatus.sync_progress_pct.toFixed(2)}%
+                </span>
+              )}
+              <span className="text-gray-600 ml-auto">HTLC Protocol</span>
+            </div>
+            {bridgeStatus?.sync_progress_pct != null && !bridgeStatus?.reth_synced && (
+              <div className="flex flex-col gap-1">
+                <div className="w-full h-1.5 bg-gray-700/50 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-gradient-to-r from-yellow-500 to-amber-400 rounded-full transition-all duration-1000"
+                    style={{ width: `${Math.min(bridgeStatus.sync_progress_pct, 100)}%` }}
+                  />
+                </div>
+                <div className="flex justify-between text-[10px] text-gray-500">
+                  <span>Block {bridgeStatus.sync_current_block?.toLocaleString() ?? '?'}</span>
+                  <span>Target {bridgeStatus.sync_target_block?.toLocaleString() ?? '?'}</span>
+                </div>
+              </div>
             )}
-            <span className="text-gray-600 ml-auto">HTLC Protocol</span>
           </div>
 
           {/* wETH Balance & ETH Address */}
