@@ -6745,6 +6745,65 @@ pub async fn bb84_status(
     )))
 }
 
+/// QKD Protocol Selector status — shows active QKD sessions and protocol selection per peer.
+/// v10.1.5: Returns enabled state, session count, and per-peer protocol/security info.
+pub async fn qkd_selector_status(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<Value>>, StatusCode> {
+    let enabled = q_network::is_qkd_enabled();
+
+    // Get session summaries from the network manager's QKD session manager
+    let sessions = if let Some(ref nm) = state.libp2p_discovery {
+        let nm_lock = nm.lock().await;
+        let mgr = nm_lock.qkd_session_manager();
+        mgr.get_all_sessions_summary()
+    } else {
+        Vec::new()
+    };
+
+    let session_count = sessions.len();
+
+    // Per-protocol breakdown
+    let bb84_count = sessions.iter().filter(|s| s.protocol == "BB84").count();
+    let sarg04_count = sessions.iter().filter(|s| s.protocol == "SARG04").count();
+    let npab_count = sessions.iter().filter(|s| s.protocol == "NPAB").count();
+    let tor_sessions = sessions.iter().filter(|s| s.is_tor).count();
+
+    let session_details: Vec<Value> = sessions
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "peer_id": s.peer_id,
+                "protocol": s.protocol,
+                "confidence": format!("{:.1}%", s.confidence * 100.0),
+                "pns_resistant": s.pns_resistant,
+                "classical_leakage": s.classical_leakage,
+                "is_tor": s.is_tor,
+                "is_hidden_service": s.is_hidden_service,
+                "session_id": s.session_id,
+            })
+        })
+        .collect();
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "qkd_enabled": enabled,
+        "active_sessions": session_count,
+        "protocol_breakdown": {
+            "BB84": bb84_count,
+            "SARG04": sarg04_count,
+            "NPAB": npab_count,
+        },
+        "tor_routed_sessions": tor_sessions,
+        "sessions": session_details,
+        "selection_rules": {
+            "direct_channel": "BB84 (50% sifting, max throughput)",
+            "tor_routed": "SARG04 (25% sifting, PNS resistant)",
+            "hidden_service": "NPAB (12.5% sifting, zero classical leakage)",
+        },
+        "key_refresh_interval_s": 240,
+    }))))
+}
+
 pub async fn dex_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
@@ -16067,4 +16126,20 @@ pub async fn get_compute_status(
             })))
         }
     }
+}
+
+/// v10.3.0: Get hashrate history for the Network Power Modal
+/// Returns up to 1440 entries (24h at 60s intervals) with network hashrate and miner count
+pub async fn get_hashrate_history(
+    State(state): State<Arc<crate::AppState>>,
+) -> Json<serde_json::Value> {
+    let history = state.pool_hashrate_history.read().await;
+    Json(serde_json::json!({
+        "success": true,
+        "history": history.iter().map(|e| serde_json::json!({
+            "hashrate": e.hashrate,
+            "miners": e.workers,
+            "timestamp": e.timestamp,
+        })).collect::<Vec<_>>()
+    }))
 }

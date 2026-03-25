@@ -125,6 +125,7 @@ pub mod pow_stamp; // v9.1.0: PoW relay stamps — anti-spam proof-of-work on P2
 pub mod peer_latency;        // v4.3.0-beta: Peer latency tracking for gossipsub mesh scoring
 pub mod pq_handshake;        // v4.3.0-beta: Post-quantum hybrid Noise handshake (Kyber1024)
 pub mod set_reconciliation;  // v4.3.0-beta: Set-reconciliation sync for bandwidth reduction
+pub mod qkd_transport;       // v10.1.5: QKD protocol selector integration
 
 // ========== v1.9.0-SLINGSHOT: Project APOLLO Phase 4 - Continuous Streaming ==========
 pub mod continuous_sync; // Continuous stream protocol (SCRAMJET FLOW) - 30-50% RTT savings
@@ -198,6 +199,9 @@ pub use pq_handshake::{
     PQ_HANDSHAKE_PROTOCOL,
 };
 pub use set_reconciliation::{SetReconciliationManager, BlockInventorySketch, ReconciliationResult};
+
+// v10.1.5: QKD transport and session management exports
+pub use qkd_transport::{QKDSessionManager, QKDSessionResult, QKDSessionSummary, is_qkd_enabled};
 
 // Simplified network structure for compilation
 pub struct QuantumNetwork {

@@ -119,6 +119,12 @@ impl ProtocolHandshake {
                 if bw >= 5000 {
                     f.push("supernode".to_string());
                 }
+                // v10.1.5: Advertise QKD protocol support
+                if crate::qkd_transport::is_qkd_enabled() {
+                    f.push("qkd-bb84".to_string());
+                    f.push("qkd-sarg04".to_string());
+                    f.push("qkd-npab".to_string());
+                }
                 f
             },
             supported_crypto_phases,

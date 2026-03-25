@@ -33,11 +33,14 @@ pub enum PQCryptoProtocol {
 }
 
 pub mod bb84_protocol;
+pub mod npab_protocol;
 pub mod qkd;
+pub mod qkd_protocol_selector;
 pub mod quantum_channels;
 pub mod quantum_entropy;
 pub mod quantum_error_correction;
 pub mod quantum_signatures;
+pub mod sarg04_protocol;
 
 pub use bb84_protocol::{BB84State, PhotonPolarization, QuantumBit};
 pub use qkd::{BB84Protocol, QKDChannel, QKDEngine, QKDKey};
@@ -45,6 +48,13 @@ pub use quantum_channels::{ChannelState, QuantumChannel, QuantumChannelManager};
 pub use quantum_entropy::{QuantumEntropySource, QuantumRNG, TrueRandomGenerator};
 pub use quantum_error_correction::{QuantumErrorCorrection, ShorCode, StabilizerCode};
 pub use quantum_signatures::{LamportOTS, QuantumSignature, QuantumSigner, QuantumVerifier};
+
+// v10.1.5: QKD protocol selector and protocol exports
+pub use sarg04_protocol::{SARG04Protocol, SARG04Config, SARG04Stats, SARG04SecurityAnalysis};
+pub use npab_protocol::{NPABProtocol, NPABConfig, NPABStats, NPABSecurityAnalysis};
+pub use qkd_protocol_selector::{
+    QKDProtocolSelector, QKDProtocolChoice, ChannelProfile, SelectionRationale, KeyExchangeRole,
+};
 
 /// Node identifier for quantum communication
 pub type NodeId = [u8; 32];

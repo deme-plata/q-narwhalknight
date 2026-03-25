@@ -36,7 +36,9 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Digest};
 use ed25519_dalek::{SigningKey, Signer};
-use rand::rngs::OsRng;
+use rand_core::OsRng;
+// Note: we use a minimal Transaction struct that matches the server's
+// deserialization format (extra fields use #[serde(default)] on server side)
 
 // ============================================================================
 // CONFIGURATION
@@ -82,22 +84,24 @@ fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
 // TRANSACTION TYPES
 // ============================================================================
 
+/// Minimal transaction matching server's q_types::Transaction deserialization.
+/// Server uses #[serde(default)] for all optional fields, so we only need core fields.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Transaction {
+struct BenchTx {
     id: Vec<u8>,
     from: Vec<u8>,
     to: Vec<u8>,
-    amount: u64,
-    fee: u64,
+    amount: u128,
+    fee: u128,
     nonce: u64,
     signature: Vec<u8>,
-    timestamp: String,
+    timestamp: chrono::DateTime<chrono::Utc>,
     data: Vec<u8>,
 }
 
-#[derive(Debug, Serialize)]
-struct BinaryTransactionBatch {
-    transactions: Vec<Transaction>,
+#[derive(Debug, Serialize, Deserialize)]
+struct TxBatch {
+    transactions: Vec<BenchTx>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,6 +113,14 @@ struct BinaryResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct ApiWrapper<T> {
+    #[serde(default)]
+    success: bool,
+    #[serde(default)]
+    data: Option<T>,
+}
+
+#[derive(Debug, Deserialize, Default)]
 struct NodeStatus {
     height: u64,
     #[serde(default)]
@@ -142,29 +154,29 @@ impl TestWallet {
         }
     }
 
-    fn create_signed_transaction(&self, recipient: &[u8], nonce: u64) -> Transaction {
-        let amount = 1000 + (nonce % 10000);
-        let fee = 10;
-        let timestamp = chrono::Utc::now().to_rfc3339();
+    fn create_signed_transaction(&self, recipient: &[u8], nonce: u64) -> BenchTx {
+        let amount: u128 = 1000 + (nonce as u128 % 10000);
+        let fee: u128 = 10;
+        let timestamp = chrono::Utc::now();
 
         // Create transaction ID
         let mut hasher = Sha256::new();
         hasher.update(&self.public_key);
         hasher.update(&nonce.to_le_bytes());
-        hasher.update(timestamp.as_bytes());
+        hasher.update(timestamp.to_rfc3339().as_bytes());
         let tx_id = hasher.finalize().to_vec();
 
-        // Create message to sign (must match server's verification)
-        let sign_message = postcard::to_allocvec(&(
+        // Create message to sign (must match server's postcard::to_allocvec format)
+        let sign_data = postcard::to_allocvec(&(
             &self.public_key,
-            recipient,
+            &recipient.to_vec(),
             amount,
             nonce,
         )).unwrap_or_default();
 
-        let signature = self.signing_key.sign(&sign_message);
+        let signature = self.signing_key.sign(&sign_data);
 
-        Transaction {
+        BenchTx {
             id: tx_id,
             from: self.public_key.clone(),
             to: recipient.to_vec(),
@@ -198,14 +210,15 @@ struct PhaseResults {
 // ============================================================================
 
 async fn get_node_height(client: &Client, base_url: &str) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
-    let url = format!("{}/api/v1/status", base_url);
-    let resp: NodeStatus = client.get(&url)
+    let url = format!("{}/api/v1/health", base_url);
+    let resp: ApiWrapper<NodeStatus> = client.get(&url)
         .timeout(Duration::from_secs(10))
         .send()
         .await?
         .json()
         .await?;
-    Ok(resp.height)
+    let data = resp.data.ok_or("No data in health response")?;
+    Ok(data.height)
 }
 
 async fn wait_for_height(
@@ -254,9 +267,9 @@ async fn phase1_verified_mempool_tps(
     wallet: &TestWallet,
     recipient: &[u8],
 ) -> Result<(f64, usize, usize), Box<dyn std::error::Error + Send + Sync>> {
-    println!("\n{'='*70}");
+    println!("\n{}", "=".repeat(70));
     println!("PHASE 1: Mempool Acceptance TPS (with signature verification)");
-    println!("{'='*70}");
+    println!("{}", "=".repeat(70));
     println!("  Transactions: {}", config.phase1_tx_count);
     println!("  Batch size: {}", config.phase1_batch_size);
     println!();
@@ -272,14 +285,14 @@ async fn phase1_verified_mempool_tps(
 
     for batch_num in 0..num_batches {
         // Create batch of signed transactions
-        let transactions: Vec<Transaction> = (0..config.phase1_batch_size)
+        let transactions: Vec<BenchTx> = (0..config.phase1_batch_size)
             .map(|i| {
                 nonce += 1;
                 wallet.create_signed_transaction(recipient, nonce)
             })
             .collect();
 
-        let batch = BinaryTransactionBatch { transactions };
+        let batch = TxBatch { transactions };
         let packed = rmp_serde::to_vec(&batch)?;
 
         // Submit batch
@@ -292,7 +305,9 @@ async fn phase1_verified_mempool_tps(
             .await?;
 
         if resp.status().is_success() {
-            let result: BinaryResponse = resp.json().await?;
+            let bytes = resp.bytes().await?;
+            let result: BinaryResponse = rmp_serde::from_slice(&bytes)
+                .unwrap_or(BinaryResponse { success: false, tx_hashes: vec![], accepted: 0, rejected: 0 });
             total_accepted += result.accepted;
             total_rejected += result.rejected;
         } else {
@@ -332,9 +347,9 @@ async fn phase2_block_inclusion_tps(
     wallet: &TestWallet,
     recipient: &[u8],
 ) -> Result<(f64, Duration), Box<dyn std::error::Error + Send + Sync>> {
-    println!("\n{'='*70}");
+    println!("\n{}", "=".repeat(70));
     println!("PHASE 2: Block Inclusion TPS");
-    println!("{'='*70}");
+    println!("{}", "=".repeat(70));
     println!("  Transactions: {}", config.phase2_tx_count);
     println!("  Wait for: {} blocks", config.phase2_wait_blocks);
     println!();
@@ -345,11 +360,11 @@ async fn phase2_block_inclusion_tps(
 
     // Submit transactions
     let url = format!("{}/api/v1/binary/batch", config.node_url);
-    let transactions: Vec<Transaction> = (0..config.phase2_tx_count)
+    let transactions: Vec<BenchTx> = (0..config.phase2_tx_count)
         .map(|i| wallet.create_signed_transaction(recipient, 1_000_000 + i as u64))
         .collect();
 
-    let batch = BinaryTransactionBatch { transactions };
+    let batch = TxBatch { transactions };
     let packed = rmp_serde::to_vec(&batch)?;
 
     let submit_start = Instant::now();
@@ -414,9 +429,9 @@ async fn phase3_finality_measurement(
     wallet: &TestWallet,
     recipient: &[u8],
 ) -> Result<(f64, Duration), Box<dyn std::error::Error + Send + Sync>> {
-    println!("\n{'='*70}");
+    println!("\n{}", "=".repeat(70));
     println!("PHASE 3: End-to-End Finality Measurement");
-    println!("{'='*70}");
+    println!("{}", "=".repeat(70));
     println!("  Transactions: {}", config.phase3_tx_count);
     println!("  Timeout: {}s", config.finality_timeout_secs);
     println!();
@@ -431,7 +446,7 @@ async fn phase3_finality_measurement(
         let tx = wallet.create_signed_transaction(recipient, 2_000_000 + i as u64);
         let tx_id = tx.id.clone();
 
-        let batch = BinaryTransactionBatch { transactions: vec![tx] };
+        let batch = TxBatch { transactions: vec![tx] };
         let packed = rmp_serde::to_vec(&batch)?;
 
         let submit_time = Instant::now();
@@ -517,9 +532,9 @@ async fn phase3_finality_measurement(
 async fn test_realistic_verified_tps() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config = RealisticBenchConfig::from_env();
 
-    println!("\n{'='*70}");
+    println!("\n{}", "=".repeat(70));
     println!("   Q-NARWHALKNIGHT REALISTIC TPS BENCHMARK (v2.3.1-beta)");
-    println!("{'='*70}");
+    println!("{}", "=".repeat(70));
     println!();
     println!("This benchmark measures ACTUAL blockchain performance:");
     println!("  - Phase 1: Mempool acceptance WITH signature verification");
@@ -564,9 +579,9 @@ async fn test_realistic_verified_tps() -> Result<(), Box<dyn std::error::Error +
     ).await?;
 
     // Final summary
-    println!("\n{'='*70}");
+    println!("\n{}", "=".repeat(70));
     println!("                    FINAL RESULTS SUMMARY");
-    println!("{'='*70}");
+    println!("{}", "=".repeat(70));
     println!();
     println!("  THROUGHPUT (Transactions Per Second):");
     println!("    Phase 1 - Verified Mempool:    {:>10.0} TPS", phase1_tps);
@@ -599,9 +614,9 @@ async fn test_realistic_verified_tps() -> Result<(), Box<dyn std::error::Error +
     }
 
     println!();
-    println!("{'='*70}");
+    println!("{}", "=".repeat(70));
     println!("Q-NarwhalKnight v2.3.1-beta - Security fixes applied");
-    println!("{'='*70}\n");
+    println!("{}\n", "=".repeat(70));
 
     Ok(())
 }

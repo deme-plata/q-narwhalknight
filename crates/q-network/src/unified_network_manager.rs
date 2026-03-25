@@ -1199,6 +1199,8 @@ pub struct UnifiedNetworkManager {
     p2p_bytes_out: Option<Arc<std::sync::atomic::AtomicU64>>,
     /// v9.7.0: Post-quantum session manager — tracks Kyber1024 key exchanges per peer
     pq_session_manager: Arc<crate::pq_handshake::PQSessionManager>,
+    /// v10.1.5: QKD session manager — selects optimal QKD protocol (BB84/SARG04/NPAB) per peer
+    qkd_session_manager: Arc<crate::qkd_transport::QKDSessionManager>,
     /// v10.0.4: Track WebSocket (browser) peers for explicit gossipsub delivery
     /// Browser peers connect via WSS and need guaranteed block delivery.
     /// add_explicit_peer() ensures gossipsub always sends messages to them.
@@ -2326,6 +2328,7 @@ impl UnifiedNetworkManager {
             slow_peer_strikes: DashMap::new(),
             p2p_bytes_out: None,
             pq_session_manager: Arc::new(crate::pq_handshake::PQSessionManager::new()),
+            qkd_session_manager: Arc::new(crate::qkd_transport::QKDSessionManager::new()),
             websocket_peers: HashSet::new(),
         })
     }
@@ -2345,6 +2348,11 @@ impl UnifiedNetworkManager {
     /// Get network configuration
     pub fn network_config(&self) -> &q_types::NetworkConfig {
         &self.network_config
+    }
+
+    /// Get the QKD session manager (for API status endpoint)
+    pub fn qkd_session_manager(&self) -> &Arc<crate::qkd_transport::QKDSessionManager> {
+        &self.qkd_session_manager
     }
 
     /// Set channel for sending discovered peers to ConnectionManager (Phase 2)
@@ -2391,6 +2399,10 @@ impl UnifiedNetworkManager {
 
         // v4.3.0-beta: Peer scoring interval - update gossipsub scores from latency data
         let mut peer_scoring_interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
+
+        // v10.1.5: QKD key refresh timer (aligned with QuantumBeacon 240s circuit rotation)
+        let mut qkd_refresh_interval = tokio::time::interval(Duration::from_secs(240));
+        qkd_refresh_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         // 🚨 v1.0.20-beta: Event loop heartbeat to diagnose silent failures
         let mut last_heartbeat = std::time::Instant::now();
@@ -2715,6 +2727,15 @@ impl UnifiedNetworkManager {
                               peer_count, established, bootstrap_connected);
                     }
                 }
+                // v10.1.5: QKD session refresh (every 240s)
+                _ = qkd_refresh_interval.tick() => {
+                    if crate::qkd_transport::is_qkd_enabled() {
+                        let refreshed = self.qkd_session_manager.refresh_all_sessions();
+                        if refreshed > 0 {
+                            debug!("🔬 [QKD] Refreshed {} QKD sessions", refreshed);
+                        }
+                    }
+                }
                 // Process network commands from API
                 // 🚀 v1.1.1-beta: Refactored to use shared handle_command() method
                 Some(command) = self.command_rx.recv() => {
@@ -2845,6 +2866,9 @@ impl UnifiedNetworkManager {
                         self.connected_peer_count.store(peer_count, std::sync::atomic::Ordering::SeqCst);
 
                         info!("👋 [DISCONNECTION] Connection closed with peer: {} (remaining peers: {})", peer_id, peer_count);
+
+                        // v10.1.5: Clean up QKD session for disconnected peer
+                        self.qkd_session_manager.remove_session(&peer_id.to_string());
 
                         // v10.0.4: Remove WebSocket peer from explicit gossipsub peers
                         if self.websocket_peers.remove(&peer_id) {
@@ -3789,6 +3813,18 @@ impl UnifiedNetworkManager {
                                                 completed_at: std::time::Instant::now(),
                                             });
                                             info!("✅ [PQ-KEM] Kyber1024 session established with {} (responder)", peer);
+                                            // v10.1.5: Establish QKD session after PQ handshake
+                                            if crate::qkd_transport::is_qkd_enabled() {
+                                                let peer_str = peer.to_string();
+                                                let is_tor = self.tor_enabled;
+                                                let profile = self.qkd_session_manager.build_channel_profile(
+                                                    is_tor,
+                                                    false, // not hidden service (we'd need onion addr detection)
+                                                    50.0,  // default latency estimate
+                                                    if is_tor { 3 } else { 0 },
+                                                );
+                                                self.qkd_session_manager.establish_session(&peer_str, profile);
+                                            }
                                         }
                                     }
                                     Err(e) => {

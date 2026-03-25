@@ -821,8 +821,11 @@ pub async fn get_zec_bridge_status(
     let (height, syncing) = match zebra_rpc_call(&zebra_rpc_url, "getblockchaininfo", vec![]).await {
         Ok(info) => {
             let h = info["result"]["blocks"].as_u64().unwrap_or(0);
-            let initial_download = info["result"]["initial_block_download"].as_bool().unwrap_or(true);
-            (h, initial_download)
+            // v10.1.5: Use verificationprogress (always present) instead of
+            // initial_block_download (missing from Zebra → defaulted to true).
+            let progress = info["result"]["verificationprogress"].as_f64().unwrap_or(0.0);
+            let still_syncing = progress < 0.999;
+            (h, still_syncing)
         }
         Err(e) => {
             warn!("Zebra RPC unavailable: {}", e);

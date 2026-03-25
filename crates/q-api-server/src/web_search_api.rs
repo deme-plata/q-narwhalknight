@@ -28,7 +28,7 @@ use crate::AppState;
 
 // Use 127.0.0.1 instead of localhost to avoid IPv6 ::1 resolution failures
 const DEFAULT_OLLAMA_URL: &str = "http://127.0.0.1:11434";
-const DEFAULT_MODEL: &str = "glm-4.7-flash";
+const DEFAULT_MODEL: &str = "nemotron-cascade-2";
 
 const SYSTEM_PROMPT: &str = "You are a helpful search assistant. The user asked a question and web search results are provided below as context. \
 Answer the user's query using the search results. Always cite your sources by referencing [Source N] where N corresponds to the numbered search results. \
@@ -84,6 +84,7 @@ struct OllamaChatRequest {
     model: String,
     messages: Vec<OllamaMessage>,
     stream: bool,
+    think: bool,
 }
 
 #[derive(Serialize)]
@@ -351,6 +352,7 @@ pub async fn web_search_handler(
                 },
             ],
             stream: true,
+            think: false,
         };
 
         // Use connect_timeout (not global timeout) because the response is streamed.

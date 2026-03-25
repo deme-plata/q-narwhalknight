@@ -49,6 +49,7 @@ pub mod evolution;
 pub mod federated;
 pub mod governance;
 pub mod autonomous;
+pub mod quantum_random_forest;
 
 use std::sync::Arc;
 use tokio::sync::RwLock;

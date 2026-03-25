@@ -14,6 +14,7 @@ circle-stark = []
 lattice-aggregate = []
 genus2-vdf = []
 sqisign = []
+sqisign-ffi = ["dep:q-sqisign"]  # Real C implementation via FFI (off by default)
 bulletproofs-v2 = []
 timelock = []
 full = ["frost", "aegis", "circle-stark", "lattice-aggregate", "genus2-vdf", "sqisign", "bulletproofs-v2", "timelock"]
@@ -70,6 +71,9 @@ bincode.workspace = true
 # Async support
 tokio.workspace = true
 async-trait.workspace = true
+
+# Real SQIsign via C reference implementation FFI (optional, off by default)
+q-sqisign = { path = "../q-sqisign", optional = true }
 
 [dev-dependencies]
 criterion.workspace = true
