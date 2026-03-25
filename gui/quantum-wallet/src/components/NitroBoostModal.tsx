@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Zap, CreditCard, Coins, TrendingUp, Award, Star } from 'lucide-react';
+import TokenIcon from './TokenIcon';
 import { TICKER_SYMBOL } from '../constants/ticker';
 import { qnkAPI } from '../services/api';
 
@@ -182,7 +183,7 @@ export default function NitroBoostModal({ isOpen, onClose, token, onPurchase }: 
 
               {/* Token Info */}
               <div className="flex items-center gap-3 p-4 rounded-xl bg-white/5 border border-white/10">
-                <div className="text-3xl">{token.icon}</div>
+                <TokenIcon symbol={token.symbol} icon={token.icon} logoUrl={(token as any).logoUrl} size={40} />
                 <div>
                   <div className="font-bold text-white text-lg">{token.symbol}</div>
                   <div className="text-sm text-gray-400">{token.name}</div>

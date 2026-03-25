@@ -5,6 +5,7 @@ import TokenDetailsModal from './TokenDetailsModal';
 import IndexFundModal from './IndexFundModal';
 import LiquidityModal from './LiquidityModal';
 import TokenSelectorModal from './TokenSelectorModal';
+import TokenIcon from './TokenIcon';
 import NitroSuccessModal from './NitroSuccessModal';
 import MintQUGUSDModal from './MintQUGUSDModal';
 import SwapSuccessModal from './SwapSuccessModal';
@@ -1735,9 +1736,7 @@ export default function DexScreen() {
                 holders: customHolders,
                 createdAt: apiToken.deployed_at ? apiToken.deployed_at * 1000 : undefined,
                 txCount: apiToken.tx_count || 0,
-                icon: apiToken.contract_type === 'Wrapped'
-                  ? (apiToken.symbol === 'wBTC' ? '₿' : apiToken.symbol === 'wZEC' ? '🛡' : apiToken.symbol === 'wIRON' ? '🐟' : apiToken.symbol === 'wETH' ? 'Ξ' : '🌉')
-                  : '🪙',
+                icon: apiToken.symbol, // TokenIcon component handles symbol-based rendering
                 logoUrl: apiToken.logo_url || localStorage.getItem(`token_logo_${apiToken.address}`) || undefined,
                 isBridgeToken: apiToken.contract_type === 'Wrapped',
                 // v3.6.7-beta: CRITICAL - Include decimals for proper amount calculation in swaps!
@@ -3148,27 +3147,7 @@ export default function DexScreen() {
                   {/* Token Info */}
                   <div className="p-4 bg-gradient-to-br from-orange-500/10 to-red-500/10 border border-orange-500/30 rounded-xl">
                     <div className="flex items-center gap-3 mb-3">
-                      <div className="text-3xl">
-                        {(nitroBoostToken.icon === 'qug-logo' || nitroBoostToken.icon === 'qugusd-logo' || nitroBoostToken.icon === 'usd-logo') ? (
-                          <div className="relative w-10 h-10">
-                            <div className="absolute inset-0 rounded-full" style={{
-                              background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 25%, #FFA500 50%, #FFD700 75%, #D4AF37 100%)',
-                              padding: '2px'
-                            }}>
-                              <div className="w-full h-full bg-gradient-to-b from-slate-900 via-blue-950 to-slate-900 rounded-full flex items-center justify-center p-1">
-                                <img
-                                  src="/quillon-logo.png"
-                                  alt="Quillon"
-                                  className="w-full h-full object-contain"
-                                  style={{ filter: 'invert(1)' }}
-                                />
-                              </div>
-                            </div>
-                          </div>
-                        ) : (
-                          nitroBoostToken.icon
-                        )}
-                      </div>
+                      <TokenIcon symbol={nitroBoostToken.symbol} icon={nitroBoostToken.icon} logoUrl={nitroBoostToken.logoUrl} size={40} />
                       <div>
                         <div className="font-bold text-white text-lg">{nitroBoostToken.symbol}</div>
                         <div className="text-sm text-gray-400">{nitroBoostToken.name}</div>
@@ -4316,44 +4295,7 @@ export default function DexScreen() {
                     className="absolute right-2 top-1/2 -translate-y-1/2 bg-quantum-purple/20 hover:bg-quantum-purple/30 border border-quantum-purple/30 rounded-lg px-3 py-2 text-white font-bold cursor-pointer focus:outline-none transition-colors flex items-center gap-2"
                   >
                     {/* Proper Logo for QUG */}
-                    {swapFrom === 'QUG' ? (
-                      <div className="relative w-6 h-6">
-                        <div className="absolute inset-0 rounded-full" style={{
-                          background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 25%, #FFA500 50%, #FFD700 75%, #D4AF37 100%)',
-                          padding: '1px'
-                        }}>
-                          <div className="w-full h-full bg-gradient-to-b from-slate-900 via-blue-950 to-slate-900 rounded-full flex items-center justify-center">
-                            <span className="text-yellow-400 font-bold text-xs">Q</span>
-                          </div>
-                        </div>
-                      </div>
-                    ) : swapFrom === 'QUGUSD' ? (
-                      /* Proper Logo for QUGUSD */
-                      <div className="relative w-6 h-6">
-                        <div className="absolute inset-0 rounded-full" style={{
-                          background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 25%, #FFA500 50%, #FFD700 75%, #D4AF37 100%)',
-                          padding: '1px'
-                        }}>
-                          <div className="w-full h-full bg-gradient-to-b from-slate-900 via-emerald-950 to-slate-900 rounded-full flex items-center justify-center">
-                            <span className="text-green-400 font-bold text-xs">$</span>
-                          </div>
-                        </div>
-                      </div>
-                    ) : swapFrom === 'USD' ? (
-                      /* Proper Logo for USD */
-                      <div className="relative w-6 h-6">
-                        <div className="absolute inset-0 rounded-full" style={{
-                          background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 25%, #FFA500 50%, #FFD700 75%, #D4AF37 100%)',
-                          padding: '1px'
-                        }}>
-                          <div className="w-full h-full bg-gradient-to-b from-slate-900 via-green-950 to-slate-900 rounded-full flex items-center justify-center">
-                            <span className="text-green-400 font-bold text-xs">$</span>
-                          </div>
-                        </div>
-                      </div>
-                    ) : (
-                      <span className="text-xl">{findToken(swapFrom)?.icon || '💎'}</span>
-                    )}
+                    <TokenIcon symbol={swapFrom} icon={findToken(swapFrom)?.icon} logoUrl={findToken(swapFrom)?.logoUrl} size={24} />
                     <span>{swapFrom}</span>
                     <span className="text-xs opacity-70">▼</span>
                   </button>
@@ -4542,45 +4484,7 @@ export default function DexScreen() {
                     onClick={() => setIsToTokenSelectorOpen(true)}
                     className="absolute right-2 top-1/2 -translate-y-1/2 bg-quantum-purple/20 hover:bg-quantum-purple/30 border border-quantum-purple/30 rounded-lg px-3 py-2 text-white font-bold cursor-pointer focus:outline-none transition-colors flex items-center gap-2"
                   >
-                    {/* Proper Logo for QUG */}
-                    {swapTo === 'QUG' ? (
-                      <div className="relative w-6 h-6">
-                        <div className="absolute inset-0 rounded-full" style={{
-                          background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 25%, #FFA500 50%, #FFD700 75%, #D4AF37 100%)',
-                          padding: '1px'
-                        }}>
-                          <div className="w-full h-full bg-gradient-to-b from-slate-900 via-blue-950 to-slate-900 rounded-full flex items-center justify-center">
-                            <span className="text-yellow-400 font-bold text-xs">Q</span>
-                          </div>
-                        </div>
-                      </div>
-                    ) : swapTo === 'QUGUSD' ? (
-                      /* Proper Logo for QUGUSD */
-                      <div className="relative w-6 h-6">
-                        <div className="absolute inset-0 rounded-full" style={{
-                          background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 25%, #FFA500 50%, #FFD700 75%, #D4AF37 100%)',
-                          padding: '1px'
-                        }}>
-                          <div className="w-full h-full bg-gradient-to-b from-slate-900 via-emerald-950 to-slate-900 rounded-full flex items-center justify-center">
-                            <span className="text-green-400 font-bold text-xs">$</span>
-                          </div>
-                        </div>
-                      </div>
-                    ) : swapTo === 'USD' ? (
-                      /* Proper Logo for USD */
-                      <div className="relative w-6 h-6">
-                        <div className="absolute inset-0 rounded-full" style={{
-                          background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 25%, #FFA500 50%, #FFD700 75%, #D4AF37 100%)',
-                          padding: '1px'
-                        }}>
-                          <div className="w-full h-full bg-gradient-to-b from-slate-900 via-green-950 to-slate-900 rounded-full flex items-center justify-center">
-                            <span className="text-green-400 font-bold text-xs">$</span>
-                          </div>
-                        </div>
-                      </div>
-                    ) : (
-                      <span className="text-xl">{findToken(swapTo)?.icon || '💵'}</span>
-                    )}
+                    <TokenIcon symbol={swapTo} icon={findToken(swapTo)?.icon} logoUrl={findToken(swapTo)?.logoUrl} size={24} />
                     <span>{swapTo}</span>
                     <span className="text-xs opacity-70">▼</span>
                   </button>
@@ -5699,27 +5603,18 @@ export default function DexScreen() {
                       >
                         <td className="py-3 px-3">
                           <div className="flex items-center gap-2">
-                            <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm overflow-hidden flex-shrink-0 ${
-                              token.isCrowdfund
-                                ? 'bg-gradient-to-br from-cyan-500 to-blue-600 ring-1 ring-cyan-400/50'
-                                : (token as any).isBridgeToken
-                                ? 'bg-gradient-to-br from-amber-500 to-orange-600 ring-1 ring-amber-400/50'
-                                : 'bg-gradient-to-br from-quantum-cyan to-quantum-purple'
-                            }`}>
-                              {token.isCrowdfund ? (
+                            {token.isCrowdfund ? (
+                              <div className="w-8 h-8 rounded-full flex items-center justify-center text-sm overflow-hidden flex-shrink-0 bg-gradient-to-br from-cyan-500 to-blue-600 ring-1 ring-cyan-400/50">
                                 <span className="text-base">{token.campaignData?.exchange_logo || '\u{1F3E6}'}</span>
-                              ) : (token.icon === 'qug-logo' || token.icon === 'qugusd-logo' || token.icon === 'usd-logo') ? (
-                                <div className="relative w-5 h-5">
-                                  <div className="absolute inset-0 rounded-full" style={{ background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 25%, #FFA500 50%, #FFD700 75%, #D4AF37 100%)', padding: '1px' }}>
-                                    <div className="w-full h-full bg-gradient-to-b from-slate-900 via-blue-950 to-slate-900 rounded-full flex items-center justify-center p-0.5">
-                                      <img src="/quillon-logo.png" alt="Quillon" className="w-full h-full object-contain" style={{ filter: 'invert(1)' }} />
-                                    </div>
-                                  </div>
-                                </div>
-                              ) : token.logoUrl ? (
-                                <img src={token.logoUrl} alt={token.symbol} className="w-6 h-6 rounded-full object-cover" onError={(e) => { e.currentTarget.style.display = 'none'; }} />
-                              ) : token.icon}
-                            </div>
+                              </div>
+                            ) : (
+                              <TokenIcon
+                                symbol={token.symbol}
+                                icon={token.icon}
+                                logoUrl={token.logoUrl}
+                                size={32}
+                              />
+                            )}
                             <div className="min-w-0">
                               <div className="flex items-center gap-1">
                                 <span className="font-bold text-white text-sm">{token.symbol}</span>
@@ -6851,14 +6746,14 @@ export default function DexScreen() {
                   <div className="text-sm text-gray-400 mb-2">Auto-buy {swapTo} with {swapFrom}</div>
                   <div className="flex items-center gap-3">
                     <div className="flex items-center gap-2 px-3 py-2 bg-white/5 rounded-lg">
-                      <span className="text-lg">{findToken(swapFrom)?.icon || '💎'}</span>
+                      <TokenIcon symbol={swapFrom} icon={findToken(swapFrom)?.icon} logoUrl={findToken(swapFrom)?.logoUrl} size={24} />
                       <span className="text-white font-medium">{swapFrom}</span>
                     </div>
                     <svg className="w-5 h-5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
                     </svg>
                     <div className="flex items-center gap-2 px-3 py-2 bg-white/5 rounded-lg">
-                      <span className="text-lg">{findToken(swapTo)?.icon || '💎'}</span>
+                      <TokenIcon symbol={swapTo} icon={findToken(swapTo)?.icon} logoUrl={findToken(swapTo)?.logoUrl} size={24} />
                       <span className="text-white font-medium">{swapTo}</span>
                     </div>
                   </div>

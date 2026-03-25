@@ -14,6 +14,7 @@ use std::sync::Arc;
 use tracing::{debug, error, info};
 
 use crate::handlers::parse_wallet_address;
+use q_storage::BalanceStorage; // v10.1.2: For get_balance() in loan collateral check
 use crate::privacy_proof_generator::apply_privacy_proofs; // v3.4.16: Auto privacy by default
 use crate::streaming::StreamEvent;
 use crate::AppState;
@@ -1127,22 +1128,33 @@ pub async fn apply_loan(
         Ok(addr) => addr,
         Err(e) => {
             error!("Invalid wallet address: {}", e);
-            return Err(StatusCode::BAD_REQUEST);
+            return Ok(Json(ApiResponse::error(format!("Invalid wallet address: {}", e))));
         }
     };
 
     // 2. Validate collateral availability
-    let wallet_balances = state.wallet_balances.read().await;
-    let current_qug_balance =
-        wallet_balances.get(&borrower_address).copied().unwrap_or(0) as f64 / 1e24;
-    drop(wallet_balances);
+    // v10.1.2: Read from RocksDB (authoritative) like swap handler does, not stale in-memory cache
+    let current_qug_balance = {
+        let storage_balance = state
+            .storage_engine
+            .get_balance(&hex::encode(borrower_address))
+            .await
+            .unwrap_or(0);
+        // Sync in-memory cache while we're at it
+        let mut wallet_balances = state.wallet_balances.write().await;
+        wallet_balances.insert(borrower_address, storage_balance);
+        storage_balance as f64 / 1e24
+    };
 
     if current_qug_balance < request.collateral_amount {
         error!(
             "Insufficient collateral: have {:.2} QUG, need {:.2} QUG",
             current_qug_balance, request.collateral_amount
         );
-        return Err(StatusCode::BAD_REQUEST);
+        return Ok(Json(ApiResponse::error(format!(
+            "Insufficient QUG collateral. Required: {:.4} QUG, Available: {:.4} QUG",
+            request.collateral_amount, current_qug_balance
+        ))));
     }
 
     // 3. Calculate interest rate based on collateral ratio and term
@@ -1159,7 +1171,11 @@ pub async fn apply_loan(
             collateral_ratio * 100.0,
             MINIMUM_COLLATERAL_RATIO * 100.0
         );
-        return Err(StatusCode::BAD_REQUEST);
+        return Ok(Json(ApiResponse::error(format!(
+            "Collateral ratio {:.1}% is below minimum {:.1}%. Add more collateral or reduce loan amount.",
+            collateral_ratio * 100.0,
+            MINIMUM_COLLATERAL_RATIO * 100.0
+        ))));
     }
 
     // Calculate interest rate

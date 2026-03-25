@@ -1,4 +1,4 @@
-import { Theme, QButton, Card } from "theme.slint";
+import { Theme, QButton, Card, Icon } from "theme.slint";
 
 export component MinerScreen inherits Rectangle {
     in property <bool> mining: false;
@@ -34,12 +34,12 @@ export component MinerScreen inherits Rectangle {
                     clicked => { root.go-back(); }
                 }
 
-                Text {
-                    text: "<";
-                    color: Theme.text-primary;
-                    font-size: Theme.font-xl;
-                    vertical-alignment: center;
-                    horizontal-alignment: center;
+                HorizontalLayout {
+                    alignment: center;
+                    Icon {
+                        source: @image-url("icons/arrow-left.svg");
+                        icon-color: Theme.text-primary;
+                    }
                 }
             }
 
@@ -61,22 +61,40 @@ export component MinerScreen inherits Rectangle {
                 alignment: center;
                 spacing: Theme.spacing-sm;
 
-                // Status indicator
-                Rectangle {
-                    width: 48px;
-                    height: 48px;
-                    border-radius: 24px;
-                    background: root.mining ? Theme.accent-green.with-alpha(0.2) : Theme.bg-hover;
-                    animate background { duration: 300ms; }
-
+                // Status indicator with animated pulse
+                HorizontalLayout {
+                    alignment: center;
                     Rectangle {
-                        x: 14px;
-                        y: 14px;
-                        width: 20px;
-                        height: 20px;
-                        border-radius: 10px;
-                        background: root.mining ? Theme.accent-green : Theme.text-muted;
+                        width: 48px;
+                        height: 48px;
+                        border-radius: 24px;
+                        background: root.mining ? Theme.accent-green.with-alpha(0.2) : Theme.bg-hover;
                         animate background { duration: 300ms; }
+
+                        // Outer pulse ring (visible when mining)
+                        if root.mining : Rectangle {
+                            x: -6px;
+                            y: -6px;
+                            width: 60px;
+                            height: 60px;
+                            border-radius: 30px;
+                            background: Theme.accent-green.with-alpha(0.08);
+                            border-width: 1px;
+                            border-color: Theme.accent-green.with-alpha(0.15);
+                        }
+
+                        // Inner dot
+                        Rectangle {
+                            x: 14px;
+                            y: 14px;
+                            width: 20px;
+                            height: 20px;
+                            border-radius: 10px;
+                            background: root.mining ? Theme.accent-green : Theme.text-muted;
+                            drop-shadow-blur: root.mining ? 8px : 0px;
+                            drop-shadow-color: Theme.accent-green.with-alpha(0.4);
+                            animate background, drop-shadow-blur { duration: 300ms; }
+                        }
                     }
                 }
 
@@ -314,10 +332,12 @@ export component MinerScreen inherits Rectangle {
         // Spacer
         Rectangle { vertical-stretch: 1; }
 
-        // Toggle button
+        // Toggle button with SVG icon
         QButton {
             label: root.mining ? "Stop Mining" : "Start Mining";
             button-color: root.mining ? Theme.accent-red : Theme.accent-green;
+            has-icon: true;
+            btn-icon: root.mining ? @image-url("icons/square.svg") : @image-url("icons/play.svg");
             clicked => { root.toggle-mining(); }
         }
     }

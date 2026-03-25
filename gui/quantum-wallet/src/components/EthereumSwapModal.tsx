@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, ArrowRightLeft, Clock, CheckCircle, AlertCircle, Copy, Loader2 } from 'lucide-react';
+import { X, ArrowRightLeft, Clock, CheckCircle, AlertCircle, Copy, Loader2, Wallet, Shield } from 'lucide-react';
 import { qnkAPI } from '../services/api';
 
 interface EthereumSwapModalProps {
@@ -9,8 +9,9 @@ interface EthereumSwapModalProps {
   walletAddress: string;
 }
 
-type SwapTab = 'swap' | 'history';
+type SwapTab = 'swap' | 'metamask' | 'history';
 type SwapDirection = 'buy_eth' | 'sell_eth';
+type MetaMaskStep = 'input' | 'signing' | 'confirming' | 'attesting' | 'complete';
 
 interface SwapHistoryItem {
   swap_id: string;
@@ -36,12 +37,36 @@ const EthereumSwapModal = ({ isOpen, onClose, walletAddress }: EthereumSwapModal
   const [wethBalance, setWethBalance] = useState<{ balance_wei: string; balance_eth: number } | null>(null);
   const [ethAddress, setEthAddress] = useState<string | null>(null);
 
+  // MetaMask WETH Bridge state
+  const [mmStep, setMmStep] = useState<MetaMaskStep>('input');
+  const [mmConnected, setMmConnected] = useState(false);
+  const [mmAccount, setMmAccount] = useState<string | null>(null);
+  const [mmWethAmount, setMmWethAmount] = useState('');
+  const [mmQugEstimate, setMmQugEstimate] = useState('');
+  const [mmDepositId, setMmDepositId] = useState<string | null>(null);
+  const [mmTxHash, setMmTxHash] = useState<string | null>(null);
+  const [mmConfirmations, setMmConfirmations] = useState(0);
+  const [mmAttestations, setMmAttestations] = useState(0);
+  const [mmError, setMmError] = useState<string | null>(null);
+  const [mmBridgeInfo, setMmBridgeInfo] = useState<{
+    bridge_deposit_address: string;
+    weth_contract_address: string;
+    chain_id: number;
+    min_deposit_wei: string;
+    max_deposit_wei: string;
+    required_confirmations: number;
+    required_attestations: number;
+  } | null>(null);
+  const [mmRate, setMmRate] = useState<number>(65.0);
+
   useEffect(() => {
     if (isOpen) {
       fetchBridgeStatus();
       fetchSwapHistory();
       fetchWethBalance();
       fetchEthAddress();
+      fetchBridgeInfo();
+      fetchBridgeRate();
     }
   }, [isOpen]);
 
@@ -89,8 +114,209 @@ const EthereumSwapModal = ({ isOpen, onClose, walletAddress }: EthereumSwapModal
     }
   };
 
+  // MetaMask bridge support functions
+  const fetchBridgeInfo = async () => {
+    try {
+      const res = await qnkAPI.getBridgeDepositAddress();
+      if (res.success && res.data) {
+        setMmBridgeInfo(res.data);
+      }
+    } catch (e) {
+      console.warn('Failed to fetch bridge deposit info:', e);
+    }
+  };
+
+  const fetchBridgeRate = async () => {
+    try {
+      const res = await qnkAPI.getBridgeRate();
+      if (res.success && res.data) {
+        setMmRate(res.data.weth_to_qug_rate);
+      }
+    } catch (e) {
+      console.warn('Failed to fetch bridge rate:', e);
+    }
+  };
+
+  const connectMetaMask = async () => {
+    setMmError(null);
+    const ethereum = (window as any).ethereum;
+    if (!ethereum) {
+      setMmError('MetaMask not detected. Please install MetaMask.');
+      return;
+    }
+    try {
+      const accounts = await ethereum.request({ method: 'eth_requestAccounts' });
+      if (accounts.length > 0) {
+        // Verify chain is Ethereum mainnet (chain_id 0x1)
+        let chainId = await ethereum.request({ method: 'eth_chainId' });
+        if (chainId !== '0x1') {
+          try {
+            await ethereum.request({
+              method: 'wallet_switchEthereumChain',
+              params: [{ chainId: '0x1' }],
+            });
+            chainId = '0x1';
+          } catch (switchErr: any) {
+            setMmError('Failed to switch to Ethereum Mainnet. Please switch manually in MetaMask.');
+            return;
+          }
+        }
+        setMmAccount(accounts[0]);
+        setMmConnected(true);
+      }
+    } catch (e: any) {
+      setMmError(e.message || 'Failed to connect MetaMask.');
+    }
+  };
+
+  const getWethBalance = async (address: string): Promise<string> => {
+    const ethereum = (window as any).ethereum;
+    if (!ethereum || !mmBridgeInfo) return '0';
+    // ERC-20 balanceOf(address) calldata
+    const paddedAddr = address.slice(2).padStart(64, '0');
+    const data = '0x70a08231' + paddedAddr; // balanceOf selector
+    try {
+      const result = await ethereum.request({
+        method: 'eth_call',
+        params: [{
+          to: mmBridgeInfo.weth_contract_address,
+          data,
+        }, 'latest'],
+      });
+      return BigInt(result).toString();
+    } catch {
+      return '0';
+    }
+  };
+
+  const sendWethToBridge = async () => {
+    setMmError(null);
+    if (!mmAccount || !mmBridgeInfo) return;
+
+    const amount = parseFloat(mmWethAmount);
+    if (isNaN(amount) || amount <= 0) {
+      setMmError('Enter a valid WETH amount.');
+      return;
+    }
+
+    const amountWei = BigInt(Math.round(amount * 1e18));
+    const minWei = BigInt(mmBridgeInfo.min_deposit_wei);
+    const maxWei = BigInt(mmBridgeInfo.max_deposit_wei);
+
+    if (amountWei < minWei) {
+      setMmError(`Minimum deposit is ${Number(minWei) / 1e18} WETH`);
+      return;
+    }
+    if (amountWei > maxWei) {
+      setMmError(`Maximum deposit is ${Number(maxWei) / 1e18} WETH`);
+      return;
+    }
+
+    // Check WETH balance
+    const balanceWei = await getWethBalance(mmAccount);
+    if (BigInt(balanceWei) < amountWei) {
+      setMmError(`Insufficient WETH balance. Have ${(Number(balanceWei) / 1e18).toFixed(6)} WETH`);
+      return;
+    }
+
+    setMmStep('signing');
+
+    try {
+      const ethereum = (window as any).ethereum;
+      // Build ERC-20 transfer(address,uint256) calldata
+      const toAddr = mmBridgeInfo.bridge_deposit_address.slice(2).padStart(64, '0');
+      const amountHex = amountWei.toString(16).padStart(64, '0');
+      const data = '0xa9059cbb' + toAddr + amountHex; // transfer selector
+
+      const txHash = await ethereum.request({
+        method: 'eth_sendTransaction',
+        params: [{
+          from: mmAccount,
+          to: mmBridgeInfo.weth_contract_address,
+          data,
+          // Gas will be estimated by MetaMask
+        }],
+      });
+
+      setMmTxHash(txHash);
+      setMmStep('confirming');
+
+      // Register deposit with backend
+      const res = await qnkAPI.registerWethDeposit({
+        tx_hash: txHash,
+        sender_address: mmAccount,
+        amount_wei: amountWei.toString(),
+      });
+
+      if (res.success && res.data) {
+        setMmDepositId(res.data.deposit_id);
+        setMmQugEstimate(res.data.qug_estimate);
+        // Start polling for status
+        pollDepositStatus(res.data.deposit_id);
+      } else {
+        setMmError(res.error || 'Failed to register deposit.');
+        setMmStep('input');
+      }
+    } catch (e: any) {
+      if (e.code === 4001) {
+        // User rejected in MetaMask
+        setMmError('Transaction rejected by user.');
+      } else {
+        setMmError(e.message || 'MetaMask transaction failed.');
+      }
+      setMmStep('input');
+    }
+  };
+
+  const pollDepositStatus = useCallback(async (depositId: string) => {
+    const poll = async () => {
+      try {
+        const res = await qnkAPI.getDepositStatus(depositId);
+        if (res.success && res.data) {
+          setMmConfirmations(res.data.confirmations);
+          setMmAttestations(res.data.attestations);
+
+          if (res.data.status === 'confirming') {
+            setMmStep('confirming');
+          } else if (res.data.status === 'attesting') {
+            setMmStep('attesting');
+          } else if (res.data.status === 'completed') {
+            setMmStep('complete');
+            return; // Stop polling
+          } else if (res.data.status === 'failed') {
+            setMmError('Deposit verification failed.');
+            setMmStep('input');
+            return;
+          }
+        }
+      } catch (e) {
+        console.warn('Deposit status poll error:', e);
+      }
+      // Poll every 5 seconds
+      setTimeout(poll, 5000);
+    };
+    poll();
+  }, []);
+
+  const handleMmAmountChange = (value: string) => {
+    setMmWethAmount(value);
+    const numVal = parseFloat(value) || 0;
+    setMmQugEstimate((numVal * mmRate).toFixed(4));
+  };
+
+  const resetMetaMaskFlow = () => {
+    setMmStep('input');
+    setMmWethAmount('');
+    setMmQugEstimate('');
+    setMmDepositId(null);
+    setMmTxHash(null);
+    setMmConfirmations(0);
+    setMmAttestations(0);
+    setMmError(null);
+  };
+
   // Exchange rate (placeholder - in production, fetch from Reth node oracle)
-  const ETH_QNK_RATE = 65.0; // 1 ETH = ~65 QNK equivalent
+  const ETH_QNK_RATE = mmRate;
   const ETH_USD_RATE = 2750;
 
   const handleAmountChange = (value: string, field: 'eth' | 'qnk') => {
@@ -265,7 +491,7 @@ const EthereumSwapModal = ({ isOpen, onClose, walletAddress }: EthereumSwapModal
 
           {/* Tabs */}
           <div className="flex gap-1 px-5 pt-2">
-            {(['swap', 'history'] as SwapTab[]).map(tab => (
+            {(['swap', 'metamask', 'history'] as SwapTab[]).map(tab => (
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
@@ -275,7 +501,7 @@ const EthereumSwapModal = ({ isOpen, onClose, walletAddress }: EthereumSwapModal
                     : 'text-gray-400 hover:text-gray-200 hover:bg-white/5'
                 }`}
               >
-                {tab === 'swap' ? 'Swap' : `History (${swapHistory.length})`}
+                {tab === 'swap' ? 'Swap' : tab === 'metamask' ? 'MetaMask Bridge' : `History (${swapHistory.length})`}
               </button>
             ))}
           </div>
@@ -413,6 +639,219 @@ const EthereumSwapModal = ({ isOpen, onClose, walletAddress }: EthereumSwapModal
                   Atomic swaps use Hash Time-Locked Contracts (HTLC).
                   <br />
                   Trustless, non-custodial, with automatic refund on timeout.
+                  <br />
+                  <span className="text-indigo-400/50">Powered by Reth full node on Server Delta</span>
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'metamask' && (
+              <div className="space-y-4">
+                {/* Step Progress Bar */}
+                <div className="flex items-center justify-between mb-2">
+                  {(['input', 'signing', 'confirming', 'attesting', 'complete'] as MetaMaskStep[]).map((step, i) => {
+                    const steps: MetaMaskStep[] = ['input', 'signing', 'confirming', 'attesting', 'complete'];
+                    const currentIdx = steps.indexOf(mmStep);
+                    const stepIdx = i;
+                    const isActive = stepIdx === currentIdx;
+                    const isDone = stepIdx < currentIdx;
+                    return (
+                      <div key={step} className="flex items-center flex-1">
+                        <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold border-2 transition-colors ${
+                          isDone ? 'bg-green-500 border-green-500 text-white' :
+                          isActive ? 'bg-indigo-500 border-indigo-400 text-white' :
+                          'border-gray-600 text-gray-500'
+                        }`}>
+                          {isDone ? <CheckCircle size={14} /> : i + 1}
+                        </div>
+                        {i < 4 && (
+                          <div className={`flex-1 h-0.5 mx-1 ${isDone ? 'bg-green-500' : 'bg-gray-700'}`} />
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="flex justify-between text-[10px] text-gray-500 -mt-1 mb-3">
+                  <span>Input</span><span>Sign</span><span>Confirm</span><span>Attest</span><span>Done</span>
+                </div>
+
+                {mmError && (
+                  <div className="rounded-lg p-3 bg-red-500/10 border border-red-500/20 text-red-300 text-sm flex items-center gap-2">
+                    <AlertCircle size={16} />
+                    {mmError}
+                  </div>
+                )}
+
+                {/* Step: Input */}
+                {mmStep === 'input' && (
+                  <div className="space-y-4">
+                    {!mmConnected ? (
+                      <button
+                        onClick={connectMetaMask}
+                        className="w-full py-3 rounded-xl bg-orange-500/20 border border-orange-500/30 text-orange-300 font-medium hover:bg-orange-500/30 transition-colors flex items-center justify-center gap-2"
+                      >
+                        <Wallet size={18} />
+                        Connect MetaMask
+                      </button>
+                    ) : (
+                      <>
+                        <div className="rounded-lg p-3 bg-green-500/10 border border-green-500/20 text-green-300 text-sm flex items-center gap-2">
+                          <CheckCircle size={16} />
+                          Connected: {mmAccount?.slice(0, 8)}...{mmAccount?.slice(-6)}
+                        </div>
+
+                        <div className="rounded-xl p-4 bg-white/5 border border-white/10">
+                          <label className="text-xs text-gray-400 mb-1 block">WETH Amount</label>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="number"
+                              value={mmWethAmount}
+                              onChange={e => handleMmAmountChange(e.target.value)}
+                              placeholder="0.01"
+                              step="0.001"
+                              min="0.001"
+                              max="1.0"
+                              className="flex-1 bg-transparent text-xl font-mono text-white outline-none"
+                            />
+                            <span className="text-gray-400 text-sm">WETH</span>
+                          </div>
+                          <div className="text-xs text-gray-500 mt-1">Min 0.001 WETH, Max 1.0 WETH</div>
+                        </div>
+
+                        <div className="rounded-xl p-4 bg-white/5 border border-white/10">
+                          <label className="text-xs text-gray-400 mb-1 block">You Receive (estimate)</label>
+                          <div className="flex items-center gap-2">
+                            <span className="flex-1 text-xl font-mono text-indigo-300">
+                              {mmQugEstimate || '0.0000'}
+                            </span>
+                            <span className="text-gray-400 text-sm">QUG</span>
+                          </div>
+                          <div className="text-xs text-gray-500 mt-1">Rate: 1 WETH = {mmRate} QUG</div>
+                        </div>
+
+                        {mmBridgeInfo && (
+                          <div className="text-xs text-gray-500 space-y-1">
+                            <div className="flex justify-between">
+                              <span>Bridge Address:</span>
+                              <span className="font-mono">{mmBridgeInfo.bridge_deposit_address.slice(0, 10)}...</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span>Confirmations Required:</span>
+                              <span>{mmBridgeInfo.required_confirmations}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span>Committee Attestations:</span>
+                              <span>{mmBridgeInfo.required_attestations}/11</span>
+                            </div>
+                          </div>
+                        )}
+
+                        <button
+                          onClick={sendWethToBridge}
+                          disabled={!mmWethAmount || parseFloat(mmWethAmount) < 0.001}
+                          className="w-full py-3 rounded-xl bg-indigo-500/20 border border-indigo-500/30 text-indigo-300 font-medium hover:bg-indigo-500/30 transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                        >
+                          <Shield size={18} />
+                          Send WETH to Bridge
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {/* Step: Signing */}
+                {mmStep === 'signing' && (
+                  <div className="text-center py-8 space-y-4">
+                    <Loader2 size={40} className="mx-auto animate-spin text-orange-400" />
+                    <p className="text-lg font-medium text-orange-300">Waiting for MetaMask...</p>
+                    <p className="text-sm text-gray-400">Please confirm the WETH transfer in your MetaMask wallet.</p>
+                    <p className="text-xs text-gray-500">Sending {mmWethAmount} WETH to bridge deposit address</p>
+                  </div>
+                )}
+
+                {/* Step: Confirming */}
+                {mmStep === 'confirming' && (
+                  <div className="text-center py-6 space-y-4">
+                    <div className="relative mx-auto w-20 h-20">
+                      <svg className="w-20 h-20 -rotate-90">
+                        <circle cx="40" cy="40" r="36" fill="none" stroke="#1e1b4b" strokeWidth="4" />
+                        <circle cx="40" cy="40" r="36" fill="none" stroke="#818cf8" strokeWidth="4"
+                          strokeDasharray={`${(mmConfirmations / 12) * 226} 226`}
+                          strokeLinecap="round"
+                        />
+                      </svg>
+                      <span className="absolute inset-0 flex items-center justify-center text-lg font-bold text-indigo-300">
+                        {mmConfirmations}/12
+                      </span>
+                    </div>
+                    <p className="text-lg font-medium text-indigo-300">Confirming on Ethereum</p>
+                    <p className="text-sm text-gray-400">Waiting for block confirmations...</p>
+                    {mmTxHash && (
+                      <div className="flex items-center justify-center gap-2 text-xs text-gray-500">
+                        <span className="font-mono">{mmTxHash.slice(0, 16)}...{mmTxHash.slice(-8)}</span>
+                        <button onClick={() => copyToClipboard(mmTxHash!, 'mm-tx')} className="hover:text-gray-300">
+                          {copiedId === 'mm-tx' ? <CheckCircle size={10} className="text-green-400" /> : <Copy size={10} />}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Step: Attesting */}
+                {mmStep === 'attesting' && (
+                  <div className="text-center py-6 space-y-4">
+                    <div className="relative mx-auto w-20 h-20">
+                      <svg className="w-20 h-20 -rotate-90">
+                        <circle cx="40" cy="40" r="36" fill="none" stroke="#1e1b4b" strokeWidth="4" />
+                        <circle cx="40" cy="40" r="36" fill="none" stroke="#22c55e" strokeWidth="4"
+                          strokeDasharray={`${(mmAttestations / 7) * 226} 226`}
+                          strokeLinecap="round"
+                        />
+                      </svg>
+                      <span className="absolute inset-0 flex items-center justify-center text-lg font-bold text-green-300">
+                        {mmAttestations}/7
+                      </span>
+                    </div>
+                    <p className="text-lg font-medium text-green-300">Committee Attestation</p>
+                    <p className="text-sm text-gray-400">Bridge committee verifying deposit...</p>
+                    <p className="text-xs text-gray-500">7 of 11 attestations required</p>
+                  </div>
+                )}
+
+                {/* Step: Complete */}
+                {mmStep === 'complete' && (
+                  <div className="text-center py-6 space-y-4">
+                    <CheckCircle size={48} className="mx-auto text-green-400" />
+                    <p className="text-lg font-medium text-green-300">Bridge Complete!</p>
+                    <div className="rounded-xl p-4 bg-green-500/10 border border-green-500/20 space-y-2">
+                      <div className="flex justify-between text-sm">
+                        <span className="text-gray-400">Sent</span>
+                        <span className="text-white font-mono">{mmWethAmount} WETH</span>
+                      </div>
+                      <div className="flex justify-between text-sm">
+                        <span className="text-gray-400">Received</span>
+                        <span className="text-green-300 font-mono">{mmQugEstimate} QUG</span>
+                      </div>
+                      {mmTxHash && (
+                        <div className="flex justify-between text-xs">
+                          <span className="text-gray-500">Tx Hash</span>
+                          <span className="text-gray-400 font-mono">{mmTxHash.slice(0, 12)}...{mmTxHash.slice(-6)}</span>
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      onClick={resetMetaMaskFlow}
+                      className="w-full py-2 rounded-xl bg-white/5 border border-white/10 text-gray-300 hover:bg-white/10 transition-colors text-sm"
+                    >
+                      Bridge More WETH
+                    </button>
+                  </div>
+                )}
+
+                <div className="text-xs text-gray-500 text-center leading-relaxed">
+                  MetaMask WETH Bridge uses ERC-20 deposit verification.
+                  <br />
+                  Deposits are verified by the bridge committee (7-of-11 attestation).
                   <br />
                   <span className="text-indigo-400/50">Powered by Reth full node on Server Delta</span>
                 </div>

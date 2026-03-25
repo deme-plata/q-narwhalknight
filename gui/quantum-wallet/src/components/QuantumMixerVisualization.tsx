@@ -222,6 +222,17 @@ export default function QuantumMixerVisualization({
   const [isComplete, setIsComplete] = useState(false);
   const [elapsedTime, setElapsedTime] = useState(0);
 
+  // v10.1.2 FIX: Store onComplete in a ref to avoid effect restarts.
+  // The parent passes an inline arrow function as onComplete, which gets a new
+  // reference on every render. With onComplete in the useEffect deps, every
+  // parent re-render (SSE updates, balance polling) restarted the timer,
+  // resetting progress to 0% permanently.
+  const onCompleteRef = useRef(onComplete);
+  useEffect(() => { onCompleteRef.current = onComplete; }, [onComplete]);
+
+  // Stage thresholds as a stable array (not recreated every render)
+  const stageThresholds = [0.2, 0.4, 0.6, 0.8, 1.0];
+
   const stages: MixingStage[] = [
     {
       name: 'Ring Signatures',
@@ -273,17 +284,18 @@ export default function QuantumMixerVisualization({
       setProgress((prev) => {
         const newProgress = Math.min(prev + increment, 1);
 
-        // Update stage based on progress
-        const newStage = stages.findIndex(s => newProgress < s.progress);
-        setStage(newStage === -1 ? stages.length - 1 : newStage);
+        // Update stage based on progress (use stable thresholds, not stages array)
+        const newStage = stageThresholds.findIndex(t => newProgress < t);
+        setStage(newStage === -1 ? stageThresholds.length - 1 : newStage);
 
         // Check if complete
         if (newProgress >= 1) {
           setIsComplete(true);
           clearInterval(timer);
           console.log(`✅ [MIXER VIZ] Mixing visualization complete after ${durationSeconds}s`);
-          if (onComplete) {
-            setTimeout(onComplete, 1000);
+          const cb = onCompleteRef.current;
+          if (cb) {
+            setTimeout(cb, 1000);
           }
         }
 
@@ -299,12 +311,10 @@ export default function QuantumMixerVisualization({
 
     return () => {
       clearInterval(timer);
-      if (isComplete) {
-        localStorage.removeItem('activeMixingSession');
-        localStorage.removeItem('mixingStartTime');
-      }
+      localStorage.removeItem('activeMixingSession');
+      localStorage.removeItem('mixingStartTime');
     };
-  }, [sessionId, onComplete, privacyLevel]); // Added privacyLevel to dependencies
+  }, [sessionId, privacyLevel]); // Removed onComplete — use ref instead
 
   // Calculate remaining time based on privacy level
   const totalDuration = privacyLevel === 'standard' ? 15 : privacyLevel === 'high' ? 30 : 60;

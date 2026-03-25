@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Plus, ArrowRight, AlertCircle, Minus, Loader2 } from 'lucide-react';
+import TokenIcon from './TokenIcon';
 import { qnkAPI } from '../services/api';
 
 // v2.4.7: Pool interface for remove liquidity
@@ -291,9 +292,7 @@ export default function LiquidityModal({ token, availableTokens, onClose, onAddL
                       <div className="relative bg-quantum-dark/80 border border-quantum-cyan/20 rounded-xl p-3">
                         <div className="flex items-center justify-between mb-2">
                           <div className="flex items-center gap-3">
-                            <div className="w-10 h-10 bg-gradient-to-br from-quantum-cyan to-quantum-purple rounded-full flex items-center justify-center text-xl">
-                              {token.icon}
-                            </div>
+                            <TokenIcon symbol={token.symbol} icon={token.icon} logoUrl={(token as any).logoUrl} size={40} />
                             <div>
                               <div className="font-bold text-white">{token.symbol}</div>
                               <div className="text-xs text-gray-400">{token.name}</div>

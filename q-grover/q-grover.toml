@@ -1,0 +1,66 @@
+# q-grover configuration
+# Copy to ~/.config/q-grover/config.toml or pass with --config
+
+[node]
+# QNK node URL (HTTPS required for production)
+url = "https://quillon.xyz"
+# Fallback nodes (tried in order if primary fails)
+fallback_urls = []
+# Request timeout in seconds
+timeout = 30
+# Challenge poll interval in seconds (how often to fetch new challenges)
+poll_interval = 2
+
+[miner]
+# Your QNK wallet address (67 chars: "qnk" + 64 hex)
+address = ""
+# Miner display name
+worker_name = "q-grover-worker-1"
+# Number of classical worker threads for VDF verification
+classical_workers = 4
+# Max nonces to try per challenge (0 = unlimited until challenge expires)
+max_nonces_per_challenge = 0
+
+[quantum]
+# Backend: "simulator", "origin_pilot", "local_qpu"
+backend = "simulator"
+# Number of qubits for nonce prefix search
+prefix_qubits = 20
+# Number of measurement shots per Grover run
+shots = 1024
+# Grover iteration count override (0 = auto-calculate optimal)
+grover_iterations = 0
+# Enable noise-aware iteration adjustment
+noise_adaptive = true
+# Circuit optimization level (0=none, 1=basic, 2=aggressive)
+optimization_level = 1
+
+[quantum.origin_pilot]
+# Origin Pilot cloud API endpoint
+api_url = ""
+# API token for Origin Pilot cloud
+api_token = ""
+# Preferred QPU backend name
+qpu_name = ""
+
+[mev]
+# Enable MEV protection
+enabled = true
+# Quantum commit-reveal for transaction ordering
+commit_reveal = true
+# Oracle integrity verification
+oracle_integrity_check = true
+
+[metrics]
+# Enable metrics reporting
+enabled = true
+# Log metrics every N seconds
+log_interval = 30
+# Track quantum vs classical performance ratio
+track_advantage = true
+
+[logging]
+# Log level: debug, info, warning, error
+level = "info"
+# Structured JSON logging
+json = false

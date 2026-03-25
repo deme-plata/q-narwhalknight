@@ -126,6 +126,12 @@ pub enum DiagnosticEvent {
     UpdateReadyToApply { version: String },
     UpdateApplying { version: String },
     UpdateError { version: String, message: String },
+
+    // v10.2.0: Hybrid Quantum Mining — GPU events
+    GpuStarted { device_name: String },
+    GpuStopped,
+    GpuSolutionFound { nonce: u64, block_height: u64 },
+    GpuError { message: String },
 }
 
 /// v9.0.4: Starship sync telemetry — rich sync progress for TUI
@@ -271,6 +277,12 @@ pub struct SharedMinerState {
     pub p2p_peer_count: Arc<AtomicU32>,
     pub p2p_challenges_received: Arc<AtomicU64>,
     pub p2p_solutions_broadcast: Arc<AtomicU64>,
+
+    // v10.2.0: Hybrid Quantum Mining — GPU state
+    pub gpu_active: Arc<AtomicBool>,
+    pub gpu_hashrate_hs: Arc<AtomicU64>,     // f64 bits stored as u64
+    pub gpu_hashes_total: Arc<AtomicU64>,
+    pub gpu_device_name: Arc<RwLock<String>>,
 }
 
 impl SharedMinerState {
@@ -334,6 +346,10 @@ impl SharedMinerState {
             p2p_peer_count: Arc::new(AtomicU32::new(0)),
             p2p_challenges_received: Arc::new(AtomicU64::new(0)),
             p2p_solutions_broadcast: Arc::new(AtomicU64::new(0)),
+            gpu_active: Arc::new(AtomicBool::new(false)),
+            gpu_hashrate_hs: Arc::new(AtomicU64::new(0)),
+            gpu_hashes_total: Arc::new(AtomicU64::new(0)),
+            gpu_device_name: Arc::new(RwLock::new(String::new())),
         });
 
         (state, event_rx)

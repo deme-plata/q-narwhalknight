@@ -26,6 +26,7 @@ type Category = (typeof CATEGORIES)[number];
 
 const PAPERS: Paper[] = [
   // ── Core Protocol ──
+  { title: 'Formal Safety & Liveness Proofs', description: 'Formal safety and liveness proofs for DAG-Knight consensus under partial synchrony with K-parameter finality bounds', score: 10, category: 'Core Protocol', filename: 'dagknight-formal-safety-liveness.pdf' },
   { title: 'DAG-Knight Architecture', description: 'Detailed architecture of the DAG-Knight consensus protocol with quantum anchor election', score: 10, category: 'Core Protocol', filename: 'dagknight-architecture-detailed.pdf' },
   { title: 'Consensus Security Analysis', description: 'Formal security analysis of Q-NarwhalKnight consensus under adversarial conditions', score: 9, category: 'Core Protocol', filename: 'q-narwhalknight-consensus-security-analysis.pdf' },
   { title: 'BFT Slashing Protocol', description: 'Byzantine fault tolerance with economic slashing for misbehaving validators', score: 9, category: 'Core Protocol', filename: 'qnk-bft-slashing-whitepaper.pdf' },
@@ -56,6 +57,7 @@ const PAPERS: Paper[] = [
 
   // ── Economics ──
   { title: 'QUG Emission Economics', description: 'Tokenomics of QUG emission schedule: 21M supply, 4-year halving, era-based rewards', score: 10, category: 'Economics', filename: 'qug-emission-economics.pdf' },
+  { title: 'Incentive-Compatible Multi-Shard Mining', description: 'Game-theoretic analysis of DAG-based multi-shard PoW mining with Nash equilibrium proofs, selfish mining resistance, MEV dilution, and halving emission incentive compatibility', score: 9, category: 'Economics', filename: 'incentive-compatible-multishard-mining.pdf' },
   { title: 'Reserve Asset Whitepaper', description: 'Quillon as a quantum-resistant reserve asset and store of value thesis', score: 9, category: 'Economics', filename: 'quillon-reserve-asset-whitepaper.pdf' },
   { title: 'Investor Pitch v2', description: 'Investment thesis for the Quillon Graph ecosystem and QUG token', score: 7, category: 'Economics', filename: 'investor-pitch-v2.pdf' },
   { title: 'RWA Tokenization', description: 'Real-world asset tokenization framework with compliance and oracle integration', score: 8, category: 'Economics', filename: 'rwa-tokenization-whitepaper.pdf' },
@@ -75,6 +77,7 @@ const PAPERS: Paper[] = [
   { title: 'Browser P2P Integration', description: 'WebRTC and libp2p integration for browser-native P2P connectivity', score: 8, category: 'Infrastructure', filename: 'browser-p2p-libp2p-integration.pdf' },
   { title: 'Q Miner', description: 'Mining client architecture, proof-of-work algorithms, and pool protocol', score: 8, category: 'Infrastructure', filename: 'q-miner-whitepaper.pdf' },
   { title: 'Node Operator Guide v2', description: 'Zero-config setup, fee structure (0.1% block rewards + DEX protocol fees), admin wallet linking, and OAuth2 wallet integration', score: 9, category: 'Infrastructure', filename: 'qnk-node-operator-guide.pdf' },
+  { title: 'Q-Flux Reverse Proxy Architecture', description: 'Architecture of a blockchain-aware reverse proxy with worker-per-core design, AIMD concurrency control, and lock-free connection pooling', score: 9, category: 'Infrastructure', filename: 'q-flux-reverse-proxy.pdf' },
 
   // ── Applications ──
   { title: 'VM & DEX Whitepaper', description: 'WASM virtual machine and decentralized exchange with AMM liquidity pools', score: 9, category: 'Applications', filename: 'q-narwhalknight-vm-dex-whitepaper.pdf' },

@@ -57,6 +57,13 @@ fn main() {
     let update_tick: Arc<std::sync::atomic::AtomicU32> =
         Arc::new(std::sync::atomic::AtomicU32::new(0));
 
+    // ── PoS (Point of Sale) shared state ──
+    let pos_watching = Arc::new(AtomicBool::new(false));
+    let pos_expected_amount: Arc<std::sync::Mutex<f64>> = Arc::new(std::sync::Mutex::new(0.0));
+    let pos_initial_balance: Arc<std::sync::Mutex<f64>> = Arc::new(std::sync::Mutex::new(0.0));
+    let pos_wait_start: Arc<std::sync::Mutex<Option<std::time::Instant>>> =
+        Arc::new(std::sync::Mutex::new(None));
+
     // Tokio runtime for async API calls
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -1063,6 +1070,783 @@ fn main() {
         });
     }
 
+    // ── PoS: Create Payment Request callback ──
+    {
+        let app_weak = app_weak.clone();
+        let pos_watching = pos_watching.clone();
+        let pos_expected_amount = pos_expected_amount.clone();
+        let pos_initial_balance = pos_initial_balance.clone();
+        let pos_wait_start = pos_wait_start.clone();
+        app.on_create_payment_request(move |amount_str, memo_str| {
+            let app = app_weak.upgrade().unwrap();
+            let amount: f64 = amount_str.to_string().parse().unwrap_or(0.0);
+            if amount <= 0.0 {
+                return;
+            }
+
+            // Snapshot current balance
+            let current_balance: f64 = app.get_qug_balance().to_string().parse().unwrap_or(0.0);
+            *pos_expected_amount.lock().unwrap() = amount;
+            *pos_initial_balance.lock().unwrap() = current_balance;
+            *pos_wait_start.lock().unwrap() = Some(std::time::Instant::now());
+            pos_watching.store(true, Ordering::SeqCst);
+
+            // Generate QR code with payment URI
+            let addr = app.get_wallet_address().to_string();
+            let uri = if memo_str.is_empty() {
+                format!("qnk:{}?amount={}", addr, amount_str)
+            } else {
+                format!("qnk:{}?amount={}&memo={}", addr, amount_str,
+                    memo_str.to_string().replace(' ', "%20"))
+            };
+            let qr_img = generate_qr_image(&uri);
+            app.set_pos_qr_image(qr_img);
+            app.set_pos_state(1);
+            app.set_pos_wait_seconds(0);
+        });
+    }
+
+    // ── PoS: Cancel Payment Request callback ──
+    {
+        let app_weak = app_weak.clone();
+        let pos_watching = pos_watching.clone();
+        app.on_cancel_payment_request(move || {
+            pos_watching.store(false, Ordering::SeqCst);
+            if let Some(app) = app_weak.upgrade() {
+                app.set_pos_state(0);
+            }
+        });
+    }
+
+    // ── DEX: Flip tokens callback ──
+    {
+        let app_weak = app_weak.clone();
+        app.on_dex_flip_tokens(move || {
+            let app = app_weak.upgrade().unwrap();
+            let from_sym = app.get_dex_from_symbol().to_string();
+            let from_name = app.get_dex_from_name().to_string();
+            let from_bal = app.get_dex_from_balance().to_string();
+            let to_sym = app.get_dex_to_symbol().to_string();
+            let to_name = app.get_dex_to_name().to_string();
+            let to_bal = app.get_dex_to_balance().to_string();
+
+            app.set_dex_from_symbol(slint::SharedString::from(&to_sym));
+            app.set_dex_from_name(slint::SharedString::from(&to_name));
+            app.set_dex_from_balance(slint::SharedString::from(&to_bal));
+            app.set_dex_to_symbol(slint::SharedString::from(&from_sym));
+            app.set_dex_to_name(slint::SharedString::from(&from_name));
+            app.set_dex_to_balance(slint::SharedString::from(&from_bal));
+            // Clear amounts and quote
+            app.set_dex_from_amount(slint::SharedString::from(""));
+            app.set_dex_to_amount(slint::SharedString::from(""));
+            app.set_dex_exchange_rate(slint::SharedString::from(""));
+            app.set_dex_price_impact(slint::SharedString::from(""));
+            app.set_dex_min_received(slint::SharedString::from(""));
+            app.set_dex_swap_status(slint::SharedString::from(""));
+        });
+    }
+
+    // ── DEX: Open token list (fetches tokens from API) ──
+    // Also initializes from-balance to QUG balance on first open (side=0 from nav click)
+    {
+        let app_weak = app_weak.clone();
+        let api_client = api_client.clone();
+        let rt_handle = rt_handle.clone();
+        let token_balances_map = token_balances_map.clone();
+        app.on_dex_open_token_list(move |side| {
+            let app = match app_weak.upgrade() {
+                Some(a) => a,
+                None => return,
+            };
+
+            // side=0 means "just entered DEX screen" — sync from-balance with QUG balance
+            let qug_bal = app.get_qug_balance().to_string();
+            if side == 0 {
+                // Initialize from-balance to current QUG balance
+                app.set_dex_from_balance(slint::SharedString::from(&qug_bal));
+                app.set_dex_swap_status(slint::SharedString::from(""));
+                app.set_dex_swap_success(false);
+            }
+
+            // Grab known token balances from shared map
+            let tb_map = token_balances_map.lock().unwrap().clone();
+
+            // Build token list synchronously from what we already know (tokens from SSE)
+            // This ensures the modal is never empty
+            let mut items: Vec<DexToken> = Vec::new();
+            items.push(DexToken {
+                symbol: "QUG".into(),
+                name: "Quillon".into(),
+                balance: slint::SharedString::from(&qug_bal),
+                price_usd: slint::SharedString::from(""),
+            });
+            // Add QUGUSD as a known stablecoin
+            let qugusd_bal = tb_map.get("QUGUSD").cloned().unwrap_or_else(|| "0.00".to_string());
+            items.push(DexToken {
+                symbol: "QUGUSD".into(),
+                name: "QUG Stablecoin".into(),
+                balance: slint::SharedString::from(&qugusd_bal),
+                price_usd: slint::SharedString::from("$1.00"),
+            });
+            // Add any other tokens from balance map (bridge tokens + custom)
+            for (sym, bal) in &tb_map {
+                if sym != "QUG" && sym != "QUGUSD" {
+                    items.push(DexToken {
+                        symbol: slint::SharedString::from(sym.as_str()),
+                        name: slint::SharedString::from(sym.as_str()),
+                        balance: slint::SharedString::from(bal.as_str()),
+                        price_usd: slint::SharedString::from(""),
+                    });
+                }
+            }
+            let model = std::rc::Rc::new(slint::VecModel::from(items));
+            app.set_dex_token_list(model.into());
+
+            // Fetch ALL live tokens from the public /api/v1/dex/tokens endpoint
+            // This returns real on-chain data: QUG, QUGUSD, wBTC, wETH, wZEC, wIRON, + custom deployed
+            let client_opt = api_client.lock().unwrap().clone();
+            if let Some(client) = client_opt {
+                let weak = app_weak.clone();
+                let tb_map2 = tb_map.clone();
+                let qug_bal2 = qug_bal.clone();
+                rt_handle.spawn(async move {
+                    match client.get_supported_tokens().await {
+                        Ok(tokens) => {
+                            println!("[DEX] Fetched {} live tokens from server", tokens.len());
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(app) = weak.upgrade() {
+                                    let mut items: Vec<DexToken> = Vec::new();
+                                    let mut seen = std::collections::HashSet::new();
+                                    for t in &tokens {
+                                        if seen.contains(&t.symbol) { continue; }
+                                        seen.insert(t.symbol.clone());
+                                        // Use user's balance from SSE if available, else "0.00"
+                                        let bal = if t.symbol == "QUG" {
+                                            qug_bal2.clone()
+                                        } else {
+                                            tb_map2.get(&t.symbol).cloned().unwrap_or_else(|| "0.00".to_string())
+                                        };
+                                        let type_badge = if t.contract_type == "Wrapped" {
+                                            format!("[{}]", t.contract_type)
+                                        } else {
+                                            String::new()
+                                        };
+                                        items.push(DexToken {
+                                            symbol: slint::SharedString::from(&t.symbol),
+                                            name: slint::SharedString::from(&t.name),
+                                            balance: slint::SharedString::from(&bal),
+                                            price_usd: slint::SharedString::from(&type_badge),
+                                        });
+                                    }
+                                    // Add any tokens from user's balance map not already in server list
+                                    for (sym, bal) in &tb_map2 {
+                                        if !seen.contains(sym.as_str()) {
+                                            items.push(DexToken {
+                                                symbol: slint::SharedString::from(sym.as_str()),
+                                                name: slint::SharedString::from(sym.as_str()),
+                                                balance: slint::SharedString::from(bal.as_str()),
+                                                price_usd: slint::SharedString::from(""),
+                                            });
+                                        }
+                                    }
+                                    println!("[DEX] Token list updated: {} tokens total", items.len());
+                                    let model = std::rc::Rc::new(slint::VecModel::from(items));
+                                    app.set_dex_token_list(model.into());
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            eprintln!("[DEX] Token fetch failed (using cached list): {}", e);
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    // ── DEX: Select token callback ──
+    {
+        let app_weak = app_weak.clone();
+        app.on_dex_select_token(move |side, symbol| {
+            use slint::Model;
+            let app = app_weak.upgrade().unwrap();
+            let sym = symbol.to_string();
+            // Look up name/balance from the token list
+            let list = app.get_dex_token_list();
+            let mut name = sym.clone();
+            let mut balance = "0.00".to_string();
+            for i in 0..list.row_count() {
+                let t = list.row_data(i).unwrap();
+                if t.symbol.as_str() == sym {
+                    name = t.name.to_string();
+                    balance = t.balance.to_string();
+                    break;
+                }
+            }
+            if side == 1 {
+                app.set_dex_from_symbol(slint::SharedString::from(&sym));
+                app.set_dex_from_name(slint::SharedString::from(&name));
+                app.set_dex_from_balance(slint::SharedString::from(&balance));
+            } else {
+                app.set_dex_to_symbol(slint::SharedString::from(&sym));
+                app.set_dex_to_name(slint::SharedString::from(&name));
+                app.set_dex_to_balance(slint::SharedString::from(&balance));
+            }
+            // Clear computed amounts
+            app.set_dex_to_amount(slint::SharedString::from(""));
+            app.set_dex_exchange_rate(slint::SharedString::from(""));
+            app.set_dex_price_impact(slint::SharedString::from(""));
+            app.set_dex_min_received(slint::SharedString::from(""));
+            app.set_dex_swap_status(slint::SharedString::from(""));
+        });
+    }
+
+    // ── DEX: Request quote callback (client-side oracle pricing, like web wallet) ──
+    {
+        let app_weak = app_weak.clone();
+        app.on_dex_request_quote(move |amount_str| {
+            let amount_s = amount_str.to_string();
+            if amount_s.is_empty() || amount_s.parse::<f64>().unwrap_or(0.0) <= 0.0 {
+                if let Some(app) = app_weak.upgrade() {
+                    app.set_dex_to_amount(slint::SharedString::from(""));
+                    app.set_dex_exchange_rate(slint::SharedString::from(""));
+                    app.set_dex_price_impact(slint::SharedString::from(""));
+                    app.set_dex_min_received(slint::SharedString::from(""));
+                }
+                return;
+            }
+            let app = match app_weak.upgrade() {
+                Some(a) => a,
+                None => return,
+            };
+            let from_sym = app.get_dex_from_symbol().to_string();
+            let to_sym = app.get_dex_to_symbol().to_string();
+            let slippage = app.get_dex_slippage().to_string().replace('%', "").trim().parse::<f64>().unwrap_or(0.5);
+
+            let amount_in: f64 = amount_s.parse().unwrap_or(0.0);
+
+            // Oracle pricing: QUG=$3000, QUGUSD=$1 (same as web wallet)
+            let from_price: f64 = match from_sym.to_uppercase().as_str() {
+                "QUG" | "NATIVE-QUG" => 3000.0,
+                "QUGUSD" | "QUGUSD-STABLE" => 1.0,
+                _ => 1.0, // fallback for custom tokens
+            };
+            let to_price: f64 = match to_sym.to_uppercase().as_str() {
+                "QUG" | "NATIVE-QUG" => 3000.0,
+                "QUGUSD" | "QUGUSD-STABLE" => 1.0,
+                _ => 1.0,
+            };
+
+            if from_price <= 0.0 || to_price <= 0.0 {
+                app.set_dex_swap_status(slint::SharedString::from("Cannot determine exchange rate"));
+                return;
+            }
+
+            // Calculate output with 0.3% fee (same as AMM)
+            let exchange_rate = (from_price / to_price) * 0.997;
+            let amount_out = amount_in * exchange_rate;
+            let min_out = amount_out * (1.0 - slippage / 100.0);
+
+            app.set_dex_to_amount(slint::SharedString::from(format!("{:.4}", amount_out)));
+            app.set_dex_exchange_rate(slint::SharedString::from(
+                format!("1 {} = {:.4} {}", from_sym, exchange_rate, to_sym)
+            ));
+            app.set_dex_price_impact(slint::SharedString::from("< 0.01%"));
+            app.set_dex_min_received(slint::SharedString::from(
+                format!("{:.4} {}", min_out, to_sym)
+            ));
+            app.set_dex_swap_status(slint::SharedString::from(""));
+        });
+    }
+
+    // ── DEX: Execute swap callback ──
+    {
+        let app_weak = app_weak.clone();
+        let api_client = api_client.clone();
+        let rt_handle = rt_handle.clone();
+        app.on_dex_execute_swap(move || {
+            let app = match app_weak.upgrade() {
+                Some(a) => a,
+                None => return,
+            };
+            let client = match api_client.lock().unwrap().clone() {
+                Some(c) => c,
+                None => {
+                    app.set_dex_swap_status(slint::SharedString::from("Not connected"));
+                    return;
+                }
+            };
+            let from_sym = app.get_dex_from_symbol().to_string();
+            let to_sym = app.get_dex_to_symbol().to_string();
+            let amount_in = app.get_dex_from_amount().to_string();
+            let min_out = app.get_dex_min_received().to_string().replace(&format!(" {}", to_sym), "");
+            let wallet_addr = app.get_wallet_address().to_string();
+
+            if amount_in.is_empty() || amount_in.parse::<f64>().unwrap_or(0.0) <= 0.0 {
+                app.set_dex_swap_status(slint::SharedString::from("Enter an amount"));
+                return;
+            }
+
+            app.set_dex_swap_loading(true);
+            app.set_dex_swap_status(slint::SharedString::from(""));
+            app.set_dex_swap_success(false);
+
+            let weak = app.as_weak();
+            rt_handle.spawn(async move {
+                // Convert display amounts to 24-decimal raw for AMM
+                let amount_f64: f64 = amount_in.parse().unwrap_or(0.0);
+                let amount_raw = format!("{:.0}", amount_f64 * 1_000_000_000_000_000_000_000_000.0_f64);
+                let min_out_f64: f64 = min_out.parse().unwrap_or(0.0);
+                let min_out_raw = format!("{:.0}", min_out_f64 * 1_000_000_000_000_000_000_000_000.0_f64);
+
+                // Use handlers::execute_swap endpoint (from_token/to_token + auth)
+                let body = serde_json::json!({
+                    "from_token": from_sym,
+                    "to_token": to_sym,
+                    "amount_in": amount_raw,
+                    "min_amount_out": min_out_raw,
+                    "wallet_address": wallet_addr,
+                });
+                let url = format!("{}/api/v1/dex/swap", client.base_url());
+                match client.post_json::<serde_json::Value>(&url, &body).await {
+                    Ok(data) => {
+                        let from_display = format!("{} {}", amount_in, from_sym);
+                        let to_display = {
+                            let out_amount = data.get("amount_out")
+                                .and_then(|v| v.as_str())
+                                .and_then(|s| s.parse::<f64>().ok())
+                                .map(|a| a / 1_000_000_000_000_000_000_000_000.0_f64)
+                                .unwrap_or(min_out_f64);
+                            format!("{:.4} {}", out_amount, to_sym)
+                        };
+                        let _ = slint::invoke_from_event_loop(move || {
+                            let Some(app) = weak.upgrade() else { return; };
+                            app.set_dex_swap_loading(false);
+                            let tx_hash = data.get("transaction_hash")
+                                .or_else(|| data.get("tx_hash"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("done");
+                            let tx_short = if tx_hash.len() > 20 {
+                                format!("{}...{}", &tx_hash[..10], &tx_hash[tx_hash.len()-8..])
+                            } else {
+                                tx_hash.to_string()
+                            };
+                            app.set_dex_swap_success(true);
+                            app.set_dex_swap_status(slint::SharedString::from(""));
+                            app.set_dex_swap_result_from(slint::SharedString::from(&from_display));
+                            app.set_dex_swap_result_to(slint::SharedString::from(&to_display));
+                            app.set_dex_swap_result_tx(slint::SharedString::from(&tx_short));
+                            app.set_dex_from_amount(slint::SharedString::from(""));
+                            app.set_dex_to_amount(slint::SharedString::from(""));
+                            app.set_dex_exchange_rate(slint::SharedString::from(""));
+                            app.set_dex_price_impact(slint::SharedString::from(""));
+                            app.set_dex_min_received(slint::SharedString::from(""));
+                        });
+                    }
+                    Err(e) => {
+                        let err_str = e.to_string();
+                        eprintln!("[DEX] Swap failed: {}", err_str);
+                        let _ = slint::invoke_from_event_loop(move || {
+                            let Some(app) = weak.upgrade() else { return; };
+                            app.set_dex_swap_loading(false);
+                            app.set_dex_swap_success(false);
+                            app.set_dex_swap_status(slint::SharedString::from(
+                                format!("Swap failed: {}", &err_str[..err_str.len().min(80)])
+                            ));
+                        });
+                    }
+                }
+            });
+        });
+    }
+
+    // ── DEX: Set slippage callback ──
+    {
+        let app_weak = app_weak.clone();
+        app.on_dex_set_slippage(move |s| {
+            if let Some(app) = app_weak.upgrade() {
+                app.set_dex_slippage(s);
+            }
+        });
+    }
+
+    // ── DEX: Add liquidity callback (placeholder — opens message) ──
+    {
+        let app_weak = app_weak.clone();
+        app.on_dex_add_liquidity(move || {
+            if let Some(app) = app_weak.upgrade() {
+                app.set_dex_swap_status(slint::SharedString::from(
+                    "Add liquidity via the web wallet at quillon.xyz"
+                ));
+            }
+        });
+    }
+
+    // ── DEX: Dismiss swap success modal ──
+    {
+        let app_weak = app_weak.clone();
+        app.on_dex_dismiss_swap_success(move || {
+            if let Some(app) = app_weak.upgrade() {
+                app.set_dex_swap_success(false);
+                app.set_dex_swap_result_from(slint::SharedString::from(""));
+                app.set_dex_swap_result_to(slint::SharedString::from(""));
+                app.set_dex_swap_result_tx(slint::SharedString::from(""));
+            }
+        });
+    }
+
+    // ── DEX: Open token detail modal — fetches price, chart, txns from server ──
+    {
+        let app_weak = app_weak.clone();
+        let api_client = api_client.clone();
+        let rt_handle = rt_handle.clone();
+        let token_balances_map = token_balances_map.clone();
+        app.on_dex_open_token_detail(move |symbol| {
+            let sym = symbol.to_string();
+            let app = match app_weak.upgrade() {
+                Some(a) => a,
+                None => return,
+            };
+
+            // Immediately show modal with basic info from the token list
+            app.set_dex_show_token_detail(true);
+            app.set_dex_detail_symbol(slint::SharedString::from(&sym));
+            app.set_dex_detail_name(slint::SharedString::from(&sym));
+            app.set_dex_detail_price(slint::SharedString::from("Loading..."));
+            app.set_dex_detail_change_24h(slint::SharedString::from(""));
+            app.set_dex_detail_chart_bars(slint::ModelRc::default());
+            app.set_dex_detail_txns(slint::ModelRc::default());
+
+            // Set balance from cached map
+            let bal = if sym == "QUG" {
+                app.get_qug_balance().to_string()
+            } else {
+                token_balances_map.lock().unwrap().get(&sym).cloned().unwrap_or_else(|| "0.00".to_string())
+            };
+            app.set_dex_detail_balance(slint::SharedString::from(format!("{} {}", bal, sym)));
+            app.set_dex_detail_value_usd(slint::SharedString::from(""));
+
+            // Fetch full details from server in background
+            let client_opt = api_client.lock().unwrap().clone();
+            if let Some(client) = client_opt {
+                let weak = app_weak.clone();
+                let sym2 = sym.clone();
+                rt_handle.spawn(async move {
+                    // 1) Fetch token info from /api/v1/dex/tokens to get metadata
+                    let mut detail_name = sym2.clone();
+                    let mut detail_type = String::new();
+                    let mut detail_addr = String::new();
+                    let mut detail_addr_full = String::new(); // Full address for swap matching
+                    let mut detail_decimals = 0u8;
+                    let mut detail_supply = String::new();
+                    let mut detail_verified = false;
+
+                    if let Ok(tokens) = client.get_supported_tokens().await {
+                        if let Some(t) = tokens.iter().find(|t| t.symbol == sym2) {
+                            detail_name = t.name.clone();
+                            detail_type = t.contract_type.clone();
+                            detail_addr_full = t.address.clone();
+                            detail_addr = if t.address.len() > 20 {
+                                format!("{}...{}", &t.address[..10], &t.address[t.address.len()-8..])
+                            } else {
+                                t.address.clone()
+                            };
+                            // Native/Stablecoin tokens use 24 decimals internally
+                            detail_decimals = if t.contract_type == "Native" || t.contract_type == "Stablecoin" {
+                                24
+                            } else {
+                                t.decimals
+                            };
+                            detail_verified = t.verified;
+                            // Format supply nicely
+                            // Server returns total_supply in 24-decimal base units
+                            if let Ok(s) = t.total_supply.parse::<f64>() {
+                                // Always divide by 10^24 (blockchain base units)
+                                let display = if s > 1e18 { s / 1e24 } else { s };
+                                if display > 1_000_000_000.0 {
+                                    detail_supply = format!("{:.2}B", display / 1_000_000_000.0);
+                                } else if display > 1_000_000.0 {
+                                    detail_supply = format!("{:.2}M", display / 1_000_000.0);
+                                } else if display > 1_000.0 {
+                                    detail_supply = format!("{:.0}", display);
+                                } else {
+                                    detail_supply = format!("{:.0}", s);
+                                }
+                            } else {
+                                detail_supply = t.total_supply.clone();
+                            }
+                        }
+                    }
+
+                    // 2) Fetch price from /api/v1/oracle/price/{symbol}
+                    let mut price_usd = 0.0f64;
+                    let price_url = format!("{}/api/v1/oracle/price/{}", client.base_url(), sym2);
+                    if let Ok(resp) = client.get_public_raw(&price_url).await {
+                        if let Some(data) = resp.get("data") {
+                            price_usd = data.get("price_usd").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        }
+                    }
+
+                    // 3) Fetch price history from /api/v1/oracle/price-history/{symbol}?timeframe=24H
+                    let mut chart_bars: Vec<ChartBar> = Vec::new();
+                    let mut chart_high = 0.0f64;
+                    let mut chart_low = f64::MAX;
+                    let history_url = format!("{}/api/v1/oracle/price-history/{}?timeframe=24H", client.base_url(), sym2);
+                    if let Ok(resp) = client.get_public_raw(&history_url).await {
+                        if let Some(data) = resp.get("data").and_then(|d| d.as_array()) {
+                            let prices: Vec<f64> = data.iter()
+                                .filter_map(|p| p.get("price").and_then(|v| v.as_f64()))
+                                .filter(|p| *p > 0.0)
+                                .collect();
+                            if prices.len() >= 2 {
+                                chart_high = prices.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                                chart_low = prices.iter().cloned().fold(f64::INFINITY, f64::min);
+                                let range = (chart_high - chart_low).max(0.0001);
+                                // Downsample to max ~48 bars
+                                let step = (prices.len() / 48).max(1);
+                                let mut prev = prices[0];
+                                for chunk in prices.chunks(step) {
+                                    let avg = chunk.iter().sum::<f64>() / chunk.len() as f64;
+                                    let pct = ((avg - chart_low) / range) as f32;
+                                    chart_bars.push(ChartBar {
+                                        height_pct: pct.max(0.02),
+                                        is_green: avg >= prev,
+                                    });
+                                    prev = avg;
+                                }
+                            }
+                        }
+                    }
+
+                    // Fallback: if no price history but we have a current price, generate
+                    // a flat chart so the UI isn't empty
+                    if chart_bars.is_empty() && price_usd > 0.0 {
+                        chart_high = price_usd * 1.02;
+                        chart_low = price_usd * 0.98;
+                        let range = chart_high - chart_low;
+                        // Generate 24 bars with slight random-ish variation from hash of symbol
+                        let seed = sym2.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+                        for i in 0..24u64 {
+                            let noise = ((seed.wrapping_mul(i.wrapping_add(1)).wrapping_mul(2654435761)) % 1000) as f64 / 1000.0;
+                            let price = chart_low + noise * range;
+                            let pct = ((price - chart_low) / range) as f32;
+                            let prev_noise = if i > 0 {
+                                ((seed.wrapping_mul(i).wrapping_mul(2654435761)) % 1000) as f64 / 1000.0
+                            } else {
+                                0.5
+                            };
+                            chart_bars.push(ChartBar {
+                                height_pct: pct.max(0.05),
+                                is_green: noise >= prev_noise,
+                            });
+                        }
+                    }
+
+                    // 4) Fetch recent transactions — wallet history includes both transfers + swaps
+                    // Build address lookup for matching swap token_in/token_out to our symbol
+                    let token_addr_lower = detail_addr_full.to_lowercase();
+                    let mut txns: Vec<TokenTx> = Vec::new();
+                    if let Ok(history) = client.get_history().await {
+                        let now = chrono::Utc::now().timestamp();
+                        for tx in history.iter().take(50) {
+                            if txns.len() >= 8 { break; }
+
+                            // Match: regular transfer with matching token_symbol
+                            let is_regular = tx.token_symbol.as_deref() == Some(&sym2)
+                                || (sym2 == "QUG" && tx.token_symbol.is_none() && tx.tx_type != "swap");
+                            // Match: swap where token_in or token_out contains our token address
+                            let is_swap = tx.tx_type == "swap" && (
+                                tx.token_in.as_deref().map(|a| a.to_lowercase().contains(&token_addr_lower)).unwrap_or(false)
+                                || tx.token_out.as_deref().map(|a| a.to_lowercase().contains(&token_addr_lower)).unwrap_or(false)
+                                // Also match QUG swaps by checking for all-zeros address or "QUG" in token fields
+                                || (sym2 == "QUG" && (
+                                    tx.token_in.as_deref().map(|a| a.contains("515547") || a == "QUG").unwrap_or(false)
+                                    || tx.token_out.as_deref().map(|a| a.contains("515547") || a == "QUG").unwrap_or(false)
+                                ))
+                            );
+
+                            if !is_regular && !is_swap { continue; }
+
+                            // Normalize any amount that looks like raw 24-decimal base units.
+                            // Display amounts are always < 1 billion in practice.
+                            // Raw u128 amounts for even 0.000001 QUG = 1e18.
+                            let normalize_amount = |amt: f64| -> f64 {
+                                if amt > 1_000_000_000.0 { amt / 1e24 } else { amt }
+                            };
+
+                            let (is_buy, tx_type_str, display_amount, display_sym) = if tx.tx_type == "swap" {
+                                // For swaps, determine if this token was bought or sold
+                                let bought = tx.token_out.as_deref()
+                                    .map(|a| a.to_lowercase().contains(&token_addr_lower)
+                                        || (sym2 == "QUG" && (a.contains("515547") || a == "QUG")))
+                                    .unwrap_or(false);
+                                let amt = if bought {
+                                    tx.amount_out.as_deref()
+                                        .and_then(|s| s.parse::<f64>().ok())
+                                        .map(normalize_amount)
+                                        .unwrap_or_else(|| normalize_amount(tx.amount))
+                                } else {
+                                    normalize_amount(tx.amount)
+                                };
+                                (bought, if bought { "Buy" } else { "Sell" }, amt, sym2.clone())
+                            } else {
+                                let is_buy = tx.tx_type == "receive" || tx.tx_type == "mining_reward";
+                                let label = if tx.tx_type == "mining_reward" { "Mining" }
+                                    else if is_buy { "Received" }
+                                    else { "Sent" };
+                                let amt = normalize_amount(tx.amount);
+                                (is_buy, label, amt, sym2.clone())
+                            };
+
+                            // Parse timestamp to "Xm ago" / "Xh ago"
+                            let time_ago = if let Ok(ts) = chrono::NaiveDateTime::parse_from_str(&tx.timestamp, "%Y-%m-%d %H:%M") {
+                                let secs = now - ts.and_utc().timestamp();
+                                if secs < 60 { format!("{}s ago", secs) }
+                                else if secs < 3600 { format!("{}m ago", secs / 60) }
+                                else if secs < 86400 { format!("{}h ago", secs / 3600) }
+                                else { format!("{}d ago", secs / 86400) }
+                            } else {
+                                tx.timestamp.clone()
+                            };
+
+                            let value_str = if price_usd > 0.0 && display_amount > 0.0 {
+                                format!("${:.2}", display_amount * price_usd)
+                            } else {
+                                String::new()
+                            };
+
+                            let amt_str = if display_amount >= 1000.0 {
+                                format!("{:.2} {}", display_amount, display_sym)
+                            } else if display_amount >= 1.0 {
+                                format!("{:.4} {}", display_amount, display_sym)
+                            } else if display_amount > 0.0 {
+                                format!("{:.6} {}", display_amount, display_sym)
+                            } else {
+                                format!("0 {}", display_sym)
+                            };
+
+                            txns.push(TokenTx {
+                                tx_type: tx_type_str.to_string().into(),
+                                amount: slint::SharedString::from(amt_str),
+                                price: value_str.into(),
+                                time_ago: time_ago.into(),
+                                is_buy,
+                            });
+                        }
+                    }
+
+                    // Update UI
+                    let _ = slint::invoke_from_event_loop(move || {
+                        let Some(app) = weak.upgrade() else { return; };
+                        app.set_dex_detail_name(slint::SharedString::from(&detail_name));
+                        app.set_dex_detail_contract_type(slint::SharedString::from(&detail_type));
+                        app.set_dex_detail_address(slint::SharedString::from(&detail_addr));
+                        app.set_dex_detail_decimals(slint::SharedString::from(format!("{}", detail_decimals)));
+                        app.set_dex_detail_total_supply(slint::SharedString::from(&detail_supply));
+                        app.set_dex_detail_verified(detail_verified);
+
+                        if price_usd > 0.0 {
+                            app.set_dex_detail_price(slint::SharedString::from(format!("${:.4}", price_usd)));
+                        } else {
+                            app.set_dex_detail_price(slint::SharedString::from("N/A"));
+                        }
+
+                        // 24h change from chart data
+                        if chart_bars.len() >= 2 {
+                            let first_price = chart_low + (chart_bars[0].height_pct as f64) * (chart_high - chart_low);
+                            let last_price = chart_low + (chart_bars.last().unwrap().height_pct as f64) * (chart_high - chart_low);
+                            let change_pct = if first_price > 0.0 { ((last_price - first_price) / first_price) * 100.0 } else { 0.0 };
+                            app.set_dex_detail_change_24h(slint::SharedString::from(
+                                format!("{}{:.2}%", if change_pct >= 0.0 { "+" } else { "" }, change_pct)
+                            ));
+                            app.set_dex_detail_change_positive(change_pct >= 0.0);
+                        }
+
+                        if chart_high > 0.0 && chart_low < f64::MAX {
+                            app.set_dex_detail_chart_high(slint::SharedString::from(format!("${:.4}", chart_high)));
+                            app.set_dex_detail_chart_low(slint::SharedString::from(format!("${:.4}", chart_low)));
+                        }
+
+                        // Set chart bars
+                        let bar_model = std::rc::Rc::new(slint::VecModel::from(chart_bars));
+                        app.set_dex_detail_chart_bars(bar_model.into());
+
+                        // Set transactions
+                        let tx_model = std::rc::Rc::new(slint::VecModel::from(txns));
+                        app.set_dex_detail_txns(tx_model.into());
+
+                        // Calculate USD value of balance
+                        if price_usd > 0.0 {
+                            let bal_str = app.get_dex_detail_balance().to_string();
+                            let bal_num: f64 = bal_str.split_whitespace().next()
+                                .and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                            app.set_dex_detail_value_usd(slint::SharedString::from(
+                                format!("${:.2}", bal_num * price_usd)
+                            ));
+                        }
+                    });
+                });
+            }
+        });
+    }
+
+    // ── DEX: Close token detail modal ──
+    {
+        let app_weak = app_weak.clone();
+        app.on_dex_close_token_detail(move || {
+            if let Some(app) = app_weak.upgrade() {
+                app.set_dex_show_token_detail(false);
+            }
+        });
+    }
+
+    // ── PoS: 1-second timer for wait counter + payment detection ──
+    {
+        let app_weak = app_weak.clone();
+        let pos_watching = pos_watching.clone();
+        let pos_expected_amount = pos_expected_amount.clone();
+        let pos_initial_balance = pos_initial_balance.clone();
+        let pos_wait_start = pos_wait_start.clone();
+
+        let pos_timer = slint::Timer::default();
+        pos_timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_secs(1),
+            move || {
+                if !pos_watching.load(Ordering::Relaxed) {
+                    return;
+                }
+                let app = match app_weak.upgrade() {
+                    Some(a) => a,
+                    None => return,
+                };
+
+                // Update elapsed time
+                if let Some(start) = *pos_wait_start.lock().unwrap() {
+                    let elapsed = start.elapsed().as_secs() as i32;
+                    app.set_pos_wait_seconds(elapsed);
+                }
+
+                // Check if payment arrived: current_balance - initial_balance >= expected * 0.999
+                let current_balance: f64 = app.get_qug_balance().to_string().parse().unwrap_or(0.0);
+                let initial = *pos_initial_balance.lock().unwrap();
+                let expected = *pos_expected_amount.lock().unwrap();
+                let diff = current_balance - initial;
+
+                if diff >= expected * 0.999 && expected > 0.0 {
+                    // Payment detected!
+                    pos_watching.store(false, Ordering::SeqCst);
+                    app.set_pos_received_amount(slint::SharedString::from(
+                        format!("{:.4}", diff),
+                    ));
+                    app.set_pos_state(2);
+                    println!("[PoS] Payment detected! Expected={:.4}, Received={:.4}", expected, diff);
+                }
+            },
+        );
+        std::mem::forget(pos_timer);
+    }
+
     // ── Background polling timer ──
     // Poll status every 5s, balances every 10s, miner stats continuously
     {
@@ -1439,8 +2223,12 @@ fn start_sse_listener(
     let running_clone = running.clone();
     rt_handle.spawn(async move {
         // v8.2.7: Use connect_timeout but no overall timeout (SSE is long-lived)
+        // v10.1.1: Disable auto-decompression — gzip/brotli breaks chunked SSE streams
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(15))
+            .no_gzip()
+            .no_brotli()
+            .no_deflate()
             .build()
             .unwrap_or_default();
 

@@ -9,8 +9,10 @@ import { SyncBar } from "sync_bar.slint";
 import { UpdateBar } from "update_bar.slint";
 import { NavButton } from "theme.slint";
 import { OAuthConsentScreen, OAuthScope } from "oauth_consent.slint";
+import { PosScreen } from "pos.slint";
+import { DexScreen, DexToken, ChartBar, TokenTx } from "dex.slint";
 
-export { TokenInfo, TxRecord, OAuthScope, AddressEntry }
+export { TokenInfo, TxRecord, OAuthScope, AddressEntry, DexToken, ChartBar, TokenTx }
 
 export component AppWindow inherits Window {
     title: "Q-NarwhalKnight Wallet";
@@ -20,7 +22,7 @@ export component AppWindow inherits Window {
     preferred-height: 820px;
     background: Theme.bg-primary;
 
-    // Screen state: 0=login, 1=dashboard, 2=send, 3=history, 4=miner, 5=receive, 6=oauth-consent
+    // Screen state: 0=login, 1=dashboard, 2=send, 3=history, 4=miner, 5=receive, 6=oauth-consent, 7=pos, 8=dex
     in-out property <int> active-screen: 0;
 
     // Login properties
@@ -70,6 +72,14 @@ export component AppWindow inherits Window {
     // Receive / QR code properties
     in property <image> qr-code-image;
 
+    // PoS properties
+    in-out property <int> pos-state: 0;
+    in-out property <string> pos-amount: "";
+    in-out property <string> pos-memo: "";
+    in property <string> pos-received-amount: "0";
+    in property <image> pos-qr-image;
+    in property <int> pos-wait-seconds: 0;
+
     // Sync bar properties
     in property <bool> connected: false;
     in property <string> current-height: "0";
@@ -108,6 +118,63 @@ export component AppWindow inherits Window {
     callback send-token(string);
     callback select-token(string);
     callback copy-text(string);
+
+    // PoS callbacks
+    callback create-payment-request(string, string);
+    callback cancel-payment-request();
+
+    // DEX properties
+    in-out property <string> dex-from-symbol: "QUG";
+    in-out property <string> dex-from-name: "Quillon";
+    in-out property <string> dex-from-balance: "0.00";
+    in-out property <string> dex-from-amount: "";
+    in-out property <string> dex-to-symbol: "QUGUSD";
+    in-out property <string> dex-to-name: "QUG Stablecoin";
+    in-out property <string> dex-to-balance: "0.00";
+    in-out property <string> dex-to-amount: "";
+    in property <string> dex-exchange-rate: "";
+    in property <string> dex-price-impact: "";
+    in property <string> dex-min-received: "";
+    in property <string> dex-swap-fee: "0.3%";
+    in-out property <string> dex-slippage: "0.5%";
+    in property <bool> dex-swap-loading: false;
+    in property <string> dex-swap-status: "";
+    in property <bool> dex-swap-success: false;
+    in property <string> dex-swap-result-from: "";
+    in property <string> dex-swap-result-to: "";
+    in property <string> dex-swap-result-tx: "";
+    in property <[DexToken]> dex-token-list: [];
+
+    // DEX callbacks
+    callback dex-execute-swap();
+    callback dex-flip-tokens();
+    callback dex-request-quote(string);
+    callback dex-open-token-list(int);
+    callback dex-select-token(int, string);
+    callback dex-set-slippage(string);
+    callback dex-add-liquidity();
+    callback dex-dismiss-swap-success();
+    callback dex-open-token-detail(string);
+    callback dex-close-token-detail();
+
+    // Token detail properties
+    in property <bool> dex-show-token-detail: false;
+    in property <string> dex-detail-symbol: "";
+    in property <string> dex-detail-name: "";
+    in property <string> dex-detail-contract-type: "";
+    in property <string> dex-detail-address: "";
+    in property <string> dex-detail-decimals: "";
+    in property <string> dex-detail-total-supply: "";
+    in property <bool> dex-detail-verified: false;
+    in property <string> dex-detail-price: "";
+    in property <string> dex-detail-change-24h: "";
+    in property <bool> dex-detail-change-positive: true;
+    in property <string> dex-detail-balance: "";
+    in property <string> dex-detail-value-usd: "";
+    in property <[ChartBar]> dex-detail-chart-bars: [];
+    in property <string> dex-detail-chart-high: "";
+    in property <string> dex-detail-chart-low: "";
+    in property <[TokenTx]> dex-detail-txns: [];
 
     VerticalLayout {
         // Main content area
@@ -198,6 +265,10 @@ export component AppWindow inherits Window {
 
                 copy-address => { root.copy-address(); }
                 go-back => { root.active-screen = 1; }
+                open-pos => {
+                    root.pos-state = 0;
+                    root.active-screen = 7;
+                }
             }
 
             if root.active-screen == 6 : OAuthConsentScreen {
@@ -210,49 +281,150 @@ export component AppWindow inherits Window {
                 approve => { root.oauth-approve(); }
                 deny => { root.oauth-deny(); }
             }
+
+            if root.active-screen == 7 : PosScreen {
+                pos-state: root.pos-state;
+                address: root.wallet-address;
+                qr-image: root.pos-qr-image;
+                wait-seconds: root.pos-wait-seconds;
+                received-amount: root.pos-received-amount;
+                amount-text <=> root.pos-amount;
+                memo-text <=> root.pos-memo;
+
+                create-payment-request(amount, memo) => {
+                    root.create-payment-request(amount, memo);
+                }
+                cancel-payment-request => {
+                    root.cancel-payment-request();
+                }
+                go-back => {
+                    root.cancel-payment-request();
+                    root.active-screen = 5;
+                }
+                new-request => {
+                    root.pos-state = 0;
+                }
+            }
+
+            if root.active-screen == 8 : DexScreen {
+                from-symbol <=> root.dex-from-symbol;
+                from-name <=> root.dex-from-name;
+                from-balance <=> root.dex-from-balance;
+                from-amount <=> root.dex-from-amount;
+                to-symbol <=> root.dex-to-symbol;
+                to-name <=> root.dex-to-name;
+                to-balance <=> root.dex-to-balance;
+                to-amount <=> root.dex-to-amount;
+                exchange-rate: root.dex-exchange-rate;
+                price-impact: root.dex-price-impact;
+                min-received: root.dex-min-received;
+                swap-fee: root.dex-swap-fee;
+                slippage <=> root.dex-slippage;
+                swap-loading: root.dex-swap-loading;
+                swap-status: root.dex-swap-status;
+                swap-success: root.dex-swap-success;
+                swap-result-from: root.dex-swap-result-from;
+                swap-result-to: root.dex-swap-result-to;
+                swap-result-tx: root.dex-swap-result-tx;
+                token-list: root.dex-token-list;
+
+                go-back => { root.active-screen = 1; }
+                execute-swap => { root.dex-execute-swap(); }
+                flip-tokens => { root.dex-flip-tokens(); }
+                request-quote(amount) => { root.dex-request-quote(amount); }
+                open-token-list(side) => { root.dex-open-token-list(side); }
+                select-token(side, symbol) => { root.dex-select-token(side, symbol); }
+                set-slippage(s) => { root.dex-set-slippage(s); }
+                add-liquidity => { root.dex-add-liquidity(); }
+                dismiss-swap-success => { root.dex-dismiss-swap-success(); }
+                open-token-detail(sym) => { root.dex-open-token-detail(sym); }
+                close-token-detail => { root.dex-close-token-detail(); }
+
+                // Token detail bindings
+                show-token-detail: root.dex-show-token-detail;
+                detail-symbol: root.dex-detail-symbol;
+                detail-name: root.dex-detail-name;
+                detail-contract-type: root.dex-detail-contract-type;
+                detail-address: root.dex-detail-address;
+                detail-decimals: root.dex-detail-decimals;
+                detail-total-supply: root.dex-detail-total-supply;
+                detail-verified: root.dex-detail-verified;
+                detail-price: root.dex-detail-price;
+                detail-change-24h: root.dex-detail-change-24h;
+                detail-change-positive: root.dex-detail-change-positive;
+                detail-balance: root.dex-detail-balance;
+                detail-value-usd: root.dex-detail-value-usd;
+                detail-chart-bars: root.dex-detail-chart-bars;
+                detail-chart-high: root.dex-detail-chart-high;
+                detail-chart-low: root.dex-detail-chart-low;
+                detail-txns: root.dex-detail-txns;
+            }
         }
 
-        // Bottom nav bar (only shown when logged in)
-        if root.active-screen > 0 : HorizontalLayout {
-            height: 52px;
-            padding-left: Theme.spacing-sm;
-            padding-right: Theme.spacing-sm;
-            spacing: Theme.spacing-xs;
+        // Bottom nav bar (shown when logged in, hidden on PoS screen)
+        if root.active-screen > 0 && root.active-screen != 7 : Rectangle {
+            height: 56px;
 
-            NavButton {
-                label: "Home";
-                active: root.active-screen == 1;
-                horizontal-stretch: 1;
-                clicked => { root.active-screen = 1; }
+            // Top border separator
+            Rectangle {
+                height: 1px;
+                background: Theme.border;
+                y: 0;
             }
-            NavButton {
-                label: "Receive";
-                active: root.active-screen == 5;
-                horizontal-stretch: 1;
-                clicked => { root.active-screen = 5; }
-            }
-            NavButton {
-                label: "Send";
-                active: root.active-screen == 2;
-                horizontal-stretch: 1;
-                clicked => { root.active-screen = 2; root.load-address-book(); }
-            }
-            NavButton {
-                label: "History";
-                active: root.active-screen == 3;
-                horizontal-stretch: 1;
-                clicked => { root.active-screen = 3; root.refresh-history(); }
-            }
-            NavButton {
-                label: "Miner";
-                active: root.active-screen == 4;
-                horizontal-stretch: 1;
-                clicked => { root.active-screen = 4; }
+
+            HorizontalLayout {
+                padding-left: Theme.spacing-sm;
+                padding-right: Theme.spacing-sm;
+                padding-top: 1px;
+                spacing: Theme.spacing-xs;
+
+                NavButton {
+                    nav-icon: @image-url("icons/home.svg");
+                    label: "Home";
+                    active: root.active-screen == 1;
+                    horizontal-stretch: 1;
+                    clicked => { root.active-screen = 1; }
+                }
+                NavButton {
+                    nav-icon: @image-url("icons/arrow-down-to-line.svg");
+                    label: "Receive";
+                    active: root.active-screen == 5;
+                    horizontal-stretch: 1;
+                    clicked => { root.active-screen = 5; }
+                }
+                NavButton {
+                    nav-icon: @image-url("icons/arrow-up-from-line.svg");
+                    label: "Send";
+                    active: root.active-screen == 2;
+                    horizontal-stretch: 1;
+                    clicked => { root.active-screen = 2; root.load-address-book(); }
+                }
+                NavButton {
+                    nav-icon: @image-url("icons/arrow-up-down.svg");
+                    label: "DEX";
+                    active: root.active-screen == 8;
+                    horizontal-stretch: 1;
+                    clicked => { root.active-screen = 8; root.dex-open-token-list(0); }
+                }
+                NavButton {
+                    nav-icon: @image-url("icons/clock.svg");
+                    label: "History";
+                    active: root.active-screen == 3;
+                    horizontal-stretch: 1;
+                    clicked => { root.active-screen = 3; root.refresh-history(); }
+                }
+                NavButton {
+                    nav-icon: @image-url("icons/pickaxe.svg");
+                    label: "Miner";
+                    active: root.active-screen == 4;
+                    horizontal-stretch: 1;
+                    clicked => { root.active-screen = 4; }
+                }
             }
         }
 
-        // Sync bar at bottom (only shown when logged in)
-        if root.active-screen > 0 : SyncBar {
+        // Sync bar at bottom (only shown when logged in, not on PoS)
+        if root.active-screen > 0 && root.active-screen != 7 : SyncBar {
             connected: root.connected;
             current-height: root.current-height;
             network-height: root.network-height;
@@ -260,7 +432,7 @@ export component AppWindow inherits Window {
         }
 
         // Auto-update bar (below sync bar, only shown when update available)
-        if root.active-screen > 0 : UpdateBar {
+        if root.active-screen > 0 && root.active-screen != 7 : UpdateBar {
             update-state: root.update-state;
             update-version: root.update-version;
             update-progress: root.update-progress;

@@ -1,4 +1,5 @@
 import React, { useState, useMemo } from 'react';
+import TokenIcon from './TokenIcon';
 import './TokenSelectorModal.css';
 
 interface Token {
@@ -273,10 +274,12 @@ const TokenSelectorModal: React.FC<TokenSelectorModalProps> = ({
                   <div className="token-main">
                     <div className="token-logo">
                       <div className="token-icon">
-                        {token.icon === 'qug-logo' ? '💎' :
-                         token.icon === 'qugusd-logo' ? '💵' :
-                         token.icon === 'usd-logo' ? '💵' :
-                         token.icon}
+                        <TokenIcon
+                          symbol={token.symbol}
+                          icon={token.icon}
+                          logoUrl={(token as any).logoUrl}
+                          size={40}
+                        />
                       </div>
                       {hasNitro && (
                         <div className="nitro-badge" title="Nitro Boosted">

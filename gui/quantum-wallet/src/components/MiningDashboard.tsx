@@ -76,21 +76,21 @@ export default function MiningDashboard() {
   networkHashRateRef.current = stats.networkHashRate;
 
   // ═══════════════════════════════════════════════════════════════
-  // v7.4.4: "The VDF Forge" — Mining Engine Visualization
-  // Inspired by BLAKE3 × 101 VDF from the Q-NarwhalKnight miner
-  // whitepaper. Each pulse = a nonce spiraling through 10 VDF rings
-  // (each ≈ 10 iterations), color-shifting blue→cyan→white→gold as
-  // it approaches the difficulty target at the center. Most fail
-  // (red ember). Solutions = golden supernova with shockwave.
+  // v10.2.0: "The VDF Forge" — Mining Engine Visualization (rewrite)
+  // 10 concentric VDF rings (101 BLAKE3 stages grouped into 10 rings).
+  // Nonces spawn from miners on the outer rim and spiral inward,
+  // color-shifting blue→cyan→white→gold. Golden hexagon difficulty
+  // target at center. Failed nonces = red flash, solutions = golden
+  // supernova with expanding shockwave rings.
   // ═══════════════════════════════════════════════════════════════
-  // v8.5.5: Stable callback — reads dynamic values from refs, zero dependencies
   const startMiningEngineCanvas = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext('2d', { willReadFrequently: false }) as CanvasRenderingContext2D | null;
+    const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | null;
     if (!ctx) return;
     if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
 
+    // ── Canvas sizing ──
     const dpr = window.devicePixelRatio || 1;
     const rect = canvas.getBoundingClientRect();
     const W = rect.width || canvas.parentElement?.clientWidth || 800;
@@ -98,348 +98,431 @@ export default function MiningDashboard() {
     canvas.width = W * dpr;
     canvas.height = H * dpr;
     ctx.scale(dpr, dpr);
+
     const cx = W / 2;
     const cy = H / 2;
-    const maxR = Math.min(W, H) * 0.42;
+    const maxR = Math.min(W, H) * 0.43;
+    const RINGS = 10;
+    const TAU = Math.PI * 2;
 
-    // v8.5.5: Read from ref (live) instead of closure-captured state
-    const minerCount = Math.max(connectedMinersRef.current, 1);
-    const VDF_RINGS = 10; // 10 visual rings ≈ 10 VDF iterations each = 100 + 1 initial
-
-    // VDF ring radii (outer to inner)
-    const ringR: number[] = [];
-    for (let i = 0; i < VDF_RINGS; i++) {
-      ringR.push(maxR * ((VDF_RINGS - i) / VDF_RINGS) * 0.88 + maxR * 0.1);
+    // ── Ring radii (outer ring 0 → inner ring 9) ──
+    const ringRadii: number[] = [];
+    for (let i = 0; i < RINGS; i++) {
+      ringRadii.push(maxR * (1 - i / RINGS) * 0.86 + maxR * 0.12);
     }
-    const coreR = maxR * 0.07;
+    const coreRadius = maxR * 0.08;
 
-    // Miner positions on outer rim
-    const minerDots = Array.from({ length: Math.min(minerCount, 400) }, (_, i) => {
-      const a = (i / Math.min(minerCount, 400)) * Math.PI * 2;
-      return { angle: a, phase: Math.random() * Math.PI * 2, hue: 185 + Math.random() * 45 };
-    });
+    // ── Miner dots on outer rim ──
+    interface MinerDot { angle: number; phase: number; hue: number }
+    const buildMiners = (count: number): MinerDot[] => {
+      const n = Math.min(Math.max(count, 1), 400);
+      return Array.from({ length: n }, (_, i) => ({
+        angle: (i / n) * TAU,
+        phase: Math.random() * TAU,
+        hue: 185 + Math.random() * 50,
+      }));
+    };
+    let minerDots = buildMiners(connectedMinersRef.current);
+    let lastMinerCount = connectedMinersRef.current;
 
-    // VDF stage node markers on each ring
-    const stageNodes: { angle: number; ring: number }[] = [];
-    for (let ring = 0; ring < VDF_RINGS; ring++) {
-      const count = 10 + ring * 2;
-      for (let j = 0; j < count; j++) {
-        stageNodes.push({ angle: (j / count) * Math.PI * 2 + ring * 0.25, ring });
+    // ── Stage node markers per ring ──
+    interface StageNode { angle: number; ring: number }
+    const stageNodes: StageNode[] = [];
+    for (let ring = 0; ring < RINGS; ring++) {
+      const n = 8 + ring * 3;
+      for (let j = 0; j < n; j++) {
+        stageNodes.push({ angle: (j / n) * TAU + ring * 0.3, ring });
       }
     }
 
-    // Hash pulses spiraling inward through VDF chain
-    interface HPulse {
-      angle: number; progress: number; speed: number; spin: number;
-      hue: number; brightness: number; alive: boolean; minerIdx: number;
+    // ── Nonce pulses spiraling inward ──
+    interface Nonce {
+      angle: number; progress: number; speed: number;
+      spin: number; brightness: number; minerIdx: number;
+      trail: { x: number; y: number; alpha: number }[];
     }
-    const pulses: HPulse[] = [];
-    let spawnTick = 0;
+    const nonces: Nonce[] = [];
+    let spawnTimer = 0;
 
-    // Solution burst effects
-    interface SBurst {
-      t: number; maxT: number;
-      pts: { x: number; y: number; vx: number; vy: number; hue: number; sz: number }[];
-    }
-    const bursts: SBurst[] = [];
-    let burstN = 0;
+    // ── Solution burst particles ──
+    interface Particle { x: number; y: number; vx: number; vy: number; hue: number; size: number }
+    interface Burst { age: number; life: number; particles: Particle[] }
+    const bursts: Burst[] = [];
 
-    // Ring glow (flashes when pulse crosses)
-    const ringGlow = new Float32Array(VDF_RINGS);
-    let failFlash = 0;
+    // ── Per-ring glow intensity ──
+    const ringGlow = new Float32Array(RINGS);
+    let failGlow = 0;
     let frame = 0;
-    let lastSolFrame = 0;
+    let noncesProcessed = 0;
+    let lastSolutionFrame = -999;
 
-    const animate = () => {
+    // ── Helper: nonce color from progress (0→1) ──
+    const nonceColor = (t: number): [number, number, number] => {
+      if (t < 0.3) return [230, 88, 58];           // blue
+      if (t < 0.55) return [195, 92, 65];           // cyan
+      if (t < 0.8) return [180, 45, 85];            // white-ish
+      return [42, 100, 72];                         // gold
+    };
+
+    // ── Helper: draw hexagon ──
+    const drawHexagon = (x: number, y: number, r: number, rot: number) => {
+      ctx.beginPath();
+      for (let v = 0; v < 6; v++) {
+        const a = rot + (v / 6) * TAU;
+        const px = x + Math.cos(a) * r;
+        const py = y + Math.sin(a) * r;
+        v === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+    };
+
+    // ── Main animation loop ──
+    const tick = () => {
       frame++;
+
+      // Rebuild miners if count changed
+      const curMiners = Math.max(connectedMinersRef.current, 1);
+      if (curMiners !== lastMinerCount) {
+        minerDots = buildMiners(curMiners);
+        lastMinerCount = curMiners;
+      }
+
       ctx.clearRect(0, 0, W, H);
 
-      // ─── BACKGROUND: deep forge ambience ───
-      const bg = ctx.createRadialGradient(cx, cy, 0, cx, cy, maxR * 1.3);
-      bg.addColorStop(0, 'rgba(12, 3, 24, 0.97)');
-      bg.addColorStop(0.5, 'rgba(5, 2, 12, 0.99)');
-      bg.addColorStop(1, 'rgba(2, 1, 6, 1)');
+      // ─── 1. BACKGROUND ───
+      const bg = ctx.createRadialGradient(cx, cy, 0, cx, cy, maxR * 1.4);
+      bg.addColorStop(0, '#0c0318');
+      bg.addColorStop(0.55, '#05020e');
+      bg.addColorStop(1, '#020108');
       ctx.fillStyle = bg;
       ctx.fillRect(0, 0, W, H);
 
-      // ─── VDF CHAIN RINGS ───
-      for (let i = 0; i < VDF_RINGS; i++) {
-        const r = ringR[i];
-        const base = 0.08 + (i / VDF_RINGS) * 0.1;
-        const flash = ringGlow[i];
-        const alpha = Math.min(base + flash, 0.9);
-        const hue = 260 - i * 18; // purple→blue→cyan inward
+      // ─── 2. VDF RINGS ───
+      for (let i = 0; i < RINGS; i++) {
+        const r = ringRadii[i];
+        const glow = ringGlow[i];
+        const hue = 265 - i * 20;
+        const baseAlpha = 0.1 + (i / RINGS) * 0.08;
 
+        // Main ring stroke
         ctx.beginPath();
-        ctx.arc(cx, cy, r, 0, Math.PI * 2);
-        ctx.strokeStyle = `hsla(${hue}, 80%, 55%, ${alpha})`;
-        ctx.lineWidth = 0.6 + flash * 3;
+        ctx.arc(cx, cy, r, 0, TAU);
+        ctx.strokeStyle = `hsla(${hue}, 75%, 50%, ${Math.min(baseAlpha + glow, 1)})`;
+        ctx.lineWidth = 0.7 + glow * 4;
         ctx.stroke();
 
-        if (flash > 0.08) {
+        // Glow aura when active
+        if (glow > 0.05) {
           ctx.beginPath();
-          ctx.arc(cx, cy, r, 0, Math.PI * 2);
-          ctx.strokeStyle = `hsla(${hue}, 100%, 75%, ${flash * 0.4})`;
-          ctx.lineWidth = 5;
+          ctx.arc(cx, cy, r, 0, TAU);
+          ctx.strokeStyle = `hsla(${hue}, 100%, 70%, ${glow * 0.35})`;
+          ctx.lineWidth = 6;
           ctx.stroke();
         }
-        ringGlow[i] *= 0.91;
+
+        ringGlow[i] *= 0.9;
       }
 
-      // ─── VDF STAGE MARKERS ───
+      // ─── 3. VDF STAGE MARKERS ───
       for (const node of stageNodes) {
         const dir = node.ring % 2 === 0 ? 1 : -1;
-        const ra = node.angle + frame * 0.0005 * dir;
-        const nx = cx + Math.cos(ra) * ringR[node.ring];
-        const ny = cy + Math.sin(ra) * ringR[node.ring];
-        const flash = ringGlow[node.ring];
-        const hue = 260 - node.ring * 18;
-        ctx.fillStyle = `hsla(${hue}, 70%, 70%, ${0.15 + flash * 0.7})`;
+        const a = node.angle + frame * 0.0004 * dir;
+        const x = cx + Math.cos(a) * ringRadii[node.ring];
+        const y = cy + Math.sin(a) * ringRadii[node.ring];
+        const glow = ringGlow[node.ring];
+        const hue = 265 - node.ring * 20;
+        ctx.fillStyle = `hsla(${hue}, 65%, 68%, ${0.12 + glow * 0.6})`;
         ctx.beginPath();
-        ctx.arc(nx, ny, 1 + flash * 1.5, 0, Math.PI * 2);
+        ctx.arc(x, y, 1.2 + glow * 2, 0, TAU);
         ctx.fill();
       }
 
-      // ─── MINER RING (outer edge) ───
+      // ─── 4. OUTER MINER RING ───
+      const minerRimR = maxR + 10;
       for (const m of minerDots) {
-        const pulse = Math.sin(frame * 0.025 + m.phase) * 0.3 + 0.7;
-        const mx = cx + Math.cos(m.angle) * (maxR + 8);
-        const my = cy + Math.sin(m.angle) * (maxR + 8);
-        ctx.fillStyle = `hsla(${m.hue}, 85%, 70%, ${0.35 * pulse})`;
+        const pulse = Math.sin(frame * 0.02 + m.phase) * 0.3 + 0.7;
+        const mx = cx + Math.cos(m.angle) * minerRimR;
+        const my = cy + Math.sin(m.angle) * minerRimR;
+
+        // Glow halo
+        ctx.fillStyle = `hsla(${m.hue}, 100%, 80%, ${0.08 * pulse})`;
         ctx.beginPath();
-        ctx.arc(mx, my, pulse, 0, Math.PI * 2);
+        ctx.arc(mx, my, 3.5 * pulse, 0, TAU);
         ctx.fill();
-        ctx.fillStyle = `hsla(${m.hue}, 100%, 80%, ${0.1 * pulse})`;
+
+        // Core dot
+        ctx.fillStyle = `hsla(${m.hue}, 85%, 72%, ${0.4 * pulse})`;
         ctx.beginPath();
-        ctx.arc(mx, my, pulse * 3, 0, Math.PI * 2);
+        ctx.arc(mx, my, 1.2 * pulse, 0, TAU);
         ctx.fill();
       }
 
-      // ─── SPAWN HASH PULSES ───
-      spawnTick++;
-      const rate = Math.max(2, 7 - Math.floor(minerCount / 60));
-      if (spawnTick % rate === 0 && pulses.length < 40) {
+      // ─── 5. SPAWN NONCES ───
+      spawnTimer++;
+      const spawnRate = Math.max(2, 6 - Math.floor(curMiners / 80));
+      if (spawnTimer % spawnRate === 0 && nonces.length < 50) {
         const mIdx = Math.floor(Math.random() * minerDots.length);
         const m = minerDots[mIdx];
-        pulses.push({
-          angle: m.angle, progress: 0,
-          speed: 0.004 + Math.random() * 0.004,
-          spin: (Math.random() - 0.5) * 0.03,
-          hue: m.hue, brightness: 0.6 + Math.random() * 0.4,
-          alive: true, minerIdx: mIdx,
+        nonces.push({
+          angle: m.angle,
+          progress: 0,
+          speed: 0.003 + Math.random() * 0.005,
+          spin: (Math.random() - 0.5) * 0.04,
+          brightness: 0.65 + Math.random() * 0.35,
+          minerIdx: mIdx,
+          trail: [],
         });
       }
 
-      // ─── ANIMATE HASH PULSES (spiraling through VDF stages) ───
-      for (let i = pulses.length - 1; i >= 0; i--) {
-        const p = pulses[i];
-        if (!p.alive) { pulses.splice(i, 1); continue; }
+      // ─── 6. ANIMATE NONCES (spiral through VDF rings) ───
+      for (let i = nonces.length - 1; i >= 0; i--) {
+        const n = nonces[i];
+        n.progress += n.speed;
 
-        p.progress += p.speed;
-        const curA = p.angle + p.progress * p.spin * 120;
-        const curR = maxR * (1 - p.progress) * 0.88 + maxR * 0.1;
-        const px = cx + Math.cos(curA) * curR;
-        const py = cy + Math.sin(curA) * curR;
+        // Spiral position
+        const curAngle = n.angle + n.progress * n.spin * 140;
+        const curR = maxR * (1 - n.progress) * 0.86 + maxR * 0.12;
+        const px = cx + Math.cos(curAngle) * curR;
+        const py = cy + Math.sin(curAngle) * curR;
 
-        // Flash VDF rings as pulse crosses
-        for (let ring = 0; ring < VDF_RINGS; ring++) {
-          if (Math.abs(curR - ringR[ring]) < 4) {
-            ringGlow[ring] = Math.max(ringGlow[ring], 0.35);
+        // Store trail point
+        n.trail.push({ x: px, y: py, alpha: 0.6 });
+        if (n.trail.length > 12) n.trail.shift();
+
+        // Flash VDF rings on crossing
+        for (let ring = 0; ring < RINGS; ring++) {
+          if (Math.abs(curR - ringRadii[ring]) < 5) {
+            ringGlow[ring] = Math.max(ringGlow[ring], 0.4);
           }
         }
 
-        // Color evolution: blue→cyan→white→gold through VDF chain
-        let h: number, s: number, l: number;
-        if (p.progress < 0.25) { h = 230; s = 90; l = 60; }
-        else if (p.progress < 0.5) { h = 195; s = 95; l = 68; }
-        else if (p.progress < 0.75) { h = 180; s = 50; l = 82; }
-        else { h = 42; s = 100; l = 72; }
+        // Color from progress
+        const [h, s, l] = nonceColor(n.progress);
 
-        // Pulse glow
-        const gSz = 5 + p.progress * 6;
-        const pG = ctx.createRadialGradient(px, py, 0, px, py, gSz);
-        pG.addColorStop(0, `hsla(${h}, ${s}%, ${l}%, ${0.7 * p.brightness})`);
-        pG.addColorStop(0.5, `hsla(${h}, ${s}%, ${l}%, ${0.15 * p.brightness})`);
-        pG.addColorStop(1, 'rgba(0,0,0,0)');
-        ctx.fillStyle = pG;
-        ctx.beginPath();
-        ctx.arc(px, py, gSz, 0, Math.PI * 2);
-        ctx.fill();
-
-        // Pulse core
-        ctx.fillStyle = `hsla(${h}, ${s}%, ${Math.min(l + 20, 100)}%, ${0.9 * p.brightness})`;
-        ctx.beginPath();
-        ctx.arc(px, py, 1.8, 0, Math.PI * 2);
-        ctx.fill();
-
-        // Faint beam to source miner
-        if (p.progress < 0.2) {
-          const m = minerDots[p.minerIdx];
-          const mx2 = cx + Math.cos(m.angle) * (maxR + 8);
-          const my2 = cy + Math.sin(m.angle) * (maxR + 8);
+        // Draw trail
+        for (let t = 0; t < n.trail.length - 1; t++) {
+          const tp = n.trail[t];
+          const frac = t / n.trail.length;
+          tp.alpha *= 0.88;
+          ctx.fillStyle = `hsla(${h}, ${s}%, ${l}%, ${tp.alpha * frac * n.brightness * 0.4})`;
           ctx.beginPath();
-          ctx.moveTo(mx2, my2);
+          ctx.arc(tp.x, tp.y, 1 + frac * 1.5, 0, TAU);
+          ctx.fill();
+        }
+
+        // Pulse glow aura
+        const glowSize = 6 + n.progress * 8;
+        const grad = ctx.createRadialGradient(px, py, 0, px, py, glowSize);
+        grad.addColorStop(0, `hsla(${h}, ${s}%, ${l}%, ${0.65 * n.brightness})`);
+        grad.addColorStop(0.45, `hsla(${h}, ${s}%, ${l}%, ${0.12 * n.brightness})`);
+        grad.addColorStop(1, 'transparent');
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(px, py, glowSize, 0, TAU);
+        ctx.fill();
+
+        // Bright core
+        ctx.fillStyle = `hsla(${h}, ${s}%, ${Math.min(l + 25, 100)}%, ${0.9 * n.brightness})`;
+        ctx.beginPath();
+        ctx.arc(px, py, 2, 0, TAU);
+        ctx.fill();
+
+        // Faint beam to source miner (early progress only)
+        if (n.progress < 0.15) {
+          const m = minerDots[n.minerIdx];
+          const mx = cx + Math.cos(m.angle) * minerRimR;
+          const my = cy + Math.sin(m.angle) * minerRimR;
+          ctx.beginPath();
+          ctx.moveTo(mx, my);
           ctx.lineTo(px, py);
-          ctx.strokeStyle = `hsla(${p.hue}, 80%, 60%, ${0.08 * (1 - p.progress * 5)})`;
-          ctx.lineWidth = 0.4;
+          ctx.strokeStyle = `hsla(${m.hue}, 80%, 65%, ${0.06 * (1 - n.progress * 7)})`;
+          ctx.lineWidth = 0.5;
           ctx.stroke();
         }
 
-        // Reached core → difficulty check
-        if (p.progress >= 1.0) {
-          p.alive = false;
-          burstN++;
-          const isSolution = burstN % 40 === 0 ||
-            (frame - lastSolFrame > 300 && Math.random() < 0.03);
+        // ─── Reached center → difficulty check ───
+        if (n.progress >= 1.0) {
+          nonces.splice(i, 1);
+          noncesProcessed++;
+
+          const isSolution = noncesProcessed % 35 === 0 ||
+            (frame - lastSolutionFrame > 350 && Math.random() < 0.04);
 
           if (isSolution) {
-            // ★ SOLUTION FOUND — gold supernova ★
-            lastSolFrame = frame;
-            const pts: SBurst['pts'] = [];
-            for (let j = 0; j < 35; j++) {
-              const a = Math.random() * Math.PI * 2;
-              const spd = 1.2 + Math.random() * 3.5;
-              pts.push({ x: cx, y: cy, vx: Math.cos(a) * spd, vy: Math.sin(a) * spd,
-                hue: 30 + Math.random() * 30, sz: 1 + Math.random() * 2.5 });
+            // ★ SOLUTION — golden supernova burst ★
+            lastSolutionFrame = frame;
+            const particles: Particle[] = [];
+            for (let j = 0; j < 45; j++) {
+              const a = Math.random() * TAU;
+              const spd = 1.5 + Math.random() * 4;
+              particles.push({
+                x: cx, y: cy,
+                vx: Math.cos(a) * spd, vy: Math.sin(a) * spd,
+                hue: 25 + Math.random() * 35,
+                size: 1 + Math.random() * 3,
+              });
             }
-            bursts.push({ t: 0, maxT: 70, pts });
-            for (let r = 0; r < VDF_RINGS; r++) ringGlow[r] = 0.7;
+            bursts.push({ age: 0, life: 80, particles });
+            // Flash all rings gold
+            for (let r = 0; r < RINGS; r++) ringGlow[r] = 0.8;
           } else {
-            failFlash = 0.5;
+            // Failed nonce → red flash at core
+            failGlow = 0.55;
           }
         }
       }
 
-      // ─── DIFFICULTY CORE: rotating hexagonal target ───
-      const cPulse = Math.sin(frame * 0.04) * 0.25 + 0.75;
-      const cSz = coreR * cPulse;
+      // ─── 7. GOLDEN HEXAGON DIFFICULTY TARGET ───
+      const corePulse = Math.sin(frame * 0.035) * 0.2 + 0.8;
+      const cSize = coreRadius * corePulse;
 
-      const cG = ctx.createRadialGradient(cx, cy, 0, cx, cy, cSz * 4);
-      cG.addColorStop(0, `rgba(255, 184, 0, ${(0.3 + failFlash * 0.5) * cPulse})`);
-      cG.addColorStop(0.4, `rgba(255, 140, 0, ${0.1 * cPulse})`);
-      cG.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.fillStyle = cG;
+      // Core ambient glow
+      const coreGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, cSize * 5);
+      coreGrad.addColorStop(0, `rgba(255, 180, 0, ${(0.25 + failGlow * 0.45) * corePulse})`);
+      coreGrad.addColorStop(0.35, `rgba(255, 140, 0, ${0.08 * corePulse})`);
+      coreGrad.addColorStop(1, 'transparent');
+      ctx.fillStyle = coreGrad;
       ctx.beginPath();
-      ctx.arc(cx, cy, cSz * 4, 0, Math.PI * 2);
+      ctx.arc(cx, cy, cSize * 5, 0, TAU);
       ctx.fill();
 
-      if (failFlash > 0.02) {
-        ctx.fillStyle = `rgba(255, 60, 40, ${failFlash * 0.4})`;
+      // Failed-nonce red flash
+      if (failGlow > 0.02) {
+        ctx.fillStyle = `rgba(255, 55, 35, ${failGlow * 0.45})`;
         ctx.beginPath();
-        ctx.arc(cx, cy, cSz * 2, 0, Math.PI * 2);
+        ctx.arc(cx, cy, cSize * 2.5, 0, TAU);
         ctx.fill();
-        failFlash *= 0.88;
+        failGlow *= 0.87;
       }
 
-      // Rotating hexagon
+      // Rotating golden hexagon (outer)
       ctx.save();
       ctx.translate(cx, cy);
-      ctx.rotate(frame * 0.006);
-      ctx.beginPath();
-      for (let v = 0; v < 6; v++) {
-        const a = (v / 6) * Math.PI * 2;
-        if (v === 0) ctx.moveTo(Math.cos(a) * cSz * 2.2, Math.sin(a) * cSz * 2.2);
-        else ctx.lineTo(Math.cos(a) * cSz * 2.2, Math.sin(a) * cSz * 2.2);
-      }
-      ctx.closePath();
-      ctx.strokeStyle = `rgba(255, 184, 0, ${0.5 * cPulse})`;
-      ctx.lineWidth = 1.2;
+      ctx.rotate(frame * 0.005);
+      drawHexagon(0, 0, cSize * 2.5, 0);
+      ctx.strokeStyle = `rgba(255, 184, 0, ${0.55 * corePulse})`;
+      ctx.lineWidth = 1.4;
       ctx.stroke();
       ctx.restore();
 
-      // ─── SOLUTION BURSTS ───
+      // Inner hexagon (counter-rotate)
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(-frame * 0.008);
+      drawHexagon(0, 0, cSize * 1.4, Math.PI / 6);
+      ctx.strokeStyle = `rgba(255, 200, 60, ${0.3 * corePulse})`;
+      ctx.lineWidth = 0.8;
+      ctx.stroke();
+      ctx.restore();
+
+      // ─── 8. SOLUTION BURSTS ───
       for (let i = bursts.length - 1; i >= 0; i--) {
         const b = bursts[i];
-        b.t++;
-        if (b.t > b.maxT) { bursts.splice(i, 1); continue; }
-        const prog = b.t / b.maxT;
+        b.age++;
+        if (b.age > b.life) { bursts.splice(i, 1); continue; }
+        const prog = b.age / b.life;
 
-        // Shockwave ring
+        // Primary shockwave ring
+        const waveR = prog * maxR * 1.4;
+        const waveAlpha = (1 - prog) * 0.5;
         ctx.beginPath();
-        ctx.arc(cx, cy, prog * maxR * 1.3, 0, Math.PI * 2);
-        ctx.strokeStyle = `rgba(255, 184, 0, ${(1 - prog) * 0.45})`;
-        ctx.lineWidth = 2.5 * (1 - prog);
+        ctx.arc(cx, cy, waveR, 0, TAU);
+        ctx.strokeStyle = `rgba(255, 184, 0, ${waveAlpha})`;
+        ctx.lineWidth = 3 * (1 - prog);
         ctx.stroke();
 
-        // Second shockwave (delayed)
-        if (prog > 0.15) {
+        // Secondary shockwave (delayed)
+        if (prog > 0.12) {
+          const wave2R = (prog - 0.12) * maxR * 1.3;
           ctx.beginPath();
-          ctx.arc(cx, cy, (prog - 0.15) * maxR * 1.2, 0, Math.PI * 2);
-          ctx.strokeStyle = `rgba(255, 220, 100, ${(1 - prog) * 0.2})`;
-          ctx.lineWidth = 1.5 * (1 - prog);
+          ctx.arc(cx, cy, wave2R, 0, TAU);
+          ctx.strokeStyle = `rgba(255, 220, 80, ${(1 - prog) * 0.22})`;
+          ctx.lineWidth = 1.8 * (1 - prog);
           ctx.stroke();
         }
 
-        for (const pt of b.pts) {
-          pt.x += pt.vx; pt.y += pt.vy;
-          pt.vx *= 0.975; pt.vy *= 0.975;
-          const a = (1 - prog) * 0.85;
-          ctx.fillStyle = `hsla(${pt.hue}, 100%, 70%, ${a})`;
+        // Particles
+        for (const pt of b.particles) {
+          pt.x += pt.vx;
+          pt.y += pt.vy;
+          pt.vx *= 0.97;
+          pt.vy *= 0.97;
+          const alpha = (1 - prog) * 0.85;
+          const sz = pt.size * (1 - prog * 0.35);
+
+          // Particle glow
+          ctx.fillStyle = `hsla(${pt.hue}, 100%, 72%, ${alpha})`;
           ctx.beginPath();
-          ctx.arc(pt.x, pt.y, pt.sz * (1 - prog * 0.4), 0, Math.PI * 2);
+          ctx.arc(pt.x, pt.y, sz, 0, TAU);
           ctx.fill();
-          ctx.fillStyle = `hsla(${pt.hue}, 100%, 55%, ${a * 0.3})`;
+
+          // Motion trail
+          ctx.fillStyle = `hsla(${pt.hue}, 100%, 55%, ${alpha * 0.25})`;
           ctx.beginPath();
-          ctx.arc(pt.x - pt.vx * 2, pt.y - pt.vy * 2, pt.sz * 0.5, 0, Math.PI * 2);
+          ctx.arc(pt.x - pt.vx * 2.5, pt.y - pt.vy * 2.5, sz * 0.5, 0, TAU);
           ctx.fill();
         }
       }
 
-      // ─── STATS OVERLAY ───
-      ctx.textAlign = 'center';
+      // ─── 9. STATS OVERLAY ───
       ctx.textBaseline = 'middle';
 
-      // Center: miner count
-      ctx.font = 'bold 22px "SF Mono", "Fira Code", "Cascadia Code", monospace';
+      // Center: miner count inside hexagon
+      ctx.textAlign = 'center';
+      ctx.font = 'bold 24px "SF Mono", "Fira Code", "Cascadia Code", monospace';
       ctx.fillStyle = '#ffffff';
-      ctx.shadowColor = 'rgba(255, 184, 0, 0.6)';
-      ctx.shadowBlur = 12;
-      ctx.fillText(`${connectedMinersRef.current || minerCount}`, cx, cy - 4);
+      ctx.shadowColor = 'rgba(255, 184, 0, 0.7)';
+      ctx.shadowBlur = 14;
+      ctx.fillText(`${connectedMinersRef.current || curMiners}`, cx, cy - 5);
       ctx.shadowBlur = 0;
-      ctx.font = '8px system-ui, -apple-system, sans-serif';
-      ctx.fillStyle = 'rgba(255, 184, 0, 0.85)';
-      ctx.fillText('MINERS', cx, cy + 12);
+      ctx.font = '9px system-ui, -apple-system, sans-serif';
+      ctx.fillStyle = 'rgba(255, 184, 0, 0.9)';
+      ctx.fillText('MINERS', cx, cy + 13);
 
-      // Top-left: Algorithm label
+      // Top-left: Algorithm
       ctx.textAlign = 'left';
       ctx.font = 'bold 12px "SF Mono", "Fira Code", monospace';
-      ctx.fillStyle = 'rgba(120, 160, 255, 0.9)';
+      ctx.fillStyle = 'rgba(120, 160, 255, 0.92)';
       ctx.fillText('BLAKE3 \u00D7 101 VDF', 14, 20);
       ctx.font = '10px system-ui, sans-serif';
-      ctx.fillStyle = 'rgba(120, 160, 255, 0.6)';
-      ctx.fillText('Sequential Proof-of-Work Engine', 14, 34);
+      ctx.fillStyle = 'rgba(120, 160, 255, 0.55)';
+      ctx.fillText('Sequential Proof-of-Work', 14, 34);
 
-      // Top-right: Network hashrate (v8.5.5: read from ref)
+      // Top-right: Network hashrate
       ctx.textAlign = 'right';
       const netHR = networkHashRateRef.current;
-      const totalKhs = netHR / 1000;
-      const hrText = totalKhs >= 1000 ? `${(totalKhs / 1000).toFixed(1)} MH/s` : `${totalKhs.toFixed(0)} KH/s`;
+      const khs = netHR / 1000;
+      let hrLabel: string;
+      if (khs >= 1e6) hrLabel = `${(khs / 1e6).toFixed(2)} TH/s`;
+      else if (khs >= 1000) hrLabel = `${(khs / 1000).toFixed(1)} GH/s`;
+      else if (khs >= 1) hrLabel = `${khs.toFixed(0)} MH/s`;
+      else hrLabel = `${netHR.toFixed(0)} KH/s`;
       ctx.font = 'bold 13px "SF Mono", "Fira Code", monospace';
-      ctx.fillStyle = 'rgba(0, 230, 200, 0.9)';
-      ctx.fillText(hrText, W - 14, 20);
+      ctx.fillStyle = 'rgba(0, 230, 200, 0.92)';
+      ctx.fillText(hrLabel, W - 14, 20);
       ctx.font = '10px system-ui, sans-serif';
-      ctx.fillStyle = 'rgba(0, 230, 200, 0.6)';
+      ctx.fillStyle = 'rgba(0, 230, 200, 0.55)';
       ctx.fillText('Network Hashrate', W - 14, 34);
 
-      // Bottom-left: Your share (v8.5.5: read from ref)
+      // Bottom-left: Your share
       ctx.textAlign = 'left';
       const yourPct = netHR > 0
         ? ((displayHashRateRef.current / netHR) * 100).toFixed(2) : '0.00';
       ctx.font = 'bold 11px system-ui, sans-serif';
-      ctx.fillStyle = 'rgba(180, 140, 255, 0.8)';
+      ctx.fillStyle = 'rgba(180, 140, 255, 0.82)';
       ctx.fillText(`Your share: ${yourPct}%`, 14, H - 20);
 
-      // Bottom-right: VDF explanation
+      // Bottom-right: VDF pipeline label
       ctx.textAlign = 'right';
       ctx.font = '11px system-ui, sans-serif';
-      ctx.fillStyle = 'rgba(255, 184, 0, 0.65)';
-      ctx.fillText('nonce \u2192 101\u00D7 BLAKE3 \u2192 target check', W - 14, H - 20);
+      ctx.fillStyle = 'rgba(255, 184, 0, 0.6)';
+      ctx.fillText('nonce \u2192 101\u00D7 BLAKE3 \u2192 target', W - 14, H - 20);
 
-      animFrameRef.current = requestAnimationFrame(animate);
+      animFrameRef.current = requestAnimationFrame(tick);
     };
 
-    animate();
-  }, []); // v8.5.5: Empty deps — reads connectedMiners/networkHashRate from refs
+    tick();
+  }, []);
 
   // v3.4.21-beta: Fetch authoritative balance from API
   const fetchBalance = async () => {
@@ -1554,10 +1637,10 @@ export default function MiningDashboard() {
       >
         <h4 className="text-lg font-bold text-quantum-green mb-3 flex items-center gap-2">
           <Zap className="w-5 h-5" />
-          Download Optimized Miner v9.2.6
+          Download Optimized Miner v10.1.1
         </h4>
         <p className="text-gray-300 text-sm mb-4">
-          v9.2.6: OAuth2 login + Tor by default + Lock-free multi-threading + P2P propagation
+          v10.1.1: AVX2 SIMD + CPU core pinning + 2.5x faster hashing + P2P peer compute
         </p>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <a

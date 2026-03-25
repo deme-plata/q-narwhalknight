@@ -7332,6 +7332,36 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         }
     }
 
+    // v10.1.2: Pre-register quillon-mobile-wallet as PKCE public client
+    // This allows the Expo mobile wallet to complete OAuth2 browser consent flow.
+    {
+        let mobile_client = q_api_server::oauth2_provider::OAuth2Client {
+            client_id: "quillon-mobile-wallet".to_string(),
+            client_secret: String::new(), // PKCE-only public client, no secret
+            redirect_uris: vec![
+                "qnk://auth/callback".to_string(),
+                "exp://auth/callback".to_string(), // Expo Go development
+            ],
+            name: "Quillon Mobile Wallet".to_string(),
+            description: "Expo React Native mobile wallet (PKCE public client)".to_string(),
+            website: "https://quillon.xyz".to_string(),
+            logo_url: None,
+            scopes: vec![
+                "read:balance".to_string(),
+                "read:history".to_string(),
+                "read:tokens".to_string(),
+                "send:transaction".to_string(),
+            ],
+            created_at: chrono::Utc::now(),
+            kyber_public_key: None,
+        };
+        if let Err(e) = app_state.oauth2_storage.register_client(mobile_client).await {
+            warn!("Failed to register quillon-mobile-wallet OAuth2 client: {}", e);
+        } else {
+            info!("🔐 Registered quillon-mobile-wallet OAuth2 client (PKCE public)");
+        }
+    }
+
     // ========================================
     // v7.3.1: BRIDGE COMMITTEE PERIODIC TASK (cleanup + peer update + rotation)
     // ========================================

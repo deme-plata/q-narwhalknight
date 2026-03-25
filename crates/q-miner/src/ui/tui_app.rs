@@ -207,6 +207,7 @@ pub struct MinerTuiApp {
     pub wallet_send_field: u8,        // 0=address, 1=amount
     pub wallet_send_status: Option<String>, // result message
     pub wallet_send_confirming: bool, // awaiting Enter to confirm
+    pub wallet_send_disabled: bool,   // v10.1.2: true = send blocked (master/community wallet)
     // v8.6.5: Password protection for sends
     pub wallet_send_password: String,      // password being typed in confirm step
     pub wallet_send_password_err: bool,    // true if last password check failed
@@ -252,6 +253,11 @@ pub struct MinerTuiApp {
     pub network_total_hashrate_hs: f64,
     pub live_security_bits: f64,
 
+    // v10.2.0: Hybrid Quantum Mining — GPU state
+    pub gpu_active: bool,
+    pub gpu_device_name: String,
+    pub gpu_hashrate_khs: f64,
+
     // UI state
     pub running: bool,
     pub show_help: bool,
@@ -285,6 +291,7 @@ impl MinerTuiApp {
             wallet_send_field: 0,
             wallet_send_status: None,
             wallet_send_confirming: false,
+            wallet_send_disabled: false,
             wallet_send_password: String::new(),
             wallet_send_password_err: false,
             wallet_password_hash: load_wallet_password_hash(),
@@ -322,6 +329,9 @@ impl MinerTuiApp {
             network_compute_peers: 0,
             network_total_hashrate_hs: 0.0,
             live_security_bits: 0.0,
+            gpu_active: false,
+            gpu_device_name: String::new(),
+            gpu_hashrate_khs: 0.0,
             running: true,
             show_help: false,
             start_time: Instant::now(),
@@ -352,6 +362,18 @@ impl MinerTuiApp {
             self.command_center.tick(peer_count, connected);
         } else {
             self.command_center.tick(0, false);
+        }
+
+        // v10.2.0: Update GPU state
+        if let Some(ref state) = self.state {
+            self.gpu_active = state.gpu_active.load(Ordering::Relaxed);
+            if self.gpu_active {
+                let gpu_hr_bits = state.gpu_hashrate_hs.load(Ordering::Relaxed);
+                self.gpu_hashrate_khs = f64::from_bits(gpu_hr_bits) / 1000.0;
+                if self.gpu_device_name.is_empty() {
+                    self.gpu_device_name = state.gpu_device_name.read().clone();
+                }
+            }
         }
 
         // Update hashrate history
@@ -688,6 +710,38 @@ impl MinerTuiApp {
                     message: format!("Update v{} failed: {}", version, message),
                 });
             }
+            // v10.2.0: Hybrid Quantum Mining — GPU events
+            DiagnosticEvent::GpuStarted { device_name } => {
+                self.gpu_active = true;
+                self.gpu_device_name = device_name.clone();
+                self.add_log(LogEntry {
+                    timestamp: now,
+                    level: LogLevel::Success,
+                    message: format!("GPU started: {}", device_name),
+                });
+            }
+            DiagnosticEvent::GpuStopped => {
+                self.gpu_active = false;
+                self.add_log(LogEntry {
+                    timestamp: now,
+                    level: LogLevel::Warn,
+                    message: "GPU mining stopped".to_string(),
+                });
+            }
+            DiagnosticEvent::GpuSolutionFound { nonce, block_height } => {
+                self.add_log(LogEntry {
+                    timestamp: now,
+                    level: LogLevel::Success,
+                    message: format!("GPU solution! Block #{} nonce {}", block_height, nonce),
+                });
+            }
+            DiagnosticEvent::GpuError { message } => {
+                self.add_log(LogEntry {
+                    timestamp: now,
+                    level: LogLevel::Error,
+                    message: format!("GPU error: {}", message),
+                });
+            }
         }
     }
 
@@ -750,6 +804,12 @@ pub async fn run_miner_tui(
 
     let mut app = MinerTuiApp::new(Some(state.clone()));
     app.updater = auto_updater;
+
+    // v10.1.2: Disable send when using community/master wallet
+    const MASTER_WALLET: &str = "qnkefca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+    if state.wallet_address == MASTER_WALLET {
+        app.wallet_send_disabled = true;
+    }
 
     // Initial diagnostics run
     app.diagnostics.run_checks(&state);
@@ -869,6 +929,11 @@ fn handle_key_press(app: &mut MinerTuiApp, code: KeyCode, modifiers: KeyModifier
         }
         // Toggle send mode with 's' on wallet tab
         KeyCode::Char('s') | KeyCode::Char('S') if app.current_tab == 1 => {
+            // v10.1.2: Block send when using community/master wallet
+            if app.wallet_send_disabled {
+                app.wallet_send_status = Some("Send disabled — link your own wallet first (restart miner)".into());
+                return;
+            }
             app.wallet_send_mode = !app.wallet_send_mode;
             if app.wallet_send_mode {
                 app.wallet_send_address.clear();

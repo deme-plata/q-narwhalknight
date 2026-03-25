@@ -3694,6 +3694,18 @@ async fn send_transaction_inner(
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     debug!("Processing send transaction request (inner)");
 
+    // v10.1.2: Block transfers FROM the admin/master wallet via the miner's /api/v1/transfer endpoint.
+    // Older miners without OAuth fall back to the master wallet and expose the Send function,
+    // allowing anyone to drain the master wallet. The web UI uses a different auth path (session-based)
+    // so this only blocks the unauthenticated miner send path.
+    let from_hex_check = if request.from.starts_with("qnk") { &request.from[3..] } else { &request.from };
+    if from_hex_check == state.admin_wallet {
+        warn!("🚫 [SECURITY v10.1.2] Blocked transfer FROM admin wallet via transfer API");
+        return Ok(Json(ApiResponse::error(
+            "Transfers from the admin wallet are not permitted via this endpoint".to_string(),
+        )));
+    }
+
     // Parse sender address from request (handle 'qnk' prefix)
     let from_hex = if request.from.starts_with("qnk") {
         &request.from[3..]
@@ -9832,15 +9844,21 @@ pub async fn execute_swap(
     }
 
     // ✅ SANITIZE TOKEN SYMBOLS
-    let from_token_normalized = sanitize_token_symbol(&request.from_token).map_err(|e| {
-        warn!("Invalid from_token: {}", e);
-        StatusCode::BAD_REQUEST
-    })?;
+    let from_token_normalized = match sanitize_token_symbol(&request.from_token) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("Invalid from_token: {}", e);
+            return Ok(Json(ApiResponse::error(format!("Invalid from token: {}", e))));
+        }
+    };
 
-    let to_token_normalized = sanitize_token_symbol(&request.to_token).map_err(|e| {
-        warn!("Invalid to_token: {}", e);
-        StatusCode::BAD_REQUEST
-    })?;
+    let to_token_normalized = match sanitize_token_symbol(&request.to_token) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("Invalid to_token: {}", e);
+            return Ok(Json(ApiResponse::error(format!("Invalid to token: {}", e))));
+        }
+    };
 
     // Check for same-token swap
     if from_token_normalized == to_token_normalized {
@@ -10264,8 +10282,68 @@ pub async fn execute_swap(
         );
 
         (true, calculated_out)
+    } else if pool_id.is_none() && (from_is_bridge || to_is_bridge) && (from_is_native || to_is_native) {
+        // v10.1.2: Bridge token oracle pricing for QUG <-> wBTC/wETH/wZEC/wIRON
+        // When no direct liquidity pool exists, use Quillon Bank oracle (CoinGecko/Binance)
+        let vault = state.collateral_vault.read().await;
+        let qug_price_usd = vault.qug_price_usd;
+        drop(vault);
+
+        // Look up bridge token oracle price via Quillon Bank
+        let bridge_symbol = if from_is_bridge { &from_upper } else { &to_upper };
+        let bridge_asset = match bridge_symbol.as_str() {
+            "WBTC" => q_quillon_bank::AssetType::BTC,
+            "WZEC" => q_quillon_bank::AssetType::ZEC,
+            "WETH" => q_quillon_bank::AssetType::ETH,
+            "WIRON" => q_quillon_bank::AssetType::IRON,
+            _ => {
+                return Ok(Json(ApiResponse::error(format!(
+                    "Unknown bridge token: {}", bridge_symbol
+                ))));
+            }
+        };
+        let quillon_bank = state.quillon_bank.read().await;
+        let bridge_price_usd = quillon_bank.oracle_integration.get_price_f64(&bridge_asset).await;
+        drop(quillon_bank);
+
+        if bridge_price_usd <= 0.0 || qug_price_usd <= 0.0 {
+            return Ok(Json(ApiResponse::error(format!(
+                "Oracle price unavailable for {} <-> {}. Bridge: ${:.2}, QUG: ${:.2}. Try again shortly.",
+                request.from_token, request.to_token, bridge_price_usd, qug_price_usd
+            ))));
+        }
+
+        // Apply 0.3% fee
+        let fee = 3u128;
+        let amount_in_with_fee = request.amount_in
+            .checked_mul(1000 - fee)
+            .and_then(|v| v.checked_div(1000))
+            .unwrap_or(0);
+
+        let calculated_out = if from_is_native && to_is_bridge {
+            // QUG → wBTC/wZEC/wETH/wIRON: convert QUG to USD, then USD to bridge token
+            let qug_amount = amount_in_with_fee as f64 / 1e24;
+            let usd_value = qug_amount * qug_price_usd;
+            let bridge_amount = usd_value / bridge_price_usd;
+            (bridge_amount * 1e24) as u128
+        } else {
+            // wBTC/wZEC/wETH/wIRON → QUG: convert bridge to USD, then USD to QUG
+            let bridge_amount = amount_in_with_fee as f64 / 1e24;
+            let usd_value = bridge_amount * bridge_price_usd;
+            let qug_amount = usd_value / qug_price_usd;
+            (qug_amount * 1e24) as u128
+        };
+
+        info!(
+            "🌉 [BRIDGE SWAP v10.1.2] {} <-> {} | QUG=${:.2} {}=${:.2} | in={:.6} → out={:.6}",
+            request.from_token, request.to_token,
+            qug_price_usd, bridge_symbol, bridge_price_usd,
+            request.amount_in as f64 / 1e24, calculated_out as f64 / 1e24
+        );
+
+        (true, calculated_out)
     } else if pool_id.is_none() {
-        // No pool and not a QUG<->QUGUSD swap - return error
+        // No pool and not a QUG<->QUGUSD swap and not a bridge swap - return error
         return Ok(Json(ApiResponse::error(format!(
             "No liquidity pool found for {} -> {}. Please add liquidity first.",
             request.from_token, request.to_token
@@ -10287,17 +10365,22 @@ pub async fn execute_swap(
             let fee = 3u128; // 0.3% = 3/1000
 
             // Calculate amount after fee with overflow protection
-            let amount_in_with_fee = request
+            let amount_in_with_fee = match request
                 .amount_in
                 .checked_mul(1000 - fee)
                 .and_then(|v| v.checked_div(1000))
-                .ok_or_else(|| {
+            {
+                Some(v) => v,
+                None => {
                     warn!(
                         "Overflow in fee calculation for amount: {}",
                         request.amount_in
                     );
-                    StatusCode::BAD_REQUEST
-                })?;
+                    return Ok(Json(ApiResponse::error(
+                        "Swap amount too large — arithmetic overflow. Please reduce the amount.".to_string(),
+                    )));
+                }
+            };
 
             // v4.0.11: ALL pool reserves are stored in 24-decimal format internally.
             // The amount_in from the frontend may be in the token's native decimals
@@ -11084,26 +11167,45 @@ pub async fn execute_swap(
             //   create block transactions, so balance_consensus never processes them)
             //   → balance reverts on restart or 75s RocksDB sync overwrites it
             //
-            // v9.1.4 FIX: Use subtract_balance() which does atomic read-modify-write from
-            // RocksDB (reads CURRENT value, subtracts delta, writes back). This is safe
-            // because balance_consensus does NOT process DEX swap transactions — there is
-            // no double-deduction risk. The old v3.6.9 bug was caused by set_balance()
-            // (absolute write) racing with add_balance() (incremental write), NOT by
-            // balance_consensus processing swap TXs.
+            // v10.1.2 FIX: Read balance from RocksDB (source of truth) FIRST, then
+            // persist the deduction, then update in-memory to match.
+            //
+            // Bug: in-memory wallet_balances can lag behind RocksDB (e.g. after a batch
+            // sync that updates RocksDB but not the hashmap, or during startup when the
+            // hashmap is seeded from a stale snapshot). If in-memory has HALF the real
+            // balance, the deduction zeroes it out while RocksDB still has the other half.
+            // The 15s sync then corrects in-memory to the RocksDB value (which was also
+            // deducted), but the user sees zero for up to 15s — and the amounts diverge.
+            //
+            // Fix: subtract_balance reads RocksDB atomically and returns the new value.
+            // We use that new value to set in-memory, guaranteeing consistency.
             drop(token_balances);
-            let mut wallet_balances = state.wallet_balances.write().await;
-            let old_qug_balance = wallet_balances.get(&wallet_addr).copied().unwrap_or(0);
-            let new_qug_balance = old_qug_balance.saturating_sub(request.amount_in as u128);
-            wallet_balances.insert(wallet_addr, new_qug_balance);
-            info!("💸 [SWAP v9.1.4] Deducted {} QUG from user (was: {}, now: {})",
-                request.amount_in as f64 / 1e24, old_qug_balance as f64 / 1e24, new_qug_balance as f64 / 1e24);
-            drop(wallet_balances);
-
-            // Persist QUG debit to RocksDB via subtract_balance (atomic read-modify-write)
             let wallet_hex = hex::encode(wallet_addr);
-            if let Err(e) = state.storage_engine.subtract_balance(&wallet_hex, request.amount_in as u128).await {
-                warn!("⚠️ [SWAP v9.1.4] Failed to persist QUG debit: {} — in-memory still updated", e);
-            }
+
+            // Step 1: Persist to RocksDB first (atomic read-modify-write, source of truth)
+            let rocks_new_balance = match state.storage_engine.subtract_balance(&wallet_hex, request.amount_in as u128).await {
+                Ok(()) => {
+                    // Read back the new balance from RocksDB to get the exact value
+                    state.storage_engine.get_balance(&wallet_hex).await.unwrap_or(0)
+                }
+                Err(e) => {
+                    warn!("⚠️ [SWAP v10.1.2] RocksDB subtract_balance failed: {} — swap rejected", e);
+                    return Ok(Json(ApiResponse::error(format!(
+                        "Insufficient QUG balance for swap: {}", e
+                    ))));
+                }
+            };
+
+            // Step 2: Update in-memory to match RocksDB (not the other way around)
+            let mut wallet_balances = state.wallet_balances.write().await;
+            let old_mem_balance = wallet_balances.get(&wallet_addr).copied().unwrap_or(0);
+            wallet_balances.insert(wallet_addr, rocks_new_balance);
+            info!("💸 [SWAP v10.1.2] Deducted {:.8} QUG (RocksDB: {:.8} → {:.8}, mem was: {:.8})",
+                request.amount_in as f64 / 1e24,
+                (rocks_new_balance as f64 / 1e24) + (request.amount_in as f64 / 1e24),
+                rocks_new_balance as f64 / 1e24,
+                old_mem_balance as f64 / 1e24);
+            drop(wallet_balances);
 
             // v9.3.3: Record cumulative DEX debit counter for rebuild-safe accounting.
             // This counter survives balance rebuilds and is re-applied after any migration

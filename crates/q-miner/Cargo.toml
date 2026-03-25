@@ -15,6 +15,7 @@ q-network = { path = "../q-network", optional = true }
 q-storage = { path = "../q-storage", optional = true }
 # q-bitcoin-bridge = { path = "../q-bitcoin-bridge" } # DEACTIVATED
 q-quantum-rng = { path = "../q-quantum-rng" }
+q-mining = { path = "../q-mining", optional = true, default-features = false }
 
 # Core Rust ecosystem  
 tokio = { workspace = true, features = ["full", "tracing"] }
@@ -161,7 +162,7 @@ vendored-openssl = []  # No longer needed — using rustls (v9.0.2)
 # Mining backends
 cpu-mining = []
 cuda-mining = ["cudarc", "half"]
-opencl-mining = ["opencl3"]
+opencl-mining = ["opencl3", "q-mining/gpu-mining"]
 vulkan-mining = ["vulkano", "vulkano-shaders"]
 
 # User interfaces

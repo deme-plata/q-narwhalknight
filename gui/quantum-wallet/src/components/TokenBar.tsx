@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, memo, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { TrendingUp, TrendingDown, Zap, ChevronLeft, ChevronRight, Flame } from 'lucide-react';
+import TokenIcon from './TokenIcon';
 import { qnkAPI } from '../services/api';
 import NitroSuccessModal from './NitroSuccessModal';
 
@@ -176,7 +177,7 @@ const TokenBar = memo(function TokenBar({ onTokenClick }: TokenBarProps) {
             price: qugPrice,
             change24h: qugChange,
             volume24h: 1850000,
-            icon: '💎',
+            icon: 'qug-logo',
             isNitroBoost: true, // QUG always has Nitro Boost
           },
           {
@@ -187,7 +188,7 @@ const TokenBar = memo(function TokenBar({ onTokenClick }: TokenBarProps) {
             price: qugusdPrice,
             change24h: qugusdChange,
             volume24h: 950000,
-            icon: '💵',
+            icon: 'qugusd-logo',
             isNitroBoost: true, // Stablecoin has Nitro Boost
           },
         ];
@@ -619,7 +620,7 @@ const TokenBar = memo(function TokenBar({ onTokenClick }: TokenBarProps) {
                   }}
                 >
                   {/* Token Icon */}
-                  <div className="text-2xl">{token.icon}</div>
+                  <TokenIcon symbol={token.symbol} icon={token.icon} size={28} />
 
                   {/* Token Info */}
                   <div className="flex flex-col items-start min-w-[120px]">

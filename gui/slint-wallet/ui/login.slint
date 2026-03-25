@@ -1,4 +1,4 @@
-import { Theme, QButton, QInput, Card } from "theme.slint";
+import { Theme, QButton, QInput, Card, Icon } from "theme.slint";
 
 export component LoginScreen inherits Rectangle {
     in-out property <string> mnemonic-text: "";
@@ -23,17 +23,51 @@ export component LoginScreen inherits Rectangle {
             spacing: Theme.spacing-lg;
 
             // Logo / Title
+            HorizontalLayout {
+                alignment: center;
+
+                Rectangle {
+                    width: 72px;
+                    height: 72px;
+                    border-radius: 36px;
+                    background: Theme.accent-cyan.with-alpha(0.12);
+                    drop-shadow-blur: 20px;
+                    drop-shadow-color: Theme.accent-cyan.with-alpha(0.2);
+
+                    // Inner glow ring
+                    Rectangle {
+                        x: 4px;
+                        y: 4px;
+                        width: 64px;
+                        height: 64px;
+                        border-radius: 32px;
+                        border-width: 1px;
+                        border-color: Theme.accent-cyan.with-alpha(0.2);
+                    }
+
+                    HorizontalLayout {
+                        alignment: center;
+                        Icon {
+                            source: @image-url("icons/shield-check.svg");
+                            icon-color: Theme.accent-cyan;
+                            width: 36px;
+                            height: 36px;
+                        }
+                    }
+                }
+            }
+
             Text {
-                text: "Q-NarwhalKnight";
-                color: Theme.accent-cyan;
-                font-size: Theme.font-3xl;
+                text: "NarwhalKnight";
+                color: Theme.text-primary;
+                font-size: Theme.font-2xl;
                 font-weight: 700;
                 horizontal-alignment: center;
             }
             Text {
-                text: "Native Wallet";
+                text: "Quantum-Secure Wallet";
                 color: Theme.text-secondary;
-                font-size: Theme.font-lg;
+                font-size: Theme.font-md;
                 horizontal-alignment: center;
             }
 
@@ -136,6 +170,8 @@ export component LoginScreen inherits Rectangle {
                                     height: 10px;
                                     border-radius: 5px;
                                     background: root.oauth-server-running ? Theme.accent-green : Theme.accent-red;
+                                    drop-shadow-blur: root.oauth-server-running ? 4px : 0px;
+                                    drop-shadow-color: Theme.accent-green.with-alpha(0.3);
                                 }
                             }
 

@@ -283,7 +283,16 @@ fn draw_balance_view(f: &mut Frame, area: Rect, app: &MinerTuiApp, wallet_addr: 
             Line::from(""),
             Line::from(Span::styled(
                 format!("  {}", status),
-                Style::default().fg(Color::Green),
+                Style::default().fg(if app.wallet_send_disabled { Color::Yellow } else { Color::Green }),
+            )),
+        ]
+    } else if app.wallet_send_disabled {
+        // v10.1.2: Send disabled when using community/master wallet
+        vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "  Send disabled — community pool wallet",
+                Style::default().fg(Color::DarkGray),
             )),
         ]
     } else {

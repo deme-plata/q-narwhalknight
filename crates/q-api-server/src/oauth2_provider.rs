@@ -820,7 +820,19 @@ pub async fn authorize(
     };
 
     // Validate redirect URI
-    if !client.redirect_uris.contains(&params.redirect_uri) {
+    // For PKCE public clients (no secret), allow scheme-prefix matching
+    // since mobile dev environments generate dynamic redirect URIs.
+    // PKCE already prevents authorization code interception.
+    let redirect_valid = if client.client_secret.is_empty() && params.code_challenge.is_some() {
+        // PKCE client: allow if redirect starts with any registered scheme prefix
+        client.redirect_uris.iter().any(|uri| {
+            let scheme = uri.split("://").next().unwrap_or("");
+            params.redirect_uri.starts_with(&format!("{}://", scheme))
+        }) || client.redirect_uris.contains(&params.redirect_uri)
+    } else {
+        client.redirect_uris.contains(&params.redirect_uri)
+    };
+    if !redirect_valid {
         error!("Invalid redirect URI: {}", params.redirect_uri);
         return Err(StatusCode::BAD_REQUEST);
     }

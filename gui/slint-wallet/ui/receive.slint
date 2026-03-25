@@ -1,4 +1,4 @@
-import { Theme, Card, QButton } from "theme.slint";
+import { Theme, Card, QButton, Icon } from "theme.slint";
 
 export component ReceiveScreen inherits Rectangle {
     in property <image> qr-code-image;
@@ -7,6 +7,7 @@ export component ReceiveScreen inherits Rectangle {
 
     callback copy-address();
     callback go-back();
+    callback open-pos();
 
     background: Theme.bg-primary;
 
@@ -28,12 +29,21 @@ export component ReceiveScreen inherits Rectangle {
                     clicked => { root.go-back(); }
                 }
 
-                Text {
-                    text: "< Back";
-                    color: Theme.accent-blue;
-                    font-size: Theme.font-sm;
-                    vertical-alignment: center;
-                    horizontal-alignment: center;
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 3px;
+                    Icon {
+                        source: @image-url("icons/arrow-left.svg");
+                        icon-color: Theme.accent-blue;
+                        width: 14px;
+                        height: 14px;
+                    }
+                    Text {
+                        text: "Back";
+                        color: Theme.accent-blue;
+                        font-size: Theme.font-sm;
+                        vertical-alignment: center;
+                    }
                 }
             }
 
@@ -74,6 +84,8 @@ export component ReceiveScreen inherits Rectangle {
                         height: 248px;
                         border-radius: Theme.radius-md;
                         background: white;
+                        drop-shadow-blur: 8px;
+                        drop-shadow-color: #000000.with-alpha(0.2);
 
                         Image {
                             source: root.qr-code-image;
@@ -90,6 +102,50 @@ export component ReceiveScreen inherits Rectangle {
                     font-size: Theme.font-lg;
                     font-weight: 600;
                     horizontal-alignment: center;
+                }
+            }
+        }
+
+        // PoS Button — gradient cyan-to-blue
+        Rectangle {
+            height: 56px;
+            border-radius: Theme.radius-md;
+            background: pos-touch.pressed
+                ? @linear-gradient(90deg, #0891b2, #2563eb)
+                : @linear-gradient(90deg, #06b6d4, #3b82f6);
+            drop-shadow-blur: pos-touch.pressed ? 2px : 12px;
+            drop-shadow-offset-y: pos-touch.pressed ? 0px : 3px;
+            drop-shadow-color: Theme.accent-cyan.with-alpha(0.3);
+            animate drop-shadow-blur, drop-shadow-offset-y { duration: 100ms; }
+
+            pos-touch := TouchArea {
+                clicked => { root.open-pos(); }
+            }
+
+            HorizontalLayout {
+                alignment: center;
+                spacing: Theme.spacing-sm;
+
+                Icon {
+                    source: @image-url("icons/qr-code.svg");
+                    icon-color: white;
+                    width: Theme.icon-lg;
+                    height: Theme.icon-lg;
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    Text {
+                        text: "Request Payment";
+                        color: white;
+                        font-size: Theme.font-md;
+                        font-weight: 700;
+                    }
+                    Text {
+                        text: "Point of Sale Mode";
+                        color: white.with-alpha(0.7);
+                        font-size: Theme.font-xs;
+                    }
                 }
             }
         }
@@ -127,39 +183,6 @@ export component ReceiveScreen inherits Rectangle {
                 QButton {
                     label: "Copy Address";
                     clicked => { root.copy-address(); }
-                }
-            }
-        }
-
-        // Instructions
-        Card {
-            VerticalLayout {
-                padding: Theme.spacing-md;
-                spacing: Theme.spacing-xs;
-
-                Text {
-                    text: "How to receive QUG";
-                    color: Theme.text-primary;
-                    font-size: Theme.font-md;
-                    font-weight: 600;
-                }
-                Text {
-                    text: "1. Share your QR code or wallet address";
-                    color: Theme.text-secondary;
-                    font-size: Theme.font-sm;
-                    wrap: word-wrap;
-                }
-                Text {
-                    text: "2. The sender scans or pastes your address";
-                    color: Theme.text-secondary;
-                    font-size: Theme.font-sm;
-                    wrap: word-wrap;
-                }
-                Text {
-                    text: "3. Funds appear after network confirmation";
-                    color: Theme.text-secondary;
-                    font-size: Theme.font-sm;
-                    wrap: word-wrap;
                 }
             }
         }

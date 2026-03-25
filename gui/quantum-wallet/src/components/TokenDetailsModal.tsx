@@ -2,6 +2,7 @@ import { motion } from 'framer-motion';
 import { X, TrendingUp, TrendingDown, ExternalLink, Info, Droplet, Zap, Shield, Coins, Users, Activity, ArrowUpDown, ArrowUp, ArrowDown, Filter, Twitter, MessageCircle, Globe, Github, FileText, Lock, Unlock, Clock, Gift, ChevronDown, AlertCircle, CheckCircle } from 'lucide-react';
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
+import TokenIcon from './TokenIcon';
 import { qnkAPI, getQCreditStatus, getQCreditPosition, getQCreditTiers, lockQCredit, unlockQCredit, claimQCreditYield } from '../services/api';
 import type { QCreditStatus, QCreditPosition, QCreditPositionResponse, QCreditTier } from '../services/api';
 
@@ -789,26 +790,8 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
           <div className="relative z-10 p-6 border-b border-white/10">
             <div className="flex items-start justify-between">
               <div className="flex items-center gap-4">
-                <div className="w-16 h-16 bg-gradient-to-br from-quantum-cyan to-quantum-purple rounded-2xl flex items-center justify-center text-3xl shadow-lg">
-                  {(token.icon === 'qug-logo' || token.icon === 'qugusd-logo' || token.icon === 'usd-logo') ? (
-                    <div className="relative w-12 h-12">
-                      <div className="absolute inset-0 rounded-full" style={{
-                        background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 25%, #FFA500 50%, #FFD700 75%, #D4AF37 100%)',
-                        padding: '2px'
-                      }}>
-                        <div className="w-full h-full bg-gradient-to-b from-slate-900 via-blue-950 to-slate-900 rounded-full flex items-center justify-center p-1">
-                          <img
-                            src="/quillon-logo.png"
-                            alt="Quillon"
-                            className="w-full h-full object-contain"
-                            style={{ filter: 'invert(1)' }}
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  ) : (
-                    token.icon
-                  )}
+                <div className="w-16 h-16 bg-gradient-to-br from-quantum-cyan to-quantum-purple rounded-2xl flex items-center justify-center shadow-lg">
+                  <TokenIcon symbol={token.symbol} icon={token.icon} logoUrl={(token as any).logoUrl} size={48} />
                 </div>
                 <div>
                   <h2 className="text-3xl font-black text-white">{token.name}</h2>

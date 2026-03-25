@@ -151,6 +151,18 @@ impl ApiClient {
         wrapper.data.ok_or_else(|| anyhow!("No data in response"))
     }
 
+    /// GET request without auth, returns raw JSON Value (for endpoints with non-standard wrappers).
+    pub async fn get_public_raw(&self, url: &str) -> Result<serde_json::Value> {
+        let resp = self.client.get(url).send().await
+            .map_err(|e| anyhow!("Request failed: {}", e))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("HTTP {}: {}", status, body));
+        }
+        resp.json().await.map_err(|e| anyhow!("JSON parse error: {}", e))
+    }
+
     /// POST request with auth and JSON body, unwraps {"data":...}.
     async fn post_auth<T: serde::de::DeserializeOwned, B: serde::Serialize>(
         &self,
@@ -177,6 +189,49 @@ impl ApiClient {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             return Err(anyhow!("HTTP {}: {}", status, body));
+        }
+
+        let wrapper: ApiWrapper<T> = resp
+            .json()
+            .await
+            .map_err(|e| anyhow!("JSON parse error: {}", e))?;
+
+        if let Some(err) = wrapper.error.filter(|e| !e.is_empty()) {
+            return Err(anyhow!("API error: {}", err));
+        }
+
+        wrapper.data.ok_or_else(|| anyhow!("No data in response"))
+    }
+
+    /// Public POST with auth, for generic JSON endpoints (DEX, etc).
+    /// Takes a full URL (not a relative path) and returns the unwrapped data.
+    pub async fn post_json<T: serde::de::DeserializeOwned>(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+    ) -> Result<T> {
+        let req = self.client.post(url);
+        let req = match &self.auth {
+            AuthMode::Wallet(wallet) => {
+                // Extract path from URL for auth header
+                let path = url.strip_prefix(&self.base_url).unwrap_or(url);
+                req.header("X-Wallet-Auth", wallet.auth_header(path))
+            }
+            AuthMode::Bearer { token, .. } => {
+                req.header("Authorization", format!("Bearer {}", token))
+            }
+        };
+
+        let resp = req
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| anyhow!("Request failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body_text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("HTTP {}: {}", status, body_text));
         }
 
         let wrapper: ApiWrapper<T> = resp
@@ -242,6 +297,12 @@ impl ApiClient {
         }
         println!("[Tokens] Parsed {} tokens with non-zero balance", result.len());
         Ok(result)
+    }
+
+    /// Fetch all supported tokens from the public DEX endpoint (no auth needed).
+    /// Returns the full token list: QUG, QUGUSD, bridge tokens (wBTC, wETH, wZEC, wIRON), + custom deployed.
+    pub async fn get_supported_tokens(&self) -> Result<Vec<crate::models::SupportedToken>> {
+        self.get_public::<Vec<crate::models::SupportedToken>>("/api/v1/dex/tokens").await
     }
 
     /// Send a transaction via the /transactions/send endpoint.

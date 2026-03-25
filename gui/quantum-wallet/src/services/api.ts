@@ -2777,6 +2777,63 @@ class QNarwhalKnightAPI {
     });
   }
 
+  // ═══ WETH ↔ QUG MetaMask Bridge (v1.0.3) ═══
+
+  async getBridgeDepositAddress(): Promise<ApiResponse<{
+    bridge_deposit_address: string;
+    weth_contract_address: string;
+    chain_id: number;
+    min_deposit_wei: string;
+    max_deposit_wei: string;
+    required_confirmations: number;
+    required_attestations: number;
+  }>> {
+    return this.request<any>('/v1/ethereum/bridge/deposit-address');
+  }
+
+  async registerWethDeposit(params: {
+    tx_hash: string;
+    sender_address: string;
+    amount_wei: string;
+  }): Promise<ApiResponse<{
+    deposit_id: string;
+    status: string;
+    qug_estimate: string;
+    confirmations: number;
+    required_confirmations: number;
+  }>> {
+    return this.authenticatedRequest<any>('/v1/ethereum/bridge/deposit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+  }
+
+  async getDepositStatus(depositId: string): Promise<ApiResponse<{
+    deposit_id: string;
+    eth_tx_hash: string;
+    sender_eth_address: string;
+    amount_wei: string;
+    qug_amount: string;
+    confirmations: number;
+    required_confirmations: number;
+    attestations: number;
+    required_attestations: number;
+    status: string;
+    created_at: string;
+  }>> {
+    return this.authenticatedRequest<any>(`/v1/ethereum/bridge/deposit/${depositId}/status`);
+  }
+
+  async getBridgeRate(): Promise<ApiResponse<{
+    weth_to_qug_rate: number;
+    qug_to_weth_rate: number;
+    min_deposit_weth: number;
+    max_deposit_weth: number;
+  }>> {
+    return this.request<any>('/v1/ethereum/bridge/rate');
+  }
+
   // ═══ Cross-Chain Bridge Aggregate API (v7.2.5) ═══
 
   async getBridgeStatus(): Promise<ApiResponse<{

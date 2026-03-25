@@ -334,7 +334,9 @@ fn draw_hashrate_sparkline(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
         .collect();
 
     let current_khs = app.current_hashrate_khs();
-    let current_mhs = current_khs / 1000.0;
+    // v10.2.0: Combined CPU+GPU hashrate
+    let combined_khs = current_khs + app.gpu_hashrate_khs;
+    let combined_mhs = combined_khs / 1000.0;
     let peak_mhs = app.peak_hashrate_khs / 1000.0;
 
     // Total hashes computed
@@ -342,10 +344,12 @@ fn draw_hashrate_sparkline(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
         .map(|s| s.hash_counter.load(Ordering::Relaxed))
         .unwrap_or(0);
 
+    let mode_badge = if app.gpu_active { "[CPU+GPU]" } else { "" };
+
     let title = format!(
-        " {} {:.2} MH/s  Peak {:.2} MH/s  Total {} ",
+        " {} {:.2} MH/s {} Peak {:.2} MH/s  Total {} ",
         "\u{26A1}", // ⚡
-        current_mhs, peak_mhs,
+        combined_mhs, mode_badge, peak_mhs,
         format_hash_count(total_hashes),
     );
 
@@ -380,20 +384,29 @@ fn draw_compute_power_cards(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
 
     let current_khs = app.current_hashrate_khs();
 
-    // ── Card 1: SIMD Tier & Batch Size ──
-    let batch_str = format!("{}x batch", app.simd_batch_size);
+    // ── Card 1: SIMD Tier / Hybrid Mode ──
+    let (card1_title, card1_main, card1_sub, card1_color) = if app.gpu_active {
+        let gpu_khs = app.gpu_hashrate_khs;
+        let gpu_str = if gpu_khs >= 1000.0 { format!("{:.1} MH/s", gpu_khs / 1000.0) }
+            else if gpu_khs > 0.0 { format!("{:.1} kH/s", gpu_khs) }
+            else { "warming up".to_string() };
+        ("Hybrid", format!("CPU+GPU"), gpu_str, Color::Magenta)
+    } else {
+        let batch_str = format!("{}x batch", app.simd_batch_size);
+        ("SIMD", app.simd_tier.clone(), batch_str, Color::Cyan)
+    };
     let card1 = Paragraph::new(vec![
         Line::from(vec![
-            Span::styled(" \u{2301} ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)), // ⌁
-            Span::styled("SIMD", Style::default().fg(Color::Gray)),
+            Span::styled(" \u{2301} ", Style::default().fg(card1_color).add_modifier(Modifier::BOLD)),
+            Span::styled(card1_title, Style::default().fg(Color::Gray)),
         ]),
         Line::from(vec![
-            Span::styled(format!("  {}", app.simd_tier), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  {}", card1_main), Style::default().fg(card1_color).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(vec![
-            Span::styled(format!("  {}", batch_str), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("  {}", card1_sub), Style::default().fg(Color::DarkGray)),
         ]),
-    ]).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan)));
+    ]).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(card1_color)));
     f.render_widget(card1, cols[0]);
 
     // ── Card 2: Network Compute Power (from P2P announcements) ──

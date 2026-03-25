@@ -30,6 +30,26 @@ pub struct TokenBalanceDisplay {
     pub usd_value: f64,
 }
 
+/// Token info from the public /api/v1/dex/tokens endpoint.
+/// Lists ALL live tokens: QUG, QUGUSD, bridge tokens, custom deployed contracts.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SupportedToken {
+    #[serde(default)]
+    pub address: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub symbol: String,
+    #[serde(default)]
+    pub decimals: u8,
+    #[serde(default)]
+    pub total_supply: String,
+    #[serde(default)]
+    pub contract_type: String,
+    #[serde(default)]
+    pub verified: bool,
+}
+
 /// Mining challenge from server
 #[derive(Debug, Deserialize)]
 pub struct MiningChallenge {
@@ -101,6 +121,14 @@ pub struct TransactionRecord {
     pub block_height: u64,
     #[serde(default)]
     pub token_symbol: Option<String>,
+    #[serde(default)]
+    pub direction: Option<String>,
+    #[serde(default)]
+    pub token_in: Option<String>,
+    #[serde(default)]
+    pub token_out: Option<String>,
+    #[serde(default)]
+    pub amount_out: Option<String>,
 }
 
 /// Deserialize amount from either String or f64

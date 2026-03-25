@@ -44,29 +44,77 @@ export global Theme {
     out property <length> radius-sm: 6px;
     out property <length> radius-md: 10px;
     out property <length> radius-lg: 16px;
+
+    // Shadows
+    out property <length> shadow-sm-blur: 4px;
+    out property <length> shadow-md-blur: 8px;
+    out property <length> shadow-lg-blur: 16px;
+
+    // Icon sizes
+    out property <length> icon-sm: 16px;
+    out property <length> icon-md: 20px;
+    out property <length> icon-lg: 24px;
+
+    // PoS-specific colors
+    out property <color> pos-waiting: #f59e0b;
+    out property <color> pos-received: #10b981;
 }
 
-// Reusable styled button
+// Tinted SVG icon component
+export component Icon inherits Image {
+    in property <color> icon-color: Theme.text-primary;
+
+    width: Theme.icon-md;
+    height: Theme.icon-md;
+    colorize: root.icon-color;
+    image-fit: contain;
+}
+
+// Reusable styled button with press/hover states and shadow
 export component QButton inherits Rectangle {
     in property <string> label: "Button";
     in property <color> button-color: Theme.accent-blue;
     in property <bool> enabled: true;
+    in property <bool> loading: false;
+    in property <image> btn-icon;
+    in property <bool> has-icon: false;
+
     callback clicked;
 
     height: 44px;
     border-radius: Theme.radius-md;
-    background: enabled ? (touch.has-hover ? button-color.darker(15%) : button-color) : Theme.bg-hover;
-    animate background { duration: 150ms; }
+    background: !enabled ? Theme.bg-hover
+        : touch.pressed ? button-color.darker(25%)
+        : touch.has-hover ? button-color.darker(10%)
+        : button-color;
+
+    drop-shadow-blur: !enabled ? 0px
+        : touch.pressed ? 2px
+        : touch.has-hover ? 10px
+        : 6px;
+    drop-shadow-offset-y: touch.pressed ? 0px : 2px;
+    drop-shadow-color: enabled ? button-color.with-alpha(0.3) : transparent;
+
+    animate background, drop-shadow-blur, drop-shadow-offset-y { duration: 100ms; }
 
     touch := TouchArea {
-        enabled: root.enabled;
+        enabled: root.enabled && !root.loading;
         clicked => { root.clicked(); }
     }
 
     HorizontalLayout {
         alignment: center;
+        spacing: Theme.spacing-sm;
+
+        if root.has-icon : Icon {
+            source: root.btn-icon;
+            icon-color: root.enabled ? Theme.text-primary : Theme.text-muted;
+            width: Theme.icon-sm;
+            height: Theme.icon-sm;
+        }
+
         Text {
-            text: root.label;
+            text: root.loading ? "..." : root.label;
             color: root.enabled ? Theme.text-primary : Theme.text-muted;
             font-size: Theme.font-md;
             font-weight: 600;
@@ -75,12 +123,37 @@ export component QButton inherits Rectangle {
     }
 }
 
-// Card container
+// Card container with subtle shadow
 export component Card inherits Rectangle {
+    in property <bool> elevated: false;
+
     background: Theme.bg-card;
     border-radius: Theme.radius-md;
     border-width: 1px;
     border-color: Theme.border;
+    drop-shadow-blur: card-touch.has-hover && elevated ? Theme.shadow-md-blur : Theme.shadow-sm-blur;
+    drop-shadow-offset-y: card-touch.has-hover && elevated ? 4px : 1px;
+    drop-shadow-color: #000000.with-alpha(0.25);
+
+    animate drop-shadow-blur, drop-shadow-offset-y { duration: 200ms; }
+
+    card-touch := TouchArea {
+        // Pass-through — only used for hover detection on elevated cards
+        enabled: root.elevated;
+    }
+}
+
+// Gradient card for hero sections (balance card, PoS header)
+export component GradientCard inherits Rectangle {
+    in property <brush> card-gradient: @linear-gradient(135deg, #1a2744, #0f172a);
+
+    background: card-gradient;
+    border-radius: Theme.radius-lg;
+    border-width: 1px;
+    border-color: Theme.accent-blue.with-alpha(0.2);
+    drop-shadow-blur: Theme.shadow-lg-blur;
+    drop-shadow-offset-y: 4px;
+    drop-shadow-color: #000000.with-alpha(0.35);
 }
 
 // Text input
@@ -120,32 +193,55 @@ export component QInput inherits Rectangle {
     }
 }
 
-// Nav button for sidebar/bottom bar
+// Nav button for bottom bar with SVG icon + label + active indicator
 export component NavButton inherits Rectangle {
     in property <string> label;
+    in property <image> nav-icon;
     in property <bool> active: false;
     callback clicked;
 
-    height: 48px;
+    height: 52px;
     border-radius: Theme.radius-sm;
-    background: active ? Theme.accent-blue.with-alpha(0.15) : transparent;
+    background: active ? Theme.accent-blue.with-alpha(0.10) : (touch.has-hover ? Theme.bg-hover.with-alpha(0.5) : transparent);
     animate background { duration: 150ms; }
 
     touch := TouchArea {
         clicked => { root.clicked(); }
     }
 
-    HorizontalLayout {
+    VerticalLayout {
         alignment: center;
-        padding-left: 12px;
-        padding-right: 12px;
+        spacing: 2px;
+        padding-top: 4px;
+        padding-bottom: 2px;
+
+        HorizontalLayout {
+            alignment: center;
+            Icon {
+                source: root.nav-icon;
+                icon-color: root.active ? Theme.accent-blue : Theme.text-muted;
+                width: Theme.icon-md;
+                height: Theme.icon-md;
+            }
+        }
 
         Text {
             text: root.label;
             color: root.active ? Theme.accent-blue : Theme.text-secondary;
-            font-size: Theme.font-md;
+            font-size: Theme.font-xs;
             font-weight: root.active ? 600 : 400;
-            vertical-alignment: center;
+            horizontal-alignment: center;
+        }
+
+        // Active indicator dot
+        if root.active : HorizontalLayout {
+            alignment: center;
+            Rectangle {
+                width: 4px;
+                height: 4px;
+                border-radius: 2px;
+                background: Theme.accent-blue;
+            }
         }
     }
 }

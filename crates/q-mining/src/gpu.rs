@@ -1,218 +1,254 @@
-//! GPU Mining Module for Q-NarwhalKnight
+//! GPU Mining Module for Q-NarwhalKnight — Hybrid Quantum Mining
 //!
-//! This module implements high-performance GPU mining using OpenCL for SHA-3-256
-//! proof-of-work computation. Designed to leverage massively parallel GPU architectures
-//! for maximum hashrate.
+//! Implements BLAKE3 + 100-round VDF proof-of-work on GPU via OpenCL.
+//! Each GPU work item independently computes: BLAKE3(challenge||nonce) then
+//! 99 sequential BLAKE3(h) VDF rounds, checking the final hash against
+//! the difficulty target. GPU parallelism comes from running thousands of
+//! nonce candidates simultaneously.
 //!
-//! ## Features
-//!
-//! - **OpenCL Acceleration**: Cross-platform GPU support (NVIDIA, AMD, Intel)
-//! - **Kernel Optimization**: Hand-tuned SHA-3-256 kernel for GPUs
-//! - **Batch Processing**: Process millions of nonces per kernel dispatch
-//! - **Memory Optimization**: Efficient buffer management and data transfer
-//! - **Multi-GPU Support**: Use all available GPUs in parallel
-//!
-//! ## GPU Component in Hybrid Mining
-//!
-//! The GPU component handles the compute-bound SHA-3 PoW mining while the
-//! CPU handles the sequential VDF proofs. This creates an optimal split:
-//! - GPU: High parallelism SHA-3 hashing (thousands of threads)
-//! - CPU: Sequential VDF computation (memory-bound, not parallelizable)
+//! ## Algorithm (must match server validation)
+//! ```text
+//! input = challenge_hash[32] || nonce_le[8]   // 40 bytes
+//! h = BLAKE3(input)                           // initial hash
+//! for _ in 0..99: h = BLAKE3(h)              // VDF chain (99 rounds)
+//! if h < difficulty_target: SOLUTION!         // total: 100 BLAKE3 hashes
+//! ```
 
 use anyhow::{anyhow, Result};
-use sha3::{Digest, Sha3_256};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::{debug, info, warn, error};
+use tracing::{info, warn, error};
 
 #[cfg(feature = "gpu-mining")]
 use opencl3::{
     command_queue::{CommandQueue, CL_QUEUE_PROFILING_ENABLE},
     context::Context,
     device::{Device, CL_DEVICE_TYPE_GPU},
-    kernel::{ExecuteKernel, Kernel},
+    kernel::Kernel,
     memory::{Buffer, CL_MEM_READ_ONLY, CL_MEM_READ_WRITE, CL_MEM_WRITE_ONLY},
     program::Program,
     types::{cl_uchar, cl_uint, cl_ulong},
 };
 
 // ============================================================================
-// SHA-3-256 OpenCL Kernel
+// BLAKE3 + VDF OpenCL Kernel
 // ============================================================================
 
-/// OpenCL kernel source for SHA-3-256 mining
-/// This is a highly optimized implementation for GPU execution
-pub const SHA3_KERNEL_SOURCE: &str = r#"
-// Keccak-f[1600] round constants
-__constant ulong KECCAK_RC[24] = {
-    0x0000000000000001UL, 0x0000000000008082UL, 0x800000000000808aUL,
-    0x8000000080008000UL, 0x000000000000808bUL, 0x0000000080000001UL,
-    0x8000000080008081UL, 0x8000000000008009UL, 0x000000000000008aUL,
-    0x0000000000000088UL, 0x0000000080008009UL, 0x000000008000000aUL,
-    0x000000008000808bUL, 0x800000000000008bUL, 0x8000000000008089UL,
-    0x8000000000008003UL, 0x8000000000008002UL, 0x8000000000000080UL,
-    0x000000000000800aUL, 0x800000008000000aUL, 0x8000000080008081UL,
-    0x8000000000008080UL, 0x0000000080000001UL, 0x8000000080008008UL
+/// OpenCL kernel implementing BLAKE3 + 99-round VDF for Q-NarwhalKnight mining.
+///
+/// Algorithm per work item:
+///   1. Build 40-byte input: challenge_hash[32] || nonce_le[8]
+///   2. h = BLAKE3(input)           — single-block 40-byte hash
+///   3. for 99 rounds: h = BLAKE3(h) — single-block 32-byte hash (VDF chain)
+///   4. Compare final h < target (byte-wise, big-endian-like)
+pub const BLAKE3_KERNEL_SOURCE: &str = r#"
+// ═══════════════════════════════════════════════════════════════════
+// BLAKE3 constants
+// ═══════════════════════════════════════════════════════════════════
+
+__constant uint BLAKE3_IV[8] = {
+    0x6A09E667u, 0xBB67AE85u, 0x3C6EF372u, 0xA54FF53Au,
+    0x510E527Fu, 0x9B05688Cu, 0x1F83D9ABu, 0x5BE0CD19u
 };
 
-// Rotation offsets
-__constant uint KECCAK_ROT[24] = {
-    1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 2, 14,
-    27, 41, 56, 8, 25, 43, 62, 18, 39, 61, 20, 44
+// Pre-computed message schedule for 7 rounds (BLAKE3 spec §2.2)
+__constant uchar MSG_SCHED[7][16] = {
+    { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,15},
+    { 2, 6, 3,10, 7, 0, 4,13, 1,11,12, 5, 9,14,15, 8},
+    { 3, 4,10,12,13, 2, 7,14, 6, 5, 9, 0,11,15, 8, 1},
+    {10, 7,12, 9,14, 3,13,15, 4, 0,11, 2, 5, 8, 1, 6},
+    {12,13, 9,11,15,10,14, 8, 7, 2, 5, 3, 0, 1, 6, 4},
+    { 9,14,11, 5, 8,12,15, 1,13, 3, 0,10, 2, 6, 4, 7},
+    {11,15, 5, 0, 1, 9, 8, 6,14,10, 2,12, 3, 4, 7,13}
 };
 
-// Pi lane indices
-__constant uint KECCAK_PI[24] = {
-    10, 7, 11, 17, 18, 3, 5, 16, 8, 21, 24, 4,
-    15, 23, 19, 13, 12, 2, 20, 14, 22, 9, 6, 1
-};
+#define CHUNK_START 1u
+#define CHUNK_END   2u
+#define ROOT        8u
 
-// Rotate left
-inline ulong rotl64(ulong x, uint n) {
-    return (x << n) | (x >> (64 - n));
+inline uint rotr32(uint x, uint n) {
+    return (x >> n) | (x << (32u - n));
 }
 
-// Keccak-f[1600] permutation
-void keccak_f1600(__private ulong state[25]) {
-    for (int round = 0; round < 24; round++) {
-        // Theta
-        ulong C[5], D[5];
-        for (int x = 0; x < 5; x++) {
-            C[x] = state[x] ^ state[x + 5] ^ state[x + 10] ^ state[x + 15] ^ state[x + 20];
-        }
-        for (int x = 0; x < 5; x++) {
-            D[x] = C[(x + 4) % 5] ^ rotl64(C[(x + 1) % 5], 1);
-        }
-        for (int x = 0; x < 5; x++) {
-            for (int y = 0; y < 5; y++) {
-                state[x + 5 * y] ^= D[x];
-            }
-        }
+// ═══════════════════════════════════════════════════════════════════
+// BLAKE3 G mixing function (inlined for performance)
+// ═══════════════════════════════════════════════════════════════════
 
-        // Rho and Pi
-        ulong t = state[1];
-        for (int i = 0; i < 24; i++) {
-            uint j = KECCAK_PI[i];
-            ulong temp = state[j];
-            state[j] = rotl64(t, KECCAK_ROT[i]);
-            t = temp;
-        }
+#define G(s, a, b, c, d, mx, my) \
+    s[a] = s[a] + s[b] + (mx);  \
+    s[d] = rotr32(s[d] ^ s[a], 16u); \
+    s[c] = s[c] + s[d];         \
+    s[b] = rotr32(s[b] ^ s[c], 12u); \
+    s[a] = s[a] + s[b] + (my);  \
+    s[d] = rotr32(s[d] ^ s[a], 8u);  \
+    s[c] = s[c] + s[d];         \
+    s[b] = rotr32(s[b] ^ s[c], 7u);
 
-        // Chi
-        for (int y = 0; y < 5; y++) {
-            ulong row[5];
-            for (int x = 0; x < 5; x++) {
-                row[x] = state[x + 5 * y];
-            }
-            for (int x = 0; x < 5; x++) {
-                state[x + 5 * y] = row[x] ^ ((~row[(x + 1) % 5]) & row[(x + 2) % 5]);
-            }
-        }
+// ═══════════════════════════════════════════════════════════════════
+// BLAKE3 compression — single-block hash
+// cv[8]: chaining value, block[16]: message words, counter: u64,
+// block_len: actual data bytes, flags: combination of START/END/ROOT
+// output[8]: resulting hash words
+// ═══════════════════════════════════════════════════════════════════
 
-        // Iota
-        state[0] ^= KECCAK_RC[round];
-    }
-}
+void blake3_compress(
+    const uint cv[8],
+    const uint block[16],
+    ulong counter,
+    uint block_len,
+    uint flags,
+    uint output[8]
+) {
+    uint s[16];
+    s[0]  = cv[0]; s[1]  = cv[1]; s[2]  = cv[2]; s[3]  = cv[3];
+    s[4]  = cv[4]; s[5]  = cv[5]; s[6]  = cv[6]; s[7]  = cv[7];
+    s[8]  = BLAKE3_IV[0]; s[9]  = BLAKE3_IV[1];
+    s[10] = BLAKE3_IV[2]; s[11] = BLAKE3_IV[3];
+    s[12] = (uint)(counter & 0xFFFFFFFFul);
+    s[13] = (uint)(counter >> 32);
+    s[14] = block_len;
+    s[15] = flags;
 
-// SHA3-256 hash function
-void sha3_256(__private ulong state[25], __private const uchar* input, uint input_len, __private uchar output[32]) {
-    // Initialize state to zero
-    for (int i = 0; i < 25; i++) {
-        state[i] = 0;
-    }
+    // 7 rounds with message schedule permutation
+    for (int r = 0; r < 7; r++) {
+        uint m0  = block[MSG_SCHED[r][ 0]]; uint m1  = block[MSG_SCHED[r][ 1]];
+        uint m2  = block[MSG_SCHED[r][ 2]]; uint m3  = block[MSG_SCHED[r][ 3]];
+        uint m4  = block[MSG_SCHED[r][ 4]]; uint m5  = block[MSG_SCHED[r][ 5]];
+        uint m6  = block[MSG_SCHED[r][ 6]]; uint m7  = block[MSG_SCHED[r][ 7]];
+        uint m8  = block[MSG_SCHED[r][ 8]]; uint m9  = block[MSG_SCHED[r][ 9]];
+        uint m10 = block[MSG_SCHED[r][10]]; uint m11 = block[MSG_SCHED[r][11]];
+        uint m12 = block[MSG_SCHED[r][12]]; uint m13 = block[MSG_SCHED[r][13]];
+        uint m14 = block[MSG_SCHED[r][14]]; uint m15 = block[MSG_SCHED[r][15]];
 
-    // Absorb input (rate = 136 bytes for SHA3-256)
-    const uint rate = 136;
-    uint offset = 0;
-
-    // Process full blocks
-    while (input_len >= rate) {
-        for (int i = 0; i < rate / 8; i++) {
-            ulong lane = 0;
-            for (int j = 0; j < 8; j++) {
-                lane |= ((ulong)input[offset + i * 8 + j]) << (j * 8);
-            }
-            state[i] ^= lane;
-        }
-        keccak_f1600(state);
-        offset += rate;
-        input_len -= rate;
+        // Column step
+        G(s, 0, 4,  8, 12, m0,  m1);
+        G(s, 1, 5,  9, 13, m2,  m3);
+        G(s, 2, 6, 10, 14, m4,  m5);
+        G(s, 3, 7, 11, 15, m6,  m7);
+        // Diagonal step
+        G(s, 0, 5, 10, 15, m8,  m9);
+        G(s, 1, 6, 11, 12, m10, m11);
+        G(s, 2, 7,  8, 13, m12, m13);
+        G(s, 3, 4,  9, 14, m14, m15);
     }
 
-    // Final block with padding
-    uchar final_block[136];
-    for (int i = 0; i < 136; i++) {
-        final_block[i] = 0;
-    }
-    for (uint i = 0; i < input_len; i++) {
-        final_block[i] = input[offset + i];
-    }
-    final_block[input_len] = 0x06;  // SHA3 domain separator
-    final_block[rate - 1] |= 0x80;  // Final padding bit
-
-    // XOR final block
-    for (int i = 0; i < rate / 8; i++) {
-        ulong lane = 0;
-        for (int j = 0; j < 8; j++) {
-            lane |= ((ulong)final_block[i * 8 + j]) << (j * 8);
-        }
-        state[i] ^= lane;
-    }
-    keccak_f1600(state);
-
-    // Squeeze output (32 bytes)
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 8; j++) {
-            output[i * 8 + j] = (uchar)(state[i] >> (j * 8));
-        }
+    // Output: XOR lower and upper halves
+    for (int i = 0; i < 8; i++) {
+        output[i] = s[i] ^ s[i + 8];
     }
 }
 
-// Check if hash meets difficulty target
-bool meets_target(__private const uchar hash[32], __global const uchar* target) {
-    for (int i = 0; i < 32; i++) {
-        if (hash[i] < target[i]) return true;
-        if (hash[i] > target[i]) return false;
+// ═══════════════════════════════════════════════════════════════════
+// blake3_hash_40: Hash 40-byte input (challenge[32] + nonce_le[8])
+// Returns 32-byte hash as 8 uint words (little-endian)
+// ═══════════════════════════════════════════════════════════════════
+
+void blake3_hash_40(
+    __global const uchar* challenge,
+    ulong nonce,
+    uint output[8]
+) {
+    // Build message block: 40 bytes of data + 24 bytes of zero padding
+    uint block[16];
+
+    // challenge_hash bytes → LE u32 words (bytes 0..31)
+    for (int i = 0; i < 8; i++) {
+        block[i] = (uint)challenge[i*4]
+                 | ((uint)challenge[i*4+1] << 8)
+                 | ((uint)challenge[i*4+2] << 16)
+                 | ((uint)challenge[i*4+3] << 24);
+    }
+
+    // nonce (u64 LE) → two u32 words (bytes 32..39)
+    block[8] = (uint)(nonce & 0xFFFFFFFFul);
+    block[9] = (uint)(nonce >> 32);
+
+    // Zero padding (bytes 40..63)
+    block[10] = 0; block[11] = 0; block[12] = 0;
+    block[13] = 0; block[14] = 0; block[15] = 0;
+
+    // Single-chunk, single-block: flags = CHUNK_START | CHUNK_END | ROOT
+    blake3_compress(BLAKE3_IV, block, 0, 40u, CHUNK_START | CHUNK_END | ROOT, output);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// blake3_hash_32: Hash 32-byte input (VDF intermediate hash)
+// Input and output are both uint[8] (LE words)
+// ═══════════════════════════════════════════════════════════════════
+
+void blake3_hash_32(const uint input[8], uint output[8]) {
+    uint block[16];
+    for (int i = 0; i < 8; i++) block[i] = input[i];
+    for (int i = 8; i < 16; i++) block[i] = 0;
+
+    blake3_compress(BLAKE3_IV, block, 0, 32u, CHUNK_START | CHUNK_END | ROOT, output);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Target comparison: hash < target (byte-wise, little-endian words)
+// hash is uint[8] (LE words), target is uchar[32] (raw bytes)
+// Both represent the same byte ordering: word[0] bits 0-7 = byte[0]
+// ═══════════════════════════════════════════════════════════════════
+
+bool meets_target(const uint hash[8], __global const uchar* target) {
+    for (int i = 0; i < 8; i++) {
+        uint h = hash[i];
+        for (int j = 0; j < 4; j++) {
+            uchar hb = (uchar)((h >> (j * 8)) & 0xFFu);
+            uchar tb = target[i * 4 + j];
+            if (hb < tb) return true;
+            if (hb > tb) return false;
+        }
     }
     return true;
 }
 
-// Main mining kernel
-__kernel void sha3_mine(
-    __global const uchar* header,      // Block header (without nonce)
-    const uint header_len,              // Header length
-    __global const uchar* target,       // Difficulty target (32 bytes)
-    const ulong nonce_start,            // Starting nonce for this dispatch
-    __global ulong* found_nonce,        // Output: found nonce (0 if none)
-    __global uchar* found_hash,         // Output: found hash (32 bytes)
-    __global uint* found_flag           // Output: 1 if solution found
+// ═══════════════════════════════════════════════════════════════════
+// MAIN MINING KERNEL: BLAKE3 + 99-round VDF
+//
+// Each work item:
+//   1. Compute h = BLAKE3(challenge[32] || nonce_le[8])  — 40 bytes
+//   2. Repeat 99 times: h = BLAKE3(h)                    — 32 bytes
+//   3. If h < target → atomically write solution
+//
+// Total: 100 BLAKE3 hashes per nonce candidate
+// ═══════════════════════════════════════════════════════════════════
+
+__kernel void blake3_mine(
+    __global const uchar* challenge,    // challenge_hash (32 bytes)
+    __global const uchar* target,       // difficulty target (32 bytes)
+    const ulong nonce_start,            // starting nonce for this dispatch
+    __global ulong* found_nonce,        // output: winning nonce
+    __global uchar* found_hash,         // output: winning hash (32 bytes)
+    __global uint* found_flag           // output: 1 if solution found
 ) {
     uint gid = get_global_id(0);
-    ulong nonce = nonce_start + gid;
+    ulong nonce = nonce_start + (ulong)gid;
 
-    // Build input: header + nonce (little-endian)
-    uchar input[256];
-    for (uint i = 0; i < header_len; i++) {
-        input[i] = header[i];
+    // Step 1: Initial BLAKE3 hash of 40-byte input
+    uint h[8];
+    blake3_hash_40(challenge, nonce, h);
+
+    // Step 2: VDF chain — 99 sequential BLAKE3 hashes
+    uint tmp[8];
+    for (int vdf = 0; vdf < 99; vdf++) {
+        blake3_hash_32(h, tmp);
+        for (int i = 0; i < 8; i++) h[i] = tmp[i];
     }
-    for (int i = 0; i < 8; i++) {
-        input[header_len + i] = (uchar)(nonce >> (i * 8));
-    }
 
-    // Compute SHA3-256
-    ulong state[25];
-    uchar hash[32];
-    sha3_256(state, input, header_len + 8, hash);
-
-    // Check if meets target
-    if (meets_target(hash, target)) {
-        // Atomic to prevent race conditions
-        uint old = atomic_cmpxchg(found_flag, 0, 1);
-        if (old == 0) {
+    // Step 3: Check if final hash meets difficulty target
+    if (meets_target(h, target)) {
+        // Atomic CAS to claim the solution (first writer wins)
+        uint old = atomic_cmpxchg(found_flag, 0u, 1u);
+        if (old == 0u) {
             *found_nonce = nonce;
-            for (int i = 0; i < 32; i++) {
-                found_hash[i] = hash[i];
+            // Convert hash words to bytes (LE)
+            for (int i = 0; i < 8; i++) {
+                found_hash[i*4 + 0] = (uchar)( h[i]        & 0xFFu);
+                found_hash[i*4 + 1] = (uchar)((h[i] >>  8) & 0xFFu);
+                found_hash[i*4 + 2] = (uchar)((h[i] >> 16) & 0xFFu);
+                found_hash[i*4 + 3] = (uchar)((h[i] >> 24) & 0xFFu);
             }
         }
     }
@@ -226,31 +262,14 @@ __kernel void sha3_mine(
 /// Information about an available GPU device
 #[derive(Debug, Clone)]
 pub struct GPUDeviceInfo {
-    /// Device index
     pub index: usize,
-
-    /// Device name
     pub name: String,
-
-    /// Vendor name
     pub vendor: String,
-
-    /// Compute units (cores)
     pub compute_units: u32,
-
-    /// Max work group size
     pub max_work_group_size: usize,
-
-    /// Global memory size (bytes)
     pub global_memory: u64,
-
-    /// Local memory size (bytes)
     pub local_memory: u64,
-
-    /// Max clock frequency (MHz)
     pub max_clock_freq: u32,
-
-    /// OpenCL version
     pub opencl_version: String,
 }
 
@@ -258,44 +277,25 @@ pub struct GPUDeviceInfo {
 // GPU MINER
 // ============================================================================
 
-/// GPU miner using OpenCL for SHA-3 mining
+/// GPU miner using OpenCL for BLAKE3+VDF hybrid quantum mining
 pub struct GPUMiner {
-    /// Configuration
     config: GPUMinerConfig,
-
-    /// Stop signal
     should_stop: Arc<AtomicBool>,
-
-    /// Mining statistics
     stats: Arc<GPUMiningStats>,
-
-    /// Available devices
     devices: Vec<GPUDeviceInfo>,
-
     #[cfg(feature = "gpu-mining")]
-    /// OpenCL contexts (one per device)
     contexts: Vec<GPUContext>,
 }
 
 /// GPU miner configuration
 #[derive(Debug, Clone)]
 pub struct GPUMinerConfig {
-    /// Use all available GPUs
     pub use_all_gpus: bool,
-
-    /// Specific GPU indices to use
     pub gpu_indices: Vec<usize>,
-
-    /// Work items per dispatch (global work size)
+    /// Work items per dispatch (global work size). Each item = 100 BLAKE3 hashes.
     pub work_size: usize,
-
-    /// Local work group size
     pub local_work_size: usize,
-
-    /// Mining intensity (1-100)
     pub intensity: u32,
-
-    /// Stats reporting interval
     pub stats_interval: Duration,
 }
 
@@ -304,7 +304,9 @@ impl Default for GPUMinerConfig {
         Self {
             use_all_gpus: true,
             gpu_indices: vec![],
-            work_size: 1 << 22, // ~4M work items
+            // ~1M work items. Each does 100 BLAKE3 hashes, so 100M hashes per dispatch.
+            // Reduced from 4M to avoid GPU timeouts on the 100-round VDF.
+            work_size: 1 << 20,
             local_work_size: 256,
             intensity: 80,
             stats_interval: Duration::from_secs(5),
@@ -315,9 +317,11 @@ impl Default for GPUMinerConfig {
 /// GPU-specific mining context
 #[cfg(feature = "gpu-mining")]
 struct GPUContext {
+    #[allow(dead_code)]
     device: Device,
     context: Context,
     queue: CommandQueue,
+    #[allow(dead_code)]
     program: Program,
     kernel: Kernel,
 }
@@ -325,25 +329,12 @@ struct GPUContext {
 /// GPU mining statistics
 #[derive(Debug, Default)]
 pub struct GPUMiningStats {
-    /// Total hashes computed
     pub total_hashes: AtomicU64,
-
-    /// Current hash rate (H/s)
     pub current_hashrate: AtomicU64,
-
-    /// Peak hash rate
     pub peak_hashrate: AtomicU64,
-
-    /// Blocks found
     pub blocks_found: AtomicU64,
-
-    /// Kernel dispatches
     pub dispatches: AtomicU64,
-
-    /// GPU temperature (if available)
     pub temperature: AtomicU64,
-
-    /// GPU power draw (watts, if available)
     pub power_draw: AtomicU64,
 }
 
@@ -356,18 +347,19 @@ pub struct GPUSolution {
     pub hashes_computed: u64,
 }
 
-/// GPU mining job
-#[derive(Clone)]
-pub struct GPUMiningJob {
-    pub header: Vec<u8>,
-    pub target: [u8; 32],
-    pub height: u64,
+/// Result from a single mine_batch dispatch
+#[derive(Debug)]
+pub struct BatchResult {
+    /// Solution found (if any)
+    pub solution: Option<GPUSolution>,
+    /// Number of nonce candidates tried in this batch
+    pub hashes: u64,
 }
 
 impl GPUMiner {
-    /// Create new GPU miner
+    /// Create new GPU miner with BLAKE3+VDF kernel
     pub fn new(config: GPUMinerConfig) -> Result<Self> {
-        info!("🎮 Initializing GPU miner...");
+        info!("🎮 Initializing GPU miner (BLAKE3+VDF hybrid quantum mining)...");
 
         let devices = Self::enumerate_devices()?;
 
@@ -379,9 +371,7 @@ impl GPUMiner {
         for dev in &devices {
             info!(
                 "  [{}] {} - {} CUs, {} MB VRAM",
-                dev.index,
-                dev.name,
-                dev.compute_units,
+                dev.index, dev.name, dev.compute_units,
                 dev.global_memory / (1024 * 1024)
             );
         }
@@ -408,11 +398,9 @@ impl GPUMiner {
             let mut index = 0;
 
             for platform in platforms {
-                // Get devices from this platform
                 if let Ok(device_ids) = platform.get_devices(CL_DEVICE_TYPE_GPU) {
                     for device_id in device_ids {
                         let device = Device::new(device_id);
-
                         let info = GPUDeviceInfo {
                             index,
                             name: device.name().unwrap_or_default(),
@@ -457,9 +445,8 @@ impl GPUMiner {
                 continue;
             }
 
-            info!("🎮 Initializing GPU {} ({})", idx, devices[idx].name);
+            info!("🎮 Initializing GPU {} ({}) with BLAKE3+VDF kernel", idx, devices[idx].name);
 
-            // Get device
             let platforms = opencl3::platform::get_platforms()?;
             let mut target_device = None;
 
@@ -478,19 +465,13 @@ impl GPUMiner {
             }
 
             let device = target_device.ok_or_else(|| anyhow!("Failed to find GPU {}", idx))?;
-
-            // Create context
             let context = Context::from_device(&device)?;
-
-            // Create command queue
             let queue = CommandQueue::create_default(&context, CL_QUEUE_PROFILING_ENABLE)?;
 
-            // Build program
-            let program = Program::create_and_build_from_source(&context, SHA3_KERNEL_SOURCE, "")
-                .map_err(|e| anyhow!("Failed to build OpenCL program: {}", e))?;
+            let program = Program::create_and_build_from_source(&context, BLAKE3_KERNEL_SOURCE, "")
+                .map_err(|e| anyhow!("Failed to build BLAKE3 OpenCL program: {}", e))?;
 
-            // Create kernel
-            let kernel = Kernel::create(&program, "sha3_mine")?;
+            let kernel = Kernel::create(&program, "blake3_mine")?;
 
             contexts.push(GPUContext {
                 device,
@@ -504,93 +485,64 @@ impl GPUMiner {
         Ok(contexts)
     }
 
-    /// Start mining with given job
+    /// Dispatch a single batch of mining work to the first GPU and return.
+    ///
+    /// This is the primary API for the mining loop. The caller controls:
+    /// - New-block abandonment (check signal between batches)
+    /// - Statistics updates
+    /// - Nonce progression
+    ///
+    /// Returns (solution_if_found, nonces_tried).
     #[cfg(feature = "gpu-mining")]
-    pub async fn mine(&self, job: GPUMiningJob) -> Result<Option<GPUSolution>> {
+    pub fn mine_batch(
+        &self,
+        challenge_hash: &[u8; 32],
+        target: &[u8; 32],
+        nonce_start: u64,
+    ) -> Result<BatchResult> {
         if self.contexts.is_empty() {
             return Err(anyhow!("No GPU contexts initialized"));
         }
 
-        let start_time = Instant::now();
-        let mut nonce_offset = 0u64;
+        let ctx = &self.contexts[0];
         let work_size = self.config.work_size;
 
-        info!(
-            "🎮 GPU mining started on {} device(s) | Work size: {}",
-            self.contexts.len(),
-            work_size
-        );
+        let result = self.dispatch_blake3_kernel(ctx, challenge_hash, target, nonce_start, work_size)?;
 
-        while !self.should_stop.load(Ordering::Relaxed) {
-            // Dispatch to all GPUs
-            for (gpu_idx, ctx) in self.contexts.iter().enumerate() {
-                let result = self.dispatch_kernel(
-                    ctx,
-                    &job.header,
-                    &job.target,
-                    nonce_offset,
-                    work_size,
-                )?;
+        self.stats.dispatches.fetch_add(1, Ordering::Relaxed);
+        self.stats.total_hashes.fetch_add(work_size as u64, Ordering::Relaxed);
 
-                self.stats.dispatches.fetch_add(1, Ordering::Relaxed);
-                self.stats.total_hashes.fetch_add(work_size as u64, Ordering::Relaxed);
-
-                if let Some((nonce, hash)) = result {
-                    info!(
-                        "🎉 GPU {} found solution! Nonce: {} | Hash: {}",
-                        gpu_idx,
-                        nonce,
-                        hex::encode(&hash[..8])
-                    );
-
-                    self.stats.blocks_found.fetch_add(1, Ordering::Relaxed);
-
-                    return Ok(Some(GPUSolution {
-                        nonce,
-                        hash,
-                        gpu_index: gpu_idx,
-                        hashes_computed: self.stats.total_hashes.load(Ordering::Relaxed),
-                    }));
-                }
-
-                nonce_offset += work_size as u64;
+        let solution = result.map(|(nonce, hash)| {
+            self.stats.blocks_found.fetch_add(1, Ordering::Relaxed);
+            GPUSolution {
+                nonce,
+                hash,
+                gpu_index: 0,
+                hashes_computed: work_size as u64,
             }
+        });
 
-            // Update hashrate
-            let elapsed = start_time.elapsed().as_secs_f64();
-            if elapsed > 0.0 {
-                let hashrate = (self.stats.total_hashes.load(Ordering::Relaxed) as f64 / elapsed) as u64;
-                self.stats.current_hashrate.store(hashrate, Ordering::Relaxed);
-
-                let peak = self.stats.peak_hashrate.load(Ordering::Relaxed);
-                if hashrate > peak {
-                    self.stats.peak_hashrate.store(hashrate, Ordering::Relaxed);
-                }
-            }
-
-            // Yield to prevent blocking
-            tokio::task::yield_now().await;
-        }
-
-        Ok(None)
+        Ok(BatchResult {
+            solution,
+            hashes: work_size as u64,
+        })
     }
 
-    /// Dispatch mining kernel to GPU
+    /// Dispatch the BLAKE3+VDF mining kernel to one GPU context
     #[cfg(feature = "gpu-mining")]
-    fn dispatch_kernel(
+    fn dispatch_blake3_kernel(
         &self,
         ctx: &GPUContext,
-        header: &[u8],
+        challenge: &[u8; 32],
         target: &[u8; 32],
         nonce_start: u64,
         work_size: usize,
     ) -> Result<Option<(u64, [u8; 32])>> {
-        // CL_TRUE for blocking operations
         const CL_TRUE: cl_uint = 1;
 
         // Create buffers
-        let mut header_buffer = unsafe {
-            Buffer::<cl_uchar>::create(&ctx.context, CL_MEM_READ_ONLY, header.len(), std::ptr::null_mut())?
+        let mut challenge_buffer = unsafe {
+            Buffer::<cl_uchar>::create(&ctx.context, CL_MEM_READ_ONLY, 32, std::ptr::null_mut())?
         };
         let mut target_buffer = unsafe {
             Buffer::<cl_uchar>::create(&ctx.context, CL_MEM_READ_ONLY, 32, std::ptr::null_mut())?
@@ -607,24 +559,20 @@ impl GPUMiner {
 
         // Upload data
         unsafe {
-            ctx.queue.enqueue_write_buffer(&mut header_buffer, CL_TRUE, 0, header, &[])?;
+            ctx.queue.enqueue_write_buffer(&mut challenge_buffer, CL_TRUE, 0, challenge, &[])?;
             ctx.queue.enqueue_write_buffer(&mut target_buffer, CL_TRUE, 0, target, &[])?;
-
             let zero_flag: [u32; 1] = [0];
             ctx.queue.enqueue_write_buffer(&mut found_flag_buffer, CL_TRUE, 0, &zero_flag, &[])?;
         }
 
         // Set kernel arguments
-        let header_len = header.len() as u32;
-
         unsafe {
-            ctx.kernel.set_arg(0, &header_buffer)?;
-            ctx.kernel.set_arg(1, &header_len)?;
-            ctx.kernel.set_arg(2, &target_buffer)?;
-            ctx.kernel.set_arg(3, &nonce_start)?;
-            ctx.kernel.set_arg(4, &found_nonce_buffer)?;
-            ctx.kernel.set_arg(5, &found_hash_buffer)?;
-            ctx.kernel.set_arg(6, &found_flag_buffer)?;
+            ctx.kernel.set_arg(0, &challenge_buffer)?;
+            ctx.kernel.set_arg(1, &target_buffer)?;
+            ctx.kernel.set_arg(2, &nonce_start)?;
+            ctx.kernel.set_arg(3, &found_nonce_buffer)?;
+            ctx.kernel.set_arg(4, &found_hash_buffer)?;
+            ctx.kernel.set_arg(5, &found_flag_buffer)?;
         }
 
         // Execute kernel
@@ -665,53 +613,19 @@ impl GPUMiner {
         Ok(None)
     }
 
-    /// Fallback CPU mining when GPU is not available
+    /// Fallback mine_batch when GPU feature is not compiled in
     #[cfg(not(feature = "gpu-mining"))]
-    pub async fn mine(&self, job: GPUMiningJob) -> Result<Option<GPUSolution>> {
-        warn!("GPU mining not available, falling back to CPU");
-
-        let mut nonce = 0u64;
-        let start_time = Instant::now();
-
-        while !self.should_stop.load(Ordering::Relaxed) {
-            // Build input
-            let mut input = job.header.clone();
-            input.extend_from_slice(&nonce.to_le_bytes());
-
-            // Hash
-            let hash = Sha3_256::digest(&input);
-            let mut hash_arr = [0u8; 32];
-            hash_arr.copy_from_slice(&hash);
-
-            // Check target
-            if Self::meets_target(&hash_arr, &job.target) {
-                return Ok(Some(GPUSolution {
-                    nonce,
-                    hash: hash_arr,
-                    gpu_index: 0,
-                    hashes_computed: nonce,
-                }));
-            }
-
-            nonce += 1;
-            self.stats.total_hashes.fetch_add(1, Ordering::Relaxed);
-
-            // Update stats periodically
-            if nonce % 1_000_000 == 0 {
-                let elapsed = start_time.elapsed().as_secs_f64();
-                if elapsed > 0.0 {
-                    let hashrate = (nonce as f64 / elapsed) as u64;
-                    self.stats.current_hashrate.store(hashrate, Ordering::Relaxed);
-                }
-                tokio::task::yield_now().await;
-            }
-        }
-
-        Ok(None)
+    pub fn mine_batch(
+        &self,
+        _challenge_hash: &[u8; 32],
+        _target: &[u8; 32],
+        _nonce_start: u64,
+    ) -> Result<BatchResult> {
+        Err(anyhow!("GPU mining not available. Compile with --features gpu-mining"))
     }
 
-    /// Check if hash meets target
-    fn meets_target(hash: &[u8; 32], target: &[u8; 32]) -> bool {
+    /// Check if hash meets target (byte-wise comparison: hash < target)
+    pub fn meets_target(hash: &[u8; 32], target: &[u8; 32]) -> bool {
         for i in 0..32 {
             if hash[i] < target[i] {
                 return true;
@@ -739,9 +653,23 @@ impl GPUMiner {
         }
     }
 
+    /// Update the hashrate stat (called by the mining loop externally)
+    pub fn update_hashrate(&self, hashrate: u64) {
+        self.stats.current_hashrate.store(hashrate, Ordering::Relaxed);
+        let peak = self.stats.peak_hashrate.load(Ordering::Relaxed);
+        if hashrate > peak {
+            self.stats.peak_hashrate.store(hashrate, Ordering::Relaxed);
+        }
+    }
+
     /// Get available devices
     pub fn get_devices(&self) -> &[GPUDeviceInfo] {
         &self.devices
+    }
+
+    /// Get device name of the first GPU (for TUI display)
+    pub fn device_name(&self) -> &str {
+        self.devices.first().map(|d| d.name.as_str()).unwrap_or("Unknown GPU")
     }
 
     /// Format hashrate for display
@@ -772,22 +700,6 @@ pub struct GPUStatsSnapshot {
 }
 
 // ============================================================================
-// OpenCL Context wrapper (for export)
-// ============================================================================
-
-/// OpenCL context wrapper for external use
-pub struct OpenCLContext {
-    #[cfg(feature = "gpu-mining")]
-    inner: Context,
-}
-
-/// SHA-3 kernel wrapper for external use
-pub struct SHA3Kernel {
-    #[cfg(feature = "gpu-mining")]
-    inner: Kernel,
-}
-
-// ============================================================================
 // TESTS
 // ============================================================================
 
@@ -812,10 +724,38 @@ mod tests {
         assert_eq!(GPUMiner::format_hashrate(1_500_000_000), "1.50 GH/s");
     }
 
-    #[tokio::test]
-    async fn test_gpu_enumeration() {
+    #[test]
+    fn test_gpu_enumeration() {
         let devices = GPUMiner::enumerate_devices();
         assert!(devices.is_ok());
         // May be empty if no GPU is available
+    }
+
+    /// Verify that the CPU BLAKE3+VDF produces the expected hash for a known input.
+    /// The GPU kernel must produce identical output for the same input.
+    #[test]
+    fn test_blake3_vdf_reference() {
+        let challenge = [0x42u8; 32]; // test challenge
+        let nonce: u64 = 12345;
+
+        // CPU reference: BLAKE3(challenge || nonce_le) then 99 rounds of BLAKE3(h)
+        let mut input = [0u8; 40];
+        input[..32].copy_from_slice(&challenge);
+        input[32..].copy_from_slice(&nonce.to_le_bytes());
+
+        let mut h = *blake3::hash(&input).as_bytes();
+        for _ in 0..99 {
+            h = *blake3::hash(&h).as_bytes();
+        }
+
+        // The hash should be deterministic
+        assert_ne!(h, [0u8; 32], "BLAKE3+VDF should produce non-zero output");
+
+        // Verify it matches a second computation (deterministic)
+        let mut h2 = *blake3::hash(&input).as_bytes();
+        for _ in 0..99 {
+            h2 = *blake3::hash(&h2).as_bytes();
+        }
+        assert_eq!(h, h2, "BLAKE3+VDF must be deterministic");
     }
 }

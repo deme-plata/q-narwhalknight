@@ -1858,11 +1858,155 @@ async fn run_mining(
         None
     };
 
-    if gpu_enabled {
-        info!("🚀 GPU mining would be enabled (placeholder)");
-    }
+    // v10.2.0: Hybrid Quantum Mining — GPU mining task (feature-gated)
+    #[cfg(feature = "opencl-mining")]
+    let gpu_handle: Option<tokio::task::JoinHandle<()>> = if gpu_enabled {
+        match q_mining::GPUMiner::new(q_mining::GPUMinerConfig::default()) {
+            Ok(gpu_miner) => {
+                let dev_name = gpu_miner.device_name().to_string();
+                info!("🎮 GPU initialized: {}", dev_name);
+                shared_state.gpu_active.store(true, Ordering::Relaxed);
+                *shared_state.gpu_device_name.write() = dev_name.clone();
+                shared_state.send_event(DiagnosticEvent::GpuStarted { device_name: dev_name });
+
+                let gpu_shared_challenge = shared_challenge.clone();
+                let gpu_new_block_signal = new_block_signal.clone();
+                let gpu_is_running = is_running.clone();
+                let gpu_hash_counter = hash_counter.clone();
+                let gpu_hashrate_hs = shared_state.gpu_hashrate_hs.clone();
+                let gpu_hashes_total = shared_state.gpu_hashes_total.clone();
+                let gpu_solution_tx = solution_submit_tx.clone();
+                let gpu_event_tx = shared_state.event_tx.clone();
+                let gpu_wallet = wallet.clone();
+                let gpu_miner_id = miner_id.clone();
+                let gpu_miner_name = miner_name.clone();
+                let gpu_solutions = solutions_found.clone();
+
+                Some(tokio::task::spawn_blocking(move || {
+                    let mut gpu_nonce: u64 = u64::MAX / 2; // Start high to avoid CPU nonce collision
+                    let mut last_signal = 0u64;
+                    let mut batch_start = std::time::Instant::now();
+                    let mut batch_hashes: u64 = 0;
+
+                    while gpu_is_running.load(Ordering::Relaxed) {
+                        // Read current challenge from shared cache
+                        let (challenge_hash, target, block_height, vdf_iterations) = {
+                            let guard = gpu_shared_challenge.read();
+                            match guard.as_ref() {
+                                Some((chal, _ts)) => {
+                                    let ch = match hex_to_bytes(&chal.challenge_hash) {
+                                        Ok(b) => b,
+                                        Err(_) => { std::thread::sleep(std::time::Duration::from_millis(100)); continue; }
+                                    };
+                                    let tgt = match hex_to_bytes(&chal.difficulty_target) {
+                                        Ok(b) => b,
+                                        Err(_) => { std::thread::sleep(std::time::Duration::from_millis(100)); continue; }
+                                    };
+                                    (ch, tgt, chal.block_height, chal.vdf_iterations)
+                                }
+                                None => {
+                                    // No challenge yet — wait
+                                    std::thread::sleep(std::time::Duration::from_millis(500));
+                                    continue;
+                                }
+                            }
+                        };
+
+                        // Dispatch one GPU batch
+                        match gpu_miner.mine_batch(&challenge_hash, &target, gpu_nonce) {
+                            Ok(result) => {
+                                gpu_nonce = gpu_nonce.wrapping_add(result.hashes);
+                                batch_hashes += result.hashes;
+                                gpu_hash_counter.fetch_add(result.hashes, Ordering::Relaxed);
+                                gpu_hashes_total.fetch_add(result.hashes, Ordering::Relaxed);
+
+                                // Update GPU hashrate every batch
+                                let elapsed = batch_start.elapsed().as_secs_f64();
+                                if elapsed >= 1.0 {
+                                    let hr = batch_hashes as f64 / elapsed;
+                                    gpu_hashrate_hs.store(hr.to_bits(), Ordering::Relaxed);
+                                    gpu_miner.update_hashrate(hr as u64);
+                                    batch_hashes = 0;
+                                    batch_start = std::time::Instant::now();
+                                }
+
+                                if let Some(solution) = result.solution {
+                                    info!("🎮💎 GPU solution found! Block #{}, Nonce: {}", block_height, solution.nonce);
+                                    gpu_solutions.fetch_add(1, Ordering::Relaxed);
+                                    let _ = gpu_event_tx.send(DiagnosticEvent::GpuSolutionFound {
+                                        nonce: solution.nonce,
+                                        block_height,
+                                    });
+
+                                    let hashrate_khs = f64::from_bits(gpu_hashrate_hs.load(Ordering::Relaxed)) / 1000.0;
+                                    let solution_json = serde_json::json!({
+                                        "miner_address": gpu_wallet,
+                                        "nonce": solution.nonce,
+                                        "hash": hex::encode(solution.hash),
+                                        "difficulty_target": hex::encode(target),
+                                        "challenge_hash": hex::encode(challenge_hash),
+                                        "hash_rate": hashrate_khs,
+                                        "miner_id": gpu_miner_id,
+                                        "worker_name": gpu_miner_name,
+                                        "miner_version": env!("CARGO_PKG_VERSION")
+                                    });
+
+                                    let mut wallet_bytes = [0u8; 32];
+                                    if let Ok(decoded) = hex::decode(gpu_wallet.trim_start_matches("qnk")) {
+                                        let len = decoded.len().min(32);
+                                        wallet_bytes[..len].copy_from_slice(&decoded[..len]);
+                                    }
+                                    let p2p_sub = Some(q_types::mining_solution::P2PMiningSubmission::new(
+                                        wallet_bytes, solution.hash, target, block_height,
+                                        challenge_hash, solution.nonce, vdf_iterations, gpu_miner_id.clone(),
+                                    ));
+
+                                    let _ = gpu_solution_tx.send(q_miner::solution_submitter::SolutionMessage {
+                                        solution_json,
+                                        solution_hash: solution.hash,
+                                        block_height,
+                                        nonce: solution.nonce,
+                                        p2p_submission: p2p_sub,
+                                    });
+                                }
+                            }
+                            Err(e) => {
+                                error!("🎮 GPU mining error: {}", e);
+                                let _ = gpu_event_tx.send(DiagnosticEvent::GpuError { message: e.to_string() });
+                                std::thread::sleep(std::time::Duration::from_secs(5));
+                            }
+                        }
+
+                        // Check for new block signal — reset nonce
+                        let sig = gpu_new_block_signal.load(Ordering::Relaxed);
+                        if sig != last_signal {
+                            last_signal = sig;
+                            gpu_nonce = u64::MAX / 2; // Reset high nonce range
+                        }
+                    }
+                }))
+            }
+            Err(e) => {
+                warn!("🎮 GPU initialization failed: {} — continuing CPU-only", e);
+                shared_state.send_event(DiagnosticEvent::GpuError { message: e.to_string() });
+                None
+            }
+        }
+    } else {
+        None
+    };
+    #[cfg(not(feature = "opencl-mining"))]
+    let gpu_handle: Option<tokio::task::JoinHandle<()>> = if gpu_enabled {
+        info!("🎮 GPU mining requested but opencl-mining feature not compiled in — CPU only");
+        None
+    } else {
+        None
+    };
 
     info!("✅ Quillon miner started successfully!");
+    if shared_state.gpu_active.load(Ordering::Relaxed) {
+        info!("🎮 Hybrid Quantum Mining: CPU + GPU");
+    }
     info!("🎧 Connected to SSE stream for real-time block updates");
     info!("🔗 Miner-link relay active — connect your wallet for real-time monitoring");
 
@@ -1904,6 +2048,7 @@ async fn run_mining(
     monitor_handle.abort();
     if let Some(h) = sse_handle { h.abort(); }
     if let Some(h) = ml_handle { h.abort(); }
+    if let Some(h) = gpu_handle { h.abort(); }
 
     let total_hashes = hash_counter.load(Ordering::Relaxed);
     info!("👋 Quillon miner stopped. Total hashes: {}", total_hashes);

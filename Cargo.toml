@@ -65,7 +65,7 @@ members = [
  "sdk/rust", "crates/q-ai-inference", "crates/q-crypto-advanced", "crates/q-index-fund", "crates/q-mining-pool", "crates/q-temporal-shield", "crates/q-bitnet-ffi", "crates/q-consensus-guard", "crates/q-bio-dsl", "crates/q-eternal-cypher", "crates/q-dune", "crates/q-flux", "crates/q-queue"]
 
 [workspace.package]
-version = "10.1.1"  # v10.1.1: fix explorer/miner network hashrate discrepancy — include P2P peer compute power in all endpoints
+version = "10.1.4"  # v10.1.4: fix mobile OAuth2 endpoints + register mobile PKCE client + flexible redirect URI
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"

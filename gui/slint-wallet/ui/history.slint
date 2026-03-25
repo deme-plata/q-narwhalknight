@@ -1,4 +1,4 @@
-import { Theme, Card, QButton, QInput } from "theme.slint";
+import { Theme, Card, QButton, QInput, Icon } from "theme.slint";
 
 export struct TxRecord {
     direction: string,
@@ -51,12 +51,12 @@ export component HistoryScreen inherits Rectangle {
                     clicked => { root.go-back(); }
                 }
 
-                Text {
-                    text: "<";
-                    color: Theme.text-primary;
-                    font-size: Theme.font-xl;
-                    vertical-alignment: center;
-                    horizontal-alignment: center;
+                HorizontalLayout {
+                    alignment: center;
+                    Icon {
+                        source: @image-url("icons/arrow-left.svg");
+                        icon-color: Theme.text-primary;
+                    }
                 }
             }
 
@@ -70,7 +70,6 @@ export component HistoryScreen inherits Rectangle {
 
             Rectangle { horizontal-stretch: 1; }
 
-            // Transaction count
             if root.transactions.length > 0 : Text {
                 text: root.transactions.length + " tx";
                 color: Theme.text-muted;
@@ -79,7 +78,7 @@ export component HistoryScreen inherits Rectangle {
             }
 
             Rectangle {
-                width: 70px;
+                width: 80px;
                 border-radius: Theme.radius-sm;
                 background: refresh-touch.has-hover ? Theme.bg-hover : transparent;
 
@@ -87,12 +86,21 @@ export component HistoryScreen inherits Rectangle {
                     clicked => { root.refresh(); }
                 }
 
-                Text {
-                    text: "Refresh";
-                    color: Theme.accent-blue;
-                    font-size: Theme.font-sm;
-                    vertical-alignment: center;
-                    horizontal-alignment: center;
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 4px;
+                    Icon {
+                        source: @image-url("icons/refresh-cw.svg");
+                        icon-color: Theme.accent-blue;
+                        width: 14px;
+                        height: 14px;
+                    }
+                    Text {
+                        text: "Refresh";
+                        color: Theme.accent-blue;
+                        font-size: Theme.font-sm;
+                        vertical-alignment: center;
+                    }
                 }
             }
         }
@@ -120,6 +128,7 @@ export component HistoryScreen inherits Rectangle {
 
                 for tx[i] in root.transactions : Card {
                     height: 72px;
+                    elevated: true;
 
                     Rectangle {
                         border-radius: Theme.radius-md;
@@ -146,7 +155,7 @@ export component HistoryScreen inherits Rectangle {
                             padding-right: Theme.spacing-md;
                             spacing: Theme.spacing-sm;
 
-                            // Direction indicator
+                            // Direction indicator — SVG icons
                             VerticalLayout {
                                 alignment: center;
                                 width: 36px;
@@ -159,13 +168,26 @@ export component HistoryScreen inherits Rectangle {
                                         ? Theme.accent-red.with-alpha(0.15)
                                         : (tx.direction == "Mining" ? Theme.accent-yellow.with-alpha(0.15) : Theme.accent-green.with-alpha(0.15));
 
-                                    Text {
-                                        text: tx.direction == "Sent" ? "^" : (tx.direction == "Mining" ? "M" : "v");
-                                        color: tx.direction == "Sent" ? Theme.accent-red : (tx.direction == "Mining" ? Theme.accent-yellow : Theme.accent-green);
-                                        font-size: Theme.font-lg;
-                                        font-weight: 700;
-                                        vertical-alignment: center;
-                                        horizontal-alignment: center;
+                                    HorizontalLayout {
+                                        alignment: center;
+                                        if tx.direction == "Sent" : Icon {
+                                            source: @image-url("icons/arrow-up-right.svg");
+                                            icon-color: Theme.accent-red;
+                                            width: 18px;
+                                            height: 18px;
+                                        }
+                                        if tx.direction == "Mining" : Icon {
+                                            source: @image-url("icons/pickaxe.svg");
+                                            icon-color: Theme.accent-yellow;
+                                            width: 18px;
+                                            height: 18px;
+                                        }
+                                        if tx.direction != "Sent" && tx.direction != "Mining" : Icon {
+                                            source: @image-url("icons/arrow-down-left.svg");
+                                            icon-color: Theme.accent-green;
+                                            width: 18px;
+                                            height: 18px;
+                                        }
                                     }
                                 }
                             }
@@ -239,12 +261,14 @@ export component HistoryScreen inherits Rectangle {
                     border-color: root.detail-direction == "Sent"
                         ? Theme.accent-red.with-alpha(0.5)
                         : (root.detail-direction == "Mining" ? Theme.accent-yellow.with-alpha(0.5) : Theme.accent-green.with-alpha(0.5));
+                    drop-shadow-blur: 20px;
+                    drop-shadow-color: #000000.with-alpha(0.4);
 
                     VerticalLayout {
                         padding: Theme.spacing-lg;
                         spacing: Theme.spacing-md;
 
-                        // Type badge
+                        // Type badge — SVG icons
                         HorizontalLayout {
                             alignment: center;
 
@@ -256,13 +280,26 @@ export component HistoryScreen inherits Rectangle {
                                     ? Theme.accent-red.with-alpha(0.15)
                                     : (root.detail-direction == "Mining" ? Theme.accent-yellow.with-alpha(0.15) : Theme.accent-green.with-alpha(0.15));
 
-                                Text {
-                                    text: root.detail-direction == "Sent" ? "^" : (root.detail-direction == "Mining" ? "M" : "v");
-                                    color: root.detail-direction == "Sent" ? Theme.accent-red : (root.detail-direction == "Mining" ? Theme.accent-yellow : Theme.accent-green);
-                                    font-size: 24px;
-                                    font-weight: 700;
-                                    vertical-alignment: center;
-                                    horizontal-alignment: center;
+                                HorizontalLayout {
+                                    alignment: center;
+                                    if root.detail-direction == "Sent" : Icon {
+                                        source: @image-url("icons/arrow-up-right.svg");
+                                        icon-color: Theme.accent-red;
+                                        width: Theme.icon-lg;
+                                        height: Theme.icon-lg;
+                                    }
+                                    if root.detail-direction == "Mining" : Icon {
+                                        source: @image-url("icons/pickaxe.svg");
+                                        icon-color: Theme.accent-yellow;
+                                        width: Theme.icon-lg;
+                                        height: Theme.icon-lg;
+                                    }
+                                    if root.detail-direction != "Sent" && root.detail-direction != "Mining" : Icon {
+                                        source: @image-url("icons/arrow-down-left.svg");
+                                        icon-color: Theme.accent-green;
+                                        width: Theme.icon-lg;
+                                        height: Theme.icon-lg;
+                                    }
                                 }
                             }
                         }
@@ -321,7 +358,7 @@ export component HistoryScreen inherits Rectangle {
                                         }
 
                                         Rectangle {
-                                            width: 48px;
+                                            width: 52px;
                                             height: 24px;
                                             border-radius: 4px;
                                             background: addr-cp.has-hover ? Theme.bg-hover : transparent;
@@ -333,13 +370,22 @@ export component HistoryScreen inherits Rectangle {
                                                 }
                                             }
 
-                                            Text {
-                                                text: root.addr-copied ? "OK" : "Copy";
-                                                color: root.addr-copied ? Theme.accent-green : Theme.accent-blue;
-                                                font-size: Theme.font-xs;
-                                                font-weight: 500;
-                                                vertical-alignment: center;
-                                                horizontal-alignment: center;
+                                            HorizontalLayout {
+                                                alignment: center;
+                                                spacing: 2px;
+                                                Icon {
+                                                    source: @image-url("icons/copy.svg");
+                                                    icon-color: root.addr-copied ? Theme.accent-green : Theme.accent-blue;
+                                                    width: 12px;
+                                                    height: 12px;
+                                                }
+                                                Text {
+                                                    text: root.addr-copied ? "OK" : "Copy";
+                                                    color: root.addr-copied ? Theme.accent-green : Theme.accent-blue;
+                                                    font-size: Theme.font-xs;
+                                                    font-weight: 500;
+                                                    vertical-alignment: center;
+                                                }
                                             }
                                         }
                                     }
@@ -367,7 +413,7 @@ export component HistoryScreen inherits Rectangle {
                                         }
 
                                         Rectangle {
-                                            width: 48px;
+                                            width: 52px;
                                             height: 24px;
                                             border-radius: 4px;
                                             background: hash-cp.has-hover ? Theme.bg-hover : transparent;
@@ -379,13 +425,22 @@ export component HistoryScreen inherits Rectangle {
                                                 }
                                             }
 
-                                            Text {
-                                                text: root.hash-copied ? "OK" : "Copy";
-                                                color: root.hash-copied ? Theme.accent-green : Theme.accent-blue;
-                                                font-size: Theme.font-xs;
-                                                font-weight: 500;
-                                                vertical-alignment: center;
-                                                horizontal-alignment: center;
+                                            HorizontalLayout {
+                                                alignment: center;
+                                                spacing: 2px;
+                                                Icon {
+                                                    source: @image-url("icons/copy.svg");
+                                                    icon-color: root.hash-copied ? Theme.accent-green : Theme.accent-blue;
+                                                    width: 12px;
+                                                    height: 12px;
+                                                }
+                                                Text {
+                                                    text: root.hash-copied ? "OK" : "Copy";
+                                                    color: root.hash-copied ? Theme.accent-green : Theme.accent-blue;
+                                                    font-size: Theme.font-xs;
+                                                    font-weight: 500;
+                                                    vertical-alignment: center;
+                                                }
                                             }
                                         }
                                     }
@@ -394,38 +449,15 @@ export component HistoryScreen inherits Rectangle {
                                 // Fee
                                 if root.detail-fee != "" && root.detail-fee != "0" : HorizontalLayout {
                                     spacing: Theme.spacing-sm;
-
-                                    Text {
-                                        text: "Fee:";
-                                        color: Theme.text-muted;
-                                        font-size: Theme.font-xs;
-                                        vertical-alignment: center;
-                                    }
-                                    Text {
-                                        text: root.detail-fee + " QUG";
-                                        color: Theme.text-secondary;
-                                        font-size: Theme.font-sm;
-                                        vertical-alignment: center;
-                                    }
+                                    Text { text: "Fee:"; color: Theme.text-muted; font-size: Theme.font-xs; vertical-alignment: center; }
+                                    Text { text: root.detail-fee + " QUG"; color: Theme.text-secondary; font-size: Theme.font-sm; vertical-alignment: center; }
                                 }
 
                                 // Token
                                 if root.detail-token != "" && root.detail-token != "QUG" : HorizontalLayout {
                                     spacing: Theme.spacing-sm;
-
-                                    Text {
-                                        text: "Token:";
-                                        color: Theme.text-muted;
-                                        font-size: Theme.font-xs;
-                                        vertical-alignment: center;
-                                    }
-                                    Text {
-                                        text: root.detail-token;
-                                        color: Theme.accent-cyan;
-                                        font-size: Theme.font-sm;
-                                        font-weight: 500;
-                                        vertical-alignment: center;
-                                    }
+                                    Text { text: "Token:"; color: Theme.text-muted; font-size: Theme.font-xs; vertical-alignment: center; }
+                                    Text { text: root.detail-token; color: Theme.accent-cyan; font-size: Theme.font-sm; font-weight: 500; vertical-alignment: center; }
                                 }
                             }
                         }
@@ -434,9 +466,7 @@ export component HistoryScreen inherits Rectangle {
                         QButton {
                             label: "Close";
                             button-color: Theme.accent-blue;
-                            clicked => {
-                                root.show-detail = false;
-                            }
+                            clicked => { root.show-detail = false; }
                         }
                     }
                 }

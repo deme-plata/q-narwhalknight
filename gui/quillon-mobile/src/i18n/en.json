@@ -1,0 +1,107 @@
+{
+  "app_name": "Quillon Wallet",
+  "tabs": {
+    "home": "Home",
+    "send": "Send",
+    "receive": "Receive",
+    "dex": "DEX",
+    "history": "History"
+  },
+  "login": {
+    "title": "Quillon",
+    "subtitle": "Quantum Wallet",
+    "create_wallet": "Create New Wallet",
+    "import_wallet": "Import Mnemonic",
+    "server_vault": "Server Vault (OAuth)",
+    "enter_mnemonic": "Enter your 24-word recovery phrase",
+    "invalid_mnemonic": "Invalid recovery phrase. Please check your words."
+  },
+  "dashboard": {
+    "balance": "Balance",
+    "recent_transactions": "Recent Transactions",
+    "no_transactions": "No transactions yet",
+    "pull_to_refresh": "Pull to refresh"
+  },
+  "send": {
+    "title": "Send {{token}}",
+    "recipient": "Recipient Address",
+    "amount": "Amount",
+    "memo": "Memo (optional)",
+    "available": "Available: {{balance}}",
+    "review": "Review Transaction",
+    "confirm": "Confirm & Send",
+    "success": "Transaction sent!",
+    "insufficient_balance": "Insufficient balance",
+    "invalid_address": "Invalid QNK address",
+    "no_network": "No network connection. Connect to send."
+  },
+  "receive": {
+    "title": "Receive",
+    "copy_address": "Copy Address",
+    "share_address": "Share Address",
+    "pos_mode": "Point of Sale",
+    "waiting": "Waiting for payment...",
+    "remaining": "{{time}} remaining",
+    "payment_received": "Payment Received!"
+  },
+  "dex": {
+    "title": "DEX",
+    "you_pay": "You Pay",
+    "you_receive": "You Receive",
+    "swap": "Swap",
+    "rate": "Rate",
+    "fee": "Fee",
+    "slippage": "Slippage",
+    "price_impact": "Price Impact",
+    "select_token": "Select Token",
+    "insufficient_liquidity": "Insufficient liquidity"
+  },
+  "history": {
+    "title": "History",
+    "filter_all": "All",
+    "filter_sent": "Sent",
+    "filter_received": "Received",
+    "filter_pending": "Pending",
+    "no_history": "No transaction history"
+  },
+  "mining": {
+    "title": "Mining Dashboard",
+    "hashrate": "Hashrate",
+    "shares": "Shares",
+    "earnings": "Earnings",
+    "blocks_found": "Blocks Found",
+    "not_mining": "Not mining. Start mining on your desktop."
+  },
+  "settings": {
+    "title": "Settings",
+    "security": "Security",
+    "biometric_lock": "Biometric Lock",
+    "auto_lock": "Auto-Lock Timeout",
+    "change_pin": "Change PIN",
+    "view_recovery": "View Recovery Phrase",
+    "network": "Network",
+    "appearance": "Appearance",
+    "theme": "Theme",
+    "currency": "Currency",
+    "about": "About",
+    "version": "Version",
+    "check_updates": "Check for Updates",
+    "delete_wallet": "Delete Wallet",
+    "delete_confirm": "Type DELETE to confirm"
+  },
+  "auth": {
+    "unlock": "Unlock Quillon Wallet",
+    "enter_pin": "Enter PIN",
+    "use_biometrics": "Use Biometrics",
+    "locked_out": "Too many attempts. Try again in {{time}}."
+  },
+  "common": {
+    "cancel": "Cancel",
+    "confirm": "Confirm",
+    "copy": "Copy",
+    "share": "Share",
+    "retry": "Retry",
+    "offline": "Offline",
+    "loading": "Loading..."
+  }
+}

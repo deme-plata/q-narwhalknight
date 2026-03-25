@@ -31,10 +31,10 @@ pub type IpConnTracker = Arc<DashMap<std::net::IpAddr, u64>>;
 pub type ActiveConnCount = Arc<AtomicU64>;
 
 /// Max concurrent connection handlers per worker.
-/// 48 workers × 8192 = 393,216 total concurrent handlers.
+/// 48 workers × 1024 = 49,152 total concurrent handlers.
 /// Each handler holds a reference to the shared upstream pool + ~8KB buffer.
-/// At 393K concurrent × ~10KB = ~4GB. Scale further via config.
-const MAX_HANDLERS_PER_WORKER: usize = 512;
+/// At 49K concurrent × ~10KB = ~480MB. Handles 10K+ SSE connections + burst downloads.
+const MAX_HANDLERS_PER_WORKER: usize = 1024;
 
 /// How often to garbage-collect the per-IP connection tracker (seconds).
 /// IPs with 0 active connections are removed to prevent unbounded growth.
