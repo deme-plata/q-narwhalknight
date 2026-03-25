@@ -4257,6 +4257,53 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     }
 
     // ========================================
+    // 📊 v10.3.0: SOLO-MODE HASHRATE HISTORY SAMPLER
+    // When pool is disabled, sample network hashrate (local + P2P peers) every 60s
+    // Reuses pool_hashrate_history ring buffer (max 1440 entries = 24h)
+    // ========================================
+    if state.mining_pool.is_none() {
+        let solo_mining_stats = state.mining_statistics.clone();
+        let solo_hashrate_history = state.pool_hashrate_history.clone();
+        tokio::spawn(async move {
+            info!("📊 Solo-mode hashrate history sampler started (60s interval)");
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                // Calculate network hashrate (local miners + P2P peers)
+                let (hashrate, miners) = if let Some(ref ms) = solo_mining_stats {
+                    if let Ok(mut stats) = ms.try_write() {
+                        let local_hr = stats.calculate_network_hashrate();
+                        let local_miners = stats.active_miner_count();
+                        let peer_hr: f64 = q_storage::PEER_COMPUTE_POWER.iter().map(|e| e.value().0).sum();
+                        let peer_count = q_storage::PEER_COMPUTE_POWER.len();
+                        (local_hr + peer_hr, local_miners + peer_count)
+                    } else {
+                        let peer_hr: f64 = q_storage::PEER_COMPUTE_POWER.iter().map(|e| e.value().0).sum();
+                        let peer_count = q_storage::PEER_COMPUTE_POWER.len();
+                        (peer_hr, peer_count)
+                    }
+                } else {
+                    let peer_hr: f64 = q_storage::PEER_COMPUTE_POWER.iter().map(|e| e.value().0).sum();
+                    let peer_count = q_storage::PEER_COMPUTE_POWER.len();
+                    (peer_hr, peer_count)
+                };
+
+                let entry = pool_api::HashrateEntry {
+                    hashrate,
+                    workers: miners,
+                    timestamp: chrono::Utc::now().timestamp(),
+                };
+                let mut history = solo_hashrate_history.write().await;
+                history.push(entry);
+                if history.len() > 1440 {
+                    history.remove(0);
+                }
+            }
+        });
+        info!("✅ Solo-mode hashrate history sampler started");
+    }
+
+    // ========================================
     // 📊 LIBP2P PEER COUNT & INFO - Atomic Counter and Cached Peer Info
     // ========================================
     // peer_count_atomic was already extracted before spawning the event loop (see above)
@@ -15591,6 +15638,16 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                     debug!("⏭️  [DEDUP] Block {} already exists, skipping save (lost race to another producer)",
                                         new_block.header.height);
                                     save_succeeded = true; // Mark as succeeded since block is already saved
+
+                                    // 🚨 v10.1.5 CRITICAL FIX: Update height cache even for dedup hits!
+                                    // ROOT CAUSE: After restart, block N exists in RocksDB (saved in previous session)
+                                    // but height_cache is initialized to N-1 (from height pointer scan).
+                                    // The dedup path sets save_succeeded=true but NEVER updates height_cache.
+                                    // Result: get_highest_contiguous_block() returns N-1 forever.
+                                    // STALL-FIX resets producers to N-1, they produce N again, dedup hits again.
+                                    // This creates an infinite loop where the chain NEVER advances.
+                                    // FIX: Always ensure height_cache reflects blocks that exist in storage.
+                                    app_state_mining.storage_engine.update_height_cache(new_block.header.height).await;
                                 } else {
                                     // Serialize block to bytes
                                     let block_bytes = match bincode::serialize(&new_block) {
@@ -17221,6 +17278,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             } else {
                                 debug!("⏭️  [DEDUP TIME-BASED] Block {} already exists, skipping save",
                                     new_block.header.height);
+                                // 🚨 v10.1.5: Same fix as first DEDUP path — update height cache
+                                app_state_block_producer.storage_engine.update_height_cache(new_block.header.height).await;
                             } // end if !block_already_exists
                         } // end if async_storage exists
 
@@ -21201,6 +21260,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/admin/caddy/stats-local", get(q_api_server::deploy_admin_api::caddy_stats_local)) // v9.0.6: Local Caddy metrics (no auth)
         .route("/api/v1/admin/flux/stats-local", get(q_api_server::deploy_admin_api::flux_stats_local)) // v9.2.0: Local q-flux metrics (no auth)
         .route("/api/v1/mining/stats/:wallet", get(handlers::get_wallet_mining_stats)) // v3.5.0-beta: Wallet mining stats
+        .route("/api/v1/mining/hashrate/history", get(handlers::get_hashrate_history)) // v10.3.0: Hashrate history for Network Power Modal
         // v0.0.22-beta Quick Win #1: Manual trigger endpoint REMOVED from default routes
         // Added conditionally below based on config.allow_manual_trigger
         // Chain endpoints
@@ -21512,6 +21572,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             get(handlers::quantum_crypto_status),
         )
         .route("/api/v1/quantum/bb84/status", get(handlers::bb84_status))
+        // v10.1.5: QKD Protocol Selector — per-peer session info and protocol breakdown
+        .route("/api/v1/quantum/qkd/status", get(handlers::qkd_selector_status))
         // DeFi Components
         .route("/api/v1/defi/dex/status", get(handlers::dex_status))
         .route("/api/v1/defi/oracle/status", get(handlers::oracle_status))
@@ -21999,20 +22061,42 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         )
         .with_state(ipfs_storage_state);
 
-    // ✅ v1.0.15-beta: Initialize Zcash RPC client and create Zcash router
-    info!("🔗 [ZCASH] Initializing Zcash RPC client...");
-    let zcash_client = match q_api_server::zcash_rpc::ZcashRpcClient::new() {
-        Ok(client) => {
-            info!("✅ [ZCASH] RPC client initialized successfully");
-            Arc::new(client)
-        }
-        Err(e) => {
-            warn!("⚠️  [ZCASH] Failed to initialize RPC client: {}. Zcash endpoints will be unavailable.", e);
-            // Create a dummy client that will return errors
-            Arc::new(
-                q_api_server::zcash_rpc::ZcashRpcClient::new()
-                    .unwrap_or_else(|_| panic!("Failed to create fallback Zcash client")),
-            )
+    // ✅ v1.0.15-beta / v10.1.5: Reuse the Zebra RPC client already initialized
+    // from ZEC_RPC_URL (defaults to 5.79.79.158:8232). Previously this created a
+    // second client pointing at 127.0.0.1:8232 which doesn't exist on Beta.
+    info!("🔗 [ZCASH] Initializing Zcash RPC client for zcash_api routes...");
+    let zcash_client: Arc<q_api_server::zcash_rpc::ZcashRpcClient> = if let Some(ref existing) = app_state.zcash_rpc_client {
+        info!("✅ [ZCASH] Reusing existing Zebra RPC client from AppState");
+        existing.clone()
+    } else {
+        // Fallback: create with env var (same logic as the AppState init at line ~3570)
+        let zec_rpc_url = std::env::var("ZEC_RPC_URL")
+            .unwrap_or_else(|_| "http://5.79.79.158:8232".to_string());
+        match q_api_server::zcash_rpc::ZcashRpcClient::with_config(
+            q_api_server::zcash_rpc::ZcashRpcConfig {
+                rpc_url: zec_rpc_url.clone(),
+                rpc_user: None,
+                rpc_password: None,
+                timeout_secs: 30,
+            },
+        ) {
+            Ok(client) => {
+                info!("✅ [ZCASH] Created Zebra RPC client: {}", zec_rpc_url);
+                Arc::new(client)
+            }
+            Err(e) => {
+                warn!("⚠️  [ZCASH] Failed to initialize RPC client: {}. Zcash endpoints will be unavailable.", e);
+                Arc::new(
+                    q_api_server::zcash_rpc::ZcashRpcClient::with_config(
+                        q_api_server::zcash_rpc::ZcashRpcConfig {
+                            rpc_url: "http://5.79.79.158:8232".to_string(),
+                            rpc_user: None,
+                            rpc_password: None,
+                            timeout_secs: 30,
+                        },
+                    ).unwrap_or_else(|_| panic!("Failed to create fallback Zcash client"))
+                )
+            }
         }
     };
 
