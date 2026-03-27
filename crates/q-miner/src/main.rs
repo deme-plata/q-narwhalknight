@@ -163,11 +163,11 @@ mod embedded_tor {
     /// Returns the SOCKS5 proxy URL (e.g. "socks5://127.0.0.1:19050").
     pub async fn start_embedded_tor() -> Result<String> {
         use arti_client::{TorClient, TorClientConfig};
-        use tor_rtcompat::tokio::TokioNativeTlsRuntime;
+        use tor_rtcompat::tokio::TokioRustlsRuntime;
 
         eprintln!("\x1b[36m   Bootstrapping embedded Tor (arti)...\x1b[0m");
 
-        let runtime = TokioNativeTlsRuntime::current()
+        let runtime = TokioRustlsRuntime::current()
             .map_err(|e| anyhow::anyhow!("Failed to get Tokio runtime for arti: {}", e))?;
 
         let config = TorClientConfig::default();

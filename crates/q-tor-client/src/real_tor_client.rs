@@ -18,7 +18,7 @@ use tokio::{
     time::interval,
 };
 use tor_hsservice::OnionService;
-use tor_rtcompat::tokio::TokioNativeTlsRuntime;
+use tor_rtcompat::tokio::TokioRustlsRuntime;
 use tracing::{debug, info, warn};
 
 /// Tor client configuration
@@ -136,13 +136,13 @@ pub enum TorEvent {
 /// Real Tor client using Arti
 pub struct RealTorClient {
     config: TorConfig,
-    arti_client: Arc<ArtiClient<TokioNativeTlsRuntime>>,
+    arti_client: Arc<ArtiClient<TokioRustlsRuntime>>,
     connections: Arc<RwLock<HashMap<String, TorConnection>>>,
     circuits: Arc<RwLock<HashMap<u32, TorCircuit>>>,
     onion_services: Arc<RwLock<HashMap<String, OnionService>>>,
     event_sender: broadcast::Sender<TorEvent>,
     stats: Arc<Mutex<TorStats>>,
-    runtime: TokioNativeTlsRuntime,
+    runtime: TokioRustlsRuntime,
 }
 
 /// Tor client statistics
@@ -167,7 +167,7 @@ impl RealTorClient {
         info!("Creating real Tor client with Arti");
 
         // Use current Tokio runtime for Arti (avoid nested runtime creation)
-        let runtime = TokioNativeTlsRuntime::current()
+        let runtime = TokioRustlsRuntime::current()
             .map_err(|e| anyhow!("Failed to get current Tokio runtime: {}", e))?;
 
         // v10.0.9: Configure Arti with capped memory quota.

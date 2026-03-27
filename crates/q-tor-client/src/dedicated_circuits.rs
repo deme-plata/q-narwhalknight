@@ -22,7 +22,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 use tokio::sync::{Mutex, RwLock};
-use tor_rtcompat::tokio::TokioNativeTlsRuntime;
+use tor_rtcompat::tokio::TokioRustlsRuntime;
 use tracing::{debug, error, info, warn};
 
 /// Custom isolation token for circuit separation
@@ -152,7 +152,7 @@ pub struct IsolatedCircuitStats {
 /// Isolated client wrapper for a specific operation type
 pub struct IsolatedOperationClient {
     /// The isolated TorClient handle for this operation
-    client: TorClient<TokioNativeTlsRuntime>,
+    client: TorClient<TokioRustlsRuntime>,
     /// Operation type this client serves
     operation_type: OperationType,
     /// Isolation token for stream preferences
@@ -164,7 +164,7 @@ pub struct IsolatedOperationClient {
 impl IsolatedOperationClient {
     /// Create a new isolated client for an operation type
     pub fn new(
-        client: TorClient<TokioNativeTlsRuntime>,
+        client: TorClient<TokioRustlsRuntime>,
         operation_type: OperationType,
     ) -> Self {
         let now = Instant::now();
@@ -350,11 +350,11 @@ impl IsolatedOperationClient {
 /// - Operation-specific error handling and recovery
 pub struct DedicatedCircuitManager {
     /// Base TorClient for creating isolated clients
-    base_client: Arc<TorClient<TokioNativeTlsRuntime>>,
+    base_client: Arc<TorClient<TokioRustlsRuntime>>,
     /// Isolated clients per operation type
     operation_clients: RwLock<HashMap<OperationType, Arc<IsolatedOperationClient>>>,
     /// Runtime for async operations
-    runtime: TokioNativeTlsRuntime,
+    runtime: TokioRustlsRuntime,
     /// Configuration
     config: DedicatedCircuitConfig,
     /// Manager statistics
@@ -451,7 +451,7 @@ impl DedicatedCircuitManager {
         let start = Instant::now();
 
         // Get current Tokio runtime for Arti
-        let runtime = TokioNativeTlsRuntime::current()
+        let runtime = TokioRustlsRuntime::current()
             .map_err(|e| anyhow!("Failed to get Tokio runtime: {}", e))?;
 
         // Configure Arti client
