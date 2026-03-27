@@ -1,10 +1,12 @@
 import React, { useEffect } from 'react';
+import { View, ActivityIndicator, StyleSheet } from 'react-native';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { PaperProvider } from 'react-native-paper';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { quilTheme } from '../src/theme';
+import { COLORS } from '../src/theme';
 import { useWalletStore } from '../src/stores/walletStore';
 import { useSettingsStore } from '../src/stores/settingsStore';
 import { useNetworkStore } from '../src/stores/networkStore';
@@ -41,6 +43,24 @@ export default function RootLayout() {
 
     return () => clearInterval(interval);
   }, [initialize, loadSettings, checkHealth]);
+
+  // Wait for SecureStore to be read before deciding which screen to show.
+  // Without this gate, isLoggedIn defaults to false and the auth screen
+  // flashes briefly even when the user has a saved wallet.
+  if (isLoading) {
+    return (
+      <GestureHandlerRootView style={{ flex: 1 }}>
+        <SafeAreaProvider>
+          <PaperProvider theme={quilTheme}>
+            <StatusBar style="light" />
+            <View style={splashStyles.container}>
+              <ActivityIndicator size="large" color={COLORS.cyan} />
+            </View>
+          </PaperProvider>
+        </SafeAreaProvider>
+      </GestureHandlerRootView>
+    );
+  }
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
@@ -81,6 +101,17 @@ export default function RootLayout() {
                 }}
               />
               <Stack.Screen
+                name="miner-scan"
+                options={{
+                  headerShown: true,
+                  title: 'Link Miner',
+                  headerStyle: { backgroundColor: 'transparent' },
+                  headerTintColor: '#FFFFFF',
+                  headerTransparent: true,
+                  presentation: 'fullScreenModal',
+                }}
+              />
+              <Stack.Screen
                 name="tx/[id]"
                 options={{
                   headerShown: true,
@@ -96,3 +127,12 @@ export default function RootLayout() {
     </GestureHandlerRootView>
   );
 }
+
+const splashStyles = StyleSheet.create({
+  container: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: COLORS.darkBg,
+  },
+});

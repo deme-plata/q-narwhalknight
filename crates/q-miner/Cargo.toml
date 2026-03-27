@@ -75,8 +75,10 @@ libp2p = { version = "0.56", features = [
     "macros", "tokio",
 ], optional = true }
 rmp-serde = { version = "1.3", optional = true }
-# openssl no longer needed — switched to rustls-tls-webpki-roots (v9.0.2)
-# openssl = { version = "0.10", features = ["vendored"], optional = true }
+# v10.1.9: openssl with vendored feature — statically links OpenSSL to avoid
+# "libssl.so version not found" errors on systems with different OpenSSL versions.
+# Needed because hf-hub (AI) transitively pulls native-tls → openssl-sys.
+openssl = { version = "0.10", features = ["vendored"], optional = true }
 url = "2.5"
 # rustls = { workspace = true } # Not needed for miner, using native-tls
 tokio-socks = "0.5"
@@ -158,8 +160,8 @@ tempfile = { workspace = true }
 tokio-test = "0.4"
 
 [features]
-default = ["cpu-mining", "network", "cli", "jemalloc", "tui", "tor-support", "p2p"]
-vendored-openssl = []  # No longer needed — using rustls (v9.0.2)
+default = ["cpu-mining", "network", "cli", "jemalloc", "tui", "tor-support", "p2p", "vendored-openssl"]
+vendored-openssl = ["openssl/vendored"]  # v10.1.9: Statically link OpenSSL for portable binaries
 
 # Mining backends
 cpu-mining = []

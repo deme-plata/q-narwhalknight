@@ -803,6 +803,43 @@ fn open_browser(url: &str) -> bool {
     { std::process::Command::new("xdg-open").arg(url).spawn().is_ok() }
 }
 
+/// v10.1.9: Generate a compact QR code for terminal display.
+/// Encodes the login deep-link URL so Quillon mobile app can scan it.
+/// Uses Unicode half-block characters (▀▄█ ) for compact terminal rendering.
+fn generate_login_qr(data: &str) -> Vec<String> {
+    use qrcode::{QrCode, EcLevel};
+    let code = match QrCode::with_error_correction_level(data, EcLevel::L) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let matrix = code.to_colors();
+    let width = code.width();
+    let mut lines = Vec::new();
+
+    // Render 2 rows per line using Unicode half-blocks for compact display
+    let mut y = 0;
+    while y < width {
+        let mut line = String::new();
+        for x in 0..width {
+            let top = matrix[y * width + x] == qrcode::Color::Dark;
+            let bottom = if y + 1 < width {
+                matrix[(y + 1) * width + x] == qrcode::Color::Dark
+            } else {
+                false
+            };
+            match (top, bottom) {
+                (true, true) => line.push('█'),
+                (true, false) => line.push('▀'),
+                (false, true) => line.push('▄'),
+                (false, false) => line.push(' '),
+            }
+        }
+        lines.push(line);
+        y += 2;
+    }
+    lines
+}
+
 /// Device login flow: request code from server → open browser → poll until user logs in.
 /// Retries server connection with backoff. User can press Enter to skip at any time.
 /// Respects --tor / --proxy if provided.
@@ -866,7 +903,11 @@ async fn device_login_flow(server_url: &str, proxy_url: Option<&str>) -> Result<
     let verification_url = data.get("verification_url").and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("No verification_url in response"))?;
 
-    // Step 2: Show the user the code and open browser
+    // Step 2: Show the user the code, QR code, and open browser
+    // v10.1.9: Generate QR code for mobile app scanning
+    let qr_data = format!("quillon://miner-login?code={}&server={}", device_code, connected_url);
+    let qr_lines = generate_login_qr(&qr_data);
+
     eprintln!();
     eprintln!("\x1b[38;5;51m   ┌─────────────────────────────────────────────┐\x1b[0m");
     eprintln!("\x1b[38;5;51m   │\x1b[0m  \x1b[1;37mLink Your Wallet\x1b[0m                            \x1b[38;5;51m│\x1b[0m");
@@ -877,6 +918,15 @@ async fn device_login_flow(server_url: &str, proxy_url: Option<&str>) -> Result<
     eprintln!("\x1b[38;5;51m   │\x1b[0m   \x1b[2mOpen in browser or visit:\x1b[0m                  \x1b[38;5;51m│\x1b[0m");
     eprintln!("\x1b[38;5;51m   │\x1b[0m   \x1b[4;36m{}\x1b[0m", verification_url);
     eprintln!("\x1b[38;5;51m   │\x1b[0m                                             \x1b[38;5;51m│\x1b[0m");
+    // Display QR code for mobile scanning
+    if !qr_lines.is_empty() {
+        eprintln!("\x1b[38;5;51m   │\x1b[0m   \x1b[2mOr scan with Quillon mobile app:\x1b[0m           \x1b[38;5;51m│\x1b[0m");
+        eprintln!("\x1b[38;5;51m   │\x1b[0m                                             \x1b[38;5;51m│\x1b[0m");
+        for line in &qr_lines {
+            eprintln!("\x1b[38;5;51m   │\x1b[0m     {}  \x1b[38;5;51m\x1b[0m", line);
+        }
+        eprintln!("\x1b[38;5;51m   │\x1b[0m                                             \x1b[38;5;51m│\x1b[0m");
+    }
     eprintln!("\x1b[38;5;51m   └─────────────────────────────────────────────┘\x1b[0m");
     eprintln!();
 
@@ -884,7 +934,7 @@ async fn device_login_flow(server_url: &str, proxy_url: Option<&str>) -> Result<
     if browser_opened {
         eprintln!("\x1b[32m   ✓ Browser opened — complete login there\x1b[0m");
     } else {
-        eprintln!("\x1b[33m   ! Copy the URL above into your browser\x1b[0m");
+        eprintln!("\x1b[33m   ! Copy the URL above or scan QR with Quillon app\x1b[0m");
     }
     eprintln!();
     eprintln!("\x1b[2m   Waiting for login... press Enter to skip\x1b[0m");
