@@ -75,7 +75,7 @@ pub use optimized_miner::{
 };
 
 #[cfg(feature = "gpu-mining")]
-pub use gpu::{GPUMiner, GPUMinerConfig, GPUSolution, GPUStatsSnapshot, BatchResult};
+pub use gpu::{GPUMiner, GPUMinerConfig, GPUMiningJob, GPUSolution, GPUStatsSnapshot, BatchResult};
 
 // ✨ v1.0.58-beta: Bulletproofs v2 exports (confidential rewards)
 #[cfg(feature = "advanced-crypto")]

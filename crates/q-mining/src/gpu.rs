@@ -356,6 +356,17 @@ pub struct BatchResult {
     pub hashes: u64,
 }
 
+/// A mining job submitted to the GPU
+#[derive(Debug, Clone)]
+pub struct GPUMiningJob {
+    /// Block header bytes to hash
+    pub header: Vec<u8>,
+    /// Target difficulty (hash must be below this)
+    pub target: [u8; 32],
+    /// Block height
+    pub height: u64,
+}
+
 impl GPUMiner {
     /// Create new GPU miner with BLAKE3+VDF kernel
     pub fn new(config: GPUMinerConfig) -> Result<Self> {
@@ -670,6 +681,25 @@ impl GPUMiner {
     /// Get device name of the first GPU (for TUI display)
     pub fn device_name(&self) -> &str {
         self.devices.first().map(|d| d.name.as_str()).unwrap_or("Unknown GPU")
+    }
+
+    /// Mine a job by iterating mine_batch until a solution is found or stopped
+    pub async fn mine(&self, job: GPUMiningJob) -> Result<Option<GPUSolution>> {
+        use blake3;
+        // Derive challenge hash from the header
+        let challenge_hash: [u8; 32] = blake3::hash(&job.header).into();
+        let mut nonce_start: u64 = 0;
+
+        while !self.should_stop.load(Ordering::Relaxed) {
+            let result = self.mine_batch(&challenge_hash, &job.target, nonce_start)?;
+            if let Some(sol) = result.solution {
+                return Ok(Some(sol));
+            }
+            nonce_start = nonce_start.wrapping_add(result.hashes);
+            // Yield to tokio runtime
+            tokio::task::yield_now().await;
+        }
+        Ok(None)
     }
 
     /// Format hashrate for display
