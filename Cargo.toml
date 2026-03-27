@@ -68,7 +68,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.1.5"  # v10.1.5: fix wZEC Zebra RPC routing + bridge sync status detection
+version = "10.1.8"  # v10.1.8: GPU optimizations — async dispatch, kernel cache, per-GPU adaptive sizing
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"
