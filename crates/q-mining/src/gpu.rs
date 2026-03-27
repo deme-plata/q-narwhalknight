@@ -176,8 +176,12 @@ void blake3_hash_40(
     block[10] = 0; block[11] = 0; block[12] = 0;
     block[13] = 0; block[14] = 0; block[15] = 0;
 
+    // Copy IV from __constant to private address space (NVIDIA OpenCL requires matching address spaces)
+    uint iv[8];
+    for (int i = 0; i < 8; i++) iv[i] = BLAKE3_IV[i];
+
     // Single-chunk, single-block: flags = CHUNK_START | CHUNK_END | ROOT
-    blake3_compress(BLAKE3_IV, block, 0, 40u, CHUNK_START | CHUNK_END | ROOT, output);
+    blake3_compress(iv, block, 0, 40u, CHUNK_START | CHUNK_END | ROOT, output);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -190,7 +194,11 @@ void blake3_hash_32(const uint input[8], uint output[8]) {
     for (int i = 0; i < 8; i++) block[i] = input[i];
     for (int i = 8; i < 16; i++) block[i] = 0;
 
-    blake3_compress(BLAKE3_IV, block, 0, 32u, CHUNK_START | CHUNK_END | ROOT, output);
+    // Copy IV from __constant to private address space
+    uint iv[8];
+    for (int i = 0; i < 8; i++) iv[i] = BLAKE3_IV[i];
+
+    blake3_compress(iv, block, 0, 32u, CHUNK_START | CHUNK_END | ROOT, output);
 }
 
 // ═══════════════════════════════════════════════════════════════════
