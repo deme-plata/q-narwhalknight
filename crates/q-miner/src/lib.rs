@@ -1,6 +1,10 @@
 pub mod auto_updater;
 pub mod config;
 pub mod cpu;
+// NOTE: q-miner's gpu module is an unfinished alternative to q-mining's production GPU code.
+// It's gated behind "gpu-alt" (never enabled) to avoid compilation.
+// Production GPU mining uses q_mining::gpu::GPUMiner (in crates/q-mining/src/gpu.rs).
+#[cfg(feature = "gpu-alt")]
 pub mod gpu;
 pub mod miner_link;
 pub mod network;
@@ -14,6 +18,7 @@ pub mod utils;
 
 pub use config::MinerConfig;
 pub use cpu::CpuMiner;
+#[cfg(feature = "gpu-alt")]
 pub use gpu::{CudaMiner, OpenClMiner};
 pub use network::{PoolClient, StratumClient};
 pub use ui::Dashboard;
