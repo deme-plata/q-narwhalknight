@@ -1862,11 +1862,32 @@ async fn run_mining(
     #[cfg(feature = "opencl-mining")]
     let gpu_handle: Option<tokio::task::JoinHandle<()>> = if gpu_enabled {
         match q_mining::GPUMiner::new(q_mining::GPUMinerConfig::default()) {
-            Ok(gpu_miner) => {
+            Ok(mut gpu_miner) => {
                 let dev_name = gpu_miner.device_name().to_string();
                 info!("🎮 GPU initialized: {}", dev_name);
                 shared_state.gpu_active.store(true, Ordering::Relaxed);
                 *shared_state.gpu_device_name.write() = dev_name.clone();
+                // v10.1.7: Store rich GPU device info for TUI display
+                {
+                    let device_snapshots: Vec<q_miner::shared_state::GpuDeviceSnapshot> = gpu_miner.get_devices().iter().map(|d| {
+                        q_miner::shared_state::GpuDeviceSnapshot {
+                            index: d.index,
+                            name: d.name.clone(),
+                            vendor: d.vendor.clone(),
+                            compute_units: d.compute_units,
+                            global_memory_mb: d.global_memory / (1024 * 1024),
+                            local_memory_kb: d.local_memory / 1024,
+                            max_clock_mhz: d.max_clock_freq,
+                            api: d.opencl_version.clone(),
+                        }
+                    }).collect();
+                    info!("🎮 GPU devices detected: {} device(s)", device_snapshots.len());
+                    for d in &device_snapshots {
+                        info!("  GPU #{}: {} ({}) — {} CU, {} MB, {} MHz",
+                            d.index, d.name, d.vendor, d.compute_units, d.global_memory_mb, d.max_clock_mhz);
+                    }
+                    *shared_state.gpu_devices.write() = device_snapshots;
+                }
                 shared_state.send_event(DiagnosticEvent::GpuStarted { device_name: dev_name });
 
                 let gpu_shared_challenge = shared_challenge.clone();
@@ -1888,39 +1909,58 @@ async fn run_mining(
                     let mut batch_start = std::time::Instant::now();
                     let mut batch_hashes: u64 = 0;
 
+                    // v10.1.7: Cache decoded challenge/target to avoid per-dispatch hex decode + alloc
+                    let mut cached_challenge: [u8; 32] = [0u8; 32];
+                    let mut cached_target: [u8; 32] = [0u8; 32];
+                    let mut cached_block_height: u64 = 0;
+                    let mut cached_vdf_iterations: u32 = 0;
+                    let mut challenge_ready = false;
+
                     while gpu_is_running.load(Ordering::Relaxed) {
-                        // Read current challenge from shared cache
-                        let (challenge_hash, target, block_height, vdf_iterations) = {
-                            let guard = gpu_shared_challenge.read();
-                            match guard.as_ref() {
-                                Some((chal, _ts)) => {
-                                    let ch = match hex_to_bytes(&chal.challenge_hash) {
-                                        Ok(b) => b,
-                                        Err(_) => { std::thread::sleep(std::time::Duration::from_millis(100)); continue; }
-                                    };
-                                    let tgt = match hex_to_bytes(&chal.difficulty_target) {
-                                        Ok(b) => b,
-                                        Err(_) => { std::thread::sleep(std::time::Duration::from_millis(100)); continue; }
-                                    };
-                                    (ch, tgt, chal.block_height, chal.vdf_iterations)
+                        // v10.1.7: Check for new block signal at TOP of loop (immediate detection)
+                        // and only re-decode challenge when signal changes
+                        let sig = gpu_new_block_signal.load(Ordering::Relaxed);
+                        if sig != last_signal || !challenge_ready {
+                            last_signal = sig;
+                            gpu_nonce = u64::MAX / 2; // Reset high nonce range on new block
+
+                            let decoded = {
+                                let guard = gpu_shared_challenge.read();
+                                match guard.as_ref() {
+                                    Some((chal, _ts)) => {
+                                        match (hex_to_bytes(&chal.challenge_hash), hex_to_bytes(&chal.difficulty_target)) {
+                                            (Ok(ch), Ok(tg)) => Some((ch, tg, chal.block_height, chal.vdf_iterations)),
+                                            _ => None,
+                                        }
+                                    }
+                                    None => None,
+                                }
+                            };
+
+                            match decoded {
+                                Some((ch, tg, bh, vi)) => {
+                                    cached_challenge = ch;
+                                    cached_target = tg;
+                                    cached_block_height = bh;
+                                    cached_vdf_iterations = vi;
+                                    challenge_ready = true;
                                 }
                                 None => {
-                                    // No challenge yet — wait
-                                    std::thread::sleep(std::time::Duration::from_millis(500));
+                                    std::thread::sleep(std::time::Duration::from_millis(100));
                                     continue;
                                 }
                             }
-                        };
+                        }
 
-                        // Dispatch one GPU batch
-                        match gpu_miner.mine_batch(&challenge_hash, &target, gpu_nonce) {
+                        // Dispatch one GPU batch (persistent buffers + conditional upload inside)
+                        match gpu_miner.mine_batch(&cached_challenge, &cached_target, gpu_nonce) {
                             Ok(result) => {
                                 gpu_nonce = gpu_nonce.wrapping_add(result.hashes);
                                 batch_hashes += result.hashes;
                                 gpu_hash_counter.fetch_add(result.hashes, Ordering::Relaxed);
                                 gpu_hashes_total.fetch_add(result.hashes, Ordering::Relaxed);
 
-                                // Update GPU hashrate every batch
+                                // Update GPU hashrate every second
                                 let elapsed = batch_start.elapsed().as_secs_f64();
                                 if elapsed >= 1.0 {
                                     let hr = batch_hashes as f64 / elapsed;
@@ -1931,11 +1971,11 @@ async fn run_mining(
                                 }
 
                                 if let Some(solution) = result.solution {
-                                    info!("🎮💎 GPU solution found! Block #{}, Nonce: {}", block_height, solution.nonce);
+                                    info!("🎮💎 GPU solution found! Block #{}, Nonce: {}", cached_block_height, solution.nonce);
                                     gpu_solutions.fetch_add(1, Ordering::Relaxed);
                                     let _ = gpu_event_tx.send(DiagnosticEvent::GpuSolutionFound {
                                         nonce: solution.nonce,
-                                        block_height,
+                                        block_height: cached_block_height,
                                     });
 
                                     let hashrate_khs = f64::from_bits(gpu_hashrate_hs.load(Ordering::Relaxed)) / 1000.0;
@@ -1943,8 +1983,8 @@ async fn run_mining(
                                         "miner_address": gpu_wallet,
                                         "nonce": solution.nonce,
                                         "hash": hex::encode(solution.hash),
-                                        "difficulty_target": hex::encode(target),
-                                        "challenge_hash": hex::encode(challenge_hash),
+                                        "difficulty_target": hex::encode(cached_target),
+                                        "challenge_hash": hex::encode(cached_challenge),
                                         "hash_rate": hashrate_khs,
                                         "miner_id": gpu_miner_id,
                                         "worker_name": gpu_miner_name,
@@ -1957,14 +1997,14 @@ async fn run_mining(
                                         wallet_bytes[..len].copy_from_slice(&decoded[..len]);
                                     }
                                     let p2p_sub = Some(q_types::mining_solution::P2PMiningSubmission::new(
-                                        wallet_bytes, solution.hash, target, block_height,
-                                        challenge_hash, solution.nonce, vdf_iterations, gpu_miner_id.clone(),
+                                        wallet_bytes, solution.hash, cached_target, cached_block_height,
+                                        cached_challenge, solution.nonce, cached_vdf_iterations, gpu_miner_id.clone(),
                                     ));
 
                                     let _ = gpu_solution_tx.send(q_miner::solution_submitter::SolutionMessage {
                                         solution_json,
                                         solution_hash: solution.hash,
-                                        block_height,
+                                        block_height: cached_block_height,
                                         nonce: solution.nonce,
                                         p2p_submission: p2p_sub,
                                     });
@@ -1975,13 +2015,6 @@ async fn run_mining(
                                 let _ = gpu_event_tx.send(DiagnosticEvent::GpuError { message: e.to_string() });
                                 std::thread::sleep(std::time::Duration::from_secs(5));
                             }
-                        }
-
-                        // Check for new block signal — reset nonce
-                        let sig = gpu_new_block_signal.load(Ordering::Relaxed);
-                        if sig != last_signal {
-                            last_signal = sig;
-                            gpu_nonce = u64::MAX / 2; // Reset high nonce range
                         }
                     }
                 }))

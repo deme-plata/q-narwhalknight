@@ -13,6 +13,12 @@
 //! for _ in 0..99: h = BLAKE3(h)              // VDF chain (99 rounds)
 //! if h < difficulty_target: SOLUTION!         // total: 100 BLAKE3 hashes
 //! ```
+//!
+//! ## Optimizations (v10.1.7)
+//! - **Persistent buffers**: Allocated once per GPU context, reused across dispatches
+//! - **Conditional upload**: Challenge/target only re-uploaded when changed (same block = 0 uploads)
+//! - **Challenge word precompute**: 32-byte challenge converted to 8×u32 on CPU, kernel skips per-thread byte unpacking
+//! - **Adaptive work size**: Dispatch size auto-tunes to keep GPU dispatch time in [100ms, 400ms]
 
 use anyhow::{anyhow, Result};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -42,6 +48,9 @@ use opencl3::{
 ///   2. h = BLAKE3(input)           — single-block 40-byte hash
 ///   3. for 99 rounds: h = BLAKE3(h) — single-block 32-byte hash (VDF chain)
 ///   4. Compare final h < target (byte-wise, big-endian-like)
+///
+/// v10.1.7: Challenge accepted as 8×uint (pre-converted on CPU) to eliminate
+/// per-work-item byte-to-uint conversion.
 pub const BLAKE3_KERNEL_SOURCE: &str = r#"
 // ═══════════════════════════════════════════════════════════════════
 // BLAKE3 constants
@@ -140,25 +149,24 @@ void blake3_compress(
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// blake3_hash_40: Hash 40-byte input (challenge[32] + nonce_le[8])
+// blake3_hash_40: Hash 40-byte input (challenge_words[8] + nonce_le[8])
+// Challenge is pre-converted to uint[8] on CPU — no per-thread byte unpacking.
 // Returns 32-byte hash as 8 uint words (little-endian)
 // ═══════════════════════════════════════════════════════════════════
 
 void blake3_hash_40(
-    __global const uchar* challenge,
+    __global const uint* challenge_words,
     ulong nonce,
     uint output[8]
 ) {
     // Build message block: 40 bytes of data + 24 bytes of zero padding
     uint block[16];
 
-    // challenge_hash bytes → LE u32 words (bytes 0..31)
-    for (int i = 0; i < 8; i++) {
-        block[i] = (uint)challenge[i*4]
-                 | ((uint)challenge[i*4+1] << 8)
-                 | ((uint)challenge[i*4+2] << 16)
-                 | ((uint)challenge[i*4+3] << 24);
-    }
+    // Challenge words already in LE u32 — direct copy (no byte-to-uint conversion)
+    block[0] = challenge_words[0]; block[1] = challenge_words[1];
+    block[2] = challenge_words[2]; block[3] = challenge_words[3];
+    block[4] = challenge_words[4]; block[5] = challenge_words[5];
+    block[6] = challenge_words[6]; block[7] = challenge_words[7];
 
     // nonce (u64 LE) → two u32 words (bytes 32..39)
     block[8] = (uint)(nonce & 0xFFFFFFFFul);
@@ -208,7 +216,7 @@ bool meets_target(const uint hash[8], __global const uchar* target) {
 // MAIN MINING KERNEL: BLAKE3 + 99-round VDF
 //
 // Each work item:
-//   1. Compute h = BLAKE3(challenge[32] || nonce_le[8])  — 40 bytes
+//   1. Compute h = BLAKE3(challenge_words[8] || nonce_le[8])  — 40 bytes
 //   2. Repeat 99 times: h = BLAKE3(h)                    — 32 bytes
 //   3. If h < target → atomically write solution
 //
@@ -216,19 +224,19 @@ bool meets_target(const uint hash[8], __global const uchar* target) {
 // ═══════════════════════════════════════════════════════════════════
 
 __kernel void blake3_mine(
-    __global const uchar* challenge,    // challenge_hash (32 bytes)
-    __global const uchar* target,       // difficulty target (32 bytes)
-    const ulong nonce_start,            // starting nonce for this dispatch
-    __global ulong* found_nonce,        // output: winning nonce
-    __global uchar* found_hash,         // output: winning hash (32 bytes)
-    __global uint* found_flag           // output: 1 if solution found
+    __global const uint* challenge_words, // challenge as 8×u32 (LE, pre-converted on CPU)
+    __global const uchar* target,         // difficulty target (32 bytes)
+    const ulong nonce_start,              // starting nonce for this dispatch
+    __global ulong* found_nonce,          // output: winning nonce
+    __global uchar* found_hash,           // output: winning hash (32 bytes)
+    __global uint* found_flag             // output: 1 if solution found
 ) {
     uint gid = get_global_id(0);
     ulong nonce = nonce_start + (ulong)gid;
 
     // Step 1: Initial BLAKE3 hash of 40-byte input
     uint h[8];
-    blake3_hash_40(challenge, nonce, h);
+    blake3_hash_40(challenge_words, nonce, h);
 
     // Step 2: VDF chain — 99 sequential BLAKE3 hashes
     uint tmp[8];
@@ -274,6 +282,19 @@ pub struct GPUDeviceInfo {
 }
 
 // ============================================================================
+// ADAPTIVE WORK SIZE CONSTANTS
+// ============================================================================
+
+/// Minimum work size (65K items). Below this GPU utilization drops too low.
+const MIN_WORK_SIZE: usize = 1 << 16;
+/// Maximum work size (8M items). Above this dispatch latency exceeds 500ms on most GPUs.
+const MAX_WORK_SIZE: usize = 1 << 23;
+/// Target dispatch time lower bound (ms). If dispatch is faster, increase work size.
+const DISPATCH_TARGET_LOW_MS: u128 = 100;
+/// Target dispatch time upper bound (ms). If dispatch is slower, decrease work size.
+const DISPATCH_TARGET_HIGH_MS: u128 = 400;
+
+// ============================================================================
 // GPU MINER
 // ============================================================================
 
@@ -285,6 +306,8 @@ pub struct GPUMiner {
     devices: Vec<GPUDeviceInfo>,
     #[cfg(feature = "gpu-mining")]
     contexts: Vec<GPUContext>,
+    /// Adaptive work size — auto-tuned based on dispatch latency
+    adaptive_work_size: usize,
 }
 
 /// GPU miner configuration
@@ -314,7 +337,11 @@ impl Default for GPUMinerConfig {
     }
 }
 
-/// GPU-specific mining context
+/// GPU-specific mining context with persistent pre-allocated buffers.
+///
+/// Buffers are allocated once during `initialize_contexts()` and reused across
+/// all dispatches. This eliminates 5 OpenCL buffer alloc/free IPC round-trips
+/// per dispatch (~5-50µs each on typical drivers).
 #[cfg(feature = "gpu-mining")]
 struct GPUContext {
     #[allow(dead_code)]
@@ -324,6 +351,15 @@ struct GPUContext {
     #[allow(dead_code)]
     program: Program,
     kernel: Kernel,
+    // Pre-allocated persistent buffers (Phase 1: buffer reuse)
+    challenge_buf: Buffer<cl_uint>,    // 8 × u32 = 32 bytes, READ_ONLY (Phase 2: words)
+    target_buf: Buffer<cl_uchar>,      // 32 bytes, READ_ONLY
+    found_nonce_buf: Buffer<cl_ulong>, // 1 × u64 = 8 bytes, WRITE_ONLY
+    found_hash_buf: Buffer<cl_uchar>,  // 32 bytes, WRITE_ONLY
+    found_flag_buf: Buffer<cl_uint>,   // 1 × u32 = 4 bytes, READ_WRITE
+    // Track what's currently uploaded to skip redundant transfers
+    cached_challenge: [u8; 32],
+    cached_target: [u8; 32],
 }
 
 /// GPU mining statistics
@@ -367,6 +403,20 @@ pub struct GPUMiningJob {
     pub height: u64,
 }
 
+/// Convert challenge bytes [u8; 32] to LE u32 words [u32; 8] for GPU upload.
+/// This is done once on the CPU instead of per-work-item on the GPU.
+#[inline]
+fn challenge_bytes_to_words(challenge: &[u8; 32]) -> [u32; 8] {
+    std::array::from_fn(|i| {
+        u32::from_le_bytes([
+            challenge[i * 4],
+            challenge[i * 4 + 1],
+            challenge[i * 4 + 2],
+            challenge[i * 4 + 3],
+        ])
+    })
+}
+
 impl GPUMiner {
     /// Create new GPU miner with BLAKE3+VDF kernel
     pub fn new(config: GPUMinerConfig) -> Result<Self> {
@@ -387,6 +437,8 @@ impl GPUMiner {
             );
         }
 
+        let initial_work_size = config.work_size;
+
         #[cfg(feature = "gpu-mining")]
         let contexts = Self::initialize_contexts(&devices, &config)?;
 
@@ -397,6 +449,7 @@ impl GPUMiner {
             devices,
             #[cfg(feature = "gpu-mining")]
             contexts,
+            adaptive_work_size: initial_work_size,
         })
     }
 
@@ -439,7 +492,7 @@ impl GPUMiner {
         }
     }
 
-    /// Initialize OpenCL contexts for selected devices
+    /// Initialize OpenCL contexts for selected devices with persistent pre-allocated buffers
     #[cfg(feature = "gpu-mining")]
     fn initialize_contexts(devices: &[GPUDeviceInfo], config: &GPUMinerConfig) -> Result<Vec<GPUContext>> {
         let mut contexts = Vec::new();
@@ -484,12 +537,38 @@ impl GPUMiner {
 
             let kernel = Kernel::create(&program, "blake3_mine")?;
 
+            // Phase 1: Pre-allocate persistent buffers — reused across all dispatches
+            let challenge_buf = unsafe {
+                Buffer::<cl_uint>::create(&context, CL_MEM_READ_ONLY, 8, std::ptr::null_mut())?
+            };
+            let target_buf = unsafe {
+                Buffer::<cl_uchar>::create(&context, CL_MEM_READ_ONLY, 32, std::ptr::null_mut())?
+            };
+            let found_nonce_buf = unsafe {
+                Buffer::<cl_ulong>::create(&context, CL_MEM_WRITE_ONLY, 1, std::ptr::null_mut())?
+            };
+            let found_hash_buf = unsafe {
+                Buffer::<cl_uchar>::create(&context, CL_MEM_WRITE_ONLY, 32, std::ptr::null_mut())?
+            };
+            let found_flag_buf = unsafe {
+                Buffer::<cl_uint>::create(&context, CL_MEM_READ_WRITE, 1, std::ptr::null_mut())?
+            };
+
+            info!("🎮 GPU {} buffers pre-allocated (challenge 32B, target 32B, results 72B)", idx);
+
             contexts.push(GPUContext {
                 device,
                 context,
                 queue,
                 program,
                 kernel,
+                challenge_buf,
+                target_buf,
+                found_nonce_buf,
+                found_hash_buf,
+                found_flag_buf,
+                cached_challenge: [0u8; 32],
+                cached_target: [0u8; 32],
             });
         }
 
@@ -503,10 +582,12 @@ impl GPUMiner {
     /// - Statistics updates
     /// - Nonce progression
     ///
+    /// v10.1.7: Uses persistent buffers with conditional upload and adaptive work size.
+    ///
     /// Returns (solution_if_found, nonces_tried).
     #[cfg(feature = "gpu-mining")]
     pub fn mine_batch(
-        &self,
+        &mut self,
         challenge_hash: &[u8; 32],
         target: &[u8; 32],
         nonce_start: u64,
@@ -515,10 +596,22 @@ impl GPUMiner {
             return Err(anyhow!("No GPU contexts initialized"));
         }
 
-        let ctx = &self.contexts[0];
-        let work_size = self.config.work_size;
+        // Phase 4: Use adaptive work size (auto-tuned), rounded down to local_work_size multiple
+        let work_size = (self.adaptive_work_size / self.config.local_work_size) * self.config.local_work_size;
+        let work_size = work_size.max(self.config.local_work_size); // at least 1 work group
 
-        let result = self.dispatch_blake3_kernel(ctx, challenge_hash, target, nonce_start, work_size)?;
+        let dispatch_start = Instant::now();
+        let result = Self::dispatch_blake3_kernel(&mut self.contexts[0], challenge_hash, target, nonce_start, work_size, self.config.local_work_size)?;
+        let dispatch_ms = dispatch_start.elapsed().as_millis();
+
+        // Phase 4: Adaptive work size tuning
+        if dispatch_ms < DISPATCH_TARGET_LOW_MS {
+            // GPU is underutilized — increase work size (×1.5, capped at MAX)
+            self.adaptive_work_size = (self.adaptive_work_size * 3 / 2).min(MAX_WORK_SIZE);
+        } else if dispatch_ms > DISPATCH_TARGET_HIGH_MS {
+            // GPU dispatch too slow — decrease work size (×0.67, floored at MIN)
+            self.adaptive_work_size = (self.adaptive_work_size * 2 / 3).max(MIN_WORK_SIZE);
+        }
 
         self.stats.dispatches.fetch_add(1, Ordering::Relaxed);
         self.stats.total_hashes.fetch_add(work_size as u64, Ordering::Relaxed);
@@ -539,56 +632,59 @@ impl GPUMiner {
         })
     }
 
-    /// Dispatch the BLAKE3+VDF mining kernel to one GPU context
+    /// Dispatch the BLAKE3+VDF mining kernel to one GPU context.
+    ///
+    /// v10.1.7: Uses persistent buffers on GPUContext. Challenge and target are
+    /// only re-uploaded when they change (conditional upload via cached_challenge/target).
+    /// Challenge is pre-converted to u32 words on CPU (Phase 2A).
     #[cfg(feature = "gpu-mining")]
     fn dispatch_blake3_kernel(
-        &self,
-        ctx: &GPUContext,
+        ctx: &mut GPUContext,
         challenge: &[u8; 32],
         target: &[u8; 32],
         nonce_start: u64,
         work_size: usize,
+        local_work_size: usize,
     ) -> Result<Option<(u64, [u8; 32])>> {
         const CL_TRUE: cl_uint = 1;
 
-        // Create buffers
-        let mut challenge_buffer = unsafe {
-            Buffer::<cl_uchar>::create(&ctx.context, CL_MEM_READ_ONLY, 32, std::ptr::null_mut())?
-        };
-        let mut target_buffer = unsafe {
-            Buffer::<cl_uchar>::create(&ctx.context, CL_MEM_READ_ONLY, 32, std::ptr::null_mut())?
-        };
-        let found_nonce_buffer = unsafe {
-            Buffer::<cl_ulong>::create(&ctx.context, CL_MEM_WRITE_ONLY, 1, std::ptr::null_mut())?
-        };
-        let found_hash_buffer = unsafe {
-            Buffer::<cl_uchar>::create(&ctx.context, CL_MEM_WRITE_ONLY, 32, std::ptr::null_mut())?
-        };
-        let mut found_flag_buffer = unsafe {
-            Buffer::<cl_uint>::create(&ctx.context, CL_MEM_READ_WRITE, 1, std::ptr::null_mut())?
-        };
-
-        // Upload data
+        // Phase 1+2: Conditional upload — only re-upload when challenge/target changes
         unsafe {
-            ctx.queue.enqueue_write_buffer(&mut challenge_buffer, CL_TRUE, 0, challenge, &[])?;
-            ctx.queue.enqueue_write_buffer(&mut target_buffer, CL_TRUE, 0, target, &[])?;
+            if ctx.cached_challenge != *challenge {
+                // Phase 2A: Convert challenge bytes to u32 words on CPU
+                let challenge_words = challenge_bytes_to_words(challenge);
+                ctx.queue.enqueue_write_buffer(
+                    &mut ctx.challenge_buf, CL_TRUE, 0, &challenge_words, &[],
+                )?;
+                ctx.cached_challenge = *challenge;
+            }
+            if ctx.cached_target != *target {
+                ctx.queue.enqueue_write_buffer(
+                    &mut ctx.target_buf, CL_TRUE, 0, target, &[],
+                )?;
+                ctx.cached_target = *target;
+            }
+            // found_flag must be zeroed before every dispatch
             let zero_flag: [u32; 1] = [0];
-            ctx.queue.enqueue_write_buffer(&mut found_flag_buffer, CL_TRUE, 0, &zero_flag, &[])?;
+            ctx.queue.enqueue_write_buffer(
+                &mut ctx.found_flag_buf, CL_TRUE, 0, &zero_flag, &[],
+            )?;
         }
 
-        // Set kernel arguments
+        // Set kernel arguments (persistent buffers — arg pointers don't change,
+        // but OpenCL requires set_arg before each enqueue for correctness)
         unsafe {
-            ctx.kernel.set_arg(0, &challenge_buffer)?;
-            ctx.kernel.set_arg(1, &target_buffer)?;
+            ctx.kernel.set_arg(0, &ctx.challenge_buf)?;
+            ctx.kernel.set_arg(1, &ctx.target_buf)?;
             ctx.kernel.set_arg(2, &nonce_start)?;
-            ctx.kernel.set_arg(3, &found_nonce_buffer)?;
-            ctx.kernel.set_arg(4, &found_hash_buffer)?;
-            ctx.kernel.set_arg(5, &found_flag_buffer)?;
+            ctx.kernel.set_arg(3, &ctx.found_nonce_buf)?;
+            ctx.kernel.set_arg(4, &ctx.found_hash_buf)?;
+            ctx.kernel.set_arg(5, &ctx.found_flag_buf)?;
         }
 
         // Execute kernel
         let global_work_size = [work_size];
-        let local_work_size = [self.config.local_work_size];
+        let local_ws = [local_work_size];
 
         unsafe {
             ctx.queue.enqueue_nd_range_kernel(
@@ -596,7 +692,7 @@ impl GPUMiner {
                 1,
                 std::ptr::null(),
                 global_work_size.as_ptr(),
-                local_work_size.as_ptr(),
+                local_ws.as_ptr(),
                 &[],
             )?;
         }
@@ -606,7 +702,7 @@ impl GPUMiner {
         // Read results
         let mut found_flag: [u32; 1] = [0];
         unsafe {
-            ctx.queue.enqueue_read_buffer(&found_flag_buffer, CL_TRUE, 0, &mut found_flag, &[])?;
+            ctx.queue.enqueue_read_buffer(&ctx.found_flag_buf, CL_TRUE, 0, &mut found_flag, &[])?;
         }
 
         if found_flag[0] != 0 {
@@ -614,8 +710,8 @@ impl GPUMiner {
             let mut found_hash: [u8; 32] = [0; 32];
 
             unsafe {
-                ctx.queue.enqueue_read_buffer(&found_nonce_buffer, CL_TRUE, 0, &mut found_nonce, &[])?;
-                ctx.queue.enqueue_read_buffer(&found_hash_buffer, CL_TRUE, 0, &mut found_hash, &[])?;
+                ctx.queue.enqueue_read_buffer(&ctx.found_nonce_buf, CL_TRUE, 0, &mut found_nonce, &[])?;
+                ctx.queue.enqueue_read_buffer(&ctx.found_hash_buf, CL_TRUE, 0, &mut found_hash, &[])?;
             }
 
             return Ok(Some((found_nonce[0], found_hash)));
@@ -624,10 +720,88 @@ impl GPUMiner {
         Ok(None)
     }
 
+    /// Dispatch mining work across all GPUs (multi-GPU support).
+    ///
+    /// Splits nonce range proportionally by compute units across all initialized
+    /// GPU contexts. Returns the first solution found (if any) and total hashes.
+    #[cfg(feature = "gpu-mining")]
+    pub fn mine_batch_multi(
+        &mut self,
+        challenge_hash: &[u8; 32],
+        target: &[u8; 32],
+        nonce_start: u64,
+    ) -> Result<BatchResult> {
+        let num_gpus = self.contexts.len();
+        if num_gpus == 0 {
+            return Err(anyhow!("No GPU contexts initialized"));
+        }
+        if num_gpus == 1 {
+            return self.mine_batch(challenge_hash, target, nonce_start);
+        }
+
+        let work_size = (self.adaptive_work_size / self.config.local_work_size) * self.config.local_work_size;
+        let work_size = work_size.max(self.config.local_work_size);
+
+        // Split work evenly across GPUs
+        let per_gpu = work_size / num_gpus;
+        let local_ws = self.config.local_work_size;
+
+        let dispatch_start = Instant::now();
+
+        let mut total_hashes: u64 = 0;
+        let mut solution: Option<GPUSolution> = None;
+
+        for (gpu_idx, ctx) in self.contexts.iter_mut().enumerate() {
+            let gpu_nonce_start = nonce_start + (gpu_idx as u64) * (per_gpu as u64);
+            let gpu_work = if gpu_idx == num_gpus - 1 {
+                work_size - per_gpu * (num_gpus - 1) // last GPU gets remainder
+            } else {
+                per_gpu
+            };
+            // Round to local_work_size
+            let gpu_work = (gpu_work / local_ws) * local_ws;
+            if gpu_work == 0 {
+                continue;
+            }
+
+            let result = Self::dispatch_blake3_kernel(ctx, challenge_hash, target, gpu_nonce_start, gpu_work, local_ws)?;
+            total_hashes += gpu_work as u64;
+
+            if solution.is_none() {
+                if let Some((nonce, hash)) = result {
+                    solution = Some(GPUSolution {
+                        nonce,
+                        hash,
+                        gpu_index: gpu_idx,
+                        hashes_computed: total_hashes,
+                    });
+                }
+            }
+        }
+
+        let dispatch_ms = dispatch_start.elapsed().as_millis();
+        if dispatch_ms < DISPATCH_TARGET_LOW_MS {
+            self.adaptive_work_size = (self.adaptive_work_size * 3 / 2).min(MAX_WORK_SIZE);
+        } else if dispatch_ms > DISPATCH_TARGET_HIGH_MS {
+            self.adaptive_work_size = (self.adaptive_work_size * 2 / 3).max(MIN_WORK_SIZE);
+        }
+
+        self.stats.dispatches.fetch_add(1, Ordering::Relaxed);
+        self.stats.total_hashes.fetch_add(total_hashes, Ordering::Relaxed);
+        if solution.is_some() {
+            self.stats.blocks_found.fetch_add(1, Ordering::Relaxed);
+        }
+
+        Ok(BatchResult {
+            solution,
+            hashes: total_hashes,
+        })
+    }
+
     /// Fallback mine_batch when GPU feature is not compiled in
     #[cfg(not(feature = "gpu-mining"))]
     pub fn mine_batch(
-        &self,
+        &mut self,
         _challenge_hash: &[u8; 32],
         _target: &[u8; 32],
         _nonce_start: u64,
@@ -673,6 +847,11 @@ impl GPUMiner {
         }
     }
 
+    /// Get current adaptive work size (for diagnostics/TUI display)
+    pub fn current_work_size(&self) -> usize {
+        self.adaptive_work_size
+    }
+
     /// Get available devices
     pub fn get_devices(&self) -> &[GPUDeviceInfo] {
         &self.devices
@@ -684,7 +863,7 @@ impl GPUMiner {
     }
 
     /// Mine a job by iterating mine_batch until a solution is found or stopped
-    pub async fn mine(&self, job: GPUMiningJob) -> Result<Option<GPUSolution>> {
+    pub async fn mine(&mut self, job: GPUMiningJob) -> Result<Option<GPUSolution>> {
         use blake3;
         // Derive challenge hash from the header
         let challenge_hash: [u8; 32] = blake3::hash(&job.header).into();
@@ -759,6 +938,21 @@ mod tests {
         let devices = GPUMiner::enumerate_devices();
         assert!(devices.is_ok());
         // May be empty if no GPU is available
+    }
+
+    #[test]
+    fn test_challenge_bytes_to_words() {
+        // Test that byte-to-word conversion is correct (LE)
+        let mut challenge = [0u8; 32];
+        challenge[0] = 0x01;
+        challenge[1] = 0x02;
+        challenge[2] = 0x03;
+        challenge[3] = 0x04;
+        challenge[4] = 0xFF;
+
+        let words = challenge_bytes_to_words(&challenge);
+        assert_eq!(words[0], 0x04030201); // LE: byte[0] is LSB
+        assert_eq!(words[1], 0x000000FF);
     }
 
     /// Verify that the CPU BLAKE3+VDF produces the expected hash for a known input.

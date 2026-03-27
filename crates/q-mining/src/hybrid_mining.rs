@@ -475,9 +475,9 @@ pub struct IntegratedHybridMiner {
     /// VDF engine for CPU mining
     vdf_engine: Arc<QuantumVDF>,
 
-    /// GPU miner for SHA-3 mining
+    /// GPU miner for SHA-3 mining (Mutex for &mut self on mine_batch)
     #[cfg(feature = "gpu-mining")]
-    gpu_miner: Arc<GPUMiner>,
+    gpu_miner: Arc<tokio::sync::Mutex<GPUMiner>>,
 
     /// Miner address
     miner_address: Address,
@@ -528,7 +528,7 @@ impl IntegratedHybridMiner {
 
         // Initialize GPU miner
         #[cfg(feature = "gpu-mining")]
-        let gpu_miner = Arc::new(GPUMiner::new(GPUMinerConfig::default())?);
+        let gpu_miner = Arc::new(tokio::sync::Mutex::new(GPUMiner::new(GPUMinerConfig::default())?));
 
         info!("✅ Hybrid miner initialized - CPU (VDF) + GPU (SHA-3)");
 
@@ -616,7 +616,7 @@ impl IntegratedHybridMiner {
                 height,
             };
 
-            self.gpu_miner.mine(job).await?
+            self.gpu_miner.lock().await.mine(job).await?
         };
 
         #[cfg(not(feature = "gpu-mining"))]
@@ -739,7 +739,9 @@ impl IntegratedHybridMiner {
         self.should_stop.store(true, Ordering::Relaxed);
 
         #[cfg(feature = "gpu-mining")]
-        self.gpu_miner.stop();
+        if let Ok(guard) = self.gpu_miner.try_lock() {
+            guard.stop();
+        }
     }
 
     /// Get mining statistics
