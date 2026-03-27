@@ -384,6 +384,56 @@ git config user.name "Server Beta"
 git config user.email "server-beta@q-narwhalknight.dev"
 ```
 
+### **📋 LOCAL GIT WORKFLOW — Issues, Branches & PRs**
+
+**⚠️ We do NOT use GitHub.** All development uses the local git server at `code.quillon.xyz`.
+
+#### **Issue Tracking:**
+- Issues are tracked in markdown files under `docs/` (e.g., `docs/gpu-optimization-issues.md`)
+- Each issue has an ID prefix (e.g., `GPU-001`, `SYNC-001`, `NET-001`)
+- Status: ⚪ Planned → 🔵 In Progress → ✅ Closed
+- When creating a new feature area, create a `docs/{area}-issues.md` file
+
+#### **Branch Naming Convention:**
+```
+{area}/phase-{N}-{short-description}    # Feature branches
+{area}/v{X.Y.Z}-{description}           # Release integration branches
+fix/{short-description}                 # Bug fixes
+```
+Examples: `gpu/phase-1-async-dispatch`, `gpu/v10.1.8-optimizations`, `fix/oom-block-pack`
+
+#### **Pull Request Workflow (Local Git):**
+Since `code.quillon.xyz` is a bare git repo (git-http-backend, read-only HTTP), PRs are done via branch review:
+
+1. **Create feature branch** from the current working branch
+2. **Implement changes** with clear commits referencing issue IDs (e.g., `feat(gpu): GPU-001 async flag zeroing`)
+3. **Push branch** — other Claude Code terminals can pull and review
+4. **Merge** — after review, merge into the integration branch
+5. **Update issue tracker** — mark issue as ✅ Closed
+
+```bash
+# Create and push a feature branch
+git checkout -b gpu/phase-1-async-dispatch
+# ... implement changes ...
+git commit -m "feat(gpu): GPU-001 non-blocking flag zeroing + async readback"
+git push origin gpu/phase-1-async-dispatch
+
+# Other terminals can review:
+git fetch origin
+git log origin/gpu/phase-1-async-dispatch..HEAD
+
+# Merge when approved:
+git checkout gpu/v10.1.8-optimizations
+git merge gpu/phase-1-async-dispatch
+```
+
+#### **Multi-Terminal Collaboration:**
+Multiple Claude Code terminals can work on different phases simultaneously:
+- Each terminal works on its own feature branch
+- The integration branch (`gpu/v10.1.8-optimizations`) is the merge target
+- Use `git update-server-info` on Beta after pushing so Epsilon can pull
+- Coordinate via the issue tracker markdown files
+
 ### **🧅 TOR INTEGRATION PRIORITY TASKS**
 
 #### **Phase 1: Core Tor Infrastructure**
@@ -625,6 +675,73 @@ docker exec q-test-v${VERSION} curl -s localhost:8080/api/v1/status
 
 # 4. Only after successful soak: Deploy to production
 ```
+
+### **🐳 DOCKER SYNC TESTING ON EPSILON (Debian 12)**
+
+**Pre-built reusable image**: `qnk-debian12` on Epsilon (has Rust + all build deps)
+**Dockerfile**: `/home/orobit/Dockerfile.qnk-debian12`
+
+**⚠️ CRITICAL RULES FOR DOCKER ON EPSILON:**
+1. **NEVER use `--rm`** — it deletes the container on exit, losing all installed packages
+2. **Binary built on Ubuntu 24.04 does NOT run on Debian 12** — GLIBC 2.39 vs 2.36 mismatch
+3. **Must build from source** inside Debian 12 or use the `qnk-debian12` image
+4. **No `--memory=8g` for builds** — linking q-api-server needs >8GB RAM (gets OOM-killed)
+5. **P2P port uses env var** `Q_P2P_PORT=9001`, NOT `--p2p-port` CLI flag
+6. **Requires `libudev-dev`** for build, `libssl3` for runtime
+
+**Step 1: Build binary for Debian 12** (only needed once per version):
+```bash
+# On Epsilon — uses cached target dir, ~5 min for incremental builds
+ssh root@89.149.241.126 "cd /home/orobit/q-narwhalknight-src && docker run --rm \
+  -v \$(pwd):/src \
+  -v /home/orobit/target-debian12:/src/target \
+  -w /src \
+  rust:bookworm \
+  bash -c '
+    apt-get update -qq && \
+    apt-get install -y -qq libssl-dev pkg-config cmake clang libudev-dev libclang-dev >/dev/null 2>&1 && \
+    cargo build --release --package q-api-server
+  '"
+# Binary: /home/orobit/target-debian12/release/q-api-server
+```
+
+**Step 2: Run sync test container**:
+```bash
+ssh root@89.149.241.126 "docker run -d \
+  --name q-sync-test-v{VERSION} \
+  --memory=8g \
+  -p 8085:8080 -p 9005:9001 \
+  -v /home/orobit/target-debian12/release/q-api-server:/opt/q-api-server:ro \
+  -v /home/orobit/docker-sync-test-v{VERSION}:/data \
+  -e Q_NETWORK_ID=mainnet-genesis \
+  -e Q_DB_PATH=/data/db \
+  -e Q_P2P_PORT=9001 \
+  -e RUST_LOG=info \
+  -e ROCKSDB_BLOCK_CACHE_MB=2048 \
+  -e Q_TOR_BOOTSTRAP_TIMEOUT=5 \
+  debian:12 \
+  bash -c '
+    apt-get update -qq && apt-get install -y -qq libssl3 ca-certificates curl >/dev/null 2>&1 && \
+    cp /opt/q-api-server /usr/local/bin/q-api-server && \
+    chmod +x /usr/local/bin/q-api-server && \
+    echo \"\$(date +%s)\" > /data/sync_start_epoch.txt && \
+    /usr/local/bin/q-api-server --port 8080 2>&1
+  '"
+```
+
+**Step 3: Monitor sync speed**:
+```bash
+# Check height progress
+ssh root@89.149.241.126 "docker logs q-sync-test-v{VERSION} 2>&1 | grep 'Updated current_height' | tail -5"
+# Check resource usage
+ssh root@89.149.241.126 "docker stats q-sync-test-v{VERSION} --no-stream"
+```
+
+**Expected sync performance** (Epsilon 10Gbit, 48 cores):
+- 0-500K blocks: ~280 blocks/sec (warmup, peer discovery)
+- 500K-3M blocks: ~1,100 blocks/sec (peak turbo sync)
+- Overall average: ~570 blocks/sec
+- Full sync (~11.4M blocks): ~5.5 hours
 
 ### **🚀 DEPLOYMENT - ALWAYS USE HA ROLLING DEPLOY**
 
