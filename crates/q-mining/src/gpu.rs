@@ -524,11 +524,14 @@ impl GPUMiner {
         #[cfg(feature = "gpu-mining")]
         {
             let platforms = opencl3::platform::get_platforms()?;
+            info!("🎮 OpenCL: {} platform(s) found", platforms.len());
             let mut devices = Vec::new();
             let mut index = 0;
 
-            for platform in platforms {
+            for (plat_idx, platform) in platforms.iter().enumerate() {
+                let plat_name = platform.name().unwrap_or_else(|_| "Unknown".into());
                 if let Ok(device_ids) = platform.get_devices(CL_DEVICE_TYPE_GPU) {
+                    info!("🎮 Platform {}: {} — {} GPU(s)", plat_idx, plat_name, device_ids.len());
                     for device_id in device_ids {
                         let device = Device::new(device_id);
                         let info = GPUDeviceInfo {
@@ -580,16 +583,20 @@ impl GPUMiner {
             let platforms = opencl3::platform::get_platforms()?;
             let mut target_device = None;
 
+            // v10.1.9: Use global device counter across ALL platforms (not per-platform)
+            // to match enumerate_devices() which also uses a global index.
+            // Without this, multi-GPU systems with GPUs on different platforms
+            // would fail to find GPUs beyond the first platform.
+            let mut global_idx = 0usize;
             'outer: for platform in &platforms {
                 if let Ok(device_ids) = platform.get_devices(CL_DEVICE_TYPE_GPU) {
-                    let mut current_idx = 0;
                     for device_id in device_ids {
-                        let device = Device::new(device_id);
-                        if current_idx == idx {
+                        if global_idx == idx {
+                            let device = Device::new(device_id);
                             target_device = Some(device);
                             break 'outer;
                         }
-                        current_idx += 1;
+                        global_idx += 1;
                     }
                 }
             }

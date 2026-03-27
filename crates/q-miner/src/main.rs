@@ -1251,14 +1251,23 @@ async fn main() -> Result<()> {
     }
 
     // Determine mining configuration
-    // Use all available cores by default for maximum hashrate.
-    // Users who want to reserve cores can use --threads N.
-    let cpu_threads = if args.threads == 0 {
-        hardware_info.cpu_threads.max(1) // Use all available cores
-    } else {
+    // v10.1.9: When --gpu is enabled, reduce CPU threads to 2 (challenge fetch + solution submit)
+    // to avoid saturating all cores and starving the GPU driver / OS.
+    // Users can override with --threads N.
+    let cpu_threads = if args.threads > 0 {
         args.threads
+    } else if args.gpu {
+        // GPU mode: use only 2 CPU threads (supplementary mining)
+        // GPU does the heavy lifting; CPU threads waste power competing
+        let gpu_cpu = 2.min(hardware_info.cpu_threads);
+        info!("🎮 GPU mode: using {} CPU threads (GPU handles primary mining)", gpu_cpu);
+        gpu_cpu
+    } else {
+        hardware_info.cpu_threads.max(1) // CPU-only: use all available cores
     };
-    info!("🔥 Using all {} CPU cores for mining (use --threads N to limit)", cpu_threads);
+    if !args.gpu {
+        info!("🔥 Using all {} CPU cores for mining (use --threads N to limit)", cpu_threads);
+    }
 
     if args.mode == "benchmark" || args.benchmark {
         info!("🏁 Running benchmark mode for {} seconds...", args.duration);
