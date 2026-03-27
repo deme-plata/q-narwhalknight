@@ -283,6 +283,21 @@ pub struct SharedMinerState {
     pub gpu_hashrate_hs: Arc<AtomicU64>,     // f64 bits stored as u64
     pub gpu_hashes_total: Arc<AtomicU64>,
     pub gpu_device_name: Arc<RwLock<String>>,
+    // v10.1.7: Rich GPU device info for TUI display
+    pub gpu_devices: Arc<RwLock<Vec<GpuDeviceSnapshot>>>,
+}
+
+/// Lightweight snapshot of GPU device info for TUI display (avoids cross-crate deps)
+#[derive(Debug, Clone)]
+pub struct GpuDeviceSnapshot {
+    pub index: usize,
+    pub name: String,
+    pub vendor: String,
+    pub compute_units: u32,
+    pub global_memory_mb: u64,
+    pub local_memory_kb: u64,
+    pub max_clock_mhz: u32,
+    pub api: String,  // "OpenCL", "CUDA", "Vulkan"
 }
 
 impl SharedMinerState {
@@ -350,6 +365,7 @@ impl SharedMinerState {
             gpu_hashrate_hs: Arc::new(AtomicU64::new(0)),
             gpu_hashes_total: Arc::new(AtomicU64::new(0)),
             gpu_device_name: Arc::new(RwLock::new(String::new())),
+            gpu_devices: Arc::new(RwLock::new(Vec::new())),
         });
 
         (state, event_rx)
