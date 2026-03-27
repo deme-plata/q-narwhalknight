@@ -121,8 +121,10 @@ unicode-width = "0.1"
 atty = "0.2"
 
 # Embedded Tor (arti) for --tor flag without system Tor daemon
-arti-client = { version = "0.37.0", features = ["static-sqlite"], optional = true }
-tor-rtcompat = { version = "0.37.0", optional = true }
+# v10.1.9: Use rustls instead of native-tls to avoid dynamic OpenSSL dependency
+# (native-tls pulls openssl-sys → requires matching libssl on target system)
+arti-client = { version = "0.37.0", default-features = false, features = ["tokio", "rustls", "compression", "static-sqlite"], optional = true }
+tor-rtcompat = { version = "0.37.0", default-features = false, features = ["tokio", "rustls"], optional = true }
 
 # QR code for wallet TUI
 qrcode = "0.14"

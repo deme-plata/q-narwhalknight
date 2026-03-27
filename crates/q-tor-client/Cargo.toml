@@ -22,9 +22,10 @@ tokio-socks = { workspace = true }
 # Arti Tor client dependencies - upgraded to 0.37.0 (Arti 1.8.0 release)
 # Implements Proposal 368: usage-based timeouts on strongly isolated circuits
 # static-sqlite feature enables bundled SQLite for Windows cross-compilation
-arti-client = { version = "0.37.0", features = ["static-sqlite"] }
+# v10.1.9: Use rustls instead of native-tls to avoid dynamic OpenSSL dependency
+arti-client = { version = "0.37.0", default-features = false, features = ["tokio", "rustls", "compression", "static-sqlite"] }
 # arti-hyper removed - causes version conflict and not used (dedicated_circuits uses arti-client directly)
-tor-rtcompat = "0.37.0"
+tor-rtcompat = { version = "0.37.0", default-features = false, features = ["tokio", "rustls"] }
 tor-hsservice = "0.37.0"
 url = "2.5"
 
