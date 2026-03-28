@@ -15,6 +15,15 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
+export interface GpuDeviceInfo {
+  name: string
+  vendor: string
+  compute_units: number
+  memory_mb: number
+  max_clock_mhz: number
+  api: string
+}
+
 export interface MinerInfo {
   minerId: string
   minerName: string | null
@@ -34,6 +43,10 @@ export interface MinerInfo {
   lastUpdate: Date
   hashrateHistory: number[] // last 60 readings for sparkline
   avgHashrate5m: number
+  // GPU fields
+  gpuActive: boolean
+  gpuHashrate: number
+  gpuDevices: GpuDeviceInfo[]
 }
 
 export type MinerCommandAction =
@@ -79,6 +92,9 @@ interface StatsMessage {
   is_mining: boolean
   current_block_height: number
   temperature_estimate: number | null
+  gpu_active?: boolean
+  gpu_hashrate?: number
+  gpu_devices?: GpuDeviceInfo[]
 }
 
 interface SolutionFoundMessage {
@@ -194,6 +210,9 @@ export function useMinerLink(walletAddress: string | null): UseMinerLinkReturn {
                   lastUpdate: new Date(),
                   hashrateHistory: newHistory,
                   avgHashrate5m: avg5m,
+                  gpuActive: stats.gpu_active ?? false,
+                  gpuHashrate: stats.gpu_hashrate ?? 0,
+                  gpuDevices: stats.gpu_devices ?? [],
                 }
 
                 if (existing) {

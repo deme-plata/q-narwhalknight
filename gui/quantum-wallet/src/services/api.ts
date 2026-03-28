@@ -1072,6 +1072,48 @@ class QNarwhalKnightAPI {
     return this.request<WalletMiningStats>(`/v1/mining/stats/${encodeURIComponent(walletAddress)}`);
   }
 
+  // v10.3.0: Get hashrate history for Network Power Modal
+  async getHashrateHistory(): Promise<{ success: boolean; history: Array<{ hashrate: number; miners: number; timestamp: number }> }> {
+    try {
+      const response = await fetch(`${this.baseURL}/v1/mining/hashrate/history`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      return data;
+    } catch (error) {
+      console.error('[API] getHashrateHistory failed:', error);
+      return { success: false, history: [] };
+    }
+  }
+
+  // v10.3.0: Get full network miner list for Network Power Modal
+  async getNetworkMiners(): Promise<{
+    success: boolean;
+    total_miners: number;
+    total_hashrate: number;
+    miners: Array<{
+      address: string;
+      worker_id: string;
+      worker_name: string | null;
+      hash_rate: number;
+      blocks_found: number;
+      total_solutions: number;
+      rewards_earned: string;
+      last_seen_secs_ago: number;
+      source: string;
+      peer_miner_count?: number;
+    }>;
+  }> {
+    try {
+      const response = await fetch(`${this.baseURL}/v1/mining/miners`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      return data;
+    } catch (error) {
+      console.error('[API] getNetworkMiners failed:', error);
+      return { success: false, total_miners: 0, total_hashrate: 0, miners: [] };
+    }
+  }
+
   // v2.3.8-beta: Get QUGUSD stablecoin vault statistics (real CDP data)
   async getVaultStats(): Promise<ApiResponse<VaultStats>> {
     return this.request<VaultStats>('/v1/stablecoin/vault/stats');

@@ -33,12 +33,15 @@
    PERFORMANCE MODE v2.4.1 - Beautiful & Fast
    ============================================ */
 
-/* Core optimizations - disable animations but keep static styles */
+/* Core optimizations - disable CSS keyframe animations but keep static styles.
+   Uses animation-duration:0.001s instead of animation:none so that
+   Framer Motion WAAPI entrance animations (initial→animate) still complete. */
 .performance-mode *,
 .performance-mode *::before,
 .performance-mode *::after {
-  animation: none !important;
-  transition: opacity 0.15s ease, transform 0.15s ease !important; /* Keep minimal transitions for UX */
+  animation-duration: 0.001s !important;
+  animation-delay: 0s !important;
+  transition: opacity 0.15s ease, transform 0.15s ease !important;
 }
 
 /* Reduce blur intensity instead of removing completely */

@@ -4,7 +4,7 @@ import {
   X, Pickaxe, Cpu, Activity, Gauge, Play, Pause, Minus, Plus,
   Wifi, WifiOff, Clock, Zap, Hash, Monitor, Settings, Link2, ChevronRight
 } from 'lucide-react';
-import type { MinerInfo, MinerCommandAction, PendingCommand, UseMinerLinkReturn } from '../hooks/useMinerLink';
+import type { MinerInfo, MinerCommandAction, PendingCommand, UseMinerLinkReturn, GpuDeviceInfo } from '../hooks/useMinerLink';
 
 interface MinerLinkModalProps {
   isOpen: boolean;
@@ -70,7 +70,7 @@ const MinerLinkModal: React.FC<MinerLinkModalProps> = ({ isOpen, onClose, minerL
 
   const walletAddress = localStorage.getItem('walletAddress') || '';
   const currentServerUrl = localStorage.getItem('apiBaseURL') || 'https://quillon.xyz';
-  const miningCommand = `./q-miner --mode solo --wallet ${walletAddress} --threads 4 --intensity 7 --server ${currentServerUrl}`;
+  const miningCommand = `# CPU mining:\n./q-miner --mode solo --wallet ${walletAddress} --threads 4 --intensity 7 --server ${currentServerUrl}\n\n# GPU mining:\n./q-miner --mode solo --wallet ${walletAddress} --gpu --server ${currentServerUrl}`;
 
   return (
     <AnimatePresence>
@@ -244,6 +244,9 @@ function OverviewTab({ miners, totalHashrate, totalSolutions, isConnected }: {
                     {miner.minerName || `Miner ${miner.minerId.slice(0, 8)}`}
                   </span>
                   <span className="text-xs text-gray-500 font-mono">{miner.minerId.slice(0, 12)}...</span>
+                  {miner.gpuActive && (
+                    <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/20">GPU</span>
+                  )}
                 </div>
                 <span className={`text-sm font-medium ${miner.isMining ? 'text-green-400' : 'text-gray-500'}`}>
                   {miner.isMining ? 'Mining' : 'Paused'}
@@ -305,10 +308,49 @@ function DetailsTab({ miners, selectedMiner, onSelectMiner }: {
         </div>
       )}
 
-      {/* Hardware info */}
+      {/* GPU Hardware (shown when GPU miner is active) */}
+      {miner.gpuActive && miner.gpuDevices.length > 0 && (
+        <div className="p-4 rounded-xl border bg-white/[0.02]" style={{ borderColor: 'rgba(168, 85, 247, 0.15)' }}>
+          <h4 className="text-sm font-medium text-gray-400 mb-3 flex items-center gap-2">
+            <span className="text-base">🎮</span> GPU Hardware
+          </h4>
+          {miner.gpuDevices.map((gpu, i) => (
+            <div key={i} className={`${i > 0 ? 'mt-3 pt-3 border-t border-white/5' : ''}`}>
+              <div className="grid grid-cols-2 gap-4 text-sm">
+                <div>
+                  <span className="text-gray-500">GPU</span>
+                  <p className="text-white font-medium">{gpu.name}</p>
+                </div>
+                <div>
+                  <span className="text-gray-500">Vendor</span>
+                  <p className="text-white">{gpu.vendor}</p>
+                </div>
+                <div>
+                  <span className="text-gray-500">Compute Units</span>
+                  <p className="text-white">{gpu.compute_units.toLocaleString()}</p>
+                </div>
+                <div>
+                  <span className="text-gray-500">VRAM</span>
+                  <p className="text-white">{gpu.memory_mb >= 1024 ? `${(gpu.memory_mb / 1024).toFixed(1)} GB` : `${gpu.memory_mb} MB`}</p>
+                </div>
+                <div>
+                  <span className="text-gray-500">Clock</span>
+                  <p className="text-white">{gpu.max_clock_mhz} MHz</p>
+                </div>
+                <div>
+                  <span className="text-gray-500">API</span>
+                  <p className="text-white">{gpu.api}</p>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* CPU Hardware */}
       <div className="p-4 rounded-xl border bg-white/[0.02]" style={{ borderColor: 'rgba(139, 92, 246, 0.1)' }}>
         <h4 className="text-sm font-medium text-gray-400 mb-3 flex items-center gap-2">
-          <Cpu className="w-4 h-4" /> Hardware
+          <Cpu className="w-4 h-4" /> {miner.gpuActive ? 'CPU (Hybrid Mode)' : 'Hardware'}
         </h4>
         <div className="grid grid-cols-2 gap-4 text-sm">
           <div>
@@ -335,9 +377,18 @@ function DetailsTab({ miners, selectedMiner, onSelectMiner }: {
         <h4 className="text-sm font-medium text-gray-400 mb-3 flex items-center gap-2">
           <Gauge className="w-4 h-4" /> Performance
         </h4>
+        {/* GPU hashrate row (if active) */}
+        {miner.gpuActive && miner.gpuHashrate > 0 && (
+          <div className="mb-4 p-3 rounded-lg bg-purple-500/5 border border-purple-500/10">
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-gray-400 flex items-center gap-1.5"><span>🎮</span> GPU Hashrate</span>
+              <span className="text-lg font-bold text-purple-300">{formatHashrate(miner.gpuHashrate)}</span>
+            </div>
+          </div>
+        )}
         <div className="grid grid-cols-3 gap-4 text-sm mb-4">
           <div>
-            <span className="text-gray-500">Current</span>
+            <span className="text-gray-500">{miner.gpuActive ? 'Combined' : 'Current'}</span>
             <p className="text-lg font-bold text-purple-300">{formatHashrate(miner.hashrate)}</p>
           </div>
           <div>
@@ -354,7 +405,10 @@ function DetailsTab({ miners, selectedMiner, onSelectMiner }: {
         <div className="mt-3 grid grid-cols-2 gap-4 text-sm">
           <div>
             <span className="text-gray-500">Efficiency</span>
-            <p className="text-white">{formatHashrate(efficiency)} / thread</p>
+            <p className="text-white">{miner.gpuActive && miner.gpuDevices.length > 0
+              ? `${formatHashrate(miner.hashrate / Math.max(miner.gpuDevices.reduce((s, g) => s + g.compute_units, 0), 1))} / CU`
+              : `${formatHashrate(efficiency)} / thread`
+            }</p>
           </div>
           <div>
             <span className="text-gray-500">Solutions / hr</span>

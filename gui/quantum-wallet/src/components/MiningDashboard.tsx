@@ -4,6 +4,7 @@ import { Trophy, TrendingUp, Zap, Clock, Award, Sparkles, DollarSign, HelpCircle
 import { qnkAPI, type MiningRewardEvent, type BalanceUpdateEvent, type MiningStatsEvent, type WalletMiningStats } from '../services/api';
 import SecurityBitsVisualization from './SecurityBitsVisualization';
 import SecurityFrontierChart from './charts/SecurityFrontierChart';
+import NetworkPowerModal from './NetworkPowerModal';
 
 interface MiningStats {
   totalRewards: number;
@@ -46,6 +47,7 @@ export default function MiningDashboard() {
   const [showMinerTooltip, setShowMinerTooltip] = useState(false);
   const [showVdfTooltip, setShowVdfTooltip] = useState(false);
   const [showSecurityTooltip, setShowSecurityTooltip] = useState(false);
+  const [showNetworkModal, setShowNetworkModal] = useState(false);
   const [connectedMiners, setConnectedMiners] = useState(0);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const animFrameRef = useRef<number>(0);
@@ -149,6 +151,15 @@ export default function MiningDashboard() {
     interface Burst { age: number; life: number; particles: Particle[] }
     const bursts: Burst[] = [];
 
+    // ── Background stars (fixed positions) ──
+    const bgStars = Array.from({ length: 60 }, () => ({
+      x: Math.random() * W,
+      y: Math.random() * H,
+      size: 0.3 + Math.random() * 1.2,
+      phase: Math.random() * TAU,
+      speed: 0.005 + Math.random() * 0.015,
+    }));
+
     // ── Per-ring glow intensity ──
     const ringGlow = new Float32Array(RINGS);
     let failGlow = 0;
@@ -189,36 +200,115 @@ export default function MiningDashboard() {
 
       ctx.clearRect(0, 0, W, H);
 
-      // ─── 1. BACKGROUND ───
-      const bg = ctx.createRadialGradient(cx, cy, 0, cx, cy, maxR * 1.4);
-      bg.addColorStop(0, '#0c0318');
-      bg.addColorStop(0.55, '#05020e');
-      bg.addColorStop(1, '#020108');
+      // ─── 1. BACKGROUND — Deep space with nebula clouds ───
+      const bg = ctx.createRadialGradient(cx, cy, 0, cx, cy, maxR * 1.6);
+      bg.addColorStop(0, '#1a0a08');
+      bg.addColorStop(0.3, '#0c0318');
+      bg.addColorStop(0.6, '#050210');
+      bg.addColorStop(1, '#010108');
       ctx.fillStyle = bg;
       ctx.fillRect(0, 0, W, H);
 
-      // ─── 2. VDF RINGS ───
+      // Background stars
+      for (const star of bgStars) {
+        const twinkle = Math.sin(frame * star.speed + star.phase) * 0.4 + 0.6;
+        ctx.fillStyle = `rgba(200, 210, 255, ${twinkle * 0.7})`;
+        ctx.beginPath();
+        ctx.arc(star.x, star.y, star.size * twinkle, 0, TAU);
+        ctx.fill();
+      }
+
+      // Nebula gas clouds (blue-purple left, gold-amber right)
+      ctx.save();
+      ctx.globalAlpha = 0.12;
+      const nebula1 = ctx.createRadialGradient(cx * 0.3, cy * 0.5, 0, cx * 0.3, cy * 0.5, maxR * 0.9);
+      nebula1.addColorStop(0, 'rgba(60, 80, 255, 0.5)');
+      nebula1.addColorStop(0.5, 'rgba(120, 40, 200, 0.2)');
+      nebula1.addColorStop(1, 'transparent');
+      ctx.fillStyle = nebula1;
+      ctx.fillRect(0, 0, W, H);
+      const nebula2 = ctx.createRadialGradient(cx * 1.7, cy * 0.4, 0, cx * 1.7, cy * 0.4, maxR * 0.7);
+      nebula2.addColorStop(0, 'rgba(40, 100, 255, 0.4)');
+      nebula2.addColorStop(0.6, 'rgba(80, 40, 180, 0.15)');
+      nebula2.addColorStop(1, 'transparent');
+      ctx.fillStyle = nebula2;
+      ctx.fillRect(0, 0, W, H);
+      const nebula3 = ctx.createRadialGradient(cx, cy * 1.8, 0, cx, cy * 1.8, maxR * 0.6);
+      nebula3.addColorStop(0, 'rgba(80, 50, 180, 0.3)');
+      nebula3.addColorStop(1, 'transparent');
+      ctx.fillStyle = nebula3;
+      ctx.fillRect(0, 0, W, H);
+      ctx.restore();
+
+      // Central warm radiance
+      ctx.save();
+      ctx.globalAlpha = 0.25;
+      const warmCore = ctx.createRadialGradient(cx, cy, 0, cx, cy, maxR * 0.8);
+      warmCore.addColorStop(0, 'rgba(255, 160, 20, 0.6)');
+      warmCore.addColorStop(0.3, 'rgba(255, 120, 0, 0.15)');
+      warmCore.addColorStop(0.6, 'rgba(200, 60, 0, 0.04)');
+      warmCore.addColorStop(1, 'transparent');
+      ctx.fillStyle = warmCore;
+      ctx.fillRect(0, 0, W, H);
+      ctx.restore();
+
+      // Star-burst rays from center
+      ctx.save();
+      const rayCount = 8;
+      for (let i = 0; i < rayCount; i++) {
+        const angle = (i / rayCount) * TAU + frame * 0.001;
+        const rayLen = maxR * (1.0 + Math.sin(frame * 0.015 + i * 1.3) * 0.3);
+        const rayGrad = ctx.createLinearGradient(cx, cy,
+          cx + Math.cos(angle) * rayLen, cy + Math.sin(angle) * rayLen);
+        rayGrad.addColorStop(0, 'rgba(255, 180, 40, 0.18)');
+        rayGrad.addColorStop(0.3, 'rgba(255, 140, 0, 0.06)');
+        rayGrad.addColorStop(1, 'transparent');
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        const spread = 0.04;
+        ctx.lineTo(cx + Math.cos(angle - spread) * rayLen, cy + Math.sin(angle - spread) * rayLen);
+        ctx.lineTo(cx + Math.cos(angle + spread) * rayLen, cy + Math.sin(angle + spread) * rayLen);
+        ctx.closePath();
+        ctx.fillStyle = rayGrad;
+        ctx.fill();
+      }
+      ctx.restore();
+
+      // ─── 2. VDF RINGS — Warm gold/amber orbital rings ───
       for (let i = 0; i < RINGS; i++) {
         const r = ringRadii[i];
         const glow = ringGlow[i];
-        const hue = 265 - i * 20;
-        const baseAlpha = 0.1 + (i / RINGS) * 0.08;
+        // Inner rings warmer (gold), outer rings cooler (cyan-blue)
+        const hue = i < 4 ? 35 + i * 8 : 180 + (i - 4) * 15;
+        const sat = i < 4 ? 100 : 75;
+        const lit = i < 4 ? 55 : 50;
+        const baseAlpha = 0.12 + (i / RINGS) * 0.1;
 
         // Main ring stroke
         ctx.beginPath();
         ctx.arc(cx, cy, r, 0, TAU);
-        ctx.strokeStyle = `hsla(${hue}, 75%, 50%, ${Math.min(baseAlpha + glow, 1)})`;
-        ctx.lineWidth = 0.7 + glow * 4;
+        ctx.strokeStyle = `hsla(${hue}, ${sat}%, ${lit}%, ${Math.min(baseAlpha + glow * 0.8, 1)})`;
+        ctx.lineWidth = 0.8 + glow * 5;
         ctx.stroke();
 
-        // Glow aura when active
-        if (glow > 0.05) {
+        // Warm glow aura
+        if (glow > 0.04) {
           ctx.beginPath();
           ctx.arc(cx, cy, r, 0, TAU);
-          ctx.strokeStyle = `hsla(${hue}, 100%, 70%, ${glow * 0.35})`;
-          ctx.lineWidth = 6;
+          ctx.strokeStyle = `hsla(${hue}, 100%, 70%, ${glow * 0.4})`;
+          ctx.lineWidth = 8;
           ctx.stroke();
         }
+
+        // Subtle ambient ring glow (always visible)
+        ctx.save();
+        ctx.globalAlpha = 0.03 + glow * 0.1;
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, TAU);
+        ctx.strokeStyle = `hsla(${hue}, 80%, 65%, 0.5)`;
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        ctx.restore();
 
         ringGlow[i] *= 0.9;
       }
@@ -230,30 +320,43 @@ export default function MiningDashboard() {
         const x = cx + Math.cos(a) * ringRadii[node.ring];
         const y = cy + Math.sin(a) * ringRadii[node.ring];
         const glow = ringGlow[node.ring];
-        const hue = 265 - node.ring * 20;
-        ctx.fillStyle = `hsla(${hue}, 65%, 68%, ${0.12 + glow * 0.6})`;
+        const hue = node.ring < 4 ? 35 + node.ring * 8 : 180 + (node.ring - 4) * 15;
+        ctx.fillStyle = `hsla(${hue}, 80%, 72%, ${0.15 + glow * 0.7})`;
         ctx.beginPath();
-        ctx.arc(x, y, 1.2 + glow * 2, 0, TAU);
+        ctx.arc(x, y, 1.4 + glow * 2.5, 0, TAU);
         ctx.fill();
       }
 
-      // ─── 4. OUTER MINER RING ───
-      const minerRimR = maxR + 10;
-      for (const m of minerDots) {
-        const pulse = Math.sin(frame * 0.02 + m.phase) * 0.3 + 0.7;
+      // ─── 4. OUTER MINER RING — Vivid star-like dots ───
+      const minerRimR = maxR + 12;
+      const minerHues = [200, 220, 280, 320, 40, 180, 160, 30]; // varied colors
+      for (let mi = 0; mi < minerDots.length; mi++) {
+        const m = minerDots[mi];
+        const pulse = Math.sin(frame * 0.025 + m.phase) * 0.35 + 0.65;
         const mx = cx + Math.cos(m.angle) * minerRimR;
         const my = cy + Math.sin(m.angle) * minerRimR;
+        const mhue = minerHues[mi % minerHues.length];
 
-        // Glow halo
-        ctx.fillStyle = `hsla(${m.hue}, 100%, 80%, ${0.08 * pulse})`;
+        // Outer halo (large, soft)
+        const halo = ctx.createRadialGradient(mx, my, 0, mx, my, 7 * pulse);
+        halo.addColorStop(0, `hsla(${mhue}, 100%, 80%, ${0.35 * pulse})`);
+        halo.addColorStop(0.4, `hsla(${mhue}, 90%, 60%, ${0.1 * pulse})`);
+        halo.addColorStop(1, 'transparent');
+        ctx.fillStyle = halo;
         ctx.beginPath();
-        ctx.arc(mx, my, 3.5 * pulse, 0, TAU);
+        ctx.arc(mx, my, 7 * pulse, 0, TAU);
         ctx.fill();
 
-        // Core dot
-        ctx.fillStyle = `hsla(${m.hue}, 85%, 72%, ${0.4 * pulse})`;
+        // Bright core
+        ctx.fillStyle = `hsla(${mhue}, 90%, 85%, ${0.8 * pulse})`;
         ctx.beginPath();
-        ctx.arc(mx, my, 1.2 * pulse, 0, TAU);
+        ctx.arc(mx, my, 1.8 * pulse, 0, TAU);
+        ctx.fill();
+
+        // White hot center
+        ctx.fillStyle = `rgba(255, 255, 255, ${0.6 * pulse})`;
+        ctx.beginPath();
+        ctx.arc(mx, my, 0.8 * pulse, 0, TAU);
         ctx.fill();
       }
 
@@ -372,47 +475,77 @@ export default function MiningDashboard() {
         }
       }
 
-      // ─── 7. GOLDEN HEXAGON DIFFICULTY TARGET ───
+      // ─── 7. GOLDEN HEXAGON DIFFICULTY TARGET — Intense radiant core ───
       const corePulse = Math.sin(frame * 0.035) * 0.2 + 0.8;
       const cSize = coreRadius * corePulse;
 
-      // Core ambient glow
-      const coreGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, cSize * 5);
-      coreGrad.addColorStop(0, `rgba(255, 180, 0, ${(0.25 + failGlow * 0.45) * corePulse})`);
-      coreGrad.addColorStop(0.35, `rgba(255, 140, 0, ${0.08 * corePulse})`);
+      // Wide golden radiance (large soft glow)
+      const wideGlow = ctx.createRadialGradient(cx, cy, 0, cx, cy, cSize * 8);
+      wideGlow.addColorStop(0, `rgba(255, 200, 40, ${0.4 * corePulse})`);
+      wideGlow.addColorStop(0.15, `rgba(255, 160, 0, ${0.2 * corePulse})`);
+      wideGlow.addColorStop(0.4, `rgba(255, 100, 0, ${0.06 * corePulse})`);
+      wideGlow.addColorStop(1, 'transparent');
+      ctx.fillStyle = wideGlow;
+      ctx.beginPath();
+      ctx.arc(cx, cy, cSize * 8, 0, TAU);
+      ctx.fill();
+
+      // Core intense glow
+      const coreGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, cSize * 4);
+      coreGrad.addColorStop(0, `rgba(255, 240, 180, ${(0.7 + failGlow * 0.3) * corePulse})`);
+      coreGrad.addColorStop(0.2, `rgba(255, 200, 40, ${0.5 * corePulse})`);
+      coreGrad.addColorStop(0.5, `rgba(255, 140, 0, ${0.15 * corePulse})`);
       coreGrad.addColorStop(1, 'transparent');
       ctx.fillStyle = coreGrad;
       ctx.beginPath();
-      ctx.arc(cx, cy, cSize * 5, 0, TAU);
+      ctx.arc(cx, cy, cSize * 4, 0, TAU);
       ctx.fill();
 
       // Failed-nonce red flash
       if (failGlow > 0.02) {
-        ctx.fillStyle = `rgba(255, 55, 35, ${failGlow * 0.45})`;
+        ctx.fillStyle = `rgba(255, 55, 35, ${failGlow * 0.5})`;
         ctx.beginPath();
-        ctx.arc(cx, cy, cSize * 2.5, 0, TAU);
+        ctx.arc(cx, cy, cSize * 3, 0, TAU);
         ctx.fill();
         failGlow *= 0.87;
       }
 
-      // Rotating golden hexagon (outer)
+      // Outer rotating golden hexagon (bright, thick)
       ctx.save();
       ctx.translate(cx, cy);
       ctx.rotate(frame * 0.005);
-      drawHexagon(0, 0, cSize * 2.5, 0);
-      ctx.strokeStyle = `rgba(255, 184, 0, ${0.55 * corePulse})`;
-      ctx.lineWidth = 1.4;
+      drawHexagon(0, 0, cSize * 3, 0);
+      ctx.strokeStyle = `rgba(255, 200, 40, ${0.7 * corePulse})`;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      // Hexagon glow
+      drawHexagon(0, 0, cSize * 3, 0);
+      ctx.strokeStyle = `rgba(255, 160, 0, ${0.2 * corePulse})`;
+      ctx.lineWidth = 6;
       ctx.stroke();
       ctx.restore();
 
-      // Inner hexagon (counter-rotate)
+      // Middle hexagon (counter-rotate)
       ctx.save();
       ctx.translate(cx, cy);
       ctx.rotate(-frame * 0.008);
-      drawHexagon(0, 0, cSize * 1.4, Math.PI / 6);
-      ctx.strokeStyle = `rgba(255, 200, 60, ${0.3 * corePulse})`;
-      ctx.lineWidth = 0.8;
+      drawHexagon(0, 0, cSize * 1.8, Math.PI / 6);
+      ctx.strokeStyle = `rgba(255, 220, 80, ${0.5 * corePulse})`;
+      ctx.lineWidth = 1.2;
       ctx.stroke();
+      ctx.restore();
+
+      // Inner filled hexagon (solid golden core)
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(frame * 0.003);
+      drawHexagon(0, 0, cSize * 1.0, 0);
+      const hexFill = ctx.createRadialGradient(0, 0, 0, 0, 0, cSize * 1.0);
+      hexFill.addColorStop(0, `rgba(255, 240, 200, ${0.9 * corePulse})`);
+      hexFill.addColorStop(0.5, `rgba(255, 180, 20, ${0.6 * corePulse})`);
+      hexFill.addColorStop(1, `rgba(255, 140, 0, ${0.3 * corePulse})`);
+      ctx.fillStyle = hexFill;
+      ctx.fill();
       ctx.restore();
 
       // ─── 8. SOLUTION BURSTS ───
@@ -1124,10 +1257,7 @@ export default function MiningDashboard() {
       </div>
 
       {/* ═══ VDF Mining Engine — Full-Width Visualization ═══ */}
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.33 }}
+      <div
         className="bg-gradient-to-br from-[#0c0318]/80 to-[#050210]/90 backdrop-blur-xl border border-quantum-cyan/25 rounded-xl overflow-hidden"
         style={{ position: 'relative', height: 300, width: '100%' }}
       >
@@ -1266,7 +1396,7 @@ export default function MiningDashboard() {
             </motion.div>
           )}
         </AnimatePresence>
-      </motion.div>
+      </div>
 
       {/* ═══ Security Bits Hardening — Full-Width Visualization ═══ */}
       <motion.div
@@ -1453,7 +1583,8 @@ export default function MiningDashboard() {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.35 }}
-          className="bg-gradient-to-br from-quantum-indigo/40 to-quantum-purple/20 backdrop-blur-xl border border-quantum-cyan/40 rounded-xl p-6"
+          className="bg-gradient-to-br from-quantum-indigo/40 to-quantum-purple/20 backdrop-blur-xl border border-quantum-cyan/40 rounded-xl p-6 cursor-pointer hover:border-quantum-cyan/80 hover:shadow-lg hover:shadow-quantum-cyan/20 transition-all duration-200"
+          onClick={() => setShowNetworkModal(true)}
         >
           <div className="flex items-center justify-between mb-3">
             <TrendingUp className="w-6 h-6 text-quantum-cyan" />
@@ -1728,6 +1859,14 @@ export default function MiningDashboard() {
           </li>
         </ul>
       </motion.div>
+
+      {/* v10.3.0: Network Power Modal */}
+      <NetworkPowerModal
+        isOpen={showNetworkModal}
+        onClose={() => setShowNetworkModal(false)}
+        networkHashRate={stats.networkHashRate}
+        connectedMiners={connectedMiners}
+      />
     </div>
   );
 }

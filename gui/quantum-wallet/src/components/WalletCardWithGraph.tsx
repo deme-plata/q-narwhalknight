@@ -1,6 +1,6 @@
 import { motion } from 'framer-motion';
 import { Wallet, TrendingUp, TrendingDown } from 'lucide-react';
-import { memo, useMemo } from 'react';
+import { memo, useMemo, useRef, useEffect, useState } from 'react';
 
 interface BalanceHistoryPoint {
   timestamp: number;
@@ -240,39 +240,43 @@ const WalletCardWithGraph = memo(function WalletCardWithGraph({
   onCardClick,
   children
 }: WalletCardProps) {
-  // v2.3.32-beta: For QUG, ALWAYS check localStorage for locked balance
-  // This is the final defense against stale balance display
-  let displayBalance = wallet.balance;
-  if (wallet.symbol === 'QUG') {
-    const lockedBalance = localStorage.getItem('dexLockedBalance');
-    const cooldownUntil = parseInt(localStorage.getItem('dexCooldownUntil') || '0');
-    if (lockedBalance && Date.now() < cooldownUntil) {
-      const locked = parseFloat(lockedBalance);
-      if (!isNaN(locked) && isFinite(locked)) {
-        displayBalance = locked;
-        console.log('🔒 WalletCardWithGraph: Using LOCKED QUG balance:', locked, '(prop was:', wallet.balance, ')');
-      }
+  // v10.2.0: Stable balance display — debounced like TopBar to prevent flickering
+  // The parent (Dashboard) already handles DEX lock overrides, so we just stabilize here.
+  const [stableBalance, setStableBalance] = useState(wallet.balance);
+  const lastUpdateRef = useRef(Date.now());
+  const stableRef = useRef(wallet.balance);
+
+  useEffect(() => {
+    const incoming = wallet.balance;
+    const current = stableRef.current;
+    const timeSince = Date.now() - lastUpdateRef.current;
+    const delta = Math.abs(incoming - current);
+
+    // Always accept: first real value, significant changes (>0.01 QUG), or after 2s stability window
+    const isSignificant = delta > 0.01;
+    const isStabilityWindowPassed = timeSince > 2000 && delta > 0.000001;
+    const isFirstValue = current === 0 && incoming > 0;
+
+    if (isFirstValue || isSignificant || isStabilityWindowPassed) {
+      stableRef.current = incoming;
+      lastUpdateRef.current = Date.now();
+      setStableBalance(incoming);
     }
-  }
+  }, [wallet.balance]);
 
-  // Debug logging
-  if (wallet.symbol === 'QUG' || wallet.symbol === 'QUGUSD' || wallet.symbol === 'USD') {
-    console.log(`📊 WalletCardWithGraph rendering ${wallet.symbol}:`, JSON.stringify({
-      propBalance: wallet.balance,
-      displayBalance: displayBalance,
-      historyLength: wallet.history?.length || 0,
-    }, null, 2));
-  }
+  const displayBalance = stableBalance;
 
-  // Format balance with appropriate decimal places per currency
+  // v10.2.0: Consistent formatter — always show fixed decimal places per tier
+  // Prevents flickering from floating-point artifacts like 1234.5600000001
   const formatBalance = (amount: number) => {
     if (wallet.symbol === 'QUGUSD' || wallet.symbol === 'USD') {
       return amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     }
-    // QUG and others: show up to 6 significant decimals
-    if (amount >= 1000) return amount.toLocaleString('en-US', { maximumFractionDigits: 2 });
-    if (amount >= 1) return amount.toLocaleString('en-US', { maximumFractionDigits: 4 });
-    return amount.toLocaleString('en-US', { maximumFractionDigits: 6 });
+    // QUG and others: consistent decimals per magnitude tier
+    if (amount >= 1000) return amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    if (amount >= 1) return amount.toLocaleString('en-US', { minimumFractionDigits: 4, maximumFractionDigits: 4 });
+    if (amount >= 0.0001) return amount.toLocaleString('en-US', { minimumFractionDigits: 6, maximumFractionDigits: 6 });
+    return amount.toLocaleString('en-US', { minimumFractionDigits: 8, maximumFractionDigits: 8 });
   };
 
   return (

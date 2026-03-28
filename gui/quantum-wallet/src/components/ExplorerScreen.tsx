@@ -313,6 +313,14 @@ const ActivityCard = ({ title, items }: { title: string; items: ActivityItem[] }
   );
 };
 
+// Helper: ensure wallet addresses always have "qnk" prefix for display
+const ensureQnkPrefix = (addr: string | undefined): string => {
+  if (!addr || addr === 'N/A') return addr || 'N/A';
+  // If it's a raw 64-char hex address without prefix, add "qnk"
+  if (/^[0-9a-fA-F]{64}$/.test(addr)) return `qnk${addr}`;
+  return addr;
+};
+
 // Helper: shorten a hex hash or address for display
 const shortenHash = (hash: string, chars = 8) => {
   if (!hash || hash === 'N/A') return 'N/A';
@@ -513,8 +521,8 @@ const DetailModal = ({ detail, onClose, onNavigate }: {
                   {txs.map((tx: any, i: number) => {
                     const txHash = tx.hash || tx.id || `tx_${i}`;
                     const txAmount = tx.amount ? (Number(tx.amount) / 1e24) : 0;
-                    const txFrom = typeof tx.from === 'string' ? tx.from : (Array.isArray(tx.from) ? Array.from(tx.from).map((b: any) => b.toString(16).padStart(2, '0')).join('') : '');
-                    const txTo = typeof tx.to === 'string' ? tx.to : (Array.isArray(tx.to) ? Array.from(tx.to).map((b: any) => b.toString(16).padStart(2, '0')).join('') : '');
+                    const txFrom = ensureQnkPrefix(typeof tx.from === 'string' ? tx.from : (Array.isArray(tx.from) ? Array.from(tx.from).map((b: any) => b.toString(16).padStart(2, '0')).join('') : ''));
+                    const txTo = ensureQnkPrefix(typeof tx.to === 'string' ? tx.to : (Array.isArray(tx.to) ? Array.from(tx.to).map((b: any) => b.toString(16).padStart(2, '0')).join('') : ''));
                     return (
                       <div
                         key={i}
@@ -913,7 +921,7 @@ const DetailModal = ({ detail, onClose, onNavigate }: {
                         className="flex items-center justify-between p-2 bg-quantum-dark/20 rounded-lg hover:bg-quantum-dark/40 cursor-pointer transition-colors group"
                         onClick={() => onNavigate?.({
                           type: 'transaction',
-                          data: { hash: txHash, amount, status: 'confirmed', from: tx.from, to: tx.to, timestamp: txTime }
+                          data: { hash: txHash, amount, status: 'confirmed', from: ensureQnkPrefix(tx.from), to: ensureQnkPrefix(tx.to), timestamp: txTime }
                         })}
                       >
                         <div className="flex items-center gap-2 min-w-0 flex-1">
@@ -2813,8 +2821,8 @@ export default function ExplorerScreen() {
                 amount: tx.amount ? (Number(tx.amount) / 1e24) : 0,
                 status: consensus.confirmed ? 'confirmed' : 'pending',
                 timestamp: block.header.timestamp ? new Date(block.header.timestamp * 1000).toLocaleString() : 'N/A',
-                from: Array.isArray(tx.from) ? tx.from.map((b: number) => b.toString(16).padStart(2, '0')).join('') : tx.from || 'N/A',
-                to: Array.isArray(tx.to) ? tx.to.map((b: number) => b.toString(16).padStart(2, '0')).join('') : tx.to || 'N/A',
+                from: ensureQnkPrefix(Array.isArray(tx.from) ? tx.from.map((b: number) => b.toString(16).padStart(2, '0')).join('') : tx.from || 'N/A'),
+                to: ensureQnkPrefix(Array.isArray(tx.to) ? tx.to.map((b: number) => b.toString(16).padStart(2, '0')).join('') : tx.to || 'N/A'),
                 block_height: block.header.height,
                 p2pVerified: true,
                 peerConsensus: consensus.confidence,
@@ -2839,8 +2847,8 @@ export default function ExplorerScreen() {
               amount: txData.amount ? (Number(txData.amount) / 1e24) : 0,
               status: txData.status || 'confirmed',
               timestamp: txData.timestamp ? new Date(txData.timestamp * 1000).toLocaleString() : 'N/A',
-              from: txData.from || 'N/A',
-              to: txData.to || 'N/A',
+              from: ensureQnkPrefix(txData.from || 'N/A'),
+              to: ensureQnkPrefix(txData.to || 'N/A'),
               block_height: txData.block_height,
               confirmations: txData.confirmations,
               fee: txData.fee ? (Number(txData.fee) / 1e24) : 0,

@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Shield, Palette, Activity, Globe, Lock, Eye, Zap, LogOut, Clock, Info, Key, Download, EyeOff, Cloud, Code, Trash2, RefreshCw, AlertCircle, Server, ArrowDownToLine } from 'lucide-react';
 import { qnkAPI } from '../services/api';
 import { walletSession } from '../services/walletAuth';
+import QuantumChamberCanvas from './QuantumChamberCanvas';
 
 interface SettingsScreenProps {
   onLogout?: () => void;
@@ -17,6 +18,7 @@ export default function SettingsScreen({ onLogout }: SettingsScreenProps) {
     rainbowBoxes: true,
     fractalOverlay: true,
   });
+  const [showChamberInfo, setShowChamberInfo] = useState(false);
 
   // v2.4.0: Performance mode - disables heavy effects for better frame rates (DEFAULT: ON)
   const [performanceMode, setPerformanceMode] = useState(() => {
@@ -823,7 +825,63 @@ export default function SettingsScreen({ onLogout }: SettingsScreenProps) {
                 <span className="bg-gradient-to-r from-quantum-cyan via-quantum-purple to-quantum-pink bg-clip-text text-transparent">
                   Quantum Visualization Chamber
                 </span>
+                <button
+                  onClick={() => setShowChamberInfo(p => !p)}
+                  className="ml-auto p-1.5 rounded-lg hover:bg-white/10 transition-colors"
+                  title="What am I looking at?"
+                >
+                  <Info className="w-5 h-5 text-quantum-cyan/70 hover:text-quantum-cyan" />
+                </button>
               </h3>
+
+              <AnimatePresence>
+                {showChamberInfo && (
+                  <motion.div
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: 'auto', opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    transition={{ duration: 0.25 }}
+                    className="overflow-hidden mb-4"
+                  >
+                    <div className="p-5 rounded-xl bg-quantum-dark/60 border border-quantum-cyan/20 text-sm leading-relaxed space-y-4">
+                      <p className="text-white/90 font-medium text-base">What you're seeing is a real-time simulation of quantum phenomena that power this blockchain.</p>
+
+                      <div className="space-y-3 text-gray-300">
+                        <div>
+                          <span className="text-quantum-cyan font-semibold">Interference Web</span>
+                          <span className="text-gray-500 ml-1">(Fractal Overlay)</span>
+                          <p className="mt-0.5">Curved lines weaving across the screen — these represent <em>quantum interference patterns</em>. In physics, when two quantum waves overlap they can reinforce or cancel each other out, producing these beautiful fringes. In our network, this visualizes how multiple transaction paths through the DAG interfere constructively to reach consensus faster.</p>
+                        </div>
+
+                        <div>
+                          <span className="text-green-400 font-semibold">Photon Rain</span>
+                          <span className="text-gray-500 ml-1">(Photon Waterfall)</span>
+                          <p className="mt-0.5">Colored streaks falling like rain with glowing tips — each one is a <em>photon</em>, the smallest packet of light energy. Think of each streak as a single transaction being broadcast across the network. The trailing glow shows its propagation history, and the sparkles represent confirmations arriving at different nodes.</p>
+                        </div>
+
+                        <div>
+                          <span className="text-purple-400 font-semibold">Entangled Pairs</span>
+                          <span className="text-gray-500 ml-1">(Entanglement Moire)</span>
+                          <p className="mt-0.5">Glowing orbs connected by pulsing lines — this demonstrates <em>quantum entanglement</em>, where two particles share a state instantly no matter how far apart they are. Einstein called it "spooky action at a distance." Here it represents how validator nodes stay perfectly in sync: when one confirms a block, its entangled partner knows immediately. The expanding ripples show this consensus propagating outward.</p>
+                        </div>
+
+                        <div>
+                          <span className="text-amber-400 font-semibold">Rainbow Gemstones</span>
+                          <span className="text-gray-500 ml-1">(Rainbow Boxes)</span>
+                          <p className="mt-0.5">Colorful shapes that morph between hexagons and circles — these are <em>quantum state superpositions</em>. In quantum mechanics, a particle can be in multiple states simultaneously until it is measured. The morphing shape shows this superposition collapsing (circle = measured, hexagon = superposed). Each color represents a different qubit state in our post-quantum cryptographic signatures.</p>
+                        </div>
+
+                        <div>
+                          <span className="text-white font-semibold">Central Orb</span>
+                          <p className="mt-0.5">The pulsing white-purple orb at the center is the <em>network heartbeat</em> — a visual representation of the DAG-Knight consensus engine producing blocks in real time.</p>
+                        </div>
+                      </div>
+
+                      <p className="text-gray-500 text-xs border-t border-white/10 pt-3">Toggle each effect on/off with the switches on the left panel. These are cosmetic visualizations inspired by real quantum physics — they don't affect wallet performance or security.</p>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
 
               <div className="relative h-80 bg-gradient-to-br from-quantum-dark via-quantum-indigo/30 to-quantum-dark rounded-xl overflow-hidden border border-quantum-cyan/20 shadow-2xl shadow-quantum-purple/20">
                 {/* Animated border glow */}
@@ -839,266 +897,13 @@ export default function SettingsScreen({ onLogout }: SettingsScreenProps) {
                   transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
                 />
 
-                {/* Advanced Live preview of effects - DAG-inspired 3D visualizations */}
-                <div className="absolute inset-0">
-                  {/* Fractal Overlay - Mandelbrot-inspired interference patterns */}
-                  {visualEffects.fractalOverlay && (
-                    <svg className="absolute inset-0 w-full h-full opacity-30">
-                      {[...Array(16)].map((_, i) => (
-                        <motion.path
-                          key={i}
-                          d={`M ${i * 25} 0 Q ${i * 25 + 15} ${100 + Math.sin(i) * 50}, ${i * 25} 200 T ${i * 25 + 60} 350`}
-                          fill="none"
-                          stroke={`hsl(${(i * 22 + 180) % 360}, 80%, 55%)`}
-                          strokeWidth="2"
-                          animate={{
-                            d: [
-                              `M ${i * 25} 0 Q ${i * 25 + 15} ${100 + Math.sin(i) * 50}, ${i * 25} 200`,
-                              `M ${i * 25} 0 Q ${i * 25 + 35} ${140 + Math.sin(i + 1) * 70}, ${i * 25} 200`,
-                              `M ${i * 25} 0 Q ${i * 25 + 15} ${100 + Math.sin(i) * 50}, ${i * 25} 200`,
-                            ],
-                            opacity: [0.4, 0.8, 0.4],
-                            strokeWidth: [1.5, 2.5, 1.5]
-                          }}
-                          transition={{
-                            duration: 2.5 + i * 0.15,
-                            repeat: Infinity,
-                            ease: "easeInOut"
-                          }}
-                        />
-                      ))}
-                      {/* Central spiral */}
-                      <motion.circle
-                        cx="50%"
-                        cy="50%"
-                        r="60"
-                        fill="none"
-                        stroke="url(#fractalGradient)"
-                        strokeWidth="1"
-                        strokeDasharray="4 4"
-                        animate={{ rotate: [0, 360] }}
-                        transition={{ duration: 20, repeat: Infinity, ease: "linear" }}
-                        style={{ transformOrigin: 'center' }}
-                      />
-                      <defs>
-                        <linearGradient id="fractalGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                          <stop offset="0%" stopColor="#00D4FF" />
-                          <stop offset="50%" stopColor="#6B46C1" />
-                          <stop offset="100%" stopColor="#EC4899" />
-                        </linearGradient>
-                      </defs>
-                    </svg>
-                  )}
-
-                  {/* Rainbow Boxes - Quantum state superposition visualization */}
-                  {visualEffects.rainbowBoxes && (
-                    <div className="absolute inset-0 pointer-events-none">
-                      {[...Array(8)].map((_, i) => (
-                        <motion.div
-                          key={i}
-                          className="absolute rounded-xl"
-                          style={{
-                            width: 20 + i * 10,
-                            height: 20 + i * 10,
-                            left: `${10 + i * 11}%`,
-                            top: `${25 + Math.sin(i * 0.8) * 25}%`,
-                            background: `linear-gradient(${i * 45}deg,
-                              hsl(${i * 45}, 90%, 60%) 0%,
-                              hsl(${(i * 45 + 60) % 360}, 90%, 50%) 50%,
-                              hsl(${(i * 45 + 120) % 360}, 90%, 60%) 100%)`,
-                            boxShadow: `0 0 ${15 + i * 8}px hsl(${i * 45}, 90%, 50%), inset 0 0 10px rgba(255,255,255,0.3)`,
-                          }}
-                          animate={{
-                            rotate: [0, 180, 360],
-                            scale: [1, 1.4, 1],
-                            opacity: [0.6, 1, 0.6],
-                            borderRadius: ['20%', '50%', '20%'],
-                          }}
-                          transition={{
-                            duration: 3 + i * 0.4,
-                            repeat: Infinity,
-                            ease: "easeInOut",
-                            delay: i * 0.2
-                          }}
-                        />
-                      ))}
-                      {/* Central pulsing orb */}
-                      <motion.div
-                        className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-16 h-16 rounded-full"
-                        style={{
-                          background: 'radial-gradient(circle, rgba(255,255,255,0.8) 0%, rgba(107,70,193,0.6) 40%, transparent 70%)',
-                        }}
-                        animate={{
-                          scale: [1, 1.5, 1],
-                          opacity: [0.5, 1, 0.5],
-                        }}
-                        transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
-                      />
-                    </div>
-                  )}
-
-                  {/* Photon Waterfall - Particle stream simulation */}
-                  {visualEffects.photonWaterfall && (
-                    <div className="absolute inset-0">
-                      {[...Array(15)].map((_, i) => (
-                        <motion.div
-                          key={i}
-                          className="absolute rounded-full"
-                          style={{
-                            width: 3 + (i % 3) * 2,
-                            height: 30 + (i % 4) * 15,
-                            left: `${5 + i * 6.5}%`,
-                            background: `linear-gradient(to bottom,
-                              transparent,
-                              ${['#00D4FF', '#6B46C1', '#EC4899', '#10B981', '#F59E0B', '#FF6B6B', '#4ECDC4'][i % 7]} 30%,
-                              ${['#00D4FF', '#6B46C1', '#EC4899', '#10B981', '#F59E0B', '#FF6B6B', '#4ECDC4'][i % 7]} 70%,
-                              transparent)`,
-                            boxShadow: `0 0 12px ${['#00D4FF', '#6B46C1', '#EC4899', '#10B981', '#F59E0B', '#FF6B6B', '#4ECDC4'][i % 7]}`,
-                            filter: 'blur(1px)',
-                          }}
-                          animate={{
-                            y: [-60, 350],
-                            opacity: [0, 1, 1, 0],
-                            scaleY: [0.8, 1.2, 0.8],
-                          }}
-                          transition={{
-                            duration: 1.5 + (i % 5) * 0.5,
-                            repeat: Infinity,
-                            delay: i * 0.15,
-                            ease: "linear"
-                          }}
-                        />
-                      ))}
-                      {/* Sparkles */}
-                      {[...Array(20)].map((_, i) => (
-                        <motion.div
-                          key={`sparkle-${i}`}
-                          className="absolute w-1 h-1 rounded-full bg-white"
-                          style={{
-                            left: `${Math.random() * 100}%`,
-                            top: `${Math.random() * 100}%`,
-                          }}
-                          animate={{
-                            opacity: [0, 1, 0],
-                            scale: [0, 1.5, 0],
-                          }}
-                          transition={{
-                            duration: 1 + Math.random(),
-                            repeat: Infinity,
-                            delay: Math.random() * 2,
-                          }}
-                        />
-                      ))}
-                    </div>
-                  )}
-
-                  {/* Entanglement Moiré - Quantum correlation patterns */}
-                  {visualEffects.entanglementMoire && (
-                    <svg className="absolute inset-0 w-full h-full">
-                      <defs>
-                        <radialGradient id="entanglementGlow">
-                          <stop offset="0%" stopColor="#00D4FF" stopOpacity="1" />
-                          <stop offset="40%" stopColor="#6B46C1" stopOpacity="0.6" />
-                          <stop offset="100%" stopColor="transparent" stopOpacity="0" />
-                        </radialGradient>
-                        <filter id="glow">
-                          <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
-                          <feMerge>
-                            <feMergeNode in="coloredBlur"/>
-                            <feMergeNode in="SourceGraphic"/>
-                          </feMerge>
-                        </filter>
-                      </defs>
-                      {/* Entangled particle pairs */}
-                      {[...Array(4)].map((_, i) => (
-                        <g key={i} filter="url(#glow)">
-                          {/* Particle 1 */}
-                          <motion.circle
-                            cx="25%"
-                            cy={`${30 + i * 15}%`}
-                            r="10"
-                            fill="url(#entanglementGlow)"
-                            animate={{
-                              cx: ['25%', '20%', '30%', '25%'],
-                              cy: [`${30 + i * 15}%`, `${25 + i * 15}%`, `${35 + i * 15}%`, `${30 + i * 15}%`],
-                              r: [10, 15, 10],
-                            }}
-                            transition={{
-                              duration: 2.5,
-                              repeat: Infinity,
-                              delay: i * 0.5,
-                              ease: "easeInOut"
-                            }}
-                          />
-                          {/* Particle 2 (entangled) */}
-                          <motion.circle
-                            cx="75%"
-                            cy={`${30 + i * 15}%`}
-                            r="10"
-                            fill="url(#entanglementGlow)"
-                            animate={{
-                              cx: ['75%', '80%', '70%', '75%'],
-                              cy: [`${30 + i * 15}%`, `${35 + i * 15}%`, `${25 + i * 15}%`, `${30 + i * 15}%`],
-                              r: [10, 15, 10],
-                            }}
-                            transition={{
-                              duration: 2.5,
-                              repeat: Infinity,
-                              delay: i * 0.5,
-                              ease: "easeInOut"
-                            }}
-                          />
-                          {/* Connection wave */}
-                          <motion.path
-                            d={`M 25% ${30 + i * 15}% Q 50% ${20 + i * 15}%, 75% ${30 + i * 15}%`}
-                            fill="none"
-                            stroke={`hsl(${180 + i * 40}, 80%, 60%)`}
-                            strokeWidth="2"
-                            strokeDasharray="8,4"
-                            opacity="0.6"
-                            animate={{
-                              d: [
-                                `M 25% ${30 + i * 15}% Q 50% ${20 + i * 15}%, 75% ${30 + i * 15}%`,
-                                `M 25% ${30 + i * 15}% Q 50% ${40 + i * 15}%, 75% ${30 + i * 15}%`,
-                                `M 25% ${30 + i * 15}% Q 50% ${20 + i * 15}%, 75% ${30 + i * 15}%`,
-                              ],
-                              strokeDashoffset: [0, 24, 48],
-                            }}
-                            transition={{
-                              duration: 1.5,
-                              repeat: Infinity,
-                              delay: i * 0.5,
-                              ease: "linear"
-                            }}
-                          />
-                        </g>
-                      ))}
-                      {/* Interference ripples */}
-                      {[...Array(5)].map((_, i) => (
-                        <motion.circle
-                          key={`ripple-${i}`}
-                          cx="50%"
-                          cy="50%"
-                          r="20"
-                          fill="none"
-                          stroke="#00D4FF"
-                          strokeWidth="1"
-                          opacity="0.4"
-                          animate={{
-                            r: [20, 100],
-                            opacity: [0.6, 0],
-                          }}
-                          transition={{
-                            duration: 3,
-                            repeat: Infinity,
-                            delay: i * 0.6,
-                            ease: "easeOut"
-                          }}
-                        />
-                      ))}
-                    </svg>
-                  )}
-                </div>
+                {/* Canvas-based live preview of effects */}
+                <QuantumChamberCanvas
+                  fractalOverlay={visualEffects.fractalOverlay}
+                  photonWaterfall={visualEffects.photonWaterfall}
+                  entanglementMoire={visualEffects.entanglementMoire}
+                  rainbowBoxes={visualEffects.rainbowBoxes}
+                />
 
                 <div className="absolute bottom-4 left-4 text-sm text-quantum-cyan backdrop-blur-sm bg-black/50 px-4 py-2 rounded-lg border border-quantum-cyan/30">
                   <span className="animate-pulse mr-2">●</span>

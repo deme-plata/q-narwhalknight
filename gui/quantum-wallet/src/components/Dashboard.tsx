@@ -1065,8 +1065,10 @@ Provide a brief analysis (under 250 tokens) covering:
               // Label burn address as "Nitro Points Purchase"
               const toHex = tx.to?.startsWith('qnk') ? tx.to.substring(3) : (tx.to || '');
               const fromHex = tx.from?.startsWith('qnk') ? tx.from.substring(3) : (tx.from || '');
-              const displayTo = toHex === burnAddress ? 'Nitro Points Purchase ⚡' : tx.to;
-              const displayFrom = fromHex === burnAddress ? 'Burn Address' : tx.from;
+              // Ensure qnk prefix on addresses (API may return raw hex)
+              const ensureQnk = (a: string) => a && /^[0-9a-fA-F]{64}$/.test(a) ? `qnk${a}` : a;
+              const displayTo = toHex === burnAddress ? 'Nitro Points Purchase ⚡' : ensureQnk(tx.to);
+              const displayFrom = fromHex === burnAddress ? 'Burn Address' : ensureQnk(tx.from);
 
               return {
                 id: tx.id,
@@ -2055,12 +2057,13 @@ Provide a brief analysis (under 250 tokens) covering:
                 const rawAmt = typeof tx.amount === 'string' ? parseFloat(tx.amount) : (tx.amount || 0);
                 const toHex = tx.to?.startsWith('qnk') ? tx.to.substring(3) : (tx.to || '');
                 const fromHex = tx.from?.startsWith('qnk') ? tx.from.substring(3) : (tx.from || '');
+                const ensureQnk = (a: string) => a && /^[0-9a-fA-F]{64}$/.test(a) ? `qnk${a}` : a;
                 return {
                   id: tx.id,
                   type,
                   amount: rawAmt / 1e24,
-                  from: fromHex === burnAddress ? 'Burn Address' : tx.from,
-                  to: toHex === burnAddress ? 'Nitro Points Purchase ⚡' : tx.to,
+                  from: fromHex === burnAddress ? 'Burn Address' : ensureQnk(tx.from),
+                  to: toHex === burnAddress ? 'Nitro Points Purchase ⚡' : ensureQnk(tx.to),
                   timestamp: ts,
                   txHash: tx.id,
                   tokenSymbol: tx.token_symbol,
@@ -2344,15 +2347,14 @@ Provide a brief analysis (under 250 tokens) covering:
     }
   }, [refreshTrigger]); // Removed nodeStatus?.balance - SSE handles balance updates
 
-  // v3.0.6-beta: Updated to show more decimals for small amounts
+  // v10.2.0: Consistent decimal formatting — fixed decimals per tier prevents flickering
   const formatBalance = (amount: number, hidden = false) => {
     if (hidden) return '••••••••';
-    // For very small amounts, show more decimal places
-    const maxDecimals = amount > 0 && amount < 0.00000001 ? 16 : 8;
-    return new Intl.NumberFormat('en-US', {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: maxDecimals,
-    }).format(amount);
+    const abs = Math.abs(amount);
+    if (abs >= 1000) return new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(amount);
+    if (abs >= 1) return new Intl.NumberFormat('en-US', { minimumFractionDigits: 4, maximumFractionDigits: 4 }).format(amount);
+    if (abs >= 0.0001) return new Intl.NumberFormat('en-US', { minimumFractionDigits: 6, maximumFractionDigits: 6 }).format(amount);
+    return new Intl.NumberFormat('en-US', { minimumFractionDigits: 8, maximumFractionDigits: 8 }).format(amount);
   };
 
   // Smart filtering and sorting logic
@@ -2976,23 +2978,13 @@ Provide a brief analysis (under 250 tokens) covering:
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {walletBalances.map((wallet, index) => {
-                // v2.3.29-beta: For QUG, check if we have a locked balance from DEX
-                let displayWallet = wallet;
-                if (wallet.symbol === 'QUG') {
-                  const lockedBalance = localStorage.getItem('dexLockedBalance');
-                  const cooldownUntil = parseInt(localStorage.getItem('dexCooldownUntil') || '0');
-                  if (lockedBalance && Date.now() < cooldownUntil) {
-                    const locked = parseFloat(lockedBalance);
-                    if (!isNaN(locked) && isFinite(locked)) {
-                      console.log('🔒 Dashboard: Using LOCKED QUG balance:', locked);
-                      displayWallet = { ...wallet, balance: locked };
-                    }
-                  }
-                }
+                // v10.2.0: DEX lock is handled by event handlers (qug-balance-changed, dex-cooldown-expired)
+                // which update walletBalances state directly. WalletCardWithGraph has its own
+                // debounced stable balance to prevent decimal flickering. No render-time override needed.
                 return (
                   <WalletCardWithGraph
                     key={wallet.symbol}
-                    wallet={displayWallet}
+                    wallet={wallet}
                     index={index}
                     isAnimating={balanceAnimations[wallet.symbol] || false}
                     onCardClick={
