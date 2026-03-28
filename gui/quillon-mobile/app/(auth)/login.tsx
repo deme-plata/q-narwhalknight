@@ -14,6 +14,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { COLORS, GRADIENTS } from '../../src/theme';
 import { useWalletStore } from '../../src/stores/walletStore';
+import { useNetworkStore } from '../../src/stores/networkStore';
 import { runOAuthFlow } from '../../src/services/oauth';
 
 // ============================================================================
@@ -73,6 +74,7 @@ export default function LoginScreen() {
   const createWallet = useWalletStore((s) => s.createWallet);
   const importWallet = useWalletStore((s) => s.importWallet);
   const loginWithOAuth = useWalletStore((s) => s.loginWithOAuth);
+  const checkHealth = useNetworkStore((s) => s.checkHealth);
 
   // ---- Create Wallet ----
   const handleCreateWallet = async () => {
@@ -122,6 +124,8 @@ export default function LoginScreen() {
       if (result.success) {
         console.log('[OAUTH] Authenticated!', result.walletInfo?.walletAddress ?? '');
         await loginWithOAuth(result.tokens, result.walletInfo);
+        // Immediately verify connectivity so the dashboard shows Online
+        checkHealth();
         router.replace('/(tabs)');
       } else {
         if (result.error.code !== 'cancelled') {

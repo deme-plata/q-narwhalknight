@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import * as api from '../services/api';
+import { sseManager } from '../services/sse';
 
 interface NetworkState {
   height: number;
@@ -65,3 +66,25 @@ export const useNetworkStore = create<NetworkState>((set) => ({
 
   setOnline: (online) => set({ isOnline: online }),
 }));
+
+// SSE connection → auto-update isOnline.
+sseManager.on('connection', (event) => {
+  const data = event.data as { status: string };
+  if (data.status === 'connected') {
+    useNetworkStore.getState().setOnline(true);
+    useNetworkStore.getState().checkHealth();
+  }
+});
+
+// SSE new-block → instant height update without REST call
+sseManager.on('new-block', (event) => {
+  const data = event.data as { height?: number; block_height?: number };
+  const height = data.height ?? data.block_height;
+  if (typeof height === 'number' && height > 0) {
+    useNetworkStore.setState({
+      height,
+      isOnline: true,
+      lastChecked: Date.now(),
+    });
+  }
+});

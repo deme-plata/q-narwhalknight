@@ -37,11 +37,11 @@ export function useDexQuote() {
     };
   }, [amountIn, tokenIn, tokenOut, fetchQuote]);
 
-  const priceImpact = quote?.price_impact ?? 0;
-  const fee = quote?.fee ?? '0';
+  const priceImpact = quote ? quote.price_impact * 100 : 0; // Server sends as fraction (0.003), display as percent
+  const fee = quote ? '0.3%' : '0'; // AMM uses constant 0.3% swap fee
   const rate =
-    tokenIn && tokenOut && quote
-      ? `1 ${tokenIn.symbol} = ${(parseFloat(quote.amount_out) / parseFloat(amountIn)).toFixed(6)} ${tokenOut.symbol}`
+    tokenIn && tokenOut && amountOut && parseFloat(amountOut) > 0
+      ? `1 ${tokenIn.symbol} = ${(parseFloat(amountOut) / parseFloat(amountIn)).toFixed(6)} ${tokenOut.symbol}`
       : null;
 
   return {

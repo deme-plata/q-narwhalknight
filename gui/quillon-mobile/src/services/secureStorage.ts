@@ -29,9 +29,16 @@ const KEYS = {
   OAUTH_EXPIRES_AT: 'qnk_oauth_expires',
 } as const;
 
-const SECURE_OPTIONS: SecureStore.SecureStoreOptions = {
-  keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
-};
+// iOS: AFTER_FIRST_UNLOCK persists across reboots and is available when
+// the device has been unlocked at least once since boot. This is more
+// reliable than WHEN_UNLOCKED_THIS_DEVICE_ONLY which can lose data in
+// Expo Go on some devices.
+// Android: keychainAccessible is ignored — EncryptedSharedPreferences is
+// always used and data persists across app restarts.
+const SECURE_OPTIONS: SecureStore.SecureStoreOptions = Platform.select({
+  ios: { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK },
+  default: {}, // Android ignores keychainAccessible
+});
 
 // ---------- Mnemonic ----------
 

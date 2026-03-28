@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import * as api from '../services/api';
+import { baseUnitsToDisplay } from '../services/api';
 
 interface DexState {
   // Token selection
@@ -35,6 +36,9 @@ interface DexState {
   executeSwap: (sender: string, signature: string, publicKey: string) => Promise<void>;
   reset: () => void;
 }
+
+// Cancel in-flight quote requests when a new one is triggered
+let _quoteAbort: AbortController | null = null;
 
 export const useDexStore = create<DexState>((set, get) => ({
   tokenIn: null,
@@ -115,40 +119,52 @@ export const useDexStore = create<DexState>((set, get) => ({
       return;
     }
 
+    // Cancel any in-flight quote request
+    _quoteAbort?.abort();
+    _quoteAbort = new AbortController();
+    const signal = _quoteAbort.signal;
+
     try {
       set({ quoteLoading: true, quoteError: null });
-      const quote = await api.getDexQuote(tokenIn.address, tokenOut.address, amountIn);
+      const quote = await api.getDexQuote(tokenIn.address, tokenOut.address, amountIn, signal);
+
+      // Don't update if this request was cancelled
+      if (signal.aborted) return;
+
+      // Convert amount_out from 24-decimal base units to display
+      const displayOut = baseUnitsToDisplay(quote.amount_out, 24);
       set({
         quote,
-        amountOut: quote.amount_out,
+        amountOut: displayOut,
         quoteLoading: false,
       });
     } catch (error) {
+      // Suppress AbortError — it's an intentional cancellation (typing fast, switching tokens)
+      if (error instanceof Error && error.name === 'AbortError') {
+        set({ quoteLoading: false });
+        return;
+      }
       const message = error instanceof Error ? error.message : 'Failed to get quote';
       set({ quoteError: message, quoteLoading: false, amountOut: '' });
     }
   },
 
-  executeSwap: async (sender, signature, publicKey) => {
-    const { tokenIn, tokenOut, amountIn, amountOut, slippageBps, quote } = get();
+  executeSwap: async (sender, signature, _publicKey) => {
+    const { tokenIn, tokenOut, amountIn, slippageBps, quote } = get();
     if (!tokenIn || !tokenOut || !quote) {
       throw new Error('Incomplete swap parameters');
     }
-
-    // Calculate minimum output with slippage
-    const minOut = (parseFloat(amountOut) * (10000 - slippageBps)) / 10000;
 
     try {
       set({ swapping: true, swapError: null });
       const result = await api.executeSwap({
         token_in: tokenIn.address,
         token_out: tokenOut.address,
-        amount_in: amountIn,
-        min_amount_out: minOut.toString(),
-        slippage_bps: slippageBps,
-        sender,
+        amount_in: quote.amount_in, // already in base units from the quote
+        minimum_amount_out: quote.minimum_amount_out,
+        recipient: sender,
+        deadline: Math.floor(Date.now() / 1000) + 300, // 5 minutes
         signature,
-        public_key: publicKey,
       });
       set({ swapResult: result, swapping: false });
     } catch (error) {

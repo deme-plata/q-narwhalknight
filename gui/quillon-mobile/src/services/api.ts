@@ -12,7 +12,7 @@ import { getMnemonic } from './secureStorage';
 
 const API_ENDPOINTS = [
   'https://quillon.xyz/api/v1',
-  'https://89.149.241.126:8080/api/v1', // Epsilon direct fallback
+  'http://89.149.241.126:8080/api/v1', // Epsilon direct fallback (HTTP — IP has no TLS cert)
 ] as const;
 
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -91,40 +91,56 @@ export interface DexToken {
 }
 
 export interface DexQuote {
-  token_in: string;
-  token_out: string;
   amount_in: string;
   amount_out: string;
+  minimum_amount_out: string;
   price_impact: number;
-  fee: string;
+  gas_estimate: number;
   route: string[];
-  expires_at: number;
+  execution_price: number;
+  valid_until: number;
 }
 
 export interface SwapRequest {
   token_in: string;
   token_out: string;
   amount_in: string;
-  min_amount_out: string;
-  slippage_bps: number;
-  sender: string;
+  minimum_amount_out: string;
+  recipient: string;
+  deadline: number;
   signature: string;
-  public_key: string;
 }
 
 export interface SwapResponse {
-  tx_hash: string;
-  amount_out: string;
+  transaction_hash: string;
   status: string;
+  amount_in: string;
+  amount_out: string;
+  gas_used: number;
+}
+
+export interface WorkerStats {
+  worker_id: string;
+  worker_name: string | null;
+  hash_rate: number;
+  blocks_found: number;
+  rewards_earned: string;
+  rewards_earned_raw: string;
+  solutions_submitted: number;
+  last_activity_secs: number;
+  is_active: boolean;
 }
 
 export interface MiningStats {
-  hashrate: number;
+  wallet: string;
   blocks_found: number;
-  reward_total: string;
-  difficulty: number;
-  network_hashrate: number;
-  last_block_time: number;
+  hash_rate: number;
+  rewards_earned: string;
+  rewards_earned_raw: string;
+  total_workers: number;
+  last_activity_secs: number;
+  is_active: boolean;
+  workers: WorkerStats[];
 }
 
 export interface HealthResponse {
@@ -222,15 +238,22 @@ function hexToBytes(hex: string): Uint8Array {
 async function fetchWithTimeout(
   url: string,
   options: RequestInit,
-  timeout: number = REQUEST_TIMEOUT_MS
+  timeout: number = REQUEST_TIMEOUT_MS,
+  externalSignal?: AbortSignal
 ): Promise<Response> {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
+
+  // If an external signal is provided, abort our controller when it fires
+  const onExternalAbort = () => controller.abort();
+  externalSignal?.addEventListener('abort', onExternalAbort);
+
   try {
     const response = await fetch(url, { ...options, signal: controller.signal });
     return response;
   } finally {
     clearTimeout(id);
+    externalSignal?.removeEventListener('abort', onExternalAbort);
   }
 }
 
@@ -239,12 +262,20 @@ async function apiRequest<T>(
   path: string,
   body?: unknown,
   retries: number = MAX_RETRIES,
-  extraHeaders?: Record<string, string>
+  extraHeaders?: Record<string, string>,
+  signal?: AbortSignal
 ): Promise<T> {
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
+      // If the caller's signal is already aborted, bail immediately
+      if (signal?.aborted) {
+        const err = new Error('Request aborted');
+        err.name = 'AbortError';
+        throw err;
+      }
+
       const url = `${getBaseUrl()}${path}`;
       const options: RequestInit = {
         method,
@@ -255,7 +286,7 @@ async function apiRequest<T>(
         options.body = JSON.stringify(body);
       }
 
-      const response = await fetchWithTimeout(url, options);
+      const response = await fetchWithTimeout(url, options, REQUEST_TIMEOUT_MS, signal);
 
       if (!response.ok) {
         const errorText = await response.text().catch(() => 'Unknown error');
@@ -265,6 +296,11 @@ async function apiRequest<T>(
       const data = (await response.json()) as T;
       return data;
     } catch (error) {
+      // Don't retry AbortErrors — they're intentional cancellations
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw error;
+      }
+
       lastError = error instanceof Error ? error : new Error(String(error));
       console.warn(`[API] Attempt ${attempt + 1} failed: ${lastError.message}`);
 
@@ -331,13 +367,18 @@ export async function getBalance(address: string): Promise<BalanceResponse> {
 export async function getHistory(
   address: string,
   page: number = 1,
-  pageSize: number = 20
+  pageSize: number = 20,
+  signal?: AbortSignal
 ): Promise<HistoryResponse> {
   // Server endpoint: /api/v1/wallet/:address/history
   // Returns { success: true, data: UnifiedTransactionEntry[] }
   const resp = await apiRequest<ApiDataResponse<Transaction[]>>(
     'GET',
-    `/wallet/${address}/history`
+    `/wallet/${address}/history`,
+    undefined,
+    MAX_RETRIES,
+    undefined,
+    signal
   );
 
   const txs = resp.data ?? [];
@@ -389,7 +430,10 @@ export interface MultiTokenBalance {
   total_usd_value: number;
 }
 
-export async function getMultiTokenBalance(address: string): Promise<MultiTokenBalance> {
+export async function getMultiTokenBalance(
+  address: string,
+  signal?: AbortSignal
+): Promise<MultiTokenBalance> {
   const path = '/wallet/tokens';
   const walletAuth = await generateWalletAuthHeader(address, `/api/v1${path}`);
   const headers: Record<string, string> = {};
@@ -398,7 +442,7 @@ export async function getMultiTokenBalance(address: string): Promise<MultiTokenB
   }
 
   const resp = await apiRequest<ApiDataResponse<MultiTokenBalance>>(
-    'GET', path, undefined, MAX_RETRIES, headers
+    'GET', path, undefined, MAX_RETRIES, headers, signal
   );
   return resp.data ?? { address, tokens: {}, total_usd_value: 0 };
 }
@@ -408,23 +452,79 @@ export async function getDexTokens(): Promise<DexToken[]> {
   return resp.data ?? [];
 }
 
+/**
+ * Get a DEX swap quote.
+ * The server expects amount_in in 24-decimal base units (u128 string).
+ * We convert the display amount (e.g. "1.5") to base units here.
+ */
 export async function getDexQuote(
   tokenIn: string,
   tokenOut: string,
-  amountIn: string
+  amountIn: string,
+  signal?: AbortSignal
 ): Promise<DexQuote> {
-  return apiRequest<DexQuote>(
-    'GET',
-    `/dex/quote?token_in=${tokenIn}&token_out=${tokenOut}&amount_in=${amountIn}`
+  // Convert display amount to 24-decimal base units
+  const amountInBaseUnits = displayToBaseUnits(amountIn, 24);
+
+  const resp = await apiRequest<{ success: boolean; data?: DexQuote; error?: string }>(
+    'POST',
+    '/dex/swap/quote',
+    {
+      token_in: tokenIn,
+      token_out: tokenOut,
+      amount_in: amountInBaseUnits,
+    },
+    MAX_RETRIES,
+    undefined,
+    signal
   );
+
+  if (!resp.success || !resp.data) {
+    throw new Error(resp.error || 'Quote unavailable');
+  }
+
+  return resp.data;
+}
+
+/** Convert a human-readable amount (e.g. "1.5") to base-unit string with `decimals` precision. */
+function displayToBaseUnits(display: string, decimals: number): string {
+  const parts = display.split('.');
+  const whole = parts[0] || '0';
+  let frac = (parts[1] || '').slice(0, decimals); // truncate excess
+  frac = frac.padEnd(decimals, '0');
+  // Remove leading zeros but keep at least "0"
+  const raw = (whole + frac).replace(/^0+/, '') || '0';
+  return raw;
+}
+
+/** Convert a base-unit string back to display amount with `decimals` precision. */
+export function baseUnitsToDisplay(baseUnits: string, decimals: number): string {
+  const padded = baseUnits.padStart(decimals + 1, '0');
+  const whole = padded.slice(0, padded.length - decimals) || '0';
+  const frac = padded.slice(padded.length - decimals);
+  // Trim trailing zeros from fractional part
+  const trimmedFrac = frac.replace(/0+$/, '');
+  return trimmedFrac ? `${whole}.${trimmedFrac}` : whole;
 }
 
 export async function executeSwap(request: SwapRequest): Promise<SwapResponse> {
-  return apiRequest<SwapResponse>('POST', '/dex/swap', request);
+  const resp = await apiRequest<{ success: boolean; data?: SwapResponse; error?: string }>(
+    'POST',
+    '/dex/swap/execute',
+    request
+  );
+  if (!resp.success || !resp.data) {
+    throw new Error(resp.error || 'Swap failed');
+  }
+  return resp.data;
 }
 
 export async function getMiningStats(address: string): Promise<MiningStats> {
-  return apiRequest<MiningStats>('GET', `/mining/stats/${address}`);
+  const resp = await apiRequest<ApiDataResponse<MiningStats>>('GET', `/mining/stats/${address}`);
+  if (!resp.data) {
+    throw new Error('No mining stats available');
+  }
+  return resp.data;
 }
 
 export async function getNetworkStats(): Promise<{

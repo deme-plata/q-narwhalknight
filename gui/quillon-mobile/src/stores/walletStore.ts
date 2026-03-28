@@ -70,6 +70,14 @@ interface WalletState {
   setBalance: (balance: number, tokens: TokenBalance[]) => void;
 }
 
+// Guard against concurrent refreshBalance calls + allow cancellation
+let _refreshAbort: AbortController | null = null;
+let _refreshInFlight = false;
+
+// Guard against concurrent refreshHistory calls + allow cancellation
+let _historyAbort: AbortController | null = null;
+let _historyInFlight = false;
+
 export const useWalletStore = create<WalletState>((set, get) => ({
   isLoggedIn: false,
   isLocked: true,
@@ -86,14 +94,29 @@ export const useWalletStore = create<WalletState>((set, get) => ({
   initialize: async () => {
     try {
       set({ isLoading: true });
+      console.log('[WalletStore] Initializing — reading SecureStore...');
+
       const hasWallet = await hasMnemonic();
+      console.log('[WalletStore] hasMnemonic:', hasWallet);
 
       if (hasWallet) {
         const address = await getWalletAddress();
+        console.log('[WalletStore] Restored wallet session for', address?.slice(0, 16));
         set({ address, isLoggedIn: true, isLocked: true, isLoading: false });
+
+        // Connect SSE and start refreshing immediately (auto-unlock will fire
+        // via useAuth if no PIN/biometric is configured)
+        if (address) {
+          sseManager.connect(address);
+          setTimeout(() => {
+            get().refreshBalance();
+            get().refreshHistory(1);
+          }, 500);
+        }
       } else {
         // Check for OAuth session (server vault login without mnemonic)
         const hasOAuth = await hasOAuthSession();
+        console.log('[WalletStore] hasOAuthSession:', hasOAuth);
         if (hasOAuth) {
           const address = await getWalletAddress();
           const token = await getOAuthAccessToken();
@@ -108,12 +131,13 @@ export const useWalletStore = create<WalletState>((set, get) => ({
             setTimeout(() => get().refreshBalance(), 500);
           }
         } else {
+          console.log('[WalletStore] No saved wallet found — showing login');
           set({ isLoggedIn: false, isLocked: false, isLoading: false });
         }
       }
     } catch (error) {
       console.error('[WalletStore] Initialize error:', error);
-      set({ isLoading: false });
+      set({ isLoggedIn: false, isLocked: false, isLoading: false });
     }
   },
 
@@ -200,6 +224,14 @@ export const useWalletStore = create<WalletState>((set, get) => ({
   },
 
   logout: async () => {
+    // Cancel any in-flight requests before tearing down
+    _refreshAbort?.abort();
+    _refreshAbort = null;
+    _refreshInFlight = false;
+    _historyAbort?.abort();
+    _historyAbort = null;
+    _historyInFlight = false;
+
     sseManager.disconnect();
     api.setAuthToken(null);
     await wipeAllSecureData();
@@ -233,9 +265,24 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     const { address } = get();
     if (!address) return;
 
+    // Skip if another refresh is already in flight
+    if (_refreshInFlight) {
+      console.log('[WalletStore] Balance refresh already in flight, skipping');
+      return;
+    }
+
+    // Cancel any stale request from a previous call
+    _refreshAbort?.abort();
+    _refreshAbort = new AbortController();
+    const signal = _refreshAbort.signal;
+    _refreshInFlight = true;
+
     try {
       // Fetch multi-token balances (QUG, QUGUSD, custom tokens) in one call
-      const multiToken = await api.getMultiTokenBalance(address);
+      const multiToken = await api.getMultiTokenBalance(address, signal);
+
+      // Don't update store if this request was cancelled while in flight
+      if (signal.aborted) return;
 
       const qugEntry = multiToken.tokens['QUG'];
       const qugNum = qugEntry ? parseFloat(qugEntry.balance) : 0;
@@ -263,7 +310,11 @@ export const useWalletStore = create<WalletState>((set, get) => ({
         nonce: 0,
       });
     } catch (error) {
+      // Suppress AbortError — it's an intentional cancellation, not a real failure
+      if (error instanceof Error && error.name === 'AbortError') return;
       console.error('[WalletStore] Balance refresh error:', error);
+    } finally {
+      _refreshInFlight = false;
     }
   },
 
@@ -271,9 +322,27 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     const { address } = get();
     if (!address) return;
 
+    // Skip if another history refresh is already in flight
+    if (_historyInFlight) {
+      console.log('[WalletStore] History refresh already in flight, skipping');
+      return;
+    }
+
+    // Cancel any stale request from a previous call
+    _historyAbort?.abort();
+    _historyAbort = new AbortController();
+    const signal = _historyAbort.signal;
+    _historyInFlight = true;
+
     try {
       set({ txLoading: true });
-      const data = await api.getHistory(address, page);
+      const data = await api.getHistory(address, page, 20, signal);
+
+      // Don't update store if this request was cancelled while in flight
+      if (signal.aborted) {
+        set({ txLoading: false });
+        return;
+      }
 
       set({
         transactions: page === 1 ? data.transactions : [...get().transactions, ...data.transactions],
@@ -282,8 +351,15 @@ export const useWalletStore = create<WalletState>((set, get) => ({
         txLoading: false,
       });
     } catch (error) {
+      // Suppress AbortError — it's an intentional cancellation, not a real failure
+      if (error instanceof Error && error.name === 'AbortError') {
+        set({ txLoading: false });
+        return;
+      }
       console.error('[WalletStore] History refresh error:', error);
       set({ txLoading: false });
+    } finally {
+      _historyInFlight = false;
     }
   },
 

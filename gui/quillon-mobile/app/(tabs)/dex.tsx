@@ -250,7 +250,7 @@ export default function DexScreen() {
               <View style={styles.detailDivider} />
               <View style={styles.detailRow}>
                 <Text style={styles.detailLabel}>Network Fee</Text>
-                <Text style={styles.detailValue}>{fee} QUG</Text>
+                <Text style={styles.detailValue}>{fee}</Text>
               </View>
               <View style={styles.detailDivider} />
               <View style={styles.detailRow}>
