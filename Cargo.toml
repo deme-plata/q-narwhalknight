@@ -75,7 +75,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.2.1"  # v10.2.1: CRITICAL FIX — watermark race condition blocking transfer balance processing
+version = "10.2.2"  # v10.2.2: Crown & Ash — fix join_game to create Realm entry for action API
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"

@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { Download, Server, Shield, Zap, Terminal, CheckCircle, Code, BookOpen, Rocket, Cpu, Pickaxe, Wallet } from 'lucide-react';
+import { Download, Server, Shield, Zap, Terminal, CheckCircle, Code, BookOpen, Rocket, Cpu, Pickaxe, Wallet, Monitor } from 'lucide-react';
 
 export default function DownloadNodeScreen() {
   return (
@@ -18,7 +18,7 @@ export default function DownloadNodeScreen() {
         </p>
         <div className="inline-flex items-center gap-2 px-4 py-2 bg-quantum-cyan/20 border border-quantum-cyan/50 rounded-full">
           <span className="w-2 h-2 bg-quantum-cyan rounded-full animate-pulse"></span>
-          <span className="text-sm font-bold text-quantum-cyan">v10.1.1 • Post-Quantum + DAG-Knight + DeFi Stack</span>
+          <span className="text-sm font-bold text-quantum-cyan">v10.2.2 • Post-Quantum + DAG-Knight + GPU Mining + DeFi Stack</span>
         </div>
       </motion.div>
 
@@ -135,12 +135,12 @@ export default function DownloadNodeScreen() {
 
           <div className="space-y-3">
             <a
-              href="https://quillon.xyz/downloads/q-api-server-v10.1.1"
+              href="https://quillon.xyz/downloads/q-api-server-v10.2.2"
               download="q-api-server"
               className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-quantum-cyan to-quantum-purple rounded-xl font-bold text-white hover:shadow-lg hover:shadow-quantum-cyan/50 transition-all"
             >
               <Download className="w-5 h-5" />
-              Download Linux Binary (v10.1.1)
+              Download Linux Binary (v10.2.2)
             </a>
             <p className="text-center text-sm text-gray-200">
               Size: ~83 MB | Bitcoin-Style 21M Emission + P2P Gossipsub + DeFi Stack
@@ -151,9 +151,9 @@ export default function DownloadNodeScreen() {
           <div className="mt-6 p-4 bg-quantum-dark/50 rounded-xl border border-quantum-purple/20">
             <p className="text-sm font-mono text-gray-100 mb-2">Quick Start:</p>
             <pre className="text-xs text-quantum-cyan overflow-x-auto">
-{`wget https://quillon.xyz/downloads/q-api-server-v10.1.1
-chmod +x q-api-server-v10.1.1
-./q-api-server-v10.1.1 --port 8080 --tui --admin-wallet YOUR_WALLET_ADDRESS`}
+{`wget https://quillon.xyz/downloads/q-api-server-v10.2.2
+chmod +x q-api-server-v10.2.2
+./q-api-server-v10.2.2 --port 8080 --tui --admin-wallet YOUR_WALLET_ADDRESS`}
             </pre>
             <p className="text-xs text-quantum-green mt-2">
               WarpSync auto-discovers peers & syncs 900K+ blocks in minutes
@@ -212,12 +212,12 @@ chmod +x q-api-server-v10.1.1
 
           <div className="space-y-3">
             <a
-              href="https://quillon.xyz/downloads/q-api-server-v10.1.1-linux-arm64"
+              href="https://quillon.xyz/downloads/q-api-server-v10.2.2-linux-arm64"
               download="q-api-server-arm64"
               className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-emerald-500 to-quantum-green rounded-xl font-bold text-white hover:shadow-lg hover:shadow-emerald-500/50 transition-all"
             >
               <Download className="w-5 h-5" />
-              Download ARM64 Binary (v10.1.1)
+              Download ARM64 Binary (v10.2.2)
             </a>
             <p className="text-center text-sm text-gray-200">
               Size: ~75 MB | aarch64-unknown-linux-gnu
@@ -227,9 +227,9 @@ chmod +x q-api-server-v10.1.1
           <div className="mt-6 p-4 bg-quantum-dark/50 rounded-xl border border-emerald-500/20">
             <p className="text-sm font-mono text-gray-100 mb-2">Quick Start (ARM64):</p>
             <pre className="text-xs text-emerald-400 overflow-x-auto">
-{`wget https://quillon.xyz/downloads/q-api-server-v10.1.1-linux-arm64
-chmod +x q-api-server-v10.1.1-linux-arm64
-./q-api-server-v10.1.1-linux-arm64 --port 8080 --tui --admin-wallet YOUR_WALLET_ADDRESS`}
+{`wget https://quillon.xyz/downloads/q-api-server-v10.2.2-linux-arm64
+chmod +x q-api-server-v10.2.2-linux-arm64
+./q-api-server-v10.2.2-linux-arm64 --port 8080 --tui --admin-wallet YOUR_WALLET_ADDRESS`}
             </pre>
             <p className="text-xs text-gray-300 mt-2">
               Tested on: Raspberry Pi 4/5, AWS Graviton, Oracle Ampere, Apple M1/M2 (Linux VM)
@@ -280,12 +280,12 @@ chmod +x q-api-server-v10.1.1-linux-arm64
 
           <div className="space-y-3">
             <a
-              href="https://quillon.xyz/downloads/q-api-server-v10.1.1-windows-x64.exe"
-              download="q-api-server-v10.1.1-windows-x64.exe"
+              href="https://quillon.xyz/downloads/q-api-server-v10.2.2-windows-x64.exe"
+              download="q-api-server-v10.2.2-windows-x64.exe"
               className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-quantum-purple to-quantum-pink rounded-xl font-bold text-white hover:shadow-lg hover:shadow-quantum-purple/50 transition-all"
             >
               <Download className="w-5 h-5" />
-              Download Windows Node (v10.1.1)
+              Download Windows Node (v10.2.2)
             </a>
             <p className="text-center text-sm text-gray-200">
               Size: ~70 MB | Single EXE — Full Node + TUI + DeFi Stack
@@ -297,7 +297,7 @@ chmod +x q-api-server-v10.1.1-linux-arm64
             <p className="text-sm font-mono text-gray-100 mb-2">Quick Start (PowerShell):</p>
             <pre className="text-xs text-quantum-purple overflow-x-auto">
 {`# Download from browser or PowerShell:
-Invoke-WebRequest -Uri https://quillon.xyz/downloads/q-api-server-v10.1.1-windows-x64.exe -OutFile q-api-server.exe
+Invoke-WebRequest -Uri https://quillon.xyz/downloads/q-api-server-v10.2.2-windows-x64.exe -OutFile q-api-server.exe
 .\\q-api-server.exe --port 8080 --tui --admin-wallet YOUR_WALLET_ADDRESS`}
             </pre>
             <p className="text-xs text-gray-100 mt-2">
@@ -332,6 +332,13 @@ Invoke-WebRequest -Uri https://quillon.xyz/downloads/q-api-server-v10.1.1-window
           <div className="grid md:grid-cols-2 gap-6">
             <div className="space-y-4">
               <div className="flex items-start gap-3">
+                <Monitor className="w-5 h-5 text-orange-400 flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-orange-300 font-semibold">GPU + CPU Mining (OpenCL)</p>
+                  <p className="text-sm text-orange-100">Multi-GPU OpenCL mining alongside multi-threaded CPU — auto-detects NVIDIA, AMD, Intel GPUs</p>
+                </div>
+              </div>
+              <div className="flex items-start gap-3">
                 <Cpu className="w-5 h-5 text-cyan-400 flex-shrink-0 mt-0.5" />
                 <div>
                   <p className="text-cyan-300 font-semibold">Multi-threaded CPU Mining</p>
@@ -339,17 +346,10 @@ Invoke-WebRequest -Uri https://quillon.xyz/downloads/q-api-server-v10.1.1-window
                 </div>
               </div>
               <div className="flex items-start gap-3">
-                <Shield className="w-5 h-5 text-emerald-400 flex-shrink-0 mt-0.5" />
-                <div>
-                  <p className="text-emerald-300 font-semibold">Post-Quantum VRF Election</p>
-                  <p className="text-sm text-orange-100">Ring-LWE based mining leader election for quantum resistance</p>
-                </div>
-              </div>
-              <div className="flex items-start gap-3">
                 <Zap className="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" />
                 <div>
-                  <p className="text-yellow-300 font-semibold">100+ KH/s Per Thread</p>
-                  <p className="text-sm text-orange-100">Optimized SIMD hashing with adaptive nonce ranges</p>
+                  <p className="text-yellow-300 font-semibold">Adaptive Work Sizing</p>
+                  <p className="text-sm text-orange-100">GPU dispatches auto-tune to keep 100-400ms per kernel for maximum throughput</p>
                 </div>
               </div>
               <div className="flex items-start gap-3">
@@ -397,15 +397,15 @@ Invoke-WebRequest -Uri https://quillon.xyz/downloads/q-api-server-v10.1.1-window
                 className="w-full flex items-center justify-center gap-3 px-6 py-3 bg-gradient-to-r from-purple-600 to-blue-600 rounded-xl font-bold text-purple-100 hover:shadow-lg hover:shadow-purple-500/50 transition-all"
               >
                 <Download className="w-5 h-5" />
-                Download Miner — Windows x64 (v10.1.1)
+                Download Miner — Windows x64 (v10.2.2)
               </a>
-              <p className="text-center text-xs text-orange-200">v10.1.1 — AVX2 SIMD + CPU core pinning + 2.5x faster hashing + P2P peer compute</p>
+              <p className="text-center text-xs text-orange-200">v10.2.2 — AVX2 SIMD + CPU core pinning + 2.5x faster hashing + P2P peer compute</p>
 
               {/* Universal wget download */}
               <div className="p-4 rounded-xl border border-amber-600" style={{ backgroundColor: '#0d0a00' }}>
                 <p className="text-sm font-mono text-amber-200 font-bold mb-2">Quick Download (wget):</p>
                 <pre className="text-xs text-amber-300 overflow-x-auto whitespace-pre-wrap select-all cursor-pointer p-2 rounded" style={{ backgroundColor: '#000000' }}>
-{`wget https://quillon.xyz/downloads/q-miner-v10.1.1 && chmod +x q-miner-v10.1.1`}
+{`wget https://quillon.xyz/downloads/q-miner-v10.2.2 && chmod +x q-miner-v10.2.2`}
                 </pre>
               </div>
 
@@ -452,9 +452,9 @@ Invoke-WebRequest -Uri https://quillon.xyz/downloads/q-miner-windows-x64.exe -Ou
             <div>
               <div className="flex items-center gap-3">
                 <h2 className="text-2xl font-bold text-white">Slint Native Wallet</h2>
-                <span className="px-3 py-1 bg-emerald-500/40 text-white text-xs font-bold rounded-full uppercase animate-pulse">NEW</span>
+                <span className="px-3 py-1 bg-emerald-500/40 text-white text-xs font-bold rounded-full uppercase animate-pulse">GPU MINING</span>
               </div>
-              <p className="text-white">Lightweight native desktop wallet — no browser required</p>
+              <p className="text-white">Lightweight native desktop wallet with built-in CPU + GPU mining</p>
             </div>
           </div>
 
@@ -465,6 +465,13 @@ Invoke-WebRequest -Uri https://quillon.xyz/downloads/q-miner-windows-x64.exe -Ou
                 <div>
                   <p className="text-emerald-200 font-semibold">Native Performance</p>
                   <p className="text-sm text-white">Built with Slint UI framework in pure Rust — instant startup, minimal resources</p>
+                </div>
+              </div>
+              <div className="flex items-start gap-3">
+                <Monitor className="w-5 h-5 text-orange-400 flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-orange-200 font-semibold">GPU Mining (OpenCL)</p>
+                  <p className="text-sm text-white">Mine with your GPU directly from the wallet — auto-detects NVIDIA, AMD, and Intel GPUs via OpenCL. Runs alongside CPU mining for maximum hashrate.</p>
                 </div>
               </div>
               <div className="flex items-start gap-3">
@@ -490,17 +497,22 @@ Invoke-WebRequest -Uri https://quillon.xyz/downloads/q-miner-windows-x64.exe -Ou
                 className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-emerald-500 to-teal-500 rounded-xl font-bold text-white hover:shadow-lg hover:shadow-emerald-500/50 transition-all"
               >
                 <Download className="w-5 h-5" />
-                Download Wallet — Linux x64
+                Download Wallet — Linux x64 (GPU + CPU Mining)
               </a>
               <a
-                href="https://quillon.xyz/downloads/slint-wallet-windows-x64.exe"
-                download="slint-wallet-windows-x64.exe"
+                href="https://quillon.xyz/downloads/slint-wallet-gpu-windows-x64.exe"
+                download="slint-wallet-gpu-windows-x64.exe"
                 className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-teal-500 to-cyan-500 rounded-xl font-bold text-white hover:shadow-lg hover:shadow-teal-500/50 transition-all"
               >
                 <Download className="w-5 h-5" />
-                Download Wallet — Windows x64
+                Download Wallet — Windows x64 (GPU + CPU Mining)
               </a>
-              <p className="text-center text-xs text-gray-300">v10.1.1 — Linux: ~16 MB | Windows: ~15 MB — Point of Sale, Lucide icons, OpenGL auto-fallback</p>
+              <p className="text-center text-xs text-gray-300">v10.2.2 — Linux: ~22 MB | Windows: ~16 MB — GPU Mining, Point of Sale, OpenGL auto-fallback</p>
+
+              <div className="p-3 bg-orange-500/10 rounded-xl border border-orange-400/30">
+                <p className="text-xs text-orange-200 font-bold mb-1">GPU Mining Requirements</p>
+                <p className="text-xs text-gray-300">Any GPU with OpenCL support (NVIDIA, AMD, Intel). GPU drivers install OpenCL automatically. No extra setup needed — the wallet detects GPUs on startup.</p>
+              </div>
 
               <div className="p-4 bg-black/30 rounded-xl border border-emerald-400/30">
                 <p className="text-sm font-mono text-white mb-2">Linux Quick Start:</p>
@@ -513,8 +525,9 @@ chmod +x slint-wallet-linux-x86_64
               <div className="p-4 bg-black/30 rounded-xl border border-teal-400/30">
                 <p className="text-sm font-mono text-white mb-2">Windows:</p>
                 <pre className="text-xs text-white overflow-x-auto whitespace-pre-wrap">
-{`# Download slint-wallet-windows-x64.exe
-# Double-click to launch — no install needed`}
+{`# Download slint-wallet-gpu-windows-x64.exe
+# Double-click to launch — no install needed
+# GPU mining auto-detects your graphics card`}
                 </pre>
               </div>
             </div>
