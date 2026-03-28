@@ -4634,6 +4634,29 @@ impl QStorage {
         Ok(())
     }
 
+    /// Save LP token metadata (symbol, name, decimals) for display in wallets
+    /// Key format: lp_token_meta_<addr_hex> → JSON metadata
+    pub async fn save_lp_token_meta(&self, token_addr: &[u8; 32], symbol0: &str, symbol1: &str) -> Result<()> {
+        let key = format!("lp_token_meta_{}", hex::encode(token_addr));
+        let meta = serde_json::json!({
+            "symbol": format!("LP-{}-{}", symbol0, symbol1),
+            "name": format!("{}/{} LP Token", symbol0, symbol1),
+            "decimals": 24
+        });
+        self.hot_db.put(CF_MANIFEST, key.as_bytes(), meta.to_string().as_bytes()).await?;
+        debug!("💧 Saved LP token metadata: LP-{}-{}", symbol0, symbol1);
+        Ok(())
+    }
+
+    /// Load LP token metadata by token address
+    pub async fn load_lp_token_meta(&self, token_addr: &[u8; 32]) -> Option<serde_json::Value> {
+        let key = format!("lp_token_meta_{}", hex::encode(token_addr));
+        match self.hot_db.get(CF_MANIFEST, key.as_bytes()).await {
+            Ok(Some(bytes)) => serde_json::from_slice(&bytes).ok(),
+            _ => None,
+        }
+    }
+
     // ============================================================================
     // QCREDIT Yield Vault Persistence (v8.5.5)
     // ============================================================================
@@ -7925,6 +7948,36 @@ impl BalanceStorage for QStorage {
             address, balance
         );
 
+        Ok(())
+    }
+
+    /// v10.2.0: Add amount to token balance (QUGUSD / custom tokens)
+    async fn add_token_balance(&self, wallet: &[u8; 32], token: &[u8; 32], amount: u128) -> Result<()> {
+        let current = self.get_token_balance(wallet, token).await.unwrap_or(0);
+        let new_balance = current.saturating_add(amount);
+        self.save_token_balance(wallet, token, new_balance).await?;
+        debug!(
+            "✅ [TOKEN BALANCE CONSENSUS v10.2.0] Added {} to {}:{}, new balance: {}",
+            amount, &hex::encode(&wallet[..8]), &hex::encode(&token[..4]), new_balance
+        );
+        Ok(())
+    }
+
+    /// v10.2.0: Subtract amount from token balance (QUGUSD / custom tokens)
+    async fn subtract_token_balance(&self, wallet: &[u8; 32], token: &[u8; 32], amount: u128) -> Result<()> {
+        let current = self.get_token_balance(wallet, token).await.unwrap_or(0);
+        if current < amount {
+            return Err(anyhow::anyhow!(
+                "Insufficient token balance: {} < {} for wallet {} token {}",
+                current, amount, &hex::encode(&wallet[..8]), &hex::encode(&token[..4])
+            ));
+        }
+        let new_balance = current - amount;
+        self.save_token_balance(wallet, token, new_balance).await?;
+        debug!(
+            "💸 [TOKEN BALANCE CONSENSUS v10.2.0] Subtracted {} from {}:{}, new balance: {}",
+            amount, &hex::encode(&wallet[..8]), &hex::encode(&token[..4]), new_balance
+        );
         Ok(())
     }
 }

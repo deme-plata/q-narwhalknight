@@ -637,8 +637,8 @@ pub async fn deploy_contract(
     if auth.address != deployer {
         tracing::warn!(
             "🚫 [CONTRACT] Auth mismatch: authenticated as {} but deploying as {}",
-            hex::encode(auth.address),
-            hex::encode(deployer)
+            q_log_privacy::mask_addr(&hex::encode(auth.address)),
+            q_log_privacy::mask_addr(&hex::encode(deployer))
         );
         return Ok(Json(ApiResponse::error(
             "Authenticated wallet does not match deployer address".to_string(),
@@ -653,8 +653,8 @@ pub async fn deploy_contract(
         if balance < DEPLOYMENT_COST_PRECHECK {
             tracing::warn!(
                 "🚫 [CONTRACT] Insufficient balance for deployment: {} has {} QUG, needs 1 QUG",
-                hex::encode(deployer),
-                balance as f64 / 1e24
+                q_log_privacy::mask_addr(&hex::encode(deployer)),
+                q_log_privacy::mask_amt_display(balance as f64 / 1e24)
             );
             return Ok(Json(ApiResponse::error(
                 "Insufficient balance: deployment requires 1 QUG".to_string(),
@@ -674,7 +674,7 @@ pub async fn deploy_contract(
         } else if *count >= 5 {
             tracing::warn!(
                 "🚫 [CONTRACT] Rate limit exceeded: {} has deployed {} times this hour",
-                hex::encode(deployer),
+                q_log_privacy::mask_addr(&hex::encode(deployer)),
                 count
             );
             return Ok(Json(ApiResponse::error(
@@ -734,9 +734,9 @@ pub async fn deploy_contract(
                         *balance -= DEPLOYMENT_COST;
                         tracing::info!(
                             "💸 Deducted {} QUG deployment cost from {}. New balance: {}",
-                            DEPLOYMENT_COST as f64 / 1e24,
-                            hex::encode(deployer),
-                            *balance as f64 / 1e24
+                            q_log_privacy::mask_amt_display(DEPLOYMENT_COST as f64 / 1e24),
+                            q_log_privacy::mask_addr(&hex::encode(deployer)),
+                            q_log_privacy::mask_amt_display(*balance as f64 / 1e24)
                         );
 
                         // v7.4.1: Credit deployment fee to founder wallet (previously burned!)
@@ -761,8 +761,8 @@ pub async fn deploy_contract(
                                 wallet_balances.insert(founder_addr, old + founder_share);
                                 tracing::info!(
                                     "💰 Deployment fee credited to founder: {} QUG (total: {} QUG)",
-                                    founder_share as f64 / 1e24,
-                                    (old + founder_share) as f64 / 1e24
+                                    q_log_privacy::mask_amt_display(founder_share as f64 / 1e24),
+                                    q_log_privacy::mask_amt_display((old + founder_share) as f64 / 1e24)
                                 );
                             }
 
@@ -778,8 +778,8 @@ pub async fn deploy_contract(
                                         let micro_qug = (operator_share / 1_000_000_000_000_000_000) as u64; // 1e24 / 1e6 = 1e18
                                         crate::admin_settings_api::record_operator_fee(&state, micro_qug);
                                         tracing::info!(
-                                            "💰 Operator fee earned: {:.6} QUG (deployment fee share)",
-                                            operator_share as f64 / 1e24
+                                            "💰 Operator fee earned: {} QUG (deployment fee share)",
+                                            q_log_privacy::mask_amt_display(operator_share as f64 / 1e24)
                                         );
                                     }
                                 }
@@ -825,7 +825,7 @@ pub async fn deploy_contract(
                         tracing::info!(
                             "📝 [CONTRACT] {} deployment tx {} (nonce: {}, queued: {}, broadcast: {})",
                             request.contract_type,
-                            &submission_result.tx_id_hex[..16],
+                            q_log_privacy::mask_hash(&submission_result.tx_id_hex),
                             nonce,
                             submission_result.queued_for_block,
                             submission_result.broadcast_success
@@ -833,12 +833,12 @@ pub async fn deploy_contract(
                     } else {
                         tracing::warn!(
                             "⚠️ Insufficient balance for deployment. Required: {}, Available: {}",
-                            DEPLOYMENT_COST,
-                            *balance
+                            q_log_privacy::mask_amt(DEPLOYMENT_COST),
+                            q_log_privacy::mask_amt(*balance)
                         );
                     }
                 } else {
-                    tracing::warn!("⚠️ Deployer wallet not found: {}", hex::encode(deployer));
+                    tracing::warn!("⚠️ Deployer wallet not found: {}", q_log_privacy::mask_addr(&hex::encode(deployer)));
                 }
             }
 
@@ -899,7 +899,7 @@ pub async fn deploy_contract(
                                 result_str.push_str(&"0".repeat(adjusted_exp));
 
                                 if let Ok(n) = result_str.parse::<u128>() {
-                                    tracing::info!("✅ [v3.6.18] Parsed scientific '{}' → {} (integer math, no f64)", s, n);
+                                    tracing::info!("✅ [v3.6.18] Parsed scientific '{}' → {} (integer math, no f64)", s, q_log_privacy::mask_amt(n));
                                     return Some(n);
                                 }
                             }
@@ -927,9 +927,9 @@ pub async fn deploy_contract(
                     let base_units = (supply_u64 as u128) * decimal_multiplier;
                     tracing::info!(
                         "✅ Token supply: {} × 10^{} = {} base units (u64 path)",
-                        supply_u64,
+                        q_log_privacy::mask_amt(supply_u64 as u128),
                         decimals,
-                        base_units
+                        q_log_privacy::mask_amt(base_units)
                     );
                     Some(base_units)
                 } else if let Some(supply_f64) = initial_supply_val.as_f64() {
@@ -946,7 +946,7 @@ pub async fn deploy_contract(
                             let rounded = 10u128.pow(exponent.min(38)); // u128 max is ~3.4e38
                             tracing::warn!(
                                 "⚠️ [v3.6.18] Large f64 value {} has precision loss! Rounded to 1e{} = {}",
-                                supply_f64, exponent, rounded
+                                q_log_privacy::mask_amt_display(supply_f64), exponent, q_log_privacy::mask_amt(rounded)
                             );
                             rounded
                         } else {
@@ -956,9 +956,9 @@ pub async fn deploy_contract(
                         let base_units = supply_value.saturating_mul(decimal_multiplier);
                         tracing::info!(
                             "✅ Token supply (f64): {} display tokens × 10^{} = {} base units",
-                            supply_value,
+                            q_log_privacy::mask_amt(supply_value),
                             decimals,
-                            base_units
+                            q_log_privacy::mask_amt(base_units)
                         );
                         Some(base_units)
                     } else {
@@ -988,7 +988,7 @@ pub async fn deploy_contract(
                             tracing::info!(
                                 "✅ [v3.6.19] Token supply: '{}' → {} base units (scientific={}, already_base={})",
                                 supply_str,
-                                base_units,
+                                q_log_privacy::mask_amt(base_units),
                                 is_scientific_notation,
                                 is_already_base_units
                             );
@@ -1016,10 +1016,10 @@ pub async fn deploy_contract(
                         let token_amount = initial_supply as f64 / decimal_multiplier as f64;
                         tracing::info!(
                             "💰 Minted {} base units ({} display tokens with {} decimals) to deployer {}",
-                            initial_supply,
-                            token_amount,
+                            q_log_privacy::mask_amt(initial_supply),
+                            q_log_privacy::mask_amt_display(token_amount),
                             decimals,
-                            hex::encode(deployer)
+                            q_log_privacy::mask_addr(&hex::encode(deployer))
                         );
 
                         // Persist token balance to storage
@@ -1379,7 +1379,7 @@ pub async fn interact_with_contract(
             let mut contracts = ecosystem.deployed_contracts.write().await;
             if let Some(contract) = contracts.get_mut(&contract_key) {
                 contract.deployment_params.insert("total_valuation_usd".to_string(), serde_json::json!(valuation));
-                tracing::info!("📊 RWA: Updated property valuation to ${} for {}", valuation, address);
+                tracing::info!("📊 RWA: Updated property valuation to ${} for {}", q_log_privacy::mask_amt_display(valuation.parse::<f64>().unwrap_or(0.0)), q_log_privacy::mask_addr(&address));
             }
             serde_json::json!({ "action": "update_property_valuation", "valuation_usd": valuation })
         }
@@ -1394,7 +1394,7 @@ pub async fn interact_with_contract(
                 if !rental_yield.is_empty() {
                     contract.deployment_params.insert("rental_yield_percent".to_string(), serde_json::json!(rental_yield));
                 }
-                tracing::info!("📊 RWA: Updated occupancy={}% yield={}% for {}", occupancy, rental_yield, address);
+                tracing::info!("📊 RWA: Updated occupancy={}% yield={}% for {}", occupancy, rental_yield, q_log_privacy::mask_addr(&address));
             }
             serde_json::json!({ "action": "update_occupancy", "occupancy_rate": occupancy, "rental_yield_percent": rental_yield })
         }
@@ -1402,7 +1402,7 @@ pub async fn interact_with_contract(
         // ─── Revenue / Dividend Distribution ───────────────────
         "distribute_revenue" | "distribute_dividend" | "distribute_dividends" | "distribute_royalties" => {
             let amount = payload.get("amount").and_then(|v| v.as_str()).unwrap_or("0");
-            tracing::info!("💰 RWA: Revenue distribution of ${} for contract {}", amount, address);
+            tracing::info!("💰 RWA: Revenue distribution of ${} for contract {}", q_log_privacy::mask_amt_display(amount.parse::<f64>().unwrap_or(0.0)), q_log_privacy::mask_addr(&address));
             serde_json::json!({ "action": action, "amount_usd": amount, "distributed_to": "all_holders" })
         }
 
@@ -1413,7 +1413,7 @@ pub async fn interact_with_contract(
             if let Some(contract) = contracts.get_mut(&contract_key) {
                 contract.deployment_params.insert("kyc_required".to_string(), serde_json::json!(enabled));
                 contract.metadata.features.insert("kyc_required".to_string(), enabled);
-                tracing::info!("🔐 RWA: KYC {} for {}", if enabled { "enabled" } else { "disabled" }, address);
+                tracing::info!("🔐 RWA: KYC {} for {}", if enabled { "enabled" } else { "disabled" }, q_log_privacy::mask_addr(&address));
             }
             serde_json::json!({ "action": action, "kyc_required": enabled })
         }
@@ -1429,7 +1429,7 @@ pub async fn interact_with_contract(
         "manage_whitelist" => {
             let addresses = payload.get("addresses").and_then(|v| v.as_str()).unwrap_or("");
             let operation = payload.get("operation").and_then(|v| v.as_str()).unwrap_or("add");
-            tracing::info!("📋 RWA: Whitelist {} for {}: {}", operation, address, addresses);
+            tracing::info!("📋 RWA: Whitelist {} for {}: [{}addrs]", operation, q_log_privacy::mask_addr(&address), addresses.split(',').filter(|s| !s.is_empty()).count());
             serde_json::json!({ "action": "manage_whitelist", "operation": operation, "count": addresses.split(',').filter(|s| !s.is_empty()).count() })
         }
 
@@ -1437,7 +1437,7 @@ pub async fn interact_with_contract(
         "create_proposal" => {
             let title = payload.get("title").and_then(|v| v.as_str()).unwrap_or("New Proposal");
             let description = payload.get("description").and_then(|v| v.as_str()).unwrap_or("");
-            tracing::info!("🗳️ RWA: Proposal created for {}: {}", address, title);
+            tracing::info!("🗳️ RWA: Proposal created for {}: {}", q_log_privacy::mask_addr(&address), title);
             serde_json::json!({ "action": "create_proposal", "title": title, "description": description, "proposal_id": format!("prop_{}", chrono::Utc::now().timestamp()) })
         }
         "vote_proposal" => {
@@ -1449,17 +1449,17 @@ pub async fn interact_with_contract(
         // ─── Bond / Fixed Income Actions ───────────────────────
         "call_bond" => {
             let call_price = payload.get("call_price").and_then(|v| v.as_str()).unwrap_or("0");
-            tracing::info!("🏦 RWA: Bond called at ${} for {}", call_price, address);
+            tracing::info!("🏦 RWA: Bond called at ${} for {}", q_log_privacy::mask_amt_display(call_price.parse::<f64>().unwrap_or(0.0)), q_log_privacy::mask_addr(&address));
             serde_json::json!({ "action": "call_bond", "call_price_usd": call_price })
         }
         "convert_bond" | "convert_to_equity" => {
             let conversion_ratio = payload.get("conversion_ratio").and_then(|v| v.as_str()).unwrap_or("1.0");
-            tracing::info!("🔄 RWA: Bond conversion at ratio {} for {}", conversion_ratio, address);
+            tracing::info!("🔄 RWA: Bond conversion at ratio {} for {}", conversion_ratio, q_log_privacy::mask_addr(&address));
             serde_json::json!({ "action": "convert_to_equity", "conversion_ratio": conversion_ratio })
         }
         "pay_coupon" | "issue_coupon" => {
             let amount = payload.get("amount").and_then(|v| v.as_str()).unwrap_or("0");
-            tracing::info!("💵 RWA: Coupon payment of ${} for {}", amount, address);
+            tracing::info!("💵 RWA: Coupon payment of ${} for {}", q_log_privacy::mask_amt_display(amount.parse::<f64>().unwrap_or(0.0)), q_log_privacy::mask_addr(&address));
             serde_json::json!({ "action": "pay_coupon", "amount_usd": amount, "distributed_to": "all_bondholders" })
         }
         "update_credit_rating" => {
@@ -1475,13 +1475,13 @@ pub async fn interact_with_contract(
         "update_storage_proof" | "update_inventory" => {
             let proof_hash = payload.get("proof_hash").and_then(|v| v.as_str()).unwrap_or("");
             let quantity = payload.get("quantity").and_then(|v| v.as_str()).unwrap_or("");
-            tracing::info!("📦 RWA: Storage proof updated for {}", address);
+            tracing::info!("📦 RWA: Storage proof updated for {}", q_log_privacy::mask_addr(&address));
             serde_json::json!({ "action": action, "proof_hash": proof_hash, "quantity": quantity })
         }
         "process_delivery" | "process_redemption" | "process_redemptions" => {
             let request_id = payload.get("request_id").and_then(|v| v.as_str()).unwrap_or("");
             let recipient = payload.get("recipient").and_then(|v| v.as_str()).unwrap_or("");
-            tracing::info!("🚚 RWA: Processing delivery/redemption for {}", address);
+            tracing::info!("🚚 RWA: Processing delivery/redemption for {}", q_log_privacy::mask_addr(&address));
             serde_json::json!({ "action": action, "request_id": request_id, "recipient": recipient, "status": "processing" })
         }
 
@@ -1501,7 +1501,7 @@ pub async fn interact_with_contract(
         "issue_offset_certificate" | "retire_credits" => {
             let tonnes = payload.get("tonnes_co2").and_then(|v| v.as_str()).unwrap_or("0");
             let beneficiary = payload.get("beneficiary").and_then(|v| v.as_str()).unwrap_or("");
-            tracing::info!("🌱 RWA: Offset certificate for {} tonnes CO2, beneficiary: {}", tonnes, beneficiary);
+            tracing::info!("🌱 RWA: Offset certificate for {} tonnes CO2, beneficiary: {}", tonnes, q_log_privacy::mask_addr(beneficiary));
             serde_json::json!({ "action": action, "tonnes_co2": tonnes, "beneficiary": beneficiary, "certificate_id": format!("cert_{}", chrono::Utc::now().timestamp()) })
         }
 
@@ -1511,7 +1511,7 @@ pub async fn interact_with_contract(
             let mut contracts = ecosystem.deployed_contracts.write().await;
             if let Some(contract) = contracts.get_mut(&contract_key) {
                 contract.deployment_params.insert("appraisal_value_usd".to_string(), serde_json::json!(value));
-                tracing::info!("🎨 RWA: Appraisal updated to ${} for {}", value, address);
+                tracing::info!("🎨 RWA: Appraisal updated to ${} for {}", q_log_privacy::mask_amt_display(value.parse::<f64>().unwrap_or(0.0)), q_log_privacy::mask_addr(&address));
             }
             serde_json::json!({ "action": action, "appraisal_value_usd": value })
         }
@@ -1532,7 +1532,7 @@ pub async fn interact_with_contract(
         "manage_sublicenses" => {
             let licensee = payload.get("licensee").and_then(|v| v.as_str()).unwrap_or("");
             let terms = payload.get("terms").and_then(|v| v.as_str()).unwrap_or("");
-            tracing::info!("📜 RWA: Sublicense managed for {}: licensee={}", address, licensee);
+            tracing::info!("📜 RWA: Sublicense managed for {}: licensee={}", q_log_privacy::mask_addr(&address), q_log_privacy::mask_addr(licensee));
             serde_json::json!({ "action": "manage_sublicenses", "licensee": licensee, "terms": terms })
         }
 
@@ -1570,12 +1570,12 @@ pub async fn interact_with_contract(
         }
 
         _ => {
-            tracing::warn!("⚠️ Unknown contract action: {} for {}", action, address);
+            tracing::warn!("⚠️ Unknown contract action: {} for {}", action, q_log_privacy::mask_addr(&address));
             serde_json::json!({ "action": action, "status": "unknown_action" })
         }
     };
 
-    tracing::info!("✅ Contract interaction: action={} contract={} tx={}", action, address, tx_hash);
+    tracing::info!("✅ Contract interaction: action={} contract={} tx={}", action, q_log_privacy::mask_addr(&address), q_log_privacy::mask_hash(&tx_hash));
 
     Ok(Json(ApiResponse::success(serde_json::json!({
         "result": "success",
@@ -1739,9 +1739,9 @@ pub async fn get_token_balance(
                     token_balances.insert((wallet_addr, token_addr), stored_balance);
                     tracing::debug!(
                         "💾 Loaded token balance from storage: wallet={}, token={}, balance={}",
-                        hex::encode(wallet_addr),
-                        hex::encode(token_addr),
-                        stored_balance
+                        q_log_privacy::mask_addr(&hex::encode(wallet_addr)),
+                        q_log_privacy::mask_addr(&hex::encode(token_addr)),
+                        q_log_privacy::mask_amt(stored_balance)
                     );
                     stored_balance
                 }
@@ -1756,9 +1756,9 @@ pub async fn get_token_balance(
     // v1.4.10: Log at INFO level to diagnose DEX balance mismatch
     tracing::info!(
         "🔍 [DEX BALANCE] Token balance query: wallet={}, token={}, balance={}",
-        hex::encode(wallet_addr),
-        hex::encode(token_addr),
-        balance
+        q_log_privacy::mask_addr(&hex::encode(wallet_addr)),
+        q_log_privacy::mask_addr(&hex::encode(token_addr)),
+        q_log_privacy::mask_amt(balance)
     );
 
     Ok(Json(ApiResponse::success(TokenBalanceResponse { balance })))
@@ -1913,10 +1913,10 @@ pub async fn mint_tokens(
 
         tracing::info!(
             "🪙 Minted {} tokens for contract {} to owner {}. New balance: {}",
-            amount,
-            hex::encode(contract_addr),
-            hex::encode(owner),
-            new_balance
+            q_log_privacy::mask_amt(amount as u128),
+            q_log_privacy::mask_addr(&hex::encode(contract_addr)),
+            q_log_privacy::mask_addr(&hex::encode(owner)),
+            q_log_privacy::mask_amt(new_balance)
         );
         new_balance
     };
@@ -2037,10 +2037,10 @@ pub async fn burn_tokens(
 
         tracing::info!(
             "🔥 Burned {} tokens for contract {} from owner {}. New balance: {}",
-            amount,
-            hex::encode(contract_addr),
-            hex::encode(owner),
-            new_balance
+            q_log_privacy::mask_amt(amount as u128),
+            q_log_privacy::mask_addr(&hex::encode(contract_addr)),
+            q_log_privacy::mask_addr(&hex::encode(owner)),
+            q_log_privacy::mask_amt(new_balance)
         );
         new_balance
     };
@@ -2197,18 +2197,18 @@ pub async fn airdrop_tokens(
 
             tracing::debug!(
                 "✈️ Airdropped {} tokens to {} for contract {}",
-                amount_per_recipient,
-                hex::encode(recipient_addr),
-                hex::encode(contract_addr)
+                q_log_privacy::mask_amt(amount_per_recipient as u128),
+                q_log_privacy::mask_addr(&hex::encode(recipient_addr)),
+                q_log_privacy::mask_addr(&hex::encode(contract_addr))
             );
         }
 
         tracing::info!(
             "✈️ Airdrop complete: {} tokens to {} recipients for contract {}. Total: {}",
-            amount_per_recipient,
+            q_log_privacy::mask_amt(amount_per_recipient as u128),
             recipient_addrs.len(),
-            hex::encode(contract_addr),
-            total_amount
+            q_log_privacy::mask_addr(&hex::encode(contract_addr)),
+            q_log_privacy::mask_amt(total_amount as u128)
         );
 
         (new_owner_balance, recipient_balances)
@@ -2295,7 +2295,7 @@ pub async fn get_contract_events(
 
     tracing::info!(
         "📜 Fetching events for contract {}: {} events found",
-        contract_key,
+        q_log_privacy::mask_addr(&contract_key),
         total_count
     );
 
@@ -2358,7 +2358,7 @@ pub async fn pause_contract(
     // For now, we'll just log it
     tracing::info!(
         "⏸️ Contract {} pause state set to: {}",
-        hex::encode(contract_addr),
+        q_log_privacy::mask_addr(&hex::encode(contract_addr)),
         request.paused
     );
 
@@ -2430,7 +2430,7 @@ pub async fn update_reflection_rate(
     // For now, we'll just log it
     tracing::info!(
         "✨ Reflection rate for contract {} set to: {}%",
-        hex::encode(contract_addr),
+        q_log_privacy::mask_addr(&hex::encode(contract_addr)),
         rate
     );
 
@@ -2515,7 +2515,7 @@ pub async fn stake_tokens(
     Json(request): Json<StakeRequest>,
 ) -> Result<Json<ApiResponse<StakeResponse>>, StatusCode> {
     tracing::info!("🔒 [STAKING] Stake request for contract {}: {} tokens for {} days",
-        contract_address, request.amount, request.lock_days);
+        q_log_privacy::mask_addr(&contract_address), q_log_privacy::mask_amt_display(request.amount.parse::<f64>().unwrap_or(0.0)), request.lock_days);
 
     // Parse contract address
     let contract_addr = match parse_address(&contract_address) {
@@ -2607,7 +2607,7 @@ pub async fn stake_tokens(
     let tx_hash = format!("stake-{}-{}", hex::encode(contract_addr), current_time);
 
     tracing::info!("✅ [STAKING] {} staked {} tokens in {} tier (unlocks at {})",
-        request.wallet_address, amount_f64, tier.name(), unlock_time);
+        q_log_privacy::mask_addr(&request.wallet_address), q_log_privacy::mask_amt_display(amount_f64), tier.name(), unlock_time);
 
     Ok(Json(ApiResponse::success(StakeResponse {
         success: true,
@@ -2633,7 +2633,7 @@ pub async fn unstake_tokens(
     Path(contract_address): Path<String>,
     Json(request): Json<StakeRequest>,
 ) -> Result<Json<ApiResponse<StakeResponse>>, StatusCode> {
-    tracing::info!("🔓 [STAKING] Unstake request for contract {}", contract_address);
+    tracing::info!("🔓 [STAKING] Unstake request for contract {}", q_log_privacy::mask_addr(&contract_address));
 
     // Parse addresses
     let contract_addr = match parse_address(&contract_address) {
@@ -2694,9 +2694,9 @@ pub async fn unstake_tokens(
     let total_returned = (stake.amount + pending_rewards) as f64 / 1e24;
 
     tracing::info!("✅ [STAKING] {} unstaked {} tokens (+ {} rewards)",
-        request.wallet_address,
-        stake.amount as f64 / 1e24,
-        pending_rewards as f64 / 1e24);
+        q_log_privacy::mask_addr(&request.wallet_address),
+        q_log_privacy::mask_amt_display(stake.amount as f64 / 1e24),
+        q_log_privacy::mask_amt_display(pending_rewards as f64 / 1e24));
 
     Ok(Json(ApiResponse::success(StakeResponse {
         success: true,
@@ -2713,7 +2713,7 @@ pub async fn claim_staking_rewards(
     Path(contract_address): Path<String>,
     Json(request): Json<StakeRequest>,
 ) -> Result<Json<ApiResponse<StakeResponse>>, StatusCode> {
-    tracing::info!("💰 [STAKING] Claim rewards request for contract {}", contract_address);
+    tracing::info!("💰 [STAKING] Claim rewards request for contract {}", q_log_privacy::mask_addr(&contract_address));
 
     // Parse addresses
     let contract_addr = match parse_address(&contract_address) {
@@ -2770,7 +2770,7 @@ pub async fn claim_staking_rewards(
     let tx_hash = format!("claim-{}-{}", hex::encode(contract_addr), current_time);
     let rewards_f64 = pending_rewards as f64 / 1e24;
 
-    tracing::info!("✅ [STAKING] {} claimed {} in rewards", request.wallet_address, rewards_f64);
+    tracing::info!("✅ [STAKING] {} claimed {} in rewards", q_log_privacy::mask_addr(&request.wallet_address), q_log_privacy::mask_amt_display(rewards_f64));
 
     Ok(Json(ApiResponse::success(StakeResponse {
         success: true,
@@ -2856,7 +2856,7 @@ pub async fn update_fee_config(
     Path(contract_address): Path<String>,
     Json(request): Json<UpdateFeeConfigRequest>,
 ) -> Result<Json<ApiResponse<TokenFeeConfig>>, StatusCode> {
-    tracing::info!("⚙️ [FEES] Update fee config request for {}", contract_address);
+    tracing::info!("⚙️ [FEES] Update fee config request for {}", q_log_privacy::mask_addr(&contract_address));
 
     // Parse contract address
     let contract_addr = match parse_address(&contract_address) {
@@ -2925,7 +2925,7 @@ pub async fn update_fee_config(
         tracing::warn!("Failed to persist fee config: {}", e);
     }
 
-    tracing::info!("✅ [FEES] Fee config updated for {}: {:?}", contract_address, updated_config);
+    tracing::info!("✅ [FEES] Fee config updated for {}: {:?}", q_log_privacy::mask_addr(&contract_address), updated_config);
 
     Ok(Json(ApiResponse::success(updated_config)))
 }
@@ -3170,11 +3170,11 @@ pub async fn update_social_profile(
                 contract_address: key.clone(),
                 profile_bytes,
             });
-            tracing::info!("📡 Broadcast social profile update for {} via P2P", key);
+            tracing::info!("📡 Broadcast social profile update for {} via P2P", q_log_privacy::mask_addr(&key));
         }
     }
 
-    tracing::info!("📱 Updated social profile for token {}", key);
+    tracing::info!("📱 Updated social profile for token {}", q_log_privacy::mask_addr(&key));
 
     Ok(Json(ApiResponse::success(SocialProfileResponse {
         contract_address,
@@ -3397,7 +3397,7 @@ pub async fn get_rwa_portfolio(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     let wallet = params.get("wallet").cloned().unwrap_or_default();
-    tracing::info!("📊 RWA Portfolio request for wallet: {}", wallet);
+    tracing::info!("📊 RWA Portfolio request for wallet: {}", q_log_privacy::mask_addr(&wallet));
 
     let ecosystem = &state.orobit_ecosystem;
     let collateral = {
@@ -3425,7 +3425,7 @@ pub async fn rwa_collateral_borrow(
     let amount = payload.get("amount").and_then(|v| v.as_str()).unwrap_or("0");
     let wallet = payload.get("wallet").and_then(|v| v.as_str()).unwrap_or("");
 
-    tracing::info!("🏦 RWA Collateral Borrow: {} borrows ${} against {}", wallet, amount, contract_address);
+    tracing::info!("🏦 RWA Collateral Borrow: {} borrows ${} against {}", q_log_privacy::mask_addr(wallet), q_log_privacy::mask_amt_display(amount.parse::<f64>().unwrap_or(0.0)), q_log_privacy::mask_addr(contract_address));
 
     let position_id = format!("pos_{}_{}", &wallet[..8.min(wallet.len())], chrono::Utc::now().timestamp());
     let position = serde_json::json!({
@@ -3463,7 +3463,7 @@ pub async fn rwa_collateral_repay(
     let amount = payload.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let wallet = payload.get("wallet").and_then(|v| v.as_str()).unwrap_or("");
 
-    tracing::info!("💰 RWA Collateral Repay: {} repays ${} on position {}", wallet, amount, position_id);
+    tracing::info!("💰 RWA Collateral Repay: {} repays ${} on position {}", q_log_privacy::mask_addr(wallet), q_log_privacy::mask_amt_display(amount), position_id);
 
     let ecosystem = &state.orobit_ecosystem;
     {
@@ -3494,7 +3494,7 @@ pub async fn rwa_schedule_distribution(
     let amount = payload.get("amount").and_then(|v| v.as_str()).unwrap_or("0");
     let wallet = payload.get("wallet").and_then(|v| v.as_str()).unwrap_or("");
 
-    tracing::info!("📅 RWA Distribution Schedule: {} sets {} ${} distribution for {}", wallet, frequency, amount, contract_address);
+    tracing::info!("📅 RWA Distribution Schedule: {} sets {} ${} distribution for {}", q_log_privacy::mask_addr(wallet), frequency, q_log_privacy::mask_amt_display(amount.parse::<f64>().unwrap_or(0.0)), q_log_privacy::mask_addr(contract_address));
 
     let schedule_id = format!("sched_{}_{}", &wallet[..8.min(wallet.len())], chrono::Utc::now().timestamp());
     let freq_days: i64 = match frequency {
@@ -3541,7 +3541,7 @@ pub async fn rwa_toggle_distribution(
     let enabled = payload.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
     let wallet = payload.get("wallet").and_then(|v| v.as_str()).unwrap_or("");
 
-    tracing::info!("🔄 RWA Distribution Toggle: {} {} schedule {}", wallet, if enabled { "enables" } else { "pauses" }, schedule_id);
+    tracing::info!("🔄 RWA Distribution Toggle: {} {} schedule {}", q_log_privacy::mask_addr(wallet), if enabled { "enables" } else { "pauses" }, schedule_id);
 
     let ecosystem = &state.orobit_ecosystem;
     {
@@ -3569,7 +3569,7 @@ pub async fn rwa_compliance_check(
     let wallet = payload.get("wallet").and_then(|v| v.as_str()).unwrap_or("");
     let token_address = payload.get("token_address").and_then(|v| v.as_str()).unwrap_or("");
 
-    tracing::info!("🔍 RWA Compliance Check: wallet {} for token {}", wallet, token_address);
+    tracing::info!("🔍 RWA Compliance Check: wallet {} for token {}", q_log_privacy::mask_addr(wallet), q_log_privacy::mask_addr(token_address));
 
     let ecosystem = &state.orobit_ecosystem;
 
@@ -3656,7 +3656,7 @@ pub async fn vault_redeem(
             *balance -= quantity as u128;
             tracing::info!(
                 "🔥 [VAULT] Burned {} VAULT token(s) from wallet {} (remaining: {})",
-                quantity, &wallet_hex[..16], *balance
+                quantity, q_log_privacy::mask_addr(&wallet_hex), q_log_privacy::mask_amt(*balance)
             );
         }
     }
@@ -3702,8 +3702,8 @@ pub async fn vault_redeem(
     persist_vault_redemption(&state, &redemption).await;
 
     tracing::info!(
-        "📦 [VAULT] Redemption {} created: {} device(s), color: {}, wallet: qnk{}",
-        redemption_id, quantity, redemption.color_variant, &wallet_hex[..16]
+        "📦 [VAULT] Redemption {} created: {} device(s), color: {}, wallet: {}",
+        redemption_id, quantity, redemption.color_variant, q_log_privacy::mask_addr(&wallet_hex)
     );
 
     Ok(Json(ApiResponse::success(serde_json::json!({
@@ -3883,7 +3883,7 @@ pub async fn forge_redeem(
             *balance -= quantity as u128;
             tracing::info!(
                 "🔥 [FORGE] Burned {} FORGE token(s) from wallet {} (remaining: {})",
-                quantity, &wallet_hex[..16], *balance
+                quantity, q_log_privacy::mask_addr(&wallet_hex), q_log_privacy::mask_amt(*balance)
             );
         }
     }
@@ -3962,8 +3962,8 @@ pub async fn forge_redeem(
     persist_forge_redemption(&state, &redemption).await;
 
     tracing::info!(
-        "⚒️ [FORGE] Redemption {} created: {} unit(s), CPU: {}, GPU: {}, wallet: qnk{}",
-        redemption_id, quantity, cpu_config, gpu_config, &wallet_hex[..16]
+        "⚒️ [FORGE] Redemption {} created: {} unit(s), CPU: {}, GPU: {}, wallet: {}",
+        redemption_id, quantity, cpu_config, gpu_config, q_log_privacy::mask_addr(&wallet_hex)
     );
 
     Ok(Json(ApiResponse::success(serde_json::json!({

@@ -697,41 +697,63 @@ fn find_pool_for_pair<'a>(
 /// Constant-product AMM: calculate output amount given input amount and reserves
 /// Uses x*y=k formula with 0.3% fee (997/1000)
 /// Returns (amount_out, price_impact)
+///
+/// v10.1.9: Overflow-safe using mul_div_u128 decomposition.
+/// With 24-decimal reserves, naive u128 multiplication overflows for any practical
+/// swap (e.g. 1e24 * 213e30 = 2.13e56 > u128::MAX = 3.4e38).
 fn amm_get_amount_out(amount_in: u128, reserve_in: u128, reserve_out: u128) -> (u128, f64) {
     if reserve_in == 0 || reserve_out == 0 || amount_in == 0 {
         return (0, 1.0);
     }
-    // Apply 0.3% fee: amount_in_with_fee = amount_in * 997
-    let amount_in_with_fee = amount_in.saturating_mul(997);
-    // numerator = amount_in_with_fee * reserve_out
-    // denominator = reserve_in * 1000 + amount_in_with_fee
-    // Use u128 checked arithmetic to prevent overflow on large pools
-    let numerator = (amount_in_with_fee as u128).checked_mul(reserve_out as u128);
-    let denominator = (reserve_in as u128)
-        .checked_mul(1000)
-        .and_then(|v| v.checked_add(amount_in_with_fee as u128));
+    // Apply 0.3% fee: amount_in_with_fee = amount_in * 997 / 1000
+    let amount_in_with_fee = amount_in
+        .checked_mul(997)
+        .map(|v| v / 1000)
+        .unwrap_or(amount_in.saturating_mul(997) / 1000);
 
-    let amount_out = match (numerator, denominator) {
-        (Some(n), Some(d)) if d > 0 => n / d,
-        _ => 0u128,
-    };
+    // amount_out = (amount_in_with_fee * reserve_out) / (reserve_in + amount_in_with_fee)
+    let denominator = reserve_in.saturating_add(amount_in_with_fee);
+    if denominator == 0 {
+        return (0, 1.0);
+    }
 
-    // Price impact: compare effective price vs spot price
-    // Spot price = reserve_out / reserve_in (ideal output for tiny trade)
-    // Effective price = amount_out / amount_in
-    // Price impact = 1 - (effective_price / spot_price)
-    let spot_output = if reserve_in > 0 {
-        (amount_in as f64) * (reserve_out as f64) / (reserve_in as f64) * 0.997
-    } else {
-        0.0
-    };
-    let price_impact = if spot_output > 0.0 {
-        1.0 - (amount_out as f64 / spot_output)
+    let amount_out = mul_div_u128(amount_in_with_fee, reserve_out, denominator);
+
+    // Price impact using f64 (safe for display)
+    let r_in = reserve_in as f64;
+    let r_out = reserve_out as f64;
+    let a_in = amount_in as f64;
+    let a_out = amount_out as f64;
+    let spot_price = if r_in > 0.0 { r_out / r_in } else { 0.0 };
+    let effective_price = if a_in > 0.0 { a_out / a_in } else { 0.0 };
+    let price_impact = if spot_price > 0.0 {
+        (1.0 - (effective_price / spot_price)).max(0.0)
     } else {
         1.0
     };
 
-    (amount_out, price_impact.max(0.0))
+    (amount_out, price_impact)
+}
+
+/// Overflow-safe (a * b) / d for u128.
+/// When a * b overflows, decomposes as: a * (b/d) + a * (b%d) / d.
+fn mul_div_u128(a: u128, b: u128, d: u128) -> u128 {
+    if d == 0 {
+        return 0;
+    }
+    if let Some(product) = a.checked_mul(b) {
+        return product / d;
+    }
+    // Overflow path: b = q*d + r → a*b/d = a*q + a*r/d
+    let q = b / d;
+    let r = b % d;
+    let main_part = a.checked_mul(q).unwrap_or_else(|| {
+        ((a as f64) * (q as f64)) as u128
+    });
+    let remainder_part = a.checked_mul(r)
+        .map(|v| v / d)
+        .unwrap_or_else(|| ((a as f64) * (r as f64) / (d as f64)) as u128);
+    main_part.saturating_add(remainder_part)
 }
 
 pub async fn get_swap_quote(

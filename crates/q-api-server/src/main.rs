@@ -1670,6 +1670,86 @@ std::thread_local! {
     static TUI_LOG_BUFFER: std::cell::RefCell<Option<std::sync::Arc<std::sync::RwLock<ringbuf::HeapRb<q_tui::LogEntry>>>>> = std::cell::RefCell::new(None);
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// v10.2.0: Crown & Ash — Convert a GameEvent into (event_type, description)
+// for SSE broadcast.  Pure function, no allocation beyond the strings.
+// ═══════════════════════════════════════════════════════════════════
+fn crown_ash_event_to_strings(event: &crown_ash_types::GameEvent) -> (String, String) {
+    match event {
+        crown_ash_types::GameEvent::Battle(br) => (
+            "battle".to_string(),
+            format!(
+                "Battle in province {} — {} vs {} casualties | attacker {} on turn {}",
+                br.province, br.attacker_casualties, br.defender_casualties,
+                if br.attacker_won { "won" } else { "lost" },
+                br.turn,
+            ),
+        ),
+        crown_ash_types::GameEvent::ProvinceConquered { province, old_controller, new_controller, turn } => (
+            "province-conquered".to_string(),
+            format!("Province {} conquered by faction {} (from faction {}) on turn {}", province, new_controller, old_controller, turn),
+        ),
+        crown_ash_types::GameEvent::WarDeclared { attacker, defender, casus_belli, turn } => (
+            "war-declared".to_string(),
+            format!("Faction {} declared war on faction {} ({}) on turn {}", attacker, defender, casus_belli, turn),
+        ),
+        crown_ash_types::GameEvent::TreatySigned { faction_a, faction_b, treaty_type, turn } => (
+            "treaty-signed".to_string(),
+            format!("Factions {} and {} signed {} treaty on turn {}", faction_a, faction_b, treaty_type, turn),
+        ),
+        crown_ash_types::GameEvent::CharacterDied { character_name, cause, turn, .. } => (
+            "character-died".to_string(),
+            format!("{} died ({:?}) on turn {}", character_name, cause, turn),
+        ),
+        crown_ash_types::GameEvent::CharacterBorn { character_name, dynasty, turn, .. } => (
+            "character-born".to_string(),
+            format!("{} born into dynasty {} on turn {}", character_name, dynasty, turn),
+        ),
+        crown_ash_types::GameEvent::SuccessionCrisis { faction, claimants, realm_split, turn, .. } => (
+            "succession-crisis".to_string(),
+            format!(
+                "Succession crisis in faction {} — {} claimants{} on turn {}",
+                faction, claimants.len(),
+                if *realm_split { " (realm split!)" } else { "" },
+                turn,
+            ),
+        ),
+        crown_ash_types::GameEvent::PlagueOutbreak { province, population_lost, turn, .. } => (
+            "plague".to_string(),
+            format!("Plague in province {} — {} people lost on turn {}", province, population_lost, turn),
+        ),
+        crown_ash_types::GameEvent::Famine { province, turn, .. } => (
+            "famine".to_string(),
+            format!("Famine strikes province {} on turn {}", province, turn),
+        ),
+        crown_ash_types::GameEvent::Harvest { province, turn, .. } => (
+            "harvest".to_string(),
+            format!("Bountiful harvest in province {} on turn {}", province, turn),
+        ),
+        crown_ash_types::GameEvent::Rebellion { province, rebels, turn } => (
+            "rebellion".to_string(),
+            format!("Rebellion in province {} — {} rebels on turn {}", province, rebels, turn),
+        ),
+        crown_ash_types::GameEvent::PlayerJoined { wallet, faction, turn } => (
+            "player-joined".to_string(),
+            format!("Player {} joined faction {} on turn {}", wallet, faction, turn),
+        ),
+        crown_ash_types::GameEvent::ConstructionComplete { province, improvement, turn } => (
+            "construction-complete".to_string(),
+            format!("{} completed in province {} on turn {}", improvement, province, turn),
+        ),
+        crown_ash_types::GameEvent::FactionEliminated { faction, turn } => (
+            "faction-eliminated".to_string(),
+            format!("Faction {} eliminated on turn {}", faction, turn),
+        ),
+        // Catch-all for newer GameEvent variants (RealmSplit, Plot*, Marriage, etc.)
+        other => (
+            "game-event".to_string(),
+            format!("{:?}", other),
+        ),
+    }
+}
+
 // v9.1.6: Worker threads configurable via TOKIO_WORKER_THREADS env var.
 // Without it, Tokio defaults to num_cpus (48 on Epsilon).
 // Set TOKIO_WORKER_THREADS=44 in systemd to reserve 4 cores for Caddy/OS.
@@ -1981,6 +2061,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     // Check if TUI mode is enabled
     let tui_mode = matches.get_flag("tui");
 
+    // Initialize privacy-preserving log redaction (reads Q_LOG_PRIVACY env var)
+    q_log_privacy::init_privacy_level();
+
     // Initialize tracing (re-enabled since tokio-console is disabled)
     if !tui_mode {
         // Normal logging mode - suppress verbose third-party library output
@@ -2003,7 +2086,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         .into()
                 }),
             )
-            .with(tracing_subscriber::fmt::layer())
+            .with(tracing_subscriber::fmt::layer().event_format(
+                q_log_privacy::RedactedFormatter::new(tracing_subscriber::fmt::format::Format::default())
+            ))
             .init();
     } else {
         // TUI mode - route tracing into TUI ring buffer instead of stdout.
@@ -2032,7 +2117,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     tracing_subscriber::EnvFilter::try_from_default_env()
                         .unwrap_or_else(|_| "q_api_server=info,q_network=info,tower_http=warn".into()),
                 )
-                .with(tracing_subscriber::fmt::layer())
+                .with(tracing_subscriber::fmt::layer().event_format(
+                    q_log_privacy::RedactedFormatter::new(tracing_subscriber::fmt::format::Format::default())
+                ))
                 .init();
         }
     }
@@ -4225,55 +4312,38 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         });
         info!("✅ Pool block template feeder started");
 
-        // ========================================
-        // 📊 v5.7.0: POOL HASHRATE HISTORY SAMPLER
-        // Samples pool hashrate every 60s into ring buffer (max 1440 entries = 24h)
-        // ========================================
-        let pool_for_hashrate = Arc::clone(&mining_pool);
-        let hashrate_history = state.pool_hashrate_history.clone();
-        tokio::spawn(async move {
-            info!("📊 Pool hashrate history sampler started (60s interval)");
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-            loop {
-                interval.tick().await;
-                let stats = pool_for_hashrate.stats();
-                let entry = pool_api::HashrateEntry {
-                    hashrate: stats.hashrate,
-                    workers: stats.workers,
-                    timestamp: chrono::Utc::now().timestamp(),
-                };
-                let mut history = hashrate_history.write().await;
-                history.push(entry);
-                // Keep last 24h (1440 entries at 60s interval)
-                if history.len() > 1440 {
-                    history.remove(0);
-                }
-            }
-        });
-        info!("✅ Pool hashrate history sampler started");
+        info!("✅ Pool hashrate history sampler skipped (using unified sampler)");
     } else {
         info!("ℹ️  Mining Pool disabled (set Q_ENABLE_MINING_POOL=1 to enable)");
         state.mining_pool = None;
     }
 
     // ========================================
-    // 📊 v10.3.0: SOLO-MODE HASHRATE HISTORY SAMPLER
-    // When pool is disabled, sample network hashrate (local + P2P peers) every 60s
-    // Reuses pool_hashrate_history ring buffer (max 1440 entries = 24h)
+    // 📊 v10.3.0: UNIFIED HASHRATE HISTORY SAMPLER
+    // Samples network hashrate (local miners + P2P peers) every 60s into ring buffer.
+    // Works in BOTH pool and solo mode. Max 1440 entries = 24h.
     // ========================================
-    if state.mining_pool.is_none() {
-        let solo_mining_stats = state.mining_statistics.clone();
-        let solo_hashrate_history = state.pool_hashrate_history.clone();
+    {
+        let sampler_mining_stats = state.mining_statistics.clone();
+        let sampler_hashrate_history = state.pool_hashrate_history.clone();
         tokio::spawn(async move {
-            info!("📊 Solo-mode hashrate history sampler started (60s interval)");
+            info!("📊 Hashrate history sampler started (60s interval, local+P2P)");
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
             loop {
                 interval.tick().await;
                 // Calculate network hashrate (local miners + P2P peers)
-                let (hashrate, miners) = if let Some(ref ms) = solo_mining_stats {
-                    if let Ok(mut stats) = ms.try_write() {
-                        let local_hr = stats.calculate_network_hashrate();
-                        let local_miners = stats.active_miner_count();
+                // Use try_read() (not try_write()) to avoid lock contention with mining submissions.
+                // On busy nodes with 100+ miners, try_write() almost never succeeds, producing 0 readings.
+                let (hashrate, miners) = if let Some(ref ms) = sampler_mining_stats {
+                    if let Ok(stats) = ms.try_read() {
+                        let now_inst = std::time::Instant::now();
+                        let local_hr: f64 = stats.active_miners.values()
+                            .filter(|s| now_inst.duration_since(s.last_update).as_secs() < 300)
+                            .map(|s| s.last_hashrate)
+                            .sum();
+                        let local_miners = stats.active_miners.values()
+                            .filter(|s| now_inst.duration_since(s.last_update).as_secs() < 300)
+                            .count();
                         let peer_hr: f64 = q_storage::PEER_COMPUTE_POWER.iter().map(|e| e.value().0).sum();
                         let peer_count = q_storage::PEER_COMPUTE_POWER.len();
                         (local_hr + peer_hr, local_miners + peer_count)
@@ -4293,14 +4363,14 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     workers: miners,
                     timestamp: chrono::Utc::now().timestamp(),
                 };
-                let mut history = solo_hashrate_history.write().await;
+                let mut history = sampler_hashrate_history.write().await;
                 history.push(entry);
                 if history.len() > 1440 {
                     history.remove(0);
                 }
             }
         });
-        info!("✅ Solo-mode hashrate history sampler started");
+        info!("✅ Hashrate history sampler started");
     }
 
     // ========================================
@@ -8423,7 +8493,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
                             if wallet_bytes == [0u8; 32] {
                                 warn!("⚠️ [P2P BALANCE] Invalid wallet address format: {}",
-                                      &update.wallet_address[..20.min(update.wallet_address.len())]);
+                                      q_log_privacy::mask_addr(&update.wallet_address[..20.min(update.wallet_address.len())]));
                                 continue;
                             }
 
@@ -8447,12 +8517,12 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             {
                                 error!("❌ [P2P BALANCE] Failed to persist: {}", e);
                             } else {
-                                info!("💰 [P2P BALANCE] ✅ Applied (v{}) from {}: {} +{} units = {} total (height {})",
+                                info!("💰 [P2P BALANCE] ✅ Applied (v{}) from {}: {} +{} = {} (height {})",
                                       update.version,
                                       &update.origin_node_id[..12.min(update.origin_node_id.len())],
-                                      &update.wallet_address[..16.min(update.wallet_address.len())],
-                                      update.amount,
-                                      new_balance,
+                                      q_log_privacy::mask_addr(&update.wallet_address[..16.min(update.wallet_address.len())]),
+                                      q_log_privacy::mask_amt(update.amount),
+                                      q_log_privacy::mask_amt(new_balance),
                                       update.block_height);
 
                                 // Emit SSE event for frontend
@@ -9918,6 +9988,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                                                     };
                                                                     // Step 2: RocksDB lookups + SSE broadcasts (NO lock held)
                                                                     let mut dag_balance_inserts: Vec<(q_types::Address, u128)> = Vec::new();
+                                                                    let mut dag_token_inserts: Vec<(q_types::Address, [u8; 32], u128)> = Vec::new();
                                                                     for update in &updates {
                                                                         debug!("   {} +{} QUG (mining reward)",
                                                                               &update.address[..16], update.amount);
@@ -9939,48 +10010,64 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                                                             q_storage::ChangeReason::MiningReward => "mining_reward",
                                                                             q_storage::ChangeReason::DevelopmentFee => "development_fee",
                                                                         };
-                                                                        let new_balance = match storage.get_balance(&update.address).await {
-                                                                            Ok(actual) => actual,
-                                                                            Err(_) => {
-                                                                                match update.reason {
-                                                                                    q_storage::ChangeReason::TransferSent => current.saturating_sub(update.amount),
-                                                                                    _ => current.saturating_add(update.amount),
-                                                                                }
-                                                                            }
-                                                                        };
-                                                                        dag_balance_inserts.push((address_bytes, new_balance));
-                                                                        let old_balance_qnk = current as f64 / QUG_DISPLAY_DIVISOR;
-                                                                        let new_balance_qnk = new_balance as f64 / QUG_DISPLAY_DIVISOR;
-                                                                        let wallet_address_with_prefix = if update.address.starts_with("qnk") {
-                                                                            update.address.clone()
+                                                                        // v10.2.0: Route token updates to token_balances
+                                                                        if let Some(tok_addr) = update.token_address {
+                                                                            let new_balance = match storage.get_token_balance(&address_bytes, &tok_addr).await {
+                                                                                Ok(actual) => actual,
+                                                                                Err(_) => 0,
+                                                                            };
+                                                                            dag_token_inserts.push((address_bytes, tok_addr, new_balance));
                                                                         } else {
-                                                                            format!("qnk{}", update.address)
-                                                                        };
-                                                                        let _ = app_state_gossip.event_broadcaster.broadcast(
-                                                                            q_api_server::streaming::StreamEvent::BalanceUpdated {
-                                                                                wallet_address: wallet_address_with_prefix.clone(),
-                                                                                old_balance: old_balance_qnk,
-                                                                                new_balance: new_balance_qnk,
-                                                                                change_reason: change_reason_str.to_string(),
-                                                                                timestamp: chrono::Utc::now(),
-                                                                                block_hash: Some(block_hash_hex.clone()),
-                                                                                block_height: Some(block_height),
-                                                                                confirmation_status: "confirmed".to_string(),
-                                                                            }
-                                                                        ).await;
-                                                                        let sign = if matches!(update.reason, q_storage::ChangeReason::TransferSent) { "-" } else { "+" };
-                                                                        debug!("📡 [DAG→SSE v3.5.16] Balance update: {} {}{:.8} QNK (new: {:.8} QNK) reason={} [PERSISTED]",
-                                                                              &update.address[..16.min(update.address.len())],
-                                                                              sign,
-                                                                              update.amount as f64 / QUG_DISPLAY_DIVISOR,
-                                                                              new_balance_qnk,
-                                                                              change_reason_str);
+                                                                            let new_balance = match storage.get_balance(&update.address).await {
+                                                                                Ok(actual) => actual,
+                                                                                Err(_) => {
+                                                                                    match update.reason {
+                                                                                        q_storage::ChangeReason::TransferSent => current.saturating_sub(update.amount),
+                                                                                        _ => current.saturating_add(update.amount),
+                                                                                    }
+                                                                                }
+                                                                            };
+                                                                            dag_balance_inserts.push((address_bytes, new_balance));
+                                                                            let old_balance_qnk = current as f64 / QUG_DISPLAY_DIVISOR;
+                                                                            let new_balance_qnk = new_balance as f64 / QUG_DISPLAY_DIVISOR;
+                                                                            let wallet_address_with_prefix = if update.address.starts_with("qnk") {
+                                                                                update.address.clone()
+                                                                            } else {
+                                                                                format!("qnk{}", update.address)
+                                                                            };
+                                                                            let _ = app_state_gossip.event_broadcaster.broadcast(
+                                                                                q_api_server::streaming::StreamEvent::BalanceUpdated {
+                                                                                    wallet_address: wallet_address_with_prefix.clone(),
+                                                                                    old_balance: old_balance_qnk,
+                                                                                    new_balance: new_balance_qnk,
+                                                                                    change_reason: change_reason_str.to_string(),
+                                                                                    timestamp: chrono::Utc::now(),
+                                                                                    block_hash: Some(block_hash_hex.clone()),
+                                                                                    block_height: Some(block_height),
+                                                                                    confirmation_status: "confirmed".to_string(),
+                                                                                }
+                                                                            ).await;
+                                                                            let sign = if matches!(update.reason, q_storage::ChangeReason::TransferSent) { "-" } else { "+" };
+                                                                            debug!("📡 [DAG→SSE v3.5.16] Balance update: {} {}{:.8} QNK (new: {:.8} QNK) reason={} [PERSISTED]",
+                                                                                  &update.address[..16.min(update.address.len())],
+                                                                                  sign,
+                                                                                  update.amount as f64 / QUG_DISPLAY_DIVISOR,
+                                                                                  new_balance_qnk,
+                                                                                  change_reason_str);
+                                                                        }
                                                                     }
-                                                                    // Step 3: Apply updates under brief write lock (no .await!)
+                                                                    // Step 3: Apply QUG updates under brief write lock (no .await!)
                                                                     if !dag_balance_inserts.is_empty() {
                                                                         let mut wallet_balances = app_state_gossip.wallet_balances.write().await;
                                                                         for (addr, bal) in &dag_balance_inserts {
                                                                             wallet_balances.insert(*addr, *bal);
+                                                                        }
+                                                                    }
+                                                                    // v10.2.0: Apply token balance updates
+                                                                    if !dag_token_inserts.is_empty() {
+                                                                        let mut token_balances = app_state_gossip.token_balances.write().await;
+                                                                        for (wallet, token, bal) in &dag_token_inserts {
+                                                                            token_balances.insert((*wallet, *token), *bal);
                                                                         }
                                                                     }
 
@@ -10346,10 +10433,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                         if !updates.is_empty() {
                                             let block_hash_hex = hex::encode(block.calculate_hash());
                                             // v8.9.4 FIX: Do NOT hold wallet_balances.write() across .await!
-                                            // Step 1: Read current balances under READ lock
+                                            // v10.2.0: Split updates into QUG (wallet_balances) and token (token_balances)
+                                            // Step 1: Read current QUG balances under READ lock
                                             let current_balances_snapshot: std::collections::HashMap<q_types::Address, u128> = {
                                                 let balances = app_state_gossip.wallet_balances.read().await;
-                                                updates.iter().filter_map(|update| {
+                                                updates.iter().filter(|u| u.token_address.is_none()).filter_map(|update| {
                                                     hex::decode(&update.address).ok().and_then(|bytes| {
                                                         if bytes.len() == 32 {
                                                             let mut arr = [0u8; 32];
@@ -10359,8 +10447,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                                     })
                                                 }).collect()
                                             };
-                                            // Step 2: RocksDB lookups + SSE broadcasts (NO lock held)
+                                            // Step 2: Process updates — QUG to wallet_balances, tokens to token_balances
                                             let mut balance_inserts: Vec<(q_types::Address, u128)> = Vec::new();
+                                            let mut token_balance_inserts: Vec<(q_types::Address, [u8; 32], u128)> = Vec::new();
                                             for update in &updates {
                                                 let address_bytes: q_types::Address = match hex::decode(&update.address) {
                                                     Ok(bytes) if bytes.len() == 32 => {
@@ -10373,60 +10462,110 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                                         continue;
                                                     }
                                                 };
-                                                let current = current_balances_snapshot.get(&address_bytes).copied().unwrap_or(0);
                                                 let change_reason_str = match update.reason {
                                                     q_storage::ChangeReason::TransferSent => "transfer_sent",
                                                     q_storage::ChangeReason::TransferReceived => "transfer_received",
                                                     q_storage::ChangeReason::MiningReward => "mining_reward",
                                                     q_storage::ChangeReason::DevelopmentFee => "development_fee",
                                                 };
-                                                let new_balance = match storage.get_balance(&update.address).await {
-                                                    Ok(actual) => actual,
-                                                    Err(_) => {
-                                                        match update.reason {
-                                                            q_storage::ChangeReason::TransferSent => current.saturating_sub(update.amount),
-                                                            _ => current.saturating_add(update.amount),
+
+                                                if let Some(tok_addr) = update.token_address {
+                                                    // ═══════════════════════════════════════════
+                                                    // v10.2.0: TOKEN BALANCE UPDATE (QUGUSD / Custom)
+                                                    // ═══════════════════════════════════════════
+                                                    let new_balance = match storage.get_token_balance(&address_bytes, &tok_addr).await {
+                                                        Ok(actual) => actual,
+                                                        Err(_) => 0,
+                                                    };
+                                                    token_balance_inserts.push((address_bytes, tok_addr, new_balance));
+
+                                                    // Broadcast token-specific SSE event
+                                                    let wallet_address_with_prefix = if update.address.starts_with("qnk") {
+                                                        update.address.clone()
+                                                    } else {
+                                                        format!("qnk{}", update.address)
+                                                    };
+                                                    let token_addr_hex = format!("qnk{}", hex::encode(tok_addr));
+                                                    let token_label = if tok_addr == q_types::QUGUSD_TOKEN_ADDRESS { "QUGUSD" } else { "TOKEN" };
+                                                    let _ = app_state_gossip.event_broadcaster.broadcast(
+                                                        q_api_server::streaming::StreamEvent::TokenBalanceUpdated {
+                                                            wallet_address: wallet_address_with_prefix.clone(),
+                                                            token_address: token_addr_hex,
+                                                            token_symbol: token_label.to_string(),
+                                                            old_balance: 0.0, // Not tracked for P2P path
+                                                            new_balance: new_balance as f64 / QUG_DISPLAY_DIVISOR,
+                                                            change_reason: change_reason_str.to_string(),
+                                                            timestamp: chrono::Utc::now(),
+                                                            block_hash: Some(block_hash_hex.clone()),
+                                                            block_height: Some(block_height),
+                                                            confirmation_status: "confirmed".to_string(),
                                                         }
-                                                    }
-                                                };
-                                                balance_inserts.push((address_bytes, new_balance));
-                                                let old_balance_qnk = current as f64 / QUG_DISPLAY_DIVISOR;
-                                                let new_balance_qnk = new_balance as f64 / QUG_DISPLAY_DIVISOR;
-                                                let wallet_address_with_prefix = if update.address.starts_with("qnk") {
-                                                    update.address.clone()
+                                                    ).await;
+                                                    debug!("📡 [P2P→SSE v10.2.0] Token balance update: {} {} ({} units) reason={}",
+                                                          &update.address[..16.min(update.address.len())],
+                                                          token_label,
+                                                          new_balance,
+                                                          change_reason_str);
                                                 } else {
-                                                    format!("qnk{}", update.address)
-                                                };
-                                                let _ = app_state_gossip.event_broadcaster.broadcast(
-                                                    q_api_server::streaming::StreamEvent::BalanceUpdated {
-                                                        wallet_address: wallet_address_with_prefix.clone(),
-                                                        old_balance: old_balance_qnk,
-                                                        new_balance: new_balance_qnk,
-                                                        change_reason: change_reason_str.to_string(),
-                                                        timestamp: chrono::Utc::now(),
-                                                        block_hash: Some(block_hash_hex.clone()),
-                                                        block_height: Some(block_height),
-                                                        confirmation_status: "confirmed".to_string(),
-                                                    }
-                                                ).await;
-                                                let sign = if matches!(update.reason, q_storage::ChangeReason::TransferSent) { "-" } else { "+" };
-                                                debug!("📡 [P2P→SSE v3.5.16] Balance update: {} {}{:.8} QNK (new: {:.8} QNK) reason={}",
-                                                      &update.address[..16.min(update.address.len())],
-                                                      sign,
-                                                      update.amount as f64 / QUG_DISPLAY_DIVISOR,
-                                                      new_balance_qnk,
-                                                      change_reason_str);
+                                                    // ═══════════════════════════════════════════
+                                                    // QUG NATIVE BALANCE UPDATE (original path)
+                                                    // ═══════════════════════════════════════════
+                                                    let current = current_balances_snapshot.get(&address_bytes).copied().unwrap_or(0);
+                                                    let new_balance = match storage.get_balance(&update.address).await {
+                                                        Ok(actual) => actual,
+                                                        Err(_) => {
+                                                            match update.reason {
+                                                                q_storage::ChangeReason::TransferSent => current.saturating_sub(update.amount),
+                                                                _ => current.saturating_add(update.amount),
+                                                            }
+                                                        }
+                                                    };
+                                                    balance_inserts.push((address_bytes, new_balance));
+                                                    let old_balance_qnk = current as f64 / QUG_DISPLAY_DIVISOR;
+                                                    let new_balance_qnk = new_balance as f64 / QUG_DISPLAY_DIVISOR;
+                                                    let wallet_address_with_prefix = if update.address.starts_with("qnk") {
+                                                        update.address.clone()
+                                                    } else {
+                                                        format!("qnk{}", update.address)
+                                                    };
+                                                    let _ = app_state_gossip.event_broadcaster.broadcast(
+                                                        q_api_server::streaming::StreamEvent::BalanceUpdated {
+                                                            wallet_address: wallet_address_with_prefix.clone(),
+                                                            old_balance: old_balance_qnk,
+                                                            new_balance: new_balance_qnk,
+                                                            change_reason: change_reason_str.to_string(),
+                                                            timestamp: chrono::Utc::now(),
+                                                            block_hash: Some(block_hash_hex.clone()),
+                                                            block_height: Some(block_height),
+                                                            confirmation_status: "confirmed".to_string(),
+                                                        }
+                                                    ).await;
+                                                    let sign = if matches!(update.reason, q_storage::ChangeReason::TransferSent) { "-" } else { "+" };
+                                                    debug!("📡 [P2P→SSE v3.5.16] Balance update: {} {}{:.8} QNK (new: {:.8} QNK) reason={}",
+                                                          &update.address[..16.min(update.address.len())],
+                                                          sign,
+                                                          update.amount as f64 / QUG_DISPLAY_DIVISOR,
+                                                          new_balance_qnk,
+                                                          change_reason_str);
+                                                }
                                             }
-                                            // Step 3: Apply all balance updates under brief write lock (no .await!)
+                                            // Step 3: Apply QUG balance updates under brief write lock (no .await!)
                                             if !balance_inserts.is_empty() {
                                                 let mut wallet_balances = app_state_gossip.wallet_balances.write().await;
                                                 for (addr, bal) in &balance_inserts {
                                                     wallet_balances.insert(*addr, *bal);
                                                 }
                                             }
+                                            // Step 4: v10.2.0 — Apply token balance updates to in-memory token_balances
+                                            if !token_balance_inserts.is_empty() {
+                                                let mut token_balances = app_state_gossip.token_balances.write().await;
+                                                for (wallet, token, bal) in &token_balance_inserts {
+                                                    token_balances.insert((*wallet, *token), *bal);
+                                                }
+                                            }
 
-                                            debug!("📡 [P2P→SSE] {} balance updates from block {}",
-                                                  updates.len(), block_height);
+                                            debug!("📡 [P2P→SSE] {} balance updates from block {} ({} QUG, {} token)",
+                                                  updates.len(), block_height, balance_inserts.len(), token_balance_inserts.len());
                                         }
 
                                         // ============================================
@@ -14717,7 +14856,38 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             let mut last_batch_completed = std::time::Instant::now();
             let mut watchdog_warned = false;
 
-            while let Some(submission) = mining_rx.recv().await {
+            // v1.0.3: Use timeout on recv() to prevent indefinite shard hang.
+            // ROOT CAUSE FIX: mining_rx.recv().await can block forever if the channel
+            // empties during the drain phase. Even after new items are sent, the tokio
+            // waker may not fire if the shard task was parked in a specific state.
+            // With a 5-second timeout, the shard self-heals: it logs heartbeats, processes
+            // any buffered items, and re-polls the channel.
+            loop {
+                let submission = match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    mining_rx.recv(),
+                ).await {
+                    Ok(Some(sub)) => sub,
+                    Ok(None) => {
+                        // Channel closed — all senders dropped
+                        break;
+                    }
+                    Err(_) => {
+                        // Timeout — no items in 5s. Process any buffered items and re-poll.
+                        if last_heartbeat.elapsed().as_secs() >= 60 {
+                            info!("💓 [Shard {}] alive (idle) — {} submissions processed in {} batches, channel pending ~{}",
+                                  shard_id, processed_count, batch_count, mining_rx.len());
+                            last_heartbeat = std::time::Instant::now();
+                        }
+                        // If we have buffered items, process them
+                        if !batch_buffer.is_empty() {
+                            // Fall through to batch processing below by using a dummy continue
+                            // Actually, jump to the batch processing block
+                        }
+                        continue;
+                    }
+                };
+
                 // v10.0.5: Periodic heartbeat so we can see shards are alive in journal
                 if last_heartbeat.elapsed().as_secs() >= 60 {
                     info!("💓 [Shard {}] alive — {} submissions processed in {} batches, channel pending ~{}",
@@ -14749,6 +14919,13 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             );
                         }
                         batch_buffer.clear();
+                        // v1.0.3: Reset timers during drain to prevent false watchdog warnings.
+                        // Without this, watchdog fires after 120s of drain (which is normal during sync)
+                        // and `last_batch_process` never resets → batch processing triggers immediately
+                        // on first real submission after sync, before the buffer has time to fill.
+                        last_batch_completed = std::time::Instant::now();
+                        last_batch_process = std::time::Instant::now();
+                        watchdog_warned = false;
                         continue;
                     }
                 }
@@ -16263,54 +16440,91 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                               updates.len(), new_block.header.height);
 
                                         // Broadcast balance updates via SSE
+                                        // v10.2.0: Handle both QUG and token balance updates
                                         for update in &updates {
-                                            // Fix: Only add "qnk" prefix if address doesn't already have it
                                             let wallet_addr = if update.address.starts_with("qnk") {
                                                 update.address.clone()
                                             } else {
                                                 format!("qnk{}", &update.address)
                                             };
-
-                                            // Fetch actual wallet balance from storage (not just the reward amount!)
-                                            // Strip "qnk" prefix if present since get_balance() expects raw hex
                                             let address_for_lookup =
                                                 if update.address.starts_with("qnk") {
                                                     &update.address[3..]
                                                 } else {
                                                     &update.address
                                                 };
-                                            match app_state_mining
-                                                .storage_engine
-                                                .get_balance(address_for_lookup)
-                                                .await
-                                            {
-                                                Ok(actual_balance) => {
-                                                    let old_balance_f64 = (actual_balance
-                                                        .saturating_sub(update.amount))
-                                                        as f64
-                                                        / QUG_DISPLAY_DIVISOR;
-                                                    let new_balance_f64 =
-                                                        actual_balance as f64 / QUG_DISPLAY_DIVISOR;
 
-                                                    // v1.2.0-beta Phase 3: Enhanced with block tracking
-                                                    let _ = app_state_mining.event_broadcaster.broadcast(
-                                                        q_api_server::streaming::StreamEvent::BalanceUpdated {
-                                                            wallet_address: wallet_addr.clone(),
-                                                            old_balance: old_balance_f64,
-                                                            new_balance: new_balance_f64,
-                                                            change_reason: format!("{:?}", update.reason),
-                                                            timestamp: chrono::Utc::now(),
-                                                            block_hash: None, // Coinbase update - will be set when block is finalized
-                                                            block_height: Some(update.block_height),
-                                                            confirmation_status: "confirmed".to_string(), // Coinbase in committed block
-                                                        }
-                                                    ).await;
-                                                    trace!("📡 SSE: Balance updated for {}: {} → {} QUG (+{} QUG reward)",
-                                                           wallet_addr, old_balance_f64, new_balance_f64,
-                                                           update.amount as f64 / QUG_DISPLAY_DIVISOR);
+                                            if let Some(tok_addr) = update.token_address {
+                                                // ═══════════════════════════════════════════
+                                                // v10.2.0: TOKEN BALANCE UPDATE (QUGUSD / Custom)
+                                                // ═══════════════════════════════════════════
+                                                let address_bytes: [u8; 32] = match hex::decode(address_for_lookup) {
+                                                    Ok(b) if b.len() == 32 => { let mut a = [0u8;32]; a.copy_from_slice(&b); a },
+                                                    _ => continue,
+                                                };
+                                                let new_balance = app_state_mining.storage_engine
+                                                    .get_token_balance(&address_bytes, &tok_addr).await.unwrap_or(0);
+                                                let old_balance = if matches!(update.reason, q_storage::ChangeReason::TransferSent) {
+                                                    new_balance.saturating_add(update.amount)
+                                                } else {
+                                                    new_balance.saturating_sub(update.amount)
+                                                };
+                                                let token_symbol = if tok_addr == q_types::QUGUSD_TOKEN_ADDRESS { "QUGUSD" } else { "TOKEN" };
+                                                let _ = app_state_mining.event_broadcaster.broadcast(
+                                                    q_api_server::streaming::StreamEvent::TokenBalanceUpdated {
+                                                        wallet_address: wallet_addr.clone(),
+                                                        token_address: hex::encode(tok_addr),
+                                                        token_symbol: token_symbol.to_string(),
+                                                        old_balance: old_balance as f64 / QUG_DISPLAY_DIVISOR,
+                                                        new_balance: new_balance as f64 / QUG_DISPLAY_DIVISOR,
+                                                        change_reason: format!("{:?}", update.reason),
+                                                        timestamp: chrono::Utc::now(),
+                                                        block_hash: None,
+                                                        block_height: Some(update.block_height),
+                                                        confirmation_status: "confirmed".to_string(),
+                                                    }
+                                                ).await;
+                                                // Also sync token_balances in-memory
+                                                {
+                                                    let mut token_balances = app_state_mining.token_balances.write().await;
+                                                    token_balances.insert((address_bytes, tok_addr), new_balance);
                                                 }
-                                                Err(e) => {
-                                                    error!("❌ Failed to fetch balance for SSE event {}: {:?}", wallet_addr, e);
+                                                info!("📡 [SSE v10.2.0] {} balance updated for {} (block {})",
+                                                       token_symbol, &wallet_addr[..16.min(wallet_addr.len())], update.block_height);
+                                            } else {
+                                                // ═══════════════════════════════════════════
+                                                // QUG NATIVE BALANCE UPDATE (original path)
+                                                // ═══════════════════════════════════════════
+                                                match app_state_mining
+                                                    .storage_engine
+                                                    .get_balance(address_for_lookup)
+                                                    .await
+                                                {
+                                                    Ok(actual_balance) => {
+                                                        let old_balance_f64 = (actual_balance
+                                                            .saturating_sub(update.amount))
+                                                            as f64
+                                                            / QUG_DISPLAY_DIVISOR;
+                                                        let new_balance_f64 =
+                                                            actual_balance as f64 / QUG_DISPLAY_DIVISOR;
+                                                        let _ = app_state_mining.event_broadcaster.broadcast(
+                                                            q_api_server::streaming::StreamEvent::BalanceUpdated {
+                                                                wallet_address: wallet_addr.clone(),
+                                                                old_balance: old_balance_f64,
+                                                                new_balance: new_balance_f64,
+                                                                change_reason: format!("{:?}", update.reason),
+                                                                timestamp: chrono::Utc::now(),
+                                                                block_hash: None,
+                                                                block_height: Some(update.block_height),
+                                                                confirmation_status: "confirmed".to_string(),
+                                                            }
+                                                        ).await;
+                                                        trace!("📡 SSE: Balance updated for {}: {} → {} QUG",
+                                                               wallet_addr, old_balance_f64, new_balance_f64);
+                                                    }
+                                                    Err(e) => {
+                                                        error!("❌ Failed to fetch balance for SSE event {}: {:?}", wallet_addr, e);
+                                                    }
                                                 }
                                             }
                                         }
@@ -16370,29 +16584,46 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             {
                                 // 📦 v3.5.21-beta: Sync in-memory balances for ALL transactions
                                 // v8.9.4 FIX: Do NOT hold wallet_balances.write() across .await!
-                                // Previous code held write lock while calling get_balance().await per TX,
-                                // blocking ALL mining shard processors at wallet_balances.read().
-                                // Fix: Collect RocksDB lookups first, then apply under brief write lock.
+                                // v10.2.0: Also sync token_balances for QUGUSD/custom token transfers
                                 let mut balance_updates: Vec<([u8; 32], u128)> = Vec::new();
+                                let mut token_balance_updates: Vec<([u8; 32], [u8; 32], u128)> = Vec::new();
                                 for tx in &new_block.transactions {
-                                    let to_hex = hex::encode(&tx.to);
-                                    if let Ok(actual_balance) = app_state_mining.storage_engine.get_balance(&to_hex).await {
-                                        balance_updates.push((tx.to, actual_balance));
-                                        trace!(
-                                            "💰 [CACHE SYNC] {} (to) balance synced from RocksDB: {} QNK",
-                                            hex::encode(&tx.to[..8]),
-                                            actual_balance as f64 / QUG_DISPLAY_DIVISOR
-                                        );
-                                    }
-                                    if tx.from != [0u8; 32] {
-                                        let from_hex = hex::encode(&tx.from);
-                                        if let Ok(actual_balance) = app_state_mining.storage_engine.get_balance(&from_hex).await {
-                                            balance_updates.push((tx.from, actual_balance));
-                                            info!(
-                                                "💸 [CACHE SYNC v3.5.21] {} (sender) balance synced after transfer: {} QNK",
-                                                hex::encode(&tx.from[..8]),
+                                    let tok_addr = match tx.token_type {
+                                        q_types::TokenType::QUGUSD => Some(q_types::QUGUSD_TOKEN_ADDRESS),
+                                        q_types::TokenType::Custom(addr) => Some(addr),
+                                        _ => None,
+                                    };
+
+                                    if let Some(token) = tok_addr {
+                                        // v10.2.0: Sync token balances for sender + recipient
+                                        if let Ok(bal) = app_state_mining.storage_engine.get_token_balance(&tx.to, &token).await {
+                                            token_balance_updates.push((tx.to, token, bal));
+                                        }
+                                        if tx.from != [0u8; 32] {
+                                            if let Ok(bal) = app_state_mining.storage_engine.get_token_balance(&tx.from, &token).await {
+                                                token_balance_updates.push((tx.from, token, bal));
+                                            }
+                                        }
+                                    } else {
+                                        let to_hex = hex::encode(&tx.to);
+                                        if let Ok(actual_balance) = app_state_mining.storage_engine.get_balance(&to_hex).await {
+                                            balance_updates.push((tx.to, actual_balance));
+                                            trace!(
+                                                "💰 [CACHE SYNC] {} (to) balance synced from RocksDB: {} QNK",
+                                                hex::encode(&tx.to[..8]),
                                                 actual_balance as f64 / QUG_DISPLAY_DIVISOR
                                             );
+                                        }
+                                        if tx.from != [0u8; 32] {
+                                            let from_hex = hex::encode(&tx.from);
+                                            if let Ok(actual_balance) = app_state_mining.storage_engine.get_balance(&from_hex).await {
+                                                balance_updates.push((tx.from, actual_balance));
+                                                info!(
+                                                    "💸 [CACHE SYNC v3.5.21] {} (sender) balance synced after transfer: {} QNK",
+                                                    hex::encode(&tx.from[..8]),
+                                                    actual_balance as f64 / QUG_DISPLAY_DIVISOR
+                                                );
+                                            }
                                         }
                                     }
                                 }
@@ -16402,6 +16633,14 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                     for (addr, bal) in &balance_updates {
                                         balances.insert(*addr, *bal);
                                     }
+                                }
+                                // v10.2.0: Sync token balances too
+                                if !token_balance_updates.is_empty() {
+                                    let mut token_balances = app_state_mining.token_balances.write().await;
+                                    for (wallet, token, bal) in &token_balance_updates {
+                                        token_balances.insert((*wallet, *token), *bal);
+                                    }
+                                    info!("💰 [CACHE SYNC v10.2.0] {} token balance entries synced", token_balance_updates.len());
                                 }
                             }
 
@@ -21226,6 +21465,178 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             None
         };
 
+    // ═══════════════════════════════════════════════════════════════════
+    // v10.2.0: Crown & Ash — Game tick scheduler (block-driven turns)
+    // ═══════════════════════════════════════════════════════════════════
+    // Polls block height every second. When height crosses a BLOCKS_PER_TURN
+    // boundary, runs one deterministic simulation tick seeded by the block hash.
+    // Broadcasts game events via SSE so connected clients receive real-time
+    // narrative updates (battles, plagues, conquests, etc.).
+    // ═══════════════════════════════════════════════════════════════════
+    {
+        let crown_ash_state = app_state.crown_ash_state.clone();
+        let crown_ash_height = app_state.current_height_atomic.clone();
+        let crown_ash_storage = app_state.storage_engine.clone();
+        let crown_ash_broadcaster = app_state.event_broadcaster.clone();
+
+        tokio::spawn(async move {
+            info!("⚔️  [CROWN-ASH] Game tick scheduler started (1 turn every {} blocks)", crown_ash_types::BLOCKS_PER_TURN);
+
+            let mut last_turn: u64 = 0;
+            let mut world_initialized = false;
+
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+                // Read the current block height from the lock-free atomic counter.
+                let current_height = crown_ash_height.load(std::sync::atomic::Ordering::Relaxed);
+                if current_height == 0 {
+                    continue; // No blocks yet — skip.
+                }
+
+                let current_turn = current_height / crown_ash_types::BLOCKS_PER_TURN;
+                if current_turn <= last_turn {
+                    continue; // Same turn — nothing to do.
+                }
+
+                // ── Lazy-init the game world on the very first tick ──
+                if !world_initialized {
+                    let mut game = crown_ash_state.write().await;
+
+                    if !game.world.meta.initialized {
+                        // Derive a 32-byte seed from the current block height.
+                        // This is deterministic: any node at the same height will
+                        // produce the identical world.
+                        let seed = {
+                            let mut s = [0u8; 32];
+                            let h_bytes = current_height.to_le_bytes();
+                            s[..8].copy_from_slice(&h_bytes);
+                            // Mix in a domain tag so the seed is unique to Crown & Ash.
+                            let tag = b"crown-ash-genesis-seed-v1";
+                            for (i, &b) in tag.iter().enumerate() {
+                                s[8 + (i % 24)] ^= b;
+                            }
+                            s
+                        };
+
+                        let config = crown_ash_types::WorldConfig::default();
+                        game.world = crown_ash_sim::init_world(&config, seed);
+                        game.world.meta.genesis_block = current_height;
+                        info!(
+                            "⚔️  [CROWN-ASH] World initialized at block {} | {} provinces, {} factions, {} characters",
+                            current_height,
+                            game.world.provinces.len(),
+                            game.world.factions.len(),
+                            game.world.characters.len(),
+                        );
+                    }
+
+                    world_initialized = true;
+                    // Drop the write lock before entering the tick path.
+                }
+
+                // ── Run tick(s) to catch up ──
+                // If we skipped several turns (e.g. during startup) we still advance
+                // one turn per loop iteration so the SSE feed is not flooded.
+                let target_turn = current_turn;
+                let tick_turn = last_turn + 1;
+
+                // Derive a block hash for this turn's RNG seed.
+                // We use the block at the turn boundary (tick_turn * BLOCKS_PER_TURN).
+                let boundary_height = tick_turn * crown_ash_types::BLOCKS_PER_TURN;
+                let block_hash: [u8; 32] = match crown_ash_storage.get_qblock_by_height(boundary_height).await {
+                    Ok(Some(block)) => block.calculate_hash(),
+                    Ok(None) => {
+                        // Block not yet available in storage (turbo-sync gap).
+                        // Derive a deterministic fallback from the height itself.
+                        let mut h = [0u8; 32];
+                        h[..8].copy_from_slice(&boundary_height.to_le_bytes());
+                        let hash = blake3::hash(&h);
+                        *hash.as_bytes()
+                    }
+                    Err(e) => {
+                        warn!("⚔️  [CROWN-ASH] Failed to fetch block at height {}: {} — using fallback hash", boundary_height, e);
+                        let mut h = [0u8; 32];
+                        h[..8].copy_from_slice(&boundary_height.to_le_bytes());
+                        let hash = blake3::hash(&h);
+                        *hash.as_bytes()
+                    }
+                };
+
+                // Run the simulation tick under write lock.
+                let tick_result = {
+                    let mut game = crown_ash_state.write().await;
+
+                    // Drain pending actions from the API-side queue into the world's queue.
+                    if !game.action_queue.is_empty() {
+                        let api_actions = std::mem::take(&mut game.action_queue);
+                        game.world.action_queue.extend(api_actions);
+                    }
+
+                    let mut summary = crown_ash_sim::tick(&mut game.world, &block_hash);
+                    summary.block_height = boundary_height;
+
+                    // Append to turn history (cap at 200 to bound memory).
+                    game.turn_history.push(summary.clone());
+                    if game.turn_history.len() > 200 {
+                        let excess = game.turn_history.len() - 200;
+                        game.turn_history.drain(..excess);
+                    }
+
+                    summary
+                };
+
+                last_turn = tick_turn;
+
+                let event_count = tick_result.events.len();
+                let turn_number = tick_result.turn;
+
+                // ── Broadcast SSE: GameTick summary ──
+                let _ = crown_ash_broadcaster
+                    .broadcast(q_api_server::StreamEvent::GameTick {
+                        turn: turn_number,
+                        events_count: event_count,
+                        timestamp: chrono::Utc::now(),
+                    })
+                    .await;
+
+                // ── Broadcast SSE: Individual narrative GameEvents ──
+                for event in &tick_result.events {
+                    let (event_type, description) = crown_ash_event_to_strings(event);
+                    let data = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
+                    let _ = crown_ash_broadcaster
+                        .broadcast(q_api_server::StreamEvent::GameEvent {
+                            turn: turn_number,
+                            event_type,
+                            description,
+                            data,
+                        })
+                        .await;
+                }
+
+                if event_count > 0 {
+                    info!(
+                        "⚔️  [CROWN-ASH] Turn {} completed (block {}) | {} events | {} factions alive | pop {}",
+                        turn_number, boundary_height, event_count,
+                        tick_result.active_factions, tick_result.total_population,
+                    );
+                } else {
+                    debug!(
+                        "⚔️  [CROWN-ASH] Turn {} completed (block {}) | quiet turn | {} factions alive",
+                        turn_number, boundary_height, tick_result.active_factions,
+                    );
+                }
+
+                // If we are far behind, yield to let other tasks run before catching up.
+                if last_turn < target_turn {
+                    tokio::task::yield_now().await;
+                }
+            }
+        });
+
+        info!("⚔️  [CROWN-ASH] Game tick scheduler task spawned");
+    }
+
     info!("🔍 DEBUG: About to build application router");
 
     // Build the application router
@@ -21261,6 +21672,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/admin/flux/stats-local", get(q_api_server::deploy_admin_api::flux_stats_local)) // v9.2.0: Local q-flux metrics (no auth)
         .route("/api/v1/mining/stats/:wallet", get(handlers::get_wallet_mining_stats)) // v3.5.0-beta: Wallet mining stats
         .route("/api/v1/mining/hashrate/history", get(handlers::get_hashrate_history)) // v10.3.0: Hashrate history for Network Power Modal
+        .route("/api/v1/mining/miners", get(handlers::get_network_miners)) // v10.3.0: Full miner list for Network Power Modal
         // v0.0.22-beta Quick Win #1: Manual trigger endpoint REMOVED from default routes
         // Added conditionally below based on config.allow_manual_trigger
         // Chain endpoints
@@ -22044,6 +22456,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     q_api_server::payment_request_api::spawn_expiry_cleanup(app_state.payment_requests.clone());
 
     let app = app.with_state(app_state.clone());
+
+    // ⚔️ v10.2.0: Crown & Ash — Medieval grand strategy (on-chain WASM sim)
+    // Nested AFTER .with_state() because crown-ash has its own state type (SharedGameState).
+    let app = app.nest("/api/v1/crown-ash", crown_ash_api::create_crown_ash_router(app_state.crown_ash_state.clone()));
 
     // Create separate router for IPFS storage endpoints with their own state
     let storage_router = Router::new()

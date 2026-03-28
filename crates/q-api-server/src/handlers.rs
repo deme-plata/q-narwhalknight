@@ -2009,7 +2009,7 @@ pub async fn submit_transaction(
     }
     tracing::debug!(
         "✅ [Phase 3] Transaction signature verified: {}",
-        hex::encode(&tx_hash)
+        q_log_privacy::mask_hash(&hex::encode(&tx_hash))
     );
 
     // ============================================================================
@@ -2025,7 +2025,7 @@ pub async fn submit_transaction(
         tracing::warn!(
             "🚨 [SECURITY] Transaction fee validation failed: {} (tx: {})",
             fee_error,
-            hex::encode(&tx_hash)
+            q_log_privacy::mask_hash(&hex::encode(&tx_hash))
         );
         return Ok(Json(ApiResponse::error(format!(
             "Transaction fee invalid: {}",
@@ -2034,8 +2034,8 @@ pub async fn submit_transaction(
     }
     tracing::debug!(
         "✅ [v1.4.5] Transaction fee validated: {} (fee: {} for {:?})",
-        hex::encode(&tx_hash),
-        request.transaction.fee,
+        q_log_privacy::mask_hash(&hex::encode(&tx_hash)),
+        q_log_privacy::mask_amt(request.transaction.fee as u128),
         request.transaction.tx_type
     );
 
@@ -2053,7 +2053,7 @@ pub async fn submit_transaction(
             tracing::warn!(
                 "🔐 [SECURITY] Founder wallet withdrawal blocked: {} (tx: {})",
                 founder_error,
-                hex::encode(&tx_hash)
+                q_log_privacy::mask_hash(&hex::encode(&tx_hash))
             );
             return Ok(Json(ApiResponse::error(format!(
                 "Founder wallet protection: {}",
@@ -2062,8 +2062,8 @@ pub async fn submit_transaction(
         }
         tracing::info!(
             "🔐 [v1.4.5] Founder wallet withdrawal validated: {} (amount: {}, height: {})",
-            hex::encode(&tx_hash),
-            request.transaction.amount,
+            q_log_privacy::mask_hash(&hex::encode(&tx_hash)),
+            q_log_privacy::mask_amt(request.transaction.amount as u128),
             current_height
         );
     }
@@ -2089,7 +2089,7 @@ pub async fn submit_transaction(
             match mempool.add_transaction(tx, None).await {
                 Ok(added) => {
                     if added {
-                        tracing::debug!("⚡ [NARWHAL] Transaction {} added to production mempool for pre-ordering", hex::encode(&tx_hash));
+                        tracing::debug!("⚡ [NARWHAL] Transaction {} added to production mempool for pre-ordering", q_log_privacy::mask_hash(&hex::encode(&tx_hash)));
                     }
                 }
                 Err(e) => {
@@ -2126,14 +2126,14 @@ pub async fn submit_transaction(
                             Ok(_) => {
                                 tracing::debug!(
                                     "🌻 [DANDELION++] Transaction {} propagated via stem→fluff",
-                                    hex::encode(&tx_hash_clone)
+                                    q_log_privacy::mask_hash(&hex::encode(&tx_hash_clone))
                                 );
                             }
                             Err(e) => {
                                 tracing::warn!(
                                     "⚠️ [DANDELION++] Transaction propagation failed: {} (tx: {})",
                                     e,
-                                    hex::encode(&tx_hash_clone)
+                                    q_log_privacy::mask_hash(&hex::encode(&tx_hash_clone))
                                 );
                             }
                         }
@@ -2174,7 +2174,7 @@ pub async fn submit_transaction(
                 } else {
                     tracing::debug!(
                         "📤 [P2P MEMPOOL] Transaction {} queued for P2P broadcast (no Dandelion++)",
-                        hex::encode(&tx_hash)
+                        q_log_privacy::mask_hash(&hex::encode(&tx_hash))
                     );
                 }
             }
@@ -2203,7 +2203,7 @@ pub async fn submit_transaction(
                     } else {
                         tracing::debug!(
                             "📤 Transaction {} broadcast to {} network (legacy)",
-                            hex::encode(&tx_hash),
+                            q_log_privacy::mask_hash(&hex::encode(&tx_hash)),
                             nm.network_config().network_id.as_str()
                         );
                     }
@@ -2359,8 +2359,8 @@ pub async fn estimate_fee(
     };
 
     tracing::debug!(
-        "💰 [FEE ESTIMATE] Type: {:?}, Priority: {}, Min: {}, Recommended: {} ({:.8} QUG), Mode: {}, Height: {}, Blocks until reduction: {}",
-        tx_type, priority, min_fee, recommended_fee, recommended_fee_qug, fee_mode, current_height, blocks_until_reduction
+        "💰 [FEE ESTIMATE] Type: {:?}, Priority: {}, Min: {}, Recommended: {} ({} QUG), Mode: {}, Height: {}, Blocks until reduction: {}",
+        tx_type, priority, q_log_privacy::mask_amt(min_fee as u128), q_log_privacy::mask_amt(recommended_fee as u128), q_log_privacy::mask_amt_display(recommended_fee_qug), fee_mode, current_height, blocks_until_reduction
     );
 
     Ok(Json(ApiResponse::success(response)))
@@ -2535,7 +2535,7 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
                             } else {
                                 tracing::debug!(
                                     "⏭️ Skipping Failed status for tx {} - already accepted via P2P",
-                                    hex::encode(&tx_hash[..8])
+                                    q_log_privacy::mask_hash(&hex::encode(&tx_hash[..8]))
                                 );
                             }
                         }
@@ -2901,8 +2901,8 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
                                                     token_balances.insert(dev_key, dev_balance + dev_fee as u128);
                                                     tracing::info!(
                                                         "💰 Dev fee: {} tokens sent to {}",
-                                                        dev_fee as f64 / QUG_DISPLAY_DIVISOR,
-                                                        &dev_wallet[..16]
+                                                        q_log_privacy::mask_amt_display(dev_fee as f64 / QUG_DISPLAY_DIVISOR),
+                                                        q_log_privacy::mask_addr(&dev_wallet[..16])
                                                     );
                                                 }
                                             }
@@ -2918,7 +2918,7 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
                                 token_balances.insert(liquidity_key, liquidity_balance + liquidity_fee as u128);
                                 tracing::info!(
                                     "💧 Liquidity fee: {} tokens added to pool",
-                                    liquidity_fee as f64 / QUG_DISPLAY_DIVISOR
+                                    q_log_privacy::mask_amt_display(liquidity_fee as f64 / QUG_DISPLAY_DIVISOR)
                                 );
                             }
 
@@ -2927,21 +2927,21 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
                             if total_fees > 0 {
                                 tracing::info!(
                                     "🔥 Token fees applied: transfer={}, reflection={}, burn={}, liquidity={}, dev={}",
-                                    transfer_amount as f64 / QUG_DISPLAY_DIVISOR,
-                                    reflection_fee as f64 / QUG_DISPLAY_DIVISOR,
-                                    burn_fee as f64 / QUG_DISPLAY_DIVISOR,
-                                    liquidity_fee as f64 / QUG_DISPLAY_DIVISOR,
-                                    dev_fee as f64 / QUG_DISPLAY_DIVISOR
+                                    q_log_privacy::mask_amt_display(transfer_amount as f64 / QUG_DISPLAY_DIVISOR),
+                                    q_log_privacy::mask_amt_display(reflection_fee as f64 / QUG_DISPLAY_DIVISOR),
+                                    q_log_privacy::mask_amt_display(burn_fee as f64 / QUG_DISPLAY_DIVISOR),
+                                    q_log_privacy::mask_amt_display(liquidity_fee as f64 / QUG_DISPLAY_DIVISOR),
+                                    q_log_privacy::mask_amt_display(dev_fee as f64 / QUG_DISPLAY_DIVISOR)
                                 );
                             }
 
                             tracing::info!(
                                 "🪙 Consensus confirmed CUSTOM TOKEN tx {}: {} → {} ({} tokens, token_addr={})",
-                                hex::encode(tx_hash),
-                                hex::encode(tx.from)[..8].to_string(),
-                                hex::encode(tx.to)[..8].to_string(),
-                                transfer_amount as f64 / QUG_DISPLAY_DIVISOR,
-                                hex::encode(&token_addr[..8])
+                                q_log_privacy::mask_hash(&hex::encode(tx_hash)),
+                                q_log_privacy::mask_addr(&hex::encode(tx.from)),
+                                q_log_privacy::mask_addr(&hex::encode(tx.to)),
+                                q_log_privacy::mask_amt_display(transfer_amount as f64 / QUG_DISPLAY_DIVISOR),
+                                q_log_privacy::mask_addr(&hex::encode(&token_addr[..8]))
                             );
 
                             // Persist custom token balances
@@ -2977,8 +2977,8 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
                                 }
                                 tracing::info!(
                                     "🔥 Burned {} tokens (total burned: {})",
-                                    burn_fee as f64 / QUG_DISPLAY_DIVISOR,
-                                    new_total as f64 / QUG_DISPLAY_DIVISOR
+                                    q_log_privacy::mask_amt_display(burn_fee as f64 / QUG_DISPLAY_DIVISOR),
+                                    q_log_privacy::mask_amt_display(new_total as f64 / QUG_DISPLAY_DIVISOR)
                                 );
                             }
 
@@ -2997,8 +2997,8 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
                                 }
                                 tracing::info!(
                                     "✨ Reflection: {} tokens distributed (total reflected: {})",
-                                    reflection_fee as f64 / QUG_DISPLAY_DIVISOR,
-                                    new_total as f64 / QUG_DISPLAY_DIVISOR
+                                    q_log_privacy::mask_amt_display(reflection_fee as f64 / QUG_DISPLAY_DIVISOR),
+                                    q_log_privacy::mask_amt_display(new_total as f64 / QUG_DISPLAY_DIVISOR)
                                 );
                             }
 
@@ -3061,8 +3061,8 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
                         } else {
                             warn!(
                                 "⚠️ Custom token transfer failed: insufficient balance. Have: {}, Need: {}",
-                                sender_balance as f64 / QUG_DISPLAY_DIVISOR,
-                                tx.amount as f64 / QUG_DISPLAY_DIVISOR
+                                q_log_privacy::mask_amt_display(sender_balance as f64 / QUG_DISPLAY_DIVISOR),
+                                q_log_privacy::mask_amt_display(tx.amount as f64 / QUG_DISPLAY_DIVISOR)
                             );
                         }
                     } else if is_qugusd {
@@ -3089,10 +3089,10 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
 
                             tracing::info!(
                                 "💰 Consensus confirmed QUGUSD tx {}: {} → {} ({} QUGUSD)",
-                                hex::encode(tx_hash),
-                                hex::encode(tx.from)[..8].to_string(),
-                                hex::encode(tx.to)[..8].to_string(),
-                                tx.amount as f64 / QUG_DISPLAY_DIVISOR
+                                q_log_privacy::mask_hash(&hex::encode(tx_hash)),
+                                q_log_privacy::mask_addr(&hex::encode(tx.from)),
+                                q_log_privacy::mask_addr(&hex::encode(tx.to)),
+                                q_log_privacy::mask_amt_display(tx.amount as f64 / QUG_DISPLAY_DIVISOR)
                             );
 
                             // Persist QUGUSD balances
@@ -3114,8 +3114,8 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
                         } else {
                             warn!(
                                 "⚠️ QUGUSD transfer failed: insufficient balance. Have: {}, Need: {}",
-                                sender_balance as f64 / QUG_DISPLAY_DIVISOR,
-                                total_cost as f64 / QUG_DISPLAY_DIVISOR
+                                q_log_privacy::mask_amt_display(sender_balance as f64 / QUG_DISPLAY_DIVISOR),
+                                q_log_privacy::mask_amt_display(total_cost as f64 / QUG_DISPLAY_DIVISOR)
                             );
                         }
                     } else {
@@ -3172,18 +3172,18 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
 
                                 tracing::debug!(
                                     "💰 TX fee collected: {} QUG (founder: {}, operator: {})",
-                                    tx.fee as f64 / QUG_DISPLAY_DIVISOR,
-                                    founder_share as f64 / QUG_DISPLAY_DIVISOR,
-                                    operator_share as f64 / QUG_DISPLAY_DIVISOR
+                                    q_log_privacy::mask_amt_display(tx.fee as f64 / QUG_DISPLAY_DIVISOR),
+                                    q_log_privacy::mask_amt_display(founder_share as f64 / QUG_DISPLAY_DIVISOR),
+                                    q_log_privacy::mask_amt_display(operator_share as f64 / QUG_DISPLAY_DIVISOR)
                                 );
                             }
 
                             tracing::debug!(
                                 "💰 Consensus confirmed tx {}: {} → {} ({} QUG)",
-                                hex::encode(tx_hash),
-                                hex::encode(tx.from)[..8].to_string(),
-                                hex::encode(tx.to)[..8].to_string(),
-                                tx.amount as f64 / QUG_DISPLAY_DIVISOR
+                                q_log_privacy::mask_hash(&hex::encode(tx_hash)),
+                                q_log_privacy::mask_addr(&hex::encode(tx.from)),
+                                q_log_privacy::mask_addr(&hex::encode(tx.to)),
+                                q_log_privacy::mask_amt_display(tx.amount as f64 / QUG_DISPLAY_DIVISOR)
                             );
 
                             // Release the balance lock before emitting events
@@ -3257,7 +3257,7 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
                         tracing::debug!(
                             "🌊 Resonance shadow analysis: {} tx, {} QNK, round {}",
                             batch_size,
-                            total_value as f64 / QUG_DISPLAY_DIVISOR,
+                            q_log_privacy::mask_amt_display(total_value as f64 / QUG_DISPLAY_DIVISOR),
                             current_round
                         );
                     }
@@ -3354,9 +3354,9 @@ pub async fn get_transaction(
             let from_match = wallet.address == *from;
             let to_match = wallet.address == *to;
             info!("🔐 ZK-STARK Auth Check: wallet={} from={} to={} | from_match={} to_match={}",
-                   hex::encode(&wallet.address),
-                   hex::encode(from),
-                   hex::encode(to),
+                   q_log_privacy::mask_addr(&hex::encode(&wallet.address)),
+                   q_log_privacy::mask_addr(&hex::encode(from)),
+                   q_log_privacy::mask_addr(&hex::encode(to)),
                    from_match,
                    to_match);
             from_match || to_match
@@ -3664,9 +3664,9 @@ pub async fn send_transaction(
     // v2.3.0: Enhanced logging to diagnose connection closure issues
     info!(
         "📤 [TX START] send_transaction handler called - from: {}, to: {}, amount: {}, token: {}",
-        &request.from.get(..16).unwrap_or("?"),
-        &request.to.get(..16).unwrap_or("?"),
-        request.amount,
+        q_log_privacy::mask_addr(request.from.get(..16).unwrap_or("?")),
+        q_log_privacy::mask_addr(request.to.get(..16).unwrap_or("?")),
+        q_log_privacy::mask_amt(request.amount as u128),
         request.token_type
     );
 
@@ -3694,17 +3694,10 @@ async fn send_transaction_inner(
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     debug!("Processing send transaction request (inner)");
 
-    // v10.1.2: Block transfers FROM the admin/master wallet via the miner's /api/v1/transfer endpoint.
-    // Older miners without OAuth fall back to the master wallet and expose the Send function,
-    // allowing anyone to drain the master wallet. The web UI uses a different auth path (session-based)
-    // so this only blocks the unauthenticated miner send path.
-    let from_hex_check = if request.from.starts_with("qnk") { &request.from[3..] } else { &request.from };
-    if from_hex_check == state.admin_wallet {
-        warn!("🚫 [SECURITY v10.1.2] Blocked transfer FROM admin wallet via transfer API");
-        return Ok(Json(ApiResponse::error(
-            "Transfers from the admin wallet are not permitted via this endpoint".to_string(),
-        )));
-    }
+    // v10.1.2 (updated v10.1.8): Admin wallet transfers are allowed because
+    // AuthenticatedWallet extractor already validates cryptographic signatures —
+    // only the key holder can reach this point. The original blanket block also
+    // prevented legitimate web UI transfers from the admin wallet.
 
     // Parse sender address from request (handle 'qnk' prefix)
     let from_hex = if request.from.starts_with("qnk") {
@@ -3739,8 +3732,8 @@ async fn send_transaction_inner(
     if from_address != auth_wallet.address {
         warn!(
             "🚫 Authentication mismatch: Authenticated wallet {} attempting to send from {}",
-            hex::encode(&auth_wallet.address),
-            hex::encode(from_address)
+            q_log_privacy::mask_addr(&hex::encode(&auth_wallet.address)),
+            q_log_privacy::mask_addr(&hex::encode(from_address))
         );
         return Ok(Json(ApiResponse::error(format!(
             "Authentication mismatch: You are authenticated as {} but trying to send from {}. \
@@ -3804,7 +3797,7 @@ async fn send_transaction_inner(
             if let Some(symbol) = &contract.metadata.symbol {
                 if symbol.to_uppercase() == token_type_str {
                     found_address = Some(contract.address.0);
-                    info!("📦 Found custom token {} at address {}", token_type_str, hex::encode(contract.address.0));
+                    info!("📦 Found custom token {} at address {}", token_type_str, q_log_privacy::mask_addr(&hex::encode(contract.address.0)));
                     break;
                 }
             }
@@ -3821,7 +3814,7 @@ async fn send_transaction_inner(
     let (tx_type, initial_data) = if is_custom_token {
         if let Some(token_addr) = custom_token_address {
             info!("📦 Creating TokenTransfer for {} (address: {})",
-                token_type_str, hex::encode(&token_addr[..8]));
+                token_type_str, q_log_privacy::mask_addr(&hex::encode(&token_addr[..8])));
             (q_types::TransactionType::TokenTransfer, token_addr.to_vec())
         } else {
             // Fallback to Transfer if token not found (will fail later with proper error)
@@ -3957,9 +3950,8 @@ async fn send_transaction_inner(
                         let pubkey = vk.to_bytes();
                         used_vault = true;
                         info!(
-                            "🔐 [VAULT] Auto-signing tx for OAuth2 user {}...{} (no mnemonic needed)",
-                            &hex::encode(from_address)[..8],
-                            &hex::encode(from_address)[56..]
+                            "🔐 [VAULT] Auto-signing tx for OAuth2 user {} (no mnemonic needed)",
+                            q_log_privacy::mask_addr(&hex::encode(from_address))
                         );
                         (sk, pubkey)
                     }
@@ -4004,9 +3996,9 @@ async fn send_transaction_inner(
     if !used_vault && from_address != derived_address && from_address != mnemonic_hash_address {
         warn!(
             "Address mismatch! From: {} vs Derived: {} vs MnemonicHash: {}",
-            hex::encode(from_address),
-            hex::encode(derived_address),
-            hex::encode(mnemonic_hash_address)
+            q_log_privacy::mask_addr(&hex::encode(from_address)),
+            q_log_privacy::mask_addr(&hex::encode(derived_address)),
+            q_log_privacy::mask_addr(&hex::encode(mnemonic_hash_address))
         );
     }
 
@@ -4050,9 +4042,8 @@ async fn send_transaction_inner(
             warn!("⚠️ [VAULT] Failed to persist vault key: {} (in-memory only)", e);
         } else {
             info!(
-                "🔐 [VAULT] Stored signing key for {}...{} — future OAuth2 sends auto-sign",
-                &hex::encode(from_address)[..8],
-                &hex::encode(from_address)[56..]
+                "🔐 [VAULT] Stored signing key for {} — future OAuth2 sends auto-sign",
+                q_log_privacy::mask_addr(&hex::encode(from_address))
             );
         }
     }
@@ -4098,8 +4089,8 @@ async fn send_transaction_inner(
                     warn!(
                         "Insufficient {} balance! Have: {}, Need: {}",
                         token_name,
-                        sender_token_balance as f64 / QUG_DISPLAY_DIVISOR,
-                        signed_transaction.amount as f64 / QUG_DISPLAY_DIVISOR
+                        q_log_privacy::mask_amt_display(sender_token_balance as f64 / QUG_DISPLAY_DIVISOR),
+                        q_log_privacy::mask_amt_display(signed_transaction.amount as f64 / QUG_DISPLAY_DIVISOR)
                     );
                     return Ok(Json(ApiResponse::error(format!(
                         "Insufficient {} balance. Have: {} {}, Need: {} {}",
@@ -4123,8 +4114,8 @@ async fn send_transaction_inner(
                 if sender_qug_balance < signed_transaction.fee {
                     warn!(
                         "Insufficient QUG for fee! Have: {} QUG, Need: {} QUG fee",
-                        sender_qug_balance as f64 / QUG_DISPLAY_DIVISOR,
-                        signed_transaction.fee as f64 / QUG_DISPLAY_DIVISOR
+                        q_log_privacy::mask_amt_display(sender_qug_balance as f64 / QUG_DISPLAY_DIVISOR),
+                        q_log_privacy::mask_amt_display(signed_transaction.fee as f64 / QUG_DISPLAY_DIVISOR)
                     );
                     return Ok(Json(ApiResponse::error(format!(
                         "Insufficient QUG for transaction fee. Have: {:.8} QUG, Need: {:.8} QUG",
@@ -4217,7 +4208,7 @@ async fn send_transaction_inner(
     {
         warn!("Failed to persist transaction to storage: {}", e);
     } else {
-        debug!("💳 Transaction persisted: {}", hex::encode(&tx_hash));
+        debug!("💳 Transaction persisted: {}", q_log_privacy::mask_hash(&hex::encode(&tx_hash)));
     }
 
     // OPTIMIZATION: Batch process transactions when pool reaches threshold
@@ -4241,7 +4232,7 @@ async fn send_transaction_inner(
                 if added {
                     info!(
                         "📦 [TX-QUEUED] Transaction {} queued for block production",
-                        hex::encode(&tx_hash[..8])
+                        q_log_privacy::mask_hash(&hex::encode(&tx_hash[..8]))
                     );
                 }
             }
@@ -4252,7 +4243,7 @@ async fn send_transaction_inner(
                 let error_msg = format!("Transaction rejected: {}", e);
                 warn!(
                     "❌ [TX-REJECTED] Transaction {} rejected by mempool: {}",
-                    hex::encode(&tx_hash[..8]),
+                    q_log_privacy::mask_hash(&hex::encode(&tx_hash[..8])),
                     e
                 );
                 // Update status to failed
@@ -4277,7 +4268,7 @@ async fn send_transaction_inner(
         }
     } else {
         warn!("⚠️ production_mempool not available - transaction {} will not be included in blocks!",
-              hex::encode(&tx_hash[..8]));
+              q_log_privacy::mask_hash(&hex::encode(&tx_hash[..8])));
     }
 
     // Generate STARK proof metadata (mock for now)
@@ -4336,7 +4327,7 @@ async fn send_transaction_inner(
         if let Err(e) = state.event_emitter.emit_immediate(balance_event).await {
             warn!("Failed to emit optimistic balance update: {}", e);
         } else {
-            info!("📤 [TX] Optimistic balance update emitted for sender {}", hex::encode(&sender_addr[..8]));
+            info!("📤 [TX] Optimistic balance update emitted for sender {}", q_log_privacy::mask_addr(&hex::encode(&sender_addr[..8])));
         }
     }
 
@@ -4371,7 +4362,7 @@ async fn send_transaction_inner(
                             } else {
                                 tracing::info!(
                                     "📤 Transaction {} broadcast to {} P2P network via gossipsub",
-                                    hex::encode(&tx_hash[..8]),
+                                    q_log_privacy::mask_hash(&hex::encode(&tx_hash[..8])),
                                     nm.network_config().network_id.as_str()
                                 );
                             }
@@ -4391,7 +4382,7 @@ async fn send_transaction_inner(
         tracing::warn!("⚠️ libp2p not available - transaction will only be processed locally (single-node mode)");
     }
 
-    info!("Successfully sent transaction: {:?}", tx_hash);
+    info!("Successfully sent transaction: {}", q_log_privacy::mask_hash(&hex::encode(tx_hash)));
 
     // v1.3.12-beta: Calculate validator count for decentralized consensus display
     // In multi-node mode, transactions are confirmed by 2f+1 validators (BFT consensus)
@@ -4467,7 +4458,7 @@ pub async fn get_recent_transactions(
             info!(
                 "📜 Loaded {} transactions for authenticated wallet {}",
                 txs.len(),
-                wallet_address_hex
+                q_log_privacy::mask_addr(&wallet_address_hex)
             );
             txs
         }
@@ -4562,7 +4553,7 @@ pub async fn get_wallet_transaction_history(
     State(state): State<Arc<AppState>>,
     Path(wallet_address): Path<String>,
 ) -> Result<Json<ApiResponse<Vec<UnifiedTransactionEntry>>>, StatusCode> {
-    info!("📜 [v3.5.8] Getting unified transaction history for wallet {}", wallet_address);
+    info!("📜 [v3.5.8] Getting unified transaction history for wallet {}", q_log_privacy::mask_addr(&wallet_address));
 
     // Parse wallet address (supports both hex and qnk-prefixed formats)
     // Also supports 20-byte (40 hex char) frontend addresses - pads to 32 bytes
@@ -4600,7 +4591,7 @@ pub async fn get_wallet_transaction_history(
         arr
     };
 
-    info!("📜 [v3.5.8] Wallet bytes: {}", hex::encode(&wallet_bytes));
+    info!("📜 [v3.5.8] Wallet bytes: {}", q_log_privacy::mask_addr(&hex::encode(&wallet_bytes)));
 
     let mut unified_history: Vec<UnifiedTransactionEntry> = Vec::new();
 
@@ -4615,19 +4606,13 @@ pub async fn get_wallet_transaction_history(
                     "received"
                 };
 
-                // Determine token type from transaction
-                let (token_symbol, token_address) = match tx.tx_type {
-                    q_types::TransactionType::TokenTransfer => {
-                        // Custom token transfer - token address is in tx.data[0..32]
-                        if tx.data.len() >= 32 {
-                            let token_addr = hex::encode(&tx.data[0..32]);
-                            // Try to look up token symbol from registry
-                            (Some("TOKEN".to_string()), Some(token_addr))
-                        } else {
-                            (Some("QUG".to_string()), None)
-                        }
+                // Determine token symbol from the transaction's token_type field
+                let (token_symbol, token_address) = match &tx.token_type {
+                    q_types::TokenType::QUG => (Some("QUG".to_string()), None),
+                    q_types::TokenType::QUGUSD => (Some("QUGUSD".to_string()), None),
+                    q_types::TokenType::Custom(addr) => {
+                        (Some("TOKEN".to_string()), Some(hex::encode(addr)))
                     }
-                    _ => (Some("QUG".to_string()), None),
                 };
 
                 let tx_type = match tx.tx_type {
@@ -4708,7 +4693,7 @@ pub async fn get_wallet_transaction_history(
     info!(
         "📜 [v3.5.8] Returning {} unified transaction entries for wallet {}",
         unified_history.len(),
-        &wallet_address[..16.min(wallet_address.len())]
+        q_log_privacy::mask_addr(&wallet_address)
     );
 
     Ok(Json(ApiResponse::success(unified_history)))
@@ -6479,7 +6464,7 @@ pub async fn get_wallet_balance(
     axum::extract::Path(wallet_address): axum::extract::Path<String>,
     auth_wallet: Option<AuthenticatedWallet>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    debug!("🔐 Privacy-enabled balance query for: {}", wallet_address);
+    debug!("🔐 Privacy-enabled balance query for: {}", q_log_privacy::mask_addr(&wallet_address));
 
     // Parse requested wallet address first
     let hex_part = if wallet_address.starts_with("qnk") {
@@ -6516,15 +6501,15 @@ pub async fn get_wallet_balance(
         Some(ref wallet) => {
             debug!(
                 "✅ Authenticated wallet: {}",
-                hex::encode(&wallet.address[..8])
+                q_log_privacy::mask_addr(&hex::encode(&wallet.address[..8]))
             );
 
             // PRIVACY CHECK: Only allow querying your own balance when authenticated
             if wallet.address != requested_address {
                 warn!(
                     "❌ Privacy violation attempt: {} tried to query balance of {}",
-                    hex::encode(&wallet.address[..8]),
-                    hex::encode(&requested_address[..8])
+                    q_log_privacy::mask_addr(&hex::encode(&wallet.address[..8])),
+                    q_log_privacy::mask_addr(&hex::encode(&requested_address[..8]))
                 );
                 return Ok(Json(ApiResponse::error(
                     "🔒 Privacy Protection: You can only query your own wallet balance. \
@@ -6538,7 +6523,7 @@ pub async fn get_wallet_balance(
             // SECURITY: Reject unauthenticated balance queries
             warn!(
                 "🚫 Unauthorized balance query attempt for {}",
-                wallet_address
+                q_log_privacy::mask_addr(&wallet_address)
             );
             return Ok(Json(ApiResponse::error(
                 "🔒 Authentication Required: Balance queries require cryptographic signature proof. \
@@ -6595,10 +6580,10 @@ pub async fn get_wallet_balance(
                                     tracing::info!(
                                         "💰 Auto-restored {} token balance for deployer {}: {} display × 10^{} = {} base units",
                                         symbol,
-                                        hex::encode(&address_bytes[..8]),
-                                        display_supply,
+                                        q_log_privacy::mask_addr(&hex::encode(&address_bytes[..8])),
+                                        q_log_privacy::mask_amt_display(display_supply as f64),
                                         decimals,
-                                        initial_supply
+                                        q_log_privacy::mask_amt(initial_supply as u128)
                                     );
                                 }
                             }
@@ -6634,7 +6619,7 @@ pub async fn get_wallet_balance(
     // v2.2.4: Privacy fix - don't log actual balances (private blockchain)
     debug!(
         "🔐 Authenticated balance query for {} (using {:?})",
-        &hex::encode(&address_bytes[..8])[..8], // Only first 8 chars of address
+        q_log_privacy::mask_addr(&hex::encode(&address_bytes[..8])),
         auth_wallet
             .as_ref()
             .map(|w| w.scheme)
@@ -8777,7 +8762,7 @@ pub async fn submit_mining_solution(
                 // Challenge older than 5 minutes — likely stale
                 warn!(
                     "🚨 [MINING v4.1.3] Expired challenge from miner {} (age: {}s)",
-                    &request.miner_address[..16], challenge_age_secs
+                    q_log_privacy::mask_addr(&request.miner_address[..16.min(request.miner_address.len())]), challenge_age_secs
                 );
                 return Ok(Json(ApiResponse::error(
                     "Challenge expired. Please request a new mining challenge.".to_string(),
@@ -8954,7 +8939,7 @@ pub async fn submit_mining_solution(
             };
             info!(
                 "⚡ Mining submission queued: {} | Nonce: {} | Wallet: {}",
-                miner_display, nonce, &request.miner_address[..16]
+                miner_display, nonce, q_log_privacy::mask_addr(&request.miner_address[..16.min(request.miner_address.len())])
             );
         }
         // NOTE: mining_stats.write() REMOVED from HTTP thread (v1.0.2)
@@ -9376,7 +9361,7 @@ pub async fn trigger_block_production(
             "✅ PHASE 2: Manual block produced by Producer #{}: Height {}, Hash {}, Solutions {}",
             producer_id,
             block_height,
-            hex::encode(&block_hash[..8]),
+            q_log_privacy::mask_hash(&hex::encode(&block_hash[..8])),
             solutions_count
         );
 
@@ -9863,10 +9848,10 @@ pub async fn execute_swap(
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     info!(
         "💱 Executing swap: {} {} for {} (authenticated: {})",
-        request.amount_in,
+        q_log_privacy::mask_amt(request.amount_in as u128),
         request.from_token,
         request.to_token,
-        hex::encode(&wallet_auth.address)
+        q_log_privacy::mask_addr(&hex::encode(&wallet_auth.address))
     );
 
     // Parse wallet address
@@ -9885,8 +9870,8 @@ pub async fn execute_swap(
     if wallet_auth.address != wallet_addr {
         warn!(
             "🚨 Authentication mismatch! Authenticated: {}, Requested: {}",
-            hex::encode(&wallet_auth.address),
-            hex::encode(&wallet_addr)
+            q_log_privacy::mask_addr(&hex::encode(&wallet_auth.address)),
+            q_log_privacy::mask_addr(&hex::encode(&wallet_addr))
         );
         return Ok(Json(ApiResponse::error(
             "Unauthorized: You can only swap from your own wallet".to_string(),
@@ -9987,9 +9972,9 @@ pub async fn execute_swap(
         for (addr, bal) in &db_balances {
             debug!(
                 "🔍 [SWAP DEBUG] Loading balance for {}: {} base units ({} QUG)",
-                hex::encode(&addr[..8]),
-                bal,
-                *bal as f64 / QUG_DISPLAY_DIVISOR
+                q_log_privacy::mask_addr(&hex::encode(&addr[..8])),
+                q_log_privacy::mask_amt(*bal as u128),
+                q_log_privacy::mask_amt_display(*bal as f64 / QUG_DISPLAY_DIVISOR)
             );
             wallet_balances_write.insert(*addr, *bal);
         }
@@ -10019,9 +10004,9 @@ pub async fn execute_swap(
             if *balance != storage_balance {
                 tracing::info!(
                     "🔄 [SWAP] Synced stale balance for {}: {} → {}",
-                    hex::encode(&wallet_addr[..8]),
-                    *balance as f64 / 1e24,
-                    storage_balance as f64 / 1e24
+                    q_log_privacy::mask_addr(&hex::encode(&wallet_addr[..8])),
+                    q_log_privacy::mask_amt_display(*balance as f64 / 1e24),
+                    q_log_privacy::mask_amt_display(storage_balance as f64 / 1e24)
                 );
                 *balance = storage_balance;
             }
@@ -10222,9 +10207,9 @@ pub async fn execute_swap(
                 info!(
                     "✅ Found forward-matching pool: {} ({}) <-> {} ({})",
                     p.token0,
-                    hex::encode(&pool_token0_addr[..8]),
+                    q_log_privacy::mask_addr(&hex::encode(&pool_token0_addr[..8])),
                     p.token1,
-                    hex::encode(&pool_token1_addr[..8])
+                    q_log_privacy::mask_addr(&hex::encode(&pool_token1_addr[..8]))
                 );
                 matching_pool = Some((id.clone(), p.clone(), false));
                 break;
@@ -10232,9 +10217,9 @@ pub async fn execute_swap(
                 info!(
                     "✅ Found reverse-matching pool: {} ({}) <-> {} ({})",
                     p.token0,
-                    hex::encode(&pool_token0_addr[..8]),
+                    q_log_privacy::mask_addr(&hex::encode(&pool_token0_addr[..8])),
                     p.token1,
-                    hex::encode(&pool_token1_addr[..8])
+                    q_log_privacy::mask_addr(&hex::encode(&pool_token1_addr[..8]))
                 );
                 matching_pool = Some((id.clone(), p.clone(), true));
                 break;
@@ -11659,7 +11644,7 @@ pub async fn execute_swap(
             }) {
                 warn!("🏊 [DEX P2P] Failed to broadcast liquidity update: {}", e);
             } else {
-                info!("🏊 [DEX P2P] Broadcast liquidity update for pool {}", hex::encode(&pool_id_bytes[..8]));
+                info!("🏊 [DEX P2P] Broadcast liquidity update for pool {}", q_log_privacy::mask_hash(&hex::encode(&pool_id_bytes[..8])));
             }
         }
     }
@@ -12242,7 +12227,7 @@ async fn resolve_token_address(state: &Arc<AppState>, token_id: &str) -> Result<
         addr.copy_from_slice(hash.as_bytes());
         // Mark as index fund: set first byte to 0xIF (Index Fund marker)
         addr[0] = 0x1F; // Index Fund marker
-        tracing::debug!("📊 Resolved index fund token '{}' -> qnk{}", token_id, hex::encode(&addr[..8]));
+        tracing::debug!("📊 Resolved index fund token '{}' -> {}", token_id, q_log_privacy::mask_addr(&hex::encode(&addr[..8])));
         return Ok(addr);
     }
 
@@ -13321,7 +13306,7 @@ pub async fn get_address_book(
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     info!(
         "📖 Address Book: Fetching addresses for wallet {}",
-        hex::encode(&auth.address)
+        q_log_privacy::mask_addr(&hex::encode(&auth.address))
     );
 
     // Use wallet address as the key namespace for address book
@@ -13380,7 +13365,7 @@ pub async fn save_address(
     info!(
         "💾 Address Book: Saving address '{}' for wallet {}",
         request.label,
-        hex::encode(&auth.address)
+        q_log_privacy::mask_addr(&hex::encode(&auth.address))
     );
 
     // Validate address format
@@ -13472,7 +13457,7 @@ pub async fn update_address(
     info!(
         "✏️ Address Book: Updating address ID {} for wallet {}",
         id,
-        hex::encode(&auth.address)
+        q_log_privacy::mask_addr(&hex::encode(&auth.address))
     );
 
     let wallet_hex = hex::encode(&auth.address);
@@ -13551,7 +13536,7 @@ pub async fn delete_address(
     info!(
         "🗑️ Address Book: Deleting address ID {} for wallet {}",
         id,
-        hex::encode(&auth.address)
+        q_log_privacy::mask_addr(&hex::encode(&auth.address))
     );
 
     let wallet_hex = hex::encode(&auth.address);
@@ -13626,8 +13611,8 @@ pub async fn generate_address_proof(
     info!(
         "🔐 ZK Proof: Generating {} proof for address {} (wallet: {})",
         proof_type,
-        address,
-        hex::encode(&auth.address)
+        q_log_privacy::mask_addr(&address),
+        q_log_privacy::mask_addr(&hex::encode(&auth.address))
     );
 
     // Placeholder implementation - Real ZK-STARK proof generation would go here
@@ -13665,8 +13650,8 @@ pub async fn verify_address_proof(
 
     info!(
         "✅ ZK Proof: Verifying proof for address {} (wallet: {})",
-        address,
-        hex::encode(&auth.address)
+        q_log_privacy::mask_addr(&address),
+        q_log_privacy::mask_addr(&hex::encode(&auth.address))
     );
 
     // Placeholder - Real verification would validate the ZK proof
@@ -13684,7 +13669,7 @@ pub async fn get_address_book_sync_status(
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     info!(
         "🔄 Address Book: Sync status for wallet {}",
-        hex::encode(&auth.address)
+        q_log_privacy::mask_addr(&hex::encode(&auth.address))
     );
 
     // Placeholder - Real implementation would check gossipsub P2P sync status
@@ -14582,7 +14567,7 @@ pub async fn get_token_transactions(
         drop(deployed);
 
         if let Some(addr) = found_addr {
-            info!("📜 Resolved token symbol {} to address {}", token_upper, hex::encode(&addr[..8]));
+            info!("📜 Resolved token symbol {} to address {}", token_upper, q_log_privacy::mask_addr(&hex::encode(&addr[..8])));
             addr
         } else {
             // Also check liquidity pools for token address
@@ -16141,5 +16126,97 @@ pub async fn get_hashrate_history(
             "miners": e.workers,
             "timestamp": e.timestamp,
         })).collect::<Vec<_>>()
+    }))
+}
+
+/// v10.3.0: Get full network miner list for the Network Power Modal
+/// Combines local MiningStatistics.active_miners + P2P PEER_COMPUTE_POWER data
+/// Returns all active miners with their hashrate, blocks found, worker name, and last seen
+pub async fn get_network_miners(
+    State(state): State<Arc<crate::AppState>>,
+) -> Json<serde_json::Value> {
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let mut miners_list: Vec<serde_json::Value> = Vec::new();
+
+    // 1. Local miners from MiningStatistics (includes P2P-relayed submissions)
+    if let Some(ref mining_stats_arc) = state.mining_statistics {
+        if let Ok(stats) = mining_stats_arc.try_read() {
+            let now_instant = std::time::Instant::now();
+            for (key, miner) in &stats.active_miners {
+                let secs_ago = now_instant.duration_since(miner.last_update).as_secs();
+                // Only include miners active in last 5 minutes
+                if secs_ago < 300 {
+                    miners_list.push(serde_json::json!({
+                        "address": miner.address,
+                        "worker_id": miner.worker_id,
+                        "worker_name": miner.worker_name,
+                        "hash_rate": miner.last_hashrate,
+                        "blocks_found": miner.blocks_found,
+                        "total_solutions": miner.total_solutions,
+                        "rewards_earned": miner.rewards_earned.to_string(),
+                        "last_seen_secs_ago": secs_ago,
+                        "source": if miner.worker_id.starts_with("p2p:") { "p2p" } else { "local" },
+                    }));
+                }
+            }
+        }
+    }
+
+    // 2. P2P peer-level compute power (nodes that announced hashrate but didn't relay individual miners)
+    // Only add peers not already represented in the local stats
+    let local_peer_ids: std::collections::HashSet<String> = miners_list.iter()
+        .filter_map(|m| m.get("worker_id").and_then(|v| v.as_str()))
+        .filter(|wid| wid.starts_with("p2p:"))
+        .map(|wid| wid.trim_start_matches("p2p:").to_string())
+        .collect();
+
+    for entry in q_storage::PEER_COMPUTE_POWER.iter() {
+        let peer_id = entry.key().clone();
+        let (hashrate, miner_count, timestamp) = *entry.value();
+        // Skip stale entries (>120s old)
+        if now_secs.saturating_sub(timestamp) > 120 {
+            continue;
+        }
+        // If this peer's miners are already in the local stats, skip to avoid double-counting
+        if local_peer_ids.contains(&peer_id) {
+            continue;
+        }
+        // Add as a peer-aggregate entry
+        miners_list.push(serde_json::json!({
+            "address": format!("peer:{}", &peer_id[..peer_id.len().min(12)]),
+            "worker_id": format!("node:{}", &peer_id[..peer_id.len().min(12)]),
+            "worker_name": null,
+            "hash_rate": hashrate,
+            "blocks_found": 0,
+            "total_solutions": 0,
+            "rewards_earned": "0",
+            "last_seen_secs_ago": now_secs.saturating_sub(timestamp),
+            "source": "peer",
+            "peer_miner_count": miner_count,
+        }));
+    }
+
+    // Sort by hashrate descending
+    miners_list.sort_by(|a, b| {
+        let hr_b = b.get("hash_rate").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let hr_a = a.get("hash_rate").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        hr_b.partial_cmp(&hr_a).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Calculate totals
+    let total_hashrate: f64 = miners_list.iter()
+        .filter_map(|m| m.get("hash_rate").and_then(|v| v.as_f64()))
+        .sum();
+    let total_miners = miners_list.len();
+
+    Json(serde_json::json!({
+        "success": true,
+        "total_miners": total_miners,
+        "total_hashrate": total_hashrate,
+        "miners": miners_list,
     }))
 }

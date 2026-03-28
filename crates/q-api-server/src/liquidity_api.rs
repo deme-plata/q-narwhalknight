@@ -173,6 +173,30 @@ use q_types::{
     DEX_TOTAL_FEE_BPS, DEX_PROTOCOL_FEE_BPS, DEX_LP_FEE_BPS, BPS_DIVISOR,
 };
 
+/// Generate a deterministic LP token address for a pool.
+/// Uses SHA-256("lp_token:<pool_id>") → [u8; 32].
+/// Same pool always produces the same LP token address.
+fn generate_lp_token_address(pool_id: &str) -> [u8; 32] {
+    use sha2::{Sha256, Digest};
+    let hash = Sha256::digest(format!("lp_token:{}", pool_id).as_bytes());
+    let mut addr = [0u8; 32];
+    addr.copy_from_slice(&hash[..32]);
+    addr
+}
+
+/// Extract a short display symbol from a pool's canonical token name.
+/// "QUG" → "QUG", "QUGUSD" → "QUGUSD", "qnkabcdef..." → "abcdef" (first 6 hex chars)
+fn token_display_symbol(canonical: &str) -> String {
+    if canonical == "QUG" || canonical == "QUGUSD" {
+        canonical.to_string()
+    } else if let Some(hex_part) = canonical.strip_prefix("qnk") {
+        // Use first 6 hex chars for a compact label
+        hex_part.chars().take(6).collect::<String>().to_uppercase()
+    } else {
+        canonical.to_string()
+    }
+}
+
 /// Standard decimal places for all tokens
 /// v3.0.6-beta: Updated to 24 decimals for u128 migration
 pub const TOKEN_DECIMALS: u32 = 24;
@@ -305,6 +329,8 @@ pub struct AddLiquidityResponse {
     #[serde(serialize_with = "q_types::u128_serde::serialize")]
     pub amount1: u128,
     pub transaction_id: String,
+    /// LP tokens minted and credited to the provider's wallet
+    pub lp_tokens_minted: String,
 }
 
 /// Remove liquidity request
@@ -324,6 +350,8 @@ pub struct RemoveLiquidityResponse {
     #[serde(serialize_with = "q_types::u128_serde::serialize")]
     pub amount1_returned: u128,
     pub transaction_id: String,
+    /// LP tokens burned from the provider's wallet
+    pub lp_tokens_burned: String,
 }
 
 /// Golden ratio constant for quantum-enhanced calculations
@@ -1205,7 +1233,7 @@ pub async fn add_liquidity(
         }
     };
 
-    let (final_pool_id, action) = if let Some(existing_pool_id) = pool_id {
+    let (final_pool_id, action, minted_lp_tokens) = if let Some(existing_pool_id) = pool_id {
         // Pool exists - add to reserves
         let mut pools = state.liquidity_pools.write().await;
         if let Some(pool) = pools.get_mut(&existing_pool_id) {
@@ -1239,6 +1267,10 @@ pub async fn add_liquidity(
             // Update LP token supply
             pool.lp_token_supply += additional_lp_tokens;
 
+            // Capture pool token names for LP metadata before dropping pool reference
+            let pool_token0_name = pool.token0.clone();
+            let pool_token1_name = pool.token1.clone();
+
             tracing::info!(
                 "💰 Added to existing liquidity pool {} - New reserves: {} / {} - LP tokens minted: {} (new total: {})",
                 existing_pool_id,
@@ -1264,7 +1296,22 @@ pub async fn add_liquidity(
                 }
             }
 
-            (existing_pool_id.clone(), "added")
+            // Credit LP tokens to provider's wallet
+            if additional_lp_tokens > 0 {
+                let lp_token_addr = generate_lp_token_address(&existing_pool_id);
+                let mut token_balances = state.token_balances.write().await;
+                let current = *token_balances.get(&(provider, lp_token_addr)).unwrap_or(&0u128);
+                let new_balance = current + additional_lp_tokens;
+                token_balances.insert((provider, lp_token_addr), new_balance);
+                drop(token_balances);
+                state.storage_engine.save_token_balance(&provider, &lp_token_addr, new_balance).await.ok();
+                tracing::info!(
+                    "🪙 Credited {} LP tokens to {} (pool {}, total: {})",
+                    additional_lp_tokens, hex::encode(&provider[..8]), existing_pool_id, new_balance
+                );
+            }
+
+            (existing_pool_id.clone(), "added", additional_lp_tokens)
         } else {
             // Pool was removed between read and write locks - create new one
             // FIXED: Use deterministic pool ID and canonical addresses
@@ -1326,7 +1373,20 @@ pub async fn add_liquidity(
                 }
             }
 
-            (new_pool_id, "created")
+            // Credit LP tokens to provider + save metadata
+            if lp_tokens > 0 {
+                let lp_token_addr = generate_lp_token_address(&new_pool_id);
+                let mut token_balances = state.token_balances.write().await;
+                token_balances.insert((provider, lp_token_addr), lp_tokens);
+                drop(token_balances);
+                state.storage_engine.save_token_balance(&provider, &lp_token_addr, lp_tokens).await.ok();
+                let sym0 = token_display_symbol(&token0_canonical);
+                let sym1 = token_display_symbol(&token1_canonical);
+                state.storage_engine.save_lp_token_meta(&lp_token_addr, &sym0, &sym1).await.ok();
+                tracing::info!("🪙 Credited {} LP tokens to {} (new pool {})", lp_tokens, hex::encode(&provider[..8]), new_pool_id);
+            }
+
+            (new_pool_id, "created", lp_tokens)
         }
     } else {
         // No existing pool - create new one with DETERMINISTIC pool ID
@@ -1391,7 +1451,20 @@ pub async fn add_liquidity(
             }
         }
 
-        (new_pool_id, "created")
+        // Credit LP tokens to provider + save metadata
+        if lp_tokens > 0 {
+            let lp_token_addr = generate_lp_token_address(&new_pool_id);
+            let mut token_balances = state.token_balances.write().await;
+            token_balances.insert((provider, lp_token_addr), lp_tokens);
+            drop(token_balances);
+            state.storage_engine.save_token_balance(&provider, &lp_token_addr, lp_tokens).await.ok();
+            let sym0 = token_display_symbol(&token0_canonical);
+            let sym1 = token_display_symbol(&token1_canonical);
+            state.storage_engine.save_lp_token_meta(&lp_token_addr, &sym0, &sym1).await.ok();
+            tracing::info!("🪙 Credited {} LP tokens to {} (new pool {})", lp_tokens, hex::encode(&provider[..8]), new_pool_id);
+        }
+
+        (new_pool_id, "created", lp_tokens)
     };
 
     // ========================================
@@ -1546,6 +1619,7 @@ pub async fn add_liquidity(
         amount0: request.amount0,
         amount1: request.amount1,
         transaction_id: tx_hash,
+        lp_tokens_minted: minted_lp_tokens.to_string(),
     })))
 }
 
@@ -1619,16 +1693,36 @@ pub async fn remove_liquidity(
         }
     };
 
-    // Verify ownership
-    if pool.provider != provider {
+    // Check user has LP tokens for this pool (replaces old provider-only ownership check)
+    let lp_token_addr = generate_lp_token_address(&request.pool_id);
+    let user_lp_balance = {
+        let token_balances = state.token_balances.read().await;
+        token_balances.get(&(provider, lp_token_addr)).copied().unwrap_or(0u128)
+    };
+
+    if user_lp_balance == 0 {
         return Ok(Json(ApiResponse::error(
-            "You can only remove liquidity from your own pools".to_string(),
+            "You have no LP tokens for this pool. Add liquidity first.".to_string(),
         )));
     }
 
-    // Calculate amounts to return
-    let amount0_to_return = (pool.reserve0 * request.percentage as u128) / 100;
-    let amount1_to_return = (pool.reserve1 * request.percentage as u128) / 100;
+    // Calculate LP tokens to burn based on percentage of user's LP balance
+    let lp_to_burn = (user_lp_balance * request.percentage as u128) / 100;
+    if lp_to_burn == 0 {
+        return Ok(Json(ApiResponse::error(
+            "LP token amount to burn rounds to zero".to_string(),
+        )));
+    }
+
+    // Calculate proportional token amounts to return based on LP share of total supply
+    let total_lp_supply = pool.lp_token_supply;
+    if total_lp_supply == 0 {
+        return Ok(Json(ApiResponse::error(
+            "Pool has zero LP token supply".to_string(),
+        )));
+    }
+    let amount0_to_return = (pool.reserve0 * lp_to_burn) / total_lp_supply;
+    let amount1_to_return = (pool.reserve1 * lp_to_burn) / total_lp_supply;
 
     // Check if tokens are native QUG or custom tokens
     let is_native_token0 =
@@ -1738,14 +1832,39 @@ pub async fn remove_liquidity(
         }
     }
 
+    // Burn LP tokens from provider's balance
+    {
+        let mut token_balances = state.token_balances.write().await;
+        let current_lp = token_balances.get(&(provider, lp_token_addr)).copied().unwrap_or(0);
+        let new_lp_balance = current_lp.saturating_sub(lp_to_burn);
+        token_balances.insert((provider, lp_token_addr), new_lp_balance);
+        drop(token_balances);
+        state.storage_engine.save_token_balance(&provider, &lp_token_addr, new_lp_balance).await.ok();
+        tracing::info!(
+            "🔥 Burned {} LP tokens from {} (pool {}, remaining: {})",
+            lp_to_burn, hex::encode(&provider[..8]), request.pool_id, new_lp_balance
+        );
+    }
+
     // Update or remove pool
     {
         let mut pools = state.liquidity_pools.write().await;
-        if request.percentage == 100 {
+
+        // Check if pool should be fully removed: either user requested 100%
+        // or the LP supply will drop to zero after burning
+        let should_remove = {
+            if let Some(pool) = pools.get(&request.pool_id) {
+                pool.lp_token_supply <= lp_to_burn
+            } else {
+                false
+            }
+        };
+
+        if should_remove {
             // Remove pool entirely
             pools.remove(&request.pool_id);
             tracing::info!(
-                "🗑️ Removed liquidity pool {} (100% withdrawn)",
+                "🗑️ Removed liquidity pool {} (all LP tokens burned)",
                 request.pool_id
             );
 
@@ -1764,10 +1883,11 @@ pub async fn remove_liquidity(
                 );
             }
         } else {
-            // Update pool reserves
+            // Update pool reserves and LP supply
             if let Some(pool) = pools.get_mut(&request.pool_id) {
                 pool.reserve0 -= amount0_to_return;
                 pool.reserve1 -= amount1_to_return;
+                pool.lp_token_supply = pool.lp_token_supply.saturating_sub(lp_to_burn);
                 tracing::info!(
                     "📉 Reduced liquidity pool {} reserves: {} / {}",
                     request.pool_id,
@@ -1861,6 +1981,7 @@ pub async fn remove_liquidity(
         amount0_returned: amount0_to_return,
         amount1_returned: amount1_to_return,
         transaction_id: tx_hash,
+        lp_tokens_burned: lp_to_burn.to_string(),
     })))
 }
 

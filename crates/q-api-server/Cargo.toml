@@ -113,6 +113,9 @@ lru = "0.12"  # v1.1.9: LRU cache for P2P balance update deduplication
 
 # Database - using RocksDB quantum storage
 q-storage = { path = "../q-storage" }
+crown-ash-types = { path = "../crown-ash-types" }
+crown-ash-sim = { path = "../crown-ash-sim" }
+crown-ash-api = { path = "../crown-ash-api" }
 
 # IPFS decentralized storage for database backups
 q-ipfs-storage = { path = "../q-ipfs-storage" }
@@ -140,6 +143,7 @@ q-tor-circuit = { path = "../q-tor-circuit" }
 q-robot-control = { path = "../q-robot-control" } # Re-enabled: CCC convergence for deploy pipeline
 q-network = { path = "../q-network" }
 q-compute = { path = "../q-compute" } # v9.5.0: Starship Endgame — 100% compute utilization orchestrator
+q-log-privacy = { path = "../q-log-privacy" } # Privacy-preserving log redaction
 q-governance = { path = "../q-governance" } # ✅ v1.0.1 - Proof-of-Contribution governance
 q-plugin-system = { path = "../q-plugin-system" }
 q-ai-inference = { path = "../q-ai-inference", default-features = false } # AI inference with KV-cache

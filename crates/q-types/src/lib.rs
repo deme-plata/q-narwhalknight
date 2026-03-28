@@ -4165,6 +4165,20 @@ impl NetworkId {
     pub fn compute_tunnel_topic(&self) -> String {
         format!("{}/compute-tunnel", self.gossipsub_topic_prefix())
     }
+
+    /// v10.2.0: Crown & Ash — Player action propagation topic
+    /// Signed game actions (raise army, declare war, etc.) broadcast to all nodes
+    /// Topic: /qnk/{network}/game-actions
+    pub fn game_actions_topic(&self) -> String {
+        format!("{}/game-actions", self.gossipsub_topic_prefix())
+    }
+
+    /// v10.2.0: Crown & Ash — Turn summary synchronization topic
+    /// After each game tick, nodes broadcast the deterministic turn summary
+    /// Topic: /qnk/{network}/game-state-sync
+    pub fn game_state_sync_topic(&self) -> String {
+        format!("{}/game-state-sync", self.gossipsub_topic_prefix())
+    }
 }
 
 impl std::str::FromStr for NetworkId {

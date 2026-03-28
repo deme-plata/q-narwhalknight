@@ -353,7 +353,7 @@ pub async fn create_eth_swap(
     };
 
     let wallet_hex = hex::encode(wallet.address);
-    info!("⟠ Creating ETH atomic swap for wallet {} direction={}", wallet_hex, request.direction);
+    info!("⟠ Creating ETH atomic swap for wallet {} direction={}", q_log_privacy::mask_addr(&wallet_hex), request.direction);
 
     // Validate direction
     if request.direction != "buy_eth" && request.direction != "sell_eth" {
@@ -666,7 +666,7 @@ pub async fn claim_eth_swap(
     // Bridge token operation
     if direction == "sell_eth" {
         // User sold ETH → mint wETH on QNK side
-        info!("⟠ Minting wETH for {} (amount: {} wei)", user_address, eth_amount_str);
+        info!("⟠ Minting wETH for {} (amount: {} wei)", q_log_privacy::mask_addr(&user_address), q_log_privacy::mask_amt(eth_amount_u128));
         if let Err(e) = bridge_tokens::mint_wrapped_token(
             BridgeChain::Ethereum,
             &wallet.address,
@@ -678,7 +678,7 @@ pub async fn claim_eth_swap(
         }
     } else {
         // User bought ETH → burn wETH from QNK side
-        info!("⟠ Burning wETH from {} (amount: {} wei)", user_address, eth_amount_str);
+        info!("⟠ Burning wETH from {} (amount: {} wei)", q_log_privacy::mask_addr(&user_address), q_log_privacy::mask_amt(eth_amount_u128));
         if let Err(e) = bridge_tokens::burn_wrapped_token(
             BridgeChain::Ethereum,
             &wallet.address,
@@ -772,7 +772,7 @@ pub async fn refund_eth_swap(
         "status": "refunded",
     })).await;
 
-    info!("⟠ ETH swap {} refunded for wallet {}", swap_id, wallet_hex);
+    info!("⟠ ETH swap {} refunded for wallet {}", swap_id, q_log_privacy::mask_addr(&wallet_hex));
 
     Ok(Json(ApiResponse::success(result)))
 }
@@ -968,7 +968,7 @@ pub async fn send_eth(
     let tx_id = format!("weth_send_{}", hex::encode(&wallet.address[..8]));
     let from_hex = hex::encode(wallet.address);
 
-    info!("⟠ wETH transfer: {} wei from {} to {}", amount, from_hex, to_hex);
+    info!("⟠ wETH transfer: {} wei from {} to {}", q_log_privacy::mask_amt(amount), q_log_privacy::mask_addr(&from_hex), q_log_privacy::mask_addr(to_hex));
 
     Ok(Json(ApiResponse::success(SendEthResponse {
         tx_id,
@@ -1203,7 +1203,7 @@ pub async fn register_weth_deposit(
 
     info!(
         "⟠ [WETH BRIDGE] New deposit registered: {} | tx={} | {} wei → {} QUG (24-dec) | wallet={}",
-        deposit_id, request.tx_hash, amount_wei, qug_amount, wallet_hex
+        deposit_id, q_log_privacy::mask_hash(&request.tx_hash), q_log_privacy::mask_amt(amount_wei), q_log_privacy::mask_amt(qug_amount), q_log_privacy::mask_addr(&wallet_hex)
     );
 
     Ok(Json(ApiResponse::success(RegisterWethDepositResponse {
@@ -1316,7 +1316,7 @@ pub async fn credit_qug_for_weth_deposit(
 
     info!(
         "💰 [WETH BRIDGE] Credited {} QUG (24-dec) to wallet {} for deposit {}",
-        qug_amount, recipient_wallet_hex, deposit_id
+        q_log_privacy::mask_amt(qug_amount), q_log_privacy::mask_addr(recipient_wallet_hex), deposit_id
     );
 
     Ok(())
@@ -1428,7 +1428,7 @@ pub async fn weth_deposit_monitor_tick(state: &Arc<AppState>) {
                                     &tx_hash,
                                     &dep_id,
                                 ).await;
-                                info!("🎉 [WETH BRIDGE] Deposit {} COMPLETE — {} QUG credited", dep_id, qug_amount);
+                                info!("🎉 [WETH BRIDGE] Deposit {} COMPLETE — {} QUG credited", dep_id, q_log_privacy::mask_amt(qug_amount));
                             }
                             Err(e) => {
                                 error!("❌ [WETH BRIDGE] Failed to credit QUG for deposit {}: {}", dep_id, e);

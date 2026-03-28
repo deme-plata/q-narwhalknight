@@ -34,6 +34,14 @@ const SYSTEM_PROMPT: &str = "You are a helpful search assistant. The user asked 
 Answer the user's query using the search results. Always cite your sources by referencing [Source N] where N corresponds to the numbered search results. \
 Be concise, informative, and accurate. If the search results don't contain relevant information, say so honestly.";
 
+/// System prompt for direct chat mode (no web search)
+const DIRECT_CHAT_PROMPT: &str = "You are Quillon Graph AI, the built-in assistant for the Quillon blockchain wallet. \
+IMPORTANT: The blockchain is called Quillon (ticker: QNK). The native coin is called QUG (not QNG, not QNK). \
+Always refer to the coin as QUG. Example: '90.74 QUG' not '90.74 QNG'. \
+You are helpful, concise, and friendly. You can answer questions about the Quillon blockchain, QUG coins, mining, staking, \
+transactions, and general cryptocurrency topics. When blockchain data is provided, use it to give accurate answers. \
+Format responses with markdown for readability. Keep answers concise unless the user asks for detail.";
+
 #[derive(Deserialize)]
 pub struct WebSearchRequest {
     pub query: String,
@@ -41,6 +49,9 @@ pub struct WebSearchRequest {
     pub recency: Option<String>,
     /// Whether to stream (default true)
     pub stream: Option<bool>,
+    /// Optional pre-fetched context. When provided, skips DuckDuckGo search entirely
+    /// and uses this context directly. Used for smart command routing (blockchain API data).
+    pub context: Option<String>,
 }
 
 /// SSE event data sent to the frontend
@@ -314,37 +325,55 @@ pub async fn web_search_handler(
     let model = std::env::var("OLLAMA_MODEL")
         .unwrap_or_else(|_| DEFAULT_MODEL.to_string());
 
-    info!("[WebSearch] Query: {} (model: {}, ollama: {})", query, model, ollama_url);
+    let has_context = req.context.is_some();
+    let provided_context = req.context.unwrap_or_default();
+
+    if has_context {
+        info!("[WebSearch] Direct chat mode — query: {} (context: {} bytes, model: {})", query, provided_context.len(), model);
+    } else {
+        info!("[WebSearch] Web search mode — query: {} (model: {}, ollama: {})", query, model, ollama_url);
+    }
 
     // v9.3.3: Return SSE stream IMMEDIATELY so tower TimeoutLayer doesn't kill us.
     // All slow work (DDG scraping, Ollama inference) happens inside the stream.
     // This means the HTTP 200 + SSE headers go back in <1ms, and the frontend
     // can show a loading state while we scrape + infer.
     let stream = async_stream::stream! {
-        // Step 1: Fetch search results from DuckDuckGo
-        let search_results = fetch_duckduckgo_results(&query, 8).await;
-        info!("[WebSearch] Got {} DDG results", search_results.len());
-
-        // Send search results immediately so frontend can display them
-        if !search_results.is_empty() {
-            let citations_event = SearchResultsEvent {
-                results: search_results.clone(),
+        let (system_prompt, user_prompt) = if has_context {
+            // Direct chat mode: skip DuckDuckGo, use provided context
+            let prompt = if provided_context.is_empty() {
+                // Pure chat (no blockchain data) — just the user's question
+                query.clone()
+            } else {
+                // Smart command: blockchain data provided as context
+                format!("{}\n\nUser question: {}", provided_context, query)
             };
-            if let Ok(json) = serde_json::to_string(&citations_event) {
-                yield Ok(Event::default().event("search_results").data(json));
+            (DIRECT_CHAT_PROMPT.to_string(), prompt)
+        } else {
+            // Web search mode: fetch from DuckDuckGo first
+            let search_results = fetch_duckduckgo_results(&query, 8).await;
+            info!("[WebSearch] Got {} DDG results", search_results.len());
+
+            // Send search results immediately so frontend can display them
+            if !search_results.is_empty() {
+                let citations_event = SearchResultsEvent {
+                    results: search_results.clone(),
+                };
+                if let Ok(json) = serde_json::to_string(&citations_event) {
+                    yield Ok(Event::default().event("search_results").data(json));
+                }
             }
-        }
 
-        // Step 2: Build context-augmented prompt
-        let user_prompt = build_context_prompt(&query, &search_results);
+            (SYSTEM_PROMPT.to_string(), build_context_prompt(&query, &search_results))
+        };
 
-        // Step 3: Call Ollama streaming API
+        // Call Ollama streaming API
         let ollama_req = OllamaChatRequest {
             model,
             messages: vec![
                 OllamaMessage {
                     role: "system".to_string(),
-                    content: SYSTEM_PROMPT.to_string(),
+                    content: system_prompt,
                 },
                 OllamaMessage {
                     role: "user".to_string(),

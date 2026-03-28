@@ -76,6 +76,10 @@ pub struct BalanceUpdate {
     pub block_height: u64,
     /// Index of mining solution in block (if applicable)
     pub solution_index: usize,
+    /// v10.2.0: Token address for non-QUG transfers (QUGUSD, custom tokens).
+    /// None = QUG native transfer (update wallet_balances).
+    /// Some(addr) = token transfer (update token_balances).
+    pub token_address: Option<[u8; 32]>,
 }
 
 /// Reason for balance change (for auditing)
@@ -234,13 +238,12 @@ impl BalanceConsensusEngine {
             }
         }
 
-        // v8.5.0: Skip blocks already persisted before this session (prevents re-inflation)
-        {
-            let watermark = self.balance_processed_watermark.load(std::sync::atomic::Ordering::Relaxed);
-            if watermark > 0 && block.header.height <= watermark {
-                return Ok(Vec::new());
-            }
-        }
+        // v10.2.1: REMOVED watermark early-return (was v8.5.0).
+        // The watermark caused a CRITICAL race condition: batch sync advances the
+        // watermark every ~15s to current tip. Locally-produced blocks (which contain
+        // user transfers) would have their height <= watermark, causing ALL balance
+        // processing to be skipped — transfers never applied.
+        // The processed_blocks LRU hash check below is the correct dedup mechanism.
 
         // ✅ v1.0.75-beta: FIXED - Process EXISTING coinbase transactions from synced blocks
         //
@@ -338,9 +341,9 @@ impl BalanceConsensusEngine {
             let is_coinbase_by_type = block_tx.tx_type.is_coinbase();
             info!("🔍 [TX {}] from={}, to={}, amount={}, is_coinbase_from={}, is_coinbase_type={}, tx_type={:?}",
                   idx,
-                  hex::encode(&block_tx.from[..8]),
-                  hex::encode(&block_tx.to[..8]),
-                  block_tx.amount,
+                  q_log_privacy::mask_addr(&hex::encode(&block_tx.from[..8])),
+                  q_log_privacy::mask_addr(&hex::encode(&block_tx.to[..8])),
+                  q_log_privacy::mask_amt(block_tx.amount),
                   is_coinbase_by_from,
                   is_coinbase_by_type,
                   block_tx.tx_type);
@@ -367,13 +370,14 @@ impl BalanceConsensusEngine {
                     reason: ChangeReason::MiningReward,
                     block_height: block.header.height,
                     solution_index: idx,
+                    token_address: None,
                 });
 
                 debug!("💰 [SYNC] Processed coinbase tx at height {}: {} → {} QUG",
                        block.header.height, &miner_address[..16], reward_amount);
             } else {
                 // 📦 v3.5.14-beta: Process Transfer transactions (user P2P transactions)
-                // This is CRITICAL for P2P transaction propagation to actually transfer funds!
+                // v10.2.0: CRITICAL FIX - Check token_type to route QUGUSD/custom to token_balances
                 let from_address = hex::encode(&block_tx.from);
                 let to_address = hex::encode(&block_tx.to);
                 let transfer_amount = block_tx.amount;
@@ -383,44 +387,90 @@ impl BalanceConsensusEngine {
                     continue;
                 }
 
-                // Debit from sender
-                match storage.subtract_balance(&from_address, transfer_amount).await {
-                    Ok(_) => {
-                        debug!("💸 [TRANSFER] Debited {} from {} at height {}",
-                               transfer_amount, &from_address[..16], block.header.height);
+                // v10.2.0: Determine if this is a token transfer (QUGUSD or Custom)
+                let token_addr = match block_tx.token_type {
+                    q_types::TokenType::QUGUSD => Some(q_types::QUGUSD_TOKEN_ADDRESS),
+                    q_types::TokenType::Custom(addr) => Some(addr),
+                    q_types::TokenType::QUG => None,
+                };
+
+                if let Some(tok_addr) = token_addr {
+                    // ═══════════════════════════════════════════
+                    // TOKEN TRANSFER (QUGUSD / Custom) — use token_balances CF
+                    // ═══════════════════════════════════════════
+                    let token_label = match block_tx.token_type {
+                        q_types::TokenType::QUGUSD => "QUGUSD",
+                        _ => "TOKEN",
+                    };
+                    match storage.subtract_token_balance(&block_tx.from, &tok_addr, transfer_amount).await {
+                        Ok(_) => {
+                            debug!("💸 [TOKEN TRANSFER] Debited {} {} from {} at height {}",
+                                   transfer_amount, token_label, &from_address[..16], block.header.height);
+                        }
+                        Err(e) => {
+                            warn!("⚠️ [TOKEN TRANSFER] Failed to debit {} {} from {}: {}",
+                                  transfer_amount, token_label, &from_address[..16], e);
+                            continue;
+                        }
                     }
-                    Err(e) => {
-                        // Log but don't fail - insufficient balance shouldn't block consensus
-                        warn!("⚠️ [TRANSFER] Failed to debit {} from {}: {}",
-                              transfer_amount, &from_address[..16], e);
-                        continue;
+                    storage.add_token_balance(&block_tx.to, &tok_addr, transfer_amount).await
+                        .map_err(|e| BalanceConsensusError::BatchOperation(e.to_string()))?;
+
+                    updates.push(BalanceUpdate {
+                        address: from_address.clone(),
+                        amount: transfer_amount,
+                        reason: ChangeReason::TransferSent,
+                        block_height: block.header.height,
+                        solution_index: idx,
+                        token_address: Some(tok_addr),
+                    });
+                    updates.push(BalanceUpdate {
+                        address: to_address.clone(),
+                        amount: transfer_amount,
+                        reason: ChangeReason::TransferReceived,
+                        block_height: block.header.height,
+                        solution_index: idx,
+                        token_address: Some(tok_addr),
+                    });
+                    info!("💸 [TOKEN TRANSFER] Processed {} transfer at height {}: {} → {} ({} units)",
+                           token_label, block.header.height, &from_address[..16], &to_address[..16], transfer_amount);
+                } else {
+                    // ═══════════════════════════════════════════
+                    // QUG NATIVE TRANSFER — use wallet_balances
+                    // ═══════════════════════════════════════════
+                    match storage.subtract_balance(&from_address, transfer_amount).await {
+                        Ok(_) => {
+                            debug!("💸 [TRANSFER] Debited {} from {} at height {}",
+                                   transfer_amount, &from_address[..16], block.header.height);
+                        }
+                        Err(e) => {
+                            warn!("⚠️ [TRANSFER] Failed to debit {} from {}: {}",
+                                  transfer_amount, &from_address[..16], e);
+                            continue;
+                        }
                     }
+                    storage.add_balance(&to_address, transfer_amount).await
+                        .map_err(|e| BalanceConsensusError::BatchOperation(e.to_string()))?;
+
+                    updates.push(BalanceUpdate {
+                        address: from_address.clone(),
+                        amount: transfer_amount,
+                        reason: ChangeReason::TransferSent,
+                        block_height: block.header.height,
+                        solution_index: idx,
+                        token_address: None,
+                    });
+                    updates.push(BalanceUpdate {
+                        address: to_address.clone(),
+                        amount: transfer_amount,
+                        reason: ChangeReason::TransferReceived,
+                        block_height: block.header.height,
+                        solution_index: idx,
+                        token_address: None,
+                    });
+                    info!("💸 [TRANSFER] Processed transfer at height {}: {} → {} ({} QUG)",
+                           block.header.height, &from_address[..16], &to_address[..16], transfer_amount);
                 }
-
-                // Credit to receiver
-                storage.add_balance(&to_address, transfer_amount).await
-                    .map_err(|e| BalanceConsensusError::BatchOperation(e.to_string()))?;
-
-                // Record debit update
-                updates.push(BalanceUpdate {
-                    address: from_address.clone(),
-                    amount: transfer_amount,
-                    reason: ChangeReason::TransferSent,
-                    block_height: block.header.height,
-                    solution_index: idx,
-                });
-
-                // Record credit update
-                updates.push(BalanceUpdate {
-                    address: to_address.clone(),
-                    amount: transfer_amount,
-                    reason: ChangeReason::TransferReceived,
-                    block_height: block.header.height,
-                    solution_index: idx,
-                });
-
-                info!("💸 [TRANSFER] Processed transfer at height {}: {} → {} ({} QUG)",
-                       block.header.height, &from_address[..16], &to_address[..16], transfer_amount);
             }
         }
 
@@ -501,6 +551,7 @@ impl BalanceConsensusEngine {
                 reason: ChangeReason::MiningReward,
                 block_height: block.header.height,
                 solution_index: index,
+                token_address: None,
             });
 
             // Update dev wallet balance (strip "qnk" prefix to get raw hex)
@@ -514,6 +565,7 @@ impl BalanceConsensusEngine {
                 reason: ChangeReason::DevelopmentFee,
                 block_height: block.header.height,
                 solution_index: index,
+                token_address: None,
             });
 
             debug!("   ✅ Solution {}: miner={}, reward={}",
@@ -597,27 +649,8 @@ impl BalanceConsensusEngine {
             }
         }
 
-        // v8.5.0: Skip blocks already persisted before this session (prevents re-inflation)
-        {
-            let watermark = self.balance_processed_watermark.load(std::sync::atomic::Ordering::Relaxed);
-            if watermark > 0 && block.header.height <= watermark {
-                return Ok(Vec::new());
-            }
-        }
-
-        // ✅ v1.0.75-beta: FIXED - Process EXISTING coinbase transactions from synced blocks
-        //
-        // Previous Issue (v0.9.77-beta Phase 7):
-        // - balance_consensus was CREATING new rewards, causing DOUBLE REWARDS
-        // - block_producer.rs already creates coinbase transactions
-        //
-        // NEW Approach (v1.0.75-beta):
-        // - Do NOT create new rewards
-        // - INSTEAD, process existing coinbase transactions from block.transactions
-        // - This ensures synced blocks update balances correctly on all nodes
-        //
-        // The coinbase transaction is already in block.transactions (created by block_producer)
-        // We just need to apply it to update balances when syncing blocks from other nodes.
+        // v10.2.1: REMOVED watermark early-return (was v8.5.0) — same race condition fix
+        // as process_block_mining_rewards(). processed_blocks LRU is the correct dedup.
 
         let mut updates = Vec::new();
 
@@ -714,17 +747,14 @@ impl BalanceConsensusEngine {
                     reason: ChangeReason::MiningReward,
                     block_height: block.header.height,
                     solution_index: idx,
+                    token_address: None,
                 });
 
                 debug!("💰 [SYNC] Processed coinbase tx at height {}: {} → {} QUG",
                        block.header.height, &miner_address[..16], reward_amount);
             } else {
                 // ✅ v3.5.17-beta: Process Transfer transactions in _tx version too!
-                //
-                // PREVIOUS BUG: The _tx version only processed coinbase transactions.
-                // User P2P transfers were included in blocks but NEVER applied to balances
-                // during P2P sync. This caused transfer recipients to never receive funds
-                // when syncing from other nodes.
+                // v10.2.0: CRITICAL FIX - Check token_type to route QUGUSD/custom to token_balances
                 let from_address = hex::encode(&block_tx.from);
                 let to_address = hex::encode(&block_tx.to);
                 let transfer_amount = block_tx.amount;
@@ -734,44 +764,90 @@ impl BalanceConsensusEngine {
                     continue;
                 }
 
-                // Debit from sender using the tx-aware method
-                match self.subtract_balance_tx(tx, &from_address, transfer_amount).await {
-                    Ok(_) => {
-                        debug!("💸 [TRANSFER TX] Debited {} from {} at height {}",
-                               transfer_amount, &from_address[..16], block.header.height);
+                // v10.2.0: Determine if this is a token transfer (QUGUSD or Custom)
+                let token_addr = match block_tx.token_type {
+                    q_types::TokenType::QUGUSD => Some(q_types::QUGUSD_TOKEN_ADDRESS),
+                    q_types::TokenType::Custom(addr) => Some(addr),
+                    q_types::TokenType::QUG => None,
+                };
+
+                if let Some(tok_addr) = token_addr {
+                    // ═══════════════════════════════════════════
+                    // TOKEN TRANSFER (QUGUSD / Custom) — use token_balances CF
+                    // ═══════════════════════════════════════════
+                    let token_label = match block_tx.token_type {
+                        q_types::TokenType::QUGUSD => "QUGUSD",
+                        _ => "TOKEN",
+                    };
+                    match self.subtract_token_balance_tx(tx, &block_tx.from, &tok_addr, transfer_amount).await {
+                        Ok(_) => {
+                            debug!("💸 [TOKEN TRANSFER TX] Debited {} {} from {} at height {}",
+                                   transfer_amount, token_label, &from_address[..16], block.header.height);
+                        }
+                        Err(e) => {
+                            warn!("⚠️ [TOKEN TRANSFER TX] Failed to debit {} {} from {}: {}",
+                                  transfer_amount, token_label, &from_address[..16], e);
+                            continue;
+                        }
                     }
-                    Err(e) => {
-                        // Log but don't fail - insufficient balance shouldn't block consensus
-                        warn!("⚠️ [TRANSFER TX] Failed to debit {} from {}: {}",
-                              transfer_amount, &from_address[..16], e);
-                        continue;
+                    self.add_token_balance_tx(tx, &block_tx.to, &tok_addr, transfer_amount).await
+                        .map_err(|e| BalanceConsensusError::BatchOperation(e.to_string()))?;
+
+                    updates.push(BalanceUpdate {
+                        address: from_address.clone(),
+                        amount: transfer_amount,
+                        reason: ChangeReason::TransferSent,
+                        block_height: block.header.height,
+                        solution_index: idx,
+                        token_address: Some(tok_addr),
+                    });
+                    updates.push(BalanceUpdate {
+                        address: to_address.clone(),
+                        amount: transfer_amount,
+                        reason: ChangeReason::TransferReceived,
+                        block_height: block.header.height,
+                        solution_index: idx,
+                        token_address: Some(tok_addr),
+                    });
+                    info!("💸 [TOKEN TRANSFER TX v10.2.0] Processed {} transfer at height {}: {} → {} ({} units)",
+                           token_label, block.header.height, &from_address[..16], &to_address[..16], transfer_amount);
+                } else {
+                    // ═══════════════════════════════════════════
+                    // QUG NATIVE TRANSFER — use wallet_balances
+                    // ═══════════════════════════════════════════
+                    match self.subtract_balance_tx(tx, &from_address, transfer_amount).await {
+                        Ok(_) => {
+                            debug!("💸 [TRANSFER TX] Debited {} from {} at height {}",
+                                   transfer_amount, &from_address[..16], block.header.height);
+                        }
+                        Err(e) => {
+                            warn!("⚠️ [TRANSFER TX] Failed to debit {} from {}: {}",
+                                  transfer_amount, &from_address[..16], e);
+                            continue;
+                        }
                     }
+                    self.add_balance_tx(tx, &to_address, transfer_amount).await
+                        .map_err(|e| BalanceConsensusError::BatchOperation(e.to_string()))?;
+
+                    updates.push(BalanceUpdate {
+                        address: from_address.clone(),
+                        amount: transfer_amount,
+                        reason: ChangeReason::TransferSent,
+                        block_height: block.header.height,
+                        solution_index: idx,
+                        token_address: None,
+                    });
+                    updates.push(BalanceUpdate {
+                        address: to_address.clone(),
+                        amount: transfer_amount,
+                        reason: ChangeReason::TransferReceived,
+                        block_height: block.header.height,
+                        solution_index: idx,
+                        token_address: None,
+                    });
+                    info!("💸 [TRANSFER TX v3.5.17] Processed transfer at height {}: {} → {} ({} QUG)",
+                           block.header.height, &from_address[..16], &to_address[..16], transfer_amount);
                 }
-
-                // Credit to receiver using the tx-aware method
-                self.add_balance_tx(tx, &to_address, transfer_amount).await
-                    .map_err(|e| BalanceConsensusError::BatchOperation(e.to_string()))?;
-
-                // Record debit update
-                updates.push(BalanceUpdate {
-                    address: from_address.clone(),
-                    amount: transfer_amount,
-                    reason: ChangeReason::TransferSent,
-                    block_height: block.header.height,
-                    solution_index: idx,
-                });
-
-                // Record credit update
-                updates.push(BalanceUpdate {
-                    address: to_address.clone(),
-                    amount: transfer_amount,
-                    reason: ChangeReason::TransferReceived,
-                    block_height: block.header.height,
-                    solution_index: idx,
-                });
-
-                info!("💸 [TRANSFER TX v3.5.17] Processed transfer at height {}: {} → {} ({} QUG)",
-                       block.header.height, &from_address[..16], &to_address[..16], transfer_amount);
             }
         }
 
@@ -845,6 +921,7 @@ impl BalanceConsensusEngine {
                 reason: ChangeReason::MiningReward,
                 block_height: block.header.height,
                 solution_index: index,
+                token_address: None,
             });
 
             // Update dev wallet balance via transaction
@@ -857,6 +934,7 @@ impl BalanceConsensusEngine {
                 reason: ChangeReason::DevelopmentFee,
                 block_height: block.header.height,
                 solution_index: index,
+                token_address: None,
             });
 
             debug!("   ✅ Solution {} (TX): miner={}, reward={}",
@@ -932,13 +1010,7 @@ impl BalanceConsensusEngine {
             }
         }
 
-        // v8.5.0: Skip blocks already persisted before this session (prevents re-inflation)
-        {
-            let watermark = self.balance_processed_watermark.load(std::sync::atomic::Ordering::Relaxed);
-            if watermark > 0 && block.header.height <= watermark {
-                return Ok(Vec::new());
-            }
-        }
+        // v10.2.1: REMOVED watermark early-return (was v8.5.0) — same race condition fix.
 
         let mut updates = Vec::new();
 
@@ -990,12 +1062,13 @@ impl BalanceConsensusEngine {
                     reason: ChangeReason::MiningReward,
                     block_height: block.header.height,
                     solution_index: idx,
+                    token_address: None,
                 });
 
                 trace!("💰 [COINBASE-ONLY] height {}: {} → {} QUG",
                        block.header.height, &miner_address[..16.min(miner_address.len())], reward_amount);
             } else {
-                // v1.0.2: Process transfer transactions (same logic as process_block_mining_rewards_tx)
+                // v1.0.2 / v10.2.0: Process transfer transactions with token_type awareness
                 let from_address = hex::encode(&block_tx.from);
                 let to_address = hex::encode(&block_tx.to);
                 let transfer_amount = block_tx.amount;
@@ -1004,38 +1077,78 @@ impl BalanceConsensusEngine {
                     continue;
                 }
 
-                // Debit from sender
-                match self.subtract_balance_tx(tx, &from_address, transfer_amount).await {
-                    Ok(_) => {
-                        trace!("💸 [FAST-SYNC TRANSFER] Debited {} from {} at height {}",
-                               transfer_amount, &from_address[..16.min(from_address.len())], block.header.height);
+                // v10.2.0: Determine if this is a token transfer (QUGUSD or Custom)
+                let token_addr = match block_tx.token_type {
+                    q_types::TokenType::QUGUSD => Some(q_types::QUGUSD_TOKEN_ADDRESS),
+                    q_types::TokenType::Custom(addr) => Some(addr),
+                    q_types::TokenType::QUG => None,
+                };
+
+                if let Some(tok_addr) = token_addr {
+                    // TOKEN TRANSFER (QUGUSD / Custom) — use token_balances CF
+                    match self.subtract_token_balance_tx(tx, &block_tx.from, &tok_addr, transfer_amount).await {
+                        Ok(_) => {
+                            trace!("💸 [FAST-SYNC TOKEN TRANSFER] Debited {} from {} at height {}",
+                                   transfer_amount, &from_address[..16.min(from_address.len())], block.header.height);
+                        }
+                        Err(e) => {
+                            warn!("⚠️ [FAST-SYNC TOKEN TRANSFER] Failed to debit {} from {}: {}",
+                                  transfer_amount, &from_address[..16.min(from_address.len())], e);
+                            continue;
+                        }
                     }
-                    Err(e) => {
-                        warn!("⚠️ [FAST-SYNC TRANSFER] Failed to debit {} from {}: {}",
-                              transfer_amount, &from_address[..16.min(from_address.len())], e);
-                        continue;
+                    self.add_token_balance_tx(tx, &block_tx.to, &tok_addr, transfer_amount).await
+                        .map_err(|e| BalanceConsensusError::BatchOperation(e.to_string()))?;
+
+                    updates.push(BalanceUpdate {
+                        address: from_address.clone(),
+                        amount: transfer_amount,
+                        reason: ChangeReason::TransferSent,
+                        block_height: block.header.height,
+                        solution_index: idx,
+                        token_address: Some(tok_addr),
+                    });
+                    updates.push(BalanceUpdate {
+                        address: to_address.clone(),
+                        amount: transfer_amount,
+                        reason: ChangeReason::TransferReceived,
+                        block_height: block.header.height,
+                        solution_index: idx,
+                        token_address: Some(tok_addr),
+                    });
+                } else {
+                    // QUG NATIVE TRANSFER — use wallet_balances
+                    match self.subtract_balance_tx(tx, &from_address, transfer_amount).await {
+                        Ok(_) => {
+                            trace!("💸 [FAST-SYNC TRANSFER] Debited {} from {} at height {}",
+                                   transfer_amount, &from_address[..16.min(from_address.len())], block.header.height);
+                        }
+                        Err(e) => {
+                            warn!("⚠️ [FAST-SYNC TRANSFER] Failed to debit {} from {}: {}",
+                                  transfer_amount, &from_address[..16.min(from_address.len())], e);
+                            continue;
+                        }
                     }
+                    self.add_balance_tx(tx, &to_address, transfer_amount).await
+                        .map_err(|e| BalanceConsensusError::BatchOperation(e.to_string()))?;
+
+                    updates.push(BalanceUpdate {
+                        address: from_address.clone(),
+                        amount: transfer_amount,
+                        reason: ChangeReason::TransferSent,
+                        block_height: block.header.height,
+                        solution_index: idx,
+                        token_address: None,
+                    });
+                    updates.push(BalanceUpdate {
+                        address: to_address.clone(),
+                        amount: transfer_amount,
+                        reason: ChangeReason::TransferReceived,
+                        block_height: block.header.height,
+                        solution_index: idx,
+                        token_address: None,
+                    });
                 }
-
-                // Credit to receiver
-                self.add_balance_tx(tx, &to_address, transfer_amount).await
-                    .map_err(|e| BalanceConsensusError::BatchOperation(e.to_string()))?;
-
-                updates.push(BalanceUpdate {
-                    address: from_address.clone(),
-                    amount: transfer_amount,
-                    reason: ChangeReason::TransferSent,
-                    block_height: block.header.height,
-                    solution_index: idx,
-                });
-
-                updates.push(BalanceUpdate {
-                    address: to_address.clone(),
-                    amount: transfer_amount,
-                    reason: ChangeReason::TransferReceived,
-                    block_height: block.header.height,
-                    solution_index: idx,
-                });
 
                 trace!("💸 [FAST-SYNC TRANSFER] height {}: {} → {} ({} QUG)",
                        block.header.height, &from_address[..16.min(from_address.len())],
@@ -1101,8 +1214,8 @@ impl BalanceConsensusEngine {
         // Write new balance to transaction using wallet_balance_ key format (little-endian)
         tx.put(CF_MANIFEST, key.as_bytes(), &new_balance.to_le_bytes()).await?;
 
-        info!("💰 [BALANCE TX v3.5.17] {} += {} → {} (CF: manifest, key: wallet_balance_{})",
-              &address[..16], amount, new_balance, &address[..16]);
+        info!("💰 [BALANCE TX v3.5.17] {} += {} → {} (CF: manifest)",
+              q_log_privacy::mask_addr(&address[..16.min(address.len())]), q_log_privacy::mask_amt(amount), q_log_privacy::mask_amt(new_balance));
 
         Ok(())
     }
@@ -1151,9 +1264,87 @@ impl BalanceConsensusEngine {
         // Write new balance
         tx.put(CF_MANIFEST, key.as_bytes(), &new_balance.to_le_bytes()).await?;
 
-        info!("💸 [BALANCE TX v3.5.17] {} -= {} → {} (CF: manifest, key: wallet_balance_{})",
-              &address[..16], amount, new_balance, &address[..16]);
+        info!("💸 [BALANCE TX v3.5.17] {} -= {} → {} (CF: manifest)",
+              q_log_privacy::mask_addr(&address[..16.min(address.len())]), q_log_privacy::mask_amt(amount), q_log_privacy::mask_amt(new_balance));
 
+        Ok(())
+    }
+
+    /// v10.2.0: Add token balance within a transaction (for QUGUSD / custom token transfers)
+    ///
+    /// Uses same key format as StorageEngine::save_token_balance:
+    /// CF: "manifest", Key: "token_balance_{wallet_hex}_{token_hex}", Value: u128 LE
+    async fn add_token_balance_tx(
+        &self,
+        tx: &crate::transaction::QTransaction,
+        wallet: &[u8; 32],
+        token: &[u8; 32],
+        amount: u128,
+    ) -> Result<()> {
+        let key = format!("token_balance_{}_{}", hex::encode(wallet), hex::encode(token));
+        const CF_MANIFEST: &str = "manifest";
+
+        let current = tx
+            .get(CF_MANIFEST, key.as_bytes())
+            .await?
+            .and_then(|bytes| {
+                if bytes.len() == 16 {
+                    Some(u128::from_le_bytes(bytes[..16].try_into().unwrap()))
+                } else if bytes.len() == 8 {
+                    let legacy = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+                    Some((legacy as u128) * 10u128.pow(16))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+
+        let new_balance = current.saturating_add(amount);
+        tx.put(CF_MANIFEST, key.as_bytes(), &new_balance.to_le_bytes()).await?;
+
+        debug!("💰 [TOKEN BAL TX v10.2.0] {}:{} += {} → {}",
+              &hex::encode(&wallet[..8]), &hex::encode(&token[..4]), amount, new_balance);
+        Ok(())
+    }
+
+    /// v10.2.0: Subtract token balance within a transaction (for QUGUSD / custom token transfers)
+    async fn subtract_token_balance_tx(
+        &self,
+        tx: &crate::transaction::QTransaction,
+        wallet: &[u8; 32],
+        token: &[u8; 32],
+        amount: u128,
+    ) -> Result<()> {
+        let key = format!("token_balance_{}_{}", hex::encode(wallet), hex::encode(token));
+        const CF_MANIFEST: &str = "manifest";
+
+        let current = tx
+            .get(CF_MANIFEST, key.as_bytes())
+            .await?
+            .and_then(|bytes| {
+                if bytes.len() == 16 {
+                    Some(u128::from_le_bytes(bytes[..16].try_into().unwrap()))
+                } else if bytes.len() == 8 {
+                    let legacy = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+                    Some((legacy as u128) * 10u128.pow(16))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+
+        if current < amount {
+            return Err(anyhow::anyhow!(
+                "Insufficient token balance: {} < {} for wallet {} token {}",
+                current, amount, &hex::encode(&wallet[..8]), &hex::encode(&token[..4])
+            ));
+        }
+
+        let new_balance = current.saturating_sub(amount);
+        tx.put(CF_MANIFEST, key.as_bytes(), &new_balance.to_le_bytes()).await?;
+
+        debug!("💸 [TOKEN BAL TX v10.2.0] {}:{} -= {} → {}",
+              &hex::encode(&wallet[..8]), &hex::encode(&token[..4]), amount, new_balance);
         Ok(())
     }
 
@@ -1973,6 +2164,17 @@ pub trait BalanceStorage: Send + Sync {
     /// Set balance for wallet (used in tests)
     /// v2.5.0: balance is now u128
     async fn set_balance(&self, address: &str, balance: u128) -> Result<()>;
+
+    /// v10.2.0: Add amount to token balance (QUGUSD / custom tokens)
+    /// Default implementation is no-op (for backwards compatibility with MockStorage in tests)
+    async fn add_token_balance(&self, _wallet: &[u8; 32], _token: &[u8; 32], _amount: u128) -> Result<()> {
+        Ok(())
+    }
+
+    /// v10.2.0: Subtract amount from token balance (QUGUSD / custom tokens)
+    async fn subtract_token_balance(&self, _wallet: &[u8; 32], _token: &[u8; 32], _amount: u128) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

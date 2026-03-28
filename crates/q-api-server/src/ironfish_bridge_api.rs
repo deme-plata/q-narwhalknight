@@ -276,7 +276,7 @@ pub async fn create_iron_swap(
     };
 
     let wallet_hex = hex::encode(wallet.address);
-    info!("🐟 Creating Iron Fish swap for wallet {} direction={}", wallet_hex, request.direction);
+    info!("🐟 Creating Iron Fish swap for wallet {} direction={}", q_log_privacy::mask_addr(&wallet_hex), request.direction);
 
     if request.direction != "buy_iron" && request.direction != "sell_iron" {
         return Ok(Json(ApiResponse {
@@ -412,7 +412,7 @@ pub async fn claim_iron_swap(
         }
     };
 
-    info!("🐟 Claiming Iron Fish swap {} by wallet {}", swap_id, hex::encode(wallet.address));
+    info!("🐟 Claiming Iron Fish swap {} by wallet {}", swap_id, q_log_privacy::mask_addr(&hex::encode(wallet.address)));
 
     let mut proposal: IronFishSwapProposal = match state.storage_engine.get_ironfish_swap(&swap_id).await {
         Ok(Some(data)) => match serde_json::from_slice(&data) {
@@ -542,7 +542,7 @@ pub async fn claim_iron_swap(
         Ok(new_bal) => {
             info!("🌉 Bridge {} wIRON: {} ore, new balance: {}",
                 if proposal.direction == "sell_iron" { "MINT" } else { "BURN" },
-                proposal.iron_amount, new_bal);
+                q_log_privacy::mask_amt(proposal.iron_amount as u128), q_log_privacy::mask_amt(*new_bal));
             // Emit SSE for balance update
             emit_iron_event(&state, "bridge-token-updated", serde_json::json!({
                 "token": "wIRON",
@@ -694,7 +694,7 @@ pub async fn list_iron_swaps(
     let swap_ids = match state.storage_engine.list_ironfish_swaps_by_wallet(&wallet_key).await {
         Ok(ids) => ids,
         Err(e) => {
-            warn!("Failed to list Iron Fish swaps for {}: {}", wallet_key, e);
+            warn!("Failed to list Iron Fish swaps for {}: {}", q_log_privacy::mask_addr(&wallet_key), e);
             Vec::new()
         }
     };
@@ -861,7 +861,7 @@ pub async fn send_iron(
 
     let wallet_hex = hex::encode(wallet.address);
     let wallet_key = format!("qnk{}", wallet_hex);
-    info!("🐟 Sending IRON from wallet {} → {} ({} ore)", wallet_hex, &request.to_address[..16], request.amount_ore);
+    info!("🐟 Sending IRON from wallet {} → {} ({} ore)", q_log_privacy::mask_addr(&wallet_hex), q_log_privacy::mask_addr(&request.to_address), q_log_privacy::mask_amt(request.amount_ore as u128));
 
     let balance_ore = state.storage_engine.get_ironfish_balance(&wallet_key).await
         .unwrap_or(0);

@@ -224,11 +224,11 @@ async fn production_loop(
                                 let new_balance = current + tx.amount;
                                 balances.insert(tx.to, new_balance);
 
-                                info!("💰 [BLOCK_PROD_V2] Coinbase: {} QUG → {} (balance: {} → {})",
-                                      tx.amount as f64 / QUG_DISPLAY_DIVISOR,
-                                      hex::encode(&tx.to[..8]),
-                                      current as f64 / QUG_DISPLAY_DIVISOR,
-                                      new_balance as f64 / QUG_DISPLAY_DIVISOR);
+                                info!("💰 [BLOCK_PROD_V2] Coinbase: {} → {} (balance: {} → {})",
+                                      q_log_privacy::mask_amt_display(tx.amount as f64 / QUG_DISPLAY_DIVISOR),
+                                      q_log_privacy::mask_addr(&hex::encode(&tx.to[..8])),
+                                      q_log_privacy::mask_amt_display(current as f64 / QUG_DISPLAY_DIVISOR),
+                                      q_log_privacy::mask_amt_display(new_balance as f64 / QUG_DISPLAY_DIVISOR));
 
                                 updates.push((tx.to, current, new_balance, "coinbase".to_string()));
                             } else {
@@ -241,14 +241,14 @@ async fn production_loop(
                                 let receiver_new = receiver_current.saturating_add(tx.amount);
                                 balances.insert(tx.to, receiver_new);
 
-                                info!("🔄 [BLOCK_PROD_V2] Transfer: {} QUG {} → {} (sender: {} → {}, receiver: {} → {})",
-                                      tx.amount as f64 / QUG_DISPLAY_DIVISOR,
-                                      hex::encode(&tx.from[..8]),
-                                      hex::encode(&tx.to[..8]),
-                                      sender_current as f64 / QUG_DISPLAY_DIVISOR,
-                                      sender_new as f64 / QUG_DISPLAY_DIVISOR,
-                                      receiver_current as f64 / QUG_DISPLAY_DIVISOR,
-                                      receiver_new as f64 / QUG_DISPLAY_DIVISOR);
+                                info!("🔄 [BLOCK_PROD_V2] Transfer: {} {} → {} (sender: {} → {}, receiver: {} → {})",
+                                      q_log_privacy::mask_amt_display(tx.amount as f64 / QUG_DISPLAY_DIVISOR),
+                                      q_log_privacy::mask_addr(&hex::encode(&tx.from[..8])),
+                                      q_log_privacy::mask_addr(&hex::encode(&tx.to[..8])),
+                                      q_log_privacy::mask_amt_display(sender_current as f64 / QUG_DISPLAY_DIVISOR),
+                                      q_log_privacy::mask_amt_display(sender_new as f64 / QUG_DISPLAY_DIVISOR),
+                                      q_log_privacy::mask_amt_display(receiver_current as f64 / QUG_DISPLAY_DIVISOR),
+                                      q_log_privacy::mask_amt_display(receiver_new as f64 / QUG_DISPLAY_DIVISOR));
 
                                 updates.push((tx.from, sender_current, sender_new, "transfer_sent".to_string()));
                                 updates.push((tx.to, receiver_current, receiver_new, "transfer_received".to_string()));

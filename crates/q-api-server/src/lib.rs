@@ -1660,6 +1660,9 @@ pub struct AppState {
 
     // v9.6.1: QR code payment requests for brick-and-mortar POS
     pub payment_requests: Arc<dashmap::DashMap<String, payment_request_api::PaymentRequest>>,
+
+    // v10.2.0: Crown & Ash — Medieval grand strategy game state (on-chain WASM sim)
+    pub crown_ash_state: crown_ash_api::SharedGameState,
 }
 
 // SAFETY: AppState is safe to Send/Sync because:
@@ -3197,6 +3200,8 @@ impl AppState {
             compute_orchestrator: None,
             // v9.6.1: QR code payment requests for brick-and-mortar POS
             payment_requests: Arc::new(dashmap::DashMap::new()),
+            // v10.2.0: Crown & Ash — Medieval grand strategy game state
+            crown_ash_state: Arc::new(tokio::sync::RwLock::new(crown_ash_api::CrownAshGameState::empty())),
         })
     }
 
@@ -4658,6 +4663,8 @@ impl AppState {
             compute_orchestrator: None,
             // v9.6.1: QR code payment requests for brick-and-mortar POS
             payment_requests: Arc::new(dashmap::DashMap::new()),
+            // v10.2.0: Crown & Ash — Medieval grand strategy game state
+            crown_ash_state: Arc::new(tokio::sync::RwLock::new(crown_ash_api::CrownAshGameState::empty())),
         })
     }
 

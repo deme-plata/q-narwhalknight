@@ -30,6 +30,7 @@ blake3 = "1.5"
 sha2 = { workspace = true }
 sha3 = { workspace = true }
 hex = "0.4"
+q-log-privacy = { path = "../q-log-privacy" }  # Privacy-preserving log redaction
 ed25519-dalek = { workspace = true }  # v1.0.95-beta: Block signature verification
 
 # Encryption-at-rest (v1.0.39-beta)

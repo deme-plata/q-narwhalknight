@@ -149,8 +149,8 @@ pub async fn get_multi_token_balance(
         let wallet_balances = state.wallet_balances.read().await;
         let mem_bal = wallet_balances.get(&addr_bytes).copied().unwrap_or(0);
         info!(
-            "💰 [MULTI-TOKEN] QUG in-memory balance for {}: {} base units = {:.8} QUG (wallet_balances has {} entries)",
-            &address_hex[..16], mem_bal, mem_bal as f64 / 1e24, wallet_balances.len()
+            "💰 [MULTI-TOKEN] QUG in-memory balance for {}: {} base units = {} QUG (wallet_balances has {} entries)",
+            q_log_privacy::mask_addr(&address_hex), q_log_privacy::mask_amt(mem_bal as u128), q_log_privacy::mask_amt_display(mem_bal as f64 / 1e24), wallet_balances.len()
         );
         mem_bal
     };
@@ -160,8 +160,8 @@ pub async fn get_multi_token_balance(
             .unwrap_or(None).unwrap_or(0);
         if db_bal > 0 {
             info!(
-                "💰 [MULTI-TOKEN] QUG RocksDB fallback for {}: {} base units = {:.8} QUG (in-memory was 0!)",
-                &address_hex[..16], db_bal, db_bal as f64 / 1e24
+                "💰 [MULTI-TOKEN] QUG RocksDB fallback for {}: {} base units = {} QUG (in-memory was 0!)",
+                q_log_privacy::mask_addr(&address_hex), q_log_privacy::mask_amt(db_bal as u128), q_log_privacy::mask_amt_display(db_bal as f64 / 1e24)
             );
             // Also update in-memory to stay in sync
             let mut wallet_balances = state.wallet_balances.write().await;
@@ -195,10 +195,10 @@ pub async fn get_multi_token_balance(
             // v3.0.5: Use 1e24 for logging consistency
             info!(
                 "💰 QUGUSD balance for {}: minted={}, swapped={}, total={}",
-                &address_hex[..16],
-                minted_qugusd as f64 / 1e24,
-                swapped_qugusd as f64 / 1e24,
-                total as f64 / 1e24
+                q_log_privacy::mask_addr(&address_hex),
+                q_log_privacy::mask_amt_display(minted_qugusd as f64 / 1e24),
+                q_log_privacy::mask_amt_display(swapped_qugusd as f64 / 1e24),
+                q_log_privacy::mask_amt_display(total as f64 / 1e24)
             );
         }
         total
@@ -385,8 +385,8 @@ pub async fn get_multi_token_balance(
                     let corrected = *balance / correction_factor;
                     let corrected_display = corrected as f64 / 10f64.powi(target_exp as i32);
                     warn!(
-                        "🔧 [v4.3.0] Auto-repairing swap-inflated balance for {} {}: {} → {} (display: {:.2} → {:.2}, shift={})",
-                        &address_hex[..8], symbol, balance, corrected, display_at_correct_format, corrected_display, correction_shift
+                        "🔧 [v4.3.0] Auto-repairing swap-inflated balance for {} {}: {} → {} (display: {} → {}, shift={})",
+                        q_log_privacy::mask_addr(&address_hex), symbol, q_log_privacy::mask_amt(*balance), q_log_privacy::mask_amt(corrected), q_log_privacy::mask_amt_display(display_at_correct_format), q_log_privacy::mask_amt_display(corrected_display), correction_shift
                     );
                     // Persist the corrected balance to both in-memory and RocksDB
                     let wa = *wallet_addr;
@@ -403,7 +403,7 @@ pub async fn get_multi_token_balance(
             } else if *balance > max_sane_balance {
                 warn!(
                     "🚨 [v3.9.5] Suspicious balance for {} {}: {} base_units (exceeds max for {} decimals)",
-                    &address_hex[..8], symbol, balance, decimals
+                    q_log_privacy::mask_addr(&address_hex), symbol, q_log_privacy::mask_amt(*balance), decimals
                 );
                 *balance
             } else {
@@ -437,13 +437,13 @@ pub async fn get_multi_token_balance(
             // v3.6.16: Log with corruption status
             if final_balance != *balance {
                 info!(
-                    "🪙 [v3.6.16] Custom token for {} (CORRECTED): {} = {:.8} (was {} base_units, now 0)",
-                    &address_hex[..8], symbol, balance_display, balance
+                    "🪙 [v3.6.16] Custom token for {} (CORRECTED): {} = {} (was {} base_units, now 0)",
+                    q_log_privacy::mask_addr(&address_hex), symbol, q_log_privacy::mask_amt_display(balance_display), q_log_privacy::mask_amt(*balance)
                 );
             } else {
                 info!(
-                    "🪙 [v3.6.16] Custom token for {}: {} = {:.8} (balance_base_units={})",
-                    &address_hex[..8], symbol, balance_display, balance
+                    "🪙 [v3.6.16] Custom token for {}: {} = {} (balance_base_units={})",
+                    q_log_privacy::mask_addr(&address_hex), symbol, q_log_privacy::mask_amt_display(balance_display), q_log_privacy::mask_amt(*balance)
                 );
             }
         } else if token_addr[0] == 0x1F {
@@ -482,8 +482,8 @@ pub async fn get_multi_token_balance(
             let usd_value = balance_display * nav_per_share;
 
             info!(
-                "🏦 [v4.5.0] Index fund for {}: {} = {:.4} shares @ ${:.2}/share = ${:.2} (QUG@${:.2}, {}x)",
-                &address_hex[..8], fund_symbol, balance_display, nav_per_share, usd_value, qug_price, nav_multiplier
+                "🏦 [v4.5.0] Index fund for {}: {} = {} shares @ ${}/share = ${} (QUG@${}, {}x)",
+                q_log_privacy::mask_addr(&address_hex), fund_symbol, q_log_privacy::mask_amt_display(balance_display), q_log_privacy::mask_amt_display(nav_per_share), q_log_privacy::mask_amt_display(usd_value), q_log_privacy::mask_amt_display(qug_price), nav_multiplier
             );
 
             tokens.insert(
@@ -497,6 +497,30 @@ pub async fn get_multi_token_balance(
                     decimals: Some(24),
                 },
             );
+        } else if let Some(lp_meta) = state.storage_engine.load_lp_token_meta(token_addr).await {
+            // LP token — metadata stored by liquidity_api on first add_liquidity
+            let symbol = lp_meta.get("symbol").and_then(|v| v.as_str()).unwrap_or("LP").to_string();
+            let name = lp_meta.get("name").and_then(|v| v.as_str()).unwrap_or("LP Token").to_string();
+            let decimals: u8 = lp_meta.get("decimals").and_then(|v| v.as_u64()).unwrap_or(24) as u8;
+
+            let balance_display = *balance as f64 / 10f64.powi(decimals as i32);
+
+            info!(
+                "🪙 LP token for {}: {} = {} (balance_base_units={})",
+                q_log_privacy::mask_addr(&address_hex), symbol, q_log_privacy::mask_amt_display(balance_display), q_log_privacy::mask_amt(*balance)
+            );
+
+            tokens.insert(
+                symbol.clone(),
+                TokenBalance {
+                    balance: format!("{:.8}", balance_display),
+                    balance_base_units: *balance,
+                    usd_value: 0.0, // LP tokens don't have direct USD pricing
+                    name: Some(name),
+                    contract_address: Some(format!("qnk{}", hex::encode(token_addr))),
+                    decimals: Some(decimals),
+                },
+            );
         }
     }
 
@@ -504,7 +528,7 @@ pub async fn get_multi_token_balance(
     if matched_tokens > 0 || skipped_tokens > 0 {
         info!(
             "📊 [v3.6.14] Wallet {}: {} tokens matched, {} from other wallets",
-            &address_hex[..8],
+            q_log_privacy::mask_addr(&address_hex),
             matched_tokens,
             skipped_tokens
         );
@@ -523,7 +547,7 @@ pub async fn get_multi_token_balance(
     info!(
         "📊 [v3.6.14] Retrieved {} tokens for wallet {} ({} custom, {} total in RocksDB)",
         response.tokens.len(),
-        &address_hex[..8],
+        q_log_privacy::mask_addr(&address_hex),
         custom_count,
         rocksdb_balances.len()
     );
@@ -540,8 +564,8 @@ pub async fn mint_qugusd(
     let user_address = auth.address;
     info!(
         "🏦 [AUTHENTICATED] Minting QUGUSD with {} QUG for wallet {}",
-        request.qug_amount,
-        hex::encode(&user_address[..8])
+        q_log_privacy::mask_amt_display(request.qug_amount.parse::<f64>().unwrap_or(0.0)),
+        q_log_privacy::mask_addr(&hex::encode(&user_address))
     );
 
     // Parse QUG amount
@@ -571,9 +595,9 @@ pub async fn mint_qugusd(
     };
 
     info!(
-        "✅ Minted {:.4} QUGUSD (locked {:.4} QUG)",
-        mint_result.qugusd_minted as f64 / 1e24,
-        mint_result.qug_locked as f64 / 1e24
+        "✅ Minted {} QUGUSD (locked {} QUG)",
+        q_log_privacy::mask_amt_display(mint_result.qugusd_minted as f64 / 1e24),
+        q_log_privacy::mask_amt_display(mint_result.qug_locked as f64 / 1e24)
     );
 
     // v3.6.11-beta: CRITICAL FIX - Persist CollateralVault to storage after minting
@@ -585,7 +609,7 @@ pub async fn mint_qugusd(
         if let Err(e) = state.storage_engine.save_collateral_vault_data(&vault_bytes).await {
             warn!("⚠️ Failed to persist CollateralVault after mint: {}", e);
         } else {
-            info!("💾 CollateralVault persisted after mint (minted_qugusd={})", vault_clone.total_qugusd_minted);
+            info!("💾 CollateralVault persisted after mint (minted_qugusd={})", q_log_privacy::mask_amt(vault_clone.total_qugusd_minted as u128));
         }
     }
 
@@ -610,7 +634,7 @@ pub async fn mint_qugusd(
             mint_tx, &state.tx_pool, &state.tx_status,
             state.production_mempool.as_ref(), state.libp2p_discovery.as_ref(),
         ).await;
-        info!("📤 [v8.7.4] StableMint tx {} submitted for P2P propagation", tx_id_hex);
+        info!("📤 [v8.7.4] StableMint tx {} submitted for P2P propagation", q_log_privacy::mask_hash(&tx_id_hex));
     }
 
     Ok(Json(ApiResponse::success(response)))
@@ -625,8 +649,8 @@ pub async fn redeem_qug(
     let user_address = auth.address;
     info!(
         "🔓 [AUTHENTICATED] Redeeming {} QUGUSD for QUG for wallet {}",
-        request.qugusd_amount,
-        hex::encode(&user_address[..8])
+        q_log_privacy::mask_amt_display(request.qugusd_amount.parse::<f64>().unwrap_or(0.0)),
+        q_log_privacy::mask_addr(&hex::encode(&user_address))
     );
 
     // Parse QUGUSD amount
@@ -655,9 +679,9 @@ pub async fn redeem_qug(
     };
 
     info!(
-        "✅ Redeemed {:.4} QUG (burned {:.4} QUGUSD)",
-        redeem_result.qug_unlocked as f64 / 1e24,
-        redeem_result.qugusd_burned as f64 / 1e24
+        "✅ Redeemed {} QUG (burned {} QUGUSD)",
+        q_log_privacy::mask_amt_display(redeem_result.qug_unlocked as f64 / 1e24),
+        q_log_privacy::mask_amt_display(redeem_result.qugusd_burned as f64 / 1e24)
     );
 
     // v3.6.11-beta: CRITICAL FIX - Persist CollateralVault to storage after redeem
@@ -668,7 +692,7 @@ pub async fn redeem_qug(
         if let Err(e) = state.storage_engine.save_collateral_vault_data(&vault_bytes).await {
             warn!("⚠️ Failed to persist CollateralVault after redeem: {}", e);
         } else {
-            info!("💾 CollateralVault persisted after redeem (minted_qugusd={})", vault_clone.total_qugusd_minted);
+            info!("💾 CollateralVault persisted after redeem (minted_qugusd={})", q_log_privacy::mask_amt(vault_clone.total_qugusd_minted as u128));
         }
     }
 
@@ -692,7 +716,7 @@ pub async fn redeem_qug(
             burn_tx, &state.tx_pool, &state.tx_status,
             state.production_mempool.as_ref(), state.libp2p_discovery.as_ref(),
         ).await;
-        info!("📤 [v8.7.4] StableBurn tx {} submitted for P2P propagation", tx_id_hex);
+        info!("📤 [v8.7.4] StableBurn tx {} submitted for P2P propagation", q_log_privacy::mask_hash(&tx_id_hex));
     }
 
     Ok(Json(ApiResponse::success(response)))
@@ -703,7 +727,7 @@ pub async fn get_position_health(
     State(state): State<Arc<AppState>>,
     Path(address): Path<String>,
 ) -> Result<Json<ApiResponse<PositionHealthResponse>>, StatusCode> {
-    debug!("🔍 Getting position health for: {}", address);
+    debug!("🔍 Getting position health for: {}", q_log_privacy::mask_addr(&address));
 
     // Parse address
     let addr_bytes = match hex::decode(&address) {
@@ -774,9 +798,9 @@ pub async fn get_vault_stats(
     let stats = vault_read.get_vault_stats();
 
     info!(
-        "✅ Vault stats: {:.2} QUG locked, {:.2} QUGUSD minted, ratio={:.2}%",
-        stats.total_qug_locked as f64 / 1e8,
-        stats.total_qugusd_minted as f64 / 1e8,
+        "✅ Vault stats: {} QUG locked, {} QUGUSD minted, ratio={:.2}%",
+        q_log_privacy::mask_amt_display(stats.total_qug_locked as f64 / 1e8),
+        q_log_privacy::mask_amt_display(stats.total_qugusd_minted as f64 / 1e8),
         stats.global_collateral_ratio * 100.0
     );
 
@@ -835,7 +859,7 @@ pub async fn liquidate_position(
     State(state): State<Arc<AppState>>,
     Json(request): Json<LiquidateRequest>,
 ) -> Result<Json<ApiResponse<LiquidateResponse>>, StatusCode> {
-    info!("⚡ Liquidating position: {}", request.liquidated_address);
+    info!("⚡ Liquidating position: {}", q_log_privacy::mask_addr(&request.liquidated_address));
 
     // Parse addresses
     let liquidated_bytes = match hex::decode(&request.liquidated_address) {
@@ -876,8 +900,8 @@ pub async fn liquidate_position(
     };
 
     info!(
-        "✅ Liquidated position: seized {:.4} QUG",
-        liq_result.qug_seized as f64 / 1e8
+        "✅ Liquidated position: seized {} QUG",
+        q_log_privacy::mask_amt_display(liq_result.qug_seized as f64 / 1e8)
     );
 
     // v3.6.11-beta: CRITICAL FIX - Persist CollateralVault to storage after liquidation
@@ -912,7 +936,7 @@ pub async fn liquidate_position(
             liq_tx, &state.tx_pool, &state.tx_status,
             state.production_mempool.as_ref(), state.libp2p_discovery.as_ref(),
         ).await;
-        info!("📤 [v8.7.4] VaultLiquidate tx {} submitted for P2P propagation", tx_id_hex);
+        info!("📤 [v8.7.4] VaultLiquidate tx {} submitted for P2P propagation", q_log_privacy::mask_hash(&tx_id_hex));
     }
 
     Ok(Json(ApiResponse::success(response)))

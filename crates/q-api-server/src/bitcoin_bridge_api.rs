@@ -172,7 +172,7 @@ pub async fn create_atomic_swap(
     };
 
     let wallet_hex = hex::encode(wallet.address);
-    info!("⚛️ Creating atomic swap for wallet {} direction={}", wallet_hex, request.direction);
+    info!("⚛️ Creating atomic swap for wallet {} direction={}", q_log_privacy::mask_addr(&wallet_hex), request.direction);
 
     // Validate direction
     if request.direction != "buy_btc" && request.direction != "sell_btc" {
@@ -401,7 +401,7 @@ pub async fn claim_swap(
         }
     };
 
-    info!("⚛️ Claiming swap {} by wallet {}", swap_id, hex::encode(wallet.address));
+    info!("⚛️ Claiming swap {} by wallet {}", swap_id, q_log_privacy::mask_addr(&hex::encode(wallet.address)));
 
     // Process the claim
     match swap_manager.process_qnkusd_claim(&swap_id, secret.clone()).await {
@@ -520,7 +520,7 @@ pub async fn claim_swap(
                 Ok(new_bal) if btc_amount > 0 => {
                     info!("🌉 Bridge {} wBTC: {} sat, new balance: {}",
                         if direction == "sell_btc" { "MINT" } else { "BURN" },
-                        btc_amount, new_bal);
+                        q_log_privacy::mask_amt(btc_amount as u128), q_log_privacy::mask_amt(*new_bal));
                     emit_swap_event(&state, "bridge-token-updated", serde_json::json!({
                         "token": "wBTC",
                         "wallet": hex::encode(wallet.address),
@@ -692,7 +692,7 @@ pub async fn list_swaps(
     let swap_ids = match state.storage_engine.list_atomic_swaps_by_wallet(&wallet_key).await {
         Ok(ids) => ids,
         Err(e) => {
-            warn!("Failed to list swaps for {}: {}", wallet_key, e);
+            warn!("Failed to list swaps for {}: {}", q_log_privacy::mask_addr(&wallet_key), e);
             Vec::new()
         }
     };

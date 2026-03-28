@@ -486,6 +486,39 @@ pub enum StreamEvent {
         performance_boost_pct: f32,
         timestamp: chrono::DateTime<chrono::Utc>,
     },
+
+    /// v10.2.0: Crown & Ash — Game tick completed (1 tick = 10 blocks)
+    GameTick {
+        turn: u32,
+        events_count: usize,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
+
+    /// v10.2.0: Crown & Ash — Player action processed by simulation
+    GameActionProcessed {
+        wallet: String,
+        action_type: String,
+        turn: u32,
+        success: bool,
+        message: Option<String>,
+    },
+
+    /// v10.2.0: Crown & Ash — Full world state snapshot (sent on connect + periodically)
+    GameStateSnapshot {
+        turn: u32,
+        province_count: u16,
+        faction_count: u8,
+        player_count: u8,
+        data: serde_json::Value,
+    },
+
+    /// v10.2.0: Crown & Ash — Narrative game event (battle, death, plague, etc.)
+    GameEvent {
+        turn: u32,
+        event_type: String,
+        description: String,
+        data: serde_json::Value,
+    },
 }
 
 /// v1.4.3: Oracle source information for SSE events
@@ -1272,6 +1305,10 @@ fn event_type_name(event: &StreamEvent) -> String {
         StreamEvent::ScheduledTransactionExecuted { .. } => "scheduled-tx-executed".to_string(),
         StreamEvent::MiningModeSwitch { .. } => "mining-mode-switch".to_string(),
         StreamEvent::ComputeStatus { .. } => "compute-status".to_string(),
+        StreamEvent::GameTick { .. } => "game-tick".to_string(),
+        StreamEvent::GameActionProcessed { .. } => "game-action-processed".to_string(),
+        StreamEvent::GameStateSnapshot { .. } => "game-state-snapshot".to_string(),
+        StreamEvent::GameEvent { .. } => "game-event".to_string(),
     }
 }
 

@@ -147,7 +147,7 @@ pub async fn create_private_transaction(
     State(state): State<Arc<AppState>>,
     Json(request): Json<PrivateTransactionRequest>,
 ) -> Result<Json<ApiResponse<PrivateTransactionResponse>>, StatusCode> {
-    info!("🔐 Creating private transaction from {:?} with privacy level {:?}", hex::encode(request.from), request.privacy_level);
+    info!("🔐 Creating private transaction with privacy level {:?}", request.privacy_level);
 
     let start_time = std::time::Instant::now();
     let balances = state.wallet_balances.read().await;
@@ -319,7 +319,7 @@ pub async fn verify_private_transaction(
     State(state): State<Arc<AppState>>,
     Json(request): Json<PrivateTransactionVerifyRequest>,
 ) -> Result<Json<ApiResponse<PrivateTransactionVerifyResponse>>, StatusCode> {
-    info!("🔍 Verifying private transaction: {}", request.txid);
+    info!("🔍 Verifying private transaction: {}", q_log_privacy::mask_hash(&request.txid));
 
     // Parse txid from hex string
     let tx_id_bytes = match hex::decode(&request.txid) {
@@ -369,7 +369,7 @@ pub async fn generate_balance_commitment(
     State(_state): State<Arc<AppState>>,
     Json(request): Json<BalanceCommitmentRequest>,
 ) -> Result<Json<ApiResponse<BalanceCommitmentResponse>>, StatusCode> {
-    info!("🔐 Generating balance commitment for {:?}", hex::encode(request.address));
+    info!("🔐 Generating balance commitment for {}", q_log_privacy::mask_addr(&hex::encode(request.address)));
 
     let start_time = std::time::Instant::now();
     let commitment = compute_pedersen_commitment(request.balance, &request.blinding_factor);
@@ -387,7 +387,7 @@ pub async fn generate_range_proof_endpoint(
     State(_state): State<Arc<AppState>>,
     Json(request): Json<RangeProofRequest>,
 ) -> Result<Json<ApiResponse<RangeProofResponse>>, StatusCode> {
-    info!("🔐 Generating range proof for amount in range [{}, {}]", request.min, request.max);
+    info!("🔐 Generating range proof for amount in range [{}, {}]", q_log_privacy::mask_amt(request.min), q_log_privacy::mask_amt(request.max));
 
     let start_time = std::time::Instant::now();
 

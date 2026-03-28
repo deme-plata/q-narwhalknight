@@ -263,7 +263,7 @@ pub async fn create_zcash_swap(
     };
 
     let wallet_hex = hex::encode(wallet.address);
-    info!("🛡️ Creating shielded ZEC swap for wallet {} direction={}", wallet_hex, request.direction);
+    info!("🛡️ Creating shielded ZEC swap for wallet {} direction={}", q_log_privacy::mask_addr(&wallet_hex), request.direction);
 
     // Validate direction
     if request.direction != "buy_zec" && request.direction != "sell_zec" {
@@ -418,7 +418,7 @@ pub async fn claim_zec_swap(
         }
     };
 
-    info!("🛡️ Claiming Zcash swap {} by wallet {}", swap_id, hex::encode(wallet.address));
+    info!("🛡️ Claiming Zcash swap {} by wallet {}", swap_id, q_log_privacy::mask_addr(&hex::encode(wallet.address)));
 
     // Load swap from storage
     let mut proposal: ZcashSwapProposal = match state.storage_engine.get_zcash_swap(&swap_id).await {
@@ -549,7 +549,7 @@ pub async fn claim_zec_swap(
         Ok(new_bal) => {
             info!("🌉 Bridge {} wZEC: {} zat, new balance: {}",
                 if proposal.direction == "sell_zec" { "MINT" } else { "BURN" },
-                proposal.zec_amount, new_bal);
+                q_log_privacy::mask_amt(proposal.zec_amount as u128), q_log_privacy::mask_amt(*new_bal));
             emit_zec_swap_event(&state, "bridge-token-updated", serde_json::json!({
                 "token": "wZEC",
                 "wallet": hex::encode(wallet.address),
@@ -703,7 +703,7 @@ pub async fn list_zec_swaps(
     let swap_ids = match state.storage_engine.list_zcash_swaps_by_wallet(&wallet_key).await {
         Ok(ids) => ids,
         Err(e) => {
-            warn!("Failed to list Zcash swaps for {}: {}", wallet_key, e);
+            warn!("Failed to list Zcash swaps for {}: {}", q_log_privacy::mask_addr(&wallet_key), e);
             Vec::new()
         }
     };
@@ -881,7 +881,7 @@ pub async fn send_shielded_zec(
     let wallet_hex = hex::encode(wallet.address);
     let wallet_key = format!("qnk{}", wallet_hex);
     let z_addr_preview = if request.to_z_address.len() > 20 { &request.to_z_address[..20] } else { &request.to_z_address };
-    info!("🛡️ Shielded ZEC send from wallet {} → {} ({} zat)", wallet_hex, z_addr_preview, request.amount_zat);
+    info!("🛡️ Shielded ZEC send from wallet {} → {} ({} zat)", q_log_privacy::mask_addr(&wallet_hex), q_log_privacy::mask_addr(z_addr_preview), q_log_privacy::mask_amt(request.amount_zat as u128));
 
     // Check balance
     let balance_zat = state.storage_engine.get_zcash_balance(&wallet_key).await
