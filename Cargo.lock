@@ -4680,13 +4680,25 @@ dependencies = [
  "anyhow",
  "axum 0.7.9",
  "bincode 1.3.3",
+ "crown-ash-narrative",
  "crown-ash-sim",
  "crown-ash-types",
+ "futures",
  "q-storage",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-stream",
  "tracing",
+]
+
+[[package]]
+name = "crown-ash-narrative"
+version = "10.2.1"
+dependencies = [
+ "crown-ash-types",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -21506,6 +21518,7 @@ dependencies = [
  "futures-util",
  "hex",
  "num_cpus",
+ "opencl3",
  "qrcode",
  "rand 0.8.5",
  "raw-cpuid 11.6.0",

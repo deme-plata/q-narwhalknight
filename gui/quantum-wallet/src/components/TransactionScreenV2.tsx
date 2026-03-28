@@ -1091,7 +1091,8 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
               amount: parseFloat(amount),
               memo: memo || undefined,
               // v3.6.10-beta: Use actual contract address for custom tokens, not symbol
-              tokenAddress: selectedTokenContract || (selectedCoin !== 'QUG' && selectedCoin !== 'QUGUSD' ? undefined : undefined),
+              // v3.6.11: Pass QUGUSD token address for P2P so backend knows it's not QUG
+              tokenAddress: selectedTokenContract || (selectedCoin === 'QUGUSD' ? '5155475553440000000000000000000000000000000000000000000000000000' : (selectedCoin !== 'QUG' ? selectedCoin : undefined)),
             });
             console.log('🔐 [TX v3.6.10] Signing with tokenAddress:', selectedTokenContract);
             console.log(`🔐 [TX] Signing result: success=${signingResult.success}, error=${signingResult.error || 'none'}`);

@@ -70,6 +70,7 @@ members = [
     "crates/crown-ash-sim",     # Crown & Ash — core deterministic simulation
     "crates/crown-ash-plugin",  # Crown & Ash — WASM plugin (native fallback for tests)
     "crates/crown-ash-api",     # Crown & Ash — REST API handlers
+    "crates/crown-ash-narrative", # Crown & Ash — narrative text generation (templates + optional LLM)
     # "crates/crown-ash-client",  # Crown & Ash — Bevy game client (build separately: cargo check --manifest-path crates/crown-ash-client/Cargo.toml)
 ]
 

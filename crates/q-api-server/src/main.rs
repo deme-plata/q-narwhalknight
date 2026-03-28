@@ -1635,6 +1635,30 @@ impl BrowserTransaction {
         id_hasher.update(&self.timestamp.to_le_bytes());
         let id: [u8; 32] = id_hasher.finalize().into();
 
+        // v3.6.11: Resolve token_type from token_address field instead of hardcoding QUG
+        // This fixes the critical bug where QUGUSD transfers arrived as QUG
+        let resolved_token_type = match &self.token_address {
+            Some(addr_hex) => {
+                if let Ok(bytes) = hex::decode(addr_hex) {
+                    if bytes.len() == 32 && bytes[..] == q_types::QUGUSD_TOKEN_ADDRESS[..] {
+                        q_types::TokenType::QUGUSD
+                    } else if bytes.len() == 32 {
+                        let mut addr = [0u8; 32];
+                        addr.copy_from_slice(&bytes);
+                        q_types::TokenType::Custom(addr)
+                    } else {
+                        q_types::TokenType::QUG
+                    }
+                } else if addr_hex.to_uppercase() == "QUGUSD" {
+                    q_types::TokenType::QUGUSD
+                } else {
+                    q_types::TokenType::QUG
+                }
+            }
+            None => q_types::TokenType::QUG,
+        };
+        info!("📦 [BrowserTx] token_address={:?} → token_type={:?}", self.token_address, resolved_token_type);
+
         Ok(q_types::Transaction {
             id,
             from,
@@ -1647,7 +1671,7 @@ impl BrowserTransaction {
             signature: self.signature.clone(),
             timestamp,
             data,
-            token_type: q_types::TokenType::QUG, // Default to QUG
+            token_type: resolved_token_type,
             fee_token_type: q_types::TokenType::QUGUSD, // Default fee token
             tx_type: q_types::TransactionType::Transfer,
             pqc_signature: None,
