@@ -4319,7 +4319,7 @@ async fn miner_link_task(
     proxy_url: Option<String>,
     gpu_active: Arc<AtomicBool>,
     gpu_hashrate_hs: Arc<AtomicU64>,
-    gpu_devices: Arc<parking_lot::RwLock<Vec<crate::shared_state::GpuDeviceSnapshot>>>,
+    gpu_devices: Arc<parking_lot::RwLock<Vec<q_miner::shared_state::GpuDeviceSnapshot>>>,
 ) {
     let start_time = std::time::Instant::now();
 
@@ -4472,7 +4472,7 @@ async fn run_miner_link_session<S>(
     start_time: &std::time::Instant,
     gpu_active: &AtomicBool,
     gpu_hashrate_hs: &AtomicU64,
-    gpu_devices: &parking_lot::RwLock<Vec<crate::shared_state::GpuDeviceSnapshot>>,
+    gpu_devices: &parking_lot::RwLock<Vec<q_miner::shared_state::GpuDeviceSnapshot>>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
