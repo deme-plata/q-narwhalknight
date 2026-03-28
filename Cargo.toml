@@ -65,10 +65,16 @@ members = [
  "sdk/rust", "crates/q-ai-inference", "crates/q-crypto-advanced", "crates/q-index-fund", "crates/q-mining-pool", "crates/q-temporal-shield", "crates/q-bitnet-ffi", "crates/q-consensus-guard", "crates/q-bio-dsl", "crates/q-eternal-cypher", "crates/q-dune", "crates/q-flux", "crates/q-queue",
     "crates/q-sqisign-sys",  # SQIsign C reference implementation FFI bindings
     "crates/q-sqisign",      # Safe Rust wrapper for SQIsign post-quantum signatures
+    "crates/q-log-privacy",  # Privacy-preserving log redaction
+    "crates/crown-ash-types",   # Crown & Ash — shared game data types
+    "crates/crown-ash-sim",     # Crown & Ash — core deterministic simulation
+    "crates/crown-ash-plugin",  # Crown & Ash — WASM plugin (native fallback for tests)
+    "crates/crown-ash-api",     # Crown & Ash — REST API handlers
+    "crates/crown-ash-client",  # Crown & Ash — Bevy game client (separate build target)
 ]
 
 [workspace.package]
-version = "10.1.8"  # v10.1.8: GPU optimizations — async dispatch, kernel cache, per-GPU adaptive sizing
+version = "10.2.1"  # v10.2.1: CRITICAL FIX — watermark race condition blocking transfer balance processing
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"
