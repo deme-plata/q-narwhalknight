@@ -55,8 +55,10 @@ pub fn action_buttons(
     mut action_state: ResMut<ActionState>,
 ) {
     // Drain any completed async result.
-    if let Ok(mut lock) = action_state.pending.try_lock() {
+    let pending_clone = Arc::clone(&action_state.pending);
+    if let Ok(mut lock) = pending_clone.try_lock() {
         if let Some(result) = lock.take() {
+            drop(lock); // release mutex before mutating action_state
             action_state.submitting = false;
             action_state.last_result = Some(result);
         }

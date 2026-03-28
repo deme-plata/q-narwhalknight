@@ -86,8 +86,10 @@ fn poll_server(
     // ------------------------------------------------------------------
     // 1. Drain the completed result (if any).
     // ------------------------------------------------------------------
-    if let Ok(mut lock) = net.pending.try_lock() {
+    let pending_clone = Arc::clone(&net.pending);
+    if let Ok(mut lock) = pending_clone.try_lock() {
         if let Some(result) = lock.take() {
+            drop(lock); // release mutex before mutating net
             net.in_flight = false;
             match result {
                 Ok(snapshot) => {
