@@ -3,7 +3,7 @@ use crate::systems::{camera, map_render};
 use crate::resources::selection::Selection;
 
 /// Plugin that sets up the Crown & Ash strategic map: province hexes, adjacency
-/// lines, army icons, camera controls, and province selection via click.
+/// lines, army icons, name labels, selection ring, camera controls, and click.
 pub struct CrownAshMapPlugin;
 
 impl Plugin for CrownAshMapPlugin {
@@ -21,6 +21,10 @@ impl Plugin for CrownAshMapPlugin {
                     map_render::update_map_colors,
                     map_render::update_armies,
                     map_render::handle_province_click,
+                    map_render::update_selection_ring,
+                    map_render::update_province_labels,
+                    map_render::update_movement_paths,
+                    map_render::animate_army_movement,
                 ),
             );
     }

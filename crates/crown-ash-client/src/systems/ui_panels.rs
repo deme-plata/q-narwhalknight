@@ -1,17 +1,87 @@
 //! egui-based UI panels for the Crown & Ash client.
 //!
-//! Three systems render the HUD:
+//! Systems:
 //! - `top_bar` — turn counter, faction count, population, connection indicator
+//! - `faction_list` — left panel with all factions overview
 //! - `detail_panel` — province / faction / character / army details
 //! - `event_feed` — scrolling narrative event log
+//! - `minimap` — small map overview with clickable provinces
+//! - `join_dialog` — "Join Game" overlay when the player has no realm
+//! - `dialog_bubbles` — floating speech bubbles for Tier 2/3 LLM-generated text
+//! - `keyboard_shortcuts` — ESC to deselect, Tab to cycle factions
 
 use bevy::prelude::*;
+use bevy::input::ButtonInput;
+use bevy::tasks::IoTaskPool;
 use bevy_egui::{egui, EguiContexts};
+use std::sync::{Arc, Mutex};
 
 use crate::resources::config::CrownAshConfig;
 use crate::resources::game_state::{ClientGameState, ConnectionStatus};
+use crate::resources::narrative_state::{DialogState, NarrativeImportance, NarrativeState};
 use crate::resources::selection::Selection;
 use crown_ash_types::{FixedPoint, GameEvent};
+
+// ---------------------------------------------------------------------------
+// Join game state
+// ---------------------------------------------------------------------------
+
+/// OAuth2 device-login state machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceLoginPhase {
+    /// Not started — show "Login with Quillon Wallet" button.
+    Idle,
+    /// Requesting device code from server.
+    Requesting,
+    /// Waiting for user to approve in browser.
+    WaitingForApproval {
+        device_code: String,
+        verification_url: String,
+    },
+    /// Login complete — wallet address received.
+    Complete { wallet_address: String },
+    /// Error during device login.
+    Error(String),
+}
+
+/// Tracks the "Join Game" dialog and player identity.
+#[derive(Resource)]
+pub struct JoinState {
+    /// Wallet address (populated by device-login or manual input).
+    pub wallet_input: String,
+    /// Selected faction in the join dialog (0-6).
+    pub selected_faction: u8,
+    /// True if the player has joined (or is the server operator).
+    pub joined: bool,
+    /// Join request in flight.
+    pub joining: bool,
+    /// Join result message.
+    pub join_result: Option<String>,
+    /// Async result slot for join request.
+    pending: Arc<Mutex<Option<Result<String, String>>>>,
+    /// OAuth2 device-login phase.
+    pub device_login: DeviceLoginPhase,
+    /// Async result slot for device-login polling.
+    device_login_pending: Arc<Mutex<Option<Result<DeviceLoginPhase, String>>>>,
+    /// Manual wallet input mode (fallback).
+    pub manual_mode: bool,
+}
+
+impl Default for JoinState {
+    fn default() -> Self {
+        Self {
+            wallet_input: String::new(),
+            selected_faction: 0,
+            joined: false,
+            joining: false,
+            join_result: None,
+            pending: Arc::new(Mutex::new(None)),
+            device_login: DeviceLoginPhase::Idle,
+            device_login_pending: Arc::new(Mutex::new(None)),
+            manual_mode: false,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Helper: display a FixedPoint as "integer.fractional" (3 decimals)
@@ -82,6 +152,7 @@ pub fn detail_panel(
     mut contexts: EguiContexts,
     game_state: Res<ClientGameState>,
     selection: Res<Selection>,
+    narrative: Res<NarrativeState>,
 ) {
     let ctx = contexts.ctx_mut();
 
@@ -166,6 +237,15 @@ pub fn detail_panel(
                             ));
                         }
                     }
+
+                    // Province history (narrative)
+                    if let Some(history) = narrative.province_history(pid) {
+                        if !history.is_empty() {
+                            ui.separator();
+                            ui.label(egui::RichText::new("History").strong());
+                            ui.label(history);
+                        }
+                    }
                 }
             }
 
@@ -223,6 +303,15 @@ pub fn detail_panel(
                             ui.label(format!("  ... and {} more", chars.len() - 10));
                         }
                     }
+
+                    // Faction history (narrative)
+                    if let Some(history) = narrative.faction_history(fid) {
+                        if !history.is_empty() {
+                            ui.separator();
+                            ui.label(egui::RichText::new("History").strong());
+                            ui.label(history);
+                        }
+                    }
                 }
             }
 
@@ -250,6 +339,24 @@ pub fn detail_panel(
                     if !c.traits.is_empty() {
                         ui.label(format!("Traits: {:?}", c.traits));
                     }
+
+                    // Personality archetype
+                    let archetype = crown_ash_narrative::personality::derive_archetype(&c.traits);
+                    ui.label(format!("Personality: {}", archetype.label()));
+
+                    // Character Chronicle (life history)
+                    if let Some(chronicle_text) = narrative.chronicle_text(cid) {
+                        if !chronicle_text.is_empty() {
+                            ui.separator();
+                            ui.label(egui::RichText::new("Chronicle").strong());
+                            egui::ScrollArea::vertical()
+                                .id_salt("character_chronicle")
+                                .max_height(200.0)
+                                .show(ui, |ui| {
+                                    ui.label(&chronicle_text);
+                                });
+                        }
+                    }
                 }
             }
 
@@ -267,6 +374,18 @@ pub fn detail_panel(
                     ui.label(format!("Location: province {}", army.location));
                     if let Some(dest) = army.destination {
                         ui.label(format!("Moving to: province {}", dest));
+                    }
+                    if !army.movement_queue.is_empty() {
+                        let path: Vec<String> = army.movement_queue.iter()
+                            .map(|p| format!("{}", p))
+                            .collect();
+                        ui.label(format!("Path: {}", path.join(" -> ")));
+                    }
+                    if army.siege.is_some() {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(220, 160, 50),
+                            "Besieging...",
+                        );
                     }
                     ui.separator();
                     ui.label(format!("Levy: {}", army.troops.levy));
@@ -303,6 +422,7 @@ pub fn detail_panel(
 pub fn event_feed(
     mut contexts: EguiContexts,
     game_state: Res<ClientGameState>,
+    narrative: Res<NarrativeState>,
 ) {
     let ctx = contexts.ctx_mut();
 
@@ -310,22 +430,33 @@ pub fn event_feed(
         .default_height(150.0)
         .min_height(80.0)
         .show(ctx, |ui| {
-            ui.heading("Event Log");
+            ui.heading("Chronicle");
             ui.separator();
 
             egui::ScrollArea::vertical()
                 .auto_shrink([false; 2])
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
-                    if game_state.events.is_empty() {
-                        ui.label("No events yet...");
-                        return;
-                    }
-
-                    // Show last 100 events (most recent at bottom).
-                    let start = game_state.events.len().saturating_sub(100);
-                    for event in &game_state.events[start..] {
-                        ui.label(format_event(event));
+                    // Prefer narrative prose if available, fall back to raw format
+                    if !narrative.event_narratives.is_empty() {
+                        let start = narrative.event_narratives.len().saturating_sub(100);
+                        for entry in &narrative.event_narratives[start..] {
+                            let color = match entry.importance {
+                                NarrativeImportance::Epic => egui::Color32::from_rgb(255, 200, 50),
+                                NarrativeImportance::Notable => egui::Color32::from_rgb(180, 200, 255),
+                                NarrativeImportance::Minor => egui::Color32::from_rgb(180, 180, 180),
+                            };
+                            ui.colored_label(color, &entry.prose);
+                            ui.add_space(2.0);
+                        }
+                    } else if !game_state.events.is_empty() {
+                        // Fallback: raw event formatting (before narrative engine runs)
+                        let start = game_state.events.len().saturating_sub(100);
+                        for event in &game_state.events[start..] {
+                            ui.label(format_event(event));
+                        }
+                    } else {
+                        ui.label("The chronicle awaits its first entry...");
                     }
                 });
         });
@@ -569,6 +700,58 @@ pub fn minimap(
                 }
             }
 
+            // Draw war indicator lines between warring factions (red dashed).
+            if let Some(world) = world_data {
+                // Collect war pairs from realms.
+                let mut war_pairs: Vec<(u8, u8)> = Vec::new();
+                for realm in &world.realms {
+                    for &enemy in &realm.at_war_with {
+                        let a = realm.faction.min(enemy);
+                        let b = realm.faction.max(enemy);
+                        if !war_pairs.contains(&(a, b)) {
+                            war_pairs.push((a, b));
+                        }
+                    }
+                }
+
+                // For each war pair, draw a red line between faction capitals.
+                for (fa, fb) in &war_pairs {
+                    // Find a representative province for each faction (first controlled).
+                    let prov_a = world.provinces.iter().find(|p| p.controller == *fa);
+                    let prov_b = world.provinces.iter().find(|p| p.controller == *fb);
+                    if let (Some(pa), Some(pb)) = (prov_a, prov_b) {
+                        let idx_a = pa.id as usize;
+                        let idx_b = pb.id as usize;
+                        if idx_a < MINIMAP_POSITIONS.len() && idx_b < MINIMAP_POSITIONS.len() {
+                            let (ax, az) = MINIMAP_POSITIONS[idx_a];
+                            let (bx, bz) = MINIMAP_POSITIONS[idx_b];
+                            let sa = to_screen(ax, az);
+                            let sb = to_screen(bx, bz);
+
+                            // Draw dashed red line (3 dashes along the segment).
+                            let war_color = egui::Color32::from_rgba_premultiplied(220, 50, 50, 180);
+                            let num_dashes = 5;
+                            for d in 0..num_dashes {
+                                let t0 = d as f32 / num_dashes as f32;
+                                let t1 = (d as f32 + 0.6) / num_dashes as f32;
+                                let p0 = egui::pos2(
+                                    sa.x + (sb.x - sa.x) * t0,
+                                    sa.y + (sb.y - sa.y) * t0,
+                                );
+                                let p1 = egui::pos2(
+                                    sa.x + (sb.x - sa.x) * t1.min(1.0),
+                                    sa.y + (sb.y - sa.y) * t1.min(1.0),
+                                );
+                                painter.line_segment(
+                                    [p0, p1],
+                                    egui::Stroke::new(1.5, war_color),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
             // Handle click — select nearest province on minimap
             if response.clicked() {
                 if let Some(pos) = response.interact_pointer_pos() {
@@ -588,6 +771,663 @@ pub fn minimap(
                 }
             }
         });
+}
+
+// ---------------------------------------------------------------------------
+// Faction list — left panel showing all factions at a glance.
+// ---------------------------------------------------------------------------
+
+pub fn faction_list(
+    mut contexts: EguiContexts,
+    game_state: Res<ClientGameState>,
+    mut selection: ResMut<Selection>,
+) {
+    let ctx = contexts.ctx_mut();
+
+    egui::SidePanel::left("crown_ash_factions")
+        .default_width(220.0)
+        .min_width(180.0)
+        .show(ctx, |ui| {
+            ui.heading("Factions");
+            ui.separator();
+
+            let Some(ref world) = game_state.world else {
+                ui.label("Waiting for world...");
+                return;
+            };
+
+            for faction in &world.factions {
+                let prov_count = world.provinces.iter()
+                    .filter(|p| p.controller == faction.id)
+                    .count();
+                let army_count = world.armies.iter()
+                    .filter(|a| a.owner_faction == faction.id)
+                    .count();
+                let pop: u64 = world.provinces.iter()
+                    .filter(|p| p.controller == faction.id)
+                    .map(|p| p.population as u64)
+                    .sum();
+
+                let is_selected = selection.faction == Some(faction.id);
+                let status = if faction.alive { "" } else { " [DEAD]" };
+
+                // Faction colour chip.
+                let [r, g, b] = faction.color_rgb;
+                let chip_color = egui::Color32::from_rgb(r, g, b);
+
+                ui.horizontal(|ui| {
+                    // Colour dot.
+                    let (rect, _) = ui.allocate_exact_size(
+                        egui::vec2(12.0, 12.0),
+                        egui::Sense::hover(),
+                    );
+                    ui.painter().circle_filled(rect.center(), 5.0, chip_color);
+
+                    // Clickable faction name.
+                    let label = if is_selected {
+                        egui::RichText::new(format!("{}{}", faction.name, status))
+                            .strong()
+                            .color(egui::Color32::WHITE)
+                    } else if faction.alive {
+                        egui::RichText::new(format!("{}{}", faction.name, status))
+                    } else {
+                        egui::RichText::new(format!("{}{}", faction.name, status))
+                            .strikethrough()
+                            .color(egui::Color32::GRAY)
+                    };
+
+                    if ui.add(egui::Label::new(label).sense(egui::Sense::click())).clicked() {
+                        selection.faction = Some(faction.id);
+                        // Also select the faction's capital (first province) if any.
+                        if let Some(prov) = world.provinces.iter().find(|p| p.controller == faction.id) {
+                            selection.province = Some(prov.id);
+                        }
+                    }
+                });
+
+                // Summary stats indented below.
+                ui.indent(faction.id as usize, |ui| {
+                    ui.label(format!("{} prov / {} army / {}", prov_count, army_count, format_population(pop)));
+
+                    // Show wars.
+                    if let Some(realm) = world.realms.iter().find(|r| r.faction == faction.id) {
+                        if !realm.at_war_with.is_empty() {
+                            let enemies: Vec<&str> = realm.at_war_with.iter()
+                                .filter_map(|&eid| world.factions.iter()
+                                    .find(|f| f.id == eid)
+                                    .map(|f| f.name.as_str()))
+                                .collect();
+                            ui.colored_label(
+                                egui::Color32::from_rgb(220, 80, 80),
+                                format!("At war: {}", enemies.join(", ")),
+                            );
+                        }
+                    }
+                });
+
+                ui.add_space(4.0);
+            }
+
+            // Turn info at the bottom.
+            ui.separator();
+            ui.label(format!("Turn: {}", world.meta.turn));
+            ui.label("Turns advance with each block.");
+        });
+}
+
+// ---------------------------------------------------------------------------
+// Join Game dialog — shown when player hasn't joined yet.
+// ---------------------------------------------------------------------------
+
+pub fn join_dialog(
+    mut contexts: EguiContexts,
+    game_state: Res<ClientGameState>,
+    config: Res<CrownAshConfig>,
+    mut join_state: ResMut<JoinState>,
+) {
+    // Drain join-game async result.
+    let pending = Arc::clone(&join_state.pending);
+    if let Ok(mut lock) = pending.try_lock() {
+        if let Some(result) = lock.take() {
+            drop(lock);
+            join_state.joining = false;
+            match result {
+                Ok(msg) => {
+                    join_state.joined = true;
+                    join_state.join_result = Some(msg);
+                }
+                Err(msg) => {
+                    join_state.join_result = Some(msg);
+                }
+            }
+        }
+    }
+
+    // Drain device-login async result.
+    let dl_pending = Arc::clone(&join_state.device_login_pending);
+    if let Ok(mut lock) = dl_pending.try_lock() {
+        if let Some(result) = lock.take() {
+            drop(lock);
+            match result {
+                Ok(phase) => {
+                    if let DeviceLoginPhase::Complete { ref wallet_address } = phase {
+                        join_state.wallet_input = wallet_address.clone();
+                    }
+                    join_state.device_login = phase;
+                }
+                Err(msg) => {
+                    join_state.device_login = DeviceLoginPhase::Error(msg);
+                }
+            }
+        }
+    }
+
+    // Don't show dialog if already joined.
+    if join_state.joined {
+        return;
+    }
+
+    let ctx = contexts.ctx_mut();
+
+    egui::Window::new("Join Crown & Ash")
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .default_width(420.0)
+        .resizable(false)
+        .collapsible(false)
+        .show(ctx, |ui| {
+            ui.heading("Enter the Realm");
+            ui.separator();
+
+            // ── OAuth2 Device Login ──
+            if !join_state.manual_mode {
+                match &join_state.device_login {
+                    DeviceLoginPhase::Idle => {
+                        ui.add_space(8.0);
+                        if ui.add(egui::Button::new(
+                            egui::RichText::new("Login with Quillon Wallet")
+                                .size(16.0)
+                                .strong()
+                        ).min_size(egui::vec2(380.0, 36.0))).clicked() {
+                            // Start device-login request.
+                            join_state.device_login = DeviceLoginPhase::Requesting;
+                            let base_url = config.server_url.clone();
+                            let slot = Arc::clone(&join_state.device_login_pending);
+
+                            IoTaskPool::get()
+                                .spawn(async move {
+                                    let client = reqwest::Client::new();
+                                    let url = format!("{}/api/v1/miner/device-login", base_url);
+                                    let result = request_device_login(&client, &url, slot.clone()).await;
+                                    if let Ok(mut lock) = slot.lock() {
+                                        *lock = Some(result);
+                                    }
+                                })
+                                .detach();
+                        }
+                        ui.add_space(4.0);
+                        ui.label("Sign in with your browser — no password entered here.");
+                    }
+
+                    DeviceLoginPhase::Requesting => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Requesting login code...");
+                        });
+                    }
+
+                    DeviceLoginPhase::WaitingForApproval { device_code, verification_url } => {
+                        ui.add_space(4.0);
+                        ui.label("Open this URL in your browser:");
+                        ui.add_space(4.0);
+
+                        // Clickable link.
+                        let link = egui::RichText::new(verification_url.as_str())
+                            .color(egui::Color32::from_rgb(100, 180, 255))
+                            .underline();
+                        if ui.add(egui::Label::new(link).sense(egui::Sense::click())).clicked() {
+                            let _ = open::that(verification_url);
+                        }
+
+                        ui.add_space(8.0);
+                        ui.label(format!("Code: {}", device_code));
+                        ui.add_space(8.0);
+
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Waiting for approval...");
+                        });
+
+                        // Open browser button.
+                        if ui.button("Open Browser").clicked() {
+                            let _ = open::that(verification_url);
+                        }
+                    }
+
+                    DeviceLoginPhase::Complete { wallet_address } => {
+                        ui.colored_label(
+                            egui::Color32::GREEN,
+                            format!("Logged in: {}", &wallet_address[..wallet_address.len().min(20)]),
+                        );
+                    }
+
+                    DeviceLoginPhase::Error(msg) => {
+                        ui.colored_label(egui::Color32::RED, format!("Login error: {}", msg));
+                        if ui.button("Retry").clicked() {
+                            join_state.device_login = DeviceLoginPhase::Idle;
+                        }
+                    }
+                }
+
+                ui.add_space(4.0);
+                if ui.small_button("Enter wallet manually instead").clicked() {
+                    join_state.manual_mode = true;
+                }
+            } else {
+                // ── Manual wallet input (fallback) ──
+                ui.label("Wallet address:");
+                ui.text_edit_singleline(&mut join_state.wallet_input);
+                ui.add_space(4.0);
+                if ui.small_button("Use Quillon Wallet login instead").clicked() {
+                    join_state.manual_mode = false;
+                }
+            }
+
+            ui.add_space(8.0);
+
+            // ── Faction picker ──
+            let Some(ref world) = game_state.world else {
+                ui.label("Waiting for world data...");
+                return;
+            };
+
+            let wallet_ready = !join_state.wallet_input.is_empty()
+                || matches!(join_state.device_login, DeviceLoginPhase::Complete { .. });
+
+            if wallet_ready {
+                ui.separator();
+                ui.label("Choose your faction:");
+                ui.add_space(4.0);
+
+                for faction in &world.factions {
+                    if !faction.alive {
+                        continue;
+                    }
+                    let claimed = faction.player_wallet.is_some();
+                    let is_selected = join_state.selected_faction == faction.id;
+
+                    let [r, g, b] = faction.color_rgb;
+                    let chip = egui::Color32::from_rgb(r, g, b);
+
+                    ui.horizontal(|ui| {
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::vec2(14.0, 14.0),
+                            egui::Sense::hover(),
+                        );
+                        ui.painter().circle_filled(rect.center(), 6.0, chip);
+
+                        let label_text = if claimed {
+                            format!("{} (taken)", faction.name)
+                        } else {
+                            faction.name.clone()
+                        };
+
+                        let rich = if is_selected && !claimed {
+                            egui::RichText::new(label_text).strong().color(egui::Color32::WHITE)
+                        } else if claimed {
+                            egui::RichText::new(label_text).color(egui::Color32::GRAY).strikethrough()
+                        } else {
+                            egui::RichText::new(label_text)
+                        };
+
+                        let resp = ui.add(egui::Label::new(rich).sense(egui::Sense::click()));
+                        if resp.clicked() && !claimed {
+                            join_state.selected_faction = faction.id;
+                        }
+                    });
+
+                    if is_selected && !claimed {
+                        let prov_count = world.provinces.iter()
+                            .filter(|p| p.controller == faction.id)
+                            .count();
+                        ui.indent(faction.id as usize + 100, |ui| {
+                            ui.label(format!("  {} provinces, {:?} culture, {:?} religion",
+                                prov_count, faction.culture, faction.religion));
+                        });
+                    }
+                }
+
+                ui.add_space(12.0);
+                ui.separator();
+
+                // Join button.
+                let can_join = !join_state.wallet_input.is_empty() && !join_state.joining;
+                ui.add_enabled_ui(can_join, |ui| {
+                    if ui.button(egui::RichText::new("Join Game").size(15.0).strong()).clicked() {
+                        let url = format!("{}/api/v1/crown-ash/join", config.server_url);
+                        let body = serde_json::json!({
+                            "wallet": join_state.wallet_input,
+                            "faction": join_state.selected_faction
+                        });
+                        let slot = Arc::clone(&join_state.pending);
+                        join_state.joining = true;
+                        join_state.join_result = None;
+
+                        IoTaskPool::get()
+                            .spawn(async move {
+                                let client = reqwest::Client::new();
+                                let result = match client.post(&url).json(&body).send().await {
+                                    Ok(resp) => {
+                                        if resp.status().is_success() {
+                                            Ok("Welcome to Crown & Ash!".to_string())
+                                        } else {
+                                            let body = resp.text().await.unwrap_or_default();
+                                            Err(format!("Join failed: {}", body))
+                                        }
+                                    }
+                                    Err(e) => Err(format!("Network error: {}", e)),
+                                };
+                                if let Ok(mut lock) = slot.lock() {
+                                    *lock = Some(result);
+                                }
+                            })
+                            .detach();
+                    }
+                });
+            }
+
+            // Observer mode — always available.
+            if ui.button("Watch as Observer").clicked() {
+                join_state.joined = true;
+                join_state.join_result = Some("Observing".to_string());
+            }
+
+            if join_state.joining {
+                ui.spinner();
+            }
+            if let Some(ref msg) = join_state.join_result {
+                ui.colored_label(
+                    if join_state.joined { egui::Color32::GREEN } else { egui::Color32::RED },
+                    msg,
+                );
+            }
+        });
+}
+
+// ---------------------------------------------------------------------------
+// OAuth2 device-login helper functions
+// ---------------------------------------------------------------------------
+
+/// Request a device login code, then poll until the user approves in their browser.
+///
+/// Flow:
+/// 1. POST /api/v1/miner/device-login → get device_code + verification_url
+/// 2. Open browser to verification_url
+/// 3. Write WaitingForApproval phase to slot (UI shows URL + code)
+/// 4. Poll GET /api/v1/miner/device-login/{code} every 3s
+/// 5. When status=complete → return Complete { wallet_address }
+async fn request_device_login(
+    client: &reqwest::Client,
+    url: &str,
+    slot: Arc<Mutex<Option<Result<DeviceLoginPhase, String>>>>,
+) -> Result<DeviceLoginPhase, String> {
+    // Step 1: Request device code.
+    let resp = client.post(url)
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Server error: {}", resp.status()));
+    }
+
+    let val: serde_json::Value = resp.json()
+        .await
+        .map_err(|e| format!("JSON error: {e}"))?;
+
+    let device_code = val.get("device_code")
+        .or_else(|| val.get("data").and_then(|d| d.get("device_code")))
+        .and_then(|v| v.as_str())
+        .ok_or("Missing device_code in response")?
+        .to_string();
+
+    let verification_url = val.get("verification_url")
+        .or_else(|| val.get("data").and_then(|d| d.get("verification_url")))
+        .and_then(|v| v.as_str())
+        .unwrap_or("https://quillon.xyz/miner-login")
+        .to_string();
+
+    let verification_url = if verification_url.contains('?') {
+        verification_url
+    } else {
+        format!("{}?code={}", verification_url, device_code)
+    };
+
+    // Step 2: Open browser automatically.
+    let _ = open::that(&verification_url);
+
+    // Step 3: Push WaitingForApproval phase to UI.
+    let waiting_phase = DeviceLoginPhase::WaitingForApproval {
+        device_code: device_code.clone(),
+        verification_url: verification_url.clone(),
+    };
+    if let Ok(mut lock) = slot.lock() {
+        *lock = Some(Ok(waiting_phase));
+    }
+
+    // Step 4: Poll for completion (up to 10 minutes).
+    let poll_url = format!("{}/{}", url, device_code);
+    for _ in 0..200 {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+        let resp = match client.get(&poll_url).send().await {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        if !resp.status().is_success() {
+            continue;
+        }
+
+        let val: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let status = val.get("status")
+            .or_else(|| val.get("data").and_then(|d| d.get("status")))
+            .and_then(|v| v.as_str())
+            .unwrap_or("pending");
+
+        if status == "complete" || status == "approved" {
+            let wallet = val.get("wallet_address")
+                .or_else(|| val.get("data").and_then(|d| d.get("wallet_address")))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            if !wallet.is_empty() {
+                return Ok(DeviceLoginPhase::Complete { wallet_address: wallet });
+            }
+        }
+    }
+
+    Err("Device login expired (10 min timeout)".into())
+}
+
+// ---------------------------------------------------------------------------
+// Keyboard shortcuts
+// ---------------------------------------------------------------------------
+
+pub fn keyboard_shortcuts(
+    keys: Res<ButtonInput<KeyCode>>,
+    game_state: Res<ClientGameState>,
+    mut selection: ResMut<Selection>,
+) {
+    // ESC — clear all selection.
+    if keys.just_pressed(KeyCode::Escape) {
+        selection.province = None;
+        selection.faction = None;
+        selection.character = None;
+        selection.army = None;
+    }
+
+    // Tab — cycle to next alive faction and select its first province.
+    if keys.just_pressed(KeyCode::Tab) {
+        let Some(ref world) = game_state.world else {
+            return;
+        };
+
+        let alive: Vec<u8> = world.factions.iter()
+            .filter(|f| f.alive)
+            .map(|f| f.id)
+            .collect();
+
+        if alive.is_empty() {
+            return;
+        }
+
+        let current = selection.faction.unwrap_or(255);
+        let next = alive.iter()
+            .find(|&&id| id > current)
+            .or_else(|| alive.first())
+            .copied()
+            .unwrap_or(0);
+
+        selection.faction = Some(next);
+        if let Some(prov) = world.provinces.iter().find(|p| p.controller == next) {
+            selection.province = Some(prov.id);
+        }
+        selection.army = None;
+    }
+
+    // Number keys 1-7 — direct faction select.
+    let number_keys = [
+        (KeyCode::Digit1, 0u8),
+        (KeyCode::Digit2, 1),
+        (KeyCode::Digit3, 2),
+        (KeyCode::Digit4, 3),
+        (KeyCode::Digit5, 4),
+        (KeyCode::Digit6, 5),
+        (KeyCode::Digit7, 6),
+    ];
+
+    for (key, faction_id) in number_keys {
+        if keys.just_pressed(key) {
+            let Some(ref world) = game_state.world else {
+                return;
+            };
+            if world.factions.iter().any(|f| f.id == faction_id && f.alive) {
+                selection.faction = Some(faction_id);
+                if let Some(prov) = world.provinces.iter().find(|p| p.controller == faction_id) {
+                    selection.province = Some(prov.id);
+                }
+                selection.army = None;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dialog speech bubbles — floating overlay for Tier 2/3 LLM-generated text
+// ---------------------------------------------------------------------------
+
+/// System: renders floating speech bubbles for LLM-generated dialog and
+/// narrative text.  Bubbles auto-dismiss after a timer (8s for dialog,
+/// 12s for epic narrative).  Stacked vertically from the top-right.
+pub fn dialog_bubbles(
+    mut contexts: EguiContexts,
+    mut dialog: ResMut<DialogState>,
+    time: Res<Time>,
+) {
+    // Tick timers and remove expired bubbles.
+    dialog.tick(time.delta_secs());
+
+    if dialog.bubbles.is_empty() {
+        return;
+    }
+
+    let ctx = contexts.ctx_mut();
+
+    for (i, bubble) in dialog.bubbles.iter().enumerate() {
+        // Stack bubbles vertically from the top of the viewport, offset right.
+        let y_offset = 50.0 + i as f32 * 120.0;
+
+        // Fade out in the last 1.5 seconds.
+        let alpha = if bubble.timer < 1.5 {
+            (bubble.timer / 1.5).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+
+        // Tier-based styling.
+        let (bg_color, border_color, speaker_color) = match bubble.tier {
+            3 => (
+                // Epic: dark gold background
+                egui::Color32::from_rgba_unmultiplied(40, 30, 10, (220.0 * alpha) as u8),
+                egui::Color32::from_rgba_unmultiplied(255, 200, 50, (200.0 * alpha) as u8),
+                egui::Color32::from_rgba_unmultiplied(255, 200, 50, (255.0 * alpha) as u8),
+            ),
+            _ => (
+                // Dialog: dark blue-grey background
+                egui::Color32::from_rgba_unmultiplied(25, 30, 45, (220.0 * alpha) as u8),
+                egui::Color32::from_rgba_unmultiplied(140, 170, 220, (180.0 * alpha) as u8),
+                egui::Color32::from_rgba_unmultiplied(180, 200, 255, (255.0 * alpha) as u8),
+            ),
+        };
+
+        let text_color = egui::Color32::from_rgba_unmultiplied(
+            220, 220, 220, (255.0 * alpha) as u8,
+        );
+
+        let window_id = format!("dialog_bubble_{}", i);
+        egui::Window::new("")
+            .id(egui::Id::new(&window_id))
+            .anchor(egui::Align2::RIGHT_TOP, [-20.0, y_offset])
+            .fixed_size([320.0, 0.0])
+            .title_bar(false)
+            .resizable(false)
+            .frame(egui::Frame::new()
+                .fill(bg_color)
+                .stroke(egui::Stroke::new(1.5, border_color))
+                .corner_radius(8.0)
+                .inner_margin(10.0))
+            .show(ctx, |ui| {
+                // Speaker name with a speech marker.
+                let speaker_label = if bubble.tier == 3 {
+                    format!("~ {} ~", bubble.speaker)
+                } else {
+                    format!("{} says:", bubble.speaker)
+                };
+                ui.label(
+                    egui::RichText::new(speaker_label)
+                        .strong()
+                        .size(13.0)
+                        .color(speaker_color),
+                );
+                ui.add_space(4.0);
+
+                // Dialog text (italic for epic, normal for dialog).
+                let text_rich = if bubble.tier == 3 {
+                    egui::RichText::new(&bubble.text)
+                        .italics()
+                        .size(12.0)
+                        .color(text_color)
+                } else {
+                    egui::RichText::new(format!("\"{}\"", bubble.text))
+                        .size(12.0)
+                        .color(text_color)
+                };
+                ui.label(text_rich);
+
+                // Thin progress bar showing remaining time.
+                let max_time = if bubble.tier == 3 { 12.0 } else { 8.0 };
+                let fraction = (bubble.timer / max_time).clamp(0.0, 1.0);
+                let bar = egui::ProgressBar::new(fraction)
+                    .desired_width(ui.available_width());
+                ui.add_space(4.0);
+                ui.add(bar);
+            });
+    }
 }
 
 // ---------------------------------------------------------------------------

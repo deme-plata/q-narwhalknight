@@ -38,6 +38,7 @@ use crown_ash_types::GameEvent;
 use crate::resources::{
     config::CrownAshConfig,
     game_state::{ApiResponse, ClientGameState, ConnectionStatus, WorldSnapshot},
+    narrative_state::DialogState,
     selection::Selection,
 };
 
@@ -55,6 +56,7 @@ impl Plugin for CrownAshNetworkPlugin {
             .init_resource::<CrownAshConfig>()
             .init_resource::<Selection>()
             .init_resource::<NetworkState>()
+            .init_resource::<DialogState>()
             .add_systems(Startup, setup_network)
             .add_systems(Update, drain_updates);
     }
@@ -72,6 +74,13 @@ enum NetMessage {
     Connected,
     /// Network error (SSE disconnect, REST failure, etc.).
     Error(String),
+    /// Tier 2/3 narrative dialog received via SSE.
+    NarrativeDialog {
+        tier: u8,
+        speaker: String,
+        text: String,
+        turn: u32,
+    },
 }
 
 // ─── Internal State ──────────────────────────────────────────────────────────
@@ -117,8 +126,12 @@ fn setup_network(config: Res<CrownAshConfig>, net: Res<NetworkState>) {
         .expect("Failed to spawn Crown & Ash network thread");
 }
 
-/// Per-frame system: drains the mailbox and updates [`ClientGameState`].
-fn drain_updates(net: ResMut<NetworkState>, mut game_state: ResMut<ClientGameState>) {
+/// Per-frame system: drains the mailbox and updates [`ClientGameState`] and [`DialogState`].
+fn drain_updates(
+    net: ResMut<NetworkState>,
+    mut game_state: ResMut<ClientGameState>,
+    mut dialog_state: ResMut<DialogState>,
+) {
     let Ok(mut lock) = net.mailbox.try_lock() else {
         return;
     };
@@ -147,6 +160,9 @@ fn drain_updates(net: ResMut<NetworkState>, mut game_state: ResMut<ClientGameSta
                 if !matches!(game_state.connection, ConnectionStatus::Connected) {
                     game_state.connection = ConnectionStatus::Error(e);
                 }
+            }
+            NetMessage::NarrativeDialog { tier, speaker, text, turn } => {
+                dialog_state.push_dialog(speaker, text, tier, turn);
             }
         }
     }
@@ -216,7 +232,7 @@ async fn consume_sse(
     mailbox: &Arc<Mutex<VecDeque<NetMessage>>>,
     sse_flag: &Arc<AtomicBool>,
 ) -> Result<(), String> {
-    let url = format!("{}/crown-ash/stream", server_url);
+    let url = format!("{}/api/v1/crown-ash/stream", server_url);
 
     // SSE connections are long-lived — no timeout on the client.
     let sse_client = reqwest::Client::builder()
@@ -306,7 +322,59 @@ async fn handle_sse_event(
             }
         }
 
-        // "crown_ash_heartbeat", "crown_ash_player_joined", "crown_ash_world_init"
+        "crown_ash_dialog" => {
+            // Tier 2 dialog: {"event_type":"crown_ash_dialog","tier":2,"turn":42,
+            //   "speaker":"King Aldric","text":"Victory!","generation_type":"short_dialog"}
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&event.data) {
+                let speaker = val.get("speaker")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Unknown")
+                    .to_string();
+                let text = val.get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let tier = val.get("tier")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(2) as u8;
+                let turn = val.get("turn")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32;
+
+                if !text.is_empty() {
+                    push(mailbox, NetMessage::NarrativeDialog { tier, speaker, text, turn });
+                }
+            }
+        }
+
+        "crown_ash_epic" => {
+            // Tier 3 deep narrative: {"event_type":"crown_ash_epic","tier":3,"turn":42,
+            //   "text":"The dawn broke crimson...","generation_type":"battle_epic"}
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&event.data) {
+                let text = val.get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let tier = val.get("tier")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(3) as u8;
+                let turn = val.get("turn")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32;
+
+                if !text.is_empty() {
+                    push(mailbox, NetMessage::NarrativeDialog {
+                        tier,
+                        speaker: "Narrator".to_string(),
+                        text,
+                        turn,
+                    });
+                }
+            }
+        }
+
+        // "crown_ash_heartbeat", "crown_ash_player_joined", "crown_ash_world_init",
+        // "crown_ash_prose", "crown_ash_token"
         _ => {}
     }
 }
@@ -318,7 +386,7 @@ async fn fetch_world_with_client(
     client: &reqwest::Client,
     server_url: &str,
 ) -> Result<WorldSnapshot, String> {
-    let url = format!("{}/crown-ash/world", server_url);
+    let url = format!("{}/api/v1/crown-ash/world", server_url);
     let resp = client
         .get(&url)
         .send()

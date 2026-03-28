@@ -1,7 +1,11 @@
 //! Action submission system — player action buttons that POST to the server.
 //!
-//! Renders action buttons in an egui side panel (within the detail panel context)
-//! and sends actions to the server via HTTP POST when clicked.
+//! Renders action buttons in an egui window (bottom-left) organized by category:
+//! - **Province**: Raise Army, Build Improvement, Set Tax, Trade Routes, Convert
+//! - **Army**: Move, Disband (when army is selected)
+//! - **Diplomacy**: Declare War, Propose Treaty, Accept Treaty
+//! - **Characters**: Assign Councilor, Designate Heir, Arrange Marriage
+//! - **Intrigue**: Launch Plot, Back Plot, Investigate
 
 use bevy::prelude::*;
 use bevy::tasks::IoTaskPool;
@@ -25,6 +29,8 @@ pub struct ActionState {
     pub submitting: bool,
     /// Shared slot for async result delivery.
     pending: Arc<Mutex<Option<ActionResult>>>,
+    /// Tax slider value (0..100, mapped to FixedPoint 0..1000).
+    pub tax_slider: f32,
 }
 
 impl Default for ActionState {
@@ -33,6 +39,7 @@ impl Default for ActionState {
             last_result: None,
             submitting: false,
             pending: Arc::new(Mutex::new(None)),
+            tax_slider: 20.0,
         }
     }
 }
@@ -58,7 +65,7 @@ pub fn action_buttons(
     let pending_clone = Arc::clone(&action_state.pending);
     if let Ok(mut lock) = pending_clone.try_lock() {
         if let Some(result) = lock.take() {
-            drop(lock); // release mutex before mutating action_state
+            drop(lock);
             action_state.submitting = false;
             action_state.last_result = Some(result);
         }
@@ -68,7 +75,7 @@ pub fn action_buttons(
 
     egui::Window::new("Actions")
         .anchor(egui::Align2::LEFT_BOTTOM, [10.0, -170.0])
-        .default_width(220.0)
+        .default_width(240.0)
         .resizable(false)
         .collapsible(true)
         .show(ctx, |ui| {
@@ -79,39 +86,64 @@ pub fn action_buttons(
 
             let disabled = action_state.submitting;
 
-            // --- Province actions (when a province is selected) ---
+            // ═══════════════════════════════════════════════════════
+            // Province Actions (when a province is selected)
+            // ═══════════════════════════════════════════════════════
             if let Some(pid) = selection.province {
-                ui.heading(format!("Province #{}", pid));
+                let prov_name = world.provinces.iter()
+                    .find(|p| p.id == pid)
+                    .map(|p| p.name.as_str())
+                    .unwrap_or("?");
+                ui.heading(format!("{} ({})", prov_name, pid));
                 ui.separator();
 
                 // Raise Army
                 ui.add_enabled_ui(!disabled, |ui| {
                     if ui.button("Raise Army").clicked() {
-                        let body = serde_json::json!({
+                        fire_action(&config.server_url, serde_json::json!({
                             "action": { "RaiseArmy": { "province": pid } }
-                        });
-                        fire_action(&config.server_url, body, &mut action_state);
+                        }), &mut action_state);
                     }
                 });
 
-                // Build Improvement (show a few common ones)
+                // Build Improvement
                 ui.collapsing("Build Improvement", |ui| {
-                    for imp in &["Market", "Temple", "Farmstead", "Mine", "Port", "Lumbercamp", "Quarry", "Stables", "Walls"] {
+                    for imp in &[
+                        "Market", "Temple", "Farmstead", "Mine", "Port",
+                        "Lumbercamp", "Quarry", "Stables", "Walls",
+                    ] {
                         ui.add_enabled_ui(!disabled, |ui| {
                             if ui.button(*imp).clicked() {
-                                let body = serde_json::json!({
+                                fire_action(&config.server_url, serde_json::json!({
                                     "action": { "BuildImprovement": {
                                         "province": pid,
                                         "improvement": imp
                                     }}
-                                });
-                                fire_action(&config.server_url, body, &mut action_state);
+                                }), &mut action_state);
                             }
                         });
                     }
                 });
 
-                // Establish Trade Route (to neighbors)
+                // Set Tax Rate
+                ui.collapsing("Set Tax Rate", |ui| {
+                    ui.add(egui::Slider::new(&mut action_state.tax_slider, 0.0..=100.0)
+                        .suffix("%")
+                        .text("Tax"));
+                    ui.add_enabled_ui(!disabled, |ui| {
+                        if ui.button("Apply Tax Rate").clicked() {
+                            let rate = (action_state.tax_slider * 10.0) as i32; // 0..1000
+                            fire_action(&config.server_url, serde_json::json!({
+                                "action": { "SetTaxRate": {
+                                    "province": pid,
+                                    "rate": rate
+                                }}
+                            }), &mut action_state);
+                        }
+                    });
+                });
+
+                // Trade Routes
                 if let Some(prov) = world.provinces.iter().find(|p| p.id == pid) {
                     ui.collapsing("Trade Route to...", |ui| {
                         for &neighbor in &prov.neighbors {
@@ -121,21 +153,96 @@ pub fn action_buttons(
                                 .unwrap_or("?");
                             ui.add_enabled_ui(!disabled, |ui| {
                                 if ui.button(format!("{} ({})", label, neighbor)).clicked() {
-                                    let body = serde_json::json!({
+                                    fire_action(&config.server_url, serde_json::json!({
                                         "action": { "EstablishTradeRoute": {
                                             "from": pid,
                                             "to": neighbor
                                         }}
-                                    });
-                                    fire_action(&config.server_url, body, &mut action_state);
+                                    }), &mut action_state);
                                 }
                             });
                         }
                     });
                 }
+
+                // Convert Province (religion)
+                ui.collapsing("Convert Religion", |ui| {
+                    for religion in &[
+                        "EmberFaith", "FrostCult", "OldGods", "SaltMysticism",
+                        "ShadowCrescent", "SteppeSpirits",
+                    ] {
+                        ui.add_enabled_ui(!disabled, |ui| {
+                            if ui.button(*religion).clicked() {
+                                fire_action(&config.server_url, serde_json::json!({
+                                    "action": { "ConvertProvince": {
+                                        "province": pid,
+                                        "religion": religion
+                                    }}
+                                }), &mut action_state);
+                            }
+                        });
+                    }
+                });
+
+                // ═══════════════════════════════════════════════════
+                // Army Actions (armies in the selected province)
+                // ═══════════════════════════════════════════════════
+                let armies_here: Vec<_> = world.armies.iter()
+                    .filter(|a| a.location == pid)
+                    .collect();
+
+                if !armies_here.is_empty() {
+                    ui.separator();
+                    ui.heading("Armies");
+
+                    for army in &armies_here {
+                        let owner_name = world.factions.iter()
+                            .find(|f| f.id == army.owner_faction)
+                            .map(|f| f.name.as_str())
+                            .unwrap_or("?");
+                        let total = army.troops.levy + army.troops.men_at_arms + army.troops.knights as u32;
+
+                        ui.collapsing(format!("Army #{} [{}] ({})", army.id, owner_name, total), |ui| {
+                            ui.label(format!("Levy: {} MaA: {} Knights: {}",
+                                army.troops.levy, army.troops.men_at_arms, army.troops.knights));
+
+                            // Move Army — show neighbor provinces
+                            if let Some(prov) = world.provinces.iter().find(|p| p.id == pid) {
+                                ui.label("Move to:");
+                                for &neighbor in &prov.neighbors {
+                                    let dest_name = world.provinces.iter()
+                                        .find(|p| p.id == neighbor)
+                                        .map(|p| p.name.as_str())
+                                        .unwrap_or("?");
+                                    ui.add_enabled_ui(!disabled, |ui| {
+                                        if ui.button(format!("  {} ({})", dest_name, neighbor)).clicked() {
+                                            fire_action(&config.server_url, serde_json::json!({
+                                                "action": { "MoveArmy": {
+                                                    "army": army.id,
+                                                    "target": neighbor
+                                                }}
+                                            }), &mut action_state);
+                                        }
+                                    });
+                                }
+                            }
+
+                            // Disband Army
+                            ui.add_enabled_ui(!disabled, |ui| {
+                                if ui.button("Disband").clicked() {
+                                    fire_action(&config.server_url, serde_json::json!({
+                                        "action": { "DisbandArmy": { "army": army.id } }
+                                    }), &mut action_state);
+                                }
+                            });
+                        });
+                    }
+                }
             }
 
-            // --- Diplomacy actions ---
+            // ═══════════════════════════════════════════════════════
+            // Diplomacy
+            // ═══════════════════════════════════════════════════════
             ui.separator();
             ui.heading("Diplomacy");
 
@@ -144,38 +251,175 @@ pub fn action_buttons(
                 .collect();
 
             ui.collapsing("Declare War", |ui| {
-                for f in &alive_factions {
-                    ui.add_enabled_ui(!disabled, |ui| {
-                        if ui.button(format!("{} ({})", f.name, f.id)).clicked() {
-                            let body = serde_json::json!({
-                                "action": { "DeclareWar": {
-                                    "target": f.id,
-                                    "casus_belli": "Conquest"
-                                }}
+                for casus in &["Conquest", "HolyWar", "Reconquest", "Insult"] {
+                    ui.collapsing(format!("CB: {}", casus), |ui| {
+                        for f in &alive_factions {
+                            ui.add_enabled_ui(!disabled, |ui| {
+                                if ui.button(format!("{} ({})", f.name, f.id)).clicked() {
+                                    fire_action(&config.server_url, serde_json::json!({
+                                        "action": { "DeclareWar": {
+                                            "target": f.id,
+                                            "casus_belli": casus
+                                        }}
+                                    }), &mut action_state);
+                                }
                             });
-                            fire_action(&config.server_url, body, &mut action_state);
                         }
                     });
                 }
             });
 
-            ui.collapsing("Propose Peace", |ui| {
-                for f in &alive_factions {
-                    ui.add_enabled_ui(!disabled, |ui| {
-                        if ui.button(format!("{} ({})", f.name, f.id)).clicked() {
-                            let body = serde_json::json!({
-                                "action": { "ProposeTreaty": {
-                                    "target": f.id,
-                                    "treaty": "WhitePeace"
-                                }}
+            ui.collapsing("Propose Treaty", |ui| {
+                for treaty in &[
+                    "WhitePeace", "NonAggression", "DefensiveAlliance",
+                    "TradeAgreement", "Marriage", "Surrender",
+                ] {
+                    ui.collapsing(format!("{}", treaty), |ui| {
+                        for f in &alive_factions {
+                            ui.add_enabled_ui(!disabled, |ui| {
+                                if ui.button(format!("{} ({})", f.name, f.id)).clicked() {
+                                    fire_action(&config.server_url, serde_json::json!({
+                                        "action": { "ProposeTreaty": {
+                                            "target": f.id,
+                                            "treaty": treaty
+                                        }}
+                                    }), &mut action_state);
+                                }
                             });
-                            fire_action(&config.server_url, body, &mut action_state);
                         }
                     });
                 }
             });
 
-            // --- Status feedback ---
+            // ═══════════════════════════════════════════════════════
+            // Characters & Intrigue (when a faction is selected)
+            // ═══════════════════════════════════════════════════════
+            if let Some(fid) = selection.faction {
+                let faction_chars: Vec<_> = world.characters.iter()
+                    .filter(|c| c.faction == fid && c.alive)
+                    .collect();
+
+                if !faction_chars.is_empty() {
+                    ui.separator();
+                    ui.heading("Characters");
+
+                    // Assign Councilor
+                    ui.collapsing("Assign Councilor", |ui| {
+                        for role in &["Marshal", "Chaplain", "Steward", "Spymaster"] {
+                            ui.collapsing(format!("{}", role), |ui| {
+                                for c in &faction_chars {
+                                    ui.add_enabled_ui(!disabled, |ui| {
+                                        if ui.button(format!("{} ({})", c.name, c.id)).clicked() {
+                                            fire_action(&config.server_url, serde_json::json!({
+                                                "action": { "AssignCouncilor": {
+                                                    "character": c.id,
+                                                    "role": role
+                                                }}
+                                            }), &mut action_state);
+                                        }
+                                    });
+                                }
+                            });
+                        }
+                    });
+
+                    // Designate Heir
+                    ui.collapsing("Designate Heir", |ui| {
+                        for c in &faction_chars {
+                            ui.add_enabled_ui(!disabled, |ui| {
+                                if ui.button(format!("{} (age {})", c.name, c.age)).clicked() {
+                                    fire_action(&config.server_url, serde_json::json!({
+                                        "action": { "DesignateHeir": {
+                                            "character": c.id
+                                        }}
+                                    }), &mut action_state);
+                                }
+                            });
+                        }
+                    });
+
+                    // Arrange Marriage
+                    ui.collapsing("Arrange Marriage", |ui| {
+                        // Show all living characters across all factions as potential partners.
+                        let all_chars: Vec<_> = world.characters.iter()
+                            .filter(|c| c.alive)
+                            .collect();
+                        for own in &faction_chars {
+                            ui.collapsing(format!("{}", own.name), |ui| {
+                                for partner in &all_chars {
+                                    if partner.id == own.id || partner.faction == fid {
+                                        continue;
+                                    }
+                                    let partner_faction = world.factions.iter()
+                                        .find(|f| f.id == partner.faction)
+                                        .map(|f| f.name.as_str())
+                                        .unwrap_or("?");
+                                    ui.add_enabled_ui(!disabled, |ui| {
+                                        if ui.button(format!("{} [{}]", partner.name, partner_faction)).clicked() {
+                                            fire_action(&config.server_url, serde_json::json!({
+                                                "action": { "ArrangeMarriage": {
+                                                    "a": own.id,
+                                                    "b": partner.id
+                                                }}
+                                            }), &mut action_state);
+                                        }
+                                    });
+                                }
+                            });
+                        }
+                    });
+
+                    // Intrigue — Launch Plot
+                    ui.separator();
+                    ui.heading("Intrigue");
+
+                    ui.collapsing("Launch Plot", |ui| {
+                        for plot_type in &["Assassination", "Abduction", "Sabotage", "Scandal"] {
+                            ui.collapsing(format!("{}", plot_type), |ui| {
+                                // Targets: characters in other factions
+                                let targets: Vec<_> = world.characters.iter()
+                                    .filter(|c| c.alive && c.faction != fid)
+                                    .collect();
+                                for target in &targets {
+                                    let tfaction = world.factions.iter()
+                                        .find(|f| f.id == target.faction)
+                                        .map(|f| f.name.as_str())
+                                        .unwrap_or("?");
+                                    ui.add_enabled_ui(!disabled, |ui| {
+                                        if ui.button(format!("{} [{}]", target.name, tfaction)).clicked() {
+                                            fire_action(&config.server_url, serde_json::json!({
+                                                "action": { "LaunchPlot": {
+                                                    "target": target.id,
+                                                    "plot_type": plot_type
+                                                }}
+                                            }), &mut action_state);
+                                        }
+                                    });
+                                }
+                            });
+                        }
+                    });
+
+                    // Investigate Plots (use spymaster)
+                    ui.collapsing("Investigate Plots", |ui| {
+                        for c in &faction_chars {
+                            ui.add_enabled_ui(!disabled, |ui| {
+                                if ui.button(format!("Send {} to investigate", c.name)).clicked() {
+                                    fire_action(&config.server_url, serde_json::json!({
+                                        "action": { "InvestigatePlot": {
+                                            "spymaster": c.id
+                                        }}
+                                    }), &mut action_state);
+                                }
+                            });
+                        }
+                    });
+                }
+            }
+
+            // ═══════════════════════════════════════════════════════
+            // Status feedback
+            // ═══════════════════════════════════════════════════════
             ui.separator();
             if action_state.submitting {
                 ui.spinner();
@@ -225,7 +469,9 @@ async fn post_action(url: &str, body: serde_json::Value) -> ActionResult {
             if resp.status().is_success() {
                 ActionResult::Success("Action submitted".to_string())
             } else {
-                ActionResult::Error(format!("Server error: {}", resp.status()))
+                let status = resp.status();
+                let body_text = resp.text().await.unwrap_or_default();
+                ActionResult::Error(format!("Server {}: {}", status, body_text))
             }
         }
         Err(e) => ActionResult::Error(format!("Network error: {}", e)),

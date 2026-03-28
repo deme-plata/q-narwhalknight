@@ -20,6 +20,26 @@
 - **Description**: Added egui minimap window (bottom-right) showing all 25 provinces as colored dots with adjacency lines. Click-to-select provinces on the minimap. Shows faction colors from live game state.
 - **Files**: `crates/crown-ash-client/src/systems/ui_panels.rs`, `crates/crown-ash-client/src/plugins/ui.rs`
 
+### CLIENT-005: Fix URL Path Mismatch (World Data Not Loading)
+- **Status**: ✅ Closed
+- **Priority**: Critical
+- **Found**: v0.3.0 Windows testing — client connects but shows "Waiting for world..."
+- **Root Cause**: Client used `/crown-ash/world` and `/crown-ash/stream` but server mounts at `/api/v1/crown-ash/*`. All 3 REST/SSE/Join URLs missing the `/api/v1` prefix.
+- **Fix**: Updated `fetch_world_with_client()`, `consume_sse()`, and join POST URL to use `/api/v1/crown-ash/*`.
+- **Files**: `crates/crown-ash-client/src/plugins/network.rs` (lines 235, 389), `crates/crown-ash-client/src/systems/ui_panels.rs` (join URL)
+
+### CLIENT-006: OAuth2 Device-Login Integration
+- **Status**: ✅ Closed
+- **Priority**: High
+- **Description**: Replaced raw wallet-address text input in Join dialog with OAuth2 device-login flow (same as miner uses). Player clicks "Login with Quillon Wallet" → browser opens `quillon.xyz/miner-login?code={device_code}` → player authenticates in browser → client auto-receives wallet address via polling. Includes manual wallet fallback mode, auto-browser-open via `open` crate, 10-minute polling timeout, and error/retry UI.
+- **Files**: `crates/crown-ash-client/src/systems/ui_panels.rs` (JoinState, DeviceLoginPhase, join_dialog, request_device_login), `crates/crown-ash-client/Cargo.toml` (added `open = "5"`)
+
+### CLIENT-007: Windows x64 Build Support
+- **Status**: ✅ Closed
+- **Priority**: High
+- **Description**: Cross-compiled Bevy client to Windows x64 via MinGW (`x86_64-pc-windows-gnu`). Binary is 78MB stripped, statically linked (no DLL dependencies beyond Windows system DLLs). DirectX 12 via wgpu. Available at `quillon.xyz/downloads/crown-ash-client-v0.3.0-windows-x64.exe`.
+- **Files**: `.cargo/config.toml` (already had MinGW linker config), `crates/crown-ash-client/Cargo.toml`
+
 ### CLIENT-003: Sound/Music Hooks
 - **Status**: ⚪ Planned
 - **Priority**: Low
@@ -84,7 +104,7 @@
 - **Files**: `crates/crown-ash-narrative/src/dialog.rs`, `crates/crown-ash-narrative/src/personality.rs`
 
 ### NARR-005: Province & Faction History Narratives
-- **Status**: ⚪ Planned
+- **Status**: ✅ Implemented
 - **Priority**: Medium
 - **Description**: Rich history text for provinces and factions:
   - **Province History**: "Ashenmere has changed hands 3 times. Once a prosperous heartland of the Ashen Crown, it was conquered by the Frost Marches in Turn 45, only to fall to the Salt League in Turn 89..."
@@ -93,7 +113,7 @@
 - **Files**: `crates/crown-ash-narrative/src/history.rs`
 
 ### NARR-006: LLM Integration via q-ai-inference
-- **Status**: ⚪ Planned
+- **Status**: ✅ Implemented (Prompt Engine)
 - **Priority**: Medium
 - **Description**: Wire Crown & Ash narrative engine into the existing `q-ai-inference` crate:
   - Feature-gated: `crown-ash-narrative = { features = ["llm"] }` — without the feature, only templates work
@@ -107,7 +127,7 @@
 - **Files**: `crates/crown-ash-narrative/src/llm.rs`, `crates/crown-ash-api/src/handlers.rs`
 
 ### NARR-007: Cascading Text Generation (Nemotron Cascade Pattern)
-- **Status**: ⚪ Planned
+- **Status**: ✅ Implemented (Cascade Engine)
 - **Priority**: Low
 - **Description**: Multi-tier text generation cascade for optimal quality/speed tradeoff:
   ```
@@ -123,6 +143,43 @@
   - War declared, treaty signed, succession → Tier 0 + 1 + 2
   - Epic battle (>500 casualties), realm split, faction eliminated → All 4 tiers
 - **Files**: `crates/crown-ash-narrative/src/cascade.rs`
+
+### NARR-008: Client UI Narrative Integration
+- **Status**: ✅ Implemented
+- **Priority**: High
+- **Description**: Wire the narrative engine into the Bevy client UI:
+  - **Event feed**: Shows Tier 1 template prose instead of raw `format_event()`. Color-coded by importance: gold (Epic), blue (Notable), gray (Minor). Heading changed from "Event Log" to "Chronicle".
+  - **Character Chronicle tab**: Scrollable life history in the detail panel when a character is selected. Shows personality archetype (Tyrant, Saint, Schemer, etc.) derived from traits.
+  - **Province History**: "History" section at bottom of province detail panel showing accumulated event narrative (conquests, battles, plagues, etc.).
+  - **Faction History**: "History" section at bottom of faction detail panel showing faction-level narrative (wars, treaties, conquests, succession crises).
+  - **Narrative Update Systems**: Three Bevy systems (`update_event_narratives`, `update_chronicles`, `update_histories`) process new events incrementally each frame. History regenerates every 5 turns.
+  - **NarrativeState Resource**: Central Bevy resource holding chronicles, event narratives, province/faction histories, and LLM results.
+- **Files**: `crates/crown-ash-client/src/resources/narrative_state.rs`, `crates/crown-ash-client/src/systems/narrative_update.rs`, `crates/crown-ash-client/src/systems/ui_panels.rs`, `crates/crown-ash-client/src/plugins/ui.rs`
+
+### NARR-009: Server-Side Cascade SSE Broadcasting
+- **Status**: ✅ Implemented
+- **Priority**: High
+- **Description**: Server-side integration of the cascade engine into the SSE event system:
+  - New SSE event types: `crown_ash_prose` (Tier 1), `crown_ash_dialog` (Tier 2), `crown_ash_epic` (Tier 3), `crown_ash_token` (streaming)
+  - `broadcast_cascade_narratives()` processes all turn events through the cascade engine, broadcasts Tier 1 prose immediately, returns cascade results for async Tier 2/3 LLM processing
+  - Each SSE event includes `tier` field (0-3) and `importance` field so clients know where to display and how to color-code
+  - Payload builders for all 4 cascade SSE event types with tests
+  - `crown-ash-narrative` crate added as dependency to `crown-ash-api`
+- **Files**: `crates/crown-ash-api/src/events.rs`, `crates/crown-ash-api/Cargo.toml`
+
+### NARR-010: Dialog Speech Bubble UI (Client)
+- **Status**: ✅ Implemented
+- **Priority**: High
+- **Description**: Floating speech bubble overlay system for Tier 2 (dialog) and Tier 3 (epic) LLM-generated narrative text:
+  - `DialogState` resource tracks active bubbles (max 4 visible, oldest evicted)
+  - `DialogBubble` struct: speaker, text, tier, countdown timer, turn
+  - Auto-dismiss: 8s for dialog, 12s for epic narratives, with 1.5s fade-out
+  - Tier-based visual styling: dark blue-grey for dialog (speaker says: "text"), dark gold for epic (~Narrator~ italic text)
+  - Thin progress bar shows remaining time per bubble
+  - Stacked vertically from top-right corner, 120px apart
+  - Network integration: `crown_ash_dialog` and `crown_ash_epic` SSE events parsed in network plugin, delivered via `NetMessage::NarrativeDialog` through the mailbox to `DialogState`
+  - Zero-copy: bubbles rendered directly from `DialogState` each frame, timer ticked with Bevy `Time::delta_secs()`
+- **Files**: `crates/crown-ash-client/src/resources/narrative_state.rs` (DialogBubble, DialogState), `crates/crown-ash-client/src/plugins/network.rs` (SSE handling + drain), `crates/crown-ash-client/src/systems/ui_panels.rs` (dialog_bubbles system), `crates/crown-ash-client/src/plugins/ui.rs` (registration)
 
 ---
 

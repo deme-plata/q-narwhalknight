@@ -5,6 +5,7 @@ use std::f32::consts::PI;
 
 use crate::components::province::ProvinceMarker;
 use crate::components::army::ArmyMarker;
+use crate::components::label::{MovementPath, ProvinceLabel, SelectionRing};
 use crate::resources::game_state::ClientGameState;
 use crate::resources::selection::Selection;
 use crate::systems::camera::MapCamera;
@@ -267,6 +268,49 @@ pub fn setup_map(
         },
         Transform::from_xyz(5.0, 20.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
+
+    // Province name labels — text billboards floating above each hex.
+    let province_names = [
+        "Frosthold", "Winterfell Vale", "Icemere", "Stormwatch",
+        "Goldhaven", "Thornwall", "Ravensgate",
+        "Ashenmere", "Crownspire", "Embervale", "Kingsreach",
+        "Sanctum", "Pyrelight", "Candlekeep",
+        "Saltmere", "Tidehollow", "Coinport", "Warehouse Row",
+        "Shadowmere", "Whispering Cloister", "Veilstone",
+        "Khanstead", "Windbreak", "Dustmane", "Redhorn",
+    ];
+
+    let label_font_size = 11.0;
+    for (i, &(px, pz)) in PROVINCE_POSITIONS.iter().enumerate() {
+        let name = if i < province_names.len() { province_names[i] } else { "?" };
+        commands.spawn((
+            ProvinceLabel { province_id: i as u16 },
+            Text2d::new(name),
+            TextFont {
+                font_size: label_font_size,
+                ..default()
+            },
+            TextColor(Color::srgba(0.9, 0.9, 0.9, 0.85)),
+            // Labels sit above the hex surface, billboard-facing the camera.
+            Transform::from_xyz(px, 0.15, pz - 0.7)
+                .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
+        ));
+    }
+
+    // Selection ring — a wireframe circle that follows the selected province.
+    // Starts invisible; the `update_selection_ring` system positions it.
+    let ring_mesh = meshes.add(build_ring_mesh(HEX_RADIUS + 0.12, 24));
+    let ring_mat = materials.add(StandardMaterial {
+        base_color: Color::srgba(1.0, 1.0, 1.0, 0.9),
+        unlit: true,
+        ..default()
+    });
+    commands.spawn((
+        SelectionRing,
+        Mesh3d(ring_mesh),
+        MeshMaterial3d(ring_mat),
+        Transform::from_xyz(0.0, -100.0, 0.0), // hidden off-screen initially
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -275,6 +319,7 @@ pub fn setup_map(
 
 pub fn update_map_colors(
     game_state: Res<ClientGameState>,
+    selection: Res<Selection>,
     query: Query<(&ProvinceMarker, &MeshMaterial3d<StandardMaterial>)>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -307,7 +352,18 @@ pub fn update_map_colors(
             Terrain::Plains
         };
 
-        let new_color = province_color(faction_rgb, terrain);
+        let mut new_color = province_color(faction_rgb, terrain);
+
+        // Highlight selected province — brighten it significantly.
+        let is_selected = selection.province == Some(pid as u16);
+        if is_selected {
+            let LinearRgba { red, green, blue, .. } = new_color.to_linear();
+            new_color = Color::srgb(
+                (red * 1.6 + 0.15).clamp(0.0, 1.0),
+                (green * 1.6 + 0.15).clamp(0.0, 1.0),
+                (blue * 1.6 + 0.15).clamp(0.0, 1.0),
+            );
+        }
 
         if let Some(mat) = materials.get_mut(mat_handle) {
             mat.base_color = new_color;
@@ -400,6 +456,7 @@ pub fn handle_province_click(
     mouse: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<MapCamera>>,
+    game_state: Res<ClientGameState>,
     mut selection: ResMut<Selection>,
 ) {
     if !mouse.just_pressed(MouseButton::Left) {
@@ -424,19 +481,52 @@ pub fn handle_province_click(
     };
 
     // Find intersection with Y=0 plane.
-    // ray: origin + t * direction, solve for y=0 => t = -origin.y / direction.y
     if ray.direction.y.abs() < 1e-6 {
-        return; // ray is parallel to the plane
+        return;
     }
 
     let t = -ray.origin.y / ray.direction.y;
     if t < 0.0 {
-        return; // intersection is behind the camera
+        return;
     }
 
     let hit = ray.origin + t * *ray.direction;
     let hit_x = hit.x;
     let hit_z = hit.z;
+
+    // Check army click first — army cubes sit at ARMY_Y offset from province centre.
+    // Test if click is near an army icon (smaller hit radius than province hex).
+    if let Some(ref world) = game_state.world {
+        let mut best_army: Option<(u32, f32)> = None;
+        for army in &world.armies {
+            let loc = army.location as usize;
+            if loc >= PROVINCE_POSITIONS.len() {
+                continue;
+            }
+            let (px, pz) = PROVINCE_POSITIONS[loc];
+            let ax = px + ARMY_OFFSET_X;
+            let az = pz + ARMY_OFFSET_Z;
+            let dx = hit_x - ax;
+            let dz = hit_z - az;
+            let dist_sq = dx * dx + dz * dz;
+            // Army cube is 0.4 wide — use ~0.5 radius for click detection.
+            if dist_sq < 0.25 {
+                if best_army.map_or(true, |(_, bd)| dist_sq < bd) {
+                    best_army = Some((army.id, dist_sq));
+                }
+            }
+        }
+
+        if let Some((army_id, _)) = best_army {
+            selection.army = Some(army_id);
+            // Also select the army's province and faction.
+            if let Some(army) = world.armies.iter().find(|a| a.id == army_id) {
+                selection.province = Some(army.location);
+                selection.faction = Some(army.owner_faction);
+            }
+            return;
+        }
+    }
 
     // Find the province closest to the hit point (within HEX_RADIUS).
     let mut best: Option<(u16, f32)> = None;
@@ -453,5 +543,332 @@ pub fn handle_province_click(
 
     if let Some((pid, _)) = best {
         selection.province = Some(pid);
+        selection.army = None; // Clear army selection when clicking a province.
+
+        // Auto-select the controlling faction.
+        if let Some(ref world) = game_state.world {
+            if let Some(prov) = world.provinces.iter().find(|p| p.id == pid) {
+                selection.faction = Some(prov.controller);
+            }
+        }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Update system — move selection ring to the selected province
+// ---------------------------------------------------------------------------
+
+pub fn update_selection_ring(
+    selection: Res<Selection>,
+    mut query: Query<&mut Transform, With<SelectionRing>>,
+) {
+    let Ok(mut tf) = query.get_single_mut() else {
+        return;
+    };
+
+    match selection.province {
+        Some(pid) => {
+            let idx = pid as usize;
+            if idx < PROVINCE_POSITIONS.len() {
+                let (px, pz) = PROVINCE_POSITIONS[idx];
+                tf.translation = Vec3::new(px, 0.05, pz);
+            }
+        }
+        None => {
+            // Hide off-screen when nothing is selected.
+            tf.translation.y = -100.0;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Update system — update province labels from live world data
+// ---------------------------------------------------------------------------
+
+pub fn update_province_labels(
+    game_state: Res<ClientGameState>,
+    mut query: Query<(&ProvinceLabel, &mut Text2d)>,
+) {
+    let Some(ref world) = game_state.world else {
+        return;
+    };
+
+    for (label, mut text) in query.iter_mut() {
+        if let Some(prov) = world.provinces.iter().find(|p| p.id == label.province_id) {
+            // Show name + population as a compact label.
+            let pop = if prov.population >= 1000 {
+                format!("{:.1}K", prov.population as f64 / 1000.0)
+            } else {
+                format!("{}", prov.population)
+            };
+            **text = format!("{}\n{}", prov.name, pop);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Update system — draw army movement path lines
+// ---------------------------------------------------------------------------
+
+/// Height of movement path lines above the hex surface.
+const PATH_Y: f32 = 0.08;
+
+pub fn update_movement_paths(
+    mut commands: Commands,
+    game_state: Res<ClientGameState>,
+    existing: Query<(Entity, &MovementPath)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let Some(ref world) = game_state.world else {
+        // No world data — despawn all movement paths.
+        for (entity, _) in existing.iter() {
+            commands.entity(entity).despawn();
+        }
+        return;
+    };
+
+    // Build set of armies that are currently moving.
+    let moving_armies: std::collections::HashMap<u32, &crown_ash_types::Army> = world
+        .armies
+        .iter()
+        .filter(|a| a.destination.is_some() || !a.movement_queue.is_empty())
+        .map(|a| (a.id, a))
+        .collect();
+
+    // Despawn path entities for armies that are no longer moving or don't exist.
+    for (entity, mp) in existing.iter() {
+        if !moving_armies.contains_key(&mp.army_id) {
+            commands.entity(entity).despawn();
+        }
+    }
+
+    // Collect IDs of path entities we already have.
+    let existing_ids: std::collections::HashSet<u32> =
+        existing.iter().map(|(_, m)| m.army_id).collect();
+
+    // Spawn/update movement path lines.
+    for (&army_id, army) in &moving_armies {
+        if existing_ids.contains(&army_id) {
+            // TODO: could update mesh if path changed, but despawn/respawn is simpler
+            // for now since paths change infrequently (once per turn).
+            continue;
+        }
+
+        // Build the waypoint chain: current location -> destination/queue steps.
+        let mut waypoints: Vec<u16> = vec![army.location];
+        if !army.movement_queue.is_empty() {
+            waypoints.extend_from_slice(&army.movement_queue);
+        } else if let Some(dest) = army.destination {
+            waypoints.push(dest);
+        }
+
+        if waypoints.len() < 2 {
+            continue;
+        }
+
+        // Build a dashed line mesh along the waypoint chain.
+        let mesh = build_path_mesh(&waypoints);
+        let mesh_handle = meshes.add(mesh);
+
+        // Resolve faction colour for the path line (slightly brighter/translucent).
+        let owner = army.owner_faction as usize;
+        let rgb = if owner < world.factions.len() {
+            world.factions[owner].color_rgb
+        } else if owner < DEFAULT_FACTION_COLORS.len() {
+            DEFAULT_FACTION_COLORS[owner]
+        } else {
+            [200, 200, 200]
+        };
+
+        let path_color = Color::srgba(
+            (rgb[0] as f32 / 255.0 * 1.4).min(1.0),
+            (rgb[1] as f32 / 255.0 * 1.4).min(1.0),
+            (rgb[2] as f32 / 255.0 * 1.4).min(1.0),
+            0.8,
+        );
+
+        let mat = materials.add(StandardMaterial {
+            base_color: path_color,
+            unlit: true,
+            ..default()
+        });
+
+        commands.spawn((
+            MovementPath { army_id },
+            Mesh3d(mesh_handle),
+            MeshMaterial3d(mat),
+            Transform::IDENTITY,
+        ));
+    }
+}
+
+/// Build a dashed line-list mesh following the given province waypoints.
+/// Each segment between waypoints is drawn as dashes (short line segments).
+fn build_path_mesh(waypoints: &[u16]) -> Mesh {
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
+
+    let dash_len = 0.3_f32;
+    let gap_len = 0.15_f32;
+
+    for pair in waypoints.windows(2) {
+        let from_idx = pair[0] as usize;
+        let to_idx = pair[1] as usize;
+        if from_idx >= PROVINCE_POSITIONS.len() || to_idx >= PROVINCE_POSITIONS.len() {
+            continue;
+        }
+
+        let (fx, fz) = PROVINCE_POSITIONS[from_idx];
+        let (tx, tz) = PROVINCE_POSITIONS[to_idx];
+
+        let dx = tx - fx;
+        let dz = tz - fz;
+        let total_len = (dx * dx + dz * dz).sqrt();
+        if total_len < 0.01 {
+            continue;
+        }
+
+        let nx = dx / total_len;
+        let nz = dz / total_len;
+
+        // Walk along the segment, emitting dashes.
+        let mut t = 0.0_f32;
+        while t < total_len {
+            let dash_end = (t + dash_len).min(total_len);
+            let x0 = fx + nx * t;
+            let z0 = fz + nz * t;
+            let x1 = fx + nx * dash_end;
+            let z1 = fz + nz * dash_end;
+
+            positions.push([x0, PATH_Y, z0]);
+            positions.push([x1, PATH_Y, z1]);
+            normals.push([0.0, 1.0, 0.0]);
+            normals.push([0.0, 1.0, 0.0]);
+
+            t = dash_end + gap_len;
+        }
+    }
+
+    // Add arrowhead at the final destination.
+    if waypoints.len() >= 2 {
+        let last = *waypoints.last().unwrap() as usize;
+        let prev = waypoints[waypoints.len() - 2] as usize;
+        if last < PROVINCE_POSITIONS.len() && prev < PROVINCE_POSITIONS.len() {
+            let (tx, tz) = PROVINCE_POSITIONS[last];
+            let (fx, fz) = PROVINCE_POSITIONS[prev];
+            let dx = tx - fx;
+            let dz = tz - fz;
+            let len = (dx * dx + dz * dz).sqrt();
+            if len > 0.01 {
+                let nx = dx / len;
+                let nz = dz / len;
+                let arrow_size = 0.3;
+                // Arrowhead point is slightly before the destination centre.
+                let tip_x = tx - nx * 0.2;
+                let tip_z = tz - nz * 0.2;
+                let base_x = tip_x - nx * arrow_size;
+                let base_z = tip_z - nz * arrow_size;
+                // Perpendicular offset for the two wings.
+                let px = -nz * arrow_size * 0.5;
+                let pz = nx * arrow_size * 0.5;
+
+                // Left wing.
+                positions.push([base_x + px, PATH_Y, base_z + pz]);
+                positions.push([tip_x, PATH_Y, tip_z]);
+                normals.push([0.0, 1.0, 0.0]);
+                normals.push([0.0, 1.0, 0.0]);
+
+                // Right wing.
+                positions.push([base_x - px, PATH_Y, base_z - pz]);
+                positions.push([tip_x, PATH_Y, tip_z]);
+                normals.push([0.0, 1.0, 0.0]);
+                normals.push([0.0, 1.0, 0.0]);
+            }
+        }
+    }
+
+    Mesh::new(
+        PrimitiveTopology::LineList,
+        bevy::render::render_asset::RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+}
+
+// ---------------------------------------------------------------------------
+// Update system — smoothly interpolate army positions toward destinations
+// ---------------------------------------------------------------------------
+
+pub fn animate_army_movement(
+    game_state: Res<ClientGameState>,
+    time: Res<Time>,
+    mut query: Query<(&ArmyMarker, &mut Transform)>,
+) {
+    let Some(ref world) = game_state.world else {
+        return;
+    };
+
+    let speed = 2.0_f32; // units per second interpolation speed
+
+    for (marker, mut tf) in query.iter_mut() {
+        let Some(army) = world.armies.iter().find(|a| a.id == marker.army_id) else {
+            continue;
+        };
+
+        // Determine target position — if moving, lerp toward destination.
+        let target_loc = if !army.movement_queue.is_empty() {
+            army.movement_queue[0] as usize
+        } else if let Some(dest) = army.destination {
+            dest as usize
+        } else {
+            army.location as usize
+        };
+
+        if target_loc >= PROVINCE_POSITIONS.len() {
+            continue;
+        }
+
+        let (px, pz) = PROVINCE_POSITIONS[target_loc];
+        let target = Vec3::new(px + ARMY_OFFSET_X, ARMY_Y, pz + ARMY_OFFSET_Z);
+
+        // Smoothly move toward target.
+        let current = tf.translation;
+        let diff = target - current;
+        let dist = diff.length();
+        if dist > 0.05 {
+            let step = (speed * time.delta_secs()).min(dist);
+            tf.translation += diff.normalize() * step;
+        } else {
+            tf.translation = target;
+        }
+
+        // Add a slight bobbing effect for armies in transit.
+        if army.destination.is_some() || !army.movement_queue.is_empty() {
+            let bob = (time.elapsed_secs() * 3.0 + marker.army_id as f32).sin() * 0.05;
+            tf.translation.y = ARMY_Y + bob;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mesh builder: selection ring (line-loop circle)
+// ---------------------------------------------------------------------------
+
+fn build_ring_mesh(radius: f32, segments: u32) -> Mesh {
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity((segments * 2) as usize);
+    let mut normals: Vec<[f32; 3]> = Vec::with_capacity((segments * 2) as usize);
+
+    for i in 0..segments {
+        let a0 = (i as f32) * 2.0 * PI / (segments as f32);
+        let a1 = ((i + 1) as f32) * 2.0 * PI / (segments as f32);
+        positions.push([radius * a0.cos(), 0.0, radius * a0.sin()]);
+        positions.push([radius * a1.cos(), 0.0, radius * a1.sin()]);
+        normals.push([0.0, 1.0, 0.0]);
+        normals.push([0.0, 1.0, 0.0]);
+    }
+
+    Mesh::new(PrimitiveTopology::LineList, bevy::render::render_asset::RenderAssetUsages::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
 }
