@@ -168,7 +168,7 @@ fn draw_hardware(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
     let cores = num_cpus::get_physical();
     let threads = num_cpus::get();
 
-    let text = vec![
+    let mut text = vec![
         Line::from(vec![
             Span::styled("  CPU Cores:    ", Style::default().fg(Color::Gray)),
             Span::styled(format!("{}", cores), Style::default().fg(Color::White)),
@@ -177,12 +177,72 @@ fn draw_hardware(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
             Span::styled("  CPU Threads:  ", Style::default().fg(Color::Gray)),
             Span::styled(format!("{}", threads), Style::default().fg(Color::White)),
         ]),
+        Line::from(vec![
+            Span::styled("  SIMD:         ", Style::default().fg(Color::Gray)),
+            Span::styled(&app.simd_tier, Style::default().fg(Color::Cyan)),
+            Span::styled(format!(" ({}x batch)", app.simd_batch_size), Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::from(""),
     ];
 
+    // GPU section
+    if app.gpu_active {
+        let gpu_khs = app.gpu_hashrate_khs;
+        let gpu_hr_str = if gpu_khs >= 1000.0 { format!("{:.1} MH/s", gpu_khs / 1000.0) }
+            else if gpu_khs > 0.0 { format!("{:.1} kH/s", gpu_khs) }
+            else { "warming up...".to_string() };
+
+        text.push(Line::from(vec![
+            Span::styled("  GPU Mining:   ", Style::default().fg(Color::Gray)),
+            Span::styled("ACTIVE", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  ({})", gpu_hr_str), Style::default().fg(Color::Magenta)),
+        ]));
+
+        if app.gpu_devices.is_empty() {
+            // Fallback: just show device name
+            if !app.gpu_device_name.is_empty() {
+                text.push(Line::from(vec![
+                    Span::styled("  Device:       ", Style::default().fg(Color::Gray)),
+                    Span::styled(&app.gpu_device_name, Style::default().fg(Color::White)),
+                ]));
+            }
+        } else {
+            for dev in &app.gpu_devices {
+                text.push(Line::from(vec![
+                    Span::styled(format!("  GPU #{}:       ", dev.index), Style::default().fg(Color::Gray)),
+                    Span::styled(&dev.name, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                ]));
+                text.push(Line::from(vec![
+                    Span::styled("    Vendor:     ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(&dev.vendor, Style::default().fg(Color::White)),
+                ]));
+                text.push(Line::from(vec![
+                    Span::styled("    Memory:     ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(format!("{} MB", dev.global_memory_mb), Style::default().fg(Color::White)),
+                ]));
+                text.push(Line::from(vec![
+                    Span::styled("    Compute:    ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(format!("{} CU @ {} MHz", dev.compute_units, dev.max_clock_mhz), Style::default().fg(Color::White)),
+                ]));
+                text.push(Line::from(vec![
+                    Span::styled("    API:        ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(&dev.api, Style::default().fg(Color::Cyan)),
+                ]));
+            }
+        }
+    } else {
+        text.push(Line::from(vec![
+            Span::styled("  GPU Mining:   ", Style::default().fg(Color::Gray)),
+            Span::styled("OFF", Style::default().fg(Color::DarkGray)),
+            Span::styled("  (recompile with --features cuda-mining or opencl-mining)", Style::default().fg(Color::DarkGray)),
+        ]));
+    }
+
+    let border_color = if app.gpu_active { Color::Magenta } else { Color::DarkGray };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .title(" Hardware ");
+        .border_style(Style::default().fg(border_color))
+        .title(if app.gpu_active { " Hardware + GPU " } else { " Hardware " });
 
     f.render_widget(Paragraph::new(text).block(block), area);
 }

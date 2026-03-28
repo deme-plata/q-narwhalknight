@@ -390,7 +390,18 @@ fn draw_compute_power_cards(f: &mut Frame, area: Rect, app: &MinerTuiApp) {
         let gpu_str = if gpu_khs >= 1000.0 { format!("{:.1} MH/s", gpu_khs / 1000.0) }
             else if gpu_khs > 0.0 { format!("{:.1} kH/s", gpu_khs) }
             else { "warming up".to_string() };
-        ("Hybrid", format!("CPU+GPU"), gpu_str, Color::Magenta)
+        // v10.1.7: Show GPU name in card if available
+        let gpu_label = if let Some(dev) = app.gpu_devices.first() {
+            // Truncate long names to fit card width
+            let name = &dev.name;
+            if name.len() > 18 { format!("{}...", &name[..15]) } else { name.clone() }
+        } else if !app.gpu_device_name.is_empty() {
+            let n = &app.gpu_device_name;
+            if n.len() > 18 { format!("{}...", &n[..15]) } else { n.clone() }
+        } else {
+            "CPU+GPU".to_string()
+        };
+        ("Hybrid", gpu_label, gpu_str, Color::Magenta)
     } else {
         let batch_str = format!("{}x batch", app.simd_batch_size);
         ("SIMD", app.simd_tier.clone(), batch_str, Color::Cyan)

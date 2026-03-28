@@ -7,6 +7,17 @@
 
 use serde::{Deserialize, Serialize};
 
+/// GPU device info sent from miner to wallet via MinerLink
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GpuDeviceInfo {
+    pub name: String,
+    pub vendor: String,
+    pub compute_units: u32,
+    pub memory_mb: u64,
+    pub max_clock_mhz: u32,
+    pub api: String,
+}
+
 /// All messages exchanged over the miner link WebSocket
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -35,6 +46,13 @@ pub enum MinerLinkMessage {
         is_mining: bool,
         current_block_height: u64,
         temperature_estimate: Option<f64>,
+        // v10.2.1: GPU miner fields
+        #[serde(default)]
+        gpu_active: bool,
+        #[serde(default)]
+        gpu_hashrate: f64,
+        #[serde(default)]
+        gpu_devices: Vec<GpuDeviceInfo>,
     },
 
     /// Miner → Wallet: A mining solution was found

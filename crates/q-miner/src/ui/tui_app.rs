@@ -257,6 +257,8 @@ pub struct MinerTuiApp {
     pub gpu_active: bool,
     pub gpu_device_name: String,
     pub gpu_hashrate_khs: f64,
+    // v10.1.7: Rich GPU device info for TUI
+    pub gpu_devices: Vec<crate::shared_state::GpuDeviceSnapshot>,
 
     // UI state
     pub running: bool,
@@ -332,6 +334,7 @@ impl MinerTuiApp {
             gpu_active: false,
             gpu_device_name: String::new(),
             gpu_hashrate_khs: 0.0,
+            gpu_devices: Vec::new(),
             running: true,
             show_help: false,
             start_time: Instant::now(),
@@ -372,6 +375,13 @@ impl MinerTuiApp {
                 self.gpu_hashrate_khs = f64::from_bits(gpu_hr_bits) / 1000.0;
                 if self.gpu_device_name.is_empty() {
                     self.gpu_device_name = state.gpu_device_name.read().clone();
+                }
+                // v10.1.7: Pull rich GPU device info (once)
+                if self.gpu_devices.is_empty() {
+                    let devs = state.gpu_devices.read();
+                    if !devs.is_empty() {
+                        self.gpu_devices = devs.clone();
+                    }
                 }
             }
         }

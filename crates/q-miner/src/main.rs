@@ -1901,6 +1901,9 @@ async fn run_mining(
     let ml_target_threads = target_threads.clone();
     let ml_target_intensity = target_intensity.clone();
     let ml_proxy_url = proxy_url.clone();
+    let ml_gpu_active = shared_state.gpu_active.clone();
+    let ml_gpu_hashrate = shared_state.gpu_hashrate_hs.clone();
+    let ml_gpu_devices = shared_state.gpu_devices.clone();
     // v9.0.2: MinerLink uses tokio-tungstenite which also needs TLS for wss://
     let ml_handle = if tls_available {
         Some(tokio::spawn(async move {
@@ -1911,6 +1914,7 @@ async fn run_mining(
                 ml_is_paused, ml_target_threads, ml_target_intensity,
                 threads as u32,
                 ml_proxy_url,
+                ml_gpu_active, ml_gpu_hashrate, ml_gpu_devices,
             ).await;
         }))
     } else {
@@ -4313,6 +4317,9 @@ async fn miner_link_task(
     target_intensity: Arc<AtomicU8>,
     total_threads: u32,
     proxy_url: Option<String>,
+    gpu_active: Arc<AtomicBool>,
+    gpu_hashrate_hs: Arc<AtomicU64>,
+    gpu_devices: Arc<parking_lot::RwLock<Vec<crate::shared_state::GpuDeviceSnapshot>>>,
 ) {
     let start_time = std::time::Instant::now();
 
@@ -4350,6 +4357,7 @@ async fn miner_link_task(
                                     &solutions_found, &blocks_mined, &is_paused,
                                     &target_threads, &target_intensity, total_threads,
                                     &cpu_vendor, has_avx2, has_avx512, &start_time,
+                                    &gpu_active, &gpu_hashrate_hs, &gpu_devices,
                                 ).await;
                             }
                             Err(e) => {
@@ -4382,6 +4390,7 @@ async fn miner_link_task(
                     &solutions_found, &blocks_mined, &is_paused,
                     &target_threads, &target_intensity, total_threads,
                     &cpu_vendor, has_avx2, has_avx512, &start_time,
+                    &gpu_active, &gpu_hashrate_hs, &gpu_devices,
                 ).await;
             }
             Err(e) => {
@@ -4461,6 +4470,9 @@ async fn run_miner_link_session<S>(
     has_avx2: bool,
     has_avx512: bool,
     start_time: &std::time::Instant,
+    gpu_active: &AtomicBool,
+    gpu_hashrate_hs: &AtomicU64,
+    gpu_devices: &parking_lot::RwLock<Vec<crate::shared_state::GpuDeviceSnapshot>>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -4485,6 +4497,18 @@ async fn run_miner_link_session<S>(
         tokio::select! {
             _ = stats_interval.tick() => {
                 let hashrate = f64::from_bits(current_hashrate_khs.load(Ordering::Relaxed)) * 1000.0;
+                let is_gpu = gpu_active.load(Ordering::Relaxed);
+                let gpu_hr = f64::from_bits(gpu_hashrate_hs.load(Ordering::Relaxed));
+                let gpu_devs: Vec<q_miner::miner_link::GpuDeviceInfo> = gpu_devices.read().iter().map(|d| {
+                    q_miner::miner_link::GpuDeviceInfo {
+                        name: d.name.clone(),
+                        vendor: d.vendor.clone(),
+                        compute_units: d.compute_units,
+                        memory_mb: d.global_memory_mb,
+                        max_clock_mhz: d.max_clock_mhz,
+                        api: d.api.clone(),
+                    }
+                }).collect();
                 let stats_msg = MinerLinkMessage::Stats {
                     miner_id: miner_id.to_string(),
                     hashrate,
@@ -4501,6 +4525,9 @@ async fn run_miner_link_session<S>(
                     is_mining: !is_paused.load(Ordering::Relaxed),
                     current_block_height: 0,
                     temperature_estimate: None,
+                    gpu_active: is_gpu,
+                    gpu_hashrate: gpu_hr,
+                    gpu_devices: gpu_devs,
                 };
                 if let Ok(json) = serde_json::to_string(&stats_msg) {
                     if sink.send(WsMessage::Text(json)).await.is_err() {
