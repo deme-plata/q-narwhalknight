@@ -10,6 +10,11 @@ export component MinerScreen inherits Rectangle {
     in property <string> miner-status: "";
     in property <string> thread-count: "0";
     in-out property <bool> pool-mode: false;
+    // GPU mining properties
+    in property <string> gpu-hashrate: "0";
+    in property <string> gpu-device-count: "0";
+    in property <string> gpu-status: "";
+    in property <string> gpu-blocks-found: "0";
 
     callback toggle-mining();
     callback go-back();
@@ -173,6 +178,107 @@ export component MinerScreen inherits Rectangle {
                         font-weight: 700;
                         horizontal-alignment: center;
                     }
+                }
+            }
+        }
+
+        // GPU Mining stats (visible when GPUs detected)
+        if root.gpu-device-count != "0" : Card {
+            VerticalLayout {
+                padding: Theme.spacing-md;
+                spacing: Theme.spacing-sm;
+
+                HorizontalLayout {
+                    alignment: space-between;
+                    Text {
+                        text: "GPU Mining";
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-sm;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                    Rectangle {
+                        width: gpu-badge-text.preferred-width + 12px;
+                        height: 20px;
+                        border-radius: 4px;
+                        background: Theme.accent-cyan.with-alpha(0.15);
+
+                        gpu-badge-text := Text {
+                            text: root.gpu-device-count + " GPU";
+                            color: Theme.accent-cyan;
+                            font-size: Theme.font-xs;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: Theme.spacing-sm;
+
+                    // GPU Hashrate
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 50px;
+                        border-radius: Theme.radius-sm;
+                        background: Theme.bg-hover;
+
+                        VerticalLayout {
+                            padding-top: 6px;
+                            padding-bottom: 6px;
+                            alignment: center;
+
+                            Text {
+                                text: "GPU H/s";
+                                color: Theme.text-muted;
+                                font-size: Theme.font-xs;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: root.gpu-hashrate;
+                                color: Theme.accent-cyan;
+                                font-size: Theme.font-lg;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+
+                    // GPU Blocks
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 50px;
+                        border-radius: Theme.radius-sm;
+                        background: Theme.bg-hover;
+
+                        VerticalLayout {
+                            padding-top: 6px;
+                            padding-bottom: 6px;
+                            alignment: center;
+
+                            Text {
+                                text: "GPU Blocks";
+                                color: Theme.text-muted;
+                                font-size: Theme.font-xs;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: root.gpu-blocks-found;
+                                color: Theme.accent-yellow;
+                                font-size: Theme.font-lg;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                if root.gpu-status != "" : Text {
+                    text: root.gpu-status;
+                    color: Theme.text-muted;
+                    font-size: Theme.font-xs;
+                    horizontal-alignment: center;
                 }
             }
         }

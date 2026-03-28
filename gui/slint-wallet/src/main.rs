@@ -1,5 +1,6 @@
 #[allow(dead_code)]
 mod api_client;
+mod gpu_miner;
 mod miner;
 #[allow(dead_code)]
 mod models;
@@ -1915,11 +1916,15 @@ fn main() {
 
                 // Update miner stats from atomics (fast, no async)
                 if miner_state.running.load(Ordering::Relaxed) {
-                    let hr = miner_state.hashrate.load(Ordering::Relaxed);
-                    app.set_hashrate(slint::SharedString::from(format_hashrate(hr)));
+                    let cpu_hr = miner_state.hashrate.load(Ordering::Relaxed);
+                    let gpu_hr = miner_state.gpu_hashrate.load(Ordering::Relaxed);
+                    let total_hr = cpu_hr + gpu_hr;
+                    app.set_hashrate(slint::SharedString::from(format_hashrate(total_hr)));
+                    let cpu_blocks = miner_state.blocks_found.load(Ordering::Relaxed);
+                    let gpu_blocks = miner_state.gpu_blocks_found.load(Ordering::Relaxed);
                     app.set_blocks_found(slint::SharedString::from(format!(
                         "{}",
-                        miner_state.blocks_found.load(Ordering::Relaxed)
+                        cpu_blocks + gpu_blocks
                     )));
                     // Show miner status and thread count
                     if let Ok(status) = miner_state.last_status.lock() {
@@ -1929,6 +1934,19 @@ fn main() {
                         "{}",
                         miner_state.active_threads.load(Ordering::Relaxed)
                     )));
+                    // GPU stats
+                    app.set_gpu_hashrate(slint::SharedString::from(format_hashrate(gpu_hr)));
+                    app.set_gpu_device_count(slint::SharedString::from(format!(
+                        "{}",
+                        miner_state.gpu_device_count.load(Ordering::Relaxed)
+                    )));
+                    app.set_gpu_blocks_found(slint::SharedString::from(format!(
+                        "{}",
+                        gpu_blocks
+                    )));
+                    if let Ok(gpu_status) = miner_state.gpu_status.lock() {
+                        app.set_gpu_status(slint::SharedString::from(gpu_status.as_str()));
+                    }
                 }
 
                 // Async API polls

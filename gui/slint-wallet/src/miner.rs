@@ -2,6 +2,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::api_client::ApiClient;
+#[cfg(feature = "gpu-opencl")]
+use crate::gpu_miner;
 use crate::models::MiningSubmission;
 
 /// Server-side VDF verification uses exactly 100 iterations.
@@ -22,6 +24,12 @@ pub struct MinerState {
     pub active_threads: AtomicU64,
     /// Last status message for UI display
     pub last_status: std::sync::Mutex<String>,
+    // GPU mining fields
+    pub gpu_hashrate: AtomicU64,
+    pub gpu_blocks_found: AtomicU64,
+    pub gpu_enabled: AtomicBool,
+    pub gpu_device_count: AtomicU64,
+    pub gpu_status: std::sync::Mutex<String>,
 }
 
 impl MinerState {
@@ -33,6 +41,11 @@ impl MinerState {
             total_hashes: AtomicU64::new(0),
             active_threads: AtomicU64::new(0),
             last_status: std::sync::Mutex::new(String::new()),
+            gpu_hashrate: AtomicU64::new(0),
+            gpu_blocks_found: AtomicU64::new(0),
+            gpu_enabled: AtomicBool::new(false),
+            gpu_device_count: AtomicU64::new(0),
+            gpu_status: std::sync::Mutex::new(String::new()),
         }
     }
 
@@ -41,15 +54,21 @@ impl MinerState {
             *s = msg.to_string();
         }
     }
+
+    pub fn set_gpu_status(&self, msg: &str) {
+        if let Ok(mut s) = self.gpu_status.lock() {
+            *s = msg.to_string();
+        }
+    }
 }
 
-/// Shared challenge data that all mining threads read from.
-struct SharedChallenge {
-    challenge_bytes: [u8; 32],
-    target_bytes: [u8; 32],
-    challenge_hash: String,
-    difficulty_target: String,
-    height: u64,
+/// Shared challenge data that all mining threads (CPU + GPU) read from.
+pub(crate) struct SharedChallenge {
+    pub challenge_bytes: [u8; 32],
+    pub target_bytes: [u8; 32],
+    pub challenge_hash: String,
+    pub difficulty_target: String,
+    pub height: u64,
 }
 
 /// BLAKE3 VDF mining: hash(challenge || nonce), then iterate 100 times.
@@ -323,7 +342,8 @@ async fn fetch_challenge_with_fallback(
 
 /// v8.5.2: Submit solution with automatic fallback.
 /// If primary fails, tries fallback server to avoid missing block rewards.
-async fn submit_with_fallback(
+/// Public so GPU miner can also use it.
+pub(crate) async fn submit_with_fallback(
     api_client: &ApiClient,
     submission: &MiningSubmission,
     server_url: &str,
@@ -538,7 +558,21 @@ pub fn start_mining(
             .expect("failed to spawn miner coordinator");
     }
 
-    // Spawn mining worker threads
+    // Start GPU mining threads (share same challenge RwLock + new_block_signal as CPU)
+    #[cfg(feature = "gpu-opencl")]
+    {
+        gpu_miner::start_gpu_mining(
+            state.clone(),
+            api_client.clone(),
+            miner_address.clone(),
+            rt.clone(),
+            pool_mode,
+            challenge.clone(),
+            new_block_signal.clone(),
+        );
+    }
+
+    // Spawn CPU mining worker threads
     for thread_id in 0..num_threads {
         let state = state.clone();
         let api_client = api_client.clone();
@@ -682,8 +716,10 @@ pub fn start_mining(
     }
 }
 
-/// Stop the mining loop.
+/// Stop the mining loop (CPU + GPU).
 pub fn stop_mining(state: &MinerState) {
     state.running.store(false, Ordering::SeqCst);
     state.set_status("Stopped");
+    #[cfg(feature = "gpu-opencl")]
+    crate::gpu_miner::stop_gpu_mining(state);
 }

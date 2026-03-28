@@ -68,6 +68,11 @@ export component AppWindow inherits Window {
     in property <string> miner-status: "";
     in property <string> thread-count: "0";
     in-out property <bool> pool-mode: false;
+    // GPU miner properties
+    in property <string> gpu-hashrate: "0";
+    in property <string> gpu-device-count: "0";
+    in property <string> gpu-status: "";
+    in property <string> gpu-blocks-found: "0";
 
     // Receive / QR code properties
     in property <image> qr-code-image;
@@ -253,6 +258,10 @@ export component AppWindow inherits Window {
                 miner-status: root.miner-status;
                 thread-count: root.thread-count;
                 pool-mode <=> root.pool-mode;
+                gpu-hashrate: root.gpu-hashrate;
+                gpu-device-count: root.gpu-device-count;
+                gpu-status: root.gpu-status;
+                gpu-blocks-found: root.gpu-blocks-found;
 
                 toggle-mining => { root.toggle-mining(); }
                 go-back => { root.active-screen = 1; }
