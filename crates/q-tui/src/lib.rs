@@ -65,6 +65,9 @@ where
         let mut visitor = MessageVisitor(&mut message);
         event.record(&mut visitor);
 
+        // Apply privacy redaction to log messages before storing in ring buffer
+        let message = q_log_privacy::PrivacyRedactionLayer::redact(&message);
+
         if let Ok(mut buf) = self.log_buffer.write() {
             buf.push_overwrite(LogEntry {
                 timestamp: chrono::Utc::now(),
