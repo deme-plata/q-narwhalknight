@@ -1,10 +1,10 @@
 # Crown & Ash -- Technical Review for Peer AI Collaboration
 
-**Document Version**: 3.0.0
+**Document Version**: 3.1.0
 **Date**: 2026-03-28
 **Status**: Phase 1 COMPLETE, Phase 2 COMPLETE, Phase 3 IN PROGRESS
 **Target Audience**: Peer AI systems (Claude, GPT, Gemini) for technical review and feedback
-**Crate Locations**: `crates/crown-ash-types`, `crates/crown-ash-sim`, `crates/crown-ash-plugin`, `crates/crown-ash-api`
+**Crate Locations**: `crates/crown-ash-types`, `crates/crown-ash-sim`, `crates/crown-ash-plugin`, `crates/crown-ash-api`, `crates/crown-ash-client`
 
 ---
 
@@ -55,7 +55,8 @@ The game targets a design space between Crusader Kings and Civilization, compres
 | `crown-ash-types` | 11 | 1,435 | Shared data types (FixedPoint, Province, Character, Faction, Army, Event, Action, Diplomacy, Dynasty, Realm, World) |
 | `crown-ash-plugin` | 3 | 1,449 | WASM plugin wrapper (entry points, host FFI, storage layer) |
 | `crown-ash-api` | 4 | ~1,127 | REST API handlers, SSE event helpers, RocksDB persistence |
-| **Total** | **35** | **~10,761** | |
+| `crown-ash-client` | 1 | ~950 | Bevy 3D client (campaign map, UI panels, REST/SSE networking) |
+| **Total** | **36** | **~11,711** | |
 
 ### Test Counts
 
@@ -82,7 +83,8 @@ The game targets a design space between Crusader Kings and Civilization, compres
 | `crown-ash-plugin::host` | 5 | Storage round-trip, block height/timestamp, sha3 determinism, log collection, event collection |
 | `crown-ash-api::events` | 4 | Turn payload structure, player joined payload, world init payload, world reset payload |
 | `crown-ash-api::persistence` | 4 | RocksDB save/load round-trip, periodic checkpoint trigger, tombstone persistence, dirty tracking integration |
-| **Total** | **114** | |
+| `crown-ash-sim::stress_tests` | 15 | 500-1000 tick endurance runs: no-panic, population bounded, factions alive, character count bounded, trade routes, intrigue plots, births valid, realm splits, determinism, army count, prosperity, unrest, seed divergence, cohesion clamped, 1000-tick endurance |
+| **Total** | **129** | |
 
 ### Entity Counts (Default World)
 
@@ -688,7 +690,7 @@ With all Phase 2 systems active (birth, trade, intrigue, realm split, lifecycle)
 
 ### 7.11 DEFERRED: WebGPU vs. Native-Only Rendering
 
-**Status**: DEFERRED to Phase 4. The Bevy client MVP uses native rendering (wgpu with Vulkan/Metal/DX12 backends) for the MVP. WebGPU/WASM compilation is deferred to Phase 4. The Bevy ecosystem's WebGPU support is maturing but not production-ready for complex 3D scenes with egui overlays. Native rendering provides better performance and reliability for the initial release.
+**Status**: DEFERRED to Phase 4. Native rendering for MVP, WebGPU deferred. The Bevy client MVP uses native rendering (wgpu with Vulkan/Metal/DX12 backends). WebGPU/WASM compilation is deferred to Phase 4. The Bevy ecosystem's WebGPU support is maturing but not production-ready for complex 3D scenes with egui overlays. Native rendering provides better performance and reliability for the initial release.
 
 ---
 
@@ -718,9 +720,15 @@ crown-ash-sim
 crown-ash-types
   +-- serde 1 (derive)
   +-- bincode 1.3
+
+crown-ash-client
+  +-- crown-ash-types
+  +-- bevy 0.15
+  +-- bevy_egui 0.34
+  +-- reqwest (async HTTP)
 ```
 
-No external RNG crate. No floating-point crate. No crypto crate (host provides SHA3-256 via FFI). The entire simulation compiles to a self-contained WASM module with minimal dependencies.
+No external RNG crate. No floating-point crate. No crypto crate (host provides SHA3-256 via FFI). The simulation compiles to a self-contained WASM module with minimal dependencies. The client crate does NOT depend on crown-ash-api (avoids pulling axum/q-storage into the desktop binary).
 
 ---
 
@@ -737,7 +745,7 @@ cargo test --package crown-ash-sim
 cargo test --package crown-ash-sim -- --nocapture
 
 # Check compilation (fast, no tests)
-cargo check --package crown-ash-sim --package crown-ash-types --package crown-ash-plugin --package crown-ash-api
+cargo check --package crown-ash-sim --package crown-ash-types --package crown-ash-plugin --package crown-ash-api --package crown-ash-client
 ```
 
 ---
@@ -759,9 +767,9 @@ cargo check --package crown-ash-sim --package crown-ash-types --package crown-as
 
 Phase 3 adds the visual client, stress testing, and documentation updates.
 
-**Bevy 3D Client** (`crates/crown-ash-client/`):
+**Bevy 3D Client** (`crates/crown-ash-client/`) -- Campaign map, UI panels, REST/SSE networking:
 - Native desktop client using Bevy 0.15 game engine
-- Three plugin architecture: NetworkPlugin, MapPlugin, UiPlugin
+- Three plugin architecture: CrownAshNetworkPlugin, CrownAshMapPlugin, CrownAshUiPlugin
 - HTTP polling every 5 seconds via async I/O task pool
 - egui-based UI panels (top bar, detail panel, event feed)
 - Orthographic camera with WASD pan and scroll zoom
@@ -770,9 +778,7 @@ Phase 3 adds the visual client, stress testing, and documentation updates.
 - Click-to-select provinces with detail panel population
 - Action submission via POST /crown-ash/action
 
-**Client Crate Dependencies**: bevy 0.15, bevy_egui 0.34, reqwest, crown-ash-types (does NOT depend on crown-ash-api to avoid pulling axum/q-storage)
-
-**Integration Stress Tests** (`crates/crown-ash-sim/tests/stress_tests.rs`):
+**Integration Stress Tests** (`crates/crown-ash-sim/tests/stress_tests.rs`) -- 15 tests running 500-1000 ticks:
 
 | # | Test Name | Ticks | Verifies |
 |---|-----------|-------|----------|
@@ -792,6 +798,14 @@ Phase 3 adds the visual client, stress testing, and documentation updates.
 | 14 | stress_cohesion_clamped | 500 | All 5 components in 0..1M |
 | 15 | stress_1000_ticks_endurance | 1000 | 1000 ticks, still alive |
 
+**Technical Review Update** -- This document (v3.0.0 -> v3.1.0):
+- Updated test counts to include +15 stress tests (114 -> 129 total)
+- Added Phase 3 deliverables and Bevy client architecture documentation
+- Added crown-ash-client to crate locations and dependency graph
+- Updated open questions with Bevy client status and WebGPU deferral
+
+**Client Crate Dependencies**: bevy 0.15, bevy_egui 0.34, reqwest, crown-ash-types (does NOT depend on crown-ash-api to avoid pulling axum/q-storage)
+
 ### 10.2 Bevy Client Architecture
 
 ```text
@@ -810,18 +824,33 @@ Phase 3 adds the visual client, stress testing, and documentation updates.
 
 | Plugin | Responsibility | Systems |
 |--------|---------------|---------|
-| CrownAshNetworkPlugin | HTTP polling, SSE parsing, state updates | poll_server |
-| CrownAshMapPlugin | Province rendering, army icons, camera, selection | setup_camera, setup_map, update_map_colors, update_armies, handle_province_click, camera_pan, camera_zoom |
-| CrownAshUiPlugin | egui panels, action submission | top_bar, detail_panel, event_feed, action_buttons |
+| CrownAshNetworkPlugin | HTTP polling for world state, SSE event parsing, connection status tracking | poll_server |
+| CrownAshMapPlugin | Province hex rendering, army icons, camera control, click-to-select | setup_camera, setup_map, update_map_colors, update_armies, handle_province_click, camera_pan, camera_zoom |
+| CrownAshUiPlugin | egui overlay panels, player action submission via POST | top_bar, detail_panel, event_feed, action_submit |
 
 **Key Resources**:
 
 | Resource | Purpose |
 |----------|---------|
-| ClientGameState | World snapshot, events, connection status |
-| CrownAshConfig | Server URL, poll interval |
-| Selection | Selected province/faction/character/army |
+| ClientGameState | World snapshot (provinces, factions, armies, characters), events buffer, connection status |
+| CrownAshConfig | Server URL, poll interval, wallet address |
+| Selection | Currently selected province/faction/character/army for detail panel |
 | NetworkState | Poll timer, pending request handle |
 | ActionState | Wallet input, action result feedback |
 
-**Province Positioning**: Fixed `PROVINCE_POSITIONS: [(f32, f32); 25]` array mapping province IDs to XZ coordinates, derived from the adjacency layout in `crown-ash-sim/src/map.rs`. Hex tiles are rendered on the XZ plane with orthographic camera looking down.
+**Key Components**:
+
+| Component | Purpose |
+|-----------|---------|
+| ProvinceMarker | Attached to hex tile entities, stores province ID for click detection and color updates |
+| ArmyMarker | Attached to army icon entities, stores army ID for rendering at province positions |
+
+**System Details**:
+
+- **camera_pan / camera_zoom**: WASD keys pan the orthographic camera across the XZ plane. Mouse scroll wheel adjusts zoom level with min/max bounds. Camera starts centered on the map.
+- **setup_map / update_map_colors (map_render)**: Spawns 25 hex tile meshes on the XZ plane at positions matching the adjacency graph from `crown-ash-sim/src/map.rs`. Each tile is colored by its controlling faction. Terrain type applies a tinting modifier (e.g., forest = darker green, desert = sandy overlay, mountains = grey). Tiles update colors each poll cycle when faction control changes.
+- **update_armies**: Spawns/despawns army icon entities at province positions. Each army is rendered with its faction's color. Army count is displayed as a label.
+- **top_bar / detail_panel / event_feed (ui_panels)**: Top bar shows current turn, active faction count, total population. Detail panel shows selected entity info (province stats, faction treasury, character traits, army composition). Event feed is a scrolling log of recent game events with turn numbers.
+- **action_submit**: Reads player input from UI action buttons and wallet field. Constructs the appropriate `QueuedAction` JSON payload and sends it via `POST /api/v1/crown-ash/action` using reqwest. Displays success/error feedback in ActionState.
+
+**Province Positioning**: Fixed `PROVINCE_POSITIONS: [(f32, f32); 25]` array mapping province IDs to XZ coordinates, derived from the adjacency layout in `crown-ash-sim/src/map.rs`. The 25 hex tiles are arranged on the XZ plane to match the adjacency graph -- neighboring provinces in the graph are adjacent hex tiles on the map. The orthographic camera looks down the Y axis.

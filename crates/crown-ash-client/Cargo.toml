@@ -1,9 +1,14 @@
 [package]
 name = "crown-ash-client"
-version.workspace = true
-edition.workspace = true
+version = "0.3.0"
+edition = "2021"
 description = "Crown & Ash — Bevy 3D game client"
-license.workspace = true
+license = "MIT"
+
+# This crate is excluded from the main workspace due to bevy_egui dependency
+# conflicts. Build separately:
+#   cargo check --manifest-path crates/crown-ash-client/Cargo.toml
+#   cargo run --manifest-path crates/crown-ash-client/Cargo.toml
 
 [dependencies]
 crown-ash-types = { path = "../crown-ash-types" }

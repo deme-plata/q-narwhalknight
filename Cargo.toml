@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-exclude = ["test_tx_propagation"]
+exclude = ["test_tx_propagation", "crates/crown-ash-client"]
 members = [
     "crates/q-types",
     "crates/q-wallet", 
@@ -70,7 +70,7 @@ members = [
     "crates/crown-ash-sim",     # Crown & Ash — core deterministic simulation
     "crates/crown-ash-plugin",  # Crown & Ash — WASM plugin (native fallback for tests)
     "crates/crown-ash-api",     # Crown & Ash — REST API handlers
-    "crates/crown-ash-client",  # Crown & Ash — Bevy game client (separate build target)
+    # "crates/crown-ash-client",  # Crown & Ash — Bevy game client (build separately: cargo check --manifest-path crates/crown-ash-client/Cargo.toml)
 ]
 
 [workspace.package]

@@ -1,5 +1,7 @@
 use bevy::prelude::*;
 use crown_ash_client::plugins::network::CrownAshNetworkPlugin;
+use crown_ash_client::plugins::map::CrownAshMapPlugin;
+use crown_ash_client::plugins::ui::CrownAshUiPlugin;
 
 fn main() {
     App::new()
@@ -12,8 +14,7 @@ fn main() {
             ..default()
         }))
         .add_plugins(CrownAshNetworkPlugin)
-        // Map and UI plugins will be added by other agents:
-        // .add_plugins(CrownAshMapPlugin)
-        // .add_plugins(CrownAshUiPlugin)
+        .add_plugins(CrownAshMapPlugin)
+        .add_plugins(CrownAshUiPlugin)
         .run();
 }
