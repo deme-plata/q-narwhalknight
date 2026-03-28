@@ -434,6 +434,30 @@ Multiple Claude Code terminals can work on different phases simultaneously:
 - Use `git update-server-info` on Beta after pushing so Epsilon can pull
 - Coordinate via the issue tracker markdown files
 
+#### **🚀 SHORTCUT: "Commit vital code to local git server"**
+When the user says **"commit vital and important code to local git server"** (or any variation), do ALL of the following automatically — NO GitHub, only local `code.quillon.xyz`:
+
+```bash
+# 1. Stage all modified+untracked files in the working area
+git add <relevant files>
+
+# 2. Commit with a descriptive message
+git commit -m "feat(...): description"
+
+# 3. Update server info so Epsilon (and other servers) can HTTP-pull
+git update-server-info
+
+# 4. Confirm: show commit hash + branch
+git log --oneline -1
+```
+
+**Key rules:**
+- **NEVER push to GitHub** — we use `code.quillon.xyz` (Beta's local git-http-backend)
+- `git update-server-info` is MANDATORY after every commit (enables HTTP clone/pull)
+- Epsilon pulls via: `ssh root@89.149.241.126 "cd /home/orobit/q-narwhalknight-src && git pull origin <branch>"`
+- If pulling on Epsilon fails with "not a git repository", re-clone:
+  `ssh root@89.149.241.126 "cd /home/orobit && git clone --depth 1 -b <branch> https://code.quillon.xyz/repo.git q-narwhalknight-src"`
+
 ### **🧅 TOR INTEGRATION PRIORITY TASKS**
 
 #### **Phase 1: Core Tor Infrastructure**
