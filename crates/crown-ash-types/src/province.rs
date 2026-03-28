@@ -194,6 +194,9 @@ pub struct Province {
     pub tax_rate: FixedPoint,
     /// Adjacency list (province IDs reachable in 1 move).
     pub neighbors: Vec<ProvinceId>,
+    /// Active conversion: (target_religion, progress 0-1000). Completes when progress >= 1000.
+    #[serde(default)]
+    pub conversion_progress: Option<(Religion, FixedPoint)>,
 }
 
 impl Province {

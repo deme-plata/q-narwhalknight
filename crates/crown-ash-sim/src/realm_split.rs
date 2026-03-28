@@ -211,6 +211,7 @@ pub fn process_realm_split(
         age: 0,
         at_war_with: vec![faction_id], // At war with the original.
         allies: Vec::new(),
+        religious_authority: FixedPoint::from_int(500),
     };
     world.realms.push(rebel_realm);
     world.dirty.dirty_realms.insert(new_faction_id);
@@ -642,8 +643,10 @@ mod tests {
             morale: FixedPoint::from_int(700),
             location: last_province,
             destination: None,
+            movement_queue: Vec::new(),
             raised_turn: 0,
             supply: FixedPoint::from_int(100),
+            siege: None,
         });
 
         let mut rng = DeterministicRng::new([0xAA; 32], "split_test");

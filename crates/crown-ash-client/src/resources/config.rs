@@ -1,6 +1,6 @@
 //! Client configuration resource.
 //!
-//! Holds server URL and polling interval.  Defaults point at the production
+//! Holds server URL and network settings.  Defaults point at the production
 //! bootstrap at `quillon.xyz`.
 
 use bevy::prelude::*;
@@ -13,8 +13,13 @@ use bevy::prelude::*;
 pub struct CrownAshConfig {
     /// Base URL of the q-api-server (no trailing slash).
     pub server_url: String,
-    /// Seconds between world-snapshot polls.
+    /// Seconds between REST world-snapshot polls when SSE is connected.
+    ///
+    /// With SSE active this is unused — snapshots are fetched on-demand when
+    /// the server broadcasts a turn event.  Kept for backward compat.
     pub poll_interval_secs: f32,
+    /// Seconds between REST fallback polls when SSE is disconnected.
+    pub fallback_poll_secs: f32,
 }
 
 impl Default for CrownAshConfig {
@@ -22,6 +27,7 @@ impl Default for CrownAshConfig {
         Self {
             server_url: "https://quillon.xyz".to_string(),
             poll_interval_secs: 5.0,
+            fallback_poll_secs: 30.0,
         }
     }
 }

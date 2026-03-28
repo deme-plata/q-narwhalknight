@@ -65,7 +65,7 @@ pub fn top_bar(
                     ConnectionStatus::Connected => ("Connected", egui::Color32::GREEN),
                     ConnectionStatus::Connecting => ("Connecting...", egui::Color32::YELLOW),
                     ConnectionStatus::Disconnected => ("Disconnected", egui::Color32::RED),
-                    ConnectionStatus::Error(e) => ("Error", egui::Color32::RED),
+                    ConnectionStatus::Error(_) => ("Error", egui::Color32::RED),
                 };
                 ui.colored_label(color, icon);
                 ui.label(format!("Server: {}", config.server_url));
@@ -411,7 +411,183 @@ fn format_event(event: &GameEvent) -> String {
         GameEvent::ArmyAutoDisbanded { army_id, faction, province, turn, .. } => {
             format!("[Turn {}] Army #{} (faction {}) disbanded at province {}", turn, army_id, faction, province)
         }
+        GameEvent::ReligiousConversion { province, old_religion, new_religion, turn } => {
+            format!("[Turn {}] Province {} converted from {} to {}", turn, province, old_religion, new_religion)
+        }
+        GameEvent::Heresy { faction, province, severity, turn } => {
+            format!("[Turn {}] Heresy in faction {} at province {} (severity {})", turn, faction, province, severity)
+        }
+        GameEvent::Miracle { province, prosperity_gain, turn } => {
+            format!("[Turn {}] Miracle at province {}! +{} prosperity", turn, province, prosperity_gain)
+        }
+        GameEvent::SiegeStarted { province, attacker_faction, turns_required, turn, .. } => {
+            format!("[Turn {}] Siege begun at province {} by faction {} ({} turns)", turn, province, attacker_faction, turns_required)
+        }
+        GameEvent::SiegeCompleted { province, old_controller, new_controller, turns_lasted, turn, .. } => {
+            format!("[Turn {}] Siege of province {} complete after {} turns: {} -> {}", turn, province, turns_lasted, old_controller, new_controller)
+        }
+        GameEvent::Friendship { character_a, character_b, turn } => {
+            format!("[Turn {}] Characters {} and {} became friends", turn, character_a, character_b)
+        }
+        GameEvent::Rivalry { character_a, character_b, turn } => {
+            format!("[Turn {}] Characters {} and {} became rivals", turn, character_a, character_b)
+        }
+        GameEvent::MarriageAlliance { faction_a, faction_b, turn, .. } => {
+            format!("[Turn {}] Marriage alliance formed between factions {} and {}", turn, faction_a, faction_b)
+        }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Minimap — small overview of all 25 provinces with faction colours.
+// ---------------------------------------------------------------------------
+
+/// Province positions on the XZ plane (matching map_render::PROVINCE_POSITIONS).
+const MINIMAP_POSITIONS: [(f32, f32); 25] = [
+    (-4.5, -9.0), (-1.5, -9.0), (1.5, -9.0), (4.5, -9.0),
+    (0.0, 3.0), (3.0, 3.0), (6.0, 3.0),
+    (-1.5, -3.0), (1.5, -3.0), (1.5, 0.0), (4.5, 0.0),
+    (-4.5, 0.0), (-1.5, 3.0), (0.0, 6.0),
+    (7.5, 0.0), (9.0, 3.0), (10.5, 0.0), (9.0, 6.0),
+    (-7.5, -6.0), (-7.5, -3.0), (-4.5, -3.0),
+    (7.5, -9.0), (7.5, -6.0), (10.5, -3.0), (10.5, -6.0),
+];
+
+/// Default faction colours [R,G,B].
+const FACTION_COLORS: [[u8; 3]; 7] = [
+    [200, 50, 50],    // 0: Ashen Crown — crimson
+    [50, 50, 200],    // 1: Vale Princes — blue
+    [200, 180, 30],   // 2: Ember Church — gold
+    [40, 180, 180],   // 3: Salt League — teal
+    [180, 180, 220],  // 4: Frost Marches — pale ice-blue
+    [180, 80, 40],    // 5: Red Steppe — rust
+    [90, 40, 130],    // 6: Black Abbey — dark purple
+];
+
+/// Adjacency pairs for minimap lines.
+const MINIMAP_ADJACENCY: [(usize, usize); 40] = [
+    (0,1),(1,2),(2,3),(0,18),(0,20),(1,7),(1,8),(2,8),(3,21),(3,22),
+    (4,9),(4,12),(5,9),(5,10),(5,6),(6,14),(7,8),(7,11),(7,20),(8,9),
+    (9,10),(9,12),(10,14),(10,5),(11,12),(11,19),(11,20),(12,13),(13,17),
+    (14,15),(14,16),(15,16),(15,17),(18,19),(19,20),(21,22),(22,23),(23,24),
+    (22,24),(21,3),
+];
+
+pub fn minimap(
+    mut contexts: EguiContexts,
+    game_state: Res<ClientGameState>,
+    mut selection: ResMut<Selection>,
+) {
+    let ctx = contexts.ctx_mut();
+
+    egui::Window::new("Minimap")
+        .anchor(egui::Align2::RIGHT_BOTTOM, [-10.0, -170.0])
+        .default_width(200.0)
+        .default_height(200.0)
+        .resizable(false)
+        .collapsible(true)
+        .show(ctx, |ui| {
+            let (response, painter) = ui.allocate_painter(
+                egui::vec2(200.0, 200.0),
+                egui::Sense::click(),
+            );
+            let rect = response.rect;
+
+            // Map world coords to minimap pixel coords.
+            // World X range: roughly -7.5 to 10.5 => 18 units
+            // World Z range: roughly -9 to 6 => 15 units
+            let world_min_x = -8.5_f32;
+            let world_max_x = 11.5_f32;
+            let world_min_z = -10.0_f32;
+            let world_max_z = 7.0_f32;
+            let world_w = world_max_x - world_min_x;
+            let world_h = world_max_z - world_min_z;
+
+            let to_screen = |wx: f32, wz: f32| -> egui::Pos2 {
+                let nx = (wx - world_min_x) / world_w;
+                let ny = (wz - world_min_z) / world_h;
+                egui::pos2(
+                    rect.min.x + nx * rect.width(),
+                    rect.min.y + ny * rect.height(),
+                )
+            };
+
+            // Background
+            painter.rect_filled(rect, 4.0, egui::Color32::from_rgb(30, 30, 40));
+
+            // Draw adjacency lines
+            for &(a, b) in &MINIMAP_ADJACENCY {
+                if a < MINIMAP_POSITIONS.len() && b < MINIMAP_POSITIONS.len() {
+                    let (ax, az) = MINIMAP_POSITIONS[a];
+                    let (bx, bz) = MINIMAP_POSITIONS[b];
+                    painter.line_segment(
+                        [to_screen(ax, az), to_screen(bx, bz)],
+                        egui::Stroke::new(0.5, egui::Color32::from_rgb(60, 60, 70)),
+                    );
+                }
+            }
+
+            // Draw province dots
+            let world_data = game_state.world.as_ref();
+
+            for (i, &(px, pz)) in MINIMAP_POSITIONS.iter().enumerate() {
+                let center = to_screen(px, pz);
+                let radius = 5.0;
+
+                // Resolve colour from game state or default
+                let color = if let Some(world) = world_data {
+                    if let Some(prov) = world.provinces.iter().find(|p| p.id == i as u16) {
+                        let ctrl = prov.controller as usize;
+                        if ctrl < world.factions.len() {
+                            let rgb = world.factions[ctrl].color_rgb;
+                            egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2])
+                        } else if ctrl < FACTION_COLORS.len() {
+                            let c = FACTION_COLORS[ctrl];
+                            egui::Color32::from_rgb(c[0], c[1], c[2])
+                        } else {
+                            egui::Color32::GRAY
+                        }
+                    } else {
+                        egui::Color32::GRAY
+                    }
+                } else if i / 4 < FACTION_COLORS.len() {
+                    let c = FACTION_COLORS[i / 4];
+                    egui::Color32::from_rgb(c[0], c[1], c[2])
+                } else {
+                    egui::Color32::GRAY
+                };
+
+                painter.circle_filled(center, radius, color);
+
+                // Highlight selected province
+                if selection.province == Some(i as u16) {
+                    painter.circle_stroke(
+                        center,
+                        radius + 2.0,
+                        egui::Stroke::new(2.0, egui::Color32::WHITE),
+                    );
+                }
+            }
+
+            // Handle click — select nearest province on minimap
+            if response.clicked() {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    let mut best: Option<(u16, f32)> = None;
+                    for (i, &(px, pz)) in MINIMAP_POSITIONS.iter().enumerate() {
+                        let screen_pos = to_screen(px, pz);
+                        let dist = pos.distance(screen_pos);
+                        if dist < 15.0 {
+                            if best.map_or(true, |(_, bd)| dist < bd) {
+                                best = Some((i as u16, dist));
+                            }
+                        }
+                    }
+                    if let Some((pid, _)) = best {
+                        selection.province = Some(pid);
+                    }
+                }
+            }
+        });
 }
 
 // ---------------------------------------------------------------------------

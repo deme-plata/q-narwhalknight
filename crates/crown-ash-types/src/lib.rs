@@ -27,10 +27,10 @@ pub mod world;
 // Re-export key types at crate root for convenience.
 pub use fixed_point::FixedPoint;
 pub use province::{Province, ProvinceId, Terrain, Religion, Culture, Resources, Troops, Improvement};
-pub use character::{Character, CharacterId, CharacterRole, CharacterStats, CharacterTombstone, Plot, PlotType, Trait};
+pub use character::{Character, CharacterId, CharacterRole, CharacterStats, CharacterTombstone, Plot, PlotType, Trait, PersonalRelation, RelationType, OpinionModifier};
 pub use faction::{Faction, FactionId, FactionTemplate, FactionBonuses};
 pub use realm::{Realm, RealmCohesion};
-pub use army::{Army, ArmyId, BattleResult};
+pub use army::{Army, ArmyId, BattleResult, SiegeProgress};
 pub use dynasty::{Dynasty, DynastyId, SuccessionRule};
 pub use action::{GameAction, QueuedAction, CasusBelli, TreatyType, CouncilRole};
 pub use event::{GameEvent, TurnSummary, DeathCause};

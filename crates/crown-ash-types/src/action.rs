@@ -41,6 +41,9 @@ pub enum GameAction {
     RaiseArmy { province: ProvinceId },
     /// Move army to adjacent province (1 province per turn).
     MoveArmy { army: u32, target: ProvinceId },
+    /// Move army along a multi-hop BFS path to a distant province.
+    /// The server computes the shortest path; army advances 1 step per turn.
+    MoveArmyPath { army: u32, target: ProvinceId },
     /// Disband army back to garrison.
     DisbandArmy { army: u32 },
     /// Declare war on another faction.

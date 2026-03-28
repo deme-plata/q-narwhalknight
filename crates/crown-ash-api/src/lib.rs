@@ -22,12 +22,14 @@
 //! | GET    | `/realm/:wallet`          | Player realm by wallet address      |
 //! | GET    | `/turn/:number`           | Turn summary for a specific turn    |
 //! | GET    | `/history/:province_id`   | Event history for a province        |
+//! | GET    | `/stream`                 | SSE stream for real-time updates    |
 //! | POST   | `/action`                 | Queue a game action                 |
 //! | POST   | `/join`                   | Join the game as a faction          |
 
 pub mod handlers;
 pub mod events;
 pub mod persistence;
+pub mod streaming;
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -93,18 +95,27 @@ pub type SharedGameState = Arc<RwLock<CrownAshGameState>>;
 
 // ─── Router ────────────────────────────────────────────────────────────────────
 
-/// Build the Crown & Ash router.
+/// Build the Crown & Ash router with SSE streaming support.
 ///
-/// The caller provides a [`SharedGameState`] which is injected as Axum state.
-/// Mount the returned `Router` under your desired prefix, e.g.:
+/// The caller provides a [`SharedGameState`] and an [`streaming::EventSender`]
+/// for broadcasting real-time game events.
 ///
 /// ```ignore
 /// let game_state: SharedGameState = Arc::new(RwLock::new(CrownAshGameState::empty()));
+/// let event_sender = streaming::create_event_channel(256);
 /// let app = Router::new()
-///     .nest("/api/v1/crown-ash", create_crown_ash_router(game_state));
+///     .nest("/api/v1/crown-ash", create_crown_ash_router(game_state, event_sender));
 /// ```
-pub fn create_crown_ash_router(game_state: SharedGameState) -> Router {
-    Router::new()
+pub fn create_crown_ash_router(
+    game_state: SharedGameState,
+    event_sender: streaming::EventSender,
+) -> Router {
+    let sse_state = streaming::SseState {
+        sender: event_sender,
+    };
+
+    // REST routes use SharedGameState, SSE route uses SseState.
+    let rest_routes = Router::new()
         .route("/world", get(handlers::get_world))
         .route("/province/{id}", get(handlers::get_province))
         .route("/faction/{id}", get(handlers::get_faction))
@@ -113,5 +124,11 @@ pub fn create_crown_ash_router(game_state: SharedGameState) -> Router {
         .route("/history/{province_id}", get(handlers::get_province_history))
         .route("/action", post(handlers::submit_action))
         .route("/join", post(handlers::join_game))
-        .with_state(game_state)
+        .with_state(game_state);
+
+    let sse_route = Router::new()
+        .route("/stream", get(streaming::sse_stream))
+        .with_state(sse_state);
+
+    rest_routes.merge(sse_route)
 }

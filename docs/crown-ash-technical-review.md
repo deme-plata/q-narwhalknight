@@ -2,9 +2,9 @@
 
 **Document Version**: 3.1.0
 **Date**: 2026-03-28
-**Status**: Phase 1 COMPLETE, Phase 2 COMPLETE, Phase 3 IN PROGRESS
+**Status**: Phase 1 COMPLETE, Phase 2 COMPLETE, Phase 3 COMPLETE, Phase 4 IN PROGRESS, Phase 5 (Narrative) IN PROGRESS
 **Target Audience**: Peer AI systems (Claude, GPT, Gemini) for technical review and feedback
-**Crate Locations**: `crates/crown-ash-types`, `crates/crown-ash-sim`, `crates/crown-ash-plugin`, `crates/crown-ash-api`, `crates/crown-ash-client`
+**Crate Locations**: `crates/crown-ash-types`, `crates/crown-ash-sim`, `crates/crown-ash-plugin`, `crates/crown-ash-api`, `crates/crown-ash-narrative`, `crates/crown-ash-client`
 
 ---
 
@@ -763,7 +763,7 @@ cargo check --package crown-ash-sim --package crown-ash-types --package crown-as
 | 7 | Religion mechanics (conversion, holy wars, papal system) | MEDIUM | Cohesion system (done) | Province-level religion, conversion pressure, holy war casus belli, religious authority |
 | 8 | Education system (children gain traits/skills over time) | LOW | Birth system (done) | Age-gated skill progression, mentor assignment, trait acquisition events |
 
-### 10.1 Phase 3 Deliverables (IN PROGRESS)
+### 10.1 Phase 3 Deliverables (COMPLETE)
 
 Phase 3 adds the visual client, stress testing, and documentation updates.
 
@@ -792,8 +792,8 @@ Phase 3 adds the visual client, stress testing, and documentation updates.
 | 8 | stress_realm_splits_valid | 500 | Split factions have provinces |
 | 9 | stress_determinism_500_ticks | 500 | Same seed = identical bincode bytes |
 | 10 | stress_army_count_bounded | 500 | Army count stays reasonable |
-| 11 | stress_prosperity_bounded | 500 | 0 <= prosperity <= 2M |
-| 12 | stress_unrest_clamped | 500 | 0 <= unrest <= 1M |
+| 11 | stress_prosperity_bounded | 500 | 0 <= prosperity <= 1M (strict) |
+| 12 | stress_unrest_clamped | 500 | 0 <= unrest <= 1M (strict) |
 | 13 | stress_different_seeds_diverge | 500 | Different seeds ≠ same state |
 | 14 | stress_cohesion_clamped | 500 | All 5 components in 0..1M |
 | 15 | stress_1000_ticks_endurance | 1000 | 1000 ticks, still alive |
@@ -804,7 +804,7 @@ Phase 3 adds the visual client, stress testing, and documentation updates.
 - Added crown-ash-client to crate locations and dependency graph
 - Updated open questions with Bevy client status and WebGPU deferral
 
-**Client Crate Dependencies**: bevy 0.15, bevy_egui 0.34, reqwest, crown-ash-types (does NOT depend on crown-ash-api to avoid pulling axum/q-storage)
+**Client Crate Dependencies**: bevy 0.15, bevy_egui 0.33, reqwest, crown-ash-types (does NOT depend on crown-ash-api to avoid pulling axum/q-storage)
 
 ### 10.2 Bevy Client Architecture
 
@@ -854,3 +854,37 @@ Phase 3 adds the visual client, stress testing, and documentation updates.
 - **action_submit**: Reads player input from UI action buttons and wallet field. Constructs the appropriate `QueuedAction` JSON payload and sends it via `POST /api/v1/crown-ash/action` using reqwest. Displays success/error feedback in ActionState.
 
 **Province Positioning**: Fixed `PROVINCE_POSITIONS: [(f32, f32); 25]` array mapping province IDs to XZ coordinates, derived from the adjacency layout in `crown-ash-sim/src/map.rs`. The 25 hex tiles are arranged on the XZ plane to match the adjacency graph -- neighboring provinces in the graph are adjacent hex tiles on the map. The orthographic camera looks down the Y axis.
+
+### 10.3 Phase 4 Deliverables (IN PROGRESS)
+
+Phase 4 adds real-time streaming, simulation bug fixes, and new UI features.
+
+**Bug Fixes**:
+- **SIM-001**: Unrest overshoot fixed — added `clamp_province_values()` at tick step 8b to enforce [0, 1000] bounds after all modifiers (economy, events, intrigue). Added unrest/prosperity bounds to `assert_invariants()`.
+- **SIM-002**: Prosperity overshoot fixed — included in same clamp sweep as SIM-001.
+
+**SSE Streaming Endpoint** (`crates/crown-ash-api/src/streaming.rs`):
+- `GET /stream` SSE endpoint with `tokio::sync::broadcast` channel
+- `StreamEvent` type with event_type + JSON payload
+- `create_event_channel()` factory for the broadcast sender
+- `broadcast_event()` helper for the tick loop
+- 15-second heartbeat to keep proxies alive
+- Lag detection: clients notified when they miss events
+- 3 unit tests for channel creation, zero-receiver, and delivery
+
+**Minimap Widget** (`crates/crown-ash-client/src/systems/ui_panels.rs`):
+- Egui window (bottom-right, 200x200px) showing all 25 provinces as colored dots
+- 40 adjacency lines rendered as semi-transparent edges
+- Faction colors from live game state (falls back to defaults when disconnected)
+- Click-to-select: clicking a province dot on the minimap updates the Selection resource
+- Selected province highlighted with white ring
+- Province positions and adjacency data mirrored from map_render module
+
+**Updated Test Counts**: 132 total (80 sim unit + 15 stress + 19 types + 11 api + 7 plugin)
+
+**Updated System Count**: CrownAshUiPlugin now registers 5 systems: top_bar, detail_panel, event_feed, minimap, action_buttons
+
+**Issue Tracker**: `docs/crown-ash-issues.md` created with:
+- 2 closed bugs (SIM-001, SIM-002)
+- 2 implemented features (CLIENT-001 server-side SSE, CLIENT-002 minimap)
+- 6 planned features (CLIENT-003 audio, CLIENT-004 tutorial, SIM-003 save/load, SIM-004 multiplayer, SIM-005 sieges, SIM-006 relationships)

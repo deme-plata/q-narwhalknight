@@ -5,12 +5,15 @@
 //! 1. Age characters (1 day per turn; increment year every 365 turns)
 //! 2. Process queued player actions
 //! 3. Resolve battles (armies in same province, factions at war)
+//! 3b. Process sieges (fortified province captures)
 //! 4. Move armies (destination -> location)
 //! 5. Economy (tax collection, improvement effects)
 //! 5b. Trade (inter-province trade routes, prosperity bonuses, income)
 //! 6. Unrest calculation
 //! 7. Cohesion decay
+//! 7a. Religion (authority, conversion progress, religious events)
 //! 7b. Intrigue (advance plots, check discovery, execute)
+//! 7c. Diplomacy (tribute, treaty expiry, grievance decay, coalitions)
 //! 8. Random events (plague, famine, harvest, rebellion)
 //! 9. Succession check
 //! 9b. Lifecycle cleanup (tombstone dead characters, enforce army caps)
@@ -25,12 +28,16 @@ use crate::ai;
 use crate::birth;
 use crate::cohesion;
 use crate::combat;
+use crate::diplomacy;
 use crate::economy;
+use crate::education;
 use crate::events;
 use crate::intrigue;
 use crate::lifecycle;
 use crate::process_action_internal;
 use crate::random::DeterministicRng;
+use crate::relationships;
+use crate::religion;
 use crate::succession;
 use crate::trade;
 use crate::world_state::GameWorld;
@@ -72,6 +79,13 @@ pub fn tick(world: &mut GameWorld, block_hash: [u8; 32]) -> TurnSummary {
     all_events.extend(birth_events);
 
     // -----------------------------------------------------------------------
+    // Step 1c: Education — age-gated stat growth and graduation.
+    // -----------------------------------------------------------------------
+    let mut rng_education = DeterministicRng::new(block_hash, "education");
+    let education_events = education::process_education(world, &mut rng_education);
+    all_events.extend(education_events);
+
+    // -----------------------------------------------------------------------
     // Step 2: Process queued player actions.
     // -----------------------------------------------------------------------
     let queued = std::mem::take(&mut world.action_queue);
@@ -99,7 +113,7 @@ pub fn tick(world: &mut GameWorld, block_hash: [u8; 32]) -> TurnSummary {
         all_events.push(GameEvent::Battle(br.clone()));
     }
 
-    // Check province captures after battles.
+    // Check province captures after battles (unfortified provinces only).
     let captures = combat::check_province_captures(world);
     for (pid, old_ctrl, new_ctrl) in &captures {
         all_events.push(GameEvent::ProvinceConquered {
@@ -111,6 +125,21 @@ pub fn tick(world: &mut GameWorld, block_hash: [u8; 32]) -> TurnSummary {
         // Apply cohesion penalty for conquest.
         cohesion::apply_conquest_penalty(world, *new_ctrl);
     }
+
+    // Step 3b: Process sieges (fortified provinces).
+    let siege_events = combat::process_sieges(world);
+    for ev in &siege_events {
+        if let GameEvent::SiegeCompleted { province, old_controller, new_controller, .. } = ev {
+            all_events.push(GameEvent::ProvinceConquered {
+                province: *province,
+                old_controller: *old_controller,
+                new_controller: *new_controller,
+                turn,
+            });
+            cohesion::apply_conquest_penalty(world, *new_controller);
+        }
+    }
+    all_events.extend(siege_events);
 
     // -----------------------------------------------------------------------
     // Step 4: Move armies (destination -> location).
@@ -140,11 +169,36 @@ pub fn tick(world: &mut GameWorld, block_hash: [u8; 32]) -> TurnSummary {
     cohesion::update_cohesion(world);
 
     // -----------------------------------------------------------------------
+    // Step 7a: Religion — authority, conversion progress, cohesion effects.
+    // -----------------------------------------------------------------------
+    religion::update_religious_authority(world);
+    let conversion_events = religion::process_conversions(world);
+    all_events.extend(conversion_events);
+    religion::authority_cohesion_effect(world);
+
+    let mut rng_religion = DeterministicRng::new(block_hash, "religion");
+    let religion_events = religion::roll_religious_events(world, &mut rng_religion);
+    all_events.extend(religion_events);
+
+    // -----------------------------------------------------------------------
     // Step 7b: Intrigue — advance plots, check discovery, execute.
     // -----------------------------------------------------------------------
     let mut rng_intrigue = DeterministicRng::new(block_hash, "intrigue");
     let intrigue_events = intrigue::process_intrigue(world, &mut rng_intrigue);
     all_events.extend(intrigue_events);
+
+    // -----------------------------------------------------------------------
+    // Step 7c: Character relationships — friendships, rivalries, alliances.
+    // -----------------------------------------------------------------------
+    let relationship_events = relationships::process_relationships(world);
+    all_events.extend(relationship_events);
+
+    // -----------------------------------------------------------------------
+    // Step 7d: Diplomacy — tribute, treaty expiry, grievance decay, coalitions.
+    // -----------------------------------------------------------------------
+    let mut rng_diplomacy = DeterministicRng::new(block_hash, "diplomacy");
+    let diplomacy_events = diplomacy::process_diplomacy(world, &mut rng_diplomacy);
+    all_events.extend(diplomacy_events);
 
     // -----------------------------------------------------------------------
     // Step 8: Random events (plague, famine, harvest, rebellion).
@@ -155,6 +209,13 @@ pub fn tick(world: &mut GameWorld, block_hash: [u8; 32]) -> TurnSummary {
 
     // Decay scars and grudges.
     events::decay_scars(world);
+
+    // -----------------------------------------------------------------------
+    // Step 8b: Clamp province values (unrest, prosperity) after all modifiers.
+    // -----------------------------------------------------------------------
+    // Random events (famine, plague) can push unrest/prosperity outside [0, 1000]
+    // after the step-6 clamp. This sweep enforces hard bounds at end of pipeline.
+    clamp_province_values(world);
 
     // -----------------------------------------------------------------------
     // Step 9: Succession check.
@@ -203,17 +264,28 @@ pub fn tick(world: &mut GameWorld, block_hash: [u8; 32]) -> TurnSummary {
     }
 }
 
-/// Move armies that have a destination set.
+/// Move armies that have a destination or movement queue.
 ///
-/// Armies arrive at their destination in one turn.
+/// Multi-hop: pops the front of `movement_queue` each turn.
+/// Single-hop: consumes `destination` in one turn.
 fn move_armies(world: &mut GameWorld) {
     let army_count = world.armies.len();
     for idx in 0..army_count {
-        if let Some(dest) = world.armies[idx].destination.take() {
-            world.armies[idx].location = dest;
-            // Mark army dirty — location changed.
+        // Besieging armies cannot move (siege cancelled automatically if they try).
+        if world.armies[idx].siege.is_some() {
+            continue;
+        }
+
+        // Multi-hop path takes priority over single-hop destination.
+        if !world.armies[idx].movement_queue.is_empty() {
+            let next = world.armies[idx].movement_queue.remove(0);
+            world.armies[idx].location = next;
+            // If we also had a single-hop destination, clear it.
+            world.armies[idx].destination = None;
             world.dirty.dirty_armies.insert(world.armies[idx].id);
-            // Destination is consumed (set to None by take()).
+        } else if let Some(dest) = world.armies[idx].destination.take() {
+            world.armies[idx].location = dest;
+            world.dirty.dirty_armies.insert(world.armies[idx].id);
         }
     }
 }
@@ -322,6 +394,29 @@ fn update_unrest(world: &mut GameWorld) {
     }
 }
 
+/// Enforce hard bounds on all province FixedPoint values.
+///
+/// Called after all modifier steps (economy, events, intrigue) to guarantee
+/// invariants hold before the post-tick assertion.
+fn clamp_province_values(world: &mut GameWorld) {
+    let zero = FixedPoint::ZERO;
+    let max = FixedPoint::from_int(1000);
+    let province_count = world.provinces.len();
+
+    for idx in 0..province_count {
+        let p = &mut world.provinces[idx];
+        let old_unrest = p.unrest;
+        let old_prosperity = p.prosperity;
+
+        p.unrest = p.unrest.clamp(zero, max);
+        p.prosperity = p.prosperity.clamp(zero, max);
+
+        if p.unrest != old_unrest || p.prosperity != old_prosperity {
+            world.dirty.dirty_provinces.insert(p.id);
+        }
+    }
+}
+
 /// Check for factions that have lost all provinces.
 fn check_faction_elimination(world: &mut GameWorld, events: &mut Vec<GameEvent>, turn: u32) {
     let faction_count = world.factions.len();
@@ -412,8 +507,10 @@ mod tests {
             morale: FixedPoint::from_int(800),
             location: 7,         // Ashenmere
             destination: Some(9), // Embervale (adjacent)
+            movement_queue: Vec::new(),
             raised_turn: 0,
             supply: FixedPoint::from_int(100),
+            siege: None,
         });
 
         tick(&mut world, [0x01; 32]);

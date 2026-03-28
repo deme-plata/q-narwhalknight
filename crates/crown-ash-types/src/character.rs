@@ -56,6 +56,48 @@ pub struct Plot {
 pub type CharacterId = u32;
 pub type DynastyId = u16;
 
+// ---------------------------------------------------------------------------
+// Personal relationships between characters
+// ---------------------------------------------------------------------------
+
+/// Type of personal relationship between two characters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RelationType {
+    /// Mutual respect and friendship (opinion > 50).
+    Friend,
+    /// Bitter rivalry (opinion < -50).
+    Rival,
+    /// A guardian-ward educational bond.
+    Mentor,
+    /// Marriage alliance (tracked separately from spouse field for diplomatic effects).
+    MarriageAlliance,
+}
+
+/// A timed opinion modifier attached to a personal relationship.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OpinionModifier {
+    pub reason: String,
+    pub value: FixedPoint,
+    /// Turns remaining until this modifier expires. `None` = permanent.
+    pub turns_remaining: Option<u32>,
+}
+
+/// One side of a personal relationship between two characters.
+///
+/// Each character stores their own view.  A relationship between A and B is
+/// represented by A having a `PersonalRelation { target: B, .. }` and B having
+/// one pointing at A.  Opinions need not be symmetric.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PersonalRelation {
+    pub target: CharacterId,
+    /// Net personal opinion of `target` (−1000 … +1000).
+    pub opinion: FixedPoint,
+    /// Named relationship type, if any.
+    pub relation_type: Option<RelationType>,
+    /// Stacking opinion modifiers that decay over time.
+    pub modifiers: Vec<OpinionModifier>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CharacterRole {
     Ruler,
@@ -206,6 +248,9 @@ pub struct Character {
     pub spouse: Option<CharacterId>,
     pub children: Vec<CharacterId>,
     pub parent: Option<CharacterId>,
+    /// Personal relationships with other characters.
+    #[serde(default)]
+    pub relations: Vec<PersonalRelation>,
     /// Turn on which this character died (set when alive becomes false).
     #[serde(default)]
     pub death_turn: Option<u32>,
@@ -223,6 +268,21 @@ impl Character {
     /// Effective stats including trait bonuses.
     pub fn effective_stats(&self) -> CharacterStats {
         self.stats.effective(&self.traits)
+    }
+
+    /// Get personal opinion of another character.
+    pub fn opinion_of(&self, target: CharacterId) -> FixedPoint {
+        self.relations.iter()
+            .find(|r| r.target == target)
+            .map(|r| r.opinion)
+            .unwrap_or(FixedPoint::ZERO)
+    }
+
+    /// Get the relationship type with another character, if any.
+    pub fn relation_type_with(&self, target: CharacterId) -> Option<RelationType> {
+        self.relations.iter()
+            .find(|r| r.target == target)
+            .and_then(|r| r.relation_type)
     }
 }
 

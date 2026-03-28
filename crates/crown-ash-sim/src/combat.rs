@@ -243,15 +243,17 @@ fn apply_casualties(world: &mut GameWorld, army_id: ArmyId, total_casualties: u3
     }
 }
 
-/// Province siege: if an army occupies an enemy province unopposed for a turn, capture it.
+/// Province capture: if an army occupies an unfortified enemy province
+/// unopposed, capture it immediately.  Fortified provinces require a siege
+/// (see [`process_sieges`]).
 pub fn check_province_captures(world: &mut GameWorld) -> Vec<(u16, u8, u8)> {
     let mut captures = Vec::new();
 
     let province_ids: Vec<u16> = world.provinces.iter().map(|p| p.id).collect();
 
     for &pid in &province_ids {
-        let controller = match world.province(pid) {
-            Some(p) => p.controller,
+        let (controller, fortification) = match world.province(pid) {
+            Some(p) => (p.controller, p.fortification),
             None => continue,
         };
 
@@ -262,6 +264,7 @@ pub fn check_province_captures(world: &mut GameWorld) -> Vec<(u16, u8, u8)> {
                     && !a.is_moving()
                     && a.owner_faction != controller
                     && a.troops.total() > 0
+                    && a.siege.is_none() // not already besieging
                     && world.at_war(a.owner_faction, controller)
             });
 
@@ -279,30 +282,244 @@ pub fn check_province_captures(world: &mut GameWorld) -> Vec<(u16, u8, u8)> {
                 .map(|p| p.garrison.total())
                 .unwrap_or(0);
 
-            if !defenders_present && garrison_strength == 0 {
+            if !defenders_present && garrison_strength == 0 && fortification == 0 {
+                // No walls, no defenders — instant capture.
                 let new_controller = army.owner_faction;
                 captures.push((pid, controller, new_controller));
             }
+            // Fortified provinces are handled by process_sieges().
         }
     }
 
     // Apply captures.
     for &(pid, old_ctrl, new_ctrl) in &captures {
-        if let Some(province) = world.province_mut_dirty(pid) {
-            province.controller = new_ctrl;
-        }
-        // Update realm province lists.
-        if let Some(old_realm) = world.realm_for_faction_mut_dirty(old_ctrl) {
-            old_realm.provinces.retain(|&p| p != pid);
-        }
-        if let Some(new_realm) = world.realm_for_faction_mut_dirty(new_ctrl) {
-            if !new_realm.provinces.contains(&pid) {
-                new_realm.provinces.push(pid);
+        apply_province_capture(world, pid, old_ctrl, new_ctrl);
+    }
+
+    captures
+}
+
+// ─── Siege Processing ────────────────────────────────────────────────────────
+
+/// Siege duration per fortification level (turns).
+const SIEGE_TURNS_PER_FORT_LEVEL: u32 = 3;
+
+/// Prosperity lost per turn of siege.
+const SIEGE_PROSPERITY_DRAIN: i64 = 20_000; // 20.000
+
+/// Unrest gained per turn of siege.
+const SIEGE_UNREST_GAIN: i64 = 15_000; // 15.000
+
+/// Population attrition per turn of siege (per-mille: 5 = 0.5%).
+const SIEGE_POPULATION_ATTRITION_PERMILLE: u32 = 5;
+
+/// Attacker casualty rate on siege completion (per-mille of garrison strength).
+const SIEGE_ASSAULT_CASUALTY_RATE: u32 = 200; // 20% of garrison lost as attacker casualties
+
+/// Process all active sieges and start new ones.
+///
+/// Called after battles and province captures.  For each enemy army
+/// stationary in a fortified province:
+/// 1. If already besieging: tick progress, apply attrition, check completion.
+/// 2. If new arrival: start siege.
+///
+/// Returns siege-related events (SiegeStarted, SiegeCompleted).
+pub fn process_sieges(world: &mut GameWorld) -> Vec<crown_ash_types::GameEvent> {
+    let mut events = Vec::new();
+    let turn = world.meta.turn;
+
+    // --- Phase 1: Tick existing sieges. ---
+
+    // Cancel sieges where the army moved away, died, or defenders arrived.
+    let army_count = world.armies.len();
+    for idx in 0..army_count {
+        if let Some(ref siege) = world.armies[idx].siege {
+            let pid = siege.target_province;
+            let still_there = world.armies[idx].location == pid
+                && !world.armies[idx].is_moving()
+                && world.armies[idx].troops.total() > 0;
+
+            if !still_there {
+                // Army moved or destroyed — cancel siege.
+                world.armies[idx].siege = None;
+                world.dirty.dirty_armies.insert(world.armies[idx].id);
+                continue;
+            }
+
+            // Check if a defending army arrived (would have fought in battle step).
+            let defender_faction = siege.defender_faction;
+            let defenders_present = world.armies.iter().any(|a| {
+                a.location == pid
+                    && !a.is_moving()
+                    && a.owner_faction == defender_faction
+                    && a.troops.total() > 0
+            });
+            if defenders_present {
+                // Defenders broke through — cancel siege.
+                world.armies[idx].siege = None;
+                world.dirty.dirty_armies.insert(world.armies[idx].id);
             }
         }
     }
 
-    captures
+    // Tick progress on remaining sieges.
+    let army_count = world.armies.len();
+    let mut completed_sieges: Vec<(usize, u16, u8, u8, u32)> = Vec::new();
+
+    for idx in 0..army_count {
+        let army_id = world.armies[idx].id;
+        let owner = world.armies[idx].owner_faction;
+        if let Some(ref mut siege) = world.armies[idx].siege {
+            siege.turns_besieged += 1;
+            let besieged = siege.turns_besieged;
+            let required = siege.turns_required;
+            let target = siege.target_province;
+            let defender = siege.defender_faction;
+            world.dirty.dirty_armies.insert(army_id);
+
+            if besieged >= required {
+                completed_sieges.push((idx, target, defender, owner, besieged));
+            }
+        }
+    }
+
+    // Apply siege attrition to besieged provinces.
+    let mut besieged_provinces: Vec<u16> = Vec::new();
+    for army in &world.armies {
+        if let Some(ref siege) = army.siege {
+            if !besieged_provinces.contains(&siege.target_province) {
+                besieged_provinces.push(siege.target_province);
+            }
+        }
+    }
+    for &pid in &besieged_provinces {
+        if let Some(prov) = world.province_mut_dirty(pid) {
+            prov.prosperity -= FixedPoint::from_raw(SIEGE_PROSPERITY_DRAIN);
+            prov.unrest += FixedPoint::from_raw(SIEGE_UNREST_GAIN);
+            let pop_loss = (prov.population as u64 * SIEGE_POPULATION_ATTRITION_PERMILLE as u64
+                / 1000) as u32;
+            prov.population = prov.population.saturating_sub(pop_loss.max(1));
+            prov.last_siege_turn = Some(turn);
+        }
+    }
+
+    // Apply completed sieges.
+    for (army_idx, pid, old_ctrl, new_ctrl, turns_lasted) in completed_sieges {
+        // Attacker takes casualties proportional to garrison strength.
+        let garrison_total = world.province(pid)
+            .map(|p| p.garrison.total())
+            .unwrap_or(0);
+        let assault_casualties = garrison_total * SIEGE_ASSAULT_CASUALTY_RATE / 1000;
+
+        // Apply casualties to the besieging army.
+        let army_id = world.armies[army_idx].id;
+        apply_casualties(world, army_id, assault_casualties);
+
+        // Clear garrison.
+        if let Some(prov) = world.province_mut_dirty(pid) {
+            prov.garrison = crown_ash_types::province::Troops {
+                levy: 0,
+                men_at_arms: 0,
+                knights: 0,
+            };
+            // Add siege scar.
+            prov.add_scar(crown_ash_types::province::ProvinceScar {
+                turn_inflicted: turn,
+                scar_type: crown_ash_types::province::ScarType::WarDamage,
+                severity: FixedPoint::from_int(300),
+            });
+        }
+
+        // Transfer province control.
+        apply_province_capture(world, pid, old_ctrl, new_ctrl);
+
+        // Clear siege state from army.
+        if army_idx < world.armies.len() {
+            world.armies[army_idx].siege = None;
+            world.dirty.dirty_armies.insert(world.armies[army_idx].id);
+        }
+
+        events.push(crown_ash_types::GameEvent::SiegeCompleted {
+            province: pid,
+            old_controller: old_ctrl,
+            new_controller: new_ctrl,
+            turns_lasted,
+            attacker_casualties: assault_casualties,
+            turn,
+        });
+    }
+
+    // --- Phase 2: Start new sieges. ---
+
+    let province_ids: Vec<u16> = world.provinces.iter().map(|p| p.id).collect();
+    for &pid in &province_ids {
+        let (controller, fortification) = match world.province(pid) {
+            Some(p) => (p.controller, p.fortification),
+            None => continue,
+        };
+        if fortification == 0 {
+            continue; // No walls — handled by check_province_captures.
+        }
+
+        // Find an enemy army that could start a siege.
+        let candidate_idx = world.armies.iter().position(|a| {
+            a.location == pid
+                && !a.is_moving()
+                && a.owner_faction != controller
+                && a.troops.total() > 0
+                && a.siege.is_none()
+                && world.at_war(a.owner_faction, controller)
+        });
+
+        if let Some(idx) = candidate_idx {
+            // Check no defending army present.
+            let defenders_present = world.armies.iter().any(|a| {
+                a.location == pid
+                    && !a.is_moving()
+                    && a.owner_faction == controller
+                    && a.troops.total() > 0
+            });
+            if defenders_present {
+                continue;
+            }
+
+            let turns_required = (fortification as u32 + 1) * SIEGE_TURNS_PER_FORT_LEVEL;
+            let attacker_faction = world.armies[idx].owner_faction;
+
+            world.armies[idx].siege = Some(crown_ash_types::SiegeProgress {
+                target_province: pid,
+                defender_faction: controller,
+                turns_besieged: 0,
+                turns_required,
+            });
+            world.dirty.dirty_armies.insert(world.armies[idx].id);
+
+            events.push(crown_ash_types::GameEvent::SiegeStarted {
+                province: pid,
+                attacker_faction,
+                defender_faction: controller,
+                turns_required,
+                turn,
+            });
+        }
+    }
+
+    events
+}
+
+/// Transfer province control and update realm province lists.
+fn apply_province_capture(world: &mut GameWorld, pid: u16, old_ctrl: u8, new_ctrl: u8) {
+    if let Some(province) = world.province_mut_dirty(pid) {
+        province.controller = new_ctrl;
+    }
+    if let Some(old_realm) = world.realm_for_faction_mut_dirty(old_ctrl) {
+        old_realm.provinces.retain(|&p| p != pid);
+    }
+    if let Some(new_realm) = world.realm_for_faction_mut_dirty(new_ctrl) {
+        if !new_realm.provinces.contains(&pid) {
+            new_realm.provinces.push(pid);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -344,8 +561,10 @@ mod tests {
             morale: FixedPoint::from_int(800),
             location: 7,
             destination: None,
+            movement_queue: Vec::new(),
             raised_turn: 0,
             supply: FixedPoint::from_int(100),
+            siege: None,
         });
 
         let aid2 = world.alloc_army_id();
@@ -357,8 +576,10 @@ mod tests {
             morale: FixedPoint::from_int(800),
             location: 7,
             destination: None,
+            movement_queue: Vec::new(),
             raised_turn: 0,
             supply: FixedPoint::from_int(100),
+            siege: None,
         });
 
         let mut rng = DeterministicRng::new([0x42; 32], "combat_test");
@@ -366,6 +587,236 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert!(results[0].attacker_casualties > 0 || results[0].defender_casualties > 0);
+    }
+
+    #[test]
+    fn siege_starts_on_fortified_province() {
+        let mut world = test_world();
+
+        // Declare war between faction 0 and faction 4.
+        if let Some(rel) = world.relation_mut(0, 4) {
+            rel.at_war = true;
+        }
+
+        // Fortify a province controlled by faction 0.
+        let target_pid = world.provinces.iter()
+            .find(|p| p.controller == 0)
+            .map(|p| p.id)
+            .unwrap();
+        if let Some(prov) = world.province_mut_dirty(target_pid) {
+            prov.fortification = 2; // Level 2 walls.
+            prov.garrison = Troops { levy: 0, men_at_arms: 0, knights: 0 }; // empty garrison
+        }
+
+        // Place enemy army in that province.
+        let aid = world.alloc_army_id();
+        world.armies.push(Army {
+            id: aid,
+            owner_faction: 4,
+            commander: None,
+            troops: Troops { levy: 500, men_at_arms: 100, knights: 10 },
+            morale: FixedPoint::from_int(800),
+            location: target_pid,
+            destination: None,
+            movement_queue: Vec::new(),
+            raised_turn: 0,
+            supply: FixedPoint::from_int(100),
+            siege: None,
+        });
+
+        // Remove any defender armies from that province.
+        world.armies.retain(|a| !(a.owner_faction == 0 && a.location == target_pid && a.id != aid));
+
+        let events = process_sieges(&mut world);
+
+        // Should have started a siege.
+        let siege_started = events.iter().any(|e| matches!(e, crown_ash_types::GameEvent::SiegeStarted { .. }));
+        assert!(siege_started, "Should emit SiegeStarted event");
+
+        let army = world.army(aid).unwrap();
+        assert!(army.siege.is_some(), "Army should have siege progress");
+        let siege = army.siege.as_ref().unwrap();
+        assert_eq!(siege.target_province, target_pid);
+        // (fort_level + 1) * 3 = (2 + 1) * 3 = 9
+        assert_eq!(siege.turns_required, 9);
+        assert_eq!(siege.turns_besieged, 0);
+    }
+
+    #[test]
+    fn siege_ticks_to_completion() {
+        let mut world = test_world();
+        world.meta.turn = 1;
+
+        if let Some(rel) = world.relation_mut(0, 4) {
+            rel.at_war = true;
+        }
+
+        let target_pid = world.provinces.iter()
+            .find(|p| p.controller == 0)
+            .map(|p| p.id)
+            .unwrap();
+        if let Some(prov) = world.province_mut_dirty(target_pid) {
+            prov.fortification = 1; // Level 1 → (1+1)*3 = 6 turns
+            prov.garrison = Troops { levy: 200, men_at_arms: 0, knights: 0 };
+        }
+
+        let aid = world.alloc_army_id();
+        world.armies.push(Army {
+            id: aid,
+            owner_faction: 4,
+            commander: None,
+            troops: Troops { levy: 1000, men_at_arms: 200, knights: 20 },
+            morale: FixedPoint::from_int(800),
+            location: target_pid,
+            destination: None,
+            movement_queue: Vec::new(),
+            raised_turn: 0,
+            supply: FixedPoint::from_int(100),
+            siege: Some(crown_ash_types::SiegeProgress {
+                target_province: target_pid,
+                defender_faction: 0,
+                turns_besieged: 5, // One tick away from completion (need 6).
+                turns_required: 6,
+            }),
+        });
+
+        world.armies.retain(|a| !(a.owner_faction == 0 && a.location == target_pid && a.id != aid));
+
+        let events = process_sieges(&mut world);
+
+        let completed = events.iter().any(|e| matches!(e, crown_ash_types::GameEvent::SiegeCompleted { .. }));
+        assert!(completed, "Siege should complete on 6th tick");
+
+        // Province should now belong to faction 4.
+        let prov = world.province(target_pid).unwrap();
+        assert_eq!(prov.controller, 4, "Province should be captured");
+        assert_eq!(prov.garrison.total(), 0, "Garrison should be destroyed");
+
+        // Army siege should be cleared.
+        let army = world.army(aid).unwrap();
+        assert!(army.siege.is_none(), "Siege should be cleared after completion");
+    }
+
+    #[test]
+    fn unfortified_province_instant_capture() {
+        let mut world = test_world();
+
+        if let Some(rel) = world.relation_mut(0, 4) {
+            rel.at_war = true;
+        }
+
+        let target_pid = world.provinces.iter()
+            .find(|p| p.controller == 0)
+            .map(|p| p.id)
+            .unwrap();
+        if let Some(prov) = world.province_mut_dirty(target_pid) {
+            prov.fortification = 0; // No walls.
+            prov.garrison = Troops { levy: 0, men_at_arms: 0, knights: 0 };
+        }
+
+        let aid = world.alloc_army_id();
+        world.armies.push(Army {
+            id: aid,
+            owner_faction: 4,
+            commander: None,
+            troops: Troops { levy: 500, men_at_arms: 100, knights: 10 },
+            morale: FixedPoint::from_int(800),
+            location: target_pid,
+            destination: None,
+            movement_queue: Vec::new(),
+            raised_turn: 0,
+            supply: FixedPoint::from_int(100),
+            siege: None,
+        });
+
+        world.armies.retain(|a| !(a.owner_faction == 0 && a.location == target_pid && a.id != aid));
+
+        let captures = check_province_captures(&mut world);
+        assert!(!captures.is_empty(), "Unfortified province should be captured instantly");
+        assert_eq!(captures[0].2, 4, "New controller should be faction 4");
+
+        // No siege should have started.
+        let army = world.army(aid).unwrap();
+        assert!(army.siege.is_none(), "No siege needed for unfortified");
+    }
+
+    #[test]
+    fn besieging_army_stays_put() {
+        use crate::world_gen::init_world;
+        use crate::tick::tick;
+
+        let config = crown_ash_types::WorldConfig::default();
+        let mut world = init_world(&config, [0x42; 32]);
+        world.armies.clear();
+
+        // Army is besieging with NO destination — should not move.
+        let aid = world.alloc_army_id();
+        world.armies.push(Army {
+            id: aid,
+            owner_faction: 0,
+            commander: None,
+            troops: Troops { levy: 500, men_at_arms: 100, knights: 10 },
+            morale: FixedPoint::from_int(800),
+            location: 7,
+            destination: None,
+            movement_queue: Vec::new(),
+            raised_turn: 0,
+            supply: FixedPoint::from_int(100),
+            siege: Some(crown_ash_types::SiegeProgress {
+                target_province: 7,
+                defender_faction: 4,
+                turns_besieged: 2,
+                turns_required: 9,
+            }),
+        });
+
+        let _ = tick(&mut world, [0x01; 32]);
+
+        let army = world.army(aid).unwrap();
+        assert_eq!(army.location, 7, "Besieging army should not move");
+        assert!(army.siege.is_some(), "Siege should still be active");
+    }
+
+    #[test]
+    fn siege_cancelled_when_army_moves() {
+        let mut world = test_world();
+
+        if let Some(rel) = world.relation_mut(0, 4) {
+            rel.at_war = true;
+        }
+
+        let target_pid = world.provinces.iter()
+            .find(|p| p.controller == 4)
+            .map(|p| p.id)
+            .unwrap();
+
+        // Army besieging but has a destination — siege should cancel.
+        let aid = world.alloc_army_id();
+        world.armies.push(Army {
+            id: aid,
+            owner_faction: 0,
+            commander: None,
+            troops: Troops { levy: 500, men_at_arms: 100, knights: 10 },
+            morale: FixedPoint::from_int(800),
+            location: target_pid,
+            destination: Some(7),
+            movement_queue: Vec::new(),
+            raised_turn: 0,
+            supply: FixedPoint::from_int(100),
+            siege: Some(crown_ash_types::SiegeProgress {
+                target_province: target_pid,
+                defender_faction: 4,
+                turns_besieged: 2,
+                turns_required: 9,
+            }),
+        });
+
+        let events = process_sieges(&mut world);
+
+        let army = world.army(aid).unwrap();
+        assert!(army.siege.is_none(), "Siege should be cancelled when army has destination");
+        // No SiegeCompleted event.
+        assert!(!events.iter().any(|e| matches!(e, crown_ash_types::GameEvent::SiegeCompleted { .. })));
     }
 
     #[test]
@@ -380,8 +831,10 @@ mod tests {
             morale: FixedPoint::from_int(800),
             location: 7,
             destination: None,
+            movement_queue: Vec::new(),
             raised_turn: 0,
             supply: FixedPoint::from_int(100),
+            siege: None,
         });
 
         apply_casualties(&mut world, aid, 500);

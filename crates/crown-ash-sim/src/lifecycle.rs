@@ -385,8 +385,10 @@ mod tests {
                 morale: FixedPoint::from_int(800),
                 location: 7,
                 destination: None,
+                movement_queue: Vec::new(),
                 raised_turn: turn,
                 supply: FixedPoint::from_int(100),
+                siege: None,
             });
         }
 
@@ -430,8 +432,10 @@ mod tests {
                 morale: FixedPoint::from_int(800),
                 location: 7,
                 destination: None,
+                movement_queue: Vec::new(),
                 raised_turn: turn,
                 supply: FixedPoint::from_int(100),
+                siege: None,
             });
         }
 
@@ -478,8 +482,10 @@ mod tests {
             morale: FixedPoint::from_int(800),
             location: 7,
             destination: None,
+            movement_queue: Vec::new(),
             raised_turn: turn,
             supply: FixedPoint::from_int(100),
+            siege: None,
         });
 
         let initial = world.armies.len();

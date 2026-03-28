@@ -114,6 +114,7 @@ pub fn init_world(config: &WorldConfig, seed: [u8; 32]) -> GameWorld {
             last_siege_turn: None,
             tax_rate: FixedPoint::from_raw(200), // 20% default
             neighbors: data.neighbors.to_vec(),
+            conversion_progress: None,
         });
     }
 
@@ -146,6 +147,7 @@ pub fn init_world(config: &WorldConfig, seed: [u8; 32]) -> GameWorld {
             heir: None,
             spouse: None,
             children: Vec::new(),
+            relations: Vec::new(),
             parent: None,
             death_turn: None,
             death_cause: None,
@@ -181,6 +183,7 @@ pub fn init_world(config: &WorldConfig, seed: [u8; 32]) -> GameWorld {
                 heir: None,
                 spouse: None,
                 children: Vec::new(),
+                relations: Vec::new(),
                 parent: None,
                 death_turn: None,
                 death_cause: None,
@@ -240,6 +243,7 @@ pub fn init_world(config: &WorldConfig, seed: [u8; 32]) -> GameWorld {
             age: 0,
             at_war_with: Vec::new(),
             allies: Vec::new(),
+            religious_authority: FixedPoint::from_int(500),
         });
     }
 

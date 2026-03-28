@@ -40,6 +40,9 @@
 //! | `map`        | Fixed 25-province adjacency graph               |
 //! | `random`     | Deterministic RNG from block hashes             |
 //! | `trade`      | Inter-province trade routes and income           |
+//! | `religion`   | Religious authority, gradual conversion, events  |
+//! | `diplomacy`  | Vassal tribute, treaty expiry, coalitions        |
+//! | `education`  | Age-gated skill growth, mentors, graduation      |
 
 pub mod world_state;
 pub mod world_gen;
@@ -57,6 +60,10 @@ pub mod birth;
 pub mod intrigue;
 pub mod lifecycle;
 pub mod trade;
+pub mod religion;
+pub mod diplomacy;
+pub mod education;
+pub mod relationships;
 
 // Re-export key types at crate root.
 pub use world_state::GameWorld;
@@ -125,8 +132,10 @@ pub fn process_action(world: &mut GameWorld, action: &QueuedAction) -> Vec<GameE
                         morale: FixedPoint::from_int(800),
                         location: *province,
                         destination: None,
+                        movement_queue: Vec::new(),
                         raised_turn: turn,
                         supply: FixedPoint::from_int(100),
+                        siege: None,
                     };
                     world.dirty.dirty_armies.insert(army_id);
                     world.dirty.armies_added.push(army_id);
@@ -144,6 +153,23 @@ pub fn process_action(world: &mut GameWorld, action: &QueuedAction) -> Vec<GameE
             if adjacent && owns {
                 if let Some(a) = world.army_mut_dirty(*army) {
                     a.destination = Some(*target);
+                    a.movement_queue.clear(); // cancel any multi-hop
+                }
+            }
+        }
+        GameAction::MoveArmyPath { army, target } => {
+            let owns = world.army(*army).map(|a| a.owner_faction == faction_id).unwrap_or(false);
+            let location = world.army(*army).map(|a| a.location);
+            if owns {
+                if let Some(loc) = location {
+                    if let Some(path) = map::find_path(loc, *target) {
+                        if !path.is_empty() {
+                            if let Some(a) = world.army_mut_dirty(*army) {
+                                a.movement_queue = path;
+                                a.destination = None;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -305,6 +331,7 @@ pub fn process_action(world: &mut GameWorld, action: &QueuedAction) -> Vec<GameE
                 if let Some(cb) = world.character_mut_dirty(*b) {
                     cb.spouse = Some(*a);
                 }
+                // Diplomatic opinion boost for cross-faction marriage.
                 if a_faction != b_faction {
                     if let (Some(fa), Some(fb)) = (a_faction, b_faction) {
                         if let Some(rel) = world.relation_mut_dirty(fa, fb) {
@@ -312,6 +339,9 @@ pub fn process_action(world: &mut GameWorld, action: &QueuedAction) -> Vec<GameE
                         }
                     }
                 }
+                // Set up personal relationship + alliance event.
+                let mut _marriage_events = Vec::new();
+                relationships::on_marriage(world, *a, *b, &mut _marriage_events, world.meta.turn);
             }
         }
         GameAction::ConvertProvince { province, religion } => {
@@ -321,15 +351,15 @@ pub fn process_action(world: &mut GameWorld, action: &QueuedAction) -> Vec<GameE
             let different = world.province(*province)
                 .map(|p| p.religion != *religion)
                 .unwrap_or(false);
-            if owns && different {
+            let not_already_converting = world.province(*province)
+                .map(|p| p.conversion_progress.is_none())
+                .unwrap_or(false);
+            if owns && different && not_already_converting {
+                // Start gradual conversion (progress 0 → 1000 over multiple turns).
                 if let Some(prov) = world.province_mut_dirty(*province) {
-                    prov.religion = *religion;
-                    prov.unrest += FixedPoint::from_int(100);
-                    prov.add_scar(crown_ash_types::province::ProvinceScar {
-                        turn_inflicted: turn,
-                        scar_type: crown_ash_types::province::ScarType::ForcedConversion,
-                        severity: FixedPoint::from_int(300),
-                    });
+                    prov.conversion_progress = Some((*religion, FixedPoint::ZERO));
+                    // Small initial unrest from announcing conversion.
+                    prov.unrest += FixedPoint::from_int(30);
                 }
             }
         }
@@ -529,8 +559,10 @@ fn process_npc_action(world: &mut GameWorld, action: GameAction) -> Result<(), S
                 morale: FixedPoint::from_int(600),
                 location: province,
                 destination: None,
+                movement_queue: Vec::new(),
                 raised_turn: turn,
                 supply: FixedPoint::from_int(100),
+                siege: None,
             });
             Ok(())
         }
@@ -544,6 +576,21 @@ fn process_npc_action(world: &mut GameWorld, action: GameAction) -> Result<(), S
             }
             if let Some(a) = world.army_mut_dirty(army) {
                 a.destination = Some(target);
+                a.movement_queue.clear();
+            }
+            Ok(())
+        }
+        GameAction::MoveArmyPath { army, target } => {
+            let location = world.army(army).map(|a| a.location);
+            if let Some(loc) = location {
+                if let Some(path) = map::find_path(loc, target) {
+                    if !path.is_empty() {
+                        if let Some(a) = world.army_mut_dirty(army) {
+                            a.movement_queue = path;
+                            a.destination = None;
+                        }
+                    }
+                }
             }
             Ok(())
         }
@@ -838,6 +885,101 @@ pub fn snapshot_world(world: &GameWorld) -> WorldSnapshot {
     }
 }
 
+/// Compute which provinces a faction can see (owns + adjacent to owned).
+pub fn visible_provinces(world: &GameWorld, faction_id: u8) -> Vec<u16> {
+    let mut visible = std::collections::HashSet::new();
+
+    for p in &world.provinces {
+        if p.controller == faction_id {
+            visible.insert(p.id);
+            // All neighbors are also visible.
+            for &n in &p.neighbors {
+                visible.insert(n);
+            }
+        }
+    }
+
+    let mut result: Vec<u16> = visible.into_iter().collect();
+    result.sort_unstable();
+    result
+}
+
+/// Return a fog-of-war snapshot filtered for a specific faction.
+///
+/// - Provinces outside visibility have population, garrison, resources, and
+///   construction_queue hidden (zeroed out).
+/// - Armies in non-visible provinces are excluded.
+/// - Characters in non-visible factions with no visible armies are excluded.
+/// - All factions and diplomacy are always visible (public knowledge).
+pub fn snapshot_world_for_faction(world: &GameWorld, faction_id: u8) -> WorldSnapshot {
+    let visible = visible_provinces(world, faction_id);
+
+    // Filter provinces: show full data for visible, redacted for hidden.
+    let provinces: Vec<Province> = world.provinces.iter().map(|p| {
+        if visible.contains(&p.id) {
+            p.clone()
+        } else {
+            // Redacted province: basic info only.
+            Province {
+                id: p.id,
+                name: p.name.clone(),
+                terrain: p.terrain,
+                controller: p.controller,
+                population: 0,           // hidden
+                prosperity: FixedPoint::ZERO,
+                unrest: FixedPoint::ZERO,
+                fortification: 0,
+                religion: p.religion,    // public knowledge
+                culture: p.culture,      // public knowledge
+                resources: crown_ash_types::province::Resources::default(),
+                garrison: Troops::default(),
+                improvements: vec![],
+                construction_queue: vec![],
+                scars: vec![],
+                grudges: vec![],
+                last_famine_turn: None,
+                last_siege_turn: None,
+                tax_rate: FixedPoint::ZERO,
+                neighbors: p.neighbors.clone(),
+                conversion_progress: None,
+            }
+        }
+    }).collect();
+
+    // Filter armies: only show those in visible provinces.
+    let armies: Vec<Army> = world.armies.iter()
+        .filter(|a| visible.contains(&a.location))
+        .cloned()
+        .collect();
+
+    // Characters: show all in player's faction + characters with visible armies.
+    let visible_army_commanders: std::collections::HashSet<u32> = armies.iter()
+        .filter_map(|a| a.commander)
+        .collect();
+
+    let characters: Vec<Character> = world.characters.iter()
+        .filter(|c| {
+            c.alive && (
+                c.faction == faction_id
+                || visible_army_commanders.contains(&c.id)
+                || c.role == CharacterRole::Ruler // rulers are public
+            )
+        })
+        .cloned()
+        .collect();
+
+    WorldSnapshot {
+        turn: world.meta.turn,
+        player_count: world.meta.player_count,
+        provinces,
+        characters,
+        factions: world.factions.clone(),
+        realms: world.realms.clone(),
+        armies,
+        diplomacy: world.diplomacy.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1006,5 +1148,94 @@ mod tests {
         assert_eq!(restored.meta.turn, world.meta.turn);
         assert_eq!(restored.provinces.len(), world.provinces.len());
         assert_eq!(restored.characters.len(), world.characters.len());
+    }
+
+    #[test]
+    fn visible_provinces_includes_owned_and_adjacent() {
+        let config = WorldConfig::default();
+        let world = init_world(&config, [0x42; 32]);
+
+        let visible = visible_provinces(&world, 0);
+
+        // Faction 0 controls some provinces; their neighbors should also be visible.
+        let owned: Vec<u16> = world.provinces.iter()
+            .filter(|p| p.controller == 0)
+            .map(|p| p.id)
+            .collect();
+
+        for pid in &owned {
+            assert!(visible.contains(pid),
+                "Owned province {} should be visible", pid);
+        }
+
+        // Not all 25 provinces should be visible (fog hides distant ones).
+        assert!(visible.len() < 25 || owned.len() >= 20,
+            "Fog of war should hide some provinces (visible={}, owned={})",
+            visible.len(), owned.len());
+    }
+
+    #[test]
+    fn fog_snapshot_hides_distant_province_details() {
+        let config = WorldConfig::default();
+        let world = init_world(&config, [0x42; 32]);
+
+        let full_snapshot = snapshot_world(&world);
+        let fog_snapshot = snapshot_world_for_faction(&world, 0);
+
+        // Same number of provinces (all included, just redacted).
+        assert_eq!(fog_snapshot.provinces.len(), full_snapshot.provinces.len());
+
+        // Some provinces should have zeroed population (fog).
+        let hidden_count = fog_snapshot.provinces.iter()
+            .filter(|p| p.population == 0 && p.controller != 0)
+            .count();
+
+        // Check that at least some non-owned provinces are hidden.
+        let visible = visible_provinces(&world, 0);
+        let non_visible_count = world.provinces.iter()
+            .filter(|p| !visible.contains(&p.id))
+            .count();
+
+        if non_visible_count > 0 {
+            assert!(hidden_count > 0,
+                "Non-visible provinces should have hidden details");
+        }
+    }
+
+    #[test]
+    fn fog_snapshot_hides_armies_in_distant_provinces() {
+        let config = WorldConfig::default();
+        let mut world = init_world(&config, [0x42; 32]);
+
+        // Place army in a province far from faction 0.
+        let far_province = world.provinces.iter()
+            .filter(|p| p.controller != 0)
+            .last()
+            .map(|p| p.id)
+            .unwrap_or(24);
+
+        let aid = world.alloc_army_id();
+        world.armies.push(Army {
+            id: aid,
+            owner_faction: 4,
+            commander: None,
+            troops: Troops { levy: 500, men_at_arms: 100, knights: 10 },
+            morale: FixedPoint::from_int(800),
+            location: far_province,
+            destination: None,
+            movement_queue: Vec::new(),
+            raised_turn: 0,
+            supply: FixedPoint::from_int(100),
+            siege: None,
+        });
+
+        let visible = visible_provinces(&world, 0);
+        let fog_snapshot = snapshot_world_for_faction(&world, 0);
+
+        if !visible.contains(&far_province) {
+            // Army should not appear in fog snapshot.
+            assert!(!fog_snapshot.armies.iter().any(|a| a.id == aid),
+                "Army in non-visible province should be hidden");
+        }
     }
 }

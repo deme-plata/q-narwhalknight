@@ -96,4 +96,12 @@ pub struct Realm {
     pub at_war_with: Vec<u8>,
     /// Active treaties (ally faction IDs).
     pub allies: Vec<u8>,
+    /// Religious authority: how dominant this faction's religion is within its realm (0-1000).
+    /// Higher authority = faster conversions, resistance to heresy, clerical_favor bonus.
+    #[serde(default = "default_authority")]
+    pub religious_authority: FixedPoint,
+}
+
+fn default_authority() -> FixedPoint {
+    FixedPoint::from_int(500)
 }

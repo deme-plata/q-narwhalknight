@@ -16,11 +16,12 @@ pub struct CrownAshUiPlugin;
 
 impl Plugin for CrownAshUiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(EguiPlugin { enable_multipass_for_primary_context: true })
+        app.add_plugins(EguiPlugin)
             .init_resource::<action_submit::ActionState>()
             .add_systems(Update, ui_panels::top_bar)
             .add_systems(Update, ui_panels::detail_panel)
             .add_systems(Update, ui_panels::event_feed)
+            .add_systems(Update, ui_panels::minimap)
             .add_systems(Update, action_submit::action_buttons);
     }
 }

@@ -158,6 +158,63 @@ pub enum GameEvent {
         province: ProvinceId,
         turn: u32,
     },
+    /// Province completed religious conversion.
+    ReligiousConversion {
+        province: ProvinceId,
+        old_religion: String,
+        new_religion: String,
+        turn: u32,
+    },
+    /// Heresy event — religious authority crumbles.
+    Heresy {
+        faction: u8,
+        province: ProvinceId,
+        severity: i64,
+        turn: u32,
+    },
+    /// Religious miracle — boosts province prosperity and authority.
+    Miracle {
+        province: ProvinceId,
+        prosperity_gain: i64,
+        turn: u32,
+    },
+    /// An army begins besieging a fortified province.
+    SiegeStarted {
+        province: ProvinceId,
+        attacker_faction: u8,
+        defender_faction: u8,
+        turns_required: u32,
+        turn: u32,
+    },
+    /// A siege completes — province captured after prolonged assault.
+    SiegeCompleted {
+        province: ProvinceId,
+        old_controller: u8,
+        new_controller: u8,
+        turns_lasted: u32,
+        attacker_casualties: u32,
+        turn: u32,
+    },
+    /// Two characters became friends.
+    Friendship {
+        character_a: u32,
+        character_b: u32,
+        turn: u32,
+    },
+    /// Two characters became rivals.
+    Rivalry {
+        character_a: u32,
+        character_b: u32,
+        turn: u32,
+    },
+    /// A cross-faction marriage alliance was formed.
+    MarriageAlliance {
+        character_a: u32,
+        character_b: u32,
+        faction_a: u8,
+        faction_b: u8,
+        turn: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

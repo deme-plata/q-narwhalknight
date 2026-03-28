@@ -241,6 +241,7 @@ mod tests {
             last_siege_turn: None,
             tax_rate: FixedPoint::from_raw(200), // 20%
             neighbors: vec![],
+            conversion_progress: None,
         };
 
         let gold = compute_tax(&p);
@@ -275,6 +276,7 @@ mod tests {
             last_siege_turn: None,
             tax_rate: FixedPoint::from_raw(200),
             neighbors: vec![],
+            conversion_progress: None,
         };
 
         advance_construction(&mut p);

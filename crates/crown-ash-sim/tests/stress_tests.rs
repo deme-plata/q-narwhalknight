@@ -271,9 +271,10 @@ fn stress_prosperity_bounded() {
 
         for prov in &world.provinces {
             let raw = prov.prosperity.raw();
+            // Prosperity is clamped to [0, 1000] at end of tick pipeline (step 8b).
             assert!(
-                raw >= 0 && raw <= 2_000_000,
-                "Province {} prosperity {} out of [0, 2M] at tick {}",
+                raw >= 0 && raw <= 1_000_000,
+                "Province {} prosperity {} out of [0, 1M] at tick {}",
                 prov.id, raw, i + 1
             );
         }
@@ -295,12 +296,10 @@ fn stress_unrest_clamped() {
 
         for prov in &world.provinces {
             let raw = prov.unrest.raw();
-            // Unrest is clamped to [0, 1000] each tick but can transiently exceed
-            // due to multi-source modifiers applied before the clamp step.
-            // Allow a small overshoot buffer (1100 = raw 1_100_000).
+            // Unrest is clamped to [0, 1000] at end of tick pipeline (step 8b).
             assert!(
-                raw >= 0 && raw <= 1_100_000,
-                "Province {} unrest {} out of [0, 1.1M] at tick {}",
+                raw >= 0 && raw <= 1_000_000,
+                "Province {} unrest {} out of [0, 1M] at tick {}",
                 prov.id, raw, i + 1
             );
         }

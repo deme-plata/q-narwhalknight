@@ -287,7 +287,7 @@ impl GameWorld {
         let max_faction = self.factions.len() as u8;
         let max_province = self.provinces.len() as u16;
 
-        // Province controllers are valid faction IDs
+        // Province controllers are valid faction IDs; province values in bounds
         for p in &self.provinces {
             assert!(
                 p.controller < max_faction,
@@ -295,6 +295,18 @@ impl GameWorld {
                 p.id, p.controller
             );
             assert!(p.id < max_province, "Province ID {} out of range", p.id);
+            // Unrest must be in [0, 1000]
+            assert!(
+                p.unrest.raw() >= 0 && p.unrest.raw() <= 1_000_000,
+                "Province {} unrest out of bounds: {}",
+                p.id, p.unrest.raw()
+            );
+            // Prosperity must be in [0, 1000]
+            assert!(
+                p.prosperity.raw() >= 0 && p.prosperity.raw() <= 1_000_000,
+                "Province {} prosperity out of bounds: {}",
+                p.id, p.prosperity.raw()
+            );
             // No negative population
             // population is u32, always >= 0
             // Neighbors reference valid provinces

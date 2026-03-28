@@ -98,6 +98,59 @@ pub fn movement_cost(from: u16, to: u16) -> Option<FixedPoint> {
     }
 }
 
+/// BFS shortest path from `start` to `goal`.
+///
+/// Returns the path as a sequence of province IDs **excluding** `start`,
+/// or `None` if no path exists.  The first element of the returned Vec
+/// is the immediate next step.
+///
+/// Complexity: O(V + E) where V=25, E≈63 — trivially cheap.
+pub fn find_path(start: u16, goal: u16) -> Option<Vec<u16>> {
+    if start == goal {
+        return Some(Vec::new());
+    }
+    if start as usize >= PROVINCE_DATA.len() || goal as usize >= PROVINCE_DATA.len() {
+        return None;
+    }
+
+    // BFS with parent tracking.
+    let mut visited = [false; 25];
+    let mut parent = [u16::MAX; 25];
+    let mut queue = std::collections::VecDeque::new();
+
+    visited[start as usize] = true;
+    queue.push_back(start);
+
+    while let Some(current) = queue.pop_front() {
+        for &neighbor in neighbors(current) {
+            let ni = neighbor as usize;
+            if ni < 25 && !visited[ni] {
+                visited[ni] = true;
+                parent[ni] = current;
+                if neighbor == goal {
+                    // Reconstruct path.
+                    let mut path = Vec::new();
+                    let mut node = goal;
+                    while node != start {
+                        path.push(node);
+                        node = parent[node as usize];
+                    }
+                    path.reverse();
+                    return Some(path);
+                }
+                queue.push_back(neighbor);
+            }
+        }
+    }
+
+    None // disconnected (shouldn't happen with our map)
+}
+
+/// BFS path length (number of hops) from `start` to `goal`.
+pub fn path_length(start: u16, goal: u16) -> Option<usize> {
+    find_path(start, goal).map(|p| p.len())
+}
+
 /// Get terrain for a province.
 pub fn terrain(province_id: u16) -> Terrain {
     if (province_id as usize) < PROVINCE_DATA.len() {
@@ -148,5 +201,53 @@ mod tests {
         // Province 7 (Plains) → Province 9 (River, cost 1.200)
         let cost = movement_cost(7, 9).unwrap();
         assert_eq!(cost.raw(), 1200);
+    }
+
+    #[test]
+    fn find_path_adjacent() {
+        // Direct neighbors should return a 1-element path.
+        let path = find_path(7, 8).unwrap();
+        assert_eq!(path, vec![8]);
+    }
+
+    #[test]
+    fn find_path_same_province() {
+        let path = find_path(5, 5).unwrap();
+        assert!(path.is_empty());
+    }
+
+    #[test]
+    fn find_path_multi_hop() {
+        // Province 0 (Frosthold) → Province 9 (Embervale)
+        // Must go through at least 1→7→9 or similar.
+        let path = find_path(0, 9).unwrap();
+        assert!(path.len() >= 2, "Path should be at least 2 hops");
+        // Verify each step is adjacent to the previous.
+        let mut prev = 0u16;
+        for &step in &path {
+            assert!(are_adjacent(prev, step), "{} not adjacent to {}", prev, step);
+            prev = step;
+        }
+        assert_eq!(*path.last().unwrap(), 9);
+    }
+
+    #[test]
+    fn find_path_cross_map() {
+        // Province 18 (Shadowmere, far west) → Province 24 (Redhorn, far east)
+        let path = find_path(18, 24).unwrap();
+        assert!(path.len() >= 3, "Cross-map path should be 3+ hops");
+        let mut prev = 18u16;
+        for &step in &path {
+            assert!(are_adjacent(prev, step));
+            prev = step;
+        }
+        assert_eq!(*path.last().unwrap(), 24);
+    }
+
+    #[test]
+    fn path_length_works() {
+        assert_eq!(path_length(7, 7), Some(0));
+        assert_eq!(path_length(7, 8), Some(1));
+        assert!(path_length(0, 24).unwrap() >= 3);
     }
 }
