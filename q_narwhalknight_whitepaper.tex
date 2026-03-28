@@ -428,6 +428,94 @@ Annual Inflation & 3-7\% \\
 \caption{Staking Parameters}
 \end{table}
 
+\section{Mining Architecture}
+
+Quillon employs a hybrid BLAKE3+VDF proof-of-work scheme that is both GPU-friendly and ASIC-resistant. The mining function chains 100 sequential BLAKE3 hashes per nonce candidate, combining memory-hard initial hashing with a verifiable delay function (VDF) tail that prevents unbounded parallelism.
+
+\subsection{Hash Function: BLAKE3 + VDF Chain}
+
+Each mining attempt evaluates:
+
+\begin{algorithm}
+\caption{BLAKE3+VDF Mining (per nonce candidate)}
+\begin{algorithmic}[1]
+\REQUIRE Challenge hash $C \in \{0,1\}^{256}$, nonce $n \in \mathbb{Z}_{2^{64}}$, target $T$
+\STATE $\mathit{input} \leftarrow C \| n_{\mathrm{LE}}$ \COMMENT{40 bytes: 32-byte challenge + 8-byte little-endian nonce}
+\STATE $h \leftarrow \mathrm{BLAKE3}(\mathit{input})$ \COMMENT{Initial hash (40-byte single-block)}
+\FOR{$i = 1$ \TO $99$}
+    \STATE $h \leftarrow \mathrm{BLAKE3}(h)$ \COMMENT{VDF chain: 32-byte single-block hash}
+\ENDFOR
+\IF{$h < T$}
+    \RETURN $(n, h)$ \COMMENT{Valid solution}
+\ENDIF
+\end{algorithmic}
+\end{algorithm}
+
+The 100-round VDF chain ensures that each nonce requires sequential computation, bounding the advantage of massively parallel hardware. A single BLAKE3 evaluation is fast ($\sim$3 ns on modern CPUs), but 100 sequential rounds per candidate create a minimum latency floor that limits ASIC speedup to constant factors over GPUs.
+
+\subsection{GPU Mining Pipeline}
+
+The standalone miner (\texttt{q-miner}) implements a high-performance OpenCL backend for GPU-accelerated mining. The GPU pipeline operates as follows:
+
+\begin{enumerate}
+    \item \textbf{Kernel compilation}: The BLAKE3+VDF kernel is compiled from OpenCL~C source at first launch. Compiled binaries are cached to \texttt{\textasciitilde/.config/q-miner/kernel-cache/\{hash\}.clbin} for subsequent startups (cache key = SHA-256 of source + device name + driver version), reducing startup from 2--10\,s to $<$100\,ms.
+
+    \item \textbf{Persistent buffer allocation}: Five GPU buffers are allocated once per device and reused across all dispatches, eliminating per-dispatch IPC round-trips:
+    \begin{itemize}
+        \item \texttt{challenge\_buf}: $8 \times \mathtt{u32}$ (\texttt{\_\_constant} address space, hardware constant cache)
+        \item \texttt{target\_buf}: 32 bytes (\texttt{\_\_global}, read-only)
+        \item \texttt{found\_nonce\_buf}, \texttt{found\_hash\_buf}, \texttt{found\_flag\_buf}: write-only result buffers
+    \end{itemize}
+
+    \item \textbf{Conditional upload}: Challenge and target data are re-uploaded only when the block changes. Within a block, dispatch overhead is zero-copy.
+
+    \item \textbf{Non-blocking dispatch}: Buffer writes use \texttt{CL\_FALSE} (asynchronous) on an in-order command queue. The GPU sequences writes before kernel execution; the CPU proceeds immediately without stalling.
+
+    \item \textbf{Adaptive work sizing}: Each GPU independently auto-tunes its global work size within $[2^{16}, 2^{23}]$ items to maintain dispatch latency in the $[100, 400]$\,ms window. Startup calibration benchmarks four work sizes (64K, 256K, 1M, 4M) to find the optimal starting point.
+\end{enumerate}
+
+\subsection{Kernel Optimizations}
+
+The OpenCL kernel incorporates several micro-optimizations:
+
+\begin{itemize}
+    \item \textbf{CPU-side word conversion}: The 32-byte challenge is converted to $8 \times \mathtt{u32}$ little-endian words on the CPU once, eliminating per-work-item byte-to-word unpacking on the GPU.
+    \item \textbf{Constant cache}: The challenge buffer uses \texttt{\_\_constant} address space, enabling hardware broadcast from the GPU's dedicated constant cache (one global memory read per work-group instead of per work-item).
+    \item \textbf{Partial loop unrolling}: The 99-round VDF loop is annotated with \texttt{\#pragma unroll 3} ($99 = 33 \times 3$), reducing branch overhead while keeping register pressure manageable.
+    \item \textbf{Work-group size hint}: \texttt{\_\_attribute\_\_((reqd\_work\_group\_size(256,1,1)))} enables the compiler to optimize register allocation and occupancy for a fixed work-group geometry.
+    \item \textbf{Address-space correctness}: BLAKE3 initialization vectors are copied from \texttt{\_\_constant} to private (stack) memory before use, ensuring compatibility with strict OpenCL implementations (notably NVIDIA).
+\end{itemize}
+
+\subsection{Multi-GPU Support}
+
+The miner supports multi-GPU configurations via per-device \texttt{GPUContext} instances. Each GPU maintains independent adaptive work sizing, cached challenge/target state, and persistent buffers. Nonce ranges are partitioned across devices proportionally to compute-unit count, and dispatches iterate sequentially with first-solution-wins semantics. Future work targets truly parallel per-GPU threads with channel-based solution aggregation.
+
+\subsection{Measured Performance}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{|l|r|r|r|r|}
+\hline
+\textbf{Hardware} & \textbf{Hashrate} & \textbf{Power} & \textbf{Efficiency} & \textbf{VRAM} \\
+\hline
+GTX 1080 Ti (OpenCL) & 68.7 MH/s & 169\,W & 0.41 MH/J & 145 MiB / 11 GiB \\
+CPU fallback (4 threads) & 0.30 MH/s & --- & --- & --- \\
+\hline
+\end{tabular}
+\caption{Mining performance: BLAKE3+VDF (100 rounds), v10.1.8 kernel}
+\end{table}
+
+GPU mining achieves a $229\times$ speedup over the CPU baseline. The kernel is compute-bound (100\% GPU utilization) with minimal memory footprint (145\,MiB), leaving the majority of VRAM available for concurrent workloads such as AI inference or ZK proof generation on multi-purpose nodes.
+
+\subsection{ASIC Resistance Analysis}
+
+The BLAKE3+VDF design provides moderate ASIC resistance through two mechanisms:
+
+\begin{enumerate}
+    \item \textbf{Sequential VDF tail}: The 100-round sequential hash chain bounds parallelism. An ASIC can reduce per-hash latency but cannot parallelize the VDF chain within a single nonce.
+    \item \textbf{Algorithmic agility}: The kernel source is compiled at runtime via OpenCL, enabling hash function upgrades (e.g., transitioning to a post-quantum hash) through height-gated consensus changes without hardware obsolescence.
+\end{enumerate}
+
 \section{Implementation Details}
 
 \subsection{Technology Stack}
@@ -437,6 +525,7 @@ Q-NarwhalKnight is implemented in Rust with the following key dependencies:
     \item \textbf{Consensus}: Custom DAG-Knight implementation
     \item \textbf{Networking}: libp2p, tokio, quinn (QUIC)
     \item \textbf{Cryptography}: ring, pqcrypto, bulletproofs
+    \item \textbf{Mining}: OpenCL (NVIDIA/AMD/Intel GPU), BLAKE3+VDF kernel
     \item \textbf{Storage}: RocksDB with quantum-resistant encryption
     \item \textbf{API}: Axum web framework with WebSocket support
 \end{itemize}
@@ -458,6 +547,8 @@ crates/
 |-- q-bitcoin-bridge  // Bitcoin integration
 |-- q-dns-phantom     // DNS steganography
 |-- q-tor-client      // Tor networking
+|-- q-mining          // GPU mining (OpenCL BLAKE3+VDF kernel)
+|-- q-miner           // Standalone miner binary (CPU/GPU)
 `-- q-precision       // Ultra-precision math
 \end{lstlisting}
 

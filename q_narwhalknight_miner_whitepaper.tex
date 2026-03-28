@@ -56,18 +56,18 @@
 % Header and footer
 \pagestyle{fancy}
 \fancyhf{}
-\rhead{Q-NarwhalKnight Miner Whitepaper v1.0}
-\lhead{Quantum-Enhanced Mining}
+\rhead{Quillon Miner Whitepaper v2.0}
+\lhead{GPU-Accelerated Mining}
 \cfoot{Page \thepage\ of \pageref{LastPage}}
 
-\title{\huge \textbf{Q-NarwhalKnight Miner} \\[0.5cm]
-\Large A Quantum-Enhanced Anonymous Mining System \\[0.3cm]
-\large Technical Whitepaper v1.0}
+\title{\huge \textbf{Quillon Miner} \\[0.5cm]
+\Large GPU-Accelerated BLAKE3+VDF Mining with\\Post-Quantum Security \\[0.3cm]
+\large Technical Whitepaper v2.0}
 
 \author{
-Q-NarwhalKnight Labs\\
-\texttt{contact@qnarwhal.dev}\\[0.5cm]
-\textit{September 2025}
+Quillon Development Team\\
+\texttt{contact@quillon.xyz}\\[0.5cm]
+\textit{March 2026}
 }
 
 \date{}
@@ -77,7 +77,7 @@ Q-NarwhalKnight Labs\\
 \maketitle
 
 \begin{abstract}
-The Q-NarwhalKnight Miner represents a paradigm shift in cryptocurrency mining technology, introducing quantum-enhanced algorithms, anonymous Tor-based networking, and unprecedented hardware optimization. This whitepaper presents the technical architecture, implementation details, and performance characteristics of a mining system that achieves 8.5+ GH/s on modern GPUs while maintaining complete anonymity through dedicated Tor circuits. We introduce the DAG-Knight Verifiable Delay Function (VDF), a novel mining algorithm designed for quantum resistance and energy efficiency. Our implementation supports CPU mining with AVX-512 optimizations, NVIDIA CUDA acceleration, and cross-platform OpenCL, achieving 18.9 MH/W efficiency on RTX 4090 hardware. The system integrates seamlessly with the Q-NarwhalKnight quantum consensus network, providing miners with a sophisticated, privacy-preserving solution for the post-quantum era.
+The Quillon Miner is a standalone, GPU-accelerated mining client for the Quillon private settlement network. This whitepaper presents the technical architecture and measured performance of the v10.1.8 mining system, which implements a hybrid BLAKE3 + 100-round Verifiable Delay Function (VDF) proof-of-work scheme via OpenCL. On an NVIDIA GTX 1080 Ti, the miner achieves 68.7 MH/s at 100\% GPU utilization with 145\,MiB VRAM footprint---a $229\times$ speedup over CPU mining. The kernel pipeline features persistent buffer allocation, conditional challenge upload, non-blocking async dispatch, per-GPU adaptive work sizing, and compiled kernel binary caching. The miner connects to the Quillon network via HTTPS with SSE-based block notifications and supports anonymous mining through integrated Tor circuits. Post-quantum security is maintained through the network's phased cryptographic agility model (Ed25519 $\to$ Dilithium5).
 \end{abstract}
 
 \tableofcontents
@@ -91,14 +91,16 @@ The evolution of cryptocurrency mining faces three critical challenges: the appr
 
 \subsection{Key Innovations}
 
-Our mining system introduces several groundbreaking features:
+The v10.1.8 miner introduces several production-validated features:
 
 \begin{itemize}
-    \item \textbf{Quantum-Enhanced VDF}: The DAG-Knight VDF algorithm provides provable sequential computation with quantum-resistant properties
-    \item \textbf{Anonymous Mining}: Complete Tor integration with dedicated circuits per validator ensures zero IP leakage
-    \item \textbf{Hardware Optimization}: Custom CUDA kernels achieve 8.5+ GH/s on RTX 4090, with 18.9 MH/W efficiency
-    \item \textbf{Cross-Platform Support}: Native support for Windows, Linux, and macOS with optimized installers
-    \item \textbf{Real-Time Monitoring}: WebSocket-based dashboard with sub-second latency updates
+    \item \textbf{BLAKE3+VDF Proof-of-Work}: 100-round sequential BLAKE3 hash chain per nonce candidate, combining GPU parallelism with ASIC-resistant sequential computation
+    \item \textbf{OpenCL GPU Backend}: Cross-vendor GPU support (NVIDIA, AMD, Intel) via a single OpenCL~C kernel with vendor-specific workarounds
+    \item \textbf{Zero-Copy Dispatch Pipeline}: Persistent GPU buffers, conditional upload, and non-blocking writes eliminate per-dispatch allocation overhead
+    \item \textbf{Adaptive Work Sizing}: Each GPU independently auto-tunes dispatch size within $[2^{16}, 2^{23}]$ work items to maintain optimal dispatch latency
+    \item \textbf{Kernel Binary Caching}: Compiled OpenCL kernel binaries are cached to disk, reducing subsequent startup from 2--10\,s to $<$100\,ms
+    \item \textbf{Anonymous Mining}: Optional Tor integration with dedicated circuits for zero IP leakage
+    \item \textbf{SSE Block Notifications}: Server-Sent Events provide instant new-block signals for minimal stale work
 \end{itemize}
 
 \subsection{Document Structure}
@@ -150,42 +152,48 @@ Using Dilithium5 for signatures and Kyber1024 for key encapsulation, achieving N
 The DAG-Knight VDF combines Directed Acyclic Graph (DAG) structures with time-locked puzzles:
 
 \begin{algorithm}
-\caption{DAG-Knight VDF Mining}
+\caption{BLAKE3+VDF Mining (per nonce candidate)}
 \begin{algorithmic}[1]
-\STATE \textbf{Input:} Previous hash $H_{prev}$, nonce $n$, difficulty $D$
-\STATE \textbf{Output:} Valid hash $H_{valid}$, proof $\pi$
-\STATE Initialize state $S \leftarrow \text{BLAKE3}(H_{prev} || n)$
-\FOR{$i = 1$ to $\text{VDF\_ITERATIONS}$}
-    \STATE $S \leftarrow \text{Compress}(S, i)$
-    \IF{$i \mod 128 = 0$}
-        \STATE $S \leftarrow \text{QuantumMix}(S, \text{QRNG}())$
-    \ENDIF
+\REQUIRE Challenge hash $C \in \{0,1\}^{256}$, nonce $n \in \mathbb{Z}_{2^{64}}$, target $T$
+\STATE $\mathit{input} \leftarrow C \| n_{\mathrm{LE}}$ \COMMENT{40 bytes: 32-byte challenge + 8-byte LE nonce}
+\STATE $h \leftarrow \mathrm{BLAKE3}(\mathit{input})$ \COMMENT{Initial hash, single-block 40-byte}
+\FOR{$i = 1$ \TO $99$}
+    \STATE $h \leftarrow \mathrm{BLAKE3}(h)$ \COMMENT{VDF chain: single-block 32-byte hash}
 \ENDFOR
-\STATE $H_{final} \leftarrow \text{FinalMix}(S)$
-\IF{$H_{final} < D$}
-    \STATE \textbf{return} $H_{final}$, $\text{GenerateProof}(S)$
+\IF{$h < T$} \COMMENT{Byte-wise comparison, little-endian word order}
+    \RETURN $(n, h)$ \COMMENT{Valid solution}
 \ENDIF
 \end{algorithmic}
 \end{algorithm}
 
-\subsection{Quantum Enhancement}
+Each nonce candidate requires exactly 100 sequential BLAKE3 evaluations. The initial hash operates on a 40-byte input (challenge concatenated with nonce); the subsequent 99 rounds operate on the 32-byte intermediate hash. This sequential chain is the VDF component---it cannot be parallelized within a single candidate, bounding the advantage of any hardware architecture to constant-factor improvements in single-hash latency.
 
-The algorithm incorporates quantum-inspired mixing functions:
+GPU parallelism comes from evaluating thousands of nonce candidates simultaneously. Each OpenCL work item independently executes the full 100-round chain for its assigned nonce.
+
+\subsection{BLAKE3 Compression Function}
+
+The kernel implements the full BLAKE3 compression function with 7-round mixing. Each round applies the quarter-round function $G$ to columns and diagonals of a $4 \times 4$ state matrix using the pre-computed BLAKE3 message schedule:
 
 \begin{equation}
-    \text{QuantumMix}(S, q) = S \oplus \text{Rotate}(q, S[0..7]) \times \phi
+    G(a, b, c, d, m_x, m_y) = \begin{cases}
+        a \leftarrow a + b + m_x,\ d \leftarrow (d \oplus a) \ggg 16 \\
+        c \leftarrow c + d,\ b \leftarrow (b \oplus c) \ggg 12 \\
+        a \leftarrow a + b + m_y,\ d \leftarrow (d \oplus a) \ggg 8 \\
+        c \leftarrow c + d,\ b \leftarrow (b \oplus c) \ggg 7
+    \end{cases}
 \end{equation}
 
-Where $\phi = 0x9e3779b9$ (golden ratio constant) provides avalanche properties.
+The initialization vector is the standard BLAKE3 IV (\texttt{0x6A09E667}, \texttt{0xBB67AE85}, \ldots), stored in \texttt{\_\_constant} address space for hardware-level broadcast within each work-group.
 
 \subsection{Security Properties}
 
-The DAG-Knight VDF provides:
+The BLAKE3+VDF mining function provides:
 
 \begin{itemize}
-    \item \textbf{Collision Resistance}: Finding $x_1 \neq x_2$ where $f(x_1) = f(x_2)$ requires $2^{128}$ operations
-    \item \textbf{Preimage Resistance}: Given $y$, finding $x$ where $f(x) = y$ requires $2^{256}$ operations
-    \item \textbf{Sequential Hardness}: Parallelization provides at most logarithmic speedup
+    \item \textbf{Collision Resistance}: $2^{128}$ operations (BLAKE3 security level)
+    \item \textbf{Preimage Resistance}: $2^{256}$ operations
+    \item \textbf{Sequential Hardness}: The 100-round VDF chain enforces a minimum latency floor per candidate. An adversary with unbounded parallelism gains no advantage beyond evaluating more candidates per unit time---each candidate still requires 100 sequential hash evaluations.
+    \item \textbf{ASIC Resistance}: The kernel is compiled from OpenCL~C source at runtime, enabling algorithm upgrades via height-gated consensus changes without hardware obsolescence.
 \end{itemize}
 
 \section{System Architecture}
@@ -253,18 +261,19 @@ The system provides unified interfaces for diverse hardware:
 
 \begin{table}[H]
 \centering
-\begin{tabular}{|l|c|c|c|c|}
+\begin{tabular}{|l|c|c|c|}
 \hline
-\textbf{Feature} & \textbf{CPU} & \textbf{CUDA} & \textbf{OpenCL} & \textbf{Vulkan} \\
+\textbf{Feature} & \textbf{CPU} & \textbf{OpenCL (GPU)} & \textbf{CUDA (planned)} \\
 \hline
-SIMD Support & AVX-512 & N/A & Variable & SPIR-V \\
-Memory Model & Shared & Dedicated & Global/Local & Device \\
-Parallelism & Thread & Warp (32) & Work Group & Subgroup \\
-Peak GH/s & 0.15 & 8.5 & 6.2 & 5.8 \\
-Efficiency (MH/W) & 2.1 & 18.9 & 15.3 & 14.7 \\
+Parallelism & OS threads & Work groups (256) & Warps (32) \\
+Memory Model & Shared RAM & Global + Constant cache & Shared + L1 \\
+Measured Hashrate & 0.30 MH/s & 68.7 MH/s & --- \\
+VRAM Usage & N/A & 145 MiB & --- \\
+Adaptive Sizing & No & Per-GPU $[2^{16}, 2^{23}]$ & --- \\
+Kernel Caching & N/A & Binary cached to disk & --- \\
 \hline
 \end{tabular}
-\caption{Hardware Capabilities Comparison}
+\caption{Hardware Backend Comparison (v10.1.8)}
 \end{table}
 
 \section{Implementation Details}
@@ -297,43 +306,60 @@ __m512i dag_knight_vdf_avx512(
 }
 \end{lstlisting}
 
-\subsection{GPU Kernel Optimization}
+\subsection{GPU Kernel Implementation}
 
-CUDA kernels exploit massive parallelism:
+The mining kernel is written in OpenCL~C and compiled at runtime for cross-vendor GPU support. The main entry point dispatches one work item per nonce candidate:
 
-\begin{lstlisting}[language=C, caption=CUDA Kernel Implementation]
-__global__ void dag_knight_vdf_kernel(
-    const uint8_t* previous_hash,
-    uint8_t* output_hashes,
-    uint64_t nonce_base,
-    uint32_t difficulty_target
+\begin{lstlisting}[language=C, caption=OpenCL Mining Kernel (v10.1.8)]
+__attribute__((reqd_work_group_size(256,1,1)))
+__kernel void blake3_mine(
+    __constant uint* challenge_words, // 8 x u32 (constant cache)
+    __global const uchar* target,     // 32-byte difficulty target
+    const ulong nonce_start,
+    __global ulong* found_nonce,      // output: winning nonce
+    __global uchar* found_hash,       // output: winning hash
+    __global uint* found_flag         // output: atomic CAS flag
 ) {
-    const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    uint64_t nonce = nonce_base + tid;
-    
-    // Shared memory for collaborative work
-    __shared__ uint32_t shared_state[256 * 8];
-    uint32_t* my_state = &shared_state[threadIdx.x * 8];
-    
-    // Initialize with previous hash and nonce
-    initialize_state(my_state, previous_hash, nonce);
-    
-    // Main VDF computation
-    #pragma unroll 4
-    for (int iter = 0; iter < VDF_ITERATIONS; iter++) {
-        blake3_compress_gpu(my_state);
-        
-        if ((iter & 0x7F) == 0) {
-            quantum_mix_gpu(my_state, __brev(iter));
-        }
+    uint gid = get_global_id(0);
+    ulong nonce = nonce_start + (ulong)gid;
+
+    // Step 1: BLAKE3(challenge[32] || nonce_le[8])
+    uint h[8];
+    blake3_hash_40(challenge_words, nonce, h);
+
+    // Step 2: 99-round VDF chain
+    uint tmp[8];
+    #pragma unroll 3
+    for (int vdf = 0; vdf < 99; vdf++) {
+        blake3_hash_32(h, tmp);
+        for (int i = 0; i < 8; i++) h[i] = tmp[i];
     }
-    
-    // Check difficulty and write result
-    if (meets_target(my_state, difficulty_target)) {
-        write_solution(output_hashes, tid, my_state);
+
+    // Step 3: Check target, atomic first-writer-wins
+    if (meets_target(h, target)) {
+        uint old = atomic_cmpxchg(found_flag, 0u, 1u);
+        if (old == 0u) {
+            *found_nonce = nonce;
+            // Convert hash words to bytes (LE)
+            for (int i = 0; i < 8; i++) {
+                found_hash[i*4+0] = (uchar)(h[i] & 0xFF);
+                found_hash[i*4+1] = (uchar)((h[i]>>8) & 0xFF);
+                found_hash[i*4+2] = (uchar)((h[i]>>16) & 0xFF);
+                found_hash[i*4+3] = (uchar)((h[i]>>24) & 0xFF);
+            }
+        }
     }
 }
 \end{lstlisting}
+
+Key implementation details:
+\begin{itemize}
+    \item \texttt{reqd\_work\_group\_size(256,1,1)} enables the compiler to optimize register allocation for a fixed work-group geometry.
+    \item Challenge data is passed as $8 \times \mathtt{u32}$ words in \texttt{\_\_constant} address space, leveraging the GPU's dedicated constant cache for broadcast reads.
+    \item The VDF loop uses \texttt{\#pragma unroll 3} ($99 = 33 \times 3$) to reduce branch overhead while keeping register pressure manageable.
+    \item Solution claiming uses \texttt{atomic\_cmpxchg} for race-free first-writer-wins semantics across all work items.
+    \item BLAKE3 initialization vectors are copied from \texttt{\_\_constant} to private (stack) memory before function calls, ensuring compatibility with NVIDIA's strict address-space enforcement.
+\end{itemize}
 
 \subsection{Network Protocol}
 
@@ -363,68 +389,55 @@ The miner implements Stratum v2 with Tor transport:
 
 \subsection{Benchmarking Methodology}
 
-Performance tests conducted on:
+Performance measurements from production mining on the Quillon mainnet (block height $\sim$11.7M, March 2026). Test hardware:
 \begin{itemize}
-    \item \textbf{CPU}: Intel Core i9-13900K (24 cores, 32 threads)
-    \item \textbf{GPU}: NVIDIA RTX 4090, AMD RX 7900 XTX
-    \item \textbf{Memory}: 64GB DDR5-5600
-    \item \textbf{OS}: Ubuntu 22.04 LTS, Windows 11 Pro
+    \item \textbf{GPU}: NVIDIA GeForce GTX 1080 Ti (3584 CUDA cores, 11\,GiB GDDR5X)
+    \item \textbf{Host}: vast.ai cloud instance, Ubuntu 22.04
+    \item \textbf{Driver}: NVIDIA 570.158.01, CUDA 12.8, OpenCL 1.2
+    \item \textbf{Miner version}: q-miner-gpu v10.1.8, \texttt{--features opencl-mining}
+    \item \textbf{CPU baseline}: 4-thread CPU miner on same host (for comparison)
 \end{itemize}
 
-\subsection{Hash Rate Performance}
-
-\begin{figure}[H]
-\centering
-\begin{tikzpicture}
-\begin{axis}[
-    xlabel={Intensity Level},
-    ylabel={Hash Rate (GH/s)},
-    legend pos=north west,
-    grid=major,
-    width=12cm,
-    height=8cm
-]
-\addplot[color=blue, mark=square*, line width=1.5pt] coordinates {
-    (1, 1.2) (2, 2.3) (3, 3.4) (4, 4.5) (5, 5.6) 
-    (6, 6.7) (7, 7.8) (8, 8.2) (9, 8.4) (10, 8.5)
-};
-\addlegendentry{RTX 4090}
-
-\addplot[color=red, mark=triangle*, line width=1.5pt] coordinates {
-    (1, 0.9) (2, 1.8) (3, 2.7) (4, 3.6) (5, 4.5)
-    (6, 5.4) (7, 6.0) (8, 6.1) (9, 6.2) (10, 6.2)
-};
-\addlegendentry{RX 7900 XTX}
-
-\addplot[color=green, mark=o, line width=1.5pt] coordinates {
-    (1, 0.02) (2, 0.04) (3, 0.06) (4, 0.08) (5, 0.10)
-    (6, 0.12) (7, 0.14) (8, 0.15) (9, 0.15) (10, 0.15)
-};
-\addlegendentry{i9-13900K}
-\end{axis}
-\end{tikzpicture}
-\caption{Hash Rate vs Mining Intensity}
-\end{figure}
-
-\subsection{Power Efficiency}
+\subsection{Measured Hash Rate}
 
 \begin{table}[H]
 \centering
-\begin{tabular}{|l|r|r|r|r|}
+\begin{tabular}{|l|r|r|r|r|r|}
 \hline
-\textbf{Device} & \textbf{Hash Rate} & \textbf{Power} & \textbf{Efficiency} & \textbf{Daily Revenue} \\
-& \textbf{(GH/s)} & \textbf{(W)} & \textbf{(MH/W)} & \textbf{(QNK)} \\
+\textbf{Device} & \textbf{Hash Rate} & \textbf{Power} & \textbf{Efficiency} & \textbf{GPU Util.} & \textbf{VRAM} \\
 \hline
-RTX 4090 & 8.50 & 450 & 18.89 & 0.0245 \\
-RTX 4080 & 6.20 & 320 & 19.38 & 0.0179 \\
-RTX 3090 Ti & 5.80 & 450 & 12.89 & 0.0167 \\
-RX 7900 XTX & 6.20 & 355 & 17.46 & 0.0179 \\
-RX 6900 XT & 4.50 & 300 & 15.00 & 0.0130 \\
-i9-13900K & 0.15 & 125 & 1.20 & 0.0004 \\
-Ryzen 9 7950X & 0.14 & 105 & 1.33 & 0.0004 \\
+GTX 1080 Ti (OpenCL) & 68.7 MH/s & 169\,W & 0.41 MH/W & 100\% & 145 MiB \\
+CPU fallback (4 threads) & 0.30 MH/s & --- & --- & --- & --- \\
 \hline
 \end{tabular}
-\caption{Hardware Performance Comparison}
+\caption{Measured Mining Performance (BLAKE3+VDF, 100 rounds, v10.1.8)}
+\end{table}
+
+The GPU achieves a $229\times$ speedup over the CPU baseline. Key observations:
+\begin{itemize}
+    \item \textbf{Compute-bound}: 100\% GPU utilization with near-TDP power draw (169/170\,W) confirms the workload is fully compute-bound, not memory-bandwidth-limited.
+    \item \textbf{Minimal VRAM}: 145\,MiB out of 11\,GiB used---the kernel's working set is 5 persistent buffers totaling $<$200 bytes per context. The majority of VRAM remains available for concurrent workloads.
+    \item \textbf{Thermal stability}: GPU temperature stabilized at 79\textdegree C with 47\% fan speed after 93 minutes of continuous mining.
+    \item \textbf{Throughput}: 4,120M hashes per minute (TPM), with 21,000+ solutions accepted during the test session.
+\end{itemize}
+
+\subsection{GPU Dispatch Pipeline Performance}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{|l|r|r|}
+\hline
+\textbf{Pipeline Stage} & \textbf{Latency} & \textbf{Optimization} \\
+\hline
+Buffer allocation & 0 & Persistent (allocated once) \\
+Challenge upload & 0 (same block) & Conditional (skip if unchanged) \\
+Flag zeroing & $<$1\,$\mu$s & Non-blocking (\texttt{CL\_FALSE}) \\
+Kernel dispatch & 100--400\,ms & Adaptive work size \\
+Result readback & $<$5\,$\mu$s & Blocking only for flag check \\
+Kernel compilation & $<$100\,ms & Binary cache on disk \\
+\hline
+\end{tabular}
+\caption{Per-Dispatch Pipeline Latency Breakdown}
 \end{table}
 
 \subsection{Scalability Analysis}
@@ -597,19 +610,23 @@ Docker & Image & 125 MB & Multi-arch support (amd64/arm64) \\
 
 \subsection{Installation Process}
 
-\begin{lstlisting}[language=bash, caption=Linux Installation]
-# Debian/Ubuntu
-wget https://releases.qnarwhal.dev/miner-latest.deb
-sudo dpkg -i miner-latest.deb
-sudo systemctl start q-narwhalknight-miner
+\begin{lstlisting}[language=bash, caption=Linux Installation (GPU Mining)]
+# Download the GPU-enabled miner binary
+wget https://quillon.xyz/downloads/q-miner-gpu-v10.1.8
+chmod +x q-miner-gpu-v10.1.8
 
-# Configure wallet
-sudo nano /etc/q-narwhalknight-miner/config.toml
-# Add: wallet.address = "qnk1_your_address"
+# Start GPU mining (solo mode)
+./q-miner-gpu-v10.1.8 \
+    --mode solo \
+    --wallet YOUR_QNK_WALLET_ADDRESS \
+    --gpu \
+    --server https://quillon.xyz
 
-# Monitor status
-sudo systemctl status q-narwhalknight-miner
-journalctl -u q-narwhalknight-miner -f
+# CPU-only fallback (no --gpu flag)
+./q-miner-gpu-v10.1.8 \
+    --mode solo \
+    --wallet YOUR_QNK_WALLET_ADDRESS \
+    --server https://quillon.xyz
 \end{lstlisting}
 
 \subsection{Configuration Management}
@@ -681,19 +698,20 @@ The project maintains an open development model:
 
 \section{Conclusion}
 
-The Q-NarwhalKnight Miner represents a fundamental advancement in cryptocurrency mining technology. By combining quantum-enhanced algorithms, anonymous networking, and unprecedented hardware optimization, we have created a mining system prepared for the challenges of the next decade.
+The Quillon Miner v10.1.8 delivers production-validated GPU mining with a BLAKE3+VDF proof-of-work scheme that balances GPU parallelism with sequential ASIC resistance. The OpenCL backend achieves 68.7\,MH/s on a GTX 1080 Ti---a $229\times$ speedup over CPU mining---with a pipeline optimized for zero-copy dispatch, adaptive work sizing, and kernel binary caching.
 
-Key achievements include:
+Key achievements:
 
 \begin{itemize}
-    \item \textbf{Performance}: 8.5+ GH/s on consumer GPUs with 18.9 MH/W efficiency
-    \item \textbf{Security}: Quantum-resistant VDF with NIST Level 5 post-quantum cryptography
-    \item \textbf{Privacy}: Complete anonymity through Tor integration with dedicated circuits
-    \item \textbf{Accessibility}: Cross-platform support with one-click installers
-    \item \textbf{Sustainability}: 65\% lower energy consumption than traditional PoW mining
+    \item \textbf{Performance}: 68.7 MH/s (GTX 1080 Ti), 100\% GPU utilization, 145\,MiB VRAM
+    \item \textbf{Efficiency}: Persistent buffers, conditional upload, and non-blocking dispatch eliminate all per-dispatch overhead
+    \item \textbf{Portability}: Single OpenCL~C kernel works on NVIDIA, AMD, and Intel GPUs with vendor-specific workarounds
+    \item \textbf{Security}: Post-quantum readiness via height-gated cryptographic agility (Ed25519 $\to$ Dilithium5)
+    \item \textbf{Privacy}: Optional Tor integration for anonymous mining with zero IP leakage
+    \item \textbf{Algorithmic Agility}: Runtime-compiled kernels enable hash function upgrades without hardware obsolescence
 \end{itemize}
 
-The Q-NarwhalKnight Miner is not merely an incremental improvement but a reimagining of what mining can be in the quantum era. We invite the community to join us in building the future of decentralized consensus.
+Future work targets parallel multi-GPU dispatch with per-device threads, double-buffered compute/readback overlap, hardware-specific tuning (NVIDIA vs AMD vs Intel work-group sizes), and NVML/ROCm-SMI temperature monitoring.
 
 \section*{Acknowledgments}
 
@@ -711,17 +729,18 @@ We thank the Tor Project for their anonymity infrastructure, the NIST PQC team f
 \hline
 \textbf{Parameter} & \textbf{Value} \\
 \hline
-VDF Iterations & 1024 \\
-Quantum Rounds & 8 \\
-Hash Function & BLAKE3 \\
+VDF Rounds & 100 (1 initial + 99 chain) \\
+Hash Function & BLAKE3 (single-block mode) \\
+Initial Input Size & 40 bytes (32 challenge + 8 nonce) \\
+Chain Input Size & 32 bytes \\
 Output Size & 256 bits \\
 Nonce Space & $2^{64}$ \\
-Difficulty Precision & $2^{32}$ \\
-Block Time Target & 2.3 seconds \\
-Epoch Length & 2016 blocks \\
+Work Group Size & 256 \\
+Adaptive Work Range & $[2^{16}, 2^{23}]$ items \\
+Target Dispatch Latency & 100--400\,ms \\
 \hline
 \end{tabular}
-\caption{DAG-Knight VDF Parameters}
+\caption{BLAKE3+VDF Mining Parameters}
 \end{table}
 
 \subsection{Network Protocol}
@@ -834,12 +853,12 @@ Out of memory & Reduce intensity or memory limit \\
 
 \begin{center}
 \Large
-\textbf{Q-NarwhalKnight Labs}\\[0.5cm]
+\textbf{Quillon}\\[0.5cm]
 \normalsize
-Building the Quantum-Resistant Future\\[0.3cm]
-\texttt{https://qnarwhal.dev}\\[0.2cm]
-\texttt{contact@qnarwhal.dev}\\[0.5cm]
-\textit{© 2025 Q-NarwhalKnight Labs. All rights reserved.}
+Private Settlement Infrastructure\\[0.3cm]
+\texttt{https://quillon.xyz}\\[0.2cm]
+\texttt{contact@quillon.xyz}\\[0.5cm]
+\textit{\copyright\ 2026 Quillon Development Team. All rights reserved.}
 \end{center}
 
 \end{document}
