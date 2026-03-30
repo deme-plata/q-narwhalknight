@@ -10,8 +10,9 @@
 
 import type { Libp2p } from 'libp2p'
 import type { GossipSub } from '@libp2p/gossipsub'
+import { multiaddr } from '@multiformats/multiaddr'
 import { encode as msgpackEncode, decode as msgpackDecode } from '@msgpack/msgpack'
-import { TOPICS, NETWORK_ID, PROTOCOL_VERSION } from './config'
+import { TOPICS, NETWORK_ID, PROTOCOL_VERSION, CONNECTION_CONFIG } from './config'
 
 /**
  * Browser peer announcement message
@@ -75,6 +76,12 @@ class BrowserPeerDiscoveryManager {
   private readonly PEER_EXPIRY = 120000 // Remove peers not seen for 2 minutes
   private readonly CLEANUP_INTERVAL = 60000 // Cleanup every minute
 
+  // v10.2.3: Browser-to-browser mesh — dial discovered peers via circuit relay
+  private readonly MAX_BROWSER_CONNECTIONS = 3 // Don't overwhelm relay with too many circuits
+  private readonly DIAL_COOLDOWN = 60000 // Don't re-dial a peer within 60s
+  private dialedPeers: Map<string, number> = new Map() // peerId → last dial attempt timestamp
+  private connectedBrowserPeers: Set<string> = new Set()
+
   /**
    * Initialize the browser peer discovery
    */
@@ -96,6 +103,14 @@ class BrowserPeerDiscoveryManager {
 
     // Listen for browser peer announcements
     pubsub.addEventListener('message', this.handleMessage.bind(this))
+
+    // v10.2.3: Track browser peer disconnections to refill mesh
+    node.addEventListener('peer:disconnect', (event: any) => {
+      const disconnectedPeerId = event.detail.toString()
+      if (this.connectedBrowserPeers.delete(disconnectedPeerId)) {
+        console.log(`🌐 [BROWSER MESH] Browser peer disconnected: ${disconnectedPeerId.substring(0, 12)}... (mesh: ${this.connectedBrowserPeers.size}/${this.MAX_BROWSER_CONNECTIONS})`)
+      }
+    })
 
     console.log(`🌐 [BROWSER DISCOVERY] Subscribed to ${TOPICS.BROWSER_PEERS}`)
   }
@@ -247,12 +262,73 @@ class BrowserPeerDiscoveryManager {
 
       console.log(`🌐 [BROWSER DISCOVERY] Discovered browser peer: ${announcement.peerId.substring(0, 12)}... (height=${announcement.blockHeight})`)
 
+      // v10.2.3: Try to connect to discovered browser peer via circuit relay
+      this.maybeDialBrowserPeer(announcement)
+
       // Emit custom event for UI updates
       window.dispatchEvent(new CustomEvent('browser-peer-discovered', {
         detail: { peerId: announcement.peerId, peerCount: this.knownBrowserPeers.size }
       }))
     } catch (error) {
       console.error('[BROWSER DISCOVERY] Failed to parse announcement:', error)
+    }
+  }
+
+  /**
+   * v10.2.3: Dial a discovered browser peer via circuit relay
+   * This forms the browser-to-browser gossipsub mesh, so blocks propagate
+   * peer-to-peer without every browser needing to get them from Epsilon.
+   */
+  private async maybeDialBrowserPeer(announcement: BrowserPeerAnnouncement): Promise<void> {
+    if (!this.node || !announcement.relayAddress) return
+
+    const peerId = announcement.peerId
+
+    // Already connected to this peer?
+    if (this.connectedBrowserPeers.has(peerId)) return
+
+    // Enough browser connections already?
+    if (this.connectedBrowserPeers.size >= this.MAX_BROWSER_CONNECTIONS) return
+
+    // Recently tried this peer?
+    const lastDial = this.dialedPeers.get(peerId) || 0
+    if (Date.now() - lastDial < this.DIAL_COOLDOWN) return
+
+    // Already connected via libp2p?
+    try {
+      const conns = this.node.getConnections()
+      for (const conn of conns) {
+        if (conn.remotePeer.toString() === peerId) {
+          this.connectedBrowserPeers.add(peerId)
+          return // Already connected
+        }
+      }
+    } catch { /* ignore */ }
+
+    // Mark dial attempt
+    this.dialedPeers.set(peerId, Date.now())
+
+    try {
+      const relayAddr = multiaddr(announcement.relayAddress)
+      console.log(`🌐 [BROWSER MESH] Dialing browser peer ${peerId.substring(0, 12)}... via relay`)
+      console.log(`   Address: ${announcement.relayAddress}`)
+
+      await this.node.dial(relayAddr, {
+        signal: AbortSignal.timeout(15000), // 15s timeout for relay circuit setup
+      })
+
+      this.connectedBrowserPeers.add(peerId)
+      console.log(`✅ [BROWSER MESH] Connected to browser peer ${peerId.substring(0, 12)}...!`)
+      console.log(`   Browser mesh: ${this.connectedBrowserPeers.size}/${this.MAX_BROWSER_CONNECTIONS} peers`)
+      console.log(`   Gossipsub will now relay blocks through this peer`)
+
+      // Emit event for UI
+      window.dispatchEvent(new CustomEvent('browser-mesh-peer-connected', {
+        detail: { peerId, meshSize: this.connectedBrowserPeers.size }
+      }))
+    } catch (err) {
+      // Expected to fail sometimes (peer offline, relay busy, etc.)
+      console.log(`🌐 [BROWSER MESH] Could not dial ${peerId.substring(0, 12)}...: ${err}`)
     }
   }
 
@@ -315,14 +391,22 @@ class BrowserPeerDiscoveryManager {
       initialized: this.isInitialized,
       myPeerId: this.myPeerId?.substring(0, 12) + '...',
       knownBrowserPeers: this.knownBrowserPeers.size,
+      connectedBrowserPeers: this.connectedBrowserPeers.size,
+      maxBrowserConnections: this.MAX_BROWSER_CONNECTIONS,
       currentBlockHeight: this.currentBlockHeight,
       peers: Array.from(this.knownBrowserPeers.values()).map(p => ({
         peerId: p.peerId.substring(0, 12) + '...',
         blockHeight: p.blockHeight,
         lastSeen: new Date(p.lastSeen).toISOString(),
         isTorBrowser: p.isTorBrowser,
+        connected: this.connectedBrowserPeers.has(p.peerId),
       })),
     }
+  }
+
+  /** v10.2.3: Get connected browser mesh peer count */
+  getBrowserMeshSize(): number {
+    return this.connectedBrowserPeers.size
   }
 }
 

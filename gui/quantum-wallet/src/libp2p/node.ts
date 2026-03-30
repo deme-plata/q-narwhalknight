@@ -266,13 +266,15 @@ export async function createBrowserNode(): Promise<Libp2p> {
     const node = await createLibp2p({
       // Addresses: Browser nodes listen via circuit relay (through bootstrap)
       // This makes the browser reachable by other browsers via relay
+      // v10.2.3: ENABLED — previously empty, which meant browsers couldn't
+      // receive incoming connections from other browsers. Now browsers listen
+      // on circuit relay through the bootstrap node, forming a real P2P mesh.
       addresses: {
         listen: [
-          // Listen via circuit relay - makes this browser reachable through bootstrap
-          // Address format: /p2p/BOOTSTRAP_PEER_ID/p2p-circuit
-          // Other browsers dial: /p2p/BOOTSTRAP_PEER_ID/p2p-circuit/p2p/THIS_BROWSER_ID
+          // Listen via circuit relay through bootstrap — makes this browser dialable
+          // Other browsers connect: /p2p/BOOTSTRAP_ID/p2p-circuit/p2p/THIS_BROWSER_ID
+          '/p2p/12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM/p2p-circuit',
         ],
-        // Announce circuit relay address so other browsers can find us
         announce: [],
       },
 
