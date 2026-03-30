@@ -2456,6 +2456,11 @@ pub struct SignTransactionRequest {
     pub amount: Amount,
     pub fee: Amount,
     pub password: String,
+    /// v10.2.1: Token type for the transfer ("QUG", "QUGUSD", or custom token symbol).
+    /// Previously hardcoded to QUG — QUGUSD transfers signed via this endpoint
+    /// would produce QUG transactions (critical token type corruption bug).
+    #[serde(default)]
+    pub token_type: Option<String>,
 }
 
 /// Submit transaction request

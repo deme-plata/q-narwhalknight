@@ -12,13 +12,12 @@
 
 use bevy::prelude::*;
 use bevy::input::ButtonInput;
-use bevy::tasks::IoTaskPool;
 use bevy_egui::{egui, EguiContexts};
 use std::sync::{Arc, Mutex};
 
 use crate::resources::config::CrownAshConfig;
 use crate::resources::game_state::{ClientGameState, ConnectionStatus};
-use crate::resources::narrative_state::{DialogState, NarrativeImportance, NarrativeState};
+use crate::resources::narrative_state::{DialogState, NarrativeImportance, NarrativeState, ToastState};
 use crate::resources::selection::Selection;
 use crown_ash_types::{FixedPoint, GameEvent};
 
@@ -78,7 +77,7 @@ impl Default for JoinState {
             pending: Arc::new(Mutex::new(None)),
             device_login: DeviceLoginPhase::Idle,
             device_login_pending: Arc::new(Mutex::new(None)),
-            manual_mode: false,
+            manual_mode: true,
         }
     }
 }
@@ -238,6 +237,62 @@ pub fn detail_panel(
                         }
                     }
 
+                    // Province religion narrative
+                    if let Some(rel_text) = narrative.province_religion_text(pid) {
+                        if !rel_text.is_empty() {
+                            ui.separator();
+                            ui.label(egui::RichText::new("Faith").strong());
+                            ui.label(egui::RichText::new(rel_text).italics().color(
+                                egui::Color32::from_rgb(180, 160, 200),
+                            ));
+                        }
+                    }
+
+                    // Province siege history
+                    {
+                        let ctx = build_narrative_ctx(&game_state);
+                        let siege_text = crown_ash_narrative::history::siege_narrative(
+                            pid, &prov.name, &game_state.events, &ctx,
+                        );
+                        if !siege_text.is_empty() {
+                            ui.separator();
+                            ui.label(egui::RichText::new("Sieges").strong());
+                            ui.label(egui::RichText::new(&siege_text).italics().color(
+                                egui::Color32::from_rgb(200, 140, 140),
+                            ));
+                        }
+
+                        // Province trade routes
+                        let trade_text = crown_ash_narrative::history::trade_narrative(
+                            pid, &prov.name, &game_state.events, &ctx,
+                        );
+                        if !trade_text.is_empty() {
+                            ui.separator();
+                            ui.label(egui::RichText::new("Trade").strong());
+                            ui.label(egui::RichText::new(&trade_text).italics().color(
+                                egui::Color32::from_rgb(160, 190, 140),
+                            ));
+                        }
+
+                        // Province construction/improvements
+                        let imp_strs: Vec<String> = prov.improvements.iter()
+                            .map(|i| format!("{:?}", i))
+                            .collect();
+                        let imp_refs: Vec<&str> = imp_strs.iter()
+                            .map(|s| s.as_str())
+                            .collect();
+                        let constr_text = crown_ash_narrative::history::construction_narrative(
+                            pid, &prov.name, &imp_refs, &game_state.events, &ctx,
+                        );
+                        if !constr_text.is_empty() {
+                            ui.separator();
+                            ui.label(egui::RichText::new("Improvements").strong());
+                            ui.label(egui::RichText::new(&constr_text).italics().color(
+                                egui::Color32::from_rgb(170, 190, 170),
+                            ));
+                        }
+                    }
+
                     // Province history (narrative)
                     if let Some(history) = narrative.province_history(pid) {
                         if !history.is_empty() {
@@ -270,6 +325,18 @@ pub fn detail_panel(
                         .count();
                     ui.label(format!("Armies: {}", army_count));
 
+                    // Realm prosperity narrative
+                    if let Some(prosperity) = narrative.realm_prosperity_text(fid) {
+                        if !prosperity.is_empty() {
+                            ui.separator();
+                            ui.label(egui::RichText::new("State of the Realm").strong());
+                            ui.colored_label(
+                                egui::Color32::from_rgb(160, 190, 140),
+                                egui::RichText::new(prosperity).italics(),
+                            );
+                        }
+                    }
+
                     // Realm info
                     if let Some(realm) = world.realms.iter().find(|r| r.faction == fid) {
                         ui.separator();
@@ -282,7 +349,60 @@ pub fn detail_panel(
                                     .map(|f| f.name.clone())
                                     .unwrap_or_else(|| format!("#{}", eid)))
                                 .collect();
-                            ui.label(format!("At war with: {}", enemies.join(", ")));
+                            ui.colored_label(
+                                egui::Color32::from_rgb(220, 80, 80),
+                                format!("At war with: {}", enemies.join(", ")),
+                            );
+
+                            // War summary prose for each active war
+                            for &enemy_id in &realm.at_war_with {
+                                if let Some(war_text) = narrative.war_summary(fid, enemy_id) {
+                                    if !war_text.is_empty() {
+                                        ui.add_space(4.0);
+                                        ui.colored_label(
+                                            egui::Color32::from_rgb(200, 160, 120),
+                                            egui::RichText::new(war_text).italics(),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Diplomatic relations with other factions
+                    {
+                        let other_factions: Vec<u8> = world.factions.iter()
+                            .filter(|f| f.id != fid && f.alive)
+                            .map(|f| f.id)
+                            .collect();
+                        if !other_factions.is_empty() {
+                            ui.separator();
+                            ui.label(egui::RichText::new("Diplomatic Relations").strong());
+                            for &other_id in &other_factions {
+                                if let Some(diplo_text) = narrative.diplomacy_text(fid, other_id) {
+                                    if !diplo_text.is_empty() {
+                                        ui.add_space(2.0);
+                                        ui.label(egui::RichText::new(diplo_text).italics().color(
+                                            egui::Color32::from_rgb(170, 180, 200),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Succession history
+                    {
+                        let ctx = build_narrative_ctx(&game_state);
+                        let succ_text = crown_ash_narrative::history::succession_narrative(
+                            fid, &game_state.events, &ctx,
+                        );
+                        if !succ_text.is_empty() {
+                            ui.separator();
+                            ui.label(egui::RichText::new("Succession").strong());
+                            ui.label(egui::RichText::new(&succ_text).italics().color(
+                                egui::Color32::from_rgb(200, 170, 130),
+                            ));
                         }
                     }
 
@@ -344,6 +464,65 @@ pub fn detail_panel(
                     let archetype = crown_ash_narrative::personality::derive_archetype(&c.traits);
                     ui.label(format!("Personality: {}", archetype.label()));
 
+                    // Relationships
+                    if !c.relations.is_empty() {
+                        let rel_tuples: Vec<(u32, Option<crown_ash_types::character::RelationType>, i64)> =
+                            c.relations.iter()
+                                .map(|r| (r.target, r.relation_type, r.opinion.0 as i64))
+                                .collect();
+                        let ctx = build_narrative_ctx(&game_state);
+                        let rel_text = crown_ash_narrative::history::relationship_narrative(
+                            cid, &rel_tuples, &game_state.events, &ctx,
+                        );
+                        if !rel_text.is_empty() {
+                            ui.separator();
+                            ui.label(egui::RichText::new("Relationships").strong());
+                            ui.colored_label(
+                                egui::Color32::from_rgb(200, 180, 160),
+                                egui::RichText::new(&rel_text).italics(),
+                            );
+                        }
+                    }
+
+                    // Dynasty lineage
+                    if c.dynasty > 0 {
+                        let ctx = build_narrative_ctx(&game_state);
+                        let lineage = crown_ash_narrative::history::dynasty_lineage(
+                            cid, c.dynasty, &game_state.events, &ctx,
+                        );
+                        if !lineage.is_empty() {
+                            ui.separator();
+                            ui.label(egui::RichText::new("Lineage").strong());
+                            ui.colored_label(
+                                egui::Color32::from_rgb(180, 170, 200),
+                                &lineage,
+                            );
+                        }
+                    }
+
+                    // Character biography
+                    {
+                        let ctx = build_narrative_ctx(&game_state);
+                        let trait_strs: Vec<String> = c.traits.iter()
+                            .map(|t| format!("{:?}", t))
+                            .collect();
+                        let trait_refs: Vec<&str> = trait_strs.iter()
+                            .map(|s| s.as_str())
+                            .collect();
+                        let bio = crown_ash_narrative::history::character_biography(
+                            cid, &c.name, c.age, &format!("{:?}", c.role),
+                            c.faction, c.alive, &trait_refs,
+                            &game_state.events, &ctx,
+                        );
+                        if !bio.is_empty() {
+                            ui.separator();
+                            ui.label(egui::RichText::new("Biography").strong());
+                            ui.label(egui::RichText::new(&bio).italics().color(
+                                egui::Color32::from_rgb(190, 185, 170),
+                            ));
+                        }
+                    }
+
                     // Character Chronicle (life history)
                     if let Some(chronicle_text) = narrative.chronicle_text(cid) {
                         if !chronicle_text.is_empty() {
@@ -395,6 +574,24 @@ pub fn detail_panel(
                     ui.label(format!("Morale: {}", fp_display(army.morale)));
                     ui.label(format!("Supply: {}", fp_display(army.supply)));
                     ui.label(format!("Raised turn: {}", army.raised_turn));
+
+                    // Army narrative
+                    {
+                        let ctx = build_narrative_ctx(&game_state);
+                        let army_text = crown_ash_narrative::history::army_narrative(
+                            army.id, army.owner_faction, army.commander,
+                            army.location,
+                            army.troops.levy, army.troops.men_at_arms, army.troops.knights,
+                            army.morale.0, army.raised_turn,
+                            &game_state.events, &ctx,
+                        );
+                        if !army_text.is_empty() {
+                            ui.separator();
+                            ui.label(egui::RichText::new(&army_text).italics().color(
+                                egui::Color32::from_rgb(180, 175, 160),
+                            ));
+                        }
+                    }
                 }
             }
 
@@ -405,7 +602,16 @@ pub fn detail_panel(
                 && selection.army.is_none()
             {
                 ui.heading("Crown & Ash");
-                ui.label("Click a province on the map to view details.");
+                // Era overview narrative
+                if let Some(era_text) = narrative.era_summary() {
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new(era_text).italics().color(
+                        egui::Color32::from_rgb(200, 190, 160),
+                    ));
+                    ui.add_space(4.0);
+                } else {
+                    ui.label("Click a province on the map to view details.");
+                }
                 ui.separator();
                 ui.label("Keyboard:");
                 ui.label("  WASD / Arrows — Pan camera");
@@ -440,7 +646,28 @@ pub fn event_feed(
                     // Prefer narrative prose if available, fall back to raw format
                     if !narrative.event_narratives.is_empty() {
                         let start = narrative.event_narratives.len().saturating_sub(100);
+                        let mut last_turn_shown: u32 = 0;
                         for entry in &narrative.event_narratives[start..] {
+                            // Insert turn summary header when turn changes
+                            if entry.turn != last_turn_shown && entry.turn > 0 {
+                                if last_turn_shown > 0 {
+                                    ui.add_space(6.0);
+                                }
+                                if let Some(summary) = narrative.turn_summary(entry.turn) {
+                                    ui.colored_label(
+                                        egui::Color32::from_rgb(220, 190, 120),
+                                        egui::RichText::new(summary).strong().italics(),
+                                    );
+                                } else {
+                                    ui.colored_label(
+                                        egui::Color32::from_rgb(160, 160, 160),
+                                        egui::RichText::new(format!("— Turn {} —", entry.turn)).italics(),
+                                    );
+                                }
+                                ui.add_space(2.0);
+                                last_turn_shown = entry.turn;
+                            }
+
                             let color = match entry.importance {
                                 NarrativeImportance::Epic => egui::Color32::from_rgb(255, 200, 50),
                                 NarrativeImportance::Notable => egui::Color32::from_rgb(180, 200, 255),
@@ -607,6 +834,7 @@ const MINIMAP_ADJACENCY: [(usize, usize); 40] = [
 pub fn minimap(
     mut contexts: EguiContexts,
     game_state: Res<ClientGameState>,
+    narrative: Res<NarrativeState>,
     mut selection: ResMut<Selection>,
 ) {
     let ctx = contexts.ctx_mut();
@@ -770,6 +998,56 @@ pub fn minimap(
                     }
                 }
             }
+
+            // Hover tooltip — show brief province narrative
+            if response.hovered() {
+                if let Some(hover_pos) = ui.input(|i| i.pointer.hover_pos()) {
+                    // Find nearest province to cursor
+                    let mut best_hover: Option<(u16, f32)> = None;
+                    for (i, &(px, pz)) in MINIMAP_POSITIONS.iter().enumerate() {
+                        let screen_pos = to_screen(px, pz);
+                        let dist = hover_pos.distance(screen_pos);
+                        if dist < 12.0 {
+                            if best_hover.map_or(true, |(_, bd)| dist < bd) {
+                                best_hover = Some((i as u16, dist));
+                            }
+                        }
+                    }
+
+                    if let Some((pid, _)) = best_hover {
+                        if let Some(world) = world_data {
+                            let prov_name = world.provinces.iter()
+                                .find(|p| p.id == pid)
+                                .map(|p| p.name.as_str())
+                                .unwrap_or("Unknown");
+                            let controller = world.provinces.iter()
+                                .find(|p| p.id == pid)
+                                .map(|p| {
+                                    world.factions.iter()
+                                        .find(|f| f.id == p.controller)
+                                        .map(|f| f.name.as_str())
+                                        .unwrap_or("Uncontrolled")
+                                })
+                                .unwrap_or("Unknown");
+
+                            // Build tooltip with narrative snippet
+                            let mut tip = format!("{} ({})", prov_name, controller);
+                            if let Some(history) = narrative.province_history(pid) {
+                                // Take the last sentence of the history for a brief hint
+                                let last_sentence = history.rsplit(". ")
+                                    .next()
+                                    .unwrap_or(history);
+                                if !last_sentence.is_empty() && last_sentence.len() < 120 {
+                                    tip.push_str("\n");
+                                    tip.push_str(last_sentence);
+                                }
+                            }
+
+                            response.clone().on_hover_text(tip);
+                        }
+                    }
+                }
+            }
         });
 }
 
@@ -897,7 +1175,14 @@ pub fn join_dialog(
                     join_state.join_result = Some(msg);
                 }
                 Err(msg) => {
-                    join_state.join_result = Some(msg);
+                    // If the wallet already controls a faction, the player is
+                    // already in the game — dismiss the join dialog and proceed.
+                    if msg.contains("already controls") {
+                        join_state.joined = true;
+                        join_state.join_result = Some("Rejoined — welcome back!".to_string());
+                    } else {
+                        join_state.join_result = Some(msg);
+                    }
                 }
             }
         }
@@ -953,16 +1238,23 @@ pub fn join_dialog(
                             let base_url = config.server_url.clone();
                             let slot = Arc::clone(&join_state.device_login_pending);
 
-                            IoTaskPool::get()
-                                .spawn(async move {
-                                    let client = reqwest::Client::new();
-                                    let url = format!("{}/api/v1/miner/device-login", base_url);
-                                    let result = request_device_login(&client, &url, slot.clone()).await;
-                                    if let Ok(mut lock) = slot.lock() {
-                                        *lock = Some(result);
-                                    }
+                            std::thread::Builder::new()
+                                .name("crown-ash-login".into())
+                                .spawn(move || {
+                                    let rt = tokio::runtime::Builder::new_current_thread()
+                                        .enable_all()
+                                        .build()
+                                        .expect("tokio runtime for device login");
+                                    rt.block_on(async move {
+                                        let client = reqwest::Client::new();
+                                        let url = format!("{}/api/v1/miner/device-login", base_url);
+                                        let result = request_device_login(&client, &url, slot.clone()).await;
+                                        if let Ok(mut lock) = slot.lock() {
+                                            *lock = Some(result);
+                                        }
+                                    });
                                 })
-                                .detach();
+                                .ok();
                         }
                         ui.add_space(4.0);
                         ui.label("Sign in with your browser — no password entered here.");
@@ -1112,25 +1404,32 @@ pub fn join_dialog(
                         join_state.joining = true;
                         join_state.join_result = None;
 
-                        IoTaskPool::get()
-                            .spawn(async move {
-                                let client = reqwest::Client::new();
-                                let result = match client.post(&url).json(&body).send().await {
-                                    Ok(resp) => {
-                                        if resp.status().is_success() {
-                                            Ok("Welcome to Crown & Ash!".to_string())
-                                        } else {
-                                            let body = resp.text().await.unwrap_or_default();
-                                            Err(format!("Join failed: {}", body))
+                        std::thread::Builder::new()
+                            .name("crown-ash-join".into())
+                            .spawn(move || {
+                                let rt = tokio::runtime::Builder::new_current_thread()
+                                    .enable_all()
+                                    .build()
+                                    .expect("tokio runtime for join");
+                                rt.block_on(async move {
+                                    let client = reqwest::Client::new();
+                                    let result = match client.post(&url).json(&body).send().await {
+                                        Ok(resp) => {
+                                            if resp.status().is_success() {
+                                                Ok("Welcome to Crown & Ash!".to_string())
+                                            } else {
+                                                let body = resp.text().await.unwrap_or_default();
+                                                Err(format!("Join failed: {}", body))
+                                            }
                                         }
+                                        Err(e) => Err(format!("Network error: {}", e)),
+                                    };
+                                    if let Ok(mut lock) = slot.lock() {
+                                        *lock = Some(result);
                                     }
-                                    Err(e) => Err(format!("Network error: {}", e)),
-                                };
-                                if let Ok(mut lock) = slot.lock() {
-                                    *lock = Some(result);
-                                }
+                                });
                             })
-                            .detach();
+                            .ok();
                     }
                 });
             }
@@ -1431,8 +1730,91 @@ pub fn dialog_bubbles(
 }
 
 // ---------------------------------------------------------------------------
+// Notification toasts — brief auto-dismiss popups for Epic/Notable events
+// ---------------------------------------------------------------------------
+
+/// System: renders notification toasts on the left side of the screen.
+/// Shows brief summaries of Epic and Notable events as they happen.
+pub fn notification_toasts(
+    mut contexts: EguiContexts,
+    mut toasts: ResMut<ToastState>,
+    time: Res<Time>,
+) {
+    toasts.tick(time.delta_secs());
+
+    if toasts.toasts.is_empty() {
+        return;
+    }
+
+    let ctx = contexts.ctx_mut();
+
+    for (i, toast) in toasts.toasts.iter().enumerate() {
+        let y_offset = 60.0 + i as f32 * 50.0;
+
+        let alpha = if toast.timer < 1.0 {
+            (toast.timer).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+
+        let (bg, border, text_color) = match toast.importance {
+            NarrativeImportance::Epic => (
+                egui::Color32::from_rgba_unmultiplied(50, 35, 10, (200.0 * alpha) as u8),
+                egui::Color32::from_rgba_unmultiplied(255, 200, 50, (180.0 * alpha) as u8),
+                egui::Color32::from_rgba_unmultiplied(255, 220, 100, (255.0 * alpha) as u8),
+            ),
+            NarrativeImportance::Notable => (
+                egui::Color32::from_rgba_unmultiplied(20, 30, 50, (200.0 * alpha) as u8),
+                egui::Color32::from_rgba_unmultiplied(100, 150, 220, (150.0 * alpha) as u8),
+                egui::Color32::from_rgba_unmultiplied(180, 200, 255, (255.0 * alpha) as u8),
+            ),
+            NarrativeImportance::Minor => (
+                egui::Color32::from_rgba_unmultiplied(30, 30, 30, (180.0 * alpha) as u8),
+                egui::Color32::from_rgba_unmultiplied(100, 100, 100, (120.0 * alpha) as u8),
+                egui::Color32::from_rgba_unmultiplied(180, 180, 180, (255.0 * alpha) as u8),
+            ),
+        };
+
+        let window_id = format!("toast_{}", i);
+        egui::Window::new("")
+            .id(egui::Id::new(&window_id))
+            .anchor(egui::Align2::LEFT_TOP, [20.0, y_offset])
+            .fixed_size([280.0, 0.0])
+            .title_bar(false)
+            .resizable(false)
+            .frame(egui::Frame::new()
+                .fill(bg)
+                .stroke(egui::Stroke::new(1.0, border))
+                .corner_radius(6.0)
+                .inner_margin(8.0))
+            .show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new(&toast.text)
+                        .size(11.5)
+                        .color(text_color),
+                );
+            });
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Build a WorldContext from the current game state for narrative functions.
+fn build_narrative_ctx(state: &ClientGameState) -> crown_ash_narrative::WorldContext {
+    let Some(ref world) = state.world else {
+        return crown_ash_narrative::WorldContext::default();
+    };
+    crown_ash_narrative::WorldContext {
+        province_names: world.provinces.iter().map(|p| (p.id, p.name.clone())).collect(),
+        faction_names: world.factions.iter().map(|f| (f.id, f.name.clone())).collect(),
+        character_names: world.characters.iter().map(|c| (c.id, c.name.clone())).collect(),
+        faction_cultures: world.factions.iter().map(|f| (f.id, format!("{:?}", f.culture))).collect(),
+        army_factions: world.armies.iter().map(|a| (a.id, a.owner_faction)).collect(),
+        current_turn: world.meta.turn,
+    }
+}
 
 fn format_population(pop: u64) -> String {
     if pop >= 1_000_000 {
@@ -1442,4 +1824,85 @@ fn format_population(pop: u64) -> String {
     } else {
         format!("{}", pop)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Hover tooltip — compact province info at cursor position
+// ---------------------------------------------------------------------------
+
+pub fn hover_tooltip(
+    mut contexts: EguiContexts,
+    game_state: Res<ClientGameState>,
+    selection: Res<Selection>,
+) {
+    let Some(pid) = selection.hovered_province else { return };
+    let Some((cx, cy)) = selection.cursor_screen_pos else { return };
+    let Some(ref world) = game_state.world else { return };
+    let Some(prov) = world.provinces.iter().find(|p| p.id == pid) else { return };
+
+    // Don't show tooltip if this province is already selected (detail panel covers it).
+    if selection.province == Some(pid) { return; }
+
+    let controller_name = world.factions
+        .iter()
+        .find(|f| f.id == prov.controller)
+        .map(|f| f.name.as_str())
+        .unwrap_or("Unknown");
+
+    let ctx = contexts.ctx_mut();
+
+    // Position tooltip offset from cursor.
+    let tooltip_pos = egui::pos2(cx + 16.0, cy + 16.0);
+
+    egui::Area::new(egui::Id::new("province_hover_tooltip"))
+        .fixed_pos(tooltip_pos)
+        .order(egui::Order::Tooltip)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_max_width(200.0);
+                ui.strong(&prov.name);
+                ui.label(format!("{:?} | {}", prov.terrain, controller_name));
+                ui.separator();
+
+                ui.horizontal(|ui| {
+                    ui.label(format!("Pop: {}", format_population(prov.population as u64)));
+                    ui.separator();
+                    ui.label(format!("Fort: {}", prov.fortification));
+                });
+
+                let prosperity = prov.prosperity.raw() as f32 / 10.0;
+                let unrest = prov.unrest.raw() as f32 / 10.0;
+                ui.horizontal(|ui| {
+                    ui.label(format!("Prosperity: {:.0}%", prosperity));
+                    ui.separator();
+                    ui.label(format!("Unrest: {:.0}%", unrest));
+                });
+
+                if !prov.improvements.is_empty() {
+                    let imps: Vec<&str> = prov.improvements.iter()
+                        .map(|i| match i {
+                            crown_ash_types::Improvement::Farmstead => "Farm",
+                            crown_ash_types::Improvement::Mine => "Mine",
+                            crown_ash_types::Improvement::Lumbercamp => "Lumber",
+                            crown_ash_types::Improvement::Quarry => "Quarry",
+                            crown_ash_types::Improvement::Stables => "Stables",
+                            crown_ash_types::Improvement::Market => "Market",
+                            crown_ash_types::Improvement::Temple => "Temple",
+                            crown_ash_types::Improvement::Fortification => "Fort",
+                            crown_ash_types::Improvement::University => "Uni",
+                            crown_ash_types::Improvement::Port => "Port",
+                            crown_ash_types::Improvement::Granary => "Granary",
+                            crown_ash_types::Improvement::Hospital => "Hospital",
+                        })
+                        .collect();
+                    ui.label(format!("Buildings: {}", imps.join(", ")));
+                }
+
+                // Show garrison if nonzero.
+                let total_garrison = prov.garrison.total();
+                if total_garrison > 0 {
+                    ui.label(format!("Garrison: {} troops", total_garrison));
+                }
+            });
+        });
 }

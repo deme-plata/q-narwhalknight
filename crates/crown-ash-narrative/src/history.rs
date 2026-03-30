@@ -732,6 +732,175 @@ fn render_war_summary(
     paragraphs.join(" ")
 }
 
+// ─── Era Summary / State of the World ────────────────────────────────────────
+
+/// World-level statistics for era summary generation.
+#[derive(Default)]
+struct EraStats {
+    factions_alive: u32,
+    factions_eliminated: u32,
+    total_wars: u32,
+    active_wars: u32,
+    total_battles: u32,
+    total_casualties: u32,
+    provinces_conquered: u32,
+    plagues: u32,
+    rebellions: u32,
+    treaties: u32,
+    trade_routes: u32,
+    characters_born: u32,
+    characters_died: u32,
+    realm_splits: u32,
+    dominant_faction: Option<(u8, u32)>, // (faction_id, province_count)
+}
+
+/// Generate a "State of the World" era summary narrative.
+///
+/// Displayed in the detail panel when nothing is selected. Provides a
+/// high-level overview of the game world: dominant power, ongoing conflicts,
+/// population trends, and recent major events.
+pub fn era_summary(
+    current_turn: u32,
+    factions_alive: u32,
+    active_wars: &[(u8, u8)],     // current war pairs
+    faction_provinces: &[(u8, u32)], // (faction_id, province_count)
+    events: &[GameEvent],
+    ctx: &WorldContext,
+) -> String {
+    let mut stats = EraStats::default();
+    stats.factions_alive = factions_alive;
+    stats.active_wars = active_wars.len() as u32;
+
+    // Find dominant faction
+    stats.dominant_faction = faction_provinces.iter()
+        .max_by_key(|(_, count)| *count)
+        .copied();
+
+    for event in events {
+        match event {
+            GameEvent::Battle(r) => {
+                stats.total_battles += 1;
+                stats.total_casualties += r.attacker_casualties + r.defender_casualties;
+            }
+            GameEvent::WarDeclared { .. } => stats.total_wars += 1,
+            GameEvent::TreatySigned { .. } => stats.treaties += 1,
+            GameEvent::ProvinceConquered { .. } => stats.provinces_conquered += 1,
+            GameEvent::FactionEliminated { .. } => stats.factions_eliminated += 1,
+            GameEvent::PlagueOutbreak { .. } => stats.plagues += 1,
+            GameEvent::Rebellion { .. } => stats.rebellions += 1,
+            GameEvent::CharacterBorn { .. } => stats.characters_born += 1,
+            GameEvent::CharacterDied { .. } => stats.characters_died += 1,
+            GameEvent::RealmSplit { .. } => stats.realm_splits += 1,
+            GameEvent::TradeRouteEstablished { .. } => stats.trade_routes += 1,
+            _ => {}
+        }
+    }
+
+    render_era_summary(current_turn, &stats, active_wars, ctx)
+}
+
+fn render_era_summary(
+    current_turn: u32,
+    stats: &EraStats,
+    active_wars: &[(u8, u8)],
+    ctx: &WorldContext,
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    // Opening — era and power balance
+    if let Some((dom_id, dom_count)) = stats.dominant_faction {
+        let dom_name = ctx.faction_name(dom_id);
+        if dom_count > 8 {
+            parts.push(format!(
+                "Turn {} of the chronicle. The {} dominates the realm, \
+                 holding {} provinces — a formidable empire among {} surviving factions.",
+                current_turn, dom_name, dom_count, stats.factions_alive
+            ));
+        } else {
+            parts.push(format!(
+                "Turn {} of the chronicle. {} factions vie for supremacy \
+                 across the fractured realm. {} holds the most territory with {} provinces.",
+                current_turn, stats.factions_alive, dom_name, dom_count
+            ));
+        }
+    } else {
+        parts.push(format!(
+            "Turn {} of the chronicle. {} factions contend for mastery of the realm.",
+            current_turn, stats.factions_alive
+        ));
+    }
+
+    // Active wars
+    if stats.active_wars > 0 {
+        if stats.active_wars == 1 {
+            if let Some((a, b)) = active_wars.first() {
+                parts.push(format!(
+                    "War rages between {} and {}.",
+                    ctx.faction_name(*a), ctx.faction_name(*b)
+                ));
+            }
+        } else {
+            parts.push(format!(
+                "{} wars burn across the land, consuming lives and treasure.",
+                stats.active_wars
+            ));
+        }
+    } else if stats.total_wars > 0 {
+        parts.push("An uneasy peace holds — for now.".to_string());
+    } else {
+        parts.push("The realm knows peace, though ambitions stir beneath the surface.".to_string());
+    }
+
+    // Bloodshed statistics
+    if stats.total_battles > 0 {
+        parts.push(format!(
+            "{} battle{} {} been fought, claiming {} lives.",
+            stats.total_battles,
+            if stats.total_battles == 1 { "" } else { "s" },
+            if stats.total_battles == 1 { "has" } else { "have" },
+            stats.total_casualties
+        ));
+    }
+
+    // Political upheaval
+    if stats.factions_eliminated > 0 || stats.realm_splits > 0 {
+        let mut upheaval = Vec::new();
+        if stats.factions_eliminated > 0 {
+            upheaval.push(format!(
+                "{} faction{} erased from the map",
+                stats.factions_eliminated,
+                if stats.factions_eliminated == 1 { "" } else { "s" }
+            ));
+        }
+        if stats.realm_splits > 0 {
+            upheaval.push(format!(
+                "{} realm{} shattered by succession",
+                stats.realm_splits,
+                if stats.realm_splits == 1 { "" } else { "s" }
+            ));
+        }
+        parts.push(format!("{}.", upheaval.join(", and ")));
+    }
+
+    // Hardship
+    if stats.plagues > 0 || stats.rebellions > 0 {
+        let mut hardship = Vec::new();
+        if stats.plagues > 0 {
+            hardship.push(format!("{} plague{}", stats.plagues, if stats.plagues == 1 { "" } else { "s" }));
+        }
+        if stats.rebellions > 0 {
+            hardship.push(format!("{} rebellion{}", stats.rebellions, if stats.rebellions == 1 { "" } else { "s" }));
+        }
+        parts.push(format!(
+            "{} {} tested the realm's endurance.",
+            capitalize_first(&hardship.join(" and ")),
+            if stats.plagues + stats.rebellions == 1 { "has" } else { "have" }
+        ));
+    }
+
+    parts.join(" ")
+}
+
 // ─── Character Relationship Narrative ────────────────────────────────────────
 
 /// Generate prose describing a character's personal relationships.
@@ -1258,6 +1427,687 @@ pub fn intrigue_narrative(
     }
 
     results
+}
+
+// ─── Religion Narrative ─────────────────────────────────────────────────────
+
+/// Generate prose about a province's religious history.
+///
+/// Covers conversions, heresy events, and miracles.
+pub fn religion_narrative(
+    province_id: u16,
+    province_name: &str,
+    current_religion: &str,
+    events: &[GameEvent],
+    _ctx: &WorldContext,
+) -> String {
+    let mut conversions: Vec<(String, String, u32)> = Vec::new(); // (old, new, turn)
+    let mut heresies: u32 = 0;
+    let mut miracles: u32 = 0;
+
+    for event in events {
+        match event {
+            GameEvent::ReligiousConversion { province, old_religion, new_religion, turn }
+                if *province == province_id =>
+            {
+                conversions.push((old_religion.clone(), new_religion.clone(), *turn));
+            }
+            GameEvent::Heresy { province, .. } if *province == province_id => {
+                heresies += 1;
+            }
+            GameEvent::Miracle { province, .. } if *province == province_id => {
+                miracles += 1;
+            }
+            _ => {}
+        }
+    }
+
+    if conversions.is_empty() && heresies == 0 && miracles == 0 {
+        return format!(
+            "The people of {} hold steadfast to the {} faith.",
+            province_name, current_religion
+        );
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+
+    if let Some(last) = conversions.last() {
+        if conversions.len() == 1 {
+            parts.push(format!(
+                "{} converted from {} to {} on turn {}.",
+                province_name, last.0, last.1, last.2
+            ));
+        } else {
+            parts.push(format!(
+                "{} has changed faith {} times. Most recently, the province embraced {} on turn {}.",
+                province_name, conversions.len(), last.1, last.2
+            ));
+        }
+    }
+
+    if heresies > 0 {
+        parts.push(format!(
+            "Heretical movements have plagued the province {} time{}, shaking religious authority.",
+            heresies, if heresies == 1 { "" } else { "s" }
+        ));
+    }
+
+    if miracles > 0 {
+        parts.push(format!(
+            "{} miracle{} {} been witnessed, strengthening the faith of the devout.",
+            miracles,
+            if miracles == 1 { "" } else { "s" },
+            if miracles == 1 { "has" } else { "have" }
+        ));
+    }
+
+    parts.join(" ")
+}
+
+// ─── Diplomacy Narrative ────────────────────────────────────────────────────
+
+/// Generate narrative prose for the diplomatic relationship between two factions.
+pub fn diplomacy_narrative(
+    faction_a: u8,
+    faction_b: u8,
+    at_war: bool,
+    events: &[GameEvent],
+    ctx: &WorldContext,
+) -> String {
+    let name_a = ctx.faction_name(faction_a);
+    let name_b = ctx.faction_name(faction_b);
+
+    let mut wars_declared: u32 = 0;
+    let mut treaties_signed: Vec<(String, u32)> = Vec::new();
+    let mut marriages: u32 = 0;
+    let mut provinces_taken_ab: u32 = 0;
+    let mut provinces_taken_ba: u32 = 0;
+
+    for event in events {
+        match event {
+            GameEvent::WarDeclared { attacker, defender, .. }
+                if (*attacker == faction_a && *defender == faction_b)
+                    || (*attacker == faction_b && *defender == faction_a) =>
+            {
+                wars_declared += 1;
+            }
+            GameEvent::TreatySigned { faction_a: fa, faction_b: fb, treaty_type, turn }
+                if (*fa == faction_a && *fb == faction_b)
+                    || (*fa == faction_b && *fb == faction_a) =>
+            {
+                treaties_signed.push((treaty_type.clone(), *turn));
+            }
+            GameEvent::MarriageAlliance { faction_a: fa, faction_b: fb, .. }
+                if (*fa == faction_a && *fb == faction_b)
+                    || (*fa == faction_b && *fb == faction_a) =>
+            {
+                marriages += 1;
+            }
+            GameEvent::ProvinceConquered { old_controller, new_controller, .. } => {
+                if *old_controller == faction_b && *new_controller == faction_a {
+                    provinces_taken_ab += 1;
+                } else if *old_controller == faction_a && *new_controller == faction_b {
+                    provinces_taken_ba += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+
+    // Current state
+    if at_war {
+        if wars_declared > 1 {
+            parts.push(format!(
+                "{} and {} are locked in their {} conflict.",
+                name_a, name_b,
+                match wars_declared { 2 => "2nd", 3 => "3rd", n => &format!("{}th", n) }
+            ));
+        } else {
+            parts.push(format!("{} and {} are at war.", name_a, name_b));
+        }
+    } else if marriages > 0 && wars_declared == 0 {
+        parts.push(format!(
+            "{} and {} are bound by marriage alliance — a bond of mutual interest, if not affection.",
+            name_a, name_b
+        ));
+    } else if !treaties_signed.is_empty() {
+        if let Some(last) = treaties_signed.last() {
+            parts.push(format!(
+                "A {} holds between {} and {} since turn {}.",
+                last.0, name_a, name_b, last.1
+            ));
+        }
+    } else if wars_declared > 0 {
+        parts.push(format!(
+            "An uneasy peace exists between {} and {}, scarred by {} previous war{}.",
+            name_a, name_b, wars_declared,
+            if wars_declared == 1 { "" } else { "s" }
+        ));
+    } else {
+        parts.push(format!(
+            "{} and {} regard each other with cautious neutrality.",
+            name_a, name_b
+        ));
+    }
+
+    // Territory context
+    if provinces_taken_ab > 0 || provinces_taken_ba > 0 {
+        if provinces_taken_ab > provinces_taken_ba {
+            parts.push(format!(
+                "{} has seized {} province{} from {}, fueling resentment.",
+                name_a, provinces_taken_ab,
+                if provinces_taken_ab == 1 { "" } else { "s" },
+                name_b
+            ));
+        } else if provinces_taken_ba > provinces_taken_ab {
+            parts.push(format!(
+                "{} has lost {} province{} to {}'s ambitions.",
+                name_a, provinces_taken_ba,
+                if provinces_taken_ba == 1 { "" } else { "s" },
+                name_b
+            ));
+        }
+    }
+
+    parts.join(" ")
+}
+
+// ─── Siege Narrative ────────────────────────────────────────────────────────
+
+/// Generate prose about a province's siege history.
+///
+/// Scans for SiegeStarted and SiegeCompleted events targeting this province.
+pub fn siege_narrative(
+    province_id: u16,
+    province_name: &str,
+    events: &[GameEvent],
+    ctx: &WorldContext,
+) -> String {
+    let mut sieges_started: Vec<(u8, u8, u32, u32)> = Vec::new(); // (attacker, defender, turns_req, turn)
+    let mut sieges_completed: Vec<(u8, u8, u32, u32, u32)> = Vec::new(); // (old, new, lasted, casualties, turn)
+
+    for event in events {
+        match event {
+            GameEvent::SiegeStarted { province, attacker_faction, defender_faction, turns_required, turn }
+                if *province == province_id =>
+            {
+                sieges_started.push((*attacker_faction, *defender_faction, *turns_required, *turn));
+            }
+            GameEvent::SiegeCompleted { province, old_controller, new_controller, turns_lasted, attacker_casualties, turn }
+                if *province == province_id =>
+            {
+                sieges_completed.push((*old_controller, *new_controller, *turns_lasted, *attacker_casualties, *turn));
+            }
+            _ => {}
+        }
+    }
+
+    if sieges_started.is_empty() && sieges_completed.is_empty() {
+        return String::new();
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+
+    let total = sieges_started.len().max(sieges_completed.len());
+    if total == 1 {
+        parts.push(format!(
+            "The walls of {} have been tested once by siege.",
+            province_name
+        ));
+    } else {
+        parts.push(format!(
+            "{} has endured {} sieges throughout its history.",
+            province_name, total
+        ));
+    }
+
+    // Detail the most recent completed siege
+    if let Some(&(old, new, lasted, casualties, turn)) = sieges_completed.last() {
+        let attacker_name = ctx.faction_name(new);
+        let defender_name = ctx.faction_name(old);
+        parts.push(format!(
+            "Most recently, {} besieged the {}-held fortress for {} turn{}, \
+             suffering {} casualties before taking the province on turn {}.",
+            attacker_name, defender_name,
+            lasted, if lasted == 1 { "" } else { "s" },
+            casualties, turn
+        ));
+    } else if let Some(&(attacker, _defender, turns_req, turn)) = sieges_started.last() {
+        // Siege started but not yet completed
+        let attacker_name = ctx.faction_name(attacker);
+        parts.push(format!(
+            "{} currently besieges the province (begun turn {}, \
+             estimated {} turns to breach the walls).",
+            attacker_name, turn, turns_req
+        ));
+    }
+
+    parts.join(" ")
+}
+
+// ─── Trade Narrative ────────────────────────────────────────────────────────
+
+/// Generate prose about trade routes involving a province.
+pub fn trade_narrative(
+    province_id: u16,
+    province_name: &str,
+    events: &[GameEvent],
+    ctx: &WorldContext,
+) -> String {
+    let mut established: Vec<(u16, String, u32)> = Vec::new(); // (partner, goods, turn)
+    let mut disrupted: Vec<(u16, String, u32)> = Vec::new();   // (partner, reason, turn)
+
+    for event in events {
+        match event {
+            GameEvent::TradeRouteEstablished { from, to, goods, turn } => {
+                if *from == province_id {
+                    established.push((*to, goods.clone(), *turn));
+                } else if *to == province_id {
+                    established.push((*from, goods.clone(), *turn));
+                }
+            }
+            GameEvent::TradeRouteDisrupted { from, to, reason, turn } => {
+                if *from == province_id {
+                    disrupted.push((*to, reason.clone(), *turn));
+                } else if *to == province_id {
+                    disrupted.push((*from, reason.clone(), *turn));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if established.is_empty() && disrupted.is_empty() {
+        return String::new();
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+
+    if established.len() > disrupted.len() {
+        parts.push(format!(
+            "{} is a hub of commerce, with {} trade route{} established.",
+            province_name, established.len(),
+            if established.len() == 1 { "" } else { "s" }
+        ));
+    } else if !established.is_empty() {
+        parts.push(format!(
+            "Trade flows through {}, though not without setbacks.",
+            province_name
+        ));
+    }
+
+    // Show most recent established route
+    if let Some((partner, goods, turn)) = established.last() {
+        let partner_name = ctx.province_name(*partner);
+        parts.push(format!(
+            "A route carrying {} was opened with {} on turn {}.",
+            goods, partner_name, turn
+        ));
+    }
+
+    // Show disruptions
+    if !disrupted.is_empty() {
+        if disrupted.len() == 1 {
+            let (partner, reason, turn) = &disrupted[0];
+            let partner_name = ctx.province_name(*partner);
+            parts.push(format!(
+                "Trade with {} was disrupted by {} on turn {}.",
+                partner_name, reason, turn
+            ));
+        } else {
+            parts.push(format!(
+                "{} trade routes have been disrupted by conflict or misfortune.",
+                disrupted.len()
+            ));
+        }
+    }
+
+    parts.join(" ")
+}
+
+// ─── Succession Narrative ───────────────────────────────────────────────────
+
+/// Generate prose about succession crises and realm splits for a faction.
+pub fn succession_narrative(
+    faction_id: u8,
+    events: &[GameEvent],
+    ctx: &WorldContext,
+) -> String {
+    let mut crises: Vec<(u32, u32, usize, bool)> = Vec::new(); // (dead_ruler, turn, claimants, split)
+    let mut splits: Vec<(u8, u32, u32, u32)> = Vec::new();     // (new_faction, rebel_leader, provinces_lost, turn)
+
+    for event in events {
+        match event {
+            GameEvent::SuccessionCrisis { faction, dead_ruler, claimants, realm_split, turn }
+                if *faction == faction_id =>
+            {
+                crises.push((*dead_ruler, *turn, claimants.len(), *realm_split));
+            }
+            GameEvent::RealmSplit { original_faction, new_faction, rebel_leader, provinces_lost, turn }
+                if *original_faction == faction_id =>
+            {
+                splits.push((*new_faction, *rebel_leader, *provinces_lost, *turn));
+            }
+            _ => {}
+        }
+    }
+
+    if crises.is_empty() && splits.is_empty() {
+        return String::new();
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+
+    let faction_name = ctx.faction_name(faction_id);
+
+    if crises.len() == 1 {
+        let (ruler, turn, claimants, split) = crises[0];
+        let ruler_name = ctx.character_name(ruler);
+        if split {
+            parts.push(format!(
+                "The death of {} on turn {} plunged {} into succession crisis. \
+                 {} claimants vied for the throne, and the realm was torn asunder.",
+                ruler_name, turn, faction_name, claimants
+            ));
+        } else {
+            parts.push(format!(
+                "Upon the death of {} on turn {}, {} faced a succession crisis \
+                 with {} claimants, but the realm held together.",
+                ruler_name, turn, faction_name, claimants
+            ));
+        }
+    } else if crises.len() > 1 {
+        let splits_count = crises.iter().filter(|(_, _, _, s)| *s).count();
+        parts.push(format!(
+            "{} has weathered {} succession crises, {} of which fractured the realm.",
+            faction_name, crises.len(), splits_count
+        ));
+    }
+
+    // Detail realm splits
+    for &(new_fid, rebel, provinces, turn) in &splits {
+        let new_name = ctx.faction_name(new_fid);
+        let rebel_name = ctx.character_name(rebel);
+        parts.push(format!(
+            "On turn {}, {} broke away under {}, taking {} province{} — \
+             the birth of {}.",
+            turn, rebel_name, rebel_name,
+            provinces, if provinces == 1 { "" } else { "s" },
+            new_name
+        ));
+    }
+
+    parts.join(" ")
+}
+
+// ─── Character Biography ───────────────────────────────────────���────────────
+
+/// Generate a multi-paragraph biography for a character.
+///
+/// Covers birth, role, age, traits, key life events (battles fought, plots,
+/// marriages), and current status. Designed for the character detail panel.
+pub fn character_biography(
+    character_id: u32,
+    character_name: &str,
+    age: u8,
+    role: &str,
+    faction_id: u8,
+    alive: bool,
+    traits: &[&str],
+    events: &[GameEvent],
+    ctx: &WorldContext,
+) -> String {
+    let faction_name = ctx.faction_name(faction_id);
+    let mut parts: Vec<String> = Vec::new();
+
+    // Opening — identity and role
+    if alive {
+        parts.push(format!(
+            "{}, aged {}, serves as {} of {}.",
+            character_name, age, role, faction_name
+        ));
+    } else {
+        parts.push(format!(
+            "{} was a {} of {}, who lived to the age of {}.",
+            character_name, role, faction_name, age
+        ));
+    }
+
+    // Traits
+    if !traits.is_empty() {
+        let trait_text = if traits.len() == 1 {
+            format!("Known as {}.", traits[0])
+        } else if traits.len() == 2 {
+            format!("Known as {} and {}.", traits[0], traits[1])
+        } else {
+            let (last, rest) = traits.split_last().unwrap();
+            format!("Known as {}, and {}.",
+                rest.iter().map(|s| *s).collect::<Vec<_>>().join(", "), last)
+        };
+        parts.push(trait_text);
+    }
+
+    // Count battles fought (approximate: faction's armies participated)
+    let battles_fought = events.iter().filter(|e| match e {
+        GameEvent::Battle(r) => {
+            let att_faction = ctx.army_faction(r.attacker_army);
+            let def_faction = r.defender_army.and_then(|d| ctx.army_faction(d));
+            att_faction == Some(faction_id) || def_faction == Some(faction_id)
+        }
+        _ => false,
+    }).count();
+
+    if battles_fought > 0 {
+        parts.push(format!(
+            "Participated in {} battle{} on behalf of {}.",
+            battles_fought,
+            if battles_fought == 1 { "" } else { "s" },
+            faction_name
+        ));
+    }
+
+    // Marriages
+    let marriages: Vec<_> = events.iter().filter_map(|e| match e {
+        GameEvent::MarriageAlliance { character_a, character_b, turn, .. }
+            if *character_a == character_id || *character_b == character_id =>
+        {
+            let spouse_id = if *character_a == character_id { *character_b } else { *character_a };
+            Some((spouse_id, *turn))
+        }
+        _ => None,
+    }).collect();
+
+    for (spouse_id, turn) in &marriages {
+        let spouse_name = ctx.character_name(*spouse_id);
+        parts.push(format!("Wed {} on turn {}.", spouse_name, turn));
+    }
+
+    // Plots against this character
+    let plots_against = events.iter().filter(|e| match e {
+        GameEvent::PlotSucceeded { target_name, .. } => target_name == character_name,
+        GameEvent::PlotDiscovered { target_name, .. } => target_name == character_name,
+        GameEvent::PlotFoiled { target_name, .. } => target_name == character_name,
+        _ => false,
+    }).count();
+
+    if plots_against > 0 {
+        parts.push(format!(
+            "Has been the target of {} intrigue plot{}.",
+            plots_against,
+            if plots_against == 1 { "" } else { "s" }
+        ));
+    }
+
+    // Death
+    for event in events {
+        if let GameEvent::CharacterDied { character_id: cid, cause, turn, .. } = event {
+            if *cid == character_id {
+                let cause_text = match cause {
+                    crown_ash_types::DeathCause::OldAge => "of old age",
+                    crown_ash_types::DeathCause::Battle => "in battle",
+                    crown_ash_types::DeathCause::Disease => "of disease",
+                    crown_ash_types::DeathCause::Assassination => "by assassination",
+                    crown_ash_types::DeathCause::Execution => "by execution",
+                    crown_ash_types::DeathCause::Accident => "in an accident",
+                };
+                parts.push(format!("Died {} on turn {}.", cause_text, turn));
+                break;
+            }
+        }
+    }
+
+    parts.join(" ")
+}
+
+// ─── Army Narrative ─────────────────────────────────────────────────────────
+
+/// Generate prose about an army's status, composition, and history.
+pub fn army_narrative(
+    army_id: u32,
+    owner_faction: u8,
+    commander_id: Option<u32>,
+    location: u16,
+    levy: u32,
+    men_at_arms: u32,
+    knights: u16,
+    morale: i64, // FixedPoint value (×1000)
+    raised_turn: u32,
+    events: &[GameEvent],
+    ctx: &WorldContext,
+) -> String {
+    let faction_name = ctx.faction_name(owner_faction);
+    let province_name = ctx.province_name(location);
+    let total = levy + men_at_arms + knights as u32;
+
+    let mut parts: Vec<String> = Vec::new();
+
+    // Opening — identity and location
+    let commander_text = match commander_id {
+        Some(cid) => format!("led by {}", ctx.character_name(cid)),
+        None => "without a named commander".to_string(),
+    };
+    parts.push(format!(
+        "An army of {} {}, {} strong, encamped at {}.",
+        faction_name, commander_text, total, province_name
+    ));
+
+    // Composition
+    if knights > 0 && men_at_arms > 0 {
+        parts.push(format!(
+            "The host comprises {} levy, {} men-at-arms, and {} knight{}.",
+            levy, men_at_arms, knights, if knights == 1 { "" } else { "s" }
+        ));
+    } else if men_at_arms > 0 {
+        parts.push(format!(
+            "The force includes {} levy and {} professional men-at-arms.",
+            levy, men_at_arms
+        ));
+    }
+
+    // Morale
+    let morale_pct = morale / 10; // FixedPoint ÷ 10 → percentage
+    if morale_pct >= 80 {
+        parts.push("Morale is high — the soldiers are eager for battle.".to_string());
+    } else if morale_pct >= 50 {
+        parts.push("Morale holds steady, though the troops grow restless.".to_string());
+    } else if morale_pct >= 20 {
+        parts.push("Morale is wavering — discipline frays at the edges.".to_string());
+    } else {
+        parts.push("Morale has collapsed. Desertion looms.".to_string());
+    }
+
+    // Battle history
+    let battles: Vec<_> = events.iter().filter_map(|e| match e {
+        GameEvent::Battle(r) if r.attacker_army == army_id => {
+            Some((true, r.attacker_won, r.attacker_casualties + r.defender_casualties, r.turn))
+        }
+        GameEvent::Battle(r) if r.defender_army == Some(army_id) => {
+            Some((false, !r.attacker_won, r.attacker_casualties + r.defender_casualties, r.turn))
+        }
+        _ => None,
+    }).collect();
+
+    if !battles.is_empty() {
+        let wins = battles.iter().filter(|(_, won, _, _)| *won).count();
+        let losses = battles.len() - wins;
+        parts.push(format!(
+            "Battle record: {} victor{}, {} defeat{}.",
+            wins, if wins == 1 { "y" } else { "ies" },
+            losses, if losses == 1 { "" } else { "s" }
+        ));
+    }
+
+    // Raised turn
+    parts.push(format!("Raised on turn {}.", raised_turn));
+
+    parts.join(" ")
+}
+
+// ─── Construction Narrative ─────────────────────────────────────────────────
+
+/// Generate prose about construction activity in a province.
+pub fn construction_narrative(
+    province_id: u16,
+    province_name: &str,
+    current_improvements: &[&str],
+    events: &[GameEvent],
+    _ctx: &WorldContext,
+) -> String {
+    let mut completed: Vec<(String, u32)> = Vec::new(); // (improvement, turn)
+
+    for event in events {
+        if let GameEvent::ConstructionComplete { province, improvement, turn } = event {
+            if *province == province_id {
+                completed.push((improvement.clone(), *turn));
+            }
+        }
+    }
+
+    if current_improvements.is_empty() && completed.is_empty() {
+        return String::new();
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+
+    // Current improvements
+    if !current_improvements.is_empty() {
+        if current_improvements.len() == 1 {
+            parts.push(format!(
+                "{} boasts a {}.",
+                province_name, current_improvements[0]
+            ));
+        } else if current_improvements.len() <= 3 {
+            parts.push(format!(
+                "{} is home to {}.",
+                province_name, current_improvements.join(", ")
+            ));
+        } else {
+            parts.push(format!(
+                "{} is a well-developed province with {} improvements: {}.",
+                province_name, current_improvements.len(),
+                current_improvements.join(", ")
+            ));
+        }
+    }
+
+    // Recent construction
+    if let Some((last_imp, last_turn)) = completed.last() {
+        parts.push(format!(
+            "Most recently, a {} was completed on turn {}.",
+            last_imp, last_turn
+        ));
+    }
+
+    if completed.len() > 1 {
+        parts.push(format!(
+            "{} construction projects have been completed in total.",
+            completed.len()
+        ));
+    }
+
+    parts.join(" ")
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -1787,5 +2637,490 @@ mod tests {
         let ctx = test_ctx();
         let results = intrigue_narrative(&[], &ctx);
         assert!(results.is_empty());
+    }
+
+    // ─── Era summary tests ────────────────────────────────────────────
+
+    #[test]
+    fn era_summary_peaceful() {
+        let ctx = test_ctx();
+        let text = era_summary(50, 3, &[], &[(0, 5), (1, 3), (2, 2)], &[], &ctx);
+        assert!(text.contains("Turn 50"), "text={}", text);
+        assert!(text.contains("3 factions"), "text={}", text);
+        assert!(text.contains("peace"), "text={}", text);
+    }
+
+    #[test]
+    fn era_summary_with_war_and_battles() {
+        let ctx = test_ctx();
+        let events = vec![
+            GameEvent::WarDeclared { attacker: 0, defender: 1, casus_belli: "Conquest".into(), turn: 10 },
+            GameEvent::Battle(BattleResult {
+                attacker_army: 100, defender_army: Some(200), province: 0,
+                attacker_casualties: 80, defender_casualties: 120, attacker_won: true,
+                random_factor: crown_ash_types::FixedPoint(1000), turn: 12,
+            }),
+            GameEvent::FactionEliminated { faction: 2, turn: 20 },
+        ];
+        let text = era_summary(25, 2, &[(0, 1)], &[(0, 7), (1, 3)], &events, &ctx);
+        assert!(text.contains("War rages"), "text={}", text);
+        assert!(text.contains("1 battle"), "text={}", text);
+        assert!(text.contains("200 lives"), "text={}", text);
+        assert!(text.contains("1 faction"), "text={}", text);
+    }
+
+    #[test]
+    fn era_summary_dominant_empire() {
+        let ctx = test_ctx();
+        let text = era_summary(100, 4, &[], &[(0, 12), (1, 2), (2, 1)], &[], &ctx);
+        assert!(text.contains("dominates"), "text={}", text);
+        assert!(text.contains("Ashen Crown"), "text={}", text);
+        assert!(text.contains("12 provinces"), "text={}", text);
+    }
+
+    // ─── Religion narrative tests ─────────────────────────────────────
+
+    #[test]
+    fn religion_steadfast() {
+        let ctx = test_ctx();
+        let text = religion_narrative(0, "Frosthold", "Order of the Flame", &[], &ctx);
+        assert!(text.contains("steadfast"), "text={}", text);
+        assert!(text.contains("Order of the Flame"), "text={}", text);
+    }
+
+    #[test]
+    fn religion_single_conversion() {
+        let ctx = test_ctx();
+        let events = vec![
+            GameEvent::ReligiousConversion {
+                province: 0, old_religion: "Old Gods".into(),
+                new_religion: "Order of the Flame".into(), turn: 15,
+            },
+        ];
+        let text = religion_narrative(0, "Frosthold", "Order of the Flame", &events, &ctx);
+        assert!(text.contains("converted from Old Gods"), "text={}", text);
+        assert!(text.contains("turn 15"), "text={}", text);
+    }
+
+    #[test]
+    fn religion_multiple_conversions() {
+        let ctx = test_ctx();
+        let events = vec![
+            GameEvent::ReligiousConversion {
+                province: 0, old_religion: "Old Gods".into(),
+                new_religion: "Flame".into(), turn: 10,
+            },
+            GameEvent::ReligiousConversion {
+                province: 0, old_religion: "Flame".into(),
+                new_religion: "Shadow Cult".into(), turn: 30,
+            },
+        ];
+        let text = religion_narrative(0, "Frosthold", "Shadow Cult", &events, &ctx);
+        assert!(text.contains("changed faith 2 times"), "text={}", text);
+        assert!(text.contains("Shadow Cult"), "text={}", text);
+    }
+
+    #[test]
+    fn religion_heresies_and_miracles() {
+        let ctx = test_ctx();
+        let events = vec![
+            GameEvent::Heresy { faction: 0, province: 0, severity: 100, turn: 5 },
+            GameEvent::Miracle { province: 0, prosperity_gain: 50, turn: 10 },
+            GameEvent::Miracle { province: 0, prosperity_gain: 30, turn: 20 },
+        ];
+        let text = religion_narrative(0, "Frosthold", "Order of the Flame", &events, &ctx);
+        assert!(text.contains("Heretical"), "text={}", text);
+        assert!(text.contains("2 miracles"), "text={}", text);
+    }
+
+    #[test]
+    fn religion_ignores_other_provinces() {
+        let ctx = test_ctx();
+        let events = vec![
+            GameEvent::ReligiousConversion {
+                province: 7, old_religion: "Old Gods".into(),
+                new_religion: "Flame".into(), turn: 10,
+            },
+        ];
+        let text = religion_narrative(0, "Frosthold", "Order of the Flame", &events, &ctx);
+        assert!(text.contains("steadfast"), "text={}", text); // no events for province 0
+    }
+
+    // ─── Diplomacy narrative tests ────────────────────────────────────
+
+    #[test]
+    fn diplomacy_neutral() {
+        let ctx = test_ctx();
+        let text = diplomacy_narrative(0, 1, false, &[], &ctx);
+        assert!(text.contains("cautious neutrality"), "text={}", text);
+        assert!(text.contains("Ashen Crown"), "text={}", text);
+        assert!(text.contains("Vale Princes"), "text={}", text);
+    }
+
+    #[test]
+    fn diplomacy_at_war_first_time() {
+        let ctx = test_ctx();
+        let events = vec![
+            GameEvent::WarDeclared { attacker: 0, defender: 1, casus_belli: "Conquest".into(), turn: 5 },
+        ];
+        let text = diplomacy_narrative(0, 1, true, &events, &ctx);
+        assert!(text.contains("at war"), "text={}", text);
+    }
+
+    #[test]
+    fn diplomacy_repeated_wars() {
+        let ctx = test_ctx();
+        let events = vec![
+            GameEvent::WarDeclared { attacker: 0, defender: 1, casus_belli: "X".into(), turn: 5 },
+            GameEvent::TreatySigned { faction_a: 0, faction_b: 1, treaty_type: "White Peace".into(), turn: 10 },
+            GameEvent::WarDeclared { attacker: 1, defender: 0, casus_belli: "Y".into(), turn: 20 },
+        ];
+        let text = diplomacy_narrative(0, 1, true, &events, &ctx);
+        assert!(text.contains("2nd conflict"), "text={}", text);
+    }
+
+    #[test]
+    fn diplomacy_marriage_alliance() {
+        let ctx = test_ctx();
+        let events = vec![
+            GameEvent::MarriageAlliance {
+                character_a: 100, character_b: 101,
+                faction_a: 0, faction_b: 1, turn: 8,
+            },
+        ];
+        let text = diplomacy_narrative(0, 1, false, &events, &ctx);
+        assert!(text.contains("marriage alliance"), "text={}", text);
+    }
+
+    #[test]
+    fn diplomacy_territory_conquest() {
+        let ctx = test_ctx();
+        let events = vec![
+            GameEvent::WarDeclared { attacker: 0, defender: 1, casus_belli: "X".into(), turn: 5 },
+            GameEvent::ProvinceConquered { province: 7, old_controller: 1, new_controller: 0, turn: 8 },
+            GameEvent::ProvinceConquered { province: 3, old_controller: 1, new_controller: 0, turn: 9 },
+            GameEvent::TreatySigned { faction_a: 0, faction_b: 1, treaty_type: "Peace".into(), turn: 15 },
+        ];
+        let text = diplomacy_narrative(0, 1, false, &events, &ctx);
+        assert!(text.contains("seized 2 provinces"), "text={}", text);
+    }
+
+    // ─── Siege narrative tests ────────────────────────────────────────
+
+    #[test]
+    fn siege_empty() {
+        let ctx = test_ctx();
+        let text = siege_narrative(0, "Frosthold", &[], &ctx);
+        assert!(text.is_empty());
+    }
+
+    #[test]
+    fn siege_completed() {
+        let ctx = test_ctx();
+        let events = vec![
+            GameEvent::SiegeStarted {
+                province: 0, attacker_faction: 1, defender_faction: 0,
+                turns_required: 6, turn: 10,
+            },
+            GameEvent::SiegeCompleted {
+                province: 0, old_controller: 0, new_controller: 1,
+                turns_lasted: 5, attacker_casualties: 30, turn: 15,
+            },
+        ];
+        let text = siege_narrative(0, "Frosthold", &events, &ctx);
+        assert!(text.contains("tested once"), "text={}", text);
+        assert!(text.contains("Vale Princes"), "text={}", text);
+        assert!(text.contains("5 turns"), "text={}", text);
+        assert!(text.contains("30 casualties"), "text={}", text);
+    }
+
+    #[test]
+    fn siege_ongoing() {
+        let ctx = test_ctx();
+        let events = vec![
+            GameEvent::SiegeStarted {
+                province: 0, attacker_faction: 1, defender_faction: 0,
+                turns_required: 8, turn: 20,
+            },
+        ];
+        let text = siege_narrative(0, "Frosthold", &events, &ctx);
+        assert!(text.contains("currently besieges"), "text={}", text);
+        assert!(text.contains("8 turns"), "text={}", text);
+    }
+
+    #[test]
+    fn siege_multiple() {
+        let ctx = test_ctx();
+        let events = vec![
+            GameEvent::SiegeStarted {
+                province: 0, attacker_faction: 1, defender_faction: 0,
+                turns_required: 4, turn: 5,
+            },
+            GameEvent::SiegeCompleted {
+                province: 0, old_controller: 0, new_controller: 1,
+                turns_lasted: 4, attacker_casualties: 20, turn: 9,
+            },
+            GameEvent::SiegeStarted {
+                province: 0, attacker_faction: 0, defender_faction: 1,
+                turns_required: 6, turn: 15,
+            },
+            GameEvent::SiegeCompleted {
+                province: 0, old_controller: 1, new_controller: 0,
+                turns_lasted: 5, attacker_casualties: 40, turn: 20,
+            },
+        ];
+        let text = siege_narrative(0, "Frosthold", &events, &ctx);
+        assert!(text.contains("2 sieges"), "text={}", text);
+    }
+
+    // ─── Trade narrative tests ────────────────────────────────────────
+
+    #[test]
+    fn trade_empty() {
+        let ctx = test_ctx();
+        let text = trade_narrative(0, "Frosthold", &[], &ctx);
+        assert!(text.is_empty());
+    }
+
+    #[test]
+    fn trade_established() {
+        let ctx = test_ctx();
+        let events = vec![
+            GameEvent::TradeRouteEstablished {
+                from: 0, to: 7, goods: "grain".into(), turn: 10,
+            },
+        ];
+        let text = trade_narrative(0, "Frosthold", &events, &ctx);
+        assert!(text.contains("commerce"), "text={}", text);
+        assert!(text.contains("grain"), "text={}", text);
+        assert!(text.contains("Ashenmere"), "text={}", text);
+    }
+
+    #[test]
+    fn trade_disrupted() {
+        let ctx = test_ctx();
+        let events = vec![
+            GameEvent::TradeRouteEstablished {
+                from: 0, to: 7, goods: "iron".into(), turn: 5,
+            },
+            GameEvent::TradeRouteDisrupted {
+                from: 0, to: 7, reason: "war".into(), turn: 12,
+            },
+        ];
+        let text = trade_narrative(0, "Frosthold", &events, &ctx);
+        assert!(text.contains("disrupted"), "text={}", text);
+        assert!(text.contains("war"), "text={}", text);
+    }
+
+    // ─── Succession narrative tests ───────────────────────────────────
+
+    #[test]
+    fn succession_empty() {
+        let ctx = test_ctx();
+        let text = succession_narrative(0, &[], &ctx);
+        assert!(text.is_empty());
+    }
+
+    #[test]
+    fn succession_single_crisis_held() {
+        let ctx = test_ctx();
+        let events = vec![
+            GameEvent::SuccessionCrisis {
+                faction: 0, dead_ruler: 100, claimants: vec![101, 102],
+                realm_split: false, turn: 15,
+            },
+        ];
+        let text = succession_narrative(0, &events, &ctx);
+        assert!(text.contains("death of"), "text={}", text);
+        assert!(text.contains("held together"), "text={}", text);
+        assert!(text.contains("2 claimants"), "text={}", text);
+    }
+
+    #[test]
+    fn succession_realm_split() {
+        let ctx = test_ctx();
+        let events = vec![
+            GameEvent::SuccessionCrisis {
+                faction: 0, dead_ruler: 100, claimants: vec![101, 102, 103],
+                realm_split: true, turn: 20,
+            },
+            GameEvent::RealmSplit {
+                original_faction: 0, new_faction: 2, rebel_leader: 102,
+                provinces_lost: 3, turn: 20,
+            },
+        ];
+        let text = succession_narrative(0, &events, &ctx);
+        assert!(text.contains("torn asunder"), "text={}", text);
+        assert!(text.contains("3 provinces"), "text={}", text);
+    }
+
+    #[test]
+    fn succession_multiple_crises() {
+        let ctx = test_ctx();
+        let events = vec![
+            GameEvent::SuccessionCrisis {
+                faction: 0, dead_ruler: 100, claimants: vec![101],
+                realm_split: false, turn: 10,
+            },
+            GameEvent::SuccessionCrisis {
+                faction: 0, dead_ruler: 101, claimants: vec![102, 103],
+                realm_split: true, turn: 30,
+            },
+        ];
+        let text = succession_narrative(0, &events, &ctx);
+        assert!(text.contains("2 succession crises"), "text={}", text);
+        assert!(text.contains("1 of which"), "text={}", text);
+    }
+
+    // ─── Character biography tests ────────────────────────────────────
+
+    #[test]
+    fn biography_living_ruler() {
+        let ctx = test_ctx();
+        let text = character_biography(
+            100, "King Aldric", 45, "Ruler", 0, true,
+            &["Brave", "Just"], &[], &ctx,
+        );
+        assert!(text.contains("King Aldric, aged 45"), "text={}", text);
+        assert!(text.contains("Ruler of Ashen Crown"), "text={}", text);
+        assert!(text.contains("Brave and Just"), "text={}", text);
+    }
+
+    #[test]
+    fn biography_dead_character() {
+        let ctx = test_ctx();
+        let events = vec![
+            GameEvent::CharacterDied {
+                character_id: 100, character_name: "King Aldric".into(),
+                cause: crown_ash_types::DeathCause::Assassination, turn: 30,
+            },
+        ];
+        let text = character_biography(
+            100, "King Aldric", 50, "Ruler", 0, false,
+            &[], &events, &ctx,
+        );
+        assert!(text.contains("was a Ruler"), "text={}", text);
+        assert!(text.contains("by assassination"), "text={}", text);
+        assert!(text.contains("turn 30"), "text={}", text);
+    }
+
+    #[test]
+    fn biography_with_marriage() {
+        let ctx = test_ctx();
+        let events = vec![
+            GameEvent::MarriageAlliance {
+                character_a: 100, character_b: 101,
+                faction_a: 0, faction_b: 1, turn: 12,
+            },
+        ];
+        let text = character_biography(
+            100, "King Aldric", 35, "Ruler", 0, true,
+            &[], &events, &ctx,
+        );
+        assert!(text.contains("Wed"), "text={}", text);
+        assert!(text.contains("turn 12"), "text={}", text);
+    }
+
+    // ─── Army narrative tests ─────────────────────────────────────────
+
+    #[test]
+    fn army_basic() {
+        let ctx = test_ctx();
+        let text = army_narrative(
+            100, 0, Some(100), 0,
+            500, 100, 20, 850, 5, &[], &ctx,
+        );
+        assert!(text.contains("Ashen Crown"), "text={}", text);
+        assert!(text.contains("620 strong"), "text={}", text);
+        assert!(text.contains("Frosthold"), "text={}", text);
+        assert!(text.contains("Morale is high"), "text={}", text);
+        assert!(text.contains("Raised on turn 5"), "text={}", text);
+    }
+
+    #[test]
+    fn army_with_battles() {
+        let ctx = test_ctx();
+        let events = vec![
+            GameEvent::Battle(BattleResult {
+                attacker_army: 100, defender_army: Some(200), province: 0,
+                attacker_casualties: 50, defender_casualties: 80, attacker_won: true,
+                random_factor: crown_ash_types::FixedPoint(1000), turn: 10,
+            }),
+            GameEvent::Battle(BattleResult {
+                attacker_army: 200, defender_army: Some(100), province: 7,
+                attacker_casualties: 60, defender_casualties: 40, attacker_won: true,
+                random_factor: crown_ash_types::FixedPoint(1000), turn: 15,
+            }),
+        ];
+        let text = army_narrative(
+            100, 0, None, 0,
+            300, 50, 0, 500, 3, &events, &ctx,
+        );
+        assert!(text.contains("1 victory"), "text={}", text);
+        assert!(text.contains("1 defeat"), "text={}", text);
+    }
+
+    #[test]
+    fn army_low_morale() {
+        let ctx = test_ctx();
+        let text = army_narrative(
+            100, 0, None, 0,
+            200, 0, 0, 150, 1, &[], &ctx,
+        );
+        assert!(text.contains("collapsed") || text.contains("Desertion"), "text={}", text);
+    }
+
+    // ─── Construction narrative tests ─────────────────────────────────
+
+    #[test]
+    fn construction_empty() {
+        let ctx = test_ctx();
+        let text = construction_narrative(0, "Frosthold", &[], &[], &ctx);
+        assert!(text.is_empty());
+    }
+
+    #[test]
+    fn construction_with_improvements() {
+        let ctx = test_ctx();
+        let text = construction_narrative(
+            0, "Frosthold", &["Market", "Temple"], &[], &ctx,
+        );
+        assert!(text.contains("Market"), "text={}", text);
+        assert!(text.contains("Temple"), "text={}", text);
+    }
+
+    #[test]
+    fn construction_with_recent_build() {
+        let ctx = test_ctx();
+        let events = vec![
+            GameEvent::ConstructionComplete {
+                province: 0, improvement: "Fortification".into(), turn: 20,
+            },
+        ];
+        let text = construction_narrative(
+            0, "Frosthold", &["Fortification"], &events, &ctx,
+        );
+        assert!(text.contains("Fortification"), "text={}", text);
+        assert!(text.contains("completed on turn 20"), "text={}", text);
+    }
+
+    #[test]
+    fn construction_multiple_builds() {
+        let ctx = test_ctx();
+        let events = vec![
+            GameEvent::ConstructionComplete {
+                province: 0, improvement: "Market".into(), turn: 10,
+            },
+            GameEvent::ConstructionComplete {
+                province: 0, improvement: "Temple".into(), turn: 15,
+            },
+            GameEvent::ConstructionComplete {
+                province: 0, improvement: "University".into(), turn: 25,
+            },
+        ];
+        let text = construction_narrative(
+            0, "Frosthold", &["Market", "Temple", "University"], &events, &ctx,
+        );
+        assert!(text.contains("3 construction projects"), "text={}", text);
     }
 }

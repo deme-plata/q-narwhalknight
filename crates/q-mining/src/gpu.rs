@@ -694,6 +694,9 @@ impl GPUMiner {
     /// v10.1.7: Uses persistent buffers with conditional upload and adaptive work size.
     ///
     /// Returns (solution_if_found, nonces_tried).
+    /// v10.2.3: Dispatch to ALL initialized GPUs with nonce partitioning.
+    /// Each GPU gets a unique nonce range to avoid duplicate work.
+    /// Returns the first solution found (if any) and total hashes across all GPUs.
     #[cfg(feature = "gpu-mining")]
     pub fn mine_batch(
         &mut self,
@@ -705,38 +708,52 @@ impl GPUMiner {
             return Err(anyhow!("No GPU contexts initialized"));
         }
 
-        // GPU-002: Per-GPU adaptive work size, rounded down to local_work_size multiple
-        let ctx = &mut self.contexts[0];
-        let work_size = (ctx.adaptive_work_size / self.config.local_work_size) * self.config.local_work_size;
-        let work_size = work_size.max(self.config.local_work_size); // at least 1 work group
+        let num_gpus = self.contexts.len();
+        let mut total_hashes: u64 = 0;
+        let mut best_solution: Option<GPUSolution> = None;
 
-        let dispatch_start = Instant::now();
-        let result = Self::dispatch_blake3_kernel(ctx, challenge_hash, target, nonce_start, work_size, self.config.local_work_size)?;
-        let dispatch_ms = dispatch_start.elapsed().as_millis();
+        for gpu_idx in 0..num_gpus {
+            let ctx = &mut self.contexts[gpu_idx];
 
-        // GPU-002: Per-GPU adaptive tuning
-        if dispatch_ms < DISPATCH_TARGET_LOW_MS {
-            ctx.adaptive_work_size = (ctx.adaptive_work_size * 3 / 2).min(MAX_WORK_SIZE);
-        } else if dispatch_ms > DISPATCH_TARGET_HIGH_MS {
-            ctx.adaptive_work_size = (ctx.adaptive_work_size * 2 / 3).max(MIN_WORK_SIZE);
+            // GPU-002: Per-GPU adaptive work size, rounded down to local_work_size multiple
+            let work_size = (ctx.adaptive_work_size / self.config.local_work_size) * self.config.local_work_size;
+            let work_size = work_size.max(self.config.local_work_size);
+
+            // Partition nonce space: each GPU gets a non-overlapping range
+            let gpu_nonce_start = nonce_start + (gpu_idx as u64 * work_size as u64);
+
+            let dispatch_start = Instant::now();
+            let result = Self::dispatch_blake3_kernel(ctx, challenge_hash, target, gpu_nonce_start, work_size, self.config.local_work_size)?;
+            let dispatch_ms = dispatch_start.elapsed().as_millis();
+
+            // GPU-002: Per-GPU adaptive tuning
+            if dispatch_ms < DISPATCH_TARGET_LOW_MS {
+                ctx.adaptive_work_size = (ctx.adaptive_work_size * 3 / 2).min(MAX_WORK_SIZE);
+            } else if dispatch_ms > DISPATCH_TARGET_HIGH_MS {
+                ctx.adaptive_work_size = (ctx.adaptive_work_size * 2 / 3).max(MIN_WORK_SIZE);
+            }
+
+            total_hashes += work_size as u64;
+
+            if best_solution.is_none() {
+                if let Some((nonce, hash)) = result {
+                    self.stats.blocks_found.fetch_add(1, Ordering::Relaxed);
+                    best_solution = Some(GPUSolution {
+                        nonce,
+                        hash,
+                        gpu_index: gpu_idx,
+                        hashes_computed: work_size as u64,
+                    });
+                }
+            }
         }
 
-        self.stats.dispatches.fetch_add(1, Ordering::Relaxed);
-        self.stats.total_hashes.fetch_add(work_size as u64, Ordering::Relaxed);
-
-        let solution = result.map(|(nonce, hash)| {
-            self.stats.blocks_found.fetch_add(1, Ordering::Relaxed);
-            GPUSolution {
-                nonce,
-                hash,
-                gpu_index: 0,
-                hashes_computed: work_size as u64,
-            }
-        });
+        self.stats.dispatches.fetch_add(num_gpus as u64, Ordering::Relaxed);
+        self.stats.total_hashes.fetch_add(total_hashes, Ordering::Relaxed);
 
         Ok(BatchResult {
-            solution,
-            hashes: work_size as u64,
+            solution: best_solution,
+            hashes: total_hashes,
         })
     }
 

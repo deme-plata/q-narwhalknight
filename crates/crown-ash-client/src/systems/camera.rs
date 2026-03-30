@@ -6,8 +6,12 @@ use bevy::input::ButtonInput;
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Camera height above the XZ plane (fixed; panning moves X and Z only).
-const CAMERA_Y: f32 = 30.0;
+/// Camera height above the focal point on the XZ plane.
+const CAMERA_HEIGHT: f32 = 20.0;
+
+/// Camera distance behind the focal point (creates tilt angle).
+/// With height=20 and offset=12, the tilt is ~59° from horizontal.
+const CAMERA_Z_OFFSET: f32 = 12.0;
 
 /// Units-per-second when panning with WASD.
 const PAN_SPEED: f32 = 20.0;
@@ -25,11 +29,31 @@ const MAX_SCALE: f32 = 60.0;
 #[derive(Component)]
 pub struct MapCamera;
 
+/// Tracks the camera's focal point on the XZ plane.
+#[derive(Resource)]
+pub struct CameraFocus {
+    pub x: f32,
+    pub z: f32,
+}
+
+impl Default for CameraFocus {
+    fn default() -> Self {
+        // Centre the camera on the middle of the map.
+        Self { x: 3.0, z: -1.5 }
+    }
+}
+
 // ---------------------------------------------------------------------------
-// Startup system — spawns the orthographic camera looking straight down.
+// Startup system — spawns the tilted orthographic camera.
 // ---------------------------------------------------------------------------
 
 pub fn setup_camera(mut commands: Commands) {
+    let focus = CameraFocus::default();
+
+    // Position camera above and behind the focal point for a tilted view.
+    let cam_pos = Vec3::new(focus.x, CAMERA_HEIGHT, focus.z + CAMERA_Z_OFFSET);
+    let look_at = Vec3::new(focus.x, 0.0, focus.z);
+
     commands.spawn((
         MapCamera,
         Camera3d::default(),
@@ -39,17 +63,24 @@ pub fn setup_camera(mut commands: Commands) {
             far: 100.0,
             ..OrthographicProjection::default_3d()
         }),
-        Transform::from_xyz(3.0, CAMERA_Y, 0.0).looking_at(Vec3::new(3.0, 0.0, 0.0), Vec3::NEG_Z),
+        Transform::from_translation(cam_pos).looking_at(look_at, Vec3::Y),
     ));
+
+    commands.insert_resource(focus);
+
+    // Lighting and ClearColor are set in setup_map (runs after setup_camera).
+    // Sky-blue background — light enough to clearly distinguish from hex tiles.
+    commands.insert_resource(ClearColor(Color::srgb(0.45, 0.55, 0.70)));
 }
 
 // ---------------------------------------------------------------------------
-// Update system — WASD panning (moves camera on the XZ plane).
+// Update system — WASD panning (moves camera focal point on XZ plane).
 // ---------------------------------------------------------------------------
 
 pub fn camera_pan(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
+    mut focus: ResMut<CameraFocus>,
     mut query: Query<&mut Transform, With<MapCamera>>,
 ) {
     let Ok(mut tf) = query.get_single_mut() else {
@@ -57,30 +88,36 @@ pub fn camera_pan(
     };
 
     let dt = time.delta_secs();
-    let mut delta = Vec3::ZERO;
+    let mut dx = 0.0_f32;
+    let mut dz = 0.0_f32;
 
-    // The camera looks straight down (-Y). In screen space:
-    //   "up"    on screen => camera -Z  (world north)
-    //   "down"  on screen => camera +Z  (world south)
-    //   "left"  on screen => camera -X
-    //   "right" on screen => camera +X
+    // Map screen directions to world XZ movement.
+    // With the tilted camera, "up" on screen is roughly world -Z.
     if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
-        delta.z -= PAN_SPEED * dt;
+        dz -= PAN_SPEED * dt;
     }
     if keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown) {
-        delta.z += PAN_SPEED * dt;
+        dz += PAN_SPEED * dt;
     }
     if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
-        delta.x -= PAN_SPEED * dt;
+        dx -= PAN_SPEED * dt;
     }
     if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
-        delta.x += PAN_SPEED * dt;
+        dx += PAN_SPEED * dt;
     }
 
-    tf.translation += delta;
+    if dx == 0.0 && dz == 0.0 {
+        return;
+    }
 
-    // Keep Y fixed so the camera never tilts away from the map plane.
-    tf.translation.y = CAMERA_Y;
+    // Update focal point.
+    focus.x += dx;
+    focus.z += dz;
+
+    // Position camera above and behind the focal point.
+    tf.translation = Vec3::new(focus.x, CAMERA_HEIGHT, focus.z + CAMERA_Z_OFFSET);
+    let look_at = Vec3::new(focus.x, 0.0, focus.z);
+    *tf = Transform::from_translation(tf.translation).looking_at(look_at, Vec3::Y);
 }
 
 // ---------------------------------------------------------------------------

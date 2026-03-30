@@ -118,29 +118,75 @@ const DEFAULT_TERRAIN: [Terrain; 25] = [
 const HEX_RADIUS: f32 = 1.35;
 
 // ---------------------------------------------------------------------------
+// Terrain elevation
+// ---------------------------------------------------------------------------
+
+/// Y offset for each terrain type, giving the map 3D depth.
+fn terrain_elevation(terrain: Terrain) -> f32 {
+    match terrain {
+        Terrain::Mountains => 0.45,
+        Terrain::Hills     => 0.20,
+        Terrain::Forest    => 0.08,
+        Terrain::Plains    => 0.0,
+        Terrain::Desert    => 0.0,
+        Terrain::River     => -0.05,
+        Terrain::Marsh     => -0.08,
+        Terrain::Coastal   => -0.05,
+    }
+}
+
+/// Returns the Y height for a province by index (using default terrain).
+pub fn province_elevation(province_id: usize) -> f32 {
+    if province_id < DEFAULT_TERRAIN.len() {
+        terrain_elevation(DEFAULT_TERRAIN[province_id])
+    } else {
+        0.0
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Mesh builders
 // ---------------------------------------------------------------------------
 
-/// Creates a flat hexagonal mesh on the XZ plane (Y = 0).
-/// 7 vertices: centre + 6 outer points; 6 triangles.
-fn build_hex_mesh(radius: f32) -> Mesh {
+/// Centre dome height for each terrain type (how much the centre vertex
+/// is raised above the edges, creating a gentle dome shape).
+fn terrain_dome_height(terrain: Terrain) -> f32 {
+    match terrain {
+        Terrain::Mountains => 0.35,
+        Terrain::Hills     => 0.15,
+        Terrain::Forest    => 0.05,
+        _ => 0.0, // flat for plains, desert, coastal, river, marsh
+    }
+}
+
+/// Creates a hexagonal mesh on the XZ plane with an optional raised centre
+/// (dome effect for hills/mountains). 7 vertices: centre + 6 outer points.
+fn build_hex_mesh(radius: f32, dome: f32) -> Mesh {
     let mut positions: Vec<[f32; 3]> = Vec::with_capacity(7);
     let mut normals: Vec<[f32; 3]> = Vec::with_capacity(7);
     let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(7);
     let mut indices: Vec<u32> = Vec::with_capacity(18);
 
-    // Centre vertex
-    positions.push([0.0, 0.0, 0.0]);
+    // Centre vertex — raised by dome height.
+    positions.push([0.0, dome, 0.0]);
     normals.push([0.0, 1.0, 0.0]);
     uvs.push([0.5, 0.5]);
 
-    // 6 outer vertices — flat-top hex (first vertex at +X).
+    // 6 outer vertices — flat-top hex (first vertex at +X), at Y=0.
     for i in 0..6 {
         let angle = (i as f32) * PI / 3.0;
         let x = radius * angle.cos();
         let z = radius * angle.sin();
         positions.push([x, 0.0, z]);
-        normals.push([0.0, 1.0, 0.0]);
+        // Normals tilt outward slightly when domed.
+        if dome > 0.001 {
+            let nx = -x * dome / radius;
+            let nz = -z * dome / radius;
+            let len = (nx * nx + 1.0 + nz * nz).sqrt();
+            normals.push([nx / len, 1.0 / len, nz / len]);
+        } else {
+            normals.push([0.0, 1.0, 0.0]);
+        }
         uvs.push([0.5 + 0.5 * angle.cos(), 0.5 + 0.5 * angle.sin()]);
     }
 
@@ -164,12 +210,13 @@ fn build_adjacency_lines_mesh() -> Mesh {
     let mut positions: Vec<[f32; 3]> = Vec::with_capacity(ADJACENCY.len() * 2);
     let mut normals: Vec<[f32; 3]> = Vec::with_capacity(ADJACENCY.len() * 2);
 
-    let y = 0.02; // slightly above province hexes to stay visible
     for &(a, b) in ADJACENCY.iter() {
         let (ax, az) = PROVINCE_POSITIONS[a as usize];
         let (bx, bz) = PROVINCE_POSITIONS[b as usize];
-        positions.push([ax, y, az]);
-        positions.push([bx, y, bz]);
+        let ya = province_elevation(a as usize) + 0.02;
+        let yb = province_elevation(b as usize) + 0.02;
+        positions.push([ax, ya, az]);
+        positions.push([bx, yb, bz]);
         normals.push([0.0, 1.0, 0.0]);
         normals.push([0.0, 1.0, 0.0]);
     }
@@ -222,34 +269,47 @@ pub fn setup_map(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // Shared hex mesh handle — every province uses the same shape.
-    let hex_mesh = meshes.add(build_hex_mesh(HEX_RADIUS));
+    // Pre-build hex meshes for each terrain type (different dome heights).
+    use std::collections::HashMap;
+    let mut terrain_meshes: HashMap<u8, Handle<Mesh>> = HashMap::new();
+    for terrain_val in [
+        Terrain::Plains, Terrain::Hills, Terrain::Mountains,
+        Terrain::Forest, Terrain::Marsh, Terrain::Desert,
+        Terrain::Coastal, Terrain::River,
+    ] {
+        let dome = terrain_dome_height(terrain_val);
+        let mesh = meshes.add(build_hex_mesh(HEX_RADIUS, dome));
+        terrain_meshes.insert(terrain_val as u8, mesh);
+    }
 
-    // Spawn province hexes.
+    // Spawn province hexes with terrain-appropriate mesh and elevation.
     for (i, &(px, pz)) in PROVINCE_POSITIONS.iter().enumerate() {
         let faction_id = DEFAULT_FACTION[i];
         let terrain = DEFAULT_TERRAIN[i];
         let color = province_color(DEFAULT_FACTION_COLORS[faction_id as usize], terrain);
+        let elevation = terrain_elevation(terrain);
 
         let material = materials.add(StandardMaterial {
             base_color: color,
-            unlit: true, // flat-shaded strategy map; no need for lighting complexity
+            perceptual_roughness: 0.85,
             double_sided: true,
             ..default()
         });
 
+        let hex_mesh = terrain_meshes[&(terrain as u8)].clone();
+
         commands.spawn((
             ProvinceMarker { province_id: i as u16 },
-            Mesh3d(hex_mesh.clone()),
+            Mesh3d(hex_mesh),
             MeshMaterial3d(material),
-            Transform::from_xyz(px, 0.0, pz),
+            Transform::from_xyz(px, elevation, pz),
         ));
     }
 
     // Spawn adjacency lines as a single mesh entity.
     let line_mesh = meshes.add(build_adjacency_lines_mesh());
     let line_mat = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.3, 0.3, 0.3, 0.6),
+        base_color: Color::srgba(0.15, 0.12, 0.08, 0.8),
         unlit: true,
         ..default()
     });
@@ -260,14 +320,35 @@ pub fn setup_map(
         Transform::IDENTITY,
     ));
 
-    // Simple ambient light so unlit materials render consistently.
+    // Large ground plane beneath the map for visual grounding.
+    let ground_mesh = meshes.add(Mesh::from(Plane3d::default().mesh().size(80.0, 80.0)));
+    let ground_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.28, 0.32, 0.22), // muted olive green
+        perceptual_roughness: 0.95,
+        ..default()
+    });
+    commands.spawn((
+        Mesh3d(ground_mesh),
+        MeshMaterial3d(ground_mat),
+        Transform::from_xyz(2.0, -0.5, -2.0), // centred beneath the map, slightly below hexes
+    ));
+
+    // Sun light — angled to create shadows on domed terrain and 3D buildings.
     commands.spawn((
         DirectionalLight {
-            illuminance: 5000.0,
+            illuminance: 15_000.0,
+            shadows_enabled: true,
+            color: Color::srgb(1.0, 0.96, 0.88),
             ..default()
         },
-        Transform::from_xyz(5.0, 20.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_xyz(8.0, 25.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
+
+    // Ambient light — bright enough to clearly see all terrain.
+    commands.insert_resource(AmbientLight {
+        color: Color::srgb(0.65, 0.70, 0.80),
+        brightness: 600.0,
+    });
 
     // Province name labels — text billboards floating above each hex.
     let province_names = [
@@ -283,6 +364,7 @@ pub fn setup_map(
     let label_font_size = 11.0;
     for (i, &(px, pz)) in PROVINCE_POSITIONS.iter().enumerate() {
         let name = if i < province_names.len() { province_names[i] } else { "?" };
+        let label_y = province_elevation(i) + 0.15;
         commands.spawn((
             ProvinceLabel { province_id: i as u16 },
             Text2d::new(name),
@@ -291,9 +373,9 @@ pub fn setup_map(
                 ..default()
             },
             TextColor(Color::srgba(0.9, 0.9, 0.9, 0.85)),
-            // Labels sit above the hex surface, billboard-facing the camera.
-            Transform::from_xyz(px, 0.15, pz - 0.7)
-                .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
+            // Labels face the tilted camera (atan2(20, 12) ≈ 59° from horizontal).
+            Transform::from_xyz(px, label_y, pz - 0.7)
+                .with_rotation(Quat::from_rotation_x(-1.03)),
         ));
     }
 
@@ -320,12 +402,24 @@ pub fn setup_map(
 pub fn update_map_colors(
     game_state: Res<ClientGameState>,
     selection: Res<Selection>,
+    time: Res<Time>,
     query: Query<(&ProvinceMarker, &MeshMaterial3d<StandardMaterial>)>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let Some(ref world) = game_state.world else {
         return;
     };
+
+    // Pre-compute which provinces are under active siege.
+    let mut besieged: std::collections::HashSet<u16> = std::collections::HashSet::new();
+    for army in &world.armies {
+        if let Some(ref siege) = army.siege {
+            besieged.insert(siege.target_province);
+        }
+    }
+
+    // Pulsing effect for sieges (0.3..0.7 sinusoidal).
+    let siege_pulse = 0.5 + 0.2 * (time.elapsed_secs() * 2.5).sin();
 
     for (marker, mat_handle) in query.iter() {
         let pid = marker.province_id as usize;
@@ -336,7 +430,6 @@ pub fn update_map_colors(
         let province = &world.provinces[pid];
         let controller = province.controller as usize;
 
-        // Resolve faction colour.
         let faction_rgb = if controller < world.factions.len() {
             world.factions[controller].color_rgb
         } else if controller < DEFAULT_FACTION_COLORS.len() {
@@ -345,7 +438,6 @@ pub fn update_map_colors(
             [128, 128, 128]
         };
 
-        // Resolve terrain — use the index into our local enum.
         let terrain = if pid < DEFAULT_TERRAIN.len() {
             DEFAULT_TERRAIN[pid]
         } else {
@@ -353,6 +445,40 @@ pub fn update_map_colors(
         };
 
         let mut new_color = province_color(faction_rgb, terrain);
+
+        // Siege indicator — pulsing red tint.
+        if besieged.contains(&(pid as u16)) {
+            let LinearRgba { red, green, blue, .. } = new_color.to_linear();
+            new_color = Color::srgb(
+                (red * 0.5 + siege_pulse * 0.5).clamp(0.0, 1.0),
+                (green * 0.3).clamp(0.0, 1.0),
+                (blue * 0.3).clamp(0.0, 1.0),
+            );
+        }
+
+        // High unrest (>500) — desaturate toward grey.
+        let unrest_val = province.unrest.raw() as f32 / 1000.0; // 0.0-1.0
+        if unrest_val > 0.5 {
+            let desat = (unrest_val - 0.5) * 2.0; // 0.0 at 500, 1.0 at 1000
+            let LinearRgba { red, green, blue, .. } = new_color.to_linear();
+            let grey = (red + green + blue) / 3.0;
+            new_color = Color::srgb(
+                (red + (grey - red) * desat * 0.6).clamp(0.0, 1.0),
+                (green + (grey - green) * desat * 0.6).clamp(0.0, 1.0),
+                (blue + (grey - blue) * desat * 0.6).clamp(0.0, 1.0),
+            );
+        }
+
+        // Hover highlight — subtle brightening when mouse is over this province.
+        let is_hovered = selection.hovered_province == Some(pid as u16);
+        if is_hovered {
+            let LinearRgba { red, green, blue, .. } = new_color.to_linear();
+            new_color = Color::srgb(
+                (red * 1.2 + 0.05).clamp(0.0, 1.0),
+                (green * 1.2 + 0.05).clamp(0.0, 1.0),
+                (blue * 1.2 + 0.05).clamp(0.0, 1.0),
+            );
+        }
 
         // Highlight selected province — brighten it significantly.
         let is_selected = selection.province == Some(pid as u16);
@@ -420,6 +546,7 @@ pub fn update_armies(
         }
 
         let (px, pz) = PROVINCE_POSITIONS[loc];
+        let elev = province_elevation(loc);
 
         // Resolve faction colour for the army icon.
         let owner = army.owner_faction as usize;
@@ -443,7 +570,7 @@ pub fn update_armies(
             ArmyMarker { army_id: army.id },
             Mesh3d(cube_mesh.clone()),
             MeshMaterial3d(mat),
-            Transform::from_xyz(px + ARMY_OFFSET_X, ARMY_Y, pz + ARMY_OFFSET_Z),
+            Transform::from_xyz(px + ARMY_OFFSET_X, ARMY_Y + elev, pz + ARMY_OFFSET_Z),
         ));
     }
 }
@@ -555,6 +682,63 @@ pub fn handle_province_click(
 }
 
 // ---------------------------------------------------------------------------
+// Update system — detect hovered province for tooltips
+// ---------------------------------------------------------------------------
+
+pub fn update_hover(
+    windows: Query<&Window>,
+    camera_q: Query<(&Camera, &GlobalTransform), With<MapCamera>>,
+    mut selection: ResMut<Selection>,
+) {
+    let Ok(window) = windows.get_single() else {
+        selection.hovered_province = None;
+        return;
+    };
+    let Some(cursor_pos) = window.cursor_position() else {
+        selection.hovered_province = None;
+        return;
+    };
+    let Ok((camera, cam_transform)) = camera_q.get_single() else {
+        selection.hovered_province = None;
+        return;
+    };
+
+    selection.cursor_screen_pos = Some((cursor_pos.x, cursor_pos.y));
+
+    let Ok(ray) = camera.viewport_to_world(cam_transform, cursor_pos) else {
+        selection.hovered_province = None;
+        return;
+    };
+
+    if ray.direction.y.abs() < 1e-6 {
+        selection.hovered_province = None;
+        return;
+    }
+
+    let t = -ray.origin.y / ray.direction.y;
+    if t < 0.0 {
+        selection.hovered_province = None;
+        return;
+    }
+
+    let hit = ray.origin + t * *ray.direction;
+
+    let mut best: Option<(u16, f32)> = None;
+    for (i, &(px, pz)) in PROVINCE_POSITIONS.iter().enumerate() {
+        let dx = hit.x - px;
+        let dz = hit.z - pz;
+        let dist_sq = dx * dx + dz * dz;
+        if dist_sq < HEX_RADIUS * HEX_RADIUS {
+            if best.map_or(true, |(_, bd)| dist_sq < bd) {
+                best = Some((i as u16, dist_sq));
+            }
+        }
+    }
+
+    selection.hovered_province = best.map(|(pid, _)| pid);
+}
+
+// ---------------------------------------------------------------------------
 // Update system — move selection ring to the selected province
 // ---------------------------------------------------------------------------
 
@@ -571,7 +755,8 @@ pub fn update_selection_ring(
             let idx = pid as usize;
             if idx < PROVINCE_POSITIONS.len() {
                 let (px, pz) = PROVINCE_POSITIONS[idx];
-                tf.translation = Vec3::new(px, 0.05, pz);
+                let elev = province_elevation(idx);
+                tf.translation = Vec3::new(px, elev + 0.05, pz);
             }
         }
         None => {
@@ -721,6 +906,8 @@ fn build_path_mesh(waypoints: &[u16]) -> Mesh {
 
         let (fx, fz) = PROVINCE_POSITIONS[from_idx];
         let (tx, tz) = PROVINCE_POSITIONS[to_idx];
+        let fy = province_elevation(from_idx) + PATH_Y;
+        let ty = province_elevation(to_idx) + PATH_Y;
 
         let dx = tx - fx;
         let dz = tz - fz;
@@ -732,17 +919,21 @@ fn build_path_mesh(waypoints: &[u16]) -> Mesh {
         let nx = dx / total_len;
         let nz = dz / total_len;
 
-        // Walk along the segment, emitting dashes.
+        // Walk along the segment, emitting dashes with interpolated elevation.
         let mut t = 0.0_f32;
         while t < total_len {
             let dash_end = (t + dash_len).min(total_len);
+            let frac0 = t / total_len;
+            let frac1 = dash_end / total_len;
             let x0 = fx + nx * t;
             let z0 = fz + nz * t;
+            let y0 = fy + (ty - fy) * frac0;
             let x1 = fx + nx * dash_end;
             let z1 = fz + nz * dash_end;
+            let y1 = fy + (ty - fy) * frac1;
 
-            positions.push([x0, PATH_Y, z0]);
-            positions.push([x1, PATH_Y, z1]);
+            positions.push([x0, y0, z0]);
+            positions.push([x1, y1, z1]);
             normals.push([0.0, 1.0, 0.0]);
             normals.push([0.0, 1.0, 0.0]);
 
@@ -757,6 +948,7 @@ fn build_path_mesh(waypoints: &[u16]) -> Mesh {
         if last < PROVINCE_POSITIONS.len() && prev < PROVINCE_POSITIONS.len() {
             let (tx, tz) = PROVINCE_POSITIONS[last];
             let (fx, fz) = PROVINCE_POSITIONS[prev];
+            let arrow_y = province_elevation(last) + PATH_Y;
             let dx = tx - fx;
             let dz = tz - fz;
             let len = (dx * dx + dz * dz).sqrt();
@@ -764,24 +956,20 @@ fn build_path_mesh(waypoints: &[u16]) -> Mesh {
                 let nx = dx / len;
                 let nz = dz / len;
                 let arrow_size = 0.3;
-                // Arrowhead point is slightly before the destination centre.
                 let tip_x = tx - nx * 0.2;
                 let tip_z = tz - nz * 0.2;
                 let base_x = tip_x - nx * arrow_size;
                 let base_z = tip_z - nz * arrow_size;
-                // Perpendicular offset for the two wings.
                 let px = -nz * arrow_size * 0.5;
                 let pz = nx * arrow_size * 0.5;
 
-                // Left wing.
-                positions.push([base_x + px, PATH_Y, base_z + pz]);
-                positions.push([tip_x, PATH_Y, tip_z]);
+                positions.push([base_x + px, arrow_y, base_z + pz]);
+                positions.push([tip_x, arrow_y, tip_z]);
                 normals.push([0.0, 1.0, 0.0]);
                 normals.push([0.0, 1.0, 0.0]);
 
-                // Right wing.
-                positions.push([base_x - px, PATH_Y, base_z - pz]);
-                positions.push([tip_x, PATH_Y, tip_z]);
+                positions.push([base_x - px, arrow_y, base_z - pz]);
+                positions.push([tip_x, arrow_y, tip_z]);
                 normals.push([0.0, 1.0, 0.0]);
                 normals.push([0.0, 1.0, 0.0]);
             }
@@ -830,7 +1018,8 @@ pub fn animate_army_movement(
         }
 
         let (px, pz) = PROVINCE_POSITIONS[target_loc];
-        let target = Vec3::new(px + ARMY_OFFSET_X, ARMY_Y, pz + ARMY_OFFSET_Z);
+        let target_elev = province_elevation(target_loc);
+        let target = Vec3::new(px + ARMY_OFFSET_X, ARMY_Y + target_elev, pz + ARMY_OFFSET_Z);
 
         // Smoothly move toward target.
         let current = tf.translation;
@@ -846,7 +1035,7 @@ pub fn animate_army_movement(
         // Add a slight bobbing effect for armies in transit.
         if army.destination.is_some() || !army.movement_queue.is_empty() {
             let bob = (time.elapsed_secs() * 3.0 + marker.army_id as f32).sin() * 0.05;
-            tf.translation.y = ARMY_Y + bob;
+            tf.translation.y = ARMY_Y + target_elev + bob;
         }
     }
 }
@@ -871,4 +1060,101 @@ fn build_ring_mesh(radius: f32, segments: u32) -> Mesh {
     Mesh::new(PrimitiveTopology::LineList, bevy::render::render_asset::RenderAssetUsages::default())
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+}
+
+// ---------------------------------------------------------------------------
+// Siege & battle visual markers
+// ---------------------------------------------------------------------------
+
+/// Tags a floating marker above a besieged province.
+#[derive(Component)]
+pub struct SiegeMarker {
+    pub province_id: u16,
+}
+
+/// Spawns/despawns floating siege markers above besieged provinces.
+/// Crossed-sword icons bob and rotate to draw attention.
+pub fn update_siege_markers(
+    mut commands: Commands,
+    game_state: Res<ClientGameState>,
+    existing: Query<(Entity, &SiegeMarker)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let Some(ref world) = game_state.world else {
+        for (entity, _) in existing.iter() {
+            commands.entity(entity).despawn();
+        }
+        return;
+    };
+
+    // Collect currently besieged provinces.
+    let mut besieged: std::collections::HashSet<u16> = std::collections::HashSet::new();
+    for army in &world.armies {
+        if let Some(ref siege) = army.siege {
+            besieged.insert(siege.target_province);
+        }
+    }
+
+    // Despawn markers for provinces no longer besieged; animate those that remain.
+    let mut existing_ids: std::collections::HashSet<u16> = std::collections::HashSet::new();
+    for (entity, marker) in existing.iter() {
+        if !besieged.contains(&marker.province_id) {
+            commands.entity(entity).despawn();
+        } else {
+            existing_ids.insert(marker.province_id);
+        }
+    }
+
+    // Spawn new markers for newly besieged provinces.
+    for &pid16 in &besieged {
+        if existing_ids.contains(&pid16) {
+            continue;
+        }
+        let pid = pid16 as usize;
+        if pid >= PROVINCE_POSITIONS.len() {
+            continue;
+        }
+
+        let (px, pz) = PROVINCE_POSITIONS[pid];
+        let elev = province_elevation(pid);
+
+        // Crossed-swords mesh: two thin cuboids at ±45° forming an X.
+        let sword = meshes.add(Cuboid::new(0.05, 0.4, 0.05));
+        let mat = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.9, 0.15, 0.1),
+            emissive: LinearRgba::new(2.0, 0.3, 0.1, 1.0),
+            ..default()
+        });
+
+        commands.spawn((
+            SiegeMarker { province_id: pid16 },
+            Mesh3d(sword.clone()),
+            MeshMaterial3d(mat.clone()),
+            Transform::from_xyz(px - 0.1, elev + 1.2, pz)
+                .with_rotation(Quat::from_rotation_z(0.7)),
+        ));
+
+        commands.spawn((
+            SiegeMarker { province_id: pid16 },
+            Mesh3d(sword),
+            MeshMaterial3d(mat),
+            Transform::from_xyz(px + 0.1, elev + 1.2, pz)
+                .with_rotation(Quat::from_rotation_z(-0.7)),
+        ));
+    }
+}
+
+/// Animates siege markers — bobbing and slow rotation.
+pub fn animate_siege_markers(
+    time: Res<Time>,
+    mut query: Query<(&SiegeMarker, &mut Transform)>,
+) {
+    for (marker, mut tf) in query.iter_mut() {
+        let pid = marker.province_id as usize;
+        if pid >= PROVINCE_POSITIONS.len() { continue; }
+        let elev = province_elevation(pid);
+        let bob = (time.elapsed_secs() * 2.0 + marker.province_id as f32 * 0.5).sin() * 0.15;
+        tf.translation.y = elev + 1.2 + bob;
+    }
 }

@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 crown-ash-types = { path = "../crown-ash-types" }
 crown-ash-sim = { path = "../crown-ash-sim" }
+crown-ash-narrative = { path = "../crown-ash-narrative" }
 q-storage = { path = "../q-storage" }
 axum = "0.7"
 serde = { version = "1", features = ["derive"] }

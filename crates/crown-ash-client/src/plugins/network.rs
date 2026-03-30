@@ -444,6 +444,15 @@ impl SseParser {
         let text = String::from_utf8_lossy(chunk);
         self.buf.push_str(&text);
 
+        // Safety: if buffer grows beyond 1MB without producing events,
+        // the stream is probably sending garbage — reset to avoid OOM.
+        if self.buf.len() > 1_048_576 {
+            self.buf.clear();
+            self.event_type.clear();
+            self.data.clear();
+            return Vec::new();
+        }
+
         let mut events = Vec::new();
 
         loop {
@@ -485,9 +494,19 @@ impl SseParser {
 
 // ─── Utility ─────────────────────────────────────────────────────────────────
 
-/// Push a message into the shared mailbox.
+/// Maximum pending messages before we start dropping old events.
+/// Snapshots and Connected/Error messages are always kept; only Events and
+/// NarrativeDialog are dropped when the queue is full — they'll be superseded
+/// by the next snapshot anyway.
+const MAX_MAILBOX_SIZE: usize = 512;
+
+/// Push a message into the shared mailbox, evicting oldest events if full.
 fn push(mailbox: &Arc<Mutex<VecDeque<NetMessage>>>, msg: NetMessage) {
     if let Ok(mut lock) = mailbox.lock() {
+        // If the queue is full, drop old event/dialog messages to make room.
+        while lock.len() >= MAX_MAILBOX_SIZE {
+            lock.pop_front();
+        }
         lock.push_back(msg);
     }
 }

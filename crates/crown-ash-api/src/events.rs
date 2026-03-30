@@ -35,6 +35,18 @@ pub const EVENT_WORLD_INITIALIZED: &str = "crown_ash_world_init";
 /// SSE event type emitted when the game world is reset.
 pub const EVENT_WORLD_RESET: &str = "crown_ash_world_reset";
 
+/// SSE event type for Tier 1 narrative prose (template-generated, instant).
+pub const EVENT_NARRATIVE_PROSE: &str = "crown_ash_prose";
+
+/// SSE event type for Tier 2 short dialog (LLM-generated, 1-3s).
+pub const EVENT_NARRATIVE_DIALOG: &str = "crown_ash_dialog";
+
+/// SSE event type for Tier 3 deep narrative (LLM-generated, 5-15s).
+pub const EVENT_NARRATIVE_EPIC: &str = "crown_ash_epic";
+
+/// SSE event type for streaming tokens (progressive LLM display).
+pub const EVENT_NARRATIVE_TOKEN: &str = "crown_ash_token";
+
 // ─── Payload Builders ──────────────────────────────────────────────────────────
 
 /// Envelope wrapping all Crown & Ash SSE payloads.
@@ -117,6 +129,135 @@ pub fn world_initialized_payload(turn: u32, province_count: usize, faction_count
     serde_json::to_value(&envelope).unwrap_or_default()
 }
 
+/// Build the JSON payload for a Tier 1 narrative prose event.
+///
+/// Contains the template-generated prose for a single event, color-coded by
+/// importance. Sent immediately after the event occurs (zero latency).
+pub fn narrative_prose_payload(
+    turn: u32,
+    prose: &str,
+    summary: &str,
+    importance: &crown_ash_narrative::Importance,
+) -> Value {
+    #[derive(Serialize)]
+    struct NarrativeProseData<'a> {
+        tier: u8,
+        turn: u32,
+        prose: &'a str,
+        summary: &'a str,
+        importance: &'a str,
+    }
+
+    let importance_str = match importance {
+        crown_ash_narrative::Importance::Minor => "minor",
+        crown_ash_narrative::Importance::Notable => "notable",
+        crown_ash_narrative::Importance::Epic => "epic",
+    };
+
+    let envelope = SseEnvelope {
+        event_type: EVENT_NARRATIVE_PROSE,
+        payload: NarrativeProseData {
+            tier: 1,
+            turn,
+            prose,
+            summary,
+            importance: importance_str,
+        },
+    };
+    serde_json::to_value(&envelope).unwrap_or_default()
+}
+
+/// Build the JSON payload for a Tier 2 dialog event (LLM-generated).
+pub fn narrative_dialog_payload(
+    turn: u32,
+    speaker: &str,
+    text: &str,
+    generation_type: &str,
+) -> Value {
+    #[derive(Serialize)]
+    struct DialogData<'a> {
+        tier: u8,
+        turn: u32,
+        speaker: &'a str,
+        text: &'a str,
+        generation_type: &'a str,
+    }
+
+    let envelope = SseEnvelope {
+        event_type: EVENT_NARRATIVE_DIALOG,
+        payload: DialogData { tier: 2, turn, speaker, text, generation_type },
+    };
+    serde_json::to_value(&envelope).unwrap_or_default()
+}
+
+/// Build the JSON payload for a Tier 3 deep narrative event (LLM-generated).
+pub fn narrative_epic_payload(
+    turn: u32,
+    text: &str,
+    generation_type: &str,
+) -> Value {
+    #[derive(Serialize)]
+    struct EpicData<'a> {
+        tier: u8,
+        turn: u32,
+        text: &'a str,
+        generation_type: &'a str,
+    }
+
+    let envelope = SseEnvelope {
+        event_type: EVENT_NARRATIVE_EPIC,
+        payload: EpicData { tier: 3, turn, text, generation_type },
+    };
+    serde_json::to_value(&envelope).unwrap_or_default()
+}
+
+/// Build the JSON payload for a streaming token (Tier 2/3 progressive display).
+pub fn narrative_token_payload(tier: u8, token: &str, generation_type: &str) -> Value {
+    #[derive(Serialize)]
+    struct TokenData<'a> {
+        tier: u8,
+        token: &'a str,
+        generation_type: &'a str,
+    }
+
+    let envelope = SseEnvelope {
+        event_type: EVENT_NARRATIVE_TOKEN,
+        payload: TokenData { tier, token, generation_type },
+    };
+    serde_json::to_value(&envelope).unwrap_or_default()
+}
+
+/// Process all events for a turn through the cascade engine and broadcast
+/// Tier 0 + Tier 1 results immediately via SSE.
+///
+/// Returns the cascade results for Tier 2/3 deferred LLM processing.
+pub fn broadcast_cascade_narratives(
+    sender: &super::streaming::EventSender,
+    events: &[GameEvent],
+    turn: u32,
+    ctx: &crown_ash_narrative::WorldContext,
+) -> crown_ash_narrative::cascade::TurnCascade {
+    let cascade = crown_ash_narrative::cascade::CascadeEngine::new();
+    let turn_cascade = cascade.process_turn(turn, events, ctx);
+
+    // Broadcast Tier 1 prose for each event immediately
+    for result in &turn_cascade.results {
+        let payload = narrative_prose_payload(
+            turn,
+            &result.prose,
+            &result.summary,
+            &result.importance,
+        );
+        let _ = super::streaming::broadcast_event(
+            sender,
+            EVENT_NARRATIVE_PROSE,
+            payload,
+        );
+    }
+
+    turn_cascade
+}
+
 /// Build the JSON payload for a world reset event.
 pub fn world_reset_payload(reason: &str) -> Value {
     #[derive(Serialize)]
@@ -178,5 +319,45 @@ mod tests {
         let val = world_reset_payload("admin reset");
         assert_eq!(val["event_type"], EVENT_WORLD_RESET);
         assert_eq!(val["reason"], "admin reset");
+    }
+
+    #[test]
+    fn narrative_prose_payload_structure() {
+        let val = narrative_prose_payload(
+            42,
+            "Steel met steel on the plains.",
+            "Battle at Ashenmere",
+            &crown_ash_narrative::Importance::Epic,
+        );
+        assert_eq!(val["event_type"], EVENT_NARRATIVE_PROSE);
+        assert_eq!(val["tier"], 1);
+        assert_eq!(val["turn"], 42);
+        assert_eq!(val["importance"], "epic");
+        assert!(val["prose"].as_str().unwrap().contains("Steel"));
+    }
+
+    #[test]
+    fn narrative_dialog_payload_structure() {
+        let val = narrative_dialog_payload(42, "King Aldric", "Victory is ours!", "short_dialog");
+        assert_eq!(val["event_type"], EVENT_NARRATIVE_DIALOG);
+        assert_eq!(val["tier"], 2);
+        assert_eq!(val["speaker"], "King Aldric");
+        assert!(val["text"].as_str().unwrap().contains("Victory"));
+    }
+
+    #[test]
+    fn narrative_epic_payload_structure() {
+        let val = narrative_epic_payload(42, "The dawn broke crimson over the battlefield.", "battle_epic");
+        assert_eq!(val["event_type"], EVENT_NARRATIVE_EPIC);
+        assert_eq!(val["tier"], 3);
+        assert!(val["text"].as_str().unwrap().contains("dawn"));
+    }
+
+    #[test]
+    fn narrative_token_payload_structure() {
+        let val = narrative_token_payload(2, "The", "short_dialog");
+        assert_eq!(val["event_type"], EVENT_NARRATIVE_TOKEN);
+        assert_eq!(val["tier"], 2);
+        assert_eq!(val["token"], "The");
     }
 }

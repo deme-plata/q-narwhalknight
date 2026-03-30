@@ -2680,9 +2680,9 @@ fn compute_dag_knight_hash_for_pool(header: &[u8]) -> [u8; 32] {
     // Initial hash
     let initial_hash = blake3::hash(header);
 
-    // VDF computation (100 iterations for consistency with solo mining)
+    // VDF computation (99 inner rounds = 100 total with initial hash, matching GPU kernel)
     let mut current = *initial_hash.as_bytes();
-    for _ in 0..100 {
+    for _ in 0..99 {
         current = *blake3::hash(&current).as_bytes();
     }
 

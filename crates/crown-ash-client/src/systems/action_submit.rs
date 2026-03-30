@@ -8,7 +8,7 @@
 //! - **Intrigue**: Launch Plot, Back Plot, Investigate
 
 use bevy::prelude::*;
-use bevy::tasks::IoTaskPool;
+
 use bevy_egui::{egui, EguiContexts};
 use std::sync::{Arc, Mutex};
 
@@ -452,14 +452,20 @@ fn fire_action(
     state.submitting = true;
     state.last_result = None;
 
-    IoTaskPool::get()
-        .spawn(async move {
-            let result = post_action(&url, body).await;
-            if let Ok(mut lock) = slot.lock() {
-                *lock = Some(result);
-            }
-        })
-        .detach();
+    // Spawn a dedicated thread with its own tokio runtime.
+    // Bevy's IoTaskPool is NOT a Tokio runtime, so reqwest panics there.
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build();
+        let result = match rt {
+            Ok(rt) => rt.block_on(post_action(&url, body)),
+            Err(e) => ActionResult::Error(format!("Runtime error: {}", e)),
+        };
+        if let Ok(mut lock) = slot.lock() {
+            *lock = Some(result);
+        }
+    });
 }
 
 async fn post_action(url: &str, body: serde_json::Value) -> ActionResult {

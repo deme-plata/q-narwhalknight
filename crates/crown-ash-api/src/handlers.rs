@@ -294,9 +294,20 @@ pub async fn submit_action(
 ) -> Result<impl IntoResponse, StatusCode> {
     let mut gs = state.write().await;
 
-    // Validate: the wallet must own a realm.
+    // Validate: the wallet must own a realm (check both realm.owner_wallet and faction.player_wallet).
     let has_realm = gs.world.realms.iter().any(|r| r.owner_wallet == body.wallet);
-    if !has_realm {
+    let has_faction = gs.world.factions.iter().any(|f| f.player_wallet.as_deref() == Some(&body.wallet));
+
+    // If wallet owns a faction but realm.owner_wallet is empty, fix it now.
+    if !has_realm && has_faction {
+        if let Some(faction) = gs.world.factions.iter().find(|f| f.player_wallet.as_deref() == Some(&body.wallet)) {
+            let fid = faction.id;
+            if let Some(realm) = gs.world.realms.iter_mut().find(|r| r.faction == fid) {
+                info!(wallet = %body.wallet, faction = fid, "Auto-fixing realm owner_wallet");
+                realm.owner_wallet = body.wallet.clone();
+            }
+        }
+    } else if !has_realm && !has_faction {
         warn!(wallet = %body.wallet, "Action rejected: wallet has no realm");
         return Ok((
             StatusCode::BAD_REQUEST,
@@ -404,9 +415,63 @@ pub async fn join_game(
 
     faction.player_wallet = Some(body.wallet.clone());
     let faction_name = faction.name.clone();
+    let faction_id = body.faction;
 
     gs.world.meta.player_count += 1;
     let current_turn = gs.world.meta.turn;
+
+    // Create a Realm entry so submit_action can find the wallet.
+    // Only create if a realm doesn't already exist for this faction.
+    if !gs.world.realms.iter().any(|r| r.faction == faction_id) {
+        use crown_ash_types::{Realm, RealmCohesion, FixedPoint};
+
+        let provinces: Vec<ProvinceId> = gs.world.provinces.iter()
+            .filter(|p| p.controller == faction_id)
+            .map(|p| p.id)
+            .collect();
+
+        let ruler = gs.world.characters.iter()
+            .find(|c| c.faction == faction_id && c.alive && c.role == crown_ash_types::CharacterRole::Ruler)
+            .map(|c| c.id)
+            .unwrap_or(0);
+
+        let treasury = provinces.iter()
+            .filter_map(|pid| gs.world.provinces.iter().find(|p| p.id == *pid))
+            .map(|p| p.resources.gold)
+            .fold(FixedPoint::ZERO, |a, b| a + b);
+
+        let at_war_with: Vec<u8> = gs.world.diplomacy.iter()
+            .filter(|d| d.at_war && (d.faction_a == faction_id || d.faction_b == faction_id))
+            .map(|d| if d.faction_a == faction_id { d.faction_b } else { d.faction_a })
+            .collect();
+
+        let allies: Vec<u8> = gs.world.diplomacy.iter()
+            .filter(|d| !d.at_war && !d.treaties.is_empty()
+                && (d.faction_a == faction_id || d.faction_b == faction_id))
+            .map(|d| if d.faction_a == faction_id { d.faction_b } else { d.faction_a })
+            .collect();
+
+        gs.world.realms.push(Realm {
+            owner_wallet: body.wallet.clone(),
+            faction: faction_id,
+            ruler,
+            provinces,
+            vassals: Vec::new(),
+            treasury,
+            cohesion: RealmCohesion::default(),
+            age: 0,
+            at_war_with,
+            allies,
+            religious_authority: FixedPoint::from_int(500),
+        });
+
+        info!(faction = faction_id, "Created Realm for player");
+    } else {
+        // Realm already exists (e.g., from simulation), update its owner_wallet.
+        if let Some(realm) = gs.world.realms.iter_mut().find(|r| r.faction == faction_id) {
+            realm.owner_wallet = body.wallet.clone();
+        }
+    }
 
     info!(
         wallet = %body.wallet,
@@ -459,6 +524,15 @@ fn event_references_province(event: &GameEvent, province_id: ProvinceId) -> bool
         | GameEvent::PlotSucceeded { .. }
         | GameEvent::PlotDiscovered { .. }
         | GameEvent::PlotFoiled { .. }
-        | GameEvent::CharacterTombstoned { .. } => false,
+        | GameEvent::CharacterTombstoned { .. }
+        | GameEvent::Friendship { .. }
+        | GameEvent::Rivalry { .. }
+        | GameEvent::MarriageAlliance { .. } => false,
+        // Province-specific religion and siege events.
+        GameEvent::ReligiousConversion { province, .. }
+        | GameEvent::Heresy { province, .. }
+        | GameEvent::Miracle { province, .. }
+        | GameEvent::SiegeStarted { province, .. }
+        | GameEvent::SiegeCompleted { province, .. } => *province == province_id,
     }
 }

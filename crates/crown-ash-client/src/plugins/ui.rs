@@ -13,7 +13,7 @@
 use bevy::prelude::*;
 use bevy_egui::EguiPlugin;
 
-use crate::resources::narrative_state::{DialogState, NarrativeState};
+use crate::resources::narrative_state::{DialogState, NarrativeState, ToastState};
 use crate::systems::{action_submit, narrative_update, ui_panels};
 
 /// Plugin that sets up the entire Crown & Ash egui-based UI layer.
@@ -26,11 +26,19 @@ impl Plugin for CrownAshUiPlugin {
             .init_resource::<ui_panels::JoinState>()
             .init_resource::<NarrativeState>()
             .init_resource::<DialogState>()
+            .init_resource::<ToastState>()
             .init_resource::<narrative_update::NarrativeProgress>()
             // Narrative update systems (run before UI so text is ready)
             .add_systems(Update, narrative_update::update_event_narratives)
             .add_systems(Update, narrative_update::update_chronicles)
             .add_systems(Update, narrative_update::update_histories)
+            .add_systems(Update, narrative_update::update_turn_summaries)
+            .add_systems(Update, narrative_update::update_war_summaries)
+            .add_systems(Update, narrative_update::update_realm_prosperity)
+            .add_systems(Update, narrative_update::update_intrigue_narratives)
+            .add_systems(Update, narrative_update::update_era_summary)
+            .add_systems(Update, narrative_update::update_province_religions)
+            .add_systems(Update, narrative_update::update_diplomacy_narratives)
             // UI panels
             .add_systems(Update, ui_panels::top_bar)
             .add_systems(Update, ui_panels::faction_list)
@@ -40,6 +48,8 @@ impl Plugin for CrownAshUiPlugin {
             .add_systems(Update, ui_panels::join_dialog)
             .add_systems(Update, ui_panels::keyboard_shortcuts)
             .add_systems(Update, ui_panels::dialog_bubbles)
-            .add_systems(Update, action_submit::action_buttons);
+            .add_systems(Update, ui_panels::notification_toasts)
+            .add_systems(Update, action_submit::action_buttons)
+            .add_systems(Update, ui_panels::hover_tooltip);
     }
 }

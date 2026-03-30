@@ -17,4 +17,8 @@ pub struct Selection {
     pub character: Option<u32>,
     /// Currently selected army (by `ArmyId`).
     pub army: Option<u32>,
+    /// Province currently under the mouse cursor (for hover tooltips).
+    pub hovered_province: Option<u16>,
+    /// Screen-space position of the cursor (for tooltip placement).
+    pub cursor_screen_pos: Option<(f32, f32)>,
 }

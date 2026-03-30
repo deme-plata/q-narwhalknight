@@ -1942,6 +1942,17 @@ pub async fn sign_transaction(
                 )));
             }
 
+            // v10.2.1: Resolve token_type from request instead of hardcoding QUG.
+            // This fixes the critical bug where QUGUSD sign requests produced QUG transactions.
+            let resolved_token_type = match request.token_type.as_deref() {
+                Some("QUGUSD") | Some("qugusd") => q_types::TokenType::QUGUSD,
+                Some("QUG") | Some("qug") | None => q_types::TokenType::QUG,
+                Some(other) => {
+                    warn!("⚠️ [SIGN] Unknown token_type '{}' in sign request, defaulting to QUG", other);
+                    q_types::TokenType::QUG
+                }
+            };
+
             let mut tx = Transaction {
                 id: tx_id,
                 from: from_addr,
@@ -1952,7 +1963,7 @@ pub async fn sign_transaction(
                 signature,
                 timestamp: chrono::Utc::now(),
                 data: vec![], // Empty data for simple transfers
-                token_type: q_types::TokenType::QUG,
+                token_type: resolved_token_type,
                 fee_token_type: q_types::TokenType::QUGUSD,
                 tx_type: q_types::TransactionType::Transfer,
                 pqc_signature: None,
@@ -3783,9 +3794,16 @@ async fn send_transaction_inner(
     let token_type_str = request.token_type.to_uppercase();
     let is_custom_token = token_type_str != "QUG" && token_type_str != "QUGUSD";
 
+    // v10.2.1: Explicit match arms — no silent catch-all to QUG.
+    // Previously `_ => QUG` silently converted any unrecognized token (including typos) to QUG.
     let token_type = match token_type_str.as_str() {
+        "QUG" => q_types::TokenType::QUG,
         "QUGUSD" => q_types::TokenType::QUGUSD,
-        _ => q_types::TokenType::QUG, // Use QUG type but actual token is determined by custom token logic
+        other => {
+            // Custom token — token_type stays QUG but routing is via tx_type=TokenTransfer + data[0..32]
+            info!("📦 [TX] Custom token type '{}' — will route via TokenTransfer", other);
+            q_types::TokenType::QUG
+        }
     };
 
     // For custom tokens, look up the token contract address
@@ -4301,33 +4319,88 @@ async fn send_transaction_inner(
     //
     // Trade-off: Slightly worse UX (balance updates after confirmation) but CORRECT accounting
     //
-    // v6.0.1-beta: However, we NOW emit an optimistic BalanceUpdated SSE event so the
-    // frontend can immediately show the reduced balance. The actual wallet_balances HashMap
-    // is NOT modified here (still only updated at consensus), but the UI gets instant feedback.
-    // If the transaction fails consensus, the next periodic balance refresh will correct it.
+    // v6.0.1-beta: Emit optimistic balance SSE event for immediate frontend feedback.
+    // The actual balances are NOT modified here (only updated at consensus).
+    // v10.2.1: CRITICAL FIX — emit the correct event type based on token_type!
+    // Previously this always emitted BalanceUpdated (QUG), even for QUGUSD transfers,
+    // causing recipients to see QUG credited instead of QUGUSD (2800x value exploit).
     {
         let sender_addr = signed_transaction.from;
-        let old_balance = {
-            let balances = state.wallet_balances.read().await;
-            balances.get(&sender_addr).copied().unwrap_or(0)
-        };
-        let total_deducted = signed_transaction.amount + signed_transaction.fee;
-        let optimistic_new_balance = old_balance.saturating_sub(total_deducted);
-
-        let balance_event = StreamEvent::BalanceUpdated {
-            wallet_address: hex::encode(sender_addr),
-            old_balance: old_balance as f64 / QUG_DISPLAY_DIVISOR,
-            new_balance: optimistic_new_balance as f64 / QUG_DISPLAY_DIVISOR,
-            change_reason: "transaction_sent".to_string(),
-            timestamp: chrono::Utc::now(),
-            block_hash: None,
-            block_height: None,
-            confirmation_status: "pending".to_string(),
-        };
-        if let Err(e) = state.event_emitter.emit_immediate(balance_event).await {
-            warn!("Failed to emit optimistic balance update: {}", e);
-        } else {
-            info!("📤 [TX] Optimistic balance update emitted for sender {}", q_log_privacy::mask_addr(&hex::encode(&sender_addr[..8])));
+        match signed_transaction.token_type {
+            q_types::TokenType::QUGUSD => {
+                // QUGUSD transfer — read token_balances, emit TokenBalanceUpdated
+                let old_balance = state.storage_engine
+                    .get_token_balance(&sender_addr, &q_types::QUGUSD_TOKEN_ADDRESS)
+                    .await
+                    .unwrap_or(0);
+                let optimistic_new = old_balance.saturating_sub(signed_transaction.amount);
+                let balance_event = StreamEvent::TokenBalanceUpdated {
+                    wallet_address: hex::encode(sender_addr),
+                    token_address: hex::encode(q_types::QUGUSD_TOKEN_ADDRESS),
+                    token_symbol: "QUGUSD".to_string(),
+                    old_balance: old_balance as f64 / QUG_DISPLAY_DIVISOR,
+                    new_balance: optimistic_new as f64 / QUG_DISPLAY_DIVISOR,
+                    change_reason: "transaction_sent".to_string(),
+                    timestamp: chrono::Utc::now(),
+                    block_hash: None,
+                    block_height: None,
+                    confirmation_status: "pending".to_string(),
+                };
+                if let Err(e) = state.event_emitter.emit_immediate(balance_event).await {
+                    warn!("Failed to emit optimistic QUGUSD balance update: {}", e);
+                } else {
+                    info!("📤 [TX] Optimistic QUGUSD balance update emitted for sender {}", q_log_privacy::mask_addr(&hex::encode(&sender_addr[..8])));
+                }
+            }
+            q_types::TokenType::Custom(token_addr) => {
+                // Custom token — read token_balances, emit TokenBalanceUpdated
+                let old_balance = state.storage_engine
+                    .get_token_balance(&sender_addr, &token_addr)
+                    .await
+                    .unwrap_or(0);
+                let optimistic_new = old_balance.saturating_sub(signed_transaction.amount);
+                let balance_event = StreamEvent::TokenBalanceUpdated {
+                    wallet_address: hex::encode(sender_addr),
+                    token_address: hex::encode(token_addr),
+                    token_symbol: "TOKEN".to_string(),
+                    old_balance: old_balance as f64 / QUG_DISPLAY_DIVISOR,
+                    new_balance: optimistic_new as f64 / QUG_DISPLAY_DIVISOR,
+                    change_reason: "transaction_sent".to_string(),
+                    timestamp: chrono::Utc::now(),
+                    block_hash: None,
+                    block_height: None,
+                    confirmation_status: "pending".to_string(),
+                };
+                if let Err(e) = state.event_emitter.emit_immediate(balance_event).await {
+                    warn!("Failed to emit optimistic token balance update: {}", e);
+                } else {
+                    info!("📤 [TX] Optimistic token balance update emitted for sender {}", q_log_privacy::mask_addr(&hex::encode(&sender_addr[..8])));
+                }
+            }
+            q_types::TokenType::QUG => {
+                // QUG native transfer — read wallet_balances, emit BalanceUpdated
+                let old_balance = {
+                    let balances = state.wallet_balances.read().await;
+                    balances.get(&sender_addr).copied().unwrap_or(0)
+                };
+                let total_deducted = signed_transaction.amount + signed_transaction.fee;
+                let optimistic_new_balance = old_balance.saturating_sub(total_deducted);
+                let balance_event = StreamEvent::BalanceUpdated {
+                    wallet_address: hex::encode(sender_addr),
+                    old_balance: old_balance as f64 / QUG_DISPLAY_DIVISOR,
+                    new_balance: optimistic_new_balance as f64 / QUG_DISPLAY_DIVISOR,
+                    change_reason: "transaction_sent".to_string(),
+                    timestamp: chrono::Utc::now(),
+                    block_hash: None,
+                    block_height: None,
+                    confirmation_status: "pending".to_string(),
+                };
+                if let Err(e) = state.event_emitter.emit_immediate(balance_event).await {
+                    warn!("Failed to emit optimistic balance update: {}", e);
+                } else {
+                    info!("📤 [TX] Optimistic QUG balance update emitted for sender {}", q_log_privacy::mask_addr(&hex::encode(&sender_addr[..8])));
+                }
+            }
         }
     }
 
@@ -8824,6 +8897,15 @@ pub async fn submit_mining_solution(
 
     // 🚀 ASYNC QUEUE: Send to background processor — ALL verification deferred
     // ⚡ v8.9.0: Sharded pipeline with round-robin + spillover for 1M+ TPS
+    // v10.2.3: Read vdf_iterations from cached challenge for dynamic server-side verification
+    let vdf_iterations = {
+        if let Ok(guard) = state.current_challenge.try_read() {
+            guard.as_ref().map(|c| c.vdf_iterations).unwrap_or(99)
+        } else {
+            99 // Default: 99 inner rounds (100 total with initial hash)
+        }
+    };
+
     let submission = crate::MiningSubmission {
         nonce,
         hash,
@@ -8835,6 +8917,7 @@ pub async fn submit_mining_solution(
         worker_name: request.worker_name.clone(),
         challenge_hash_bytes,
         miner_version: request.miner_version.clone(),
+        vdf_iterations,
     };
 
     // ==================================================================================

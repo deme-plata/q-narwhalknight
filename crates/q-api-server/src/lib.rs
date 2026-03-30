@@ -560,6 +560,9 @@ pub struct MiningSubmission {
     pub challenge_hash_bytes: Option<[u8; 32]>,
     /// v1.0.2: Miner version for update check (moved from HTTP-only to background SSE)
     pub miner_version: Option<String>,
+    /// v10.2.3: VDF iteration count from challenge — used for dynamic server-side verification.
+    /// Defaults to 99 (100 total with initial hash) for backwards compatibility.
+    pub vdf_iterations: u32,
 }
 
 /// ⚡ v8.9.0: Lightweight SSE mining event for decoupled broadcast pipeline.

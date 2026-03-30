@@ -8228,9 +8228,15 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     match tx_result {
                         Ok(tx) => {
                             let tx_hash = tx.id;
-                            trace!(
-                                "📥 Received transaction {} from network",
-                                hex::encode(&tx_hash[..8])
+                            // v10.2.1: Log token_type for every P2P transaction to detect
+                            // silent token_type corruption (serde default → QUG).
+                            info!(
+                                "📥 [TX-RECEIVED] tx={} token_type={:?} amount={} from={} to={}",
+                                hex::encode(&tx_hash[..8]),
+                                tx.token_type,
+                                tx.amount,
+                                hex::encode(&tx.from[..8]),
+                                hex::encode(&tx.to[..8])
                             );
 
                             // 🔐 v1.3.9-beta CRITICAL SECURITY: Verify transaction signature BEFORE adding to pool
@@ -14994,14 +15000,17 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             let results: Vec<Option<q_api_server::MiningSubmission>> = verify_buffer
                                 .into_par_iter()
                                 .map(|submission| {
-                                    // 1. VDF hash recomputation (100 blake3 iterations)
+                                    // 1. VDF hash recomputation — dynamic iteration count from challenge
+                                    // v10.2.3: Uses submission.vdf_iterations instead of hardcoded value.
+                                    // Fixed off-by-one: GPU does N inner rounds, total = N+1 with initial.
                                     if let Some(ref challenge_bytes) = submission.challenge_hash_bytes {
                                         let mut hash_input = [0u8; 40];
                                         hash_input[..32].copy_from_slice(challenge_bytes);
                                         hash_input[32..].copy_from_slice(&submission.nonce.to_le_bytes());
                                         let initial = blake3::hash(&hash_input);
                                         let mut current = *initial.as_bytes();
-                                        for _ in 0..100 {
+                                        let rounds = submission.vdf_iterations.min(10_000); // Safety cap
+                                        for _ in 0..rounds {
                                             current = *blake3::hash(&current).as_bytes();
                                         }
                                         if current != submission.hash {
@@ -22483,7 +22492,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
     // ⚔️ v10.2.0: Crown & Ash — Medieval grand strategy (on-chain WASM sim)
     // Nested AFTER .with_state() because crown-ash has its own state type (SharedGameState).
-    let app = app.nest("/api/v1/crown-ash", crown_ash_api::create_crown_ash_router(app_state.crown_ash_state.clone()));
+    let crown_ash_sse = crown_ash_api::streaming::create_event_channel(256);
+    let app = app.nest("/api/v1/crown-ash", crown_ash_api::create_crown_ash_router(app_state.crown_ash_state.clone(), crown_ash_sse));
 
     // Create separate router for IPFS storage endpoints with their own state
     let storage_router = Router::new()

@@ -7,7 +7,7 @@
 use bevy::prelude::*;
 use crown_ash_narrative::chronicle::CharacterChronicle;
 use crown_ash_narrative::cascade::CascadeResult;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 /// Cached narrative state for the client UI.
 #[derive(Resource)]
@@ -27,6 +27,27 @@ pub struct NarrativeState {
 
     /// LLM-generated text that arrived via SSE (keyed by generation ID).
     pub llm_results: Vec<LlmNarrativeResult>,
+
+    /// Per-turn summary sentences (turn number → prose).
+    pub turn_summaries: Vec<(u32, String)>,
+
+    /// War summaries keyed by (faction_a, faction_b) — cached prose for active wars.
+    pub war_summaries: HashMap<(u8, u8), String>,
+
+    /// Realm prosperity narrative per faction.
+    pub realm_prosperity: HashMap<u8, String>,
+
+    /// Intrigue narrative entries (turn, prose).
+    pub intrigue_narratives: Vec<(u32, String)>,
+
+    /// Era overview text (refreshed every 10 turns).
+    pub era_summary_text: String,
+
+    /// Province religion narrative cache.
+    pub province_religion: HashMap<u16, String>,
+
+    /// Diplomacy narrative cache keyed by (faction_a, faction_b).
+    pub diplomacy_narratives: HashMap<(u8, u8), String>,
 
     /// Whether narrative state needs rebuilding (set when new events arrive).
     pub dirty: bool,
@@ -85,8 +106,8 @@ pub struct DialogBubble {
 /// Resource tracking all active speech bubbles on screen.
 #[derive(Resource)]
 pub struct DialogState {
-    /// Active bubbles, newest last.
-    pub bubbles: Vec<DialogBubble>,
+    /// Active bubbles, newest last. VecDeque for O(1) front eviction.
+    pub bubbles: VecDeque<DialogBubble>,
     /// Maximum simultaneous bubbles on screen.
     pub max_visible: usize,
 }
@@ -94,7 +115,7 @@ pub struct DialogState {
 impl Default for DialogState {
     fn default() -> Self {
         Self {
-            bubbles: Vec::new(),
+            bubbles: VecDeque::new(),
             max_visible: 4,
         }
     }
@@ -107,27 +128,91 @@ impl DialogState {
             3 => 12.0, // Epic narratives stay longer
             _ => 8.0,  // Dialog stays 8 seconds
         };
-        self.bubbles.push(DialogBubble {
+        self.bubbles.push_back(DialogBubble {
             speaker,
             text,
             tier,
             timer: duration,
             turn,
         });
-        // Keep only max_visible bubbles — evict oldest.
+        // Keep only max_visible bubbles — evict oldest (O(1) with VecDeque).
         while self.bubbles.len() > self.max_visible {
-            self.bubbles.remove(0);
+            self.bubbles.pop_front();
         }
     }
 
     /// Tick all timers, remove expired bubbles. Returns true if any were removed.
     pub fn tick(&mut self, dt: f32) -> bool {
         let before = self.bubbles.len();
-        for b in &mut self.bubbles {
+        for b in self.bubbles.iter_mut() {
             b.timer -= dt;
         }
         self.bubbles.retain(|b| b.timer > 0.0);
         self.bubbles.len() != before
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Notification toasts — brief auto-dismiss popups for Epic/Notable events
+// ---------------------------------------------------------------------------
+
+/// A single notification toast on the left side of the screen.
+pub struct NotificationToast {
+    /// Short summary text (one line).
+    pub text: String,
+    /// Importance level for color coding.
+    pub importance: NarrativeImportance,
+    /// Seconds remaining before auto-dismiss.
+    pub timer: f32,
+    /// Turn when this event occurred.
+    pub turn: u32,
+}
+
+/// Resource tracking active notification toasts.
+#[derive(Resource)]
+pub struct ToastState {
+    /// Active toasts, newest last. VecDeque for O(1) front eviction.
+    pub toasts: VecDeque<NotificationToast>,
+    /// Maximum simultaneous toasts.
+    pub max_visible: usize,
+}
+
+impl Default for ToastState {
+    fn default() -> Self {
+        Self {
+            toasts: VecDeque::new(),
+            max_visible: 5,
+        }
+    }
+}
+
+impl ToastState {
+    /// Push a new notification toast. Evicts oldest if at capacity.
+    pub fn push(&mut self, text: String, importance: NarrativeImportance, turn: u32) {
+        let duration = match importance {
+            NarrativeImportance::Epic => 6.0,
+            NarrativeImportance::Notable => 4.0,
+            NarrativeImportance::Minor => 3.0,
+        };
+        self.toasts.push_back(NotificationToast {
+            text,
+            importance,
+            timer: duration,
+            turn,
+        });
+        while self.toasts.len() > self.max_visible {
+            self.toasts.pop_front();
+        }
+    }
+
+    /// Tick all timers, remove expired. Returns true if any were removed.
+    pub fn tick(&mut self, dt: f32) -> bool {
+        let before = self.toasts.len();
+        for t in self.toasts.iter_mut() {
+            t.timer -= dt;
+        }
+        self.toasts.retain(|t| t.timer > 0.0);
+        self.toasts.len() != before
     }
 }
 
@@ -139,6 +224,13 @@ impl Default for NarrativeState {
             province_histories: HashMap::new(),
             faction_histories: HashMap::new(),
             llm_results: Vec::new(),
+            turn_summaries: Vec::new(),
+            war_summaries: HashMap::new(),
+            realm_prosperity: HashMap::new(),
+            intrigue_narratives: Vec::new(),
+            era_summary_text: String::new(),
+            province_religion: HashMap::new(),
+            diplomacy_narratives: HashMap::new(),
             dirty: true,
         }
     }
@@ -160,6 +252,40 @@ impl NarrativeState {
     /// Get cached faction history text.
     pub fn faction_history(&self, faction_id: u8) -> Option<&str> {
         self.faction_histories.get(&faction_id).map(|s| s.as_str())
+    }
+
+    /// Get turn summary for a given turn number.
+    pub fn turn_summary(&self, turn: u32) -> Option<&str> {
+        self.turn_summaries.iter()
+            .find(|(t, _)| *t == turn)
+            .map(|(_, text)| text.as_str())
+    }
+
+    /// Get cached war summary between two factions (order-independent).
+    pub fn war_summary(&self, a: u8, b: u8) -> Option<&str> {
+        let key = if a <= b { (a, b) } else { (b, a) };
+        self.war_summaries.get(&key).map(|s| s.as_str())
+    }
+
+    /// Get realm prosperity narrative for a faction.
+    pub fn realm_prosperity_text(&self, faction_id: u8) -> Option<&str> {
+        self.realm_prosperity.get(&faction_id).map(|s| s.as_str())
+    }
+
+    /// Get the era overview text.
+    pub fn era_summary(&self) -> Option<&str> {
+        if self.era_summary_text.is_empty() { None } else { Some(&self.era_summary_text) }
+    }
+
+    /// Get province religion narrative.
+    pub fn province_religion_text(&self, province_id: u16) -> Option<&str> {
+        self.province_religion.get(&province_id).map(|s| s.as_str())
+    }
+
+    /// Get diplomacy narrative between two factions (order-independent).
+    pub fn diplomacy_text(&self, a: u8, b: u8) -> Option<&str> {
+        let key = if a <= b { (a, b) } else { (b, a) };
+        self.diplomacy_narratives.get(&key).map(|s| s.as_str())
     }
 }
 
