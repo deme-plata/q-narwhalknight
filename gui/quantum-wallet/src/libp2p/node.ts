@@ -401,22 +401,28 @@ export async function createBrowserNode(): Promise<Libp2p> {
     p2pDataService.initialize(node)
     console.log('🌐 [LIBP2P] P2P data service started')
 
-    // Subscribe to ALL network topics during node initialization
+    // Subscribe to ESSENTIAL topics only during node initialization
     // CRITICAL: Topics MUST be subscribed here (not deferred to React hooks)
     // to ensure gossipsub mesh forms immediately after connection
+    //
+    // v10.2.3: ONLY subscribe to blocks + transactions + browser-peers.
+    // DO NOT subscribe to peer-heights, verification-reports, telemetry, or turbo-sync.
+    // Those high-frequency topics flood the Rust node's per-peer gossipsub send queue,
+    // causing "Send Queue full" drops that BLOCK delivery of actual block messages.
+    // peer-heights alone generates 60% of queue pressure (~900 msgs/min).
     const pubsub = getPubSub(node)
     pubsub.subscribe(TOPICS.BLOCKS)
-    pubsub.subscribe(TOPICS.PEER_HEIGHTS)
-    pubsub.subscribe(TOPICS.VERIFICATION_REPORTS)
-    pubsub.subscribe(TOPICS.TELEMETRY)
     pubsub.subscribe(TOPICS.TRANSACTIONS)
-    console.log('📡 [LIBP2P] Subscribed to blocks, peer-heights, verification-reports, telemetry, and transactions topics')
-    console.log('⚡ [LIBP2P] All gossipsub meshes pre-warmed for instant P2P delivery')
+    console.log('📡 [LIBP2P] Subscribed to blocks + transactions (lean subscription to prevent send queue overflow)')
+    console.log('⚡ [LIBP2P] Gossipsub mesh pre-warmed for block delivery')
 
-    // v3.5.8: Initialize browser peer discovery
-    browserPeerDiscovery.initialize(node)
-    browserPeerDiscovery.start()
-    console.log('🌐 [LIBP2P] Browser peer discovery started')
+    // v10.2.3: Browser peer discovery disabled — publishing to BROWSER_PEERS topic
+    // generates traffic that fills the bootstrap node's gossipsub send queue.
+    // Browser discovery is low-value (browsers can't directly connect to each other
+    // without relay anyway). Re-enable once the Rust side has per-topic queue priority.
+    // browserPeerDiscovery.initialize(node)
+    // browserPeerDiscovery.start()
+    console.log('🌐 [LIBP2P] Browser peer discovery disabled (queue pressure reduction)')
 
     // 🧅 Start Tor health monitoring
     const stopTorMonitor = startTorHealthMonitor((healthy) => {

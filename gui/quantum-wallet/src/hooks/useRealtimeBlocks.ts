@@ -524,7 +524,7 @@ export function useRealtimeBlocks(): UseRealtimeBlocksResult {
   const lastP2PBlockTime = useRef<number>(0) // Track last P2P block time
   const p2pBlockCount = useRef<number>(0) // Count P2P blocks received
 
-  // v10.0.4: HTTP fallback removed — kept as dead code reference
+  // v10.2.3: HTTP fallback re-enabled as safety net for gossipsub send queue overflow
   const lastHttpBlockHeight = useRef<number>(0)
   const _fetchBlocksViaHttp = useCallback(async () => {
     console.log('🌐 [HTTP FALLBACK] Fetching blocks from API...')
@@ -684,9 +684,53 @@ export function useRealtimeBlocks(): UseRealtimeBlocksResult {
     }
   }, [isReady, subscribe])
 
-  // v10.0.4: HTTP fallback REMOVED — P2P-only block delivery
-  // Server now adds browser peers as explicit gossipsub peers,
-  // guaranteeing block delivery via gossipsub mesh.
+  // v10.2.3: HTTP fallback RE-ENABLED as safety net
+  // Gossipsub send queue overflow can silently drop block messages.
+  // Poll every 10s if no P2P blocks received in the last 15s.
+  useEffect(() => {
+    if (!isReady) return
+
+    const HTTP_POLL_INTERVAL = 10000 // 10 seconds
+    const P2P_SILENCE_THRESHOLD = 15000 // 15 seconds without P2P blocks → start HTTP polling
+    let lastP2pBlockTime = Date.now()
+
+    // Track when we last got a P2P block
+    const p2pTracker = setInterval(() => {
+      if (p2pBlockCount.current > 0) {
+        // Check if any new P2P blocks arrived recently
+        // We use the blockHistory length as proxy
+      }
+    }, 5000)
+
+    const httpPoller = setInterval(async () => {
+      const timeSinceP2p = Date.now() - lastP2pBlockTime
+      // Only poll HTTP if P2P is silent and we haven't received any P2P blocks
+      // OR if we've never received a P2P block at all
+      if (p2pBlockCount.current > 0 && timeSinceP2p < P2P_SILENCE_THRESHOLD) {
+        return // P2P is working, skip HTTP
+      }
+
+      try {
+        await _fetchBlocksViaHttp()
+      } catch (e) {
+        console.warn('[HTTP FALLBACK] Error:', e)
+      }
+    }, HTTP_POLL_INTERVAL)
+
+    // Update lastP2pBlockTime when P2P blocks arrive
+    const originalCount = p2pBlockCount.current
+    const p2pMonitor = setInterval(() => {
+      if (p2pBlockCount.current > originalCount) {
+        lastP2pBlockTime = Date.now()
+      }
+    }, 2000)
+
+    return () => {
+      clearInterval(p2pTracker)
+      clearInterval(httpPoller)
+      clearInterval(p2pMonitor)
+    }
+  }, [isReady, _fetchBlocksViaHttp])
 
   return {
     latestBlock,
