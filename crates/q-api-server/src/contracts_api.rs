@@ -671,14 +671,14 @@ pub async fn deploy_contract(
             // Reset window
             *count = 1;
             *window_start = now;
-        } else if *count >= 5 {
+        } else if *count >= 20 {
             tracing::warn!(
                 "🚫 [CONTRACT] Rate limit exceeded: {} has deployed {} times this hour",
                 q_log_privacy::mask_addr(&hex::encode(deployer)),
                 count
             );
             return Ok(Json(ApiResponse::error(
-                "Deployment rate limit exceeded: max 5 per hour".to_string(),
+                "Deployment rate limit exceeded: max 20 per hour".to_string(),
             )));
         } else {
             *count += 1;
