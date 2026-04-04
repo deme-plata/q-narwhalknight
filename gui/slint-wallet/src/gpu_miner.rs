@@ -770,6 +770,11 @@ fn _gpu_worker_loop_opencl(
                 miner_id: Some(format!("slint-gpu{}-{}", gpu_idx, &miner_address[3..11])),
                 worker_name: Some("slint-wallet-gpu".to_string()),
                 miner_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                // v1.0.5: Genus-2 VDF fields (None until activation height reached)
+                vdf_output: None,
+                vdf_proof: None,
+                vdf_checkpoints: None,
+                vdf_iterations_count: None,
             };
 
             let client = api_client.clone();

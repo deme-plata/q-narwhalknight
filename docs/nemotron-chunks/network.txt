@@ -1,0 +1,45 @@
+TOPIC: Quillon Network Architecture
+
+## Consensus: DAG-Knight
+Quillon uses DAG-Knight consensus — a Directed Acyclic Graph-based Byzantine Fault Tolerant protocol.
+- Zero-message-complexity BFT (no voting rounds needed)
+- VDF-based anchor election (Verifiable Delay Function)
+- ~1 second block time
+- Instant finality (no waiting for confirmations like Bitcoin)
+
+## Peer-to-Peer Network
+- Built on **libp2p** (same foundation as IPFS, Filecoin, Polkadot)
+- **Gossipsub**: Efficient pub/sub message propagation for blocks and transactions
+- **Kademlia DHT**: Distributed hash table for peer discovery
+- Network ID: mainnet2026.1 (current mainnet)
+
+## Bootstrap Nodes
+- **Epsilon** (89.149.241.126): 10Gbit supernode — primary sync source, fastest
+- **Beta** (185.182.185.227): Primary bootstrap, serves quillon.xyz API
+- **Delta** (5.79.79.158): Secondary bootstrap
+- **Gamma** (109.205.176.60): Backup node for HA failover
+
+## Running Your Own Node
+1. Download: `wget https://quillon.xyz/downloads/q-api-server-linux-x86_64`
+2. Make executable: `chmod +x q-api-server-linux-x86_64`
+3. Run: `./q-api-server-linux-x86_64 --port 8080`
+4. Node automatically syncs from bootstrap peers
+5. Sync speed: ~500-1000 blocks/second (full sync in hours, not days)
+
+## Post-Quantum Cryptography
+Quillon is designed to be quantum-resistant:
+- **Phase 0** (current): Ed25519 signatures (classical, fast)
+- **Phase 1**: Dilithium5 + Kyber1024 (NIST post-quantum standards)
+- **Phase 2**: SQIsign (isogeny-based, smallest signatures)
+- Hybrid mode: Ed25519 + post-quantum for belt-and-suspenders security
+- Crypto-agile framework: Can upgrade signature schemes via height-gated upgrades
+
+## Privacy Features
+- **Tor support**: Built-in arti Tor client for anonymous mining and transactions
+- **Dandelion++**: Traffic analysis resistance for transaction propagation
+- No KYC, no registration required for any feature
+
+## Syncing
+- **Turbo sync**: Batch sync protocol for fast initial blockchain download
+- Sync speed depends on your internet connection and peer proximity
+- Full state snapshots available for instant sync (skips block-by-block replay)

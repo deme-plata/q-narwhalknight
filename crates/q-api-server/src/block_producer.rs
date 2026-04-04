@@ -2643,7 +2643,9 @@ mod tests {
             miner_address: [1u8; 32],
             timestamp: 1234567890,
             pool_id: None,
-            hash_rate_hs: 10000, // 10 KH/s test hashrate
+            hash_rate_hs: 10000,
+            miner_id: None, worker_name: None,
+            vdf_output: None, vdf_proof: None, vdf_checkpoints: None, vdf_iterations_count: None
         };
 
         producer.queue_solution(solution);
@@ -2678,6 +2680,8 @@ mod tests {
                 timestamp: 1234567890,
                 pool_id: None,
                 hash_rate_hs: 15000 + (i * 1000),
+                miner_id: None, worker_name: None,
+                vdf_output: None, vdf_proof: None, vdf_checkpoints: None, vdf_iterations_count: None,
             };
             producer.queue_solution(solution);
         }
@@ -2697,6 +2701,8 @@ mod tests {
                 timestamp: 1234567890,
                 pool_id: None,
                 hash_rate_hs: 15000 + (i * 1000),
+                miner_id: None, worker_name: None,
+                vdf_output: None, vdf_proof: None, vdf_checkpoints: None, vdf_iterations_count: None,
             };
             producer.queue_solution(solution);
         }
@@ -2722,6 +2728,8 @@ mod tests {
                 timestamp: 1234567890,
                 pool_id: None,
                 hash_rate_hs: 20000 + (i * 1000),
+                miner_id: None, worker_name: None,
+                vdf_output: None, vdf_proof: None, vdf_checkpoints: None, vdf_iterations_count: None,
             };
             producer.queue_solution(solution);
         }

@@ -387,6 +387,24 @@ pub struct MiningSolution {
     /// v3.3.3-beta: Human-readable miner name (e.g., "Server Alpha", "Mining Rig 1")
     #[serde(default)]
     pub worker_name: Option<String>,
+
+    /// v1.0.5: Genus-2 Jacobian VDF output (Mumford representation of y = x^(2^T) in J(C))
+    /// Present when mining uses real VDF (above UPGRADE_VDF_MINING_HEIGHT)
+    #[serde(default)]
+    pub vdf_output: Option<Vec<u8>>,
+
+    /// v1.0.5: Wesolowski proof π for O(log T) VDF verification
+    /// Allows verifiers to check VDF without recomputing all T sequential squarings
+    #[serde(default)]
+    pub vdf_proof: Option<Vec<u8>>,
+
+    /// v1.0.5: VDF intermediate checkpoints for parallel verification
+    #[serde(default)]
+    pub vdf_checkpoints: Option<Vec<Vec<u8>>>,
+
+    /// v1.0.5: Number of VDF iterations (T) used for this solution
+    #[serde(default)]
+    pub vdf_iterations_count: Option<u64>,
 }
 
 /// Balance update (v0.9.0-beta: Balance Consensus, v2.5.0: u128)

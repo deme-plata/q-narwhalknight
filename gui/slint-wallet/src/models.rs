@@ -84,6 +84,22 @@ pub struct MiningSubmission {
     pub worker_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub miner_version: Option<String>,
+
+    /// v1.0.5: Genus-2 VDF output (hex-encoded)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vdf_output: Option<String>,
+
+    /// v1.0.5: Wesolowski proof (hex-encoded)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vdf_proof: Option<String>,
+
+    /// v1.0.5: VDF checkpoints (hex-encoded list)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vdf_checkpoints: Option<Vec<String>>,
+
+    /// v1.0.5: Number of Genus-2 VDF iterations
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vdf_iterations_count: Option<u64>,
 }
 
 /// Transaction to submit

@@ -34,13 +34,85 @@ const SYSTEM_PROMPT: &str = "You are a helpful search assistant. The user asked 
 Answer the user's query using the search results. Always cite your sources by referencing [Source N] where N corresponds to the numbered search results. \
 Be concise, informative, and accurate. If the search results don't contain relevant information, say so honestly.";
 
-/// System prompt for direct chat mode (no web search)
-const DIRECT_CHAT_PROMPT: &str = "You are Quillon Graph AI, the built-in assistant for the Quillon blockchain wallet. \
-IMPORTANT: The blockchain is called Quillon (ticker: QNK). The native coin is called QUG (not QNG, not QNK). \
-Always refer to the coin as QUG. Example: '90.74 QUG' not '90.74 QNG'. \
-You are helpful, concise, and friendly. You can answer questions about the Quillon blockchain, QUG coins, mining, staking, \
-transactions, and general cryptocurrency topics. When blockchain data is provided, use it to give accurate answers. \
-Format responses with markdown for readability. Keep answers concise unless the user asks for detail.";
+/// v1.0.5: Comprehensive system prompt for direct chat mode (no web search).
+/// This is the knowledge base that makes Nemotron "know" Quillon Graph without training.
+/// Keep under ~2500 tokens so query + response fit in 4K context window.
+const DIRECT_CHAT_PROMPT: &str = "\
+You are **Quillon Graph AI**, the built-in assistant for the Quillon blockchain. You know everything about this project.
+
+## CRITICAL NAMING
+- Blockchain: **Quillon** (also called Quillon Graph, Q-NarwhalKnight internally)
+- Native coin: **QUG** (NOT QNG, NOT QNK). Ticker symbol on exchanges: QUG
+- Wallet addresses start with `qnk` followed by 64 hex chars (67 total)
+- Website: quillon.xyz | Download: quillon.xyz/downloads
+
+## WHAT IS QUILLON?
+Quillon is a **Layer-1 proof-of-work blockchain** with post-quantum cryptography and DAG-Knight consensus. \
+It is NOT a token on another chain — it has its own native blockchain, miners, and peer-to-peer network. \
+QUG is the native coin used for transactions, mining rewards, gas fees, and DEX trading.
+
+## ECONOMICS
+- Max supply: **21,000,000 QUG** (21 million, like Bitcoin)
+- Decimals: **24** (extreme precision for micropayments and DeFi)
+- Emission: ~2,625,000 QUG/year (Era 0), halving every 4 years
+- Block time: ~1 second (DAG-Knight consensus)
+- Current era: Era 0 (highest emission rate)
+- Dev fee: 1% of mining rewards → founder wallet
+
+## MINING
+- Algorithm: **BLAKE3 VDF** (100 sequential BLAKE3 hash rounds per nonce)
+- Anyone can mine with CPU or GPU (download q-miner from quillon.xyz/downloads)
+- GPU mining uses OpenCL (works with AMD and NVIDIA GPUs)
+- To mine: download binary, run `./q-miner --server https://quillon.xyz --wallet qnk<your-address>`
+- Mining rewards appear in your wallet within seconds via SSE (real-time)
+- Difficulty adjusts dynamically based on network hashrate
+- Upcoming: Genus-2 Jacobian VDF upgrade (quantum-resistant sequential PoW)
+
+## WALLET
+- Create wallet: Click 'Create Wallet' in the app — generates Ed25519 keypair + mnemonic phrase
+- **SAVE YOUR MNEMONIC** — it's the only way to recover your wallet
+- Send QUG: Enter recipient qnk-address, amount, and click Send
+- Receive: Share your qnk-address with the sender
+- Transaction fees: ~0.00002 QUG per transfer (very cheap)
+
+## DEX (Decentralized Exchange)
+- Built-in AMM (Automated Market Maker) like Uniswap
+- Trade QUG for tokens and vice versa
+- Create liquidity pools for any token pair
+- Deploy your own token via the Token Factory (ERC-20 style on Quillon)
+- Token deployment costs a small QUG fee
+
+## SMART CONTRACTS
+- Quillon has a **WASM-based smart contract VM**
+- Developers can deploy contracts written in Rust (compiled to WASM)
+- Token standard: QRC-20 (similar to ERC-20)
+- Crown & Ash: Built-in blockchain game using smart contracts
+
+## NETWORK
+- Consensus: **DAG-Knight** — a DAG-based BFT protocol (zero-message-complexity)
+- P2P: libp2p with gossipsub + Kademlia DHT
+- Bootstrap nodes: Epsilon (10Gbit), Beta, Delta, Gamma
+- Tor support: Built-in Tor circuits for privacy (optional)
+- Post-quantum crypto: Dilithium5 signatures, Kyber1024 key exchange (Phase 1)
+
+## CROWN & ASH
+Crown & Ash is a **blockchain strategy game** built on Quillon. Players compete for \
+territory, form alliances, and battle for control. All game state is on-chain. \
+Game narratives are AI-generated using the built-in AI inference engine.
+
+## KEY LINKS
+- Download node: quillon.xyz/downloads
+- Block explorer: built into the wallet (Explorer tab)
+- Mining: download q-miner or use the built-in wallet miner
+- Source: code.quillon.xyz (self-hosted git)
+
+## HOW TO ANSWER
+- Be **concise** and **accurate** about Quillon-specific facts
+- Use **QUG** for the coin (NEVER say QNG or QNK for the coin)
+- When blockchain data is provided as context, use it for accurate answers
+- Format with markdown. Use bullet points for lists.
+- If you don't know something specific, say so honestly
+- For technical questions about mining or running a node, provide step-by-step instructions";
 
 #[derive(Deserialize)]
 pub struct WebSearchRequest {
@@ -282,6 +354,64 @@ fn resolve_ddg_url(href: &str) -> String {
     href.to_string()
 }
 
+/// v1.0.5: RAG (Retrieval-Augmented Generation) for Quillon knowledge base.
+/// Keyword-matches the user query against pre-written topic chunks and returns
+/// the most relevant chunks (max 2) to inject into the prompt.
+/// This gives Nemotron deep domain knowledge within its 4K context window.
+fn retrieve_knowledge_chunks(query: &str) -> String {
+    // Topic keywords → chunk file paths
+    // Each chunk is ~300-500 tokens, so 2 chunks ≈ 600-1000 tokens
+    let chunk_dir = std::path::Path::new("docs/nemotron-chunks");
+    if !chunk_dir.exists() {
+        return String::new();
+    }
+
+    let query_lower = query.to_lowercase();
+
+    // Score each chunk by keyword matches
+    let chunk_keywords: &[(&str, &[&str])] = &[
+        ("mining.txt", &["mine", "mining", "miner", "hashrate", "hash rate", "gpu", "cpu", "nonce", "vdf", "blake3", "difficulty", "block reward", "q-miner"]),
+        ("wallet.txt", &["wallet", "send", "receive", "mnemonic", "address", "qnk", "transfer", "balance", "create wallet", "restore", "private key", "backup"]),
+        ("dex.txt", &["dex", "swap", "trade", "trading", "liquidity", "pool", "amm", "token", "exchange", "uniswap", "deploy token", "token factory", "lp"]),
+        ("economics.txt", &["supply", "emission", "halving", "reward", "tokenomics", "21 million", "price", "value", "era", "inflation", "deflationary", "max supply", "fee", "cost"]),
+        ("network.txt", &["node", "sync", "peer", "p2p", "bootstrap", "network", "consensus", "dag", "libp2p", "gossipsub", "tor", "quantum", "post-quantum", "dilithium", "kyber"]),
+        ("crown_ash.txt", &["crown", "ash", "game", "strategy", "territory", "battle", "alliance", "narrative", "play"]),
+        ("smart_contracts.txt", &["contract", "smart contract", "wasm", "qrc-20", "deploy", "developer", "gas", "abi", "rust"]),
+        ("troubleshooting.txt", &["error", "problem", "issue", "fix", "stuck", "crash", "oom", "won't", "can't", "help", "not working", "failed"]),
+    ];
+
+    let mut scored: Vec<(&str, usize)> = chunk_keywords.iter().map(|(file, keywords)| {
+        let score = keywords.iter().filter(|kw| query_lower.contains(*kw)).count();
+        (*file, score)
+    }).collect();
+
+    // Sort by score descending, take top 2
+    scored.sort_by(|a, b| b.1.cmp(&a.1));
+
+    let mut context = String::new();
+    let mut chunks_loaded = 0;
+    for (file, score) in &scored {
+        if *score == 0 || chunks_loaded >= 2 {
+            break;
+        }
+        let path = chunk_dir.join(file);
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if !context.is_empty() {
+                context.push_str("\n---\n");
+            }
+            context.push_str(&content);
+            chunks_loaded += 1;
+            tracing::debug!("[RAG] Loaded chunk {} (score: {})", file, score);
+        }
+    }
+
+    if chunks_loaded > 0 {
+        tracing::info!("[RAG] Injected {} knowledge chunk(s) for query: {}", chunks_loaded, &query[..query.len().min(60)]);
+    }
+
+    context
+}
+
 /// Build the user prompt with search context
 fn build_context_prompt(query: &str, results: &[SearchResultItem]) -> String {
     if results.is_empty() {
@@ -341,12 +471,22 @@ pub async fn web_search_handler(
     let stream = async_stream::stream! {
         let (system_prompt, user_prompt) = if has_context {
             // Direct chat mode: skip DuckDuckGo, use provided context
-            let prompt = if provided_context.is_empty() {
-                // Pure chat (no blockchain data) — just the user's question
-                query.clone()
+            // v1.0.5: RAG — inject relevant knowledge chunks for deeper answers
+            let rag_context = retrieve_knowledge_chunks(&query);
+
+            let prompt = if !provided_context.is_empty() {
+                // Smart command: blockchain data + RAG chunks + question
+                if rag_context.is_empty() {
+                    format!("{}\n\nUser question: {}", provided_context, query)
+                } else {
+                    format!("Blockchain data:\n{}\n\nReference knowledge:\n{}\n\nUser question: {}", provided_context, rag_context, query)
+                }
+            } else if !rag_context.is_empty() {
+                // Pure chat with RAG context
+                format!("Reference knowledge:\n{}\n\nUser question: {}", rag_context, query)
             } else {
-                // Smart command: blockchain data provided as context
-                format!("{}\n\nUser question: {}", provided_context, query)
+                // Pure chat, no extra context
+                query.clone()
             };
             (DIRECT_CHAT_PROMPT.to_string(), prompt)
         } else {

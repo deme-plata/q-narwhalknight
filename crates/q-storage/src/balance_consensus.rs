@@ -378,6 +378,7 @@ impl BalanceConsensusEngine {
             } else {
                 // 📦 v3.5.14-beta: Process Transfer transactions (user P2P transactions)
                 // v10.2.0: CRITICAL FIX - Check token_type to route QUGUSD/custom to token_balances
+                // v10.2.4: Heavy debug logging for token routing
                 let from_address = hex::encode(&block_tx.from);
                 let to_address = hex::encode(&block_tx.to);
                 let transfer_amount = block_tx.amount;
@@ -393,6 +394,15 @@ impl BalanceConsensusEngine {
                     q_types::TokenType::Custom(addr) => Some(addr),
                     q_types::TokenType::QUG => None,
                 };
+                // v10.2.4: Heavy debug logging for token routing (primary path)
+                info!(
+                    "🔬 [BAL-ROUTE] height={} token_type={:?} → {} | from={} to={} amount={}",
+                    block.header.height, block_tx.token_type,
+                    if token_addr.is_some() { "token_balances" } else { "wallet_balances" },
+                    &from_address[..std::cmp::min(from_address.len(), 16)],
+                    &to_address[..std::cmp::min(to_address.len(), 16)],
+                    transfer_amount
+                );
 
                 if let Some(tok_addr) = token_addr {
                     // ═══════════════════════════════════════════
@@ -770,6 +780,15 @@ impl BalanceConsensusEngine {
                     q_types::TokenType::Custom(addr) => Some(addr),
                     q_types::TokenType::QUG => None,
                 };
+                // v10.2.4: Heavy debug logging for token routing (_tx variant)
+                info!(
+                    "🔬 [BAL-ROUTE-TX] height={} token_type={:?} → {} | from={} to={} amount={}",
+                    block.header.height, block_tx.token_type,
+                    if token_addr.is_some() { "token_balances" } else { "wallet_balances" },
+                    &from_address[..std::cmp::min(from_address.len(), 16)],
+                    &to_address[..std::cmp::min(to_address.len(), 16)],
+                    transfer_amount
+                );
 
                 if let Some(tok_addr) = token_addr {
                     // ═══════════════════════════════════════════
@@ -1083,6 +1102,15 @@ impl BalanceConsensusEngine {
                     q_types::TokenType::Custom(addr) => Some(addr),
                     q_types::TokenType::QUG => None,
                 };
+                // v10.2.4: Heavy debug logging for token routing (fast-sync variant)
+                info!(
+                    "🔬 [BAL-ROUTE-FAST] height={} token_type={:?} → {} | from={} to={} amount={}",
+                    block.header.height, block_tx.token_type,
+                    if token_addr.is_some() { "token_balances" } else { "wallet_balances" },
+                    &from_address[..std::cmp::min(from_address.len(), 16)],
+                    &to_address[..std::cmp::min(to_address.len(), 16)],
+                    transfer_amount
+                );
 
                 if let Some(tok_addr) = token_addr {
                     // TOKEN TRANSFER (QUGUSD / Custom) — use token_balances CF
@@ -2240,6 +2268,12 @@ mod tests {
                 timestamp,
                 pool_id: None,
                 hash_rate_hs: 10000 + (i as u64 * 1000),
+                miner_id: None,
+                worker_name: None,
+                vdf_output: None,
+                vdf_proof: None,
+                vdf_checkpoints: None,
+                vdf_iterations_count: None,
             })
             .collect();
 

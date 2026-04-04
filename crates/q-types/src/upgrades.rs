@@ -186,6 +186,41 @@ pub mod upgrades {
         activation_height: 350_000, // TESTNET: ~2 weeks from now
         description: "10x reduction in transaction fees for better UX",
     };
+
+    // =========================================================================
+    // GENUS-2 VDF MINING UPGRADE (v1.0.5)
+    // =========================================================================
+
+    /// Genus-2 Jacobian VDF Mining
+    ///
+    /// Replaces BLAKE3×100 PoW with real Genus-2 hyperelliptic curve VDF:
+    /// - Challenge: x = BLAKE3(prev_hash || merkle_root || miner_address || nonce)
+    /// - VDF Eval: y = x^(2^T) via sequential squaring in Jacobian J(C)
+    /// - Hash check: h = SHA3-256(y), accept if h < difficulty_target
+    /// - Proof: Wesolowski proof π for O(log T) verification
+    ///
+    /// Before activation:
+    /// - Mining uses BLAKE3×100 iterated hashing (GPU-parallelizable)
+    /// - Server recomputes all 100 BLAKE3 rounds to verify
+    ///
+    /// After activation:
+    /// - Mining uses Genus-2 sequential squaring (inherently sequential = ASIC/GPU resistant)
+    /// - Server verifies via O(log T) Wesolowski proof (much faster than recompute)
+    /// - MiningSolution includes vdf_output, vdf_proof, vdf_checkpoints fields
+    /// - GPU becomes challenge pre-filter; VDF runs on CPU
+    ///
+    /// Performance (per whitepaper):
+    /// - ~1,200 squarings/sec on i7-12700K (128-bit security)
+    /// - With T=5,000 min iterations: ~4.2s per VDF eval per nonce
+    /// - Target block time adjusts for VDF throughput
+    ///
+    /// Mainnet safety: Height-gated. Old BLAKE3 blocks validate with old rules.
+    /// For mainnet: Set to current_height + 40000 (~4 weeks notice).
+    pub const GENUS2_VDF_MINING: NetworkUpgrade = NetworkUpgrade {
+        name: "genus2_vdf_mining",
+        activation_height: u64::MAX, // NOT YET ACTIVATED — set after testing
+        description: "Replace BLAKE3 PoW with Genus-2 Jacobian VDF mining",
+    };
 }
 
 /// Upgrade manager - checks if upgrades are active at given height

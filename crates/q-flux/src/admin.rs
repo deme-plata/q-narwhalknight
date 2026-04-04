@@ -170,6 +170,8 @@ async fn handle_admin_request(
         (&hyper::Method::GET, "/peers") => handle_peers(state),
         (&hyper::Method::GET, "/backends") => handle_backends(state),
         (&hyper::Method::POST, "/tls-reload") => handle_tls_reload(state),
+        (&hyper::Method::POST, "/admin/drain") => handle_drain(state),
+        (&hyper::Method::POST, "/admin/undrain") => handle_undrain(state),
         _ => not_found(),
     };
     Ok(resp)
@@ -850,12 +852,142 @@ fn handle_backends(state: &AdminState) -> Response<Full<Bytes>> {
 // 404
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// POST /admin/drain — set admin drain flag on local backends
+// v1.0.5: Reviewed by Nemotron Cascade Two + DeepSeek
+//   - Uses is_admin_drained flag (not health mutation) to avoid race with health checker
+//   - Safety check: fails if no healthy cluster peers
+//   - Auto-clears after 300s timeout or 2 consecutive health check successes
+// ---------------------------------------------------------------------------
+
+fn handle_drain(state: &AdminState) -> Response<Full<Bytes>> {
+    let health_map = match &state.health_map {
+        Some(hm) => hm,
+        None => {
+            return json_error(503, "no_health_map", "Health checking is not enabled");
+        }
+    };
+
+    // P0 SAFETY CHECK: Refuse to drain if no healthy cluster peers available.
+    // Draining without healthy peers = taking down the entire service.
+    let healthy_peers = state.cluster_peers.iter().filter(|peer| {
+        health_map.get(peer.as_str())
+            .map(|e| e.is_healthy && !e.is_admin_drained)
+            .unwrap_or(true) // Unknown = assume healthy (optimistic)
+    }).count();
+
+    if healthy_peers == 0 && !state.cluster_peers.is_empty() {
+        tracing::error!(
+            "DRAIN REFUSED: no healthy cluster peers ({} configured, 0 healthy)",
+            state.cluster_peers.len()
+        );
+        return json_error(503, "no_healthy_peers",
+            "Cannot drain: no healthy cluster peers available to absorb traffic");
+    }
+
+    if state.cluster_peers.is_empty() {
+        tracing::warn!("DRAIN WARNING: no cluster peers configured — traffic will get 502s!");
+    }
+
+    let now = std::time::Instant::now();
+    let mut drained_count = 0u32;
+    for backend in &state.local_backends {
+        if let Some(mut entry) = health_map.get_mut(backend) {
+            entry.is_admin_drained = true;
+            entry.drain_started = Some(now);
+            entry.drain_success_count = 0;
+            drained_count += 1;
+            tracing::warn!("DRAIN: set admin drain on backend {}", backend);
+        }
+    }
+
+    let cluster_info: Vec<String> = state.cluster_peers.iter().map(|p| {
+        let healthy = health_map.get(p.as_str())
+            .map(|e| e.is_healthy)
+            .unwrap_or(false);
+        format!(r#"{{"addr":"{}","healthy":{}}}"#, p, healthy)
+    }).collect();
+
+    let body = format!(
+        r#"{{"drained":true,"backends_drained":{},"healthy_cluster_peers":{},"cluster_peers":[{}]}}"#,
+        drained_count,
+        healthy_peers,
+        cluster_info.join(","),
+    );
+
+    tracing::warn!(
+        "DRAIN complete: {} local backends drained, {}/{} cluster peers healthy",
+        drained_count, healthy_peers, state.cluster_peers.len(),
+    );
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/json")
+        .body(Full::new(Bytes::from(body)))
+        .unwrap()
+}
+
+// ---------------------------------------------------------------------------
+// POST /admin/undrain — clear admin drain flag, let health checker promote
+// ---------------------------------------------------------------------------
+
+fn handle_undrain(state: &AdminState) -> Response<Full<Bytes>> {
+    let health_map = match &state.health_map {
+        Some(hm) => hm,
+        None => {
+            return json_error(503, "no_health_map", "Health checking is not enabled");
+        }
+    };
+
+    let mut undrained_count = 0u32;
+    for backend in &state.local_backends {
+        if let Some(mut entry) = health_map.get_mut(backend) {
+            entry.is_admin_drained = false;
+            entry.drain_started = None;
+            entry.drain_success_count = 0;
+            // Don't touch is_healthy/half_open — let health checker decide
+            undrained_count += 1;
+            tracing::info!("UNDRAIN: cleared admin drain on backend {}", backend);
+        }
+    }
+
+    let body = format!(
+        r#"{{"drained":false,"backends_undrained":{}}}"#,
+        undrained_count,
+    );
+
+    tracing::info!(
+        "UNDRAIN complete: {} local backends cleared drain flag",
+        undrained_count,
+    );
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/json")
+        .body(Full::new(Bytes::from(body)))
+        .unwrap()
+}
+
+fn json_error(status: u16, code: &str, message: &str) -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
+        .header("Content-Type", "application/json")
+        .body(Full::new(Bytes::from(format!(
+            r#"{{"error":"{}","message":"{}"}}"#, code, message
+        ))))
+        .unwrap()
+}
+
+// ---------------------------------------------------------------------------
+// 404
+// ---------------------------------------------------------------------------
+
 fn not_found() -> Response<Full<Bytes>> {
     Response::builder()
         .status(StatusCode::NOT_FOUND)
         .header("Content-Type", "application/json")
         .body(Full::new(Bytes::from(
-            r#"{"error":"not_found","endpoints":["/health","/metrics","/status","/peers","/backends","/tls-reload"]}"#,
+            r#"{"error":"not_found","endpoints":["/health","/metrics","/status","/peers","/backends","/tls-reload","/admin/drain","/admin/undrain"]}"#,
         )))
         .unwrap()
 }

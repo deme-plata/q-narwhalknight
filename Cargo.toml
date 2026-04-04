@@ -75,7 +75,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.2.2"  # v10.2.2: Crown & Ash — fix join_game to create Realm entry for action API
+version = "10.2.6"  # v10.2.6: Zero-downtime mining supercluster + Quillon AI knowledge base + Genus-2 VDF wiring
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"

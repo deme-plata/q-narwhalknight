@@ -1,0 +1,32 @@
+TOPIC: Smart Contracts on Quillon
+
+## Overview
+Quillon has a WASM-based smart contract virtual machine.
+Developers write contracts in Rust, compile to WebAssembly, and deploy on-chain.
+
+## Token Standard: QRC-20
+Similar to Ethereum's ERC-20:
+- `transfer(to, amount)` — send tokens
+- `approve(spender, amount)` — authorize spending
+- `transfer_from(from, to, amount)` — spend on behalf of another
+- `balance_of(address)` — check token balance
+- `total_supply()` — total tokens in existence
+
+## Deploying a Token
+1. Go to Token Factory in the DEX section of the wallet
+2. Choose: name, symbol, decimals (e.g., 8), total supply
+3. Pay deployment gas fee in QUG
+4. Token is live immediately — create a liquidity pool to enable trading
+
+## Contract Execution
+- Gas model: Similar to Ethereum but much cheaper
+- Execution: WASM sandbox (secure, deterministic)
+- State storage: On-chain key-value store per contract
+- Cross-contract calls: Supported
+
+## For Developers
+- Write contracts in Rust with `#[no_std]`
+- Compile with `cargo build --target wasm32-unknown-unknown`
+- Deploy via API: `POST /api/v1/contracts/deploy`
+- Interact via API: `POST /api/v1/contracts/call`
+- ABI: JSON schema describing contract methods

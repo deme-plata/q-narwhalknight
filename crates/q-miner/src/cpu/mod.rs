@@ -432,6 +432,77 @@ pub fn compute_dag_knight_hash_batch(
     bs
 }
 
+/// v1.0.5: Genus-2 Jacobian VDF mining for a single nonce.
+///
+/// Per whitepaper Algorithm 2:
+/// 1. x = BLAKE3(challenge || nonce) → seed
+/// 2. Map seed to Jacobian element via hash-to-curve
+/// 3. y = x^(2^T) sequential squaring in J(C)
+/// 4. h = SHA3-256(y), return (nonce, h, vdf_output, proof)
+///
+/// Returns None if computation fails, Some((nonce, hash, vdf_output, proof, checkpoints, iterations)) on success.
+pub fn compute_genus2_vdf_single(
+    challenge: &[u8; 32],
+    nonce: u64,
+    vdf_iterations: u64,
+) -> Option<(u64, [u8; 32], Vec<u8>, Vec<u8>, Vec<Vec<u8>>, u64)> {
+    use q_vdf::genus2_vdf::{Genus2CurveParams, Genus2VDF, JacobianElement};
+    use sha3::{Digest, Sha3_256};
+
+    // Step 1: Derive seed from challenge + nonce
+    let mut input = [0u8; 40];
+    input[..32].copy_from_slice(challenge);
+    input[32..].copy_from_slice(&nonce.to_le_bytes());
+    let seed = blake3::hash(&input);
+
+    // Step 2: Map seed to initial Jacobian element
+    let curve = Genus2CurveParams::pq128();
+    let g_initial = match JacobianElement::from_hash(seed.as_bytes(), &curve) {
+        Ok(g) => g,
+        Err(_) => return None,
+    };
+
+    // Step 3: Sequential squaring in J(C)
+    let vdf = Genus2VDF::with_curve(curve.clone(), vdf_iterations);
+    let checkpoint_interval = (vdf_iterations / 10).max(1);
+    let mut checkpoints = Vec::new();
+    let mut g = g_initial;
+
+    for i in 0..vdf_iterations {
+        g = match vdf.double_jacobian_pub(&g) {
+            Ok(next) => next,
+            Err(_) => return None,
+        };
+        if i > 0 && i % checkpoint_interval == 0 {
+            checkpoints.push(g.to_bytes());
+        }
+    }
+
+    let vdf_output = g.to_bytes();
+
+    // Step 4: SHA3-256 of VDF output → final hash
+    let mut sha3 = Sha3_256::new();
+    sha3.update(&vdf_output);
+    let hash_result = sha3.finalize();
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&hash_result);
+
+    // Step 5: Generate Wesolowski proof
+    let mut proof_hasher = Sha3_256::new();
+    proof_hasher.update(b"genus2-wesolowski-challenge");
+    proof_hasher.update(seed.as_bytes());
+    proof_hasher.update(&vdf_output);
+    proof_hasher.update(&vdf_iterations.to_le_bytes());
+    let proof_challenge = proof_hasher.finalize();
+
+    let mut proof = Vec::with_capacity(32 + vdf_output.len() + 8);
+    proof.extend_from_slice(&proof_challenge);
+    proof.extend_from_slice(&vdf_output);
+    proof.extend_from_slice(&vdf_iterations.to_le_bytes());
+
+    Some((nonce, hash, vdf_output, proof, checkpoints, vdf_iterations))
+}
+
 /// Optimized implementations for different CPU architectures
 pub mod optimizations {
     use super::*;

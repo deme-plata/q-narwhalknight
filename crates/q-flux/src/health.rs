@@ -9,6 +9,13 @@ use tracing::{debug, error, info, warn};
 /// Prevents permanent unhealthy state when health checker is starved.
 const MAX_UNHEALTHY_SECS: u64 = 30;
 
+/// Default drain timeout: 300 seconds (5 minutes).
+/// If deploy script crashes after drain, auto-undrain prevents permanent lockout.
+const DRAIN_TIMEOUT_SECS: u64 = 300;
+
+/// Number of consecutive health check successes needed to auto-clear admin drain.
+const DRAIN_AUTO_CLEAR_SUCCESSES: u32 = 2;
+
 /// Health status of a single backend.
 #[derive(Debug, Clone)]
 pub struct BackendHealth {
@@ -29,6 +36,15 @@ pub struct BackendHealth {
     pub unhealthy_since: Option<Instant>,
     /// Last health probe response time in milliseconds.
     pub last_response_time_ms: Option<u64>,
+    /// v1.0.5: Admin drain flag — set by POST /admin/drain.
+    /// When true, the backend is excluded from routing even if health checks pass.
+    /// Auto-cleared after DRAIN_TIMEOUT_SECS or DRAIN_AUTO_CLEAR_SUCCESSES consecutive
+    /// successful health checks (whichever comes first).
+    pub is_admin_drained: bool,
+    /// v1.0.5: When admin drain was activated (for timeout auto-clear).
+    pub drain_started: Option<Instant>,
+    /// v1.0.5: Consecutive successes since drain started (for auto-clear).
+    pub drain_success_count: u32,
 }
 
 impl BackendHealth {
@@ -42,6 +58,9 @@ impl BackendHealth {
             consecutive_successes: 0,
             unhealthy_since: None,
             last_response_time_ms: None,
+            is_admin_drained: false,
+            drain_started: None,
+            drain_success_count: 0,
         }
     }
 }
@@ -288,6 +307,25 @@ fn update_health(
         health.consecutive_failures = 0;
         health.consecutive_successes += 1;
         health.last_success = Some(now);
+
+        // v1.0.5: Auto-clear admin drain after N consecutive successes or timeout
+        if health.is_admin_drained {
+            health.drain_success_count += 1;
+            let timed_out = health.drain_started
+                .map(|t| t.elapsed() > Duration::from_secs(DRAIN_TIMEOUT_SECS))
+                .unwrap_or(false);
+            if health.drain_success_count >= DRAIN_AUTO_CLEAR_SUCCESSES || timed_out {
+                info!(
+                    backend,
+                    drain_successes = health.drain_success_count,
+                    timed_out,
+                    "Auto-clearing admin drain (backend recovered after deploy)"
+                );
+                health.is_admin_drained = false;
+                health.drain_started = None;
+                health.drain_success_count = 0;
+            }
+        }
 
         if !was_healthy && !was_half_open {
             // Unhealthy → HalfOpen (first success after being down)

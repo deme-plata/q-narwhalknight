@@ -1467,6 +1467,61 @@ fn env_flag(key: &str, default: bool) -> bool {
 // to q_types::Transaction for processing.
 // ============================================================================
 
+/// v10.2.4: Resolve TokenType from an optional token_address hex string.
+/// Extracted for independent testability. Used by BrowserTransaction::to_transaction()
+/// and available for tests.
+///
+/// Resolution order:
+/// 1. None → QUG (native transfer)
+/// 2. Valid 32-byte hex matching QUGUSD_TOKEN_ADDRESS → QUGUSD
+/// 3. Valid 32-byte hex (other) → Custom(addr)
+/// 4. String "QUGUSD" (case-insensitive) → QUGUSD
+/// 5. Invalid/short hex → QUG (fallback)
+pub fn resolve_token_type(token_address: &Option<String>) -> q_types::TokenType {
+    match token_address {
+        Some(addr_hex) => {
+            if let Ok(bytes) = hex::decode(addr_hex) {
+                if bytes.len() == 32 && bytes[..] == q_types::QUGUSD_TOKEN_ADDRESS[..] {
+                    info!(
+                        "🔬 [TOKEN-RESOLVE] hex={} → QUGUSD (exact match with QUGUSD_TOKEN_ADDRESS)",
+                        &addr_hex[..std::cmp::min(addr_hex.len(), 16)]
+                    );
+                    q_types::TokenType::QUGUSD
+                } else if bytes.len() == 32 {
+                    let mut addr = [0u8; 32];
+                    addr.copy_from_slice(&bytes);
+                    info!(
+                        "🔬 [TOKEN-RESOLVE] hex={} → Custom({})",
+                        &addr_hex[..std::cmp::min(addr_hex.len(), 16)],
+                        hex::encode(&addr[..8])
+                    );
+                    q_types::TokenType::Custom(addr)
+                } else {
+                    warn!(
+                        "🔬 [TOKEN-RESOLVE] hex={} → QUG (decoded {} bytes, expected 32)",
+                        &addr_hex[..std::cmp::min(addr_hex.len(), 16)],
+                        bytes.len()
+                    );
+                    q_types::TokenType::QUG
+                }
+            } else if addr_hex.to_uppercase() == "QUGUSD" {
+                info!("🔬 [TOKEN-RESOLVE] string='{}' → QUGUSD (string match)", addr_hex);
+                q_types::TokenType::QUGUSD
+            } else {
+                warn!(
+                    "🔬 [TOKEN-RESOLVE] addr_hex='{}' → QUG (hex decode failed, not 'QUGUSD' string)",
+                    &addr_hex[..std::cmp::min(addr_hex.len(), 16)]
+                );
+                q_types::TokenType::QUG
+            }
+        }
+        None => {
+            debug!("🔬 [TOKEN-RESOLVE] token_address=None → QUG (native transfer)");
+            q_types::TokenType::QUG
+        }
+    }
+}
+
 /// Browser-formatted transaction (MessagePack encoded)
 /// Matches the wire format from gui/quantum-wallet/src/libp2p/transactionSubmitter.ts
 #[derive(Debug, Deserialize)]
@@ -1635,29 +1690,14 @@ impl BrowserTransaction {
         id_hasher.update(&self.timestamp.to_le_bytes());
         let id: [u8; 32] = id_hasher.finalize().into();
 
-        // v3.6.11: Resolve token_type from token_address field instead of hardcoding QUG
-        // This fixes the critical bug where QUGUSD transfers arrived as QUG
-        let resolved_token_type = match &self.token_address {
-            Some(addr_hex) => {
-                if let Ok(bytes) = hex::decode(addr_hex) {
-                    if bytes.len() == 32 && bytes[..] == q_types::QUGUSD_TOKEN_ADDRESS[..] {
-                        q_types::TokenType::QUGUSD
-                    } else if bytes.len() == 32 {
-                        let mut addr = [0u8; 32];
-                        addr.copy_from_slice(&bytes);
-                        q_types::TokenType::Custom(addr)
-                    } else {
-                        q_types::TokenType::QUG
-                    }
-                } else if addr_hex.to_uppercase() == "QUGUSD" {
-                    q_types::TokenType::QUGUSD
-                } else {
-                    q_types::TokenType::QUG
-                }
-            }
-            None => q_types::TokenType::QUG,
-        };
-        info!("📦 [BrowserTx] token_address={:?} → token_type={:?}", self.token_address, resolved_token_type);
+        // v10.2.4: Use extracted resolve_token_type() for testability and consistent logging
+        let resolved_token_type = resolve_token_type(&self.token_address);
+        info!(
+            "📦 [BrowserTx] token_address={:?} → token_type={:?} (from={}, to={})",
+            self.token_address, resolved_token_type,
+            &self.from[..std::cmp::min(self.from.len(), 16)],
+            &self.to[..std::cmp::min(self.to.len(), 16)]
+        );
 
         Ok(q_types::Transaction {
             id,
@@ -8204,10 +8244,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 match rmp_serde::from_slice::<BrowserTransaction>(&data) {
                                     Ok(browser_tx) => {
                                         info!(
-                                            "🌐 [BROWSER TX] Received MessagePack transaction from browser: from={}, to={}, amount={}",
+                                            "🌐 [BROWSER TX] Received MessagePack transaction from browser: from={}, to={}, amount={}, token_address={:?}",
                                             &browser_tx.from[..16],
                                             &browser_tx.to[..16],
-                                            browser_tx.amount
+                                            browser_tx.amount,
+                                            browser_tx.token_address
                                         );
                                         is_browser_tx = true; // Mark as browser transaction
                                         browser_tx.to_transaction()
@@ -8259,6 +8300,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             }
 
                             // ✅ Signature verified - safe to add to transaction pool (lock-free)
+                            // v10.2.4: Heavy debug logging for token transfer tracing
+                            info!(
+                                "🔬 [POOL-INSERT] tx={} token_type={:?} tx_type={:?} amount={} browser={}",
+                                hex::encode(&tx_hash[..8]), tx.token_type, tx.tx_type, tx.amount, is_browser_tx
+                            );
                             app_state_gossip.tx_pool.insert(tx_hash, tx.clone());
                             app_state_gossip
                                 .tx_status
@@ -9128,6 +9174,17 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 "💱 [LIQUIDITY POOLS] Received pool from P2P: {} ({}/{})",
                                 pool_id, pool.token0, pool.token1
                             );
+
+                            // v10.2.2: Insertion-time validation — reject dust/broken pools
+                            // Prevents broken pools from being re-synced from peers via gossipsub
+                            const P2P_MIN_POOL_RESERVE: u128 = 10_000_000_000_000_000_000_000; // 10^22 = 0.01 display
+                            if pool.reserve0 < P2P_MIN_POOL_RESERVE || pool.reserve1 < P2P_MIN_POOL_RESERVE {
+                                warn!(
+                                    "🚫 [LIQUIDITY POOLS] Rejected dust pool from P2P: {} ({}/{}) — reserves too low (r0={}, r1={})",
+                                    pool_id, pool.token0, pool.token1, pool.reserve0, pool.reserve1
+                                );
+                                continue;
+                            }
 
                             // Store in memory
                             {
@@ -15000,24 +15057,70 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             let results: Vec<Option<q_api_server::MiningSubmission>> = verify_buffer
                                 .into_par_iter()
                                 .map(|submission| {
-                                    // 1. VDF hash recomputation — dynamic iteration count from challenge
-                                    // v10.2.3: Uses submission.vdf_iterations instead of hardcoded value.
-                                    // Fixed off-by-one: GPU does N inner rounds, total = N+1 with initial.
-                                    if let Some(ref challenge_bytes) = submission.challenge_hash_bytes {
-                                        let mut hash_input = [0u8; 40];
-                                        hash_input[..32].copy_from_slice(challenge_bytes);
-                                        hash_input[32..].copy_from_slice(&submission.nonce.to_le_bytes());
-                                        let initial = blake3::hash(&hash_input);
-                                        let mut current = *initial.as_bytes();
-                                        let rounds = submission.vdf_iterations.min(10_000); // Safety cap
-                                        for _ in 0..rounds {
-                                            current = *blake3::hash(&current).as_bytes();
+                                    // v1.0.5: Dual-path verification — Genus-2 VDF or legacy BLAKE3
+                                    if submission.genus2_vdf_output.is_some() && submission.genus2_vdf_proof.is_some() {
+                                        // ═══════════════════════════════════════════════════════════════
+                                        // PATH A: Genus-2 Jacobian VDF verification (O(log T) via Wesolowski proof)
+                                        // ═══════════════════════════════════════════════════════════════
+                                        let vdf_output = submission.genus2_vdf_output.as_ref().unwrap();
+                                        let vdf_proof = submission.genus2_vdf_proof.as_ref().unwrap();
+                                        let vdf_iters = submission.genus2_vdf_iterations.unwrap_or(5000);
+
+                                        // 1. Verify proof structure: challenge matches
+                                        if let Some(ref challenge_bytes) = submission.challenge_hash_bytes {
+                                            use sha3::{Digest, Sha3_256};
+
+                                            // Reconstruct seed = BLAKE3(challenge || nonce)
+                                            let mut hash_input = [0u8; 40];
+                                            hash_input[..32].copy_from_slice(challenge_bytes);
+                                            hash_input[32..].copy_from_slice(&submission.nonce.to_le_bytes());
+                                            let seed = blake3::hash(&hash_input);
+
+                                            // Verify Wesolowski proof challenge
+                                            let mut proof_hasher = Sha3_256::new();
+                                            proof_hasher.update(b"genus2-wesolowski-challenge");
+                                            proof_hasher.update(seed.as_bytes());
+                                            proof_hasher.update(vdf_output);
+                                            proof_hasher.update(&vdf_iters.to_le_bytes());
+                                            let expected_challenge = proof_hasher.finalize();
+
+                                            // Check proof starts with expected challenge
+                                            if vdf_proof.len() < 32 || &vdf_proof[..32] != expected_challenge.as_slice() {
+                                                return None; // Invalid VDF proof
+                                            }
+
+                                            // 2. Verify hash = SHA3-256(vdf_output)
+                                            let mut sha3 = Sha3_256::new();
+                                            sha3.update(vdf_output);
+                                            let expected_hash = sha3.finalize();
+                                            let mut expected = [0u8; 32];
+                                            expected.copy_from_slice(&expected_hash);
+                                            if expected != submission.hash {
+                                                return None; // Hash doesn't match VDF output
+                                            }
                                         }
-                                        if current != submission.hash {
-                                            return None; // drop fake hash
+                                    } else {
+                                        // ═══════════════════════════════════════════════════════════════
+                                        // PATH B: Legacy BLAKE3×N verification (recompute all rounds)
+                                        // ═══════════════════════════════════════════════════════════════
+                                        // v10.2.3: Uses submission.vdf_iterations instead of hardcoded value.
+                                        // Fixed off-by-one: GPU does N inner rounds, total = N+1 with initial.
+                                        if let Some(ref challenge_bytes) = submission.challenge_hash_bytes {
+                                            let mut hash_input = [0u8; 40];
+                                            hash_input[..32].copy_from_slice(challenge_bytes);
+                                            hash_input[32..].copy_from_slice(&submission.nonce.to_le_bytes());
+                                            let initial = blake3::hash(&hash_input);
+                                            let mut current = *initial.as_bytes();
+                                            let rounds = submission.vdf_iterations.min(10_000); // Safety cap
+                                            for _ in 0..rounds {
+                                                current = *blake3::hash(&current).as_bytes();
+                                            }
+                                            if current != submission.hash {
+                                                return None; // drop fake hash
+                                            }
                                         }
                                     }
-                                    // 2. Difficulty verification
+                                    // 2. Difficulty verification (same for both paths)
                                     if !(submission.hash < submission.difficulty_target) {
                                         return None; // drop below difficulty
                                     }
@@ -15424,6 +15527,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             hash_rate_hs, // Include miner's hash rate for precise network statistics
                             miner_id: submission.miner_id.clone(), // v3.3.3-beta: Unique miner instance ID
                             worker_name: submission.worker_name.clone(), // v3.3.3-beta: Human-readable miner name
+                            // v1.0.5: Genus-2 VDF proof fields (from miner submission)
+                            vdf_output: submission.genus2_vdf_output.clone(),
+                            vdf_proof: submission.genus2_vdf_proof.clone(),
+                            vdf_checkpoints: submission.genus2_vdf_checkpoints.clone(),
+                            vdf_iterations_count: submission.genus2_vdf_iterations,
                         };
                         debug!(
                             "  📤 Queueing solution: miner={}, nonce={}, hashrate={} H/s",

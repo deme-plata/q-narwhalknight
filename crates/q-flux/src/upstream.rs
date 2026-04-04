@@ -336,12 +336,16 @@ impl UpstreamPool {
         let len = self.backends.len();
         let start = self.rr_index.fetch_add(1, Ordering::Relaxed);
 
-        // First pass: look for a FULLY HEALTHY local backend (not half-open)
+        // First pass: look for a FULLY HEALTHY local backend (not half-open, not drained)
         let mut first_half_open: Option<&str> = None;
         for i in 0..len {
             let idx = (start + i) % len;
             let backend = &self.backends[idx];
             if let Some(entry) = self.health_map.get(backend.as_str()) {
+                // v1.0.5: Skip admin-drained backends (deploy in progress)
+                if entry.is_admin_drained {
+                    continue;
+                }
                 if entry.is_healthy && !entry.half_open {
                     return backend;
                 }
@@ -414,7 +418,7 @@ impl UpstreamPool {
         let len = self.backends.len();
         let start = self.rr_index.fetch_add(1, Ordering::Relaxed);
 
-        // Try local backends, skipping the excluded one
+        // Try local backends, skipping the excluded one and admin-drained ones
         for i in 0..len {
             let idx = (start + i) % len;
             let backend = &self.backends[idx];
@@ -422,6 +426,9 @@ impl UpstreamPool {
                 continue;
             }
             if let Some(entry) = self.health_map.get(backend.as_str()) {
+                if entry.is_admin_drained {
+                    continue; // v1.0.5: skip drained backends
+                }
                 if entry.is_healthy {
                     return Some(backend);
                 }
@@ -461,7 +468,7 @@ impl UpstreamPool {
     /// Pick a healthy backend address (for direct TCP streaming).
     /// Returns None if no backends are healthy.
     pub fn pick_backend(&self) -> Option<String> {
-        // Round-robin through healthy backends
+        // Round-robin through healthy backends (skipping admin-drained)
         let backends = &self.backends;
         let len = backends.len();
         if len == 0 { return None; }
@@ -469,6 +476,9 @@ impl UpstreamPool {
             let idx = self.rr_index.fetch_add(1, Ordering::Relaxed) % len;
             let addr = &backends[idx];
             if let Some(entry) = self.health_map.get(addr.as_str()) {
+                if entry.is_admin_drained {
+                    continue; // v1.0.5: skip drained backends
+                }
                 if entry.is_healthy {
                     return Some(addr.clone());
                 }

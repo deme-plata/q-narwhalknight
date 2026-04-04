@@ -1,0 +1,43 @@
+TOPIC: Quillon DEX (Decentralized Exchange)
+
+## What is the Quillon DEX?
+A built-in AMM (Automated Market Maker) decentralized exchange, similar to Uniswap.
+Users can trade QUG for tokens and vice versa without intermediaries.
+All trades execute on-chain with transparent pricing.
+
+## How to Trade
+1. Go to the DEX tab in your wallet
+2. Select the token pair (e.g., QUG/MYTOKEN)
+3. Enter the amount you want to swap
+4. Review the price and slippage
+5. Click Swap — transaction executes instantly
+
+## Liquidity Pools
+- Pools hold reserves of two tokens (e.g., QUG + MYTOKEN)
+- Price is determined by the constant product formula: x * y = k
+- Anyone can add liquidity and earn trading fees
+- To add liquidity: Go to Pool tab → Add Liquidity → deposit equal value of both tokens
+- LP (Liquidity Provider) tokens represent your share of the pool
+
+## Creating a Token
+1. Go to Token Factory in the DEX section
+2. Set token name, symbol, decimals, and initial supply
+3. Pay a small QUG fee for deployment
+4. Your token is live on the Quillon blockchain!
+5. Create a liquidity pool: pair your token with QUG
+
+## Token Standard: QRC-20
+- Similar to Ethereum's ERC-20
+- Supports: transfer, approve, transferFrom, balanceOf, totalSupply
+- Deployed via WASM smart contract on Quillon's VM
+- All amounts use the token's own decimal precision
+
+## Fees
+- Swap fee: 0.3% (goes to liquidity providers)
+- Token deployment: Small QUG gas fee
+- Transaction fee: ~0.00002 QUG per swap
+
+## Price Discovery
+- Prices are set by supply and demand in the pools
+- Large trades cause price impact (slippage)
+- Arbitrageurs keep prices aligned with external markets

@@ -1,0 +1,34 @@
+TOPIC: Crown & Ash — Blockchain Strategy Game
+
+## What is Crown & Ash?
+Crown & Ash is a **blockchain-native strategy game** built on Quillon Graph.
+Players compete for territory, form alliances, build civilizations, and battle for dominance.
+All game state lives on-chain — every action is a blockchain transaction.
+
+## Gameplay
+- **Territory control**: Claim and defend hexagonal territory tiles
+- **Alliances**: Form political alliances with other players
+- **Battles**: Challenge opponents for territory in real-time combat
+- **Economy**: Mine resources, trade with other players, build infrastructure
+- **Succession**: When a ruler falls, succession events trigger new power dynamics
+
+## AI-Generated Narratives
+Crown & Ash uses AI to generate dynamic narratives:
+- Battle descriptions, succession speeches, diplomatic events
+- Powered by local AI inference (Nemotron/Mistral models)
+- Each game event produces unique, lore-rich text
+- The narrative adapts to player actions and game history
+
+## How to Play
+1. Open the Quillon wallet
+2. Navigate to the Crown & Ash tab
+3. Create or join a game session
+4. Start with a small territory and build from there
+5. QUG is used for in-game transactions
+
+## On-Chain Gaming
+Every game action is a Quillon transaction:
+- Territory claims → smart contract calls
+- Battles → resolved by on-chain random oracle
+- Resource transfers → QUG or game token transfers
+- All outcomes are transparent and verifiable

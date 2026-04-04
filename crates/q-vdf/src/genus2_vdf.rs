@@ -484,6 +484,12 @@ impl Genus2VDF {
     pub fn security_bits(&self) -> u32 {
         self.security_bits
     }
+
+    /// Public interface to Jacobian doubling for mining use.
+    /// Computes D → 2D in J(C) using Cantor's algorithm.
+    pub fn double_jacobian_pub(&self, d: &JacobianElement) -> Result<JacobianElement> {
+        self.double_jacobian(d)
+    }
 }
 
 /// Integration with mining: adaptive VDF difficulty based on hashrate

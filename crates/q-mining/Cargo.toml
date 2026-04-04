@@ -9,6 +9,7 @@ license = "MIT OR Apache-2.0"
 # Core dependencies
 q-types = { path = "../q-types" }
 q-dag-knight = { path = "../q-dag-knight" }
+q-vdf = { path = "../q-vdf" }
 # ✨ v1.0.58-beta: Advanced cryptographic primitives (IACR ePrint papers)
 q-crypto-advanced = { path = "../q-crypto-advanced", optional = true }
 # ✨ v1.0.60-beta: Post-quantum VRF for mining leader election (replaces broken X-VRF)

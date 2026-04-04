@@ -16,9 +16,11 @@ max_conns_per_worker = 32
 keepalive_timeout = "30s"
 connect_timeout = "3s"
 response_timeout = "120s"
-health_check_interval = "5s"
+health_check_interval = "2s"
 health_check_path = "/api/v1/status"
 health_check_timeout = "3s"
+failure_threshold = 1
+healthy_threshold = 1
 
 [limits]
 max_connections = 200000
@@ -31,7 +33,7 @@ peers = [
     "185.182.185.227:8080",  # Beta (bootstrap node)
     "5.79.79.158:8080",      # Delta (secondary node)
 ]
-health_check_interval = "10s"
+health_check_interval = "5s"
 
 [logging]
 level = "info"

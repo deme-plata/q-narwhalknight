@@ -3794,19 +3794,9 @@ async fn send_transaction_inner(
     let token_type_str = request.token_type.to_uppercase();
     let is_custom_token = token_type_str != "QUG" && token_type_str != "QUGUSD";
 
-    // v10.2.1: Explicit match arms — no silent catch-all to QUG.
-    // Previously `_ => QUG` silently converted any unrecognized token (including typos) to QUG.
-    let token_type = match token_type_str.as_str() {
-        "QUG" => q_types::TokenType::QUG,
-        "QUGUSD" => q_types::TokenType::QUGUSD,
-        other => {
-            // Custom token — token_type stays QUG but routing is via tx_type=TokenTransfer + data[0..32]
-            info!("📦 [TX] Custom token type '{}' — will route via TokenTransfer", other);
-            q_types::TokenType::QUG
-        }
-    };
-
-    // For custom tokens, look up the token contract address
+    // v10.2.4: Look up custom token contract address BEFORE resolving token_type,
+    // so we can set TokenType::Custom(addr) instead of QUG for custom tokens.
+    // This makes HTTP path consistent with P2P path (which uses resolve_token_type()).
     let custom_token_address: Option<[u8; 32]> = if is_custom_token {
         // Search for the custom token in deployed contracts via orobit_ecosystem
         let contracts = state.orobit_ecosystem.deployed_contracts.read().await;
@@ -3825,6 +3815,33 @@ async fn send_transaction_inner(
         None
     };
 
+    // v10.2.4: Resolve token_type with proper Custom(addr) support.
+    // Previously custom tokens were set to QUG here, causing balance_consensus to route
+    // them as QUG transfers (balance_consensus routes on token_type, not tx_type).
+    let token_type = match token_type_str.as_str() {
+        "QUG" => q_types::TokenType::QUG,
+        "QUGUSD" => q_types::TokenType::QUGUSD,
+        other => {
+            if let Some(addr) = custom_token_address {
+                info!(
+                    "🔬 [HTTP-TX] Custom token '{}' → TokenType::Custom({}) — balance_consensus will route to token_balances",
+                    other, hex::encode(&addr[..8])
+                );
+                q_types::TokenType::Custom(addr)
+            } else {
+                warn!(
+                    "🔬 [HTTP-TX] Custom token '{}' NOT found in deployed contracts — defaulting to QUG",
+                    other
+                );
+                q_types::TokenType::QUG
+            }
+        }
+    };
+    info!(
+        "🔬 [HTTP-TX] token_type_str='{}' is_custom={} → resolved={:?}",
+        token_type_str, is_custom_token, token_type
+    );
+
     // v1.4.9-beta: CRITICAL FIX for custom token transfers
     // For custom tokens, we must:
     // 1. Set tx_type to TokenTransfer (so state_processor routes correctly)
@@ -3842,9 +3859,9 @@ async fn send_transaction_inner(
         (q_types::TransactionType::Transfer, vec![])
     };
 
-    debug!(
-        "💰 Creating transaction: amount={} token_type={:?} custom_token={} tx_type={:?}",
-        request.amount, token_type, is_custom_token, tx_type
+    info!(
+        "🔬 [HTTP-TX-CREATED] token_type={:?} tx_type={:?} data_len={} amount={}",
+        token_type, tx_type, initial_data.len(), request.amount
     );
 
     // Create transaction
@@ -4475,6 +4492,12 @@ async fn send_transaction_inner(
 
     // v2.3.1: Convert u128 amounts to strings to avoid JSON number overflow
     // JSON numbers are limited to ~2^53, but u128 amounts with 24 decimals easily exceed this
+    // v10.2.3: Include token_type so explorer/frontend shows correct coin (QUG vs QUGUSD)
+    let token_type_str = match &signed_transaction.token_type {
+        q_types::TokenType::QUG => "QUG",
+        q_types::TokenType::QUGUSD => "QUGUSD",
+        q_types::TokenType::Custom(_) => "CUSTOM",
+    };
     let response = serde_json::json!({
         "transaction_hash": hex::encode(tx_hash),
         "status": "submitted",
@@ -4482,6 +4505,7 @@ async fn send_transaction_inner(
         "to": hex::encode(signed_transaction.to),
         "amount": signed_transaction.amount.to_string(),
         "amount_qnk": signed_transaction.amount as f64 / QUG_DISPLAY_DIVISOR,
+        "token_type": token_type_str,
         "fee": signed_transaction.fee.to_string(),
         "fee_qnk": signed_transaction.fee as f64 / QUG_DISPLAY_DIVISOR,
         "nonce": signed_transaction.nonce,
@@ -4548,13 +4572,20 @@ pub async fn get_recent_transactions(
     recent_txs.truncate(100);
 
     // Convert to dashboard-friendly format
+    // v10.2.3: Include token_type so frontend shows correct coin (QUG vs QUGUSD)
     let dashboard_txs: Vec<serde_json::Value> = recent_txs
         .into_iter()
         .map(|tx| {
+            let token_type_str = match &tx.token_type {
+                q_types::TokenType::QUG => "QUG",
+                q_types::TokenType::QUGUSD => "QUGUSD",
+                q_types::TokenType::Custom(_) => "CUSTOM",
+            };
             serde_json::json!({
                 "id": hex::encode(&tx.id),
                 "hash": hex::encode(&tx.id), // Use ID as hash for compatibility
                 "amount": tx.amount,
+                "token_type": token_type_str,
                 "gas_used": 21000, // Mock gas values
                 "gas_price": 20,
                 "timestamp": tx.timestamp.timestamp(),
@@ -7110,7 +7141,15 @@ pub async fn get_oracle_price(
                     } else { None }
                 };
 
+                // v10.2.2: MIN_POOL_RESERVE_RAW = 10^22 (0.01 display units in 24-decimal)
+                const ORACLE_MIN_RESERVE: u128 = 10_000_000_000_000_000_000_000;
+
                 for pool in pools.values() {
+                    // v10.2.2: Skip dust/broken pools — prevents insane prices from corrupting weighted average
+                    if pool.reserve0 < ORACLE_MIN_RESERVE || pool.reserve1 < ORACLE_MIN_RESERVE {
+                        continue;
+                    }
+
                     // Check if token is in this pool (as token0 or token1)
                     // v2.4.0: Case-insensitive comparison
                     // v2.4.8: Use resolved_feed_id (contract address) for custom tokens
@@ -7986,6 +8025,12 @@ pub async fn send_private_transaction(
     let mixer_fee_display = mixer_fee as f64 / QUG_DISPLAY_DIVISOR;
     let total_cost_display = total_cost as f64 / QUG_DISPLAY_DIVISOR;
 
+    // v10.2.3: Include token_type for privacy mixer transactions
+    let mixer_token_type_str = match &signed_transaction.token_type {
+        q_types::TokenType::QUG => "QUG",
+        q_types::TokenType::QUGUSD => "QUGUSD",
+        q_types::TokenType::Custom(_) => "CUSTOM",
+    };
     let response = serde_json::json!({
         "transaction_hash": hex::encode(tx_hash),
         "mixing_session_id": mixing_session_id,
@@ -7995,6 +8040,7 @@ pub async fn send_private_transaction(
         "from": hex::encode(signed_transaction.from),
         "to": hex::encode(signed_transaction.to),
         "amount": amount_display,
+        "token_type": mixer_token_type_str,
         "amount_atomic": signed_transaction.amount.to_string(), // Full precision as string
         "mixer_fee": mixer_fee_display,
         "total_cost": total_cost_display,
@@ -8906,6 +8952,13 @@ pub async fn submit_mining_solution(
         }
     };
 
+    // v1.0.5: Decode Genus-2 VDF fields from hex if present
+    let genus2_vdf_output = request.vdf_output.as_ref().and_then(|h| hex::decode(h).ok());
+    let genus2_vdf_proof = request.vdf_proof.as_ref().and_then(|h| hex::decode(h).ok());
+    let genus2_vdf_checkpoints = request.vdf_checkpoints.as_ref().map(|cps| {
+        cps.iter().filter_map(|h| hex::decode(h).ok()).collect::<Vec<_>>()
+    });
+
     let submission = crate::MiningSubmission {
         nonce,
         hash,
@@ -8918,6 +8971,10 @@ pub async fn submit_mining_solution(
         challenge_hash_bytes,
         miner_version: request.miner_version.clone(),
         vdf_iterations,
+        genus2_vdf_output,
+        genus2_vdf_proof,
+        genus2_vdf_checkpoints,
+        genus2_vdf_iterations: request.vdf_iterations_count,
     };
 
     // ==================================================================================
@@ -9286,6 +9343,7 @@ pub async fn get_mining_challenge(
                         connected_miners: cp_miners,
                         live_security_bits: cp_security,
                         recommended_threads: ai_recommended_threads,
+                        backup_servers: Some(get_backup_servers()),
                     })));
                 } else if age_seconds < 150 {
                     // Grace period (120-150s): Warn but still return cached challenge
@@ -9310,6 +9368,7 @@ pub async fn get_mining_challenge(
                         connected_miners: cp_miners,
                         live_security_bits: cp_security,
                         recommended_threads: ai_recommended_threads,
+                        backup_servers: Some(get_backup_servers()),
                     })));
                 } else {
                     // Challenge is too old (>150s) - force regeneration
@@ -9408,6 +9467,7 @@ pub async fn get_mining_challenge(
         connected_miners: cp_miners,
         live_security_bits: cp_security,
         recommended_threads: ai_recommended_threads,
+        backup_servers: Some(get_backup_servers()),
     })))
 }
 
@@ -9547,6 +9607,27 @@ pub struct MiningChallengeResponse {
     /// Absent = no throttle, use all threads.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recommended_threads: Option<u32>,
+    /// v1.0.2: Backup server URLs for miner failover
+    /// Miners can try these servers if the current one becomes unreachable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backup_servers: Option<Vec<String>>,
+}
+
+/// Returns the list of backup server URLs for miner failover.
+/// Reads from `Q_BACKUP_SERVERS` env var (comma-separated URLs),
+/// falling back to hardcoded defaults.
+fn get_backup_servers() -> Vec<String> {
+    if let Ok(val) = std::env::var("Q_BACKUP_SERVERS") {
+        val.split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    } else {
+        vec![
+            "https://dl.quillon.xyz".to_string(),
+            "http://185.182.185.227:8080".to_string(),
+        ]
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -9575,6 +9656,22 @@ pub struct MiningSolutionRequest {
     // v1.0.3: Miner version for update notifications
     #[serde(default)]
     pub miner_version: Option<String>,
+
+    /// v1.0.5: Genus-2 VDF output (hex-encoded Mumford representation)
+    #[serde(default)]
+    pub vdf_output: Option<String>,
+
+    /// v1.0.5: Wesolowski proof (hex-encoded)
+    #[serde(default)]
+    pub vdf_proof: Option<String>,
+
+    /// v1.0.5: VDF intermediate checkpoints (hex-encoded list)
+    #[serde(default)]
+    pub vdf_checkpoints: Option<Vec<String>>,
+
+    /// v1.0.5: Number of Genus-2 VDF iterations performed
+    #[serde(default)]
+    pub vdf_iterations_count: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]

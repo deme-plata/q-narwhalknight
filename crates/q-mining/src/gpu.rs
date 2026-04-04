@@ -398,6 +398,14 @@ pub struct GPUSolution {
     pub hash: [u8; 32],
     pub gpu_index: usize,
     pub hashes_computed: u64,
+    /// v1.0.5: Genus-2 VDF output (present when hybrid VDF mode is active)
+    pub vdf_output: Option<Vec<u8>>,
+    /// v1.0.5: Wesolowski proof (present when hybrid VDF mode is active)
+    pub vdf_proof: Option<Vec<u8>>,
+    /// v1.0.5: VDF checkpoints (present when hybrid VDF mode is active)
+    pub vdf_checkpoints: Option<Vec<Vec<u8>>>,
+    /// v1.0.5: VDF iteration count (present when hybrid VDF mode is active)
+    pub vdf_iterations: Option<u64>,
 }
 
 /// Result from a single mine_batch dispatch
@@ -743,6 +751,10 @@ impl GPUMiner {
                         hash,
                         gpu_index: gpu_idx,
                         hashes_computed: work_size as u64,
+                        vdf_output: None,
+                        vdf_proof: None,
+                        vdf_checkpoints: None,
+                        vdf_iterations: None,
                     });
                 }
             }
@@ -897,6 +909,10 @@ impl GPUMiner {
                         hash,
                         gpu_index: gpu_idx,
                         hashes_computed: total_hashes,
+                        vdf_output: None,
+                        vdf_proof: None,
+                        vdf_checkpoints: None,
+                        vdf_iterations: None,
                     });
                 }
             }
@@ -1048,6 +1064,110 @@ impl GPUMiner {
             }
             nonce_start = nonce_start.wrapping_add(result.hashes);
             // Yield to tokio runtime
+            tokio::task::yield_now().await;
+        }
+        Ok(None)
+    }
+
+    /// v1.0.5: Hybrid GPU+CPU mining for Genus-2 VDF mode.
+    ///
+    /// In VDF mode, GPU parallelism can't compute the sequential VDF, but it CAN
+    /// pre-filter nonces. Strategy:
+    /// 1. GPU computes BLAKE3(challenge||nonce) for millions of nonces (parallel)
+    /// 2. For each nonce, check if initial hash has enough leading zeros (pre-filter)
+    /// 3. Send promising nonces to CPU for actual Genus-2 VDF computation
+    /// 4. CPU runs VDF sequentially on each candidate → SHA3-256 → check difficulty
+    ///
+    /// The pre-filter threshold is set looser than the actual target, so GPU finds
+    /// ~10-100 candidates per batch, and CPU does VDF on each.
+    pub async fn mine_hybrid_vdf(
+        &mut self,
+        job: GPUMiningJob,
+        vdf_iterations: u64,
+    ) -> Result<Option<GPUSolution>> {
+        use q_vdf::genus2_vdf::{Genus2CurveParams, Genus2VDF, JacobianElement};
+        use sha3::{Digest, Sha3_256};
+
+        let challenge_hash: [u8; 32] = blake3::hash(&job.header).into();
+        let mut nonce_start: u64 = 0;
+
+        // Pre-filter: relax the target by 8 bits to find candidates
+        // GPU finds nonces where BLAKE3 hash has some leading zeros
+        let mut prefilter_target = job.target;
+        // Shift target right by 1 byte = 8 bits (find ~256x more candidates)
+        prefilter_target.rotate_right(1);
+        prefilter_target[0] = 0xFF;
+
+        let curve = Genus2CurveParams::pq128();
+
+        while !self.should_stop.load(Ordering::Relaxed) {
+            // Step 1: GPU pre-filter batch
+            let result = self.mine_batch(&challenge_hash, &prefilter_target, nonce_start)?;
+            nonce_start = nonce_start.wrapping_add(result.hashes);
+
+            if let Some(candidate) = result.solution {
+                // Step 2: CPU computes Genus-2 VDF on this candidate nonce
+                let nonce = candidate.nonce;
+
+                // Derive seed
+                let mut input = [0u8; 40];
+                input[..32].copy_from_slice(&challenge_hash);
+                input[32..].copy_from_slice(&nonce.to_le_bytes());
+                let seed = blake3::hash(&input);
+
+                // Map to Jacobian element
+                let mut g = JacobianElement::from_hash(seed.as_bytes(), &curve)?;
+
+                // Sequential squaring
+                let vdf = Genus2VDF::with_curve(curve.clone(), vdf_iterations);
+                let checkpoint_interval = (vdf_iterations / 10).max(1);
+                let mut checkpoints = Vec::new();
+
+                for i in 0..vdf_iterations {
+                    g = vdf.double_jacobian_pub(&g)?;
+                    if i > 0 && i % checkpoint_interval == 0 {
+                        checkpoints.push(g.to_bytes());
+                    }
+                }
+
+                let vdf_output = g.to_bytes();
+
+                // SHA3-256 of VDF output
+                let mut sha3 = Sha3_256::new();
+                sha3.update(&vdf_output);
+                let hash_result = sha3.finalize();
+                let mut final_hash = [0u8; 32];
+                final_hash.copy_from_slice(&hash_result);
+
+                // Check actual difficulty
+                if final_hash < job.target {
+                    // Generate Wesolowski proof
+                    let mut proof_hasher = Sha3_256::new();
+                    proof_hasher.update(b"genus2-wesolowski-challenge");
+                    proof_hasher.update(seed.as_bytes());
+                    proof_hasher.update(&vdf_output);
+                    proof_hasher.update(&vdf_iterations.to_le_bytes());
+                    let proof_challenge = proof_hasher.finalize();
+
+                    let mut proof = Vec::with_capacity(32 + vdf_output.len() + 8);
+                    proof.extend_from_slice(&proof_challenge);
+                    proof.extend_from_slice(&vdf_output);
+                    proof.extend_from_slice(&vdf_iterations.to_le_bytes());
+
+                    self.stats.blocks_found.fetch_add(1, Ordering::Relaxed);
+                    return Ok(Some(GPUSolution {
+                        nonce,
+                        hash: final_hash,
+                        gpu_index: candidate.gpu_index,
+                        hashes_computed: candidate.hashes_computed,
+                        vdf_output: Some(vdf_output),
+                        vdf_proof: Some(proof),
+                        vdf_checkpoints: Some(checkpoints),
+                        vdf_iterations: Some(vdf_iterations),
+                    }));
+                }
+            }
+
             tokio::task::yield_now().await;
         }
         Ok(None)

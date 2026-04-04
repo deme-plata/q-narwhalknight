@@ -563,6 +563,19 @@ pub struct MiningSubmission {
     /// v10.2.3: VDF iteration count from challenge — used for dynamic server-side verification.
     /// Defaults to 99 (100 total with initial hash) for backwards compatibility.
     pub vdf_iterations: u32,
+
+    /// v1.0.5: Genus-2 VDF output (Mumford representation serialized)
+    /// Present when miner uses real Genus-2 VDF (above GENUS2_VDF_MINING activation height)
+    pub genus2_vdf_output: Option<Vec<u8>>,
+
+    /// v1.0.5: Wesolowski proof for O(log T) VDF verification
+    pub genus2_vdf_proof: Option<Vec<u8>>,
+
+    /// v1.0.5: VDF intermediate checkpoints
+    pub genus2_vdf_checkpoints: Option<Vec<Vec<u8>>>,
+
+    /// v1.0.5: Number of Genus-2 VDF iterations (T)
+    pub genus2_vdf_iterations: Option<u64>,
 }
 
 /// ⚡ v8.9.0: Lightweight SSE mining event for decoupled broadcast pipeline.
@@ -2123,6 +2136,17 @@ impl AppState {
                                 let _ = storage_engine.delete_liquidity_pool(&pool_id).await;
                                 continue;
                             }
+                            // v10.2.2: Purge dust/broken pools on startup
+                            const STARTUP_MIN_POOL_RESERVE: u128 = 10_000_000_000_000_000_000_000; // 10^22
+                            if pool.reserve0 < STARTUP_MIN_POOL_RESERVE || pool.reserve1 < STARTUP_MIN_POOL_RESERVE {
+                                filtered_pool_count += 1;
+                                tracing::info!(
+                                    "🧹 [POOL CLEANUP] Purging dust pool {} ({}/{}) — r0={}, r1={}",
+                                    pool_id, pool.token0, pool.token1, pool.reserve0, pool.reserve1
+                                );
+                                let _ = storage_engine.delete_liquidity_pool(&pool_id).await;
+                                continue;
+                            }
                             liquidity_pools_map.insert(pool_id.clone(), pool);
                         }
                         Err(e) => {
@@ -2136,7 +2160,7 @@ impl AppState {
                 }
                 if filtered_pool_count > 0 {
                     tracing::info!(
-                        "🧹 [GENESIS FILTER] Purged {} pre-genesis testnet pools from storage",
+                        "🧹 [GENESIS FILTER] Purged {} pre-genesis/dust pools from storage",
                         filtered_pool_count
                     );
                 }
@@ -3548,6 +3572,17 @@ impl AppState {
                                 let _ = storage_engine.delete_liquidity_pool(&pool_id).await;
                                 continue;
                             }
+                            // v10.2.2: Purge dust/broken pools on startup
+                            const STARTUP_MIN_POOL_RESERVE: u128 = 10_000_000_000_000_000_000_000; // 10^22
+                            if pool.reserve0 < STARTUP_MIN_POOL_RESERVE || pool.reserve1 < STARTUP_MIN_POOL_RESERVE {
+                                filtered_pool_count += 1;
+                                tracing::info!(
+                                    "🧹 [POOL CLEANUP] Purging dust pool {} ({}/{}) — r0={}, r1={}",
+                                    pool_id, pool.token0, pool.token1, pool.reserve0, pool.reserve1
+                                );
+                                let _ = storage_engine.delete_liquidity_pool(&pool_id).await;
+                                continue;
+                            }
                             liquidity_pools_map.insert(pool_id.clone(), pool);
                         }
                         Err(e) => {
@@ -3561,7 +3596,7 @@ impl AppState {
                 }
                 if filtered_pool_count > 0 {
                     tracing::info!(
-                        "🧹 [GENESIS FILTER] Purged {} pre-genesis testnet pools from storage",
+                        "🧹 [GENESIS FILTER] Purged {} pre-genesis/dust pools from storage",
                         filtered_pool_count
                     );
                 }

@@ -1,0 +1,42 @@
+TOPIC: Mining on Quillon Graph
+
+## How Mining Works
+Quillon uses BLAKE3 VDF (Verifiable Delay Function) proof-of-work. Each nonce attempt:
+1. Compute BLAKE3(challenge_hash || nonce) — initial hash
+2. Iterate 100 sequential BLAKE3 rounds (VDF chain)
+3. If final hash < difficulty_target → valid solution
+
+This is inherently sequential — GPUs run many nonces in parallel but each nonce's VDF chain is serial.
+
+## Getting Started Mining
+1. Download: `wget https://quillon.xyz/downloads/q-miner-linux-x64 && chmod +x q-miner-linux-x64`
+2. Run: `./q-miner-linux-x64 --server https://quillon.xyz --wallet qnk<your-address>`
+3. Or use the built-in miner in the Quillon wallet (Mining tab)
+
+## Mining Options
+- **CPU mining**: Works on any computer. Uses all CPU cores automatically.
+- **GPU mining**: Use `--gpu` flag. Requires OpenCL (AMD or NVIDIA). ~10-100x faster than CPU.
+- **Pool mining**: Built into the miner. All miners submit to the same pool via the server.
+- **Solo mining**: Set `Q_ALLOW_SOLO_MINING=true` on your own node.
+
+## Mining Rewards
+- Current block reward: Based on emission schedule (~2,625,000 QUG/year in Era 0)
+- 1% dev fee goes to the founder wallet
+- 99% goes to miners proportional to their hashrate contribution
+- Rewards appear instantly via SSE (Server-Sent Events) in real-time
+- Block time: ~1 second
+
+## Mining Commands
+- Start mining: `./q-miner --server https://quillon.xyz --wallet qnk<address>`
+- With GPU: `./q-miner --server https://quillon.xyz --wallet qnk<address> --gpu`
+- Multiple servers (failover): `--server "https://quillon.xyz,http://185.182.185.227:8080"`
+- Check hashrate: View the TUI dashboard that appears when mining
+- Tor support: `--tor` flag for anonymous mining
+
+## Network Hashrate
+The network hashrate is the combined computing power of all miners. Higher hashrate = more security.
+Difficulty adjusts automatically to maintain ~1 second block times.
+
+## Upcoming: Genus-2 VDF Upgrade
+A planned upgrade will replace BLAKE3 VDF with Genus-2 Jacobian hyperelliptic curve VDF.
+This makes mining quantum-resistant and ASIC-resistant (sequential math that can't be parallelized).

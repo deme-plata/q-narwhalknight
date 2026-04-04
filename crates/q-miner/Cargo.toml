@@ -11,6 +11,7 @@ repository = "https://github.com/deme-plata/q-narwhalknight"
 # Core Q-NarwhalKnight dependencies
 q-types = { path = "../q-types" }
 q-dag-knight = { path = "../q-dag-knight" }
+q-vdf = { path = "../q-vdf" }
 q-network = { path = "../q-network", optional = true }
 q-storage = { path = "../q-storage", optional = true }
 # q-bitcoin-bridge = { path = "../q-bitcoin-bridge" } # DEACTIVATED

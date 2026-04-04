@@ -1,0 +1,41 @@
+TOPIC: Quillon Wallet
+
+## Creating a Wallet
+1. Open the Quillon wallet app (web: quillon.xyz, or download desktop/Slint wallet)
+2. Click "Create Wallet"
+3. Your wallet generates an Ed25519 keypair + 12/24-word mnemonic phrase
+4. **SAVE YOUR MNEMONIC PHRASE** — write it down on paper, store in a safe place
+5. Your wallet address starts with `qnk` followed by 64 hex characters (67 total)
+
+## Wallet Features
+- **Send QUG**: Enter recipient address, amount, and click Send. Fee: ~0.00002 QUG
+- **Receive QUG**: Share your qnk-address with the sender
+- **Mining**: Built-in CPU and GPU miner (Mining tab)
+- **DEX Trading**: Swap QUG for tokens directly in the wallet
+- **Token Factory**: Deploy your own QRC-20 token
+- **Block Explorer**: View blocks, transactions, and network stats
+- **AI Chat**: Ask questions about Quillon (bottom-right corner)
+
+## Restoring a Wallet
+1. Click "Restore Wallet" or "Import Mnemonic"
+2. Enter your 12/24-word mnemonic phrase
+3. Your wallet and balance will be restored
+
+## Wallet Security
+- Your private key NEVER leaves your device
+- Mnemonic phrase = full access to your funds. Keep it secret.
+- No KYC, no registration, no email required
+- Optional Tor support for full anonymity
+
+## Desktop Wallets
+- **Web wallet**: quillon.xyz (runs in browser)
+- **Slint wallet**: Native desktop app (faster, GPU mining support)
+  - Download: `wget https://quillon.xyz/downloads/slint-wallet-linux-x86_64`
+  - Auto-updates when new version is available
+
+## Transaction Types
+- **Transfer**: Send QUG to another address
+- **Token transfer**: Send QRC-20 tokens
+- **Swap**: DEX trade via AMM pools
+- **Contract call**: Interact with smart contracts
+- **Token deployment**: Create new tokens

@@ -2347,6 +2347,8 @@ mod tests {
             timestamp: 1234567890,
             pool_id: None,
             hash_rate_hs: 10000,
+            miner_id: None, worker_name: None,
+            vdf_output: None, vdf_proof: None, vdf_checkpoints: None, vdf_iterations_count: None,
         };
 
         // This should NEVER block!
@@ -2372,6 +2374,8 @@ mod tests {
             timestamp: 1234567890,
             pool_id: None,
             hash_rate_hs: 15000,
+            miner_id: None, worker_name: None,
+            vdf_output: None, vdf_proof: None, vdf_checkpoints: None, vdf_iterations_count: None,
         };
 
         pool.queue_solution(solution);

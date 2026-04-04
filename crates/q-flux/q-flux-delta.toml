@@ -16,9 +16,11 @@ max_conns_per_worker = 16
 keepalive_timeout = "30s"
 connect_timeout = "3s"
 response_timeout = "120s"
-health_check_interval = "5s"
+health_check_interval = "2s"
 health_check_path = "/api/v1/status"
 health_check_timeout = "3s"
+failure_threshold = 1
+healthy_threshold = 1
 
 # Super-cluster: if local q-api-server goes down, route to Epsilon or Beta
 [cluster]
@@ -26,7 +28,7 @@ peers = [
     "89.149.241.126:8080",   # Epsilon (10Gbit supernode — primary failover)
     "185.182.185.227:8080",  # Beta (bootstrap node — secondary failover)
 ]
-health_check_interval = "10s"
+health_check_interval = "5s"
 
 [limits]
 max_connections = 100000
