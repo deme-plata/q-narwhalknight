@@ -492,14 +492,36 @@ impl BlockProducer {
     /// Phase 2.2: Estimate queue size without locks (lock-free approximation)
     /// v0.1.5-beta FIX: Don't rely on is_empty() - always drain available solutions
     pub fn should_produce_block(&self) -> bool {
-        let time_elapsed =
-            self.last_block_time.elapsed().as_secs() >= self.config.block_interval_secs;
+        let elapsed_secs = self.last_block_time.elapsed().as_secs();
+        let time_elapsed = elapsed_secs >= self.config.block_interval_secs;
+
+        // v10.2.7: Heavy debugging for block production diagnosis
+        // Log every call so we can see if this is even being reached
+        info!(
+            "🔍 [SHOULD_PRODUCE] is_validator={}, time_elapsed={} ({}s / {}s interval), \
+             current_height={}, last_produced={}, pending_solutions=~{}, last_block_age={}s",
+            self.config.is_validator,
+            time_elapsed,
+            elapsed_secs,
+            self.config.block_interval_secs,
+            self.current_height,
+            self.last_produced_height,
+            self.pending_solutions.len(),
+            self.last_block_time.elapsed().as_secs()
+        );
 
         // CRITICAL FIX: Always produce when time elapsed if we're a validator
         // The produce_block() method will drain whatever solutions exist
         // Don't rely on is_empty() which is unreliable with lock-free SegQueue
         if time_elapsed && self.config.is_validator {
+            info!("✅ [SHOULD_PRODUCE] → YES (time elapsed + validator)");
             return true; // Always produce - drain available solutions
+        }
+
+        if !self.config.is_validator {
+            info!("❌ [SHOULD_PRODUCE] → NO (not a validator)");
+        } else {
+            debug!("⏳ [SHOULD_PRODUCE] → NO (time not elapsed: {}s < {}s)", elapsed_secs, self.config.block_interval_secs);
         }
 
         false
@@ -510,7 +532,11 @@ impl BlockProducer {
     /// Phase 2.2: Drain solutions WITHOUT LOCKS using lock-free pop operations
     /// v1.0.69-beta: Added ancestor finality check to prevent tail forking
     pub async fn produce_block(&mut self) -> Option<QBlock> {
+        info!("🔍 [PRODUCE_BLOCK] ENTERED — is_validator={}, current_height={}, last_produced={}",
+              self.config.is_validator, self.current_height, self.last_produced_height);
+
         if !self.config.is_validator {
+            info!("❌ [PRODUCE_BLOCK] EXIT: not a validator");
             return None;
         }
 
@@ -525,12 +551,14 @@ impl BlockProducer {
         };
         let now_ts = chrono::Utc::now().timestamp() as u64;
         if now_ts < genesis_ts {
-            debug!(
-                "⏳ [PRE-GENESIS] Block production blocked: current time {} < genesis {} (network: {})",
+            info!(
+                "❌ [PRODUCE_BLOCK] EXIT: PRE-GENESIS — current time {} < genesis {} (network: {})",
                 now_ts, genesis_ts, self.config.network_id_str
             );
             return None;
         }
+        info!("✅ [PRODUCE_BLOCK] Past genesis check (now={}, genesis={}, network={})",
+              now_ts, genesis_ts, self.config.network_id_str);
 
         // 🚀 v2.3.14-beta: RACE CONDITION FIX - Skip if we already produced at this height
         // Root cause: Two production loops (block_production_v2 and mining handler) both
@@ -538,12 +566,14 @@ impl BlockProducer {
         // Fix: Track last produced height and skip duplicate production.
         let proposed_height = self.current_height + 1;
         if proposed_height <= self.last_produced_height {
-            debug!(
-                "⏸️ [DUPLICATE PREVENTION] Already produced block at height {}, skipping",
-                proposed_height
+            info!(
+                "❌ [PRODUCE_BLOCK] EXIT: DUPLICATE — proposed {} <= last_produced {} (current_height={})",
+                proposed_height, self.last_produced_height, self.current_height
             );
             return None;
         }
+        info!("✅ [PRODUCE_BLOCK] Duplicate check passed (proposed={}, last_produced={})",
+              proposed_height, self.last_produced_height);
 
         // ⚔️ v1.0.69-beta: ANCESTOR FINALITY CHECK - Prevent tail forking vulnerability
         // BFT safety: Don't propose if we're too far ahead of committed/finalized height
@@ -580,15 +610,9 @@ impl BlockProducer {
 
                     // Safety check: proposed height must be within δ rounds of committed
                     if proposed_height > current_committed + delta + 1 {
-                        warn!(
-                            "⚠️ [TAIL FORK PROTECTION] Cannot propose block at height {}: \
-                            too far ahead of committed round {} (max allowed: {})",
-                            proposed_height,
-                            current_committed,
-                            current_committed + delta + 1
-                        );
-                        warn!(
-                            "   This prevents tail forking vulnerability in pipelined BFT"
+                        info!(
+                            "❌ [PRODUCE_BLOCK] EXIT: TAIL FORK PROTECTION — proposed {} > committed {} + delta {} + 1 = {}",
+                            proposed_height, current_committed, delta, current_committed + delta + 1
                         );
                         return None;
                     }
@@ -651,9 +675,12 @@ impl BlockProducer {
         // 3. Producer #1 creates block N with user tx
         // 4. Block with user tx is DISCARDED because height N "already produced"
         // 5. User transaction is LOST
+        info!("🔍 [PRODUCE_BLOCK] Solutions drained: {}, User TXs: {}, Queue depth remaining: ~{}",
+              solutions.len(), user_transactions.len(), self.pending_solutions.len());
+
         if solutions.is_empty() && user_transactions.is_empty() {
-            debug!(
-                "⏸️ [SKIP] No solutions AND no user transactions - skipping empty block at height {}",
+            info!(
+                "❌ [PRODUCE_BLOCK] EXIT: EMPTY — no solutions AND no user transactions at height {}",
                 self.current_height + 1
             );
             return None; // Don't produce empty block

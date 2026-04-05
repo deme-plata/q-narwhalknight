@@ -14975,10 +14975,14 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     }
                 };
 
-                // v10.0.5: Periodic heartbeat so we can see shards are alive in journal
-                if last_heartbeat.elapsed().as_secs() >= 60 {
-                    info!("💓 [Shard {}] alive — {} submissions processed in {} batches, channel pending ~{}",
-                          shard_id, processed_count, batch_count, mining_rx.len());
+                // v10.2.7: Enhanced heartbeat with full production diagnostic
+                if last_heartbeat.elapsed().as_secs() >= 30 {
+                    let cur_h = app_state_mining.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
+                    let net_h = app_state_mining.highest_network_height.load(std::sync::atomic::Ordering::Relaxed);
+                    info!("💓 [Shard {}] DIAGNOSTIC — submissions={}, batches={}, pending_channel=~{}, \
+                           current_height={}, network_height={}, behind={}, buffer_len={}",
+                          shard_id, processed_count, batch_count, mining_rx.len(),
+                          cur_h, net_h, net_h.saturating_sub(cur_h), batch_buffer.len());
                     last_heartbeat = std::time::Instant::now();
                 }
                 // v1.0.2: Fast drain when node is far behind — don't waste CPU on stale submissions
@@ -15565,12 +15569,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
                     // PHASE 5: Check if we should produce blocks
                     // v9.1.7: Rate-limit should_produce() to once per 200ms across ALL shards.
-                    // Previously: ALL 48 shards called should_produce() on EVERY batch (every 5ms),
-                    // generating 9,600 producer queries/sec. Producers couldn't keep up, causing
-                    // 10s waits in should_produce() → 11s batch times → 503 mining errors.
-                    // Fix: Only one shard per 200ms check period calls should_produce().
                     let should_produce = {
                         static LAST_PRODUCE_CHECK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                        static PRODUCE_CHECK_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                         let now_ms = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
@@ -15579,12 +15580,18 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         if now_ms >= prev + 200
                             && LAST_PRODUCE_CHECK.compare_exchange(prev, now_ms, std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed).is_ok()
                         {
+                            let check_num = PRODUCE_CHECK_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            // v10.2.7: Log every produce check for debugging
+                            info!("🔍 [SHARD {}] should_produce() check #{} — calling producer pool...", shard_id, check_num);
                             // This shard won the race — check should_produce()
                             match tokio::time::timeout(
                                 std::time::Duration::from_secs(5),
                                 app_state_mining.block_producer_pool.should_produce(),
                             ).await {
-                                Ok(Ok(result)) => result,
+                                Ok(Ok(result)) => {
+                                    info!("🔍 [SHARD {}] should_produce() = {} (check #{})", shard_id, result, check_num);
+                                    result
+                                }
                                 Ok(Err(e)) => {
                                     error!("❌🚨 CRITICAL: should_produce() failed: {:?}", e);
                                     error!("   This indicates one or more producer tasks have died!");
@@ -15646,6 +15653,12 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         let is_synced = network_height == 0
                             || (network_height > 0
                                 && current_height + sync_threshold >= network_height);
+
+                        // v10.2.7: Debug sync state for block production diagnosis
+                        info!("🔍 [BLOCK-PROD] Sync check: current_height={}, network_height={}, \
+                               is_synced={}, sync_threshold={}, blocks_behind={}",
+                              current_height, network_height, is_synced, sync_threshold,
+                              network_height.saturating_sub(current_height));
 
                         // v3.4.9-beta TURBO SYNC: Disable mining during large sync gaps
                         // Previously: v1.0.84 allowed mining during ANY sync gap
@@ -15791,7 +15804,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             }
                         }
 
-                        info!("🔨 Block production triggered");
+                        info!("🔨 Block production triggered — calling produce_blocks()...");
                         let produce_start = std::time::Instant::now();
                         // v8.0.5: Add 60s timeout — produce_blocks() calls DAG-Knight
                         // committed round check which can hang, freezing the mining loop.
@@ -15813,9 +15826,13 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
                         let blocks_produced = new_blocks.len();
                         info!(
-                            "⚡ Produced {} blocks in {:?}",
-                            blocks_produced, produce_duration
+                            "⚡ Produced {} blocks in {:?} (current_height_atomic={})",
+                            blocks_produced, produce_duration,
+                            app_state_mining.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed)
                         );
+                        if blocks_produced == 0 {
+                            info!("⚠️ [BLOCK-PROD] produce_blocks() returned ZERO blocks — check producer logs above for EXIT reason");
+                        }
 
                         // v0.8.11-beta: Each producer creates UNIQUE blocks with different producer_id
                         // This ensures each block has a unique hash (producer_id included in BlockHeader)
@@ -20496,17 +20513,25 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 }
             };
 
-            let contiguous_height = storage_for_gap_fill.get_highest_contiguous_block().await.unwrap_or(0);
+            // v10.2.7: Use the DB pointer (qblock:latest), NOT the height cache.
+            // The cache can be inflated by fast recovery (returns tip, not true contiguous).
+            // The DB pointer is the ground truth for where the contiguous chain actually ends.
+            let contiguous_height = pointer_height; // qblock:latest IS the contiguous pointer
 
-            if contiguous_height >= pointer_height {
-                info!("🔧 [GAP-FILL] No gaps detected (contiguous {} >= pointer {})",
-                      contiguous_height, pointer_height);
+            // Also check the height cache — if cache > pointer, fast recovery inflated it
+            // and there are blocks above the pointer that need gap scanning
+            let cached_height = storage_for_gap_fill.get_highest_contiguous_block().await.unwrap_or(pointer_height);
+            let scan_target = std::cmp::max(pointer_height, cached_height);
+
+            if contiguous_height >= scan_target {
+                info!("🔧 [GAP-FILL] No gaps detected (pointer {} >= cache/tip {})",
+                      contiguous_height, scan_target);
                 return;
             }
 
-            // Scan for gaps between contiguous height and pointer
-            info!("🔧 [GAP-FILL] Scanning for gaps between contiguous height {} and pointer {}...",
-                  contiguous_height, pointer_height);
+            // Scan for gaps between the DB pointer and the cache/tip
+            info!("🔧 [GAP-FILL] Scanning for gaps between pointer {} and cache/tip {}...",
+                  contiguous_height, scan_target);
 
             let mut gap_ranges: Vec<(u64, u64)> = Vec::new();
             let mut in_gap = false;

@@ -1324,11 +1324,45 @@ impl QStorage {
         heights.dedup();
 
         let mut new_contiguous_height = contiguous_height;
+        let mut batch_advanced = 0u64;
         for height in &heights {
             if *height == new_contiguous_height + 1 {
                 new_contiguous_height = *height;
+                batch_advanced += 1;
             } else if *height > new_contiguous_height + 1 {
+                info!("🔍 [TURBO CONTIGUITY] Gap at height {}: expected {}, got {} (cache was {})",
+                      new_contiguous_height + 1, new_contiguous_height + 1, height, contiguous_height);
                 break;
+            }
+        }
+        if batch_advanced > 0 {
+            info!("🔍 [TURBO CONTIGUITY] Batch advanced pointer by {} blocks: {} → {}",
+                  batch_advanced, contiguous_height, new_contiguous_height);
+        } else if !heights.is_empty() {
+            info!("🔍 [TURBO CONTIGUITY] Batch did NOT advance pointer (cache={}, first_height={}, last_height={})",
+                  contiguous_height, heights.first().unwrap(), heights.last().unwrap());
+        }
+
+        // v10.2.7: Forward probe — check if blocks from PREVIOUS batches bridge beyond this batch.
+        // Fixes the stuck-height bug where gap-fill stores blocks [A..A+2] but blocks [A+3..] already
+        // exist on disk from prior turbo sync. Without this, the pointer stays at A+2 instead of
+        // advancing through the pre-existing blocks to the next real gap.
+        if new_contiguous_height > contiguous_height {
+            let mut probe = new_contiguous_height + 1;
+            let probe_limit = probe + 10_000; // Bounded scan — don't block the write path
+            while probe <= probe_limit {
+                let probe_key = format!("qblock:height:{}", probe);
+                match self.hot_db.get(CF_BLOCKS, probe_key.as_bytes()).await {
+                    Ok(Some(_)) => {
+                        new_contiguous_height = probe;
+                        probe += 1;
+                    }
+                    _ => break,
+                }
+            }
+            if new_contiguous_height > contiguous_height + (heights.len() as u64) {
+                info!("🔗 [TURBO BRIDGE] Forward probe extended pointer by {} blocks ({} → {})",
+                      new_contiguous_height - contiguous_height, contiguous_height, new_contiguous_height);
             }
         }
 

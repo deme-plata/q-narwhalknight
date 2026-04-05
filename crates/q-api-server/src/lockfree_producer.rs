@@ -1411,15 +1411,14 @@ impl LockFreeProducerPool {
     /// ✅ v1.1.30-beta: FIX - Only ONE producer should produce per round to prevent double rewards!
     ///    The bug was: both producers could produce at the same height, causing 2x mining rewards.
     pub async fn produce_blocks(&self) -> Vec<(usize, QBlock)> {
+        info!("🔍 [PRODUCE_BLOCKS] ENTERED — num_producers={}, pool_last_produced={}",
+              self.num_producers, self.pool_last_produced_height.load(Ordering::SeqCst));
+
         // 🚀 v2.3.13-beta: RACE CONDITION FIX - Prevent concurrent production calls
-        // Root cause of 50% block loss: Two production loops (block_production_v2 and mining handler)
-        // could call produce_blocks() simultaneously, creating duplicate blocks at the same height.
-        // The BlockWriter's deduplication would drop one, causing gaps (382 gaps starting at 925612!).
-        // Fix: Use atomic compare-and-swap to serialize production calls.
         if self.production_in_progress.compare_exchange(
             false, true, Ordering::SeqCst, Ordering::SeqCst
         ).is_err() {
-            debug!("⏸️ [RACE PREVENTION] produce_blocks() already in progress, skipping concurrent call");
+            info!("❌ [PRODUCE_BLOCKS] EXIT: RACE PREVENTION — another call in progress");
             return Vec::new();
         }
 
@@ -1449,6 +1448,7 @@ impl LockFreeProducerPool {
             // ✅ v1.0.13-beta: Handle Result type from should_produce()
             match producer.should_produce().await {
                 Ok(true) => {
+                    info!("🔍 [PRODUCE_BLOCKS] Producer #{} says YES — calling produce_block()...", producer_id);
                     // Produce block (async via channel)
                     if let Some(block) = producer.produce_block().await {
                         let block_height = block.header.height;
@@ -1475,9 +1475,9 @@ impl LockFreeProducerPool {
                         );
                         blocks.push((producer_id, block));
                         // ✅ v1.1.30-beta CRITICAL FIX: Only ONE block per round!
-                        // Multiple producers can share solution load, but only ONE should produce
-                        // the actual block. Otherwise we get duplicate blocks at same height.
                         break;
+                    } else {
+                        info!("⚠️ [PRODUCE_BLOCKS] Producer #{} returned None from produce_block() — see EXIT reason in producer logs", producer_id);
                     }
                 }
                 Ok(false) => {
@@ -1816,8 +1816,14 @@ impl LockFreeProducerPool {
         let storage_query_start = std::time::Instant::now();
         let highest_height = storage.get_highest_contiguous_block().await?;
         let storage_query_duration = storage_query_start.elapsed();
-        debug!(
-            "🔍 [TIMING] Storage query took {:?}",
+
+        // v10.2.7: Also read the DB pointer for comparison
+        let db_pointer = storage.get_latest_qblock_height().await
+            .ok().flatten().unwrap_or(0);
+        info!(
+            "🔍 [SYNC_FROM_STORAGE] height_cache={}, db_pointer(qblock:latest)={}, delta={}, query_time={:?}",
+            highest_height, db_pointer,
+            if highest_height > db_pointer { highest_height - db_pointer } else { db_pointer - highest_height },
             storage_query_duration
         );
 
