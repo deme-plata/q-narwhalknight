@@ -2096,7 +2096,12 @@ impl QStorage {
                     }
                     Err(e) => {
                         let height = start_height + idx as u64;
-                        warn!("⚠️  Failed to deserialize block at height {}: {}", height, e);
+                        warn!("⚠️  Failed to deserialize block at height {}: {} — deleting corrupt entry", height, e);
+                        // v10.2.8: Opportunistic cleanup — delete corrupt block so turbo sync can refill it
+                        let del_key = format!("qblock:height:{}", height);
+                        if let Err(del_err) = self.hot_db.delete(CF_BLOCKS, del_key.as_bytes()).await {
+                            error!("Failed to delete corrupt block at height {}: {}", height, del_err);
+                        }
                         missing_count += 1;
                     }
                 }
@@ -2910,6 +2915,92 @@ impl QStorage {
         Ok(())
     }
 
+    /// v10.2.8: Scan for corrupt blocks NEAR the tip (both above and below recovered height).
+    ///
+    /// Fixes blind spot where `kill -9` during active RocksDB writes leaves partially-written
+    /// blocks BELOW the recovered height. `cleanup_corrupt_blocks_above()` only scans forward,
+    /// so these corrupt blocks persist indefinitely — gap detection sees them as "present"
+    /// (key exists) even though they fail deserialization.
+    ///
+    /// Returns `Ok(Some(new_height))` if corrupt blocks were found below recovered_height
+    /// and pointers were reset. Returns `Ok(None)` if no corruption found below.
+    pub async fn cleanup_corrupt_blocks_near_tip(&self, recovered_height: u64) -> Result<Option<u64>> {
+        const SCAN_BELOW: u64 = 200;
+
+        let scan_start = recovered_height.saturating_sub(SCAN_BELOW);
+        if scan_start == 0 || recovered_height < 100 {
+            return Ok(None);
+        }
+
+        info!("🔍 [v10.2.8] Scanning for corrupt blocks near tip: {} → {}", scan_start, recovered_height);
+
+        let mut deleted_count = 0u64;
+        let mut lowest_corrupt: Option<u64> = None;
+
+        for height in scan_start..=recovered_height {
+            let height_key = format!("qblock:height:{}", height);
+
+            // Raw key check — does data exist?
+            let block_data = match self.hot_db.get(CF_BLOCKS, height_key.as_bytes()).await? {
+                Some(data) => data,
+                None => continue, // Missing block — not our concern here
+            };
+
+            // Attempt full deserialization (same logic as cleanup_corrupt_blocks_above)
+            let is_valid = if precompressed_storage::is_precompressed(&block_data) {
+                precompressed_storage::PrecompressedBlock::from_bytes(&block_data)
+                    .and_then(|c| c.decompress().map_err(|e| e.into()))
+                    .and_then(|raw| q_types::legacy::deserialize_qblock_with_fallback(&raw)
+                        .map_err(|e| anyhow::anyhow!("{}", e)))
+                    .is_ok()
+            } else {
+                q_types::legacy::deserialize_qblock_with_fallback(&block_data).is_ok()
+            };
+
+            if !is_valid {
+                error!("🚨 [v10.2.8] CORRUPT BLOCK at height {} ({} bytes) — deleting", height, block_data.len());
+                self.hot_db.delete(CF_BLOCKS, height_key.as_bytes()).await?;
+
+                // Also try to delete hash-keyed entry
+                if block_data.len() >= 32 {
+                    let hash_key = format!("qblock:hash:{}", hex::encode(&block_data[0..32]));
+                    let _ = self.hot_db.delete(CF_BLOCKS, hash_key.as_bytes()).await;
+                }
+
+                deleted_count += 1;
+                if lowest_corrupt.is_none() || height < lowest_corrupt.unwrap() {
+                    lowest_corrupt = Some(height);
+                }
+            }
+        }
+
+        if deleted_count == 0 {
+            info!("✅ [v10.2.8] No corrupt blocks found near tip (scanned {} blocks)", SCAN_BELOW);
+            return Ok(None);
+        }
+
+        // Reset pointers to just below the first corrupt block
+        let new_height = lowest_corrupt.unwrap().saturating_sub(1);
+        warn!("🔧 [v10.2.8] Deleted {} corrupt blocks (lowest at {}). Resetting pointers to {}",
+              deleted_count, lowest_corrupt.unwrap(), new_height);
+
+        let height_bytes = new_height.to_be_bytes();
+        self.hot_db.put_sync(CF_BLOCKS, b"qblock:latest", &height_bytes).await
+            .context("Failed to reset qblock:latest after corruption cleanup")?;
+        self.hot_db.put_sync(CF_BLOCKS, b"qblock:safe_floor", &height_bytes).await
+            .context("Failed to reset qblock:safe_floor after corruption cleanup")?;
+        self.hot_db.put_sync(CF_BLOCKS, b"qblock:tip_height", &height_bytes).await
+            .context("Failed to reset qblock:tip_height after corruption cleanup")?;
+
+        // Update in-memory cache (force_set allows downward correction)
+        self.height_cache.force_set(new_height).await;
+
+        warn!("✅ [v10.2.8] Pointers reset to {}. Turbo sync will refill {} deleted blocks from peers.",
+              new_height, deleted_count);
+
+        Ok(Some(new_height))
+    }
+
     /// Get the first missing height in blockchain (gap detection)
     /// v0.7.4-beta: Production fix for "messy height" issue
     ///
@@ -3151,6 +3242,16 @@ impl QStorage {
 
         // 🧹 Clean up corrupt blocks above recovered height (backwards compatibility fix)
         self.cleanup_corrupt_blocks_above(recovered_height).await?;
+
+        // v10.2.8: Also scan BELOW recovered height for corrupt blocks from kill -9
+        let recovered_height = match self.cleanup_corrupt_blocks_near_tip(recovered_height).await? {
+            Some(new_height) => {
+                warn!("🔧 [CORRUPTION FIX] Adjusted recovery height {} → {} (corrupt blocks deleted, turbo sync will refill)",
+                      recovered_height, new_height);
+                new_height
+            }
+            None => recovered_height,
+        };
 
         // Verify DAG consistency
         self.verify_dag_consistency().await?;

@@ -75,7 +75,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.2.6"  # v10.2.6: Zero-downtime mining supercluster + Quillon AI knowledge base + Genus-2 VDF wiring
+version = "10.2.8"  # v10.2.8: Fix corrupt block recovery after kill -9 (scan below tip + opportunistic cleanup)
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"
