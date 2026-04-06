@@ -777,6 +777,18 @@ impl QStorage {
         storage.height_cache.update(initial_height).await;
         info!("✅ Height cache initialized with height {} (one-time DB scan)", initial_height);
 
+        // v10.2.8: Scan for corrupt blocks near the recovered tip (kill -9 fix)
+        // Must run HERE (not in recover()) because recover() gets height 0 from empty cache.
+        // scan_highest_contiguous_block_internal() is the real height discovery.
+        if let Some(new_height) = storage.cleanup_corrupt_blocks_near_tip(initial_height).await? {
+            warn!("🔧 [CORRUPTION FIX] Adjusted height {} → {} (corrupt blocks deleted, turbo sync will refill)",
+                  initial_height, new_height);
+            // Re-scan to pick up corrected state
+            let re_scanned = storage.scan_highest_contiguous_block_internal().await?;
+            storage.height_cache.force_set(re_scanned).await;
+            info!("✅ Height cache re-initialized to {} after corruption cleanup", re_scanned);
+        }
+
         // FIX 1.4: STARTUP INTEGRITY CHECK (v0.9.93-beta)
         storage.verify_database_integrity().await
             .context("Database integrity check failed - refusing to start")?;
@@ -3243,15 +3255,9 @@ impl QStorage {
         // 🧹 Clean up corrupt blocks above recovered height (backwards compatibility fix)
         self.cleanup_corrupt_blocks_above(recovered_height).await?;
 
-        // v10.2.8: Also scan BELOW recovered height for corrupt blocks from kill -9
-        let recovered_height = match self.cleanup_corrupt_blocks_near_tip(recovered_height).await? {
-            Some(new_height) => {
-                warn!("🔧 [CORRUPTION FIX] Adjusted recovery height {} → {} (corrupt blocks deleted, turbo sync will refill)",
-                      recovered_height, new_height);
-                new_height
-            }
-            None => recovered_height,
-        };
+        // NOTE: cleanup_corrupt_blocks_near_tip() is called AFTER scan_highest_contiguous_block_internal()
+        // in the init path (line ~780), NOT here. recover() runs before the cache is populated,
+        // so recovered_height is often 0 on first boot. The real height discovery happens later.
 
         // Verify DAG consistency
         self.verify_dag_consistency().await?;
