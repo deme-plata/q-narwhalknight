@@ -5041,6 +5041,21 @@ impl TurboSyncManager {
                             }
 
                             let block_count = blocks.len() as u32;
+
+                            // v10.2.8: Treat 0-block responses as FAILURE, not success.
+                            // A peer claiming a high height but returning 0 blocks is broken/lying.
+                            // Without this check, empty responses count as "success" and the sync
+                            // stalls because it thinks the chunk was completed.
+                            let requested_size = end_height.saturating_sub(start_height) + 1;
+                            if blocks.is_empty() && requested_size > 0 {
+                                warn!("🚫 [v10.2.8] Peer {} returned 0 blocks for range {}-{} (requested {}) — treating as FAILURE",
+                                      peer, start_height, end_height, requested_size);
+                                self.metrics.active_parallel_streams.fetch_sub(1, Ordering::Relaxed);
+                                return Err(anyhow::anyhow!(
+                                    "Peer {} returned 0 blocks for range {}-{}", peer, start_height, end_height
+                                ));
+                            }
+
                             let actual_start = blocks.first().map(|b| b.header.height).unwrap_or(start_height);
                             let actual_end = blocks.last().map(|b| b.header.height).unwrap_or(end_height);
 

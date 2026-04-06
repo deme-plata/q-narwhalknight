@@ -14986,11 +14986,17 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     last_heartbeat = std::time::Instant::now();
                 }
                 // v1.0.2: Fast drain when node is far behind — don't waste CPU on stale submissions
+                // v10.2.7: CRITICAL FIX — Bootstrap validators (Q_ALLOW_SOLO_MINING=true) must NEVER
+                // drain mining submissions! This was the root cause of stuck block production:
+                // corrupt blocks → stuck height pointer → "184K behind" → all mining drained → no blocks.
                 {
                     use std::sync::atomic::Ordering::Relaxed;
                     let cur = app_state_mining.current_height_atomic.load(Relaxed);
                     let net = app_state_mining.highest_network_height.load(Relaxed);
-                    if net > 0 && cur + 10_000 < net {
+                    let allow_solo = std::env::var("Q_ALLOW_SOLO_MINING")
+                        .map(|v| v == "true" || v == "1")
+                        .unwrap_or(false);
+                    if net > 0 && cur + 10_000 < net && !allow_solo {
                         let mut drained = 1u64; // count the one we just received
                         while mining_rx.try_recv().is_ok() {
                             drained += 1;
@@ -15054,6 +15060,24 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     // spawn_blocking never completes → shard consumer hangs permanently →
                     // all channels fill → 100% 503 errors. With timeout, we lose one batch
                     // but the consumer keeps draining.
+                    // v10.2.7: Per-batch rejection reason counters for debugging
+                    let reject_genus2_proof = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+                    let reject_genus2_hash = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+                    let reject_blake3_vdf = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+                    let reject_difficulty = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+                    let passed_vdf = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+                    let no_challenge = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+                    let path_genus2 = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+                    let path_blake3 = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+                    let r_genus2_proof = reject_genus2_proof.clone();
+                    let r_genus2_hash = reject_genus2_hash.clone();
+                    let r_blake3_vdf = reject_blake3_vdf.clone();
+                    let r_difficulty = reject_difficulty.clone();
+                    let p_vdf = passed_vdf.clone();
+                    let p_no_challenge = no_challenge.clone();
+                    let p_genus2 = path_genus2.clone();
+                    let p_blake3 = path_blake3.clone();
+
                     let verified_result = match tokio::time::timeout(
                         std::time::Duration::from_secs(30),
                         tokio::task::spawn_blocking(move || {
@@ -15063,24 +15087,20 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 .map(|submission| {
                                     // v1.0.5: Dual-path verification — Genus-2 VDF or legacy BLAKE3
                                     if submission.genus2_vdf_output.is_some() && submission.genus2_vdf_proof.is_some() {
-                                        // ═══════════════════════════════════════════════════════════════
-                                        // PATH A: Genus-2 Jacobian VDF verification (O(log T) via Wesolowski proof)
-                                        // ═══════════════════════════════════════════════════════════════
+                                        p_genus2.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        // PATH A: Genus-2 Jacobian VDF
                                         let vdf_output = submission.genus2_vdf_output.as_ref().unwrap();
                                         let vdf_proof = submission.genus2_vdf_proof.as_ref().unwrap();
                                         let vdf_iters = submission.genus2_vdf_iterations.unwrap_or(5000);
 
-                                        // 1. Verify proof structure: challenge matches
                                         if let Some(ref challenge_bytes) = submission.challenge_hash_bytes {
                                             use sha3::{Digest, Sha3_256};
 
-                                            // Reconstruct seed = BLAKE3(challenge || nonce)
                                             let mut hash_input = [0u8; 40];
                                             hash_input[..32].copy_from_slice(challenge_bytes);
                                             hash_input[32..].copy_from_slice(&submission.nonce.to_le_bytes());
                                             let seed = blake3::hash(&hash_input);
 
-                                            // Verify Wesolowski proof challenge
                                             let mut proof_hasher = Sha3_256::new();
                                             proof_hasher.update(b"genus2-wesolowski-challenge");
                                             proof_hasher.update(seed.as_bytes());
@@ -15088,27 +15108,26 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                             proof_hasher.update(&vdf_iters.to_le_bytes());
                                             let expected_challenge = proof_hasher.finalize();
 
-                                            // Check proof starts with expected challenge
                                             if vdf_proof.len() < 32 || &vdf_proof[..32] != expected_challenge.as_slice() {
-                                                return None; // Invalid VDF proof
+                                                r_genus2_proof.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                return None;
                                             }
 
-                                            // 2. Verify hash = SHA3-256(vdf_output)
                                             let mut sha3 = Sha3_256::new();
                                             sha3.update(vdf_output);
                                             let expected_hash = sha3.finalize();
                                             let mut expected = [0u8; 32];
                                             expected.copy_from_slice(&expected_hash);
                                             if expected != submission.hash {
-                                                return None; // Hash doesn't match VDF output
+                                                r_genus2_hash.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                return None;
                                             }
+                                        } else {
+                                            p_no_challenge.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                         }
                                     } else {
-                                        // ═══════════════════════════════════════════════════════════════
-                                        // PATH B: Legacy BLAKE3×N verification (recompute all rounds)
-                                        // ═══════════════════════════════════════════════════════════════
-                                        // v10.2.3: Uses submission.vdf_iterations instead of hardcoded value.
-                                        // Fixed off-by-one: GPU does N inner rounds, total = N+1 with initial.
+                                        p_blake3.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        // PATH B: Legacy BLAKE3×N verification
                                         if let Some(ref challenge_bytes) = submission.challenge_hash_bytes {
                                             let mut hash_input = [0u8; 40];
                                             hash_input[..32].copy_from_slice(challenge_bytes);
@@ -15120,14 +15139,19 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                                 current = *blake3::hash(&current).as_bytes();
                                             }
                                             if current != submission.hash {
-                                                return None; // drop fake hash
+                                                r_blake3_vdf.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                return None;
                                             }
+                                        } else {
+                                            p_no_challenge.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                         }
                                     }
-                                    // 2. Difficulty verification (same for both paths)
+                                    // Difficulty verification
                                     if !(submission.hash < submission.difficulty_target) {
-                                        return None; // drop below difficulty
+                                        r_difficulty.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        return None;
                                     }
+                                    p_vdf.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                     Some(submission)
                                 })
                                 .collect();
@@ -15157,8 +15181,17 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     let rejected_count = verified_result.1;
                     if rejected_count > 0 {
                         warn!(
-                            "🛡️ [Shard {}] Rejected {}/{} submissions (VDF/difficulty)",
-                            shard_id, rejected_count, pre_verify_count
+                            "🛡️ [Shard {}] Rejected {}/{} — genus2_proof={}, genus2_hash={}, blake3_vdf={}, \
+                             difficulty={}, passed={}, no_challenge={}, path_genus2={}, path_blake3={}",
+                            shard_id, rejected_count, pre_verify_count,
+                            reject_genus2_proof.load(std::sync::atomic::Ordering::Relaxed),
+                            reject_genus2_hash.load(std::sync::atomic::Ordering::Relaxed),
+                            reject_blake3_vdf.load(std::sync::atomic::Ordering::Relaxed),
+                            reject_difficulty.load(std::sync::atomic::Ordering::Relaxed),
+                            passed_vdf.load(std::sync::atomic::Ordering::Relaxed),
+                            no_challenge.load(std::sync::atomic::Ordering::Relaxed),
+                            path_genus2.load(std::sync::atomic::Ordering::Relaxed),
+                            path_blake3.load(std::sync::atomic::Ordering::Relaxed),
                         );
                     }
 
@@ -15671,7 +15704,13 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         // - ≤10,000 blocks behind: Allow mining (DAG-Knight handles conflicts)
                         const FAST_SYNC_THRESHOLD: u64 = 10_000;
                         let blocks_behind = network_height.saturating_sub(current_height);
-                        let in_fast_sync_mode = blocks_behind > FAST_SYNC_THRESHOLD;
+                        // v10.2.7: Bootstrap validators NEVER enter fast sync mode — they must
+                        // always produce blocks, even when behind. The "behind" state on a bootstrap
+                        // node means its height pointer is stuck, not that it's genuinely syncing.
+                        let bootstrap_validator = std::env::var("Q_ALLOW_SOLO_MINING")
+                            .map(|v| v == "true" || v == "1")
+                            .unwrap_or(false);
+                        let in_fast_sync_mode = blocks_behind > FAST_SYNC_THRESHOLD && !bootstrap_validator;
                         let allow_mining_while_syncing = current_height > 0
                             && batch_buffer.len() > 0
                             && !in_fast_sync_mode;  // v3.4.9: Pause mining during fast sync
@@ -18778,6 +18817,18 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                     target_height
                                 );
 
+                                // v10.2.8: Update current_height_atomic from DB after timeout sync
+                                let db_height = app_state_sync.storage_engine
+                                    .get_latest_qblock_height().await.unwrap_or(Some(0)).unwrap_or(0);
+                                let current_atomic = app_state_sync.current_height_atomic
+                                    .load(std::sync::atomic::Ordering::Relaxed);
+                                if db_height > current_atomic {
+                                    app_state_sync.current_height_atomic.store(
+                                        db_height, std::sync::atomic::Ordering::SeqCst);
+                                    info!("📈 [v10.2.8] Updated current_height_atomic: {} → {} after timeout sync",
+                                          current_atomic, db_height);
+                                }
+
                                 // 🚨 v1.0.99-beta: CRITICAL FIX - Sync producers after turbo sync!
                                 // ROOT CAUSE: STATE DIVERGENCE - turbo sync stored blocks to database
                                 // but producers weren't notified, causing 550+ block gaps
@@ -19368,14 +19419,26 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                                     warn!("⚠️  [TURBO SYNC DIRECT] Producer sync failed: {}", e);
                                                 }
 
+                                                // v10.2.8: Update current_height_atomic after turbo sync completes.
+                                                // Without this, HEIGHT CLAMP stays at the old height + 10K forever
+                                                // because turbo sync stores blocks but never advances the atomic.
+                                                // Read from DB pointer (qblock:latest) as ground truth, not height_cache
+                                                // which may be stale/0 after corruption cleanup.
+                                                let db_height = app_state_sync.storage_engine
+                                                    .get_latest_qblock_height().await.unwrap_or(Some(0)).unwrap_or(0);
+                                                let current = app_state_sync.current_height_atomic
+                                                    .load(std::sync::atomic::Ordering::Relaxed);
+                                                if db_height > current {
+                                                    app_state_sync.current_height_atomic.store(
+                                                        db_height, std::sync::atomic::Ordering::SeqCst);
+                                                    info!("📈 [v10.2.8] Updated current_height_atomic: {} → {} after turbo sync",
+                                                          current, db_height);
+                                                }
+
                                                 // v1.4.13-beta: DON'T record sync attempt when still behind!
                                                 // This allows continuous sync without cooldown delays
-                                                // 🚨 v2.3.6-beta CRITICAL FIX: Use CONTIGUOUS height, not latest stored!
-                                                // BUG: get_latest_qblock_height() returns highest stored (875,500) but with gaps
-                                                // This caused node to enter cooldown even with ~200 block internal gaps
-                                                // FIX: get_highest_contiguous_block() returns last contiguous (870,063)
-                                                let new_height = app_state_sync.storage_engine
-                                                    .get_highest_contiguous_block().await.unwrap_or(0);
+                                                // v10.2.8: Use db_height (ground truth) instead of height_cache
+                                                let new_height = db_height;
                                                 if new_height + 100 < network_height {
                                                     // Still significantly behind - don't record attempt
                                                     // This bypasses the retry_interval and enables continuous sync
