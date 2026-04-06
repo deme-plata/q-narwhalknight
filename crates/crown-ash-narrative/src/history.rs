@@ -1559,10 +1559,10 @@ pub fn diplomacy_narrative(
     // Current state
     if at_war {
         if wars_declared > 1 {
+            let ordinal = match wars_declared { 2 => "2nd".to_string(), 3 => "3rd".to_string(), n => format!("{}th", n) };
             parts.push(format!(
                 "{} and {} are locked in their {} conflict.",
-                name_a, name_b,
-                match wars_declared { 2 => "2nd", 3 => "3rd", n => &format!("{}th", n) }
+                name_a, name_b, ordinal
             ));
         } else {
             parts.push(format!("{} and {} are at war.", name_a, name_b));
