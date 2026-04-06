@@ -722,6 +722,16 @@ async fn merge_p2p_response(
             let reserve1: u128 = entry.reserve1.parse().unwrap_or(0);
             let lp_supply: u128 = entry.lp_token_supply.parse().unwrap_or(0);
 
+            // v10.2.2: Insertion-time validation — reject dust/broken pools from state sync
+            const SYNC_MIN_POOL_RESERVE: u128 = 10_000_000_000_000_000_000_000; // 10^22 = 0.01 display
+            if reserve0 < SYNC_MIN_POOL_RESERVE || reserve1 < SYNC_MIN_POOL_RESERVE {
+                tracing::debug!(
+                    "🚫 [STATE SYNC] Skipping dust pool: {} ({}/{}) r0={} r1={}",
+                    entry.pool_id, entry.token0, entry.token1, reserve0, reserve1
+                );
+                continue;
+            }
+
             if !pools.contains_key(&entry.pool_id) {
                 // New pool
                 let pool = crate::LiquidityPool {
@@ -1299,6 +1309,16 @@ async fn merge_http_snapshot(app_state: &Arc<AppState>, snapshot: &FullStateSnap
         for (pool_id, pool_val) in &snapshot.liquidity_pools {
             match serde_json::from_value::<crate::LiquidityPool>(pool_val.clone()) {
                 Ok(peer_pool) => {
+                    // v10.2.2: Insertion-time validation — reject dust/broken pools
+                    const HTTP_MIN_POOL_RESERVE: u128 = 10_000_000_000_000_000_000_000; // 10^22
+                    if peer_pool.reserve0 < HTTP_MIN_POOL_RESERVE || peer_pool.reserve1 < HTTP_MIN_POOL_RESERVE {
+                        tracing::debug!(
+                            "🚫 [STATE SYNC HTTP] Skipping dust pool: {} ({}/{}) r0={} r1={}",
+                            pool_id, peer_pool.token0, peer_pool.token1, peer_pool.reserve0, peer_pool.reserve1
+                        );
+                        continue;
+                    }
+
                     if !pools.contains_key(pool_id) {
                         if let Ok(data) = serde_json::to_vec(&peer_pool) {
                             if let Err(e) = app_state.storage_engine.save_liquidity_pool(pool_id, &data).await {

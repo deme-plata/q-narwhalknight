@@ -314,6 +314,7 @@ impl ApiClient {
         amount: &str,
         memo: Option<String>,
         mnemonic: Option<String>,
+        token_type: &str,
     ) -> Result<serde_json::Value> {
         let amount_f64: f64 = amount.parse().unwrap_or(0.0);
 
@@ -324,12 +325,14 @@ impl ApiClient {
             AuthMode::Wallet(_) => mnemonic,     // Wallet mode always sends mnemonic
         };
 
+        // v10.2.3: Pass actual selected token type instead of hardcoding QUG.
+        // Fixes critical bug where QUGUSD transfers arrived as QUG.
         let body = serde_json::json!({
             "from": self.address(),
             "to": to,
             "amount": amount_f64,
             "memo": memo,
-            "token_type": "QUG",
+            "token_type": token_type,
             "mnemonic": send_mnemonic,
         });
 

@@ -215,7 +215,7 @@ fn main() {
         let api_client = api_client.clone();
         let rt_handle = rt_handle.clone();
         let stored_mnemonic = stored_mnemonic.clone();
-        app.on_send_transaction(move |recipient, amount, memo, seed_phrase| {
+        app.on_send_transaction(move |recipient, amount, memo, seed_phrase, token_type| {
             let app = app_weak.upgrade().unwrap();
             let client_lock = api_client.lock().unwrap();
             let Some(client) = client_lock.as_ref().cloned() else {
@@ -267,6 +267,8 @@ fn main() {
 
             let amount_confirm = amount.clone();
             let recipient_confirm = recipient.clone();
+            let token_str = token_type.to_string();
+            let token_str = if token_str.is_empty() { "QUG".to_string() } else { token_str };
             let stored_mn = stored_mnemonic.clone();
             let seed_to_store = if !seed_str.trim().is_empty() {
                 Some(seed_str)
@@ -276,7 +278,7 @@ fn main() {
 
             let weak = app.as_weak();
             rt_handle.spawn(async move {
-                let result = client.send_transaction(&recipient, &amount, memo_opt, mnemonic).await;
+                let result = client.send_transaction(&recipient, &amount, memo_opt, mnemonic, &token_str).await;
                 let _ = slint::invoke_from_event_loop(move || {
                     let app = weak.upgrade().unwrap();
                     app.set_sending(false);

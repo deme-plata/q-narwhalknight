@@ -727,11 +727,16 @@ pub async fn deploy_contract(
             // Deduct deployment cost from deployer's native QUG balance
             // v3.0.6-beta: Updated for 24 decimals (1 QUG = 10^24 base units)
             const DEPLOYMENT_COST: u128 = 1_000_000_000_000_000_000_000_000; // 1 QUG
+            // v10.2.1: Track balance changes for persistence (fixes bug where deductions were lost on restart)
+            let mut persist_deployer: Option<([u8; 32], u128)> = None;
+            let mut persist_founder: Option<([u8; 32], u128)> = None;
+            let mut persist_operator: Option<([u8; 32], u128)> = None;
             {
                 let mut wallet_balances = state.wallet_balances.write().await;
                 if let Some(balance) = wallet_balances.get_mut(&deployer) {
                     if *balance >= DEPLOYMENT_COST {
                         *balance -= DEPLOYMENT_COST;
+                        persist_deployer = Some((deployer, *balance));
                         tracing::info!(
                             "💸 Deducted {} QUG deployment cost from {}. New balance: {}",
                             q_log_privacy::mask_amt_display(DEPLOYMENT_COST as f64 / 1e24),
@@ -759,6 +764,7 @@ pub async fn deploy_contract(
                                 };
                                 let old = wallet_balances.get(&founder_addr).copied().unwrap_or(0);
                                 wallet_balances.insert(founder_addr, old + founder_share);
+                                persist_founder = Some((founder_addr, old + founder_share));
                                 tracing::info!(
                                     "💰 Deployment fee credited to founder: {} QUG (total: {} QUG)",
                                     q_log_privacy::mask_amt_display(founder_share as f64 / 1e24),
@@ -774,6 +780,7 @@ pub async fn deploy_contract(
                                         op_addr.copy_from_slice(&op_bytes);
                                         let old = wallet_balances.get(&op_addr).copied().unwrap_or(0);
                                         wallet_balances.insert(op_addr, old + operator_share);
+                                        persist_operator = Some((op_addr, old + operator_share));
                                         // v8.1.1: Track fee earnings (convert from 24-decimal to micro-QUG)
                                         let micro_qug = (operator_share / 1_000_000_000_000_000_000) as u64; // 1e24 / 1e6 = 1e18
                                         crate::admin_settings_api::record_operator_fee(&state, micro_qug);
@@ -839,6 +846,13 @@ pub async fn deploy_contract(
                     }
                 } else {
                     tracing::warn!("⚠️ Deployer wallet not found: {}", q_log_privacy::mask_addr(&hex::encode(deployer)));
+                }
+            }
+
+            // v10.2.1: Persist deployment cost deductions to storage (fixes balance not decreasing on restart)
+            for (addr, new_balance) in [persist_deployer, persist_founder, persist_operator].into_iter().flatten() {
+                if let Err(e) = state.storage_engine.save_wallet_balance(&addr, new_balance).await {
+                    tracing::warn!("⚠️ Failed to persist balance after deployment fee: {}", e);
                 }
             }
 

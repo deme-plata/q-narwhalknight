@@ -455,15 +455,33 @@ pub async fn get_supported_tokens(
     }
 
     // ✅ Add custom tokens from deployed contracts
+    // v10.2.1: Deduplicate by symbol — first contract per symbol wins
+    let mut seen_symbols = std::collections::HashSet::new();
+    seen_symbols.insert("QUG".to_string());
+    seen_symbols.insert("QUGUSD".to_string());
+    seen_symbols.insert("wBTC".to_string());
+    seen_symbols.insert("wZEC".to_string());
+    seen_symbols.insert("wIRON".to_string());
+    seen_symbols.insert("wETH".to_string());
     let genesis_ts = q_storage::emission_controller::GENESIS_TIMESTAMP;
     let deployed_contracts = state.orobit_ecosystem.deployed_contracts.read().await;
-    for contract in deployed_contracts.values() {
+    // v10.2.2: Sort by deployed_at descending so the NEWEST contract per symbol wins.
+    // HashMap iteration is non-deterministic; sorting ensures the most recent (correct)
+    // deployment is always picked when duplicate symbols exist.
+    let mut sorted_contracts: Vec<_> = deployed_contracts.values().collect();
+    sorted_contracts.sort_by(|a, b| b.deployed_at.cmp(&a.deployed_at));
+    for contract in sorted_contracts {
         // v7.1.7: Skip pre-genesis (testnet) contracts
         if contract.deployed_at < genesis_ts {
             continue;
         }
         // Check if this contract has token metadata (symbol indicates it's a token)
         if let Some(symbol) = &contract.metadata.symbol {
+            // v10.2.1: Skip duplicate symbols
+            if seen_symbols.contains(&symbol.to_uppercase()) {
+                continue;
+            }
+            seen_symbols.insert(symbol.to_uppercase());
             // Get token details from deployment params
             // v4.0.15: Pass through raw supply - frontend handles arbitrary sizes
             let total_supply_str = contract
@@ -673,7 +691,14 @@ pub struct SwapQuote {
     pub valid_until: u64, // Timestamp
 }
 
-/// Find a liquidity pool matching the given token pair (order-independent)
+/// Minimum pool reserve threshold (0.01 display units = 10^22 in 24-decimal raw)
+/// Pools below this are considered dust/broken and excluded from routing and pricing.
+const MIN_POOL_RESERVE_RAW: u128 = 10_000_000_000_000_000_000_000; // 10^22
+
+/// Find the DEEPEST liquidity pool matching the given token pair (order-independent).
+/// v10.2.2: Returns the pool with the highest k-value (reserve0 × reserve1) among all
+/// matching pools that pass the minimum reserve filter. This prevents broken/dust pools
+/// from being selected for swaps, quotes, or pricing.
 fn find_pool_for_pair<'a>(
     pools: &'a HashMap<String, crate::LiquidityPool>,
     token_in: &str,
@@ -681,17 +706,31 @@ fn find_pool_for_pair<'a>(
 ) -> Option<(&'a String, &'a crate::LiquidityPool, bool)> {
     let tin = token_in.to_uppercase();
     let tout = token_out.to_uppercase();
+    let mut best: Option<(&String, &crate::LiquidityPool, bool, f64)> = None;
+
     for (pool_id, pool) in pools.iter() {
+        // Skip dust/broken pools
+        if pool.reserve0 < MIN_POOL_RESERVE_RAW || pool.reserve1 < MIN_POOL_RESERVE_RAW {
+            continue;
+        }
         let t0 = pool.token0.to_uppercase();
         let t1 = pool.token1.to_uppercase();
-        if t0 == tin && t1 == tout {
-            return Some((pool_id, pool, false)); // token_in = token0
-        }
-        if t0 == tout && t1 == tin {
-            return Some((pool_id, pool, true)); // token_in = token1 (reversed)
+        let (matched, reversed) = if t0 == tin && t1 == tout {
+            (true, false)
+        } else if t0 == tout && t1 == tin {
+            (true, true)
+        } else {
+            continue;
+        };
+        if matched {
+            // k-value = reserve product (use f64 to avoid u128 overflow)
+            let k = pool.reserve0 as f64 * pool.reserve1 as f64;
+            if best.as_ref().map_or(true, |(_, _, _, best_k)| k > *best_k) {
+                best = Some((pool_id, pool, reversed, k));
+            }
         }
     }
-    None
+    best.map(|(id, pool, rev, _)| (id, pool, rev))
 }
 
 /// Constant-product AMM: calculate output amount given input amount and reserves
@@ -1134,42 +1173,48 @@ pub async fn get_all_prices(
         last_updated: now,
     });
 
-    // Derive prices for wrapped tokens from their pool ratios against QUG
+    // v10.2.2: Derive prices from the DEEPEST pool per token (highest k = reserve0 × reserve1).
+    // Filters out dust/broken pools using MIN_POOL_RESERVE_RAW threshold.
     let pools_guard = state.liquidity_pools.read().await;
-    let mut seen_tokens = std::collections::HashSet::new();
-    seen_tokens.insert("QUG".to_string());
-    seen_tokens.insert("QUGUSD".to_string());
+    // token -> (k_value, price_usd, price_qnk)
+    let mut best_pool_per_token: std::collections::HashMap<String, (f64, f64, f64)> = std::collections::HashMap::new();
 
     for pool in pools_guard.values() {
-        if pool.reserve0 == 0 || pool.reserve1 == 0 {
+        // Skip empty and dust/broken pools
+        if pool.reserve0 < MIN_POOL_RESERVE_RAW || pool.reserve1 < MIN_POOL_RESERVE_RAW {
             continue;
         }
         let t0 = pool.token0.to_uppercase();
         let t1 = pool.token1.to_uppercase();
+        let k_value = pool.reserve0 as f64 * pool.reserve1 as f64;
+
         // If one side is QUG, derive the other token's price
-        if t0 == "QUG" && !seen_tokens.contains(&t1) {
-            let token_price = (pool.reserve0 as f64 / pool.reserve1 as f64) * qug_price_usd;
-            prices.push(TokenPrice {
-                token: t1.clone(),
-                price_usd: token_price,
-                price_qnk: pool.reserve0 as f64 / pool.reserve1 as f64,
-                change_24h: 0.0,
-                volume_24h: "0".to_string(),
-                last_updated: now,
-            });
-            seen_tokens.insert(t1);
-        } else if t1 == "QUG" && !seen_tokens.contains(&t0) {
-            let token_price = (pool.reserve1 as f64 / pool.reserve0 as f64) * qug_price_usd;
-            prices.push(TokenPrice {
-                token: t0.clone(),
-                price_usd: token_price,
-                price_qnk: pool.reserve1 as f64 / pool.reserve0 as f64,
-                change_24h: 0.0,
-                volume_24h: "0".to_string(),
-                last_updated: now,
-            });
-            seen_tokens.insert(t0);
+        if t0 == "QUG" && t1 != "QUGUSD" {
+            let price_qnk = pool.reserve0 as f64 / pool.reserve1 as f64;
+            let price_usd = price_qnk * qug_price_usd;
+            let better = best_pool_per_token.get(&t1).map_or(true, |(best_k, _, _)| k_value > *best_k);
+            if better {
+                best_pool_per_token.insert(t1, (k_value, price_usd, price_qnk));
+            }
+        } else if t1 == "QUG" && t0 != "QUGUSD" {
+            let price_qnk = pool.reserve1 as f64 / pool.reserve0 as f64;
+            let price_usd = price_qnk * qug_price_usd;
+            let better = best_pool_per_token.get(&t0).map_or(true, |(best_k, _, _)| k_value > *best_k);
+            if better {
+                best_pool_per_token.insert(t0, (k_value, price_usd, price_qnk));
+            }
         }
+    }
+
+    for (token, (_k_value, price_usd, price_qnk)) in best_pool_per_token {
+        prices.push(TokenPrice {
+            token,
+            price_usd,
+            price_qnk,
+            change_24h: 0.0,
+            volume_24h: "0".to_string(),
+            last_updated: now,
+        });
     }
 
     Ok(Json(DexApiResponse::success(prices)))

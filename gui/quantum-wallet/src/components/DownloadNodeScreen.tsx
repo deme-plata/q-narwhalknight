@@ -362,59 +362,59 @@ Invoke-WebRequest -Uri https://quillon.xyz/downloads/q-api-server-v10.2.2-window
             </div>
 
             <div className="space-y-3">
-              {/* Native CPU-Optimized (Modern CPUs) */}
+              {/* Linux GPU Miner — Native */}
               <div className="p-3 rounded-xl border border-yellow-600" style={{ backgroundColor: '#2a1a00' }}>
-                <p className="text-xs text-yellow-300 font-bold mb-2 uppercase tracking-wider">Native CPU Optimized — Modern CPUs</p>
+                <p className="text-xs text-yellow-300 font-bold mb-2 uppercase tracking-wider">Linux GPU + CPU Miner — Native (AVX2)</p>
                 <a
-                  href="https://quillon.xyz/downloads/q-miner-linux-x64-native"
-                  download="q-miner-linux-x64-native"
+                  href="https://quillon.xyz/downloads/q-miner-gpu-linux-x86_64"
+                  download="q-miner-gpu-linux-x86_64"
                   className="w-full flex items-center justify-center gap-3 px-6 py-3 bg-gradient-to-r from-yellow-600 to-orange-600 rounded-xl font-bold text-yellow-100 hover:shadow-lg hover:shadow-yellow-500/50 transition-all"
                 >
                   <Download className="w-5 h-5" />
-                  Linux x64 — Native (AVX2/AVX-512, LTO)
+                  Linux x64 — GPU + CPU Miner (Native)
                 </a>
-                <p className="text-xs text-yellow-200 mt-1 text-center">Compiled with target-cpu=native, fat LTO, codegen-units=1 — up to 30% faster hashing</p>
+                <p className="text-xs text-yellow-200 mt-1 text-center">OpenCL GPU mining + native CPU optimizations (AVX2, LTO) — up to 30% faster hashing</p>
               </div>
 
-              {/* Legacy (Portable) */}
+              {/* Linux GPU Miner — Portable */}
               <div className="p-3 rounded-xl border border-gray-600" style={{ backgroundColor: '#15101e' }}>
-                <p className="text-xs text-orange-200 font-bold mb-2 uppercase tracking-wider">Legacy — Portable (Older CPUs)</p>
+                <p className="text-xs text-orange-200 font-bold mb-2 uppercase tracking-wider">Linux GPU + CPU Miner — Portable (Older CPUs)</p>
                 <a
-                  href="https://quillon.xyz/downloads/q-miner-linux-x64-legacy"
-                  download="q-miner-linux-x64-legacy"
+                  href="https://quillon.xyz/downloads/q-miner-gpu-linux-x64"
+                  download="q-miner-gpu-linux-x64"
                   className="w-full flex items-center justify-center gap-3 px-5 py-3 bg-gradient-to-r from-orange-700 to-rose-700 rounded-xl font-bold text-orange-100 hover:shadow-lg hover:shadow-orange-500/30 transition-all text-sm"
                 >
                   <Download className="w-5 h-5" />
-                  Linux x64 — Legacy (x86-64-v2)
+                  Linux x64 — GPU + CPU Miner (Portable)
                 </a>
                 <p className="text-xs text-orange-200 mt-1 text-center">Compatible with all x86-64 CPUs (2009+). Use this if the native version crashes.</p>
               </div>
 
-              {/* Windows */}
+              {/* Windows GPU Miner */}
               <a
-                href="https://quillon.xyz/downloads/q-miner-windows-x64.exe"
-                download="q-miner-windows-x64.exe"
+                href="https://quillon.xyz/downloads/q-miner-gpu-windows-x64.exe"
+                download="q-miner-gpu-windows-x64.exe"
                 className="w-full flex items-center justify-center gap-3 px-6 py-3 bg-gradient-to-r from-purple-600 to-blue-600 rounded-xl font-bold text-purple-100 hover:shadow-lg hover:shadow-purple-500/50 transition-all"
               >
                 <Download className="w-5 h-5" />
-                Download Miner — Windows x64 (v10.2.2)
+                Download GPU + CPU Miner — Windows x64 (v10.2.1)
               </a>
-              <p className="text-center text-xs text-orange-200">v10.2.2 — AVX2 SIMD + CPU core pinning + 2.5x faster hashing + P2P peer compute</p>
+              <p className="text-center text-xs text-orange-200">v10.2.1 — OpenCL GPU mining + AVX2 SIMD + CPU core pinning + P2P peer compute</p>
 
               {/* Universal wget download */}
               <div className="p-4 rounded-xl border border-amber-600" style={{ backgroundColor: '#0d0a00' }}>
                 <p className="text-sm font-mono text-amber-200 font-bold mb-2">Quick Download (wget):</p>
                 <pre className="text-xs text-amber-300 overflow-x-auto whitespace-pre-wrap select-all cursor-pointer p-2 rounded" style={{ backgroundColor: '#000000' }}>
-{`wget https://quillon.xyz/downloads/q-miner-v10.2.2 && chmod +x q-miner-v10.2.2`}
+{`wget https://quillon.xyz/downloads/q-miner-gpu-linux-x86_64 && chmod +x q-miner-gpu-linux-x86_64`}
                 </pre>
               </div>
 
               <div className="p-4 rounded-xl border border-orange-600" style={{ backgroundColor: '#0d0a00' }}>
-                <p className="text-sm font-mono text-orange-200 font-bold mb-2">Linux Quick Start (Native):</p>
+                <p className="text-sm font-mono text-orange-200 font-bold mb-2">Linux Quick Start (GPU + CPU):</p>
                 <pre className="text-xs text-amber-300 overflow-x-auto whitespace-pre-wrap" style={{ backgroundColor: '#000000', padding: '8px', borderRadius: '6px' }}>
-{`wget https://quillon.xyz/downloads/q-miner-linux-x64-native
-chmod +x q-miner-linux-x64-native
-./q-miner-linux-x64-native \\
+{`wget https://quillon.xyz/downloads/q-miner-gpu-linux-x86_64
+chmod +x q-miner-gpu-linux-x86_64
+./q-miner-gpu-linux-x86_64 \\
   --mode solo \\
   --wallet YOUR_WALLET_ADDRESS \\
   --threads 4 \\
@@ -425,8 +425,8 @@ chmod +x q-miner-linux-x64-native
                 <p className="text-sm font-mono text-purple-200 font-bold mb-2">Windows Quick Start (PowerShell):</p>
                 <pre className="text-xs text-purple-300 overflow-x-auto whitespace-pre-wrap" style={{ backgroundColor: '#000000', padding: '8px', borderRadius: '6px' }}>
 {`# Download from browser or:
-Invoke-WebRequest -Uri https://quillon.xyz/downloads/q-miner-windows-x64.exe -OutFile q-miner.exe
-.\\q-miner.exe --mode solo --wallet YOUR_WALLET_ADDRESS --threads 4 --server https://quillon.xyz`}
+Invoke-WebRequest -Uri https://quillon.xyz/downloads/q-miner-gpu-windows-x64.exe -OutFile q-miner-gpu.exe
+.\\q-miner-gpu.exe --mode solo --wallet YOUR_WALLET_ADDRESS --threads 4 --server https://quillon.xyz`}
                 </pre>
               </div>
             </div>

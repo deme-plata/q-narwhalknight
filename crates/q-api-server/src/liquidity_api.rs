@@ -746,6 +746,8 @@ pub async fn add_liquidity(
 
     // Track which token balances changed for persistence
     let mut token_balance_changes: Vec<([u8; 32], [u8; 32], u128)> = Vec::new(); // (wallet, token, new_balance)
+    // v10.2.1: Track native QUG balance changes for persistence (fixes deductions lost on restart)
+    let mut native_qug_balance_change: Option<([u8; 32], u128)> = None;
 
     // Deduct balances
     {
@@ -783,6 +785,7 @@ pub async fn add_liquidity(
                 ))));
             }
             *balance -= request.amount0;
+            native_qug_balance_change = Some((provider, *balance)); // v10.2.1: Track for persistence
             tracing::info!(
                 "💸 Deducted {} QUG from {} for liquidity. New balance: {}",
                 request.amount0 as f64 / 1e24,
@@ -1048,6 +1051,7 @@ pub async fn add_liquidity(
                 ))));
             }
             *balance -= request.amount1;
+            native_qug_balance_change = Some((provider, *balance)); // v10.2.1: Track for persistence
             tracing::info!(
                 "💸 Deducted {} QUG from {} for liquidity. New balance: {}",
                 request.amount1 as f64 / 1e24,
@@ -1183,6 +1187,13 @@ pub async fn add_liquidity(
             .await
         {
             tracing::warn!("Failed to persist token balance after liquidity: {}", e);
+        }
+    }
+
+    // v10.2.1: Persist native QUG balance deduction (fixes deductions lost on restart)
+    if let Some((addr, new_balance)) = native_qug_balance_change {
+        if let Err(e) = state.storage_engine.save_wallet_balance(&addr, new_balance).await {
+            tracing::warn!("⚠️ Failed to persist QUG balance after liquidity add: {}", e);
         }
     }
 
@@ -1765,6 +1776,8 @@ pub async fn remove_liquidity(
     };
 
     let mut token_balance_changes: Vec<([u8; 32], [u8; 32], u128)> = Vec::new();
+    // v10.2.1: Track native QUG balance changes for persistence
+    let mut native_qug_balance_change: Option<([u8; 32], u128)> = None;
 
     // Return balances to provider
     {
@@ -1773,7 +1786,9 @@ pub async fn remove_liquidity(
 
         // Return token0
         if is_native_token0 {
-            *wallet_balances.entry(provider).or_insert(0) += amount0_to_return;
+            let balance = wallet_balances.entry(provider).or_insert(0);
+            *balance += amount0_to_return;
+            native_qug_balance_change = Some((provider, *balance));
             tracing::info!(
                 "💰 Returned {} QUG to {} from liquidity removal",
                 amount0_to_return,
@@ -1796,7 +1811,9 @@ pub async fn remove_liquidity(
 
         // Return token1
         if is_native_token1 {
-            *wallet_balances.entry(provider).or_insert(0) += amount1_to_return;
+            let balance = wallet_balances.entry(provider).or_insert(0);
+            *balance += amount1_to_return;
+            native_qug_balance_change = Some((provider, *balance));
             tracing::info!(
                 "💰 Returned {} QUG to {} from liquidity removal",
                 amount1_to_return,
@@ -1829,6 +1846,13 @@ pub async fn remove_liquidity(
                 "Failed to persist token balance after liquidity removal: {}",
                 e
             );
+        }
+    }
+
+    // v10.2.1: Persist native QUG balance after liquidity removal
+    if let Some((addr, new_balance)) = native_qug_balance_change {
+        if let Err(e) = state.storage_engine.save_wallet_balance(&addr, new_balance).await {
+            tracing::warn!("⚠️ Failed to persist QUG balance after liquidity removal: {}", e);
         }
     }
 

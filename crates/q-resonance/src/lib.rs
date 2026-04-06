@@ -26,6 +26,7 @@ pub mod shadow_mode;
 pub mod k_parameter;  // Kristensen K-Parameter phase analysis
 pub mod k_energy;     // K-Parameter enhanced energy functional
 pub mod k_metrics;    // K-Parameter metrics and monitoring
+pub mod k_effective;  // Effective K-Parameter with observer dependence (Harlow 2025)
 
 pub use string_state::StringState;
 pub use energy::EnergyFunctional;
@@ -80,6 +81,14 @@ pub use k_energy::{
 pub use k_metrics::{
     KParameterMetrics,
     TrendDirection,
+};
+pub use k_effective::{
+    KEffectiveAnalyzer,
+    KEffectiveResult,
+    DecoherenceRates,
+    ConsensusPhase,
+    observer_factor,
+    estimate_observer_entropy,
 };
 
 /// Resonance consensus error types

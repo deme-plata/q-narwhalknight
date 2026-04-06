@@ -1907,8 +1907,9 @@ export default function DexScreen() {
           });
 
           // ✅ FILTER 2: Filter out any user tokens that are already in enrichedTokens (avoid duplicates by symbol)
-          const existingSymbols = new Set(enrichedTokens.map(t => t.symbol));
-          const newUserTokens = userTokensWithLiquidity.filter(t => !existingSymbols.has(t.symbol));
+          // v10.2.2: Case-insensitive + trimmed comparison to catch "DERP" vs "Derp" duplicates
+          const existingSymbols = new Set(enrichedTokens.map(t => t.symbol.toUpperCase().trim()));
+          const newUserTokens = userTokensWithLiquidity.filter(t => !existingSymbols.has(t.symbol.toUpperCase().trim()));
 
           console.log(`✅ Adding ${newUserTokens.length} user tokens to Available Tokens (${userTokens.length - newUserTokens.length} filtered: ${userTokens.length - userTokensWithLiquidity.length} no liquidity, ${userTokensWithLiquidity.length - newUserTokens.length} duplicates)`);
           enrichedTokens = [...enrichedTokens, ...newUserTokens];

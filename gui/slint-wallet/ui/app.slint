@@ -111,7 +111,7 @@ export component AppWindow inherits Window {
     callback create-wallet();
     callback import-wallet(string);
     callback confirm-created();
-    callback send-transaction(string, string, string, string);
+    callback send-transaction(string, string, string, string, string);
     callback refresh-history();
     callback toggle-mining();
     callback copy-address();
@@ -230,7 +230,7 @@ export component AppWindow inherits Window {
                 fee-tier: root.fee-tier;
 
                 send-transaction => {
-                    root.send-transaction(self.recipient, self.amount, self.memo, self.seed-phrase);
+                    root.send-transaction(self.recipient, self.amount, self.memo, self.seed-phrase, root.selected-token);
                 }
                 go-back => { root.active-screen = 1; }
                 save-contact => {

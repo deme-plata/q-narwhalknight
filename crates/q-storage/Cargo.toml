@@ -125,6 +125,10 @@ name = "cleanup-gaps"
 path = "src/bin/cleanup_gaps.rs"
 
 [[bin]]
+name = "fix-corrupt-tip"
+path = "src/bin/fix_corrupt_tip.rs"
+
+[[bin]]
 name = "diagnose-block"
 path = "src/bin/diagnose_block.rs"
 
