@@ -15151,10 +15151,24 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                             // The server controls iteration count via the challenge response,
                                             // so miners can't fake higher iterations than what was issued.
                                             let rounds = submission.vdf_iterations.min(200_000);
+                                            // v10.2.8: Debug VDF verification (Operation Twelve Leagues Deep)
+                                            if rounds > 100_000 || rounds < 100 {
+                                                eprintln!("🔍 [VDF DEBUG] iterations={}, cap=200000, rounds={}, challenge_len={}",
+                                                    submission.vdf_iterations, rounds, challenge_bytes.len());
+                                            }
                                             for _ in 0..rounds {
                                                 current = *blake3::hash(&current).as_bytes();
                                             }
                                             if current != submission.hash {
+                                                // Log first failure per batch for debugging
+                                                static VDF_FAIL_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                                                let fail_count = VDF_FAIL_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                if fail_count % 1000 == 0 {
+                                                    eprintln!("🔍 [VDF FAIL #{}] iterations={}, rounds={}, hash_first4={:02x}{:02x}{:02x}{:02x}, expected_first4={:02x}{:02x}{:02x}{:02x}",
+                                                        fail_count, submission.vdf_iterations, rounds,
+                                                        current[0], current[1], current[2], current[3],
+                                                        submission.hash[0], submission.hash[1], submission.hash[2], submission.hash[3]);
+                                                }
                                                 r_blake3_vdf.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                                 return None;
                                             }
