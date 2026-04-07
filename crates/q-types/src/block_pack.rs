@@ -186,16 +186,63 @@ impl BlockPackCodec {
         // Header pattern: c8 00 00 00 00 00 00 00 = bincode u64 LE vec length (200 blocks),
         // followed immediately by QBlock data (height, "mainnet-genesis", etc.)
         if let Ok(blocks) = bincode::deserialize::<Vec<QBlock>>(buf) {
-            if !blocks.is_empty() {
+            if !blocks.is_empty() && blocks[0].header.height > 0 {
                 let start_height = blocks.first().unwrap().header.height;
                 let end_height = blocks.last().unwrap().header.height;
+                eprintln!("📦 [BLOCK-PACK] Parsed {} blocks via raw Vec<QBlock> (heights {}-{})", blocks.len(), start_height, end_height);
                 return Ok(BlockPackResponse {
-                    blocks,
-                    start_height,
-                    end_height,
-                    has_more: false,
-                    peer_height: 0,
+                    blocks, start_height, end_height, has_more: false, peer_height: 0,
                 });
+            }
+        }
+
+        // v10.2.8: Try legacy QBlock formats for older peers.
+        // The codebase has 3 legacy struct versions with proven From<Legacy*> for QBlock
+        // conversions (used by storage layer on 13M+ blocks). Try each as Vec<Legacy*>.
+        use crate::legacy::{LegacyQBlock, LegacyQBlockV2, LegacyQBlockV3};
+
+        // LegacyQBlockV2: most likely format for recent-but-old peers (v1.0.60-v1.0.85)
+        if let Ok(legacy_blocks) = bincode::deserialize::<Vec<LegacyQBlockV2>>(buf) {
+            if !legacy_blocks.is_empty() {
+                let blocks: Vec<QBlock> = legacy_blocks.into_iter().map(|b| b.into()).collect();
+                if blocks[0].header.height > 0 && blocks[0].header.timestamp < 2000000000 {
+                    let start_height = blocks.first().unwrap().header.height;
+                    let end_height = blocks.last().unwrap().header.height;
+                    eprintln!("📦 [BLOCK-PACK LEGACY] Parsed {} blocks via Vec<LegacyQBlockV2> (heights {}-{})", blocks.len(), start_height, end_height);
+                    return Ok(BlockPackResponse {
+                        blocks, start_height, end_height, has_more: false, peer_height: 0,
+                    });
+                }
+            }
+        }
+
+        // LegacyQBlockV3: older format with old quantum metadata
+        if let Ok(legacy_blocks) = bincode::deserialize::<Vec<LegacyQBlockV3>>(buf) {
+            if !legacy_blocks.is_empty() {
+                let blocks: Vec<QBlock> = legacy_blocks.into_iter().map(|b| b.into()).collect();
+                if blocks[0].header.height > 0 && blocks[0].header.timestamp < 2000000000 {
+                    let start_height = blocks.first().unwrap().header.height;
+                    let end_height = blocks.last().unwrap().header.height;
+                    eprintln!("📦 [BLOCK-PACK LEGACY] Parsed {} blocks via Vec<LegacyQBlockV3> (heights {}-{})", blocks.len(), start_height, end_height);
+                    return Ok(BlockPackResponse {
+                        blocks, start_height, end_height, has_more: false, peer_height: 0,
+                    });
+                }
+            }
+        }
+
+        // LegacyQBlock: oldest format (pre-v1.0.60)
+        if let Ok(legacy_blocks) = bincode::deserialize::<Vec<LegacyQBlock>>(buf) {
+            if !legacy_blocks.is_empty() {
+                let blocks: Vec<QBlock> = legacy_blocks.into_iter().map(|b| b.into()).collect();
+                if blocks[0].header.height > 0 && blocks[0].header.timestamp < 2000000000 {
+                    let start_height = blocks.first().unwrap().header.height;
+                    let end_height = blocks.last().unwrap().header.height;
+                    eprintln!("📦 [BLOCK-PACK LEGACY] Parsed {} blocks via Vec<LegacyQBlock> (heights {}-{})", blocks.len(), start_height, end_height);
+                    return Ok(BlockPackResponse {
+                        blocks, start_height, end_height, has_more: false, peer_height: 0,
+                    });
+                }
             }
         }
 
