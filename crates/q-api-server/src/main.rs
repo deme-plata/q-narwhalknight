@@ -18472,8 +18472,12 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     .map(|ts| ts.peer_count_fast())
                     .unwrap_or(0);
                 let p2p_only = std::env::var("Q_P2P_ONLY").ok().as_deref() == Some("1");
+                // v10.2.8: Also trigger HTTP fallback when HEIGHT CLAMP is active (gap looks small
+                // but real network is much higher). The clamp makes current+50K > network_height
+                // even when we're 100K+ blocks behind. Use peer_count < 2 as the primary signal.
                 let needs_http_height = !p2p_only && (network_height == 0
-                    || (fast_peer_count_for_http < 2 && current_height + 50_000 < network_height));
+                    || fast_peer_count_for_http < 2
+                    || (current_height + 50_000 < network_height));
                 if needs_http_height {
                     debug!("🌐 [BOOTSTRAP HTTP FALLBACK] network_height={}, peers={}, refreshing from HTTP", network_height, fast_peer_count_for_http);
                     debug!("   Attempting HTTP bootstrap discovery from {} peers...", HTTP_BOOTSTRAP_PEERS.len());
