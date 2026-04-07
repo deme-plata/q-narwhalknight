@@ -15271,10 +15271,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     // DO NOT add_balance() here - rewards credited via BalanceConsensusEngine only
                     // This ensures equal rewards regardless of which node receives submissions
 
-                    debug!(
-                        "⏳ [PENDING] {} mining solutions queued for consensus ({} miners)",
-                        batch_buffer.len(),
-                        batch_buffer.len()
+                    // v10.2.8: Upgrade to warn for visibility during Operation Twelve Leagues Deep
+                    warn!(
+                        "⏳ [PENDING v10.2.8] PHASE 4: {} valid solutions queued for block production (shard {})",
+                        batch_buffer.len(), shard_id
                     );
 
                     // v1.0.3: Read balances from IN-MEMORY cache (not RocksDB per-submission)
@@ -15508,10 +15508,15 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     // Without this, the node discards all valid solutions during catch-up,
                     // preventing block production even when it's the only producer.
                     let allow_solo = std::env::var("Q_ALLOW_SOLO_MINING").ok().as_deref() == Some("true");
+                    // v10.2.8: Heavy debugging for block production pipeline
+                    if !batch_buffer.is_empty() {
+                        warn!("📊 [BLOCK-PROD DEBUG v10.2.8] PHASE 3.5: {} solutions in batch, cur_h={}, net_h={}, behind={}, solo={}, threshold={}",
+                              batch_buffer.len(), early_current_height, early_network_height, early_blocks_behind, allow_solo, BATCH_FAST_SYNC_THRESHOLD);
+                    }
                     if early_current_height > 0 && early_blocks_behind > BATCH_FAST_SYNC_THRESHOLD && !batch_buffer.is_empty() && !allow_solo {
                         // Skip PHASE 4 and PHASE 5 entirely during fast-sync
-                        warn!("🚀 [FAST-SYNC] Skipping solution queueing ({} blocks behind > {} threshold, {} solutions discarded)",
-                              early_blocks_behind, BATCH_FAST_SYNC_THRESHOLD, batch_buffer.len());
+                        warn!("🚀 [FAST-SYNC] Skipping solution queueing ({} blocks behind > {} threshold, {} solutions discarded, solo={})",
+                              early_blocks_behind, BATCH_FAST_SYNC_THRESHOLD, batch_buffer.len(), allow_solo);
                         batch_buffer.clear();
                         balance_updates.clear();
                         continue; // Skip to next batch cycle
