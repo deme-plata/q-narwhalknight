@@ -18478,9 +18478,13 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 let needs_http_height = !p2p_only && (network_height == 0
                     || fast_peer_count_for_http < 2
                     || (current_height + 50_000 < network_height));
+                warn!("🔍 [HTTP BOOTSTRAP CHECK v10.2.8] needs_http={}, p2p_only={}, net_h={}, peers={}, cur_h={}, gap={}",
+                      needs_http_height, p2p_only, network_height, fast_peer_count_for_http, current_height,
+                      network_height.saturating_sub(current_height));
                 if needs_http_height {
-                    debug!("🌐 [BOOTSTRAP HTTP FALLBACK] network_height={}, peers={}, refreshing from HTTP", network_height, fast_peer_count_for_http);
-                    debug!("   Attempting HTTP bootstrap discovery from {} peers...", HTTP_BOOTSTRAP_PEERS.len());
+                    warn!("🌐 [BOOTSTRAP HTTP FALLBACK v10.2.8] network_height={}, peers={}, current_height={}, triggering HTTP discovery",
+                          network_height, fast_peer_count_for_http, current_height);
+                    warn!("   Attempting HTTP bootstrap discovery from {} peers...", HTTP_BOOTSTRAP_PEERS.len());
 
                     // v5.1.0: Try multiple bootstrap peers for height discovery
                     // v9.0.3: CRITICAL FIX — Add 5s timeout per peer to prevent sync loop stall.
@@ -18527,15 +18531,19 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
                                                     // v10.2.8: Register THIS bootstrap peer using URL → peer ID mapping.
                                                     // Previously hardcoded for Beta only; now registers ALL responding peers.
-                                                    // This fixes sync when gossipsub mesh is broken (peer-height announcements
-                                                    // not delivered) by using HTTP fallback to discover and register peers.
                                                     if let Some(ref turbo_sync) = app_state_sync.turbo_sync {
-                                                        if let Some(peer_id_str) = bootstrap_peer_id_for_url(bootstrap_peer) {
+                                                        let mapped_peer = bootstrap_peer_id_for_url(bootstrap_peer);
+                                                        warn!("🔍 [HTTP BOOTSTRAP v10.2.8] URL={}, height={}, our_height={}, mapped_peer={:?}",
+                                                              bootstrap_peer, bootstrap_height, current_height, mapped_peer);
+                                                        if let Some(peer_id_str) = mapped_peer {
                                                             if let Ok(peer_id) = peer_id_str.parse::<libp2p::PeerId>() {
                                                                 if bootstrap_height > current_height {
                                                                     turbo_sync.register_peer(peer_id, bootstrap_height).await;
-                                                                    info!("🚀 [TURBO SYNC] Auto-registered {} with height {} from HTTP discovery ({})",
+                                                                    warn!("🚀 [TURBO SYNC v10.2.8] ✅ Auto-registered {} with height {} from HTTP ({})",
                                                                           peer_id_str, bootstrap_height, bootstrap_peer);
+                                                                } else {
+                                                                    warn!("⏭️  [TURBO SYNC v10.2.8] Skipped {} — height {} <= our {} ({})",
+                                                                          peer_id_str, bootstrap_height, current_height, bootstrap_peer);
                                                                 }
                                                             }
                                                         }
