@@ -495,6 +495,18 @@ const HTTP_BOOTSTRAP_PEERS: &[&str] = &[
     "http://161.35.219.10:8080",    // Server Alpha (quaternary)
 ];
 
+/// v10.2.8: Map HTTP bootstrap URLs to known libp2p peer IDs for auto-registration.
+/// When gossipsub mesh is broken, HTTP fallback discovers peer heights but needs
+/// peer IDs to register them in turbo sync. This mapping enables that.
+fn bootstrap_peer_id_for_url(url: &str) -> Option<&'static str> {
+    if url.contains("89.149.241.126") { Some("12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM") }      // Epsilon
+    else if url.contains("5.79.79.158") { Some("12D3KooWLJJRvqo6mBoHLpgxVbGKfW3Jv39ziU4kz1adKFv93JbK") }     // Delta
+    else if url.contains("109.205.176.60") { Some("12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH") }  // Gamma
+    else if url.contains("185.182.185.227") { Some("12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH") } // Beta
+    else if url.contains("quillon.xyz") { Some("12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM") }    // quillon.xyz = Epsilon
+    else { None }
+}
+
 /// Validator allowlist for P2P balance updates
 /// v5.1.0: Tightened - must be a connected peer OR a known bootstrap node
 fn is_allowed_balance_update_origin(origin_node_id: &str) -> bool {
@@ -18509,20 +18521,23 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                                     );
                                                     network_height = bootstrap_height;
 
-                                                    // 🚀 v1.0.40-beta: FIX #1 - Auto-register bootstrap peer in TurboSync registry
-                                                    // This ensures TurboSync can use the bootstrap peer even when gossipsub
-                                                    // peer-height announcements aren't being received (mesh formation issues)
+                                                    // v10.2.8: Register THIS bootstrap peer using URL → peer ID mapping.
+                                                    // Previously hardcoded for Beta only; now registers ALL responding peers.
+                                                    // This fixes sync when gossipsub mesh is broken (peer-height announcements
+                                                    // not delivered) by using HTTP fallback to discover and register peers.
                                                     if let Some(ref turbo_sync) = app_state_sync.turbo_sync {
-                                                        // Use the known bootstrap peer ID from Server Beta (mainnet)
-                                                        // FIXED v1.0.2: Updated to current mainnet peer ID
-                                                        const BOOTSTRAP_PEER_ID: &str = "12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH";
-                                                        if let Ok(peer_id) = BOOTSTRAP_PEER_ID.parse::<libp2p::PeerId>() {
-                                                            turbo_sync.register_peer(peer_id, bootstrap_height).await;
-                                                            info!("🚀 [TURBO SYNC] Auto-registered bootstrap peer {} with height {} from HTTP discovery",
-                                                                  BOOTSTRAP_PEER_ID, bootstrap_height);
+                                                        if let Some(peer_id_str) = bootstrap_peer_id_for_url(bootstrap_peer) {
+                                                            if let Ok(peer_id) = peer_id_str.parse::<libp2p::PeerId>() {
+                                                                if bootstrap_height > current_height {
+                                                                    turbo_sync.register_peer(peer_id, bootstrap_height).await;
+                                                                    info!("🚀 [TURBO SYNC] Auto-registered {} with height {} from HTTP discovery ({})",
+                                                                          peer_id_str, bootstrap_height, bootstrap_peer);
+                                                                }
+                                                            }
                                                         }
                                                     }
-                                                    break 'bootstrap_discovery; // Found height, stop trying peers
+                                                    // v10.2.8: DON'T break — try ALL bootstrap peers for multiple sync sources
+                                                    // Previously: break 'bootstrap_discovery; (only used first responding peer)
                                                 } else {
                                                     warn!("⚠️  [BOOTSTRAP HTTP FALLBACK] JSON missing 'data.current_height' field");
                                                     if let Some(obj) = json.as_object() {
