@@ -243,9 +243,15 @@ impl BlockPackCodec {
             }
         }
 
+        // v10.2.8: Dump first 64 bytes for debugging unknown format
+        let header_hex: String = buf[..std::cmp::min(64, buf.len())]
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<Vec<_>>()
+            .join(" ");
         Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("Failed to parse response: not valid bincode, CBOR, postcard or JSON (first byte: 0x{:02x}, len: {})", buf[0], buf.len()),
+            format!("Failed to parse response: not valid bincode, rmp, CBOR, postcard or JSON (first byte: 0x{:02x}, len: {}, header: {})", buf[0], buf.len(), header_hex),
         ))
     }
 }
