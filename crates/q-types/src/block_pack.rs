@@ -167,7 +167,7 @@ impl BlockPackCodec {
         ))
     }
 
-    /// Parse response - try bincode first, then CBOR/JSON for backward compatibility
+    /// Parse response - try multiple formats for backward compatibility with older peers
     fn parse_response(buf: &[u8]) -> io::Result<BlockPackResponse> {
         if buf.is_empty() {
             return Err(io::Error::new(
@@ -177,9 +177,42 @@ impl BlockPackCodec {
         }
 
         // Try bincode first (v3.4.15+ format with u128 support)
-        // This is the only format that can handle blocks with u128 token amounts
         if let Ok(res) = bincode::deserialize::<BlockPackResponse>(buf) {
             return Ok(res);
+        }
+
+        // v10.2.8: Try postcard (used by some peer versions for compact serialization)
+        // postcard uses varint encoding — 0xc8 first byte (200) matches a varint vec length
+        if let Ok(res) = postcard::from_bytes::<BlockPackResponse>(buf) {
+            return Ok(res);
+        }
+
+        // v10.2.8: Try bincode with a minimal struct (peers before v1.0.45 lack peer_height)
+        #[derive(serde::Deserialize)]
+        struct BlockPackResponseLegacy {
+            blocks: Vec<QBlock>,
+            start_height: u64,
+            end_height: u64,
+            has_more: bool,
+        }
+        if let Ok(res) = bincode::deserialize::<BlockPackResponseLegacy>(buf) {
+            return Ok(BlockPackResponse {
+                blocks: res.blocks,
+                start_height: res.start_height,
+                end_height: res.end_height,
+                has_more: res.has_more,
+                peer_height: 0,
+            });
+        }
+        // Also try postcard with legacy struct
+        if let Ok(res) = postcard::from_bytes::<BlockPackResponseLegacy>(buf) {
+            return Ok(BlockPackResponse {
+                blocks: res.blocks,
+                start_height: res.start_height,
+                end_height: res.end_height,
+                has_more: res.has_more,
+                peer_height: 0,
+            });
         }
 
         // Fall back to CBOR for legacy peers (only works for old blocks without u128)
@@ -197,7 +230,7 @@ impl BlockPackCodec {
 
         Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("Failed to parse response: not valid bincode, CBOR or JSON (first byte: 0x{:02x}, len: {})", buf[0], buf.len()),
+            format!("Failed to parse response: not valid bincode, CBOR, postcard or JSON (first byte: 0x{:02x}, len: {})", buf[0], buf.len()),
         ))
     }
 }
