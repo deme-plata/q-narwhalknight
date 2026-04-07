@@ -15146,7 +15146,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                             hash_input[32..].copy_from_slice(&submission.nonce.to_le_bytes());
                                             let initial = blake3::hash(&hash_input);
                                             let mut current = *initial.as_bytes();
-                                            let rounds = submission.vdf_iterations.min(10_000); // Safety cap
+                                            // v10.2.8: Raised cap from 10K to 200K. At height 13.4M, formula gives
+                                            // 134,854 iterations — the old 10K cap caused 100% rejection.
+                                            // The server controls iteration count via the challenge response,
+                                            // so miners can't fake higher iterations than what was issued.
+                                            let rounds = submission.vdf_iterations.min(200_000);
                                             for _ in 0..rounds {
                                                 current = *blake3::hash(&current).as_bytes();
                                             }
