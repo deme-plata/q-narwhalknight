@@ -19762,11 +19762,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 Ok(persisted) if !persisted.is_empty() => {
                                     let count = persisted.len();
                                     let mut tb = app_state_sync.token_balances.write().await;
+                                    // v10.2.8: RocksDB authoritative (same fix as wallet_balances)
                                     for (key, amount) in &persisted {
-                                        let current = tb.get(key).copied().unwrap_or(0);
-                                        if *amount > current {
-                                            tb.insert(*key, *amount);
-                                        }
+                                        tb.insert(*key, *amount);
                                     }
                                     drop(tb);
                                     info!("✅ [SYNC COMPLETE v8.7.4] Loaded {} token balances from RocksDB", count);
