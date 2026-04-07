@@ -19706,12 +19706,12 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 Ok(persisted) => {
                                     let count = persisted.len();
                                     let mut balances = app_state_sync.wallet_balances.write().await;
-                                    // Merge: keep higher of in-memory vs RocksDB (don't lose real-time updates)
+                                    // v10.2.8: RocksDB is authoritative after sync completes.
+                                    // Previous "keep higher" logic caused balance inflation when
+                                    // in-memory had stale/inflated values from P2P gossip or
+                                    // startup double-counting (3581 QUG instead of correct 234).
                                     for (addr, amount) in &persisted {
-                                        let current = balances.get(addr).copied().unwrap_or(0);
-                                        if *amount > current {
-                                            balances.insert(*addr, *amount);
-                                        }
+                                        balances.insert(*addr, *amount);
                                     }
                                     let total: u128 = balances.values().sum();
                                     drop(balances);
