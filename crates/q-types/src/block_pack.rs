@@ -181,8 +181,13 @@ impl BlockPackCodec {
             return Ok(res);
         }
 
-        // v10.2.8: Try postcard (used by some peer versions for compact serialization)
-        // postcard uses varint encoding — 0xc8 first byte (200) matches a varint vec length
+        // v10.2.8: Try MessagePack (rmp_serde) — 0xc8 is the ext8 type marker in msgpack
+        // Some peer versions use rmp_serde for block-pack responses
+        if let Ok(res) = rmp_serde::from_slice::<BlockPackResponse>(buf) {
+            return Ok(res);
+        }
+
+        // v10.2.8: Try postcard (compact varint serialization)
         if let Ok(res) = postcard::from_bytes::<BlockPackResponse>(buf) {
             return Ok(res);
         }
@@ -196,6 +201,16 @@ impl BlockPackCodec {
             has_more: bool,
         }
         if let Ok(res) = bincode::deserialize::<BlockPackResponseLegacy>(buf) {
+            return Ok(BlockPackResponse {
+                blocks: res.blocks,
+                start_height: res.start_height,
+                end_height: res.end_height,
+                has_more: res.has_more,
+                peer_height: 0,
+            });
+        }
+        // Also try MessagePack with legacy struct
+        if let Ok(res) = rmp_serde::from_slice::<BlockPackResponseLegacy>(buf) {
             return Ok(BlockPackResponse {
                 blocks: res.blocks,
                 start_height: res.start_height,
