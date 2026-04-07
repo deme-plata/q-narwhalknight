@@ -15504,7 +15504,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
                     // v7.1.4: Skip threshold check if current_height hasn't been initialized yet
                     // This prevents discarding solutions before the node loads its height from DB
-                    if early_current_height > 0 && early_blocks_behind > BATCH_FAST_SYNC_THRESHOLD && !batch_buffer.is_empty() {
+                    // v10.2.8: Bypass fast-sync gate when Q_ALLOW_SOLO_MINING is set.
+                    // Without this, the node discards all valid solutions during catch-up,
+                    // preventing block production even when it's the only producer.
+                    let allow_solo = std::env::var("Q_ALLOW_SOLO_MINING").ok().as_deref() == Some("true");
+                    if early_current_height > 0 && early_blocks_behind > BATCH_FAST_SYNC_THRESHOLD && !batch_buffer.is_empty() && !allow_solo {
                         // Skip PHASE 4 and PHASE 5 entirely during fast-sync
                         warn!("🚀 [FAST-SYNC] Skipping solution queueing ({} blocks behind > {} threshold, {} solutions discarded)",
                               early_blocks_behind, BATCH_FAST_SYNC_THRESHOLD, batch_buffer.len());
