@@ -181,13 +181,30 @@ impl BlockPackCodec {
             return Ok(res);
         }
 
-        // v10.2.8: Try MessagePack (rmp_serde) — 0xc8 is the ext8 type marker in msgpack
-        // Some peer versions use rmp_serde for block-pack responses
+        // v10.2.8: Try deserializing as raw Vec<QBlock> (no wrapper struct).
+        // Older peers send blocks directly without BlockPackResponse wrapper fields.
+        // Header pattern: c8 00 00 00 00 00 00 00 = bincode u64 LE vec length (200 blocks),
+        // followed immediately by QBlock data (height, "mainnet-genesis", etc.)
+        if let Ok(blocks) = bincode::deserialize::<Vec<QBlock>>(buf) {
+            if !blocks.is_empty() {
+                let start_height = blocks.first().unwrap().header.height;
+                let end_height = blocks.last().unwrap().header.height;
+                return Ok(BlockPackResponse {
+                    blocks,
+                    start_height,
+                    end_height,
+                    has_more: false,
+                    peer_height: 0,
+                });
+            }
+        }
+
+        // v10.2.8: Try MessagePack (rmp_serde)
         if let Ok(res) = rmp_serde::from_slice::<BlockPackResponse>(buf) {
             return Ok(res);
         }
 
-        // v10.2.8: Try postcard (compact varint serialization)
+        // v10.2.8: Try postcard
         if let Ok(res) = postcard::from_bytes::<BlockPackResponse>(buf) {
             return Ok(res);
         }
