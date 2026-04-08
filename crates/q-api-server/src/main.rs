@@ -5117,6 +5117,18 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
     info!("✅ AsyncStorageEngine ready for block production");
     info!("🚀 ════════════════════════════════════════════════════════");
+
+    // 🔍 Diagnostic: check actual block availability in RocksDB
+    // Runs in background so it doesn't block startup
+    tokio::spawn({
+        let storage = state.storage_engine.clone();
+        async move {
+            if let Err(e) = storage.debug_scan_block_range().await {
+                tracing::error!("🔍 [DB-SCAN] Diagnostic scan failed: {}", e);
+            }
+        }
+    });
+
     } // end #[cfg(not(target_os = "windows"))] block for AsyncStorageEngine + pointer integrity + preflight
 
     // ========================================
@@ -14592,15 +14604,18 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             loop {
                 interval.tick().await;
                 if let Ok(Some(db_height)) = app_state_height_reconcile.storage_engine.get_latest_qblock_height().await {
-                    let atomic_height = app_state_height_reconcile.current_height_atomic.load(std::sync::atomic::Ordering::Acquire);
-                    if db_height > atomic_height + 1 {
-                        // Significant drift detected - fix it
-                        app_state_height_reconcile.current_height_atomic.store(db_height, std::sync::atomic::Ordering::Release);
+                    // v10.2.9: fetch_max for race-free monotonic reconciliation
+                    let prev = app_state_height_reconcile.current_height_atomic.fetch_max(db_height, std::sync::atomic::Ordering::SeqCst);
+                    if db_height > prev {
+                        // Drift detected - atomic was behind DB, now fixed
                         // v9.0.4: try_write to avoid blocking miners' try_read()
                         if let Ok(mut guard) = app_state_height_reconcile.current_challenge.try_write() { *guard = None; }
-                        if db_height > atomic_height + 10 {
+                        if db_height > prev + 10 {
                             warn!("🔧 [HEIGHT RECONCILE] current_height_atomic drifted! {} → {} (Δ{})",
-                                  atomic_height, db_height, db_height - atomic_height);
+                                  prev, db_height, db_height - prev);
+                        } else {
+                            debug!("🔧 [HEIGHT RECONCILE] current_height_atomic corrected {} → {} (Δ{})",
+                                  prev, db_height, db_height - prev);
                         }
                     }
                 }
@@ -16061,6 +16076,14 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                     // This creates an infinite loop where the chain NEVER advances.
                                     // FIX: Always ensure height_cache reflects blocks that exist in storage.
                                     app_state_mining.storage_engine.update_height_cache(new_block.header.height).await;
+                                    // 🚨 v10.2.9 CRITICAL FIX: Update current_height_atomic for dedup hits
+                                    // ROOT CAUSE: Dedup path updated height_cache but NOT current_height_atomic.
+                                    // Result: Production loop reads stale atomic → stalls for 20-30 minutes.
+                                    // Uses fetch_max for race-free monotonic advancement (reviewer recommendation).
+                                    let prev = app_state_mining.current_height_atomic.fetch_max(new_block.header.height, std::sync::atomic::Ordering::SeqCst);
+                                    if new_block.header.height > prev {
+                                        info!("🎯 [DEDUP-FIX] current_height_atomic updated {} → {} (solution-based dedup path)", prev, new_block.header.height);
+                                    }
                                 } else {
                                     // Serialize block to bytes
                                     let block_bytes = match bincode::serialize(&new_block) {
@@ -16104,10 +16127,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                             // Result: Mining API thinks node is behind (2180) even though blocks are being synced (3300+)
                                             // Symptom: "Node is syncing: X blocks behind network" even when sync is working
                                             // FIX: Update current_height_atomic alongside height_cache
-                                            let current_atomic = app_state_mining.current_height_atomic.load(std::sync::atomic::Ordering::SeqCst);
-                                            if new_block.header.height > current_atomic {
-                                                app_state_mining.current_height_atomic.store(new_block.header.height, std::sync::atomic::Ordering::SeqCst);
-                                                info!("🎯 [v1.1.3-beta] current_height_atomic updated {} → {} (Mining API fix)", current_atomic, new_block.header.height);
+                                            // v10.2.9: Use fetch_max for race-free monotonic advancement
+                                            let prev = app_state_mining.current_height_atomic.fetch_max(new_block.header.height, std::sync::atomic::Ordering::SeqCst);
+                                            if new_block.header.height > prev {
+                                                info!("🎯 [v1.1.3-beta] current_height_atomic updated {} → {} (Mining API fix)", prev, new_block.header.height);
                                             }
 
                                             // Check for congestion warning
@@ -16152,6 +16175,13 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                             if e.to_string().contains("Block already exists") =>
                                         {
                                             warn!("⚠️ Duplicate block {} detected (lost race), forcing immediate resync", new_block.header.height);
+                                            // 🚨 v10.2.9 CRITICAL FIX: Update atomic BEFORE continue
+                                            let prev = app_state_mining.current_height_atomic.fetch_max(new_block.header.height, std::sync::atomic::Ordering::SeqCst);
+                                            if new_block.header.height > prev {
+                                                info!("🎯 [DEDUP-FIX] current_height_atomic updated {} → {} (solution-based error path)", prev, new_block.header.height);
+                                            }
+                                            // Clear stale challenge
+                                            if let Ok(mut guard) = app_state_mining.current_challenge.try_write() { *guard = None; }
                                             // CRITICAL: Force producers to resync after duplicate
                                             if let Err(sync_err) = app_state_mining
                                                 .block_producer_pool
@@ -16165,7 +16195,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                             } else {
                                                 info!("✅ Producers resynced after duplicate, continuing from database height");
                                             }
-                                            continue; // Skip to next production cycle (height NOT advanced)
+                                            continue; // Now safe — atomic is updated
                                         }
                                         Ok(Err(e)) if attempt < max_retries - 1 => {
                                             warn!("⚠️ Block {} save failed (attempt {}): {}. Retrying...",
@@ -16637,13 +16667,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 info!("📝 [v10.0.6] Block {} — swap processing complete", new_block.header.height);
 
                                 // 🔧 v1.0.3-beta: Update atomic height for mining API
-                                info!("📝 [v10.0.6] Block {} — updating current_height_atomic {} → {}", new_block.header.height,
-                                    app_state_mining.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed),
-                                    new_block.header.height);
-                                app_state_mining.current_height_atomic.store(
-                                    new_block.header.height,
-                                    std::sync::atomic::Ordering::Relaxed,
-                                );
+                                // v10.2.9: fetch_max for race-free monotonic advancement
+                                let prev = app_state_mining.current_height_atomic.fetch_max(new_block.header.height, std::sync::atomic::Ordering::SeqCst);
+                                info!("📝 [v10.0.6] Block {} — updating current_height_atomic {} → {}", new_block.header.height, prev, new_block.header.height);
 
                                 // 🔧 v1.0.4-beta: Clear cached challenge (height advanced)
                                 // v9.0.4: try_write to avoid blocking miners' try_read()
@@ -17755,6 +17781,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                     new_block.header.height);
                                 // 🚨 v10.1.5: Same fix as first DEDUP path — update height cache
                                 app_state_block_producer.storage_engine.update_height_cache(new_block.header.height).await;
+                                // 🚨 v10.2.9 CRITICAL FIX: Update current_height_atomic for dedup hits
+                                let prev = app_state_block_producer.current_height_atomic.fetch_max(new_block.header.height, std::sync::atomic::Ordering::SeqCst);
+                                if new_block.header.height > prev {
+                                    info!("🎯 [DEDUP-FIX] current_height_atomic updated {} → {} (time-based dedup path)", prev, new_block.header.height);
+                                }
                             } // end if !block_already_exists
                         } // end if async_storage exists
 
@@ -17851,9 +17882,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 }
 
                                 // 2. Update atomic height for mining API consistency
-                                app_state_block_producer.current_height_atomic.store(
+                                // v10.2.9: fetch_max for race-free monotonic advancement
+                                app_state_block_producer.current_height_atomic.fetch_max(
                                     new_block.header.height,
-                                    std::sync::atomic::Ordering::Relaxed,
+                                    std::sync::atomic::Ordering::SeqCst,
                                 );
 
                                 // ✨ v1.4.2-beta: Update UpgradeManager height for height-gated features
@@ -17868,6 +17900,14 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             }
                             Err(e) if e.to_string().contains("Block already exists") => {
                                 warn!("⚠️ Duplicate block {} detected (lost race), forcing immediate resync", new_block.header.height);
+                                // 🚨 v10.2.9 CRITICAL FIX: Update atomic BEFORE continue
+                                // Without this, the continue skips height advancement → permanent stall
+                                let prev = app_state_block_producer.current_height_atomic.fetch_max(new_block.header.height, std::sync::atomic::Ordering::SeqCst);
+                                if new_block.header.height > prev {
+                                    info!("🎯 [DEDUP-FIX] current_height_atomic updated {} → {} (time-based error path)", prev, new_block.header.height);
+                                }
+                                // Clear stale challenge
+                                if let Ok(mut guard) = app_state_block_producer.current_challenge.try_write() { *guard = None; }
                                 // CRITICAL: Force producers to resync after duplicate
                                 if let Err(sync_err) = app_state_block_producer
                                     .block_producer_pool
@@ -17878,7 +17918,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 } else {
                                     info!("✅ Producers resynced after duplicate, continuing from database height");
                                 }
-                                continue; // Skip to next production cycle
+                                continue; // Now safe — atomic is updated
                             }
                             Err(e) => {
                                 error!(

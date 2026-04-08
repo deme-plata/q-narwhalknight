@@ -2038,6 +2038,11 @@ impl QStorage {
         let cached_height = self.height_cache.cached();
         let latest_height = contiguous_height.max(tip_height).max(cached_height);
 
+        if capped_limit >= 100 {
+            info!("🔍 [BLOCK-RANGE-DEBUG] contiguous_height={}, tip_height={}, cached_height={}, latest_height={}, requested_start={}, requested_limit={}",
+                  contiguous_height, tip_height, cached_height, latest_height, start_height, capped_limit);
+        }
+
         if latest_height == 0 {
             debug!("No QBlock height found (contiguous=0, tip=0, cache=0), returning empty range");
             return Ok(Vec::new());
@@ -2047,6 +2052,10 @@ impl QStorage {
         let end_height = std::cmp::min(start_height + capped_limit as u64 - 1, latest_height);
 
         if start_height > end_height {
+            if capped_limit >= 100 {
+                info!("🔍 [BLOCK-RANGE-DEBUG] EMPTY RETURN: start_height={} > end_height={} (latest_height={})",
+                      start_height, end_height, latest_height);
+            }
             return Ok(Vec::new());
         }
 
@@ -2059,6 +2068,13 @@ impl QStorage {
 
         // Use RocksDB multi_get for batch fetching
         let results = self.hot_db.multi_get(CF_BLOCKS, &keys).await?;
+
+        if capped_limit >= 100 {
+            let found_count = results.iter().filter(|r| r.is_some()).count();
+            let total_keys = keys.len();
+            info!("🔍 [BLOCK-RANGE-DEBUG] multi_get: {}/{} keys found for heights {}..={}",
+                  found_count, total_keys, start_height, end_height);
+        }
 
         // v7.3.1: Also batch-fetch quantum_metadata and transactions for reconstructing blocks
         let qm_keys: Vec<Vec<u8>> = (start_height..=end_height)
@@ -2136,6 +2152,117 @@ impl QStorage {
               blocks.len(), keys.len(), elapsed, rate, missing_count);
 
         Ok(blocks)
+    }
+
+    /// Diagnostic: Scan RocksDB to find actual block height range
+    /// This checks what qblock:height: keys actually exist in CF_BLOCKS
+    /// Returns (lowest_height, highest_height, sample_count, total_estimate)
+    pub async fn debug_scan_block_range(&self) -> Result<(u64, u64, u64, u64)> {
+        info!("🔍 [DB-SCAN] Starting diagnostic block range scan...");
+
+        // Check the pointers first
+        let contiguous = match self.hot_db.get(CF_BLOCKS, b"qblock:latest").await? {
+            Some(bytes) if bytes.len() == 8 => u64::from_be_bytes(bytes.try_into().unwrap()),
+            _ => 0,
+        };
+        let tip = match self.hot_db.get(CF_BLOCKS, b"qblock:tip_height").await? {
+            Some(bytes) if bytes.len() == 8 => u64::from_be_bytes(bytes.try_into().unwrap()),
+            _ => 0,
+        };
+        let cached = self.height_cache.cached();
+        info!("🔍 [DB-SCAN] Pointers: contiguous={}, tip={}, cached={}", contiguous, tip, cached);
+
+        // Probe specific heights to find where blocks exist
+        let mut lowest_found: u64 = u64::MAX;
+        let mut highest_found: u64 = 0;
+        let mut found_count: u64 = 0;
+
+        // Sample at various heights: 1, 100, 1000, 10000, then every 100K up to max
+        let max_height = contiguous.max(tip).max(cached);
+        let mut probe_heights: Vec<u64> = vec![0, 1, 2, 10, 100, 1000, 10000, 100000, 500000, 1000000];
+
+        // Add probes every 500K
+        let mut h = 0u64;
+        while h <= max_height {
+            probe_heights.push(h);
+            h += 500_000;
+        }
+        // Add dense probes near the tip (last 200K)
+        if max_height > 200_000 {
+            let start = max_height - 200_000;
+            let mut h = start;
+            while h <= max_height {
+                probe_heights.push(h);
+                h += 10_000;
+            }
+        }
+        // Last 1000 blocks
+        if max_height > 1000 {
+            for h in (max_height - 1000)..=max_height {
+                probe_heights.push(h);
+            }
+        }
+
+        probe_heights.sort();
+        probe_heights.dedup();
+
+        // Batch probe
+        let keys: Vec<Vec<u8>> = probe_heights.iter()
+            .map(|h| format!("qblock:height:{}", h).into_bytes())
+            .collect();
+
+        let results = self.hot_db.multi_get(CF_BLOCKS, &keys).await?;
+
+        for (i, result) in results.iter().enumerate() {
+            if result.is_some() {
+                let h = probe_heights[i];
+                found_count += 1;
+                if h < lowest_found { lowest_found = h; }
+                if h > highest_found { highest_found = h; }
+            }
+        }
+
+        if found_count == 0 {
+            warn!("🔍 [DB-SCAN] NO blocks found at any probed height! Probed {} heights from 0 to {}",
+                  probe_heights.len(), max_height);
+
+            // Also check old binary key format (height.to_be_bytes())
+            let old_format_test_heights = vec![1u64, 1000, 100000, 1000000];
+            let old_keys: Vec<Vec<u8>> = old_format_test_heights.iter()
+                .map(|h| {
+                    let mut key = Vec::with_capacity(8);
+                    key.extend_from_slice(&h.to_be_bytes());
+                    key
+                })
+                .collect();
+            let old_results = self.hot_db.multi_get(CF_BLOCKS, &old_keys).await?;
+            let old_found = old_results.iter().filter(|r| r.is_some()).count();
+            if old_found > 0 {
+                warn!("🔍 [DB-SCAN] Found {} blocks with OLD binary key format! Block data exists but key format mismatch!", old_found);
+            }
+
+            // Check scan_prefix for any qblock:height: keys
+            let sample = self.hot_db.scan_prefix(CF_BLOCKS, b"qblock:height:").await?;
+            info!("🔍 [DB-SCAN] scan_prefix('qblock:height:') returned {} entries", sample.len());
+            if let Some((first_key, _)) = sample.first() {
+                info!("🔍 [DB-SCAN] First key: {}", String::from_utf8_lossy(first_key));
+            }
+            if let Some((last_key, _)) = sample.last() {
+                info!("🔍 [DB-SCAN] Last key: {}", String::from_utf8_lossy(last_key));
+            }
+
+            return Ok((0, 0, 0, 0));
+        }
+
+        info!("🔍 [DB-SCAN] RESULTS: lowest_found={}, highest_found={}, probed_found={}/{}, pointer_claims={}",
+              lowest_found, highest_found, found_count, probe_heights.len(), max_height);
+
+        if lowest_found > 1000 {
+            warn!("🚨 [DB-SCAN] HISTORICAL BLOCKS MISSING! Lowest block is at height {} but pointer claims contiguous from 0", lowest_found);
+            warn!("🚨 [DB-SCAN] This means new nodes CANNOT sync from scratch!");
+        }
+
+        Ok((lowest_found, highest_found, found_count, max_height))
     }
 
     /// Get latest QBlock height

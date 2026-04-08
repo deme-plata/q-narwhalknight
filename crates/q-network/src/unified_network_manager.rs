@@ -3380,7 +3380,7 @@ impl UnifiedNetworkManager {
                         match message {
                             Message::Request { request_id, request, channel } => {
                                 info!("📥 [BLOCK-PACK] Received block pack request from {}", peer);
-                                info!("   Requested: blocks {}-{} (max {})",
+                                info!("   Requested: start_height={}, end_height={}, max_blocks={}",
                                       request.start_height, request.end_height, request.max_blocks);
 
                                 // v1.2.7-beta: NON-BLOCKING HANDLER - Prevents ResponseOmission timeouts
@@ -3437,13 +3437,21 @@ impl UnifiedNetworkManager {
                                         // Prevents 500+ block responses that serialize to 150MB+
                                         let limit = block_count.min(max_blocks).min(200);
 
+                                        info!("🔍 [BLOCK-PACK-DEBUG] our_height(contiguous)={}, requested range={}-{}, computed limit={}",
+                                              our_height, start_height, end_height, limit);
+
                                         match storage.get_qblocks_range(start_height, limit).await {
                                             Ok(blocks) => {
-                                                info!("✅ [BLOCK-PACK] Async task fetched {} blocks (heights {}-{}) for {}",
-                                                      blocks.len(),
-                                                      blocks.first().map(|b| b.header.height).unwrap_or(start_height),
-                                                      blocks.last().map(|b| b.header.height).unwrap_or(start_height),
-                                                      peer_clone);
+                                                let actual_first = blocks.first().map(|b| b.header.height);
+                                                let actual_last = blocks.last().map(|b| b.header.height);
+                                                if blocks.is_empty() {
+                                                    warn!("⚠️ [BLOCK-PACK-DEBUG] ZERO BLOCKS returned for range {}-{} (limit={}, our_height={})",
+                                                          start_height, end_height, limit, our_height);
+                                                    warn!("   This means get_qblocks_range({}, {}) found nothing in RocksDB", start_height, limit);
+                                                } else {
+                                                    info!("✅ [BLOCK-PACK] Async task fetched {} blocks (heights {:?}-{:?}) for {}",
+                                                          blocks.len(), actual_first, actual_last, peer_clone);
+                                                }
                                                 q_types::BlockPackResponse::from_blocks(blocks, end_height, our_height)
                                             }
                                             Err(e) => {
