@@ -1880,7 +1880,8 @@ impl QStorage {
                     match q_types::legacy::deserialize_qblock_with_fallback(&raw_bytes) {
                         Ok(b) => b,
                         Err(e) => {
-                            warn!("⚠️  Failed to deserialize decompressed QBlock at height {}: {}", height, e);
+                            // v10.2.9: Reduced to debug — corrupt blocks at heights 6-12M cause log storm
+                            debug!("⚠️  Failed to deserialize decompressed QBlock at height {}: {}", height, e);
                             return Ok(None);
                         }
                     }
@@ -1889,7 +1890,8 @@ impl QStorage {
                     match q_types::legacy::deserialize_qblock_with_fallback(&block_data) {
                         Ok(b) => b,
                         Err(e) => {
-                            warn!("⚠️  Failed to deserialize QBlock at height {}: {} - treating as missing", height, e);
+                            // v10.2.9: Reduced to debug — corrupt blocks at heights 6-12M cause log storm
+                            debug!("⚠️  Failed to deserialize QBlock at height {}: {} - treating as missing", height, e);
                             return Ok(None);
                         }
                     }
