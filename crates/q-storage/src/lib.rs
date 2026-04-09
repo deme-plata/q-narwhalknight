@@ -2089,8 +2089,25 @@ impl QStorage {
 
         let mut blocks = Vec::with_capacity(keys.len());
         let mut missing_count = 0usize;
+        let mut corrupt_count = 0usize;
+        // v10.2.9: Track consecutive failures for early abort
+        let mut consecutive_failures = 0usize;
+        const MAX_CONSECUTIVE_FAILURES: usize = 10;
 
         for (idx, result) in results.into_iter().enumerate() {
+            // v10.2.9: Early abort if entire range is corrupt/missing
+            // Prevents I/O storm when syncing peers request blocks from corrupt height ranges
+            // (e.g., heights 6-12M with thousands of corrupt entries from old format data)
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES && blocks.is_empty() {
+                let height = start_height + idx as u64;
+                if corrupt_count > 0 {
+                    warn!("⚠️ [BLOCK-RANGE] Aborting range scan at height {} — {} consecutive failures, {} corrupt blocks deleted (I/O protection)",
+                          height, consecutive_failures, corrupt_count);
+                }
+                missing_count += keys.len() - idx;
+                break;
+            }
+
             if let Some(block_data) = result {
                 // v7.3.1: Detect compressed vs legacy format
                 let deserialize_result = if precompressed_storage::is_precompressed(&block_data) {
@@ -2107,6 +2124,7 @@ impl QStorage {
 
                 match deserialize_result {
                     Ok(mut block) => {
+                        consecutive_failures = 0; // Reset on success
                         // Reconstruct from separate CFs if available
                         if let Some(Some(qm_data)) = qm_results.get(idx) {
                             if let Ok(qm) = bincode::deserialize::<q_types::block::QuantumMetadata>(qm_data) {
@@ -2124,7 +2142,12 @@ impl QStorage {
                     }
                     Err(e) => {
                         let height = start_height + idx as u64;
-                        warn!("⚠️  Failed to deserialize block at height {}: {} — deleting corrupt entry", height, e);
+                        corrupt_count += 1;
+                        consecutive_failures += 1;
+                        // v10.2.9: Rate-limit corrupt block warnings (log first + every 100th)
+                        if corrupt_count <= 1 || corrupt_count % 100 == 0 {
+                            warn!("⚠️  Failed to deserialize QBlock at height {}: {} - treating as missing", height, e);
+                        }
                         // v10.2.8: Opportunistic cleanup — delete corrupt block so turbo sync can refill it
                         let del_key = format!("qblock:height:{}", height);
                         if let Err(del_err) = self.hot_db.delete(CF_BLOCKS, del_key.as_bytes()).await {
@@ -2134,9 +2157,7 @@ impl QStorage {
                     }
                 }
             } else {
-                let height = start_height + idx as u64;
-                // Reduced to trace to avoid spam during range queries with gaps
-                trace!("Missing block at height {} during range query", height);
+                consecutive_failures += 1;
                 missing_count += 1;
             }
         }
