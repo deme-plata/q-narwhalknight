@@ -4334,6 +4334,31 @@ async fn send_transaction_inner(
                 } else {
                     info!("📤 [TX] Optimistic QUGUSD balance update emitted for sender {}", q_log_privacy::mask_addr(&hex::encode(&sender_addr[..8])));
                 }
+
+                // v10.2.9: Emit optimistic event for RECEIVER (instant UI update)
+                let recipient_addr = signed_transaction.to;
+                let old_recipient_balance = state.storage_engine
+                    .get_token_balance(&recipient_addr, &q_types::QUGUSD_TOKEN_ADDRESS)
+                    .await
+                    .unwrap_or(0);
+                let optimistic_recipient_new = old_recipient_balance + signed_transaction.amount;
+                let recipient_event = StreamEvent::TokenBalanceUpdated {
+                    wallet_address: hex::encode(recipient_addr),
+                    token_address: hex::encode(q_types::QUGUSD_TOKEN_ADDRESS),
+                    token_symbol: "QUGUSD".to_string(),
+                    old_balance: old_recipient_balance as f64 / QUG_DISPLAY_DIVISOR,
+                    new_balance: optimistic_recipient_new as f64 / QUG_DISPLAY_DIVISOR,
+                    change_reason: "transfer_received".to_string(),
+                    timestamp: chrono::Utc::now(),
+                    block_hash: None,
+                    block_height: None,
+                    confirmation_status: "pending".to_string(),
+                };
+                if let Err(e) = state.event_emitter.emit_immediate(recipient_event).await {
+                    warn!("Failed to emit optimistic QUGUSD balance update for recipient: {}", e);
+                } else {
+                    info!("📤 [TX] Optimistic QUGUSD balance update emitted for recipient {}", q_log_privacy::mask_addr(&hex::encode(&recipient_addr[..8])));
+                }
             }
             q_types::TokenType::Custom(token_addr) => {
                 // Custom token — read token_balances, emit TokenBalanceUpdated
@@ -4358,6 +4383,31 @@ async fn send_transaction_inner(
                     warn!("Failed to emit optimistic token balance update: {}", e);
                 } else {
                     info!("📤 [TX] Optimistic token balance update emitted for sender {}", q_log_privacy::mask_addr(&hex::encode(&sender_addr[..8])));
+                }
+
+                // v10.2.9: Emit optimistic event for RECEIVER (instant UI update)
+                let recipient_addr = signed_transaction.to;
+                let old_recipient_balance = state.storage_engine
+                    .get_token_balance(&recipient_addr, &token_addr)
+                    .await
+                    .unwrap_or(0);
+                let optimistic_recipient_new = old_recipient_balance + signed_transaction.amount;
+                let recipient_event = StreamEvent::TokenBalanceUpdated {
+                    wallet_address: hex::encode(recipient_addr),
+                    token_address: hex::encode(token_addr),
+                    token_symbol: "TOKEN".to_string(),
+                    old_balance: old_recipient_balance as f64 / QUG_DISPLAY_DIVISOR,
+                    new_balance: optimistic_recipient_new as f64 / QUG_DISPLAY_DIVISOR,
+                    change_reason: "transfer_received".to_string(),
+                    timestamp: chrono::Utc::now(),
+                    block_hash: None,
+                    block_height: None,
+                    confirmation_status: "pending".to_string(),
+                };
+                if let Err(e) = state.event_emitter.emit_immediate(recipient_event).await {
+                    warn!("Failed to emit optimistic token balance update for recipient: {}", e);
+                } else {
+                    info!("📤 [TX] Optimistic token balance update emitted for recipient {}", q_log_privacy::mask_addr(&hex::encode(&recipient_addr[..8])));
                 }
             }
             q_types::TokenType::QUG => {

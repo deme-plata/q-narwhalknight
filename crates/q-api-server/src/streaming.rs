@@ -835,6 +835,16 @@ pub async fn sse_events(
             | StreamEvent::CalendarReminder { .. }
             | StreamEvent::ScheduledTransactionExecuted { .. } => true,
 
+            // v10.2.9: Token balance updates (QUGUSD, custom tokens) — filter by wallet address
+            StreamEvent::TokenBalanceUpdated { ref wallet_address, .. } => {
+                let normalized_event = if wallet_address.starts_with("qnk") {
+                    wallet_address[3..].to_string()
+                } else {
+                    wallet_address.clone()
+                };
+                normalized_event == normalized_filter
+            }
+
             // All other events are private - filter them out
             _ => false,
         }
