@@ -191,16 +191,15 @@ pub async fn get_multi_token_balance(
 
         // Combine both sources
         let total = minted_qugusd as u128 + swapped_qugusd;
-        if total > 0 {
-            // v3.0.5: Use 1e24 for logging consistency
-            info!(
-                "💰 QUGUSD balance for {}: minted={}, swapped={}, total={}",
-                q_log_privacy::mask_addr(&address_hex),
-                q_log_privacy::mask_amt_display(minted_qugusd as f64 / 1e24),
-                q_log_privacy::mask_amt_display(swapped_qugusd as f64 / 1e24),
-                q_log_privacy::mask_amt_display(total as f64 / 1e24)
-            );
-        }
+        // v10.2.9: Always log QUGUSD lookup (debug zero-balance issue)
+        info!(
+            "💰 QUGUSD balance for {}: minted={} (raw={}), swapped={} (raw={}), total={} (raw={}), token_balances_size={}",
+            q_log_privacy::mask_addr(&address_hex),
+            q_log_privacy::mask_amt_display(minted_qugusd as f64 / 1e24), minted_qugusd,
+            q_log_privacy::mask_amt_display(swapped_qugusd as f64 / 1e24), swapped_qugusd,
+            q_log_privacy::mask_amt_display(total as f64 / 1e24), total,
+            state.token_balances.read().await.len()
+        );
         total
     };
 
