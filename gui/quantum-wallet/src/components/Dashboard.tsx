@@ -32,17 +32,22 @@ import QuantumLoader from './QuantumLoader';
 
 // v3.6.1-beta: SANITY CHECK - Max possible balance is 21 million QUG (total supply)
 // Any balance exceeding this is corrupted data and must be rejected
-const MAX_SANE_BALANCE = 21_000_000; // 21 million QUG
+const MAX_QUG_SUPPLY = 21_000_000; // 21 million QUG max supply
+const MAX_STABLECOIN_BALANCE = 1_000_000_000; // 1 billion (stablecoins are uncapped in practice)
 
 /**
  * v3.6.1-beta: Validate balance value to prevent corrupted data from being cached
+ * v10.2.9: Accept symbol parameter — QUGUSD/USD are stablecoins with higher caps
  */
-function isValidBalance(balance: number): boolean {
+function isValidBalance(balance: number, symbol?: string): boolean {
   if (typeof balance !== 'number') return false;
   if (isNaN(balance) || !isFinite(balance)) return false;
   if (balance < 0) return false;
-  if (balance > MAX_SANE_BALANCE) {
-    console.warn(`🚨 [Dashboard] Rejected corrupted balance: ${balance.toExponential()} > max supply ${MAX_SANE_BALANCE}`);
+  const upper = (symbol || '').toUpperCase();
+  const isStablecoin = upper === 'QUGUSD' || upper === 'USD' || upper === 'QUSD';
+  const cap = isStablecoin ? MAX_STABLECOIN_BALANCE : MAX_QUG_SUPPLY;
+  if (balance > cap) {
+    console.warn(`🚨 [Dashboard] Rejected corrupted ${symbol || 'QUG'} balance: ${balance.toExponential()} > cap ${cap}`);
     return false;
   }
   return true;

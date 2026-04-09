@@ -52,10 +52,10 @@ function isValidBalance(balance: number, symbol?: string): boolean {
   if (isNaN(balance) || !isFinite(balance)) return false;
   if (balance < 0) return false;
 
-  // v3.6.7-beta: Only apply strict limit to QUG and QUGUSD (24 decimal tokens)
+  // v3.6.7-beta: Only apply strict limit to QUG (not QUGUSD — stablecoin supply is uncapped)
   // Custom tokens with fewer decimals can legitimately have much larger display values
-  const isNativeToken = !symbol || symbol.toUpperCase() === 'QUG' || symbol.toUpperCase() === 'QUGUSD';
-  if (isNativeToken && balance > MAX_QUG_BALANCE) {
+  const isQug = !symbol || symbol.toUpperCase() === 'QUG';
+  if (isQug && balance > MAX_QUG_BALANCE) {
     console.warn(`🚨 [TransactionScreen] Rejected corrupted ${symbol || 'native'} balance: ${balance.toExponential()} > max supply ${MAX_QUG_BALANCE}`);
     return false;
   }

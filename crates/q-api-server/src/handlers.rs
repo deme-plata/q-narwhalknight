@@ -3077,57 +3077,23 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
                             );
                         }
                     } else if is_qugusd {
-                        // QUGUSD transfer - update token_balances
-                        let mut token_balances = state.token_balances.write().await;
-                        let qugusd_addr = q_types::QUGUSD_TOKEN_ADDRESS;
+                        // v10.2.9: REMOVED duplicate QUGUSD balance modification
+                        // ROOT CAUSE: This code credited QUGUSD in token_balances here,
+                        // AND balance_consensus.rs:process_block_mining_rewards_tx() credited
+                        // the same amount AGAIN when the block was processed — double-credit bug.
+                        // FIX: Let balance_consensus handle all QUGUSD balance changes (it has
+                        // proper dedup via processed_blocks LRU). Only log + save TX here.
+                        tracing::info!(
+                            "💰 Consensus confirmed QUGUSD tx {}: {} → {} ({} QUGUSD) — balance update deferred to block processing",
+                            q_log_privacy::mask_hash(&hex::encode(tx_hash)),
+                            q_log_privacy::mask_addr(&hex::encode(tx.from)),
+                            q_log_privacy::mask_addr(&hex::encode(tx.to)),
+                            q_log_privacy::mask_amt_display(tx.amount as f64 / QUG_DISPLAY_DIVISOR)
+                        );
 
-                        let sender_key = (tx.from, qugusd_addr);
-                        let recipient_key = (tx.to, qugusd_addr);
-
-                        let sender_balance = token_balances.get(&sender_key).copied().unwrap_or(0);
-                        let total_cost = tx.amount as u128; // QUGUSD transfers don't have QUG fee
-
-                        // v2.7.9-beta: token_balances now uses u128
-                        if sender_balance >= total_cost {
-                            let _old_sender_balance = sender_balance;
-                            let new_sender_balance = sender_balance - total_cost;
-                            token_balances.insert(sender_key, new_sender_balance);
-
-                            // Add to recipient
-                            let old_recipient_balance = token_balances.get(&recipient_key).copied().unwrap_or(0);
-                            let new_recipient_balance = old_recipient_balance + tx.amount as u128;
-                            token_balances.insert(recipient_key, new_recipient_balance);
-
-                            tracing::info!(
-                                "💰 Consensus confirmed QUGUSD tx {}: {} → {} ({} QUGUSD)",
-                                q_log_privacy::mask_hash(&hex::encode(tx_hash)),
-                                q_log_privacy::mask_addr(&hex::encode(tx.from)),
-                                q_log_privacy::mask_addr(&hex::encode(tx.to)),
-                                q_log_privacy::mask_amt_display(tx.amount as f64 / QUG_DISPLAY_DIVISOR)
-                            );
-
-                            // Persist QUGUSD balances
-                            let sender_bal = new_sender_balance;
-                            let recipient_bal = new_recipient_balance;
-                            drop(token_balances);
-
-                            if let Err(e) = state.storage_engine.save_token_balance(&tx.from, &qugusd_addr, sender_bal).await {
-                                warn!("Failed to persist sender QUGUSD balance: {}", e);
-                            }
-                            if let Err(e) = state.storage_engine.save_token_balance(&tx.to, &qugusd_addr, recipient_bal).await {
-                                warn!("Failed to persist recipient QUGUSD balance: {}", e);
-                            }
-
-                            // Store confirmed transaction
-                            if let Err(e) = state.storage_engine.save_transaction(&tx).await {
-                                warn!("Failed to save QUGUSD transaction to storage: {}", e);
-                            }
-                        } else {
-                            warn!(
-                                "⚠️ QUGUSD transfer failed: insufficient balance. Have: {}, Need: {}",
-                                q_log_privacy::mask_amt_display(sender_balance as f64 / QUG_DISPLAY_DIVISOR),
-                                q_log_privacy::mask_amt_display(total_cost as f64 / QUG_DISPLAY_DIVISOR)
-                            );
+                        // Store confirmed transaction (but don't modify balances)
+                        if let Err(e) = state.storage_engine.save_transaction(&tx).await {
+                            warn!("Failed to save QUGUSD transaction to storage: {}", e);
                         }
                     } else {
                         // QUG transfer - update wallet_balances (original logic)
