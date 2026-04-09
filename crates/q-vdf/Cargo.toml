@@ -56,6 +56,7 @@ rayon = { version = "1.8", optional = true }
 proptest = { workspace = true }
 criterion = { workspace = true }
 tokio-test = "0.4"
+num_cpus = "1.16"
 
 [features]
 default = ["standard"]
@@ -63,3 +64,11 @@ standard = []
 high_security = []
 quantum_enhanced = []
 parallel = ["rayon"]
+
+[[bench]]
+name = "genus2_benchmark"
+harness = false
+
+[[bench]]
+name = "parallel_chains_benchmark"
+harness = false

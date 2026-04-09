@@ -539,6 +539,15 @@ pub async fn get_multi_token_balance(
         total_usd_value,
     };
 
+    // v10.2.9: Debug dump QUGUSD response fields for zero-balance diagnosis
+    if let Some(qugusd_tok) = response.tokens.get("QUGUSD") {
+        info!(
+            "🔍 [QUGUSD-DEBUG] Response for {}: balance=\"{}\", balance_base_units={}, usd_value={}, decimals={:?}",
+            q_log_privacy::mask_addr(&address_hex),
+            qugusd_tok.balance, qugusd_tok.balance_base_units, qugusd_tok.usd_value, qugusd_tok.decimals
+        );
+    }
+
     // v3.6.14: Count custom tokens (total minus QUG and QUGUSD)
     let custom_count = response.tokens.len().saturating_sub(2);
 

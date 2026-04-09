@@ -793,10 +793,16 @@ Provide a brief analysis (under 250 tokens) covering:
 
           if (qugUsdBalance > 0) {
             localStorage.setItem('cachedQugusdBalance', qugUsdBalance.toString());
+            // v10.2.9: Also write a backup key that is NEVER cleared
+            // TransactionScreen reads this when cachedQugusdBalance is removed
+            localStorage.setItem('lastKnownQugusdBalance', qugUsdBalance.toString());
             if (qugUsdBalance > (highestKnownBalancesRef.current['QUGUSD'] || 0)) {
               highestKnownBalancesRef.current['QUGUSD'] = qugUsdBalance;
             }
           } else {
+            // v10.2.9: Don't clear cache when API returns 0 — backend token_balances
+            // may not be loaded yet after restart. Keep lastKnownQugusdBalance as backup.
+            // Only clear cachedQugusdBalance (TransactionScreen will fall back to lastKnown)
             localStorage.removeItem('cachedQugusdBalance');
             highestKnownBalancesRef.current['QUGUSD'] = 0;
           }
@@ -2221,6 +2227,7 @@ Provide a brief analysis (under 250 tokens) covering:
 
             if (qugusdBalance > 0) {
               localStorage.setItem('cachedQugusdBalance', qugusdBalance.toString());
+              localStorage.setItem('lastKnownQugusdBalance', qugusdBalance.toString());
               if (qugusdBalance > (highestKnownBalancesRef.current['QUGUSD'] || 0)) {
                 highestKnownBalancesRef.current['QUGUSD'] = qugusdBalance;
               }

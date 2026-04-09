@@ -519,12 +519,28 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
             // Handle QUGUSD (native USD stablecoin)
             if (upperSymbol === 'QUGUSD') {
               foundQugusd = true;
-              let qugUsdBalance = parseFloat(token.balance || '0');
+              // v10.2.9: Try multiple balance sources (matches Dashboard pattern)
+              // Priority: balance_base_units/1e24 → usd_value → balance string → 0
+              let qugUsdBalance = 0;
 
-              // v3.6.12: Also check balance_base_units (Dashboard pattern)
-              if (qugUsdBalance === 0 && token.balance_base_units && token.balance_base_units > 0) {
+              // Source 1: balance_base_units (most reliable — raw u128 from backend)
+              if (token.balance_base_units && token.balance_base_units > 0) {
                 qugUsdBalance = token.balance_base_units / 1e24;
                 console.log('💵 [TransactionScreen] QUGUSD from balance_base_units:', qugUsdBalance);
+              }
+
+              // Source 2: usd_value (QUGUSD is 1:1 pegged to USD)
+              if (qugUsdBalance === 0 && token.usd_value && token.usd_value > 0) {
+                qugUsdBalance = token.usd_value;
+                console.log('💵 [TransactionScreen] QUGUSD from usd_value:', qugUsdBalance);
+              }
+
+              // Source 3: balance string (formatted by backend)
+              if (qugUsdBalance === 0) {
+                qugUsdBalance = parseFloat(token.balance || '0');
+                if (qugUsdBalance > 0) {
+                  console.log('💵 [TransactionScreen] QUGUSD from balance string:', qugUsdBalance);
+                }
               }
 
               // v2.9.16-beta: Use protected balance during cooldown
@@ -534,10 +550,25 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
                 qugUsdBalance = protectedData.balance;
               }
 
-              // v3.6.12: Use cached balance if API returns 0 but we have a cached value
-              if (qugUsdBalance === 0 && cachedQugusdBalance > 0) {
-                console.log(`💾 [TransactionScreen] API returned 0 QUGUSD, using cached: ${cachedQugusdBalance}`);
-                qugUsdBalance = cachedQugusdBalance;
+              // v10.2.9: Use ANY cached QUGUSD if API returns 0
+              // The API returns 0 because token_balances in-memory may not be loaded
+              // Dashboard writes the real value to localStorage — trust it over the API
+              if (qugUsdBalance === 0) {
+                // Try all cache sources
+                const cacheKeys = ['cachedQugusdBalance', 'lastKnownQugusdBalance'];
+                for (const key of cacheKeys) {
+                  try {
+                    const cached = localStorage.getItem(key);
+                    if (cached) {
+                      const val = parseFloat(cached);
+                      if (val > 0 && !isNaN(val) && isFinite(val)) {
+                        console.log(`💾 [TransactionScreen] QUGUSD from ${key}: ${val}`);
+                        qugUsdBalance = val;
+                        break;
+                      }
+                    }
+                  } catch (e) { /* ignore */ }
+                }
               }
 
               balances.push({
@@ -569,7 +600,14 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
               continue;
             }
 
-            let customBalance = parseFloat(token.balance || '0');
+            // v10.2.9: Try balance_base_units first (more reliable than formatted string)
+            let customBalance = 0;
+            const tokenDecimals = token.decimals || 24;
+            if (token.balance_base_units && token.balance_base_units > 0) {
+              customBalance = token.balance_base_units / Math.pow(10, tokenDecimals);
+            } else {
+              customBalance = parseFloat(token.balance || '0');
+            }
             // v2.9.16-beta: Use protected balance during cooldown for custom tokens
             const protectedData = protectedBalances[upperSymbol];
             if (isInCooldown && protectedData && protectedData.until > now) {
@@ -671,8 +709,20 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
         return { ...wallet, balance: validBalance };
       });
 
-      console.log('💾 TransactionScreenV2: Setting validated walletBalances:', validatedBalances);
-      setWalletBalances(validatedBalances);
+      // v10.2.9: Sort tokens for stable dropdown order
+      // QUG always first, QUGUSD second, then alphabetical by symbol
+      const sortedBalances = [...validatedBalances].sort((a, b) => {
+        if (a.symbol === 'QUG') return -1;
+        if (b.symbol === 'QUG') return 1;
+        if (a.symbol === 'QUGUSD') return -1;
+        if (b.symbol === 'QUGUSD') return 1;
+        if (a.symbol === 'USD') return -1;
+        if (b.symbol === 'USD') return 1;
+        return a.symbol.localeCompare(b.symbol);
+      });
+
+      console.log('💾 TransactionScreenV2: Setting validated walletBalances:', sortedBalances);
+      setWalletBalances(sortedBalances);
     };
 
     fetchBalances();
