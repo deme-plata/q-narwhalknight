@@ -2177,6 +2177,208 @@ impl QStorage {
         Ok(blocks)
     }
 
+    /// Try to read a block at a given height using ALL known key formats.
+    /// Returns the first successfully deserialized block, or None.
+    ///
+    /// Key formats tried (in order):
+    /// 1. "qblock:height:{N}" (current string format)
+    /// 2. "qblock:dag:{N}:*" (DAG layer - scan prefix)
+    /// 3. N.to_be_bytes() prefix (old finalize_block binary format)
+    ///
+    /// This enables serving historical blocks that were stored by older code versions.
+    /// READ-ONLY: never modifies any data.
+    pub async fn get_qblock_any_format(&self, height: u64) -> Result<Option<q_types::block::QBlock>> {
+        // === Format 1: Current string key "qblock:height:{N}" ===
+        if let Some(block) = self.get_qblock_by_height(height).await? {
+            return Ok(Some(block));
+        }
+
+        // === Format 2: DAG layer "qblock:dag:{N}:{proposer_hex}" ===
+        let dag_prefix = format!("qblock:dag:{}:", height);
+        let dag_entries = self.hot_db.scan_prefix(CF_BLOCKS, dag_prefix.as_bytes()).await?;
+        if let Some((_key, value)) = dag_entries.into_iter().next() {
+            // DAG layer blocks are stored as bincode-serialized QBlock
+            // Try compressed first, then raw bincode with legacy fallback
+            let deser_result = if precompressed_storage::is_precompressed(&value) {
+                precompressed_storage::PrecompressedBlock::from_bytes(&value)
+                    .and_then(|c| c.decompress().map_err(|e| e.into()))
+                    .and_then(|raw| q_types::legacy::deserialize_qblock_with_fallback(&raw)
+                        .map_err(|e| anyhow::anyhow!("{}", e)))
+            } else {
+                q_types::legacy::deserialize_qblock_with_fallback(&value)
+                    .map_err(|e| anyhow::anyhow!("{}", e))
+            };
+
+            match deser_result {
+                Ok(mut block) => {
+                    // Reconstruct quantum_metadata + transactions from separate CFs
+                    let qm_key = format!("qm:{}", height);
+                    if let Ok(Some(qm_data)) = self.hot_db.get(CF_QUANTUM_METADATA, qm_key.as_bytes()).await {
+                        if let Ok(qm) = bincode::deserialize::<q_types::block::QuantumMetadata>(&qm_data) {
+                            block.quantum_metadata = qm;
+                        }
+                    }
+                    if block.transactions.is_empty() {
+                        let tx_key = format!("block_txs:{}", height);
+                        if let Ok(Some(tx_data)) = self.hot_db.get(CF_TRANSACTIONS, tx_key.as_bytes()).await {
+                            if let Ok(txs) = bincode::deserialize::<Vec<q_types::Transaction>>(&tx_data) {
+                                block.transactions = txs;
+                            }
+                        }
+                    }
+                    debug!("📦 [ANY-FORMAT] Found block at height {} via DAG layer key", height);
+                    return Ok(Some(block));
+                }
+                Err(e) => {
+                    debug!("⚠️ [ANY-FORMAT] DAG layer block at height {} failed deserialization: {}", height, e);
+                }
+            }
+        }
+
+        // === Format 3: Old finalize_block binary key (height_be_bytes ++ hash) ===
+        let binary_prefix = height.to_be_bytes();
+        let binary_entries = self.hot_db.scan_prefix(CF_BLOCKS, &binary_prefix).await?;
+        if let Some((_key, value)) = binary_entries.into_iter().next() {
+            // Old finalize_block stored bincode-serialized Block (not QBlock).
+            // Try QBlock deserialization first (in case it was migrated), then Block.
+            let deser_result = if precompressed_storage::is_precompressed(&value) {
+                precompressed_storage::PrecompressedBlock::from_bytes(&value)
+                    .and_then(|c| c.decompress().map_err(|e| e.into()))
+                    .and_then(|raw| q_types::legacy::deserialize_qblock_with_fallback(&raw)
+                        .map_err(|e| anyhow::anyhow!("{}", e)))
+            } else {
+                q_types::legacy::deserialize_qblock_with_fallback(&value)
+                    .map_err(|e| anyhow::anyhow!("{}", e))
+            };
+
+            if let Ok(mut block) = deser_result {
+                // Reconstruct from separate CFs
+                let qm_key = format!("qm:{}", height);
+                if let Ok(Some(qm_data)) = self.hot_db.get(CF_QUANTUM_METADATA, qm_key.as_bytes()).await {
+                    if let Ok(qm) = bincode::deserialize::<q_types::block::QuantumMetadata>(&qm_data) {
+                        block.quantum_metadata = qm;
+                    }
+                }
+                if block.transactions.is_empty() {
+                    let tx_key = format!("block_txs:{}", height);
+                    if let Ok(Some(tx_data)) = self.hot_db.get(CF_TRANSACTIONS, tx_key.as_bytes()).await {
+                        if let Ok(txs) = bincode::deserialize::<Vec<q_types::Transaction>>(&tx_data) {
+                            block.transactions = txs;
+                        }
+                    }
+                }
+                debug!("📦 [ANY-FORMAT] Found block at height {} via binary key prefix", height);
+                return Ok(Some(block));
+            }
+
+            // Last resort: try deserializing as old Block type and convert to minimal QBlock
+            if let Ok(old_block) = bincode::deserialize::<Block>(&value) {
+                debug!("📦 [ANY-FORMAT] Found old Block at height {} via binary key, converting to QBlock", height);
+                let qblock = q_types::block::QBlock {
+                    header: q_types::block::BlockHeader {
+                        height: old_block.height,
+                        timestamp: old_block.timestamp.timestamp() as u64,
+                        proposer: old_block.proposer,
+                        // All other fields use serde defaults or zero values
+                        phase: 0,
+                        network_id: String::new(),
+                        prev_block_hash: [0u8; 32],
+                        solutions_root: [0u8; 32],
+                        tx_root: [0u8; 32],
+                        state_root: [0u8; 32],
+                        dag_round: 0,
+                        vdf_proof: Default::default(),
+                        anchor_validator: None,
+                        producer_id: 0,
+                        total_difficulty: 0,
+                        producer_public_key: None,
+                        producer_signature: None,
+                        coinbase_merkle_root: None,
+                        total_coinbase_reward: None,
+                        coinbase_count: None,
+                    },
+                    mining_solutions: Vec::new(),
+                    dag_parents: Vec::new(),
+                    quantum_metadata: Default::default(),
+                    transactions: Vec::new(),
+                    balance_updates: Vec::new(),
+                    size_bytes: 0,
+                };
+                return Ok(Some(qblock));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Like get_qblocks_range but tries all key formats for each height.
+    /// Slower than the regular version (does up to 3 lookups per block instead of 1)
+    /// but can find historical blocks stored by older code.
+    /// READ-ONLY: never modifies any data.
+    pub async fn get_qblocks_range_any_format(&self, start_height: u64, limit: usize) -> Result<Vec<q_types::block::QBlock>> {
+        const MAX_BLOCKS_PER_REQUEST: usize = 50_000;
+        let capped_limit = std::cmp::min(limit, MAX_BLOCKS_PER_REQUEST);
+
+        if limit > MAX_BLOCKS_PER_REQUEST {
+            warn!("🚨 [ANY-FORMAT] Block range request capped: requested {} blocks, returning max {}",
+                  limit, MAX_BLOCKS_PER_REQUEST);
+        }
+
+        let fetch_start = std::time::Instant::now();
+        info!("🔍 [ANY-FORMAT] Fetching up to {} blocks from height {} (multi-format scan)",
+              capped_limit, start_height);
+
+        // First, try the fast path: standard get_qblocks_range
+        // If it returns enough blocks, no need for the slow multi-format scan
+        let fast_blocks = self.get_qblocks_range(start_height, capped_limit).await?;
+        if !fast_blocks.is_empty() {
+            info!("✅ [ANY-FORMAT] Fast path returned {} blocks, using those", fast_blocks.len());
+            return Ok(fast_blocks);
+        }
+
+        // Slow path: try each height individually with all key formats
+        let mut blocks = Vec::with_capacity(capped_limit);
+        let mut consecutive_failures: usize = 0;
+        const MAX_CONSECUTIVE_FAILURES: usize = 10;
+
+        for i in 0..capped_limit as u64 {
+            let height = start_height + i;
+
+            // Early abort after too many consecutive misses (same pattern as get_qblocks_range)
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES && blocks.is_empty() {
+                debug!("⚠️ [ANY-FORMAT] Aborting scan at height {} — {} consecutive misses with no blocks found",
+                       height, consecutive_failures);
+                break;
+            }
+
+            match self.get_qblock_any_format(height).await {
+                Ok(Some(block)) => {
+                    consecutive_failures = 0;
+                    blocks.push(block);
+                }
+                Ok(None) => {
+                    consecutive_failures += 1;
+                }
+                Err(e) => {
+                    consecutive_failures += 1;
+                    debug!("⚠️ [ANY-FORMAT] Error reading block at height {}: {}", height, e);
+                }
+            }
+        }
+
+        let elapsed = fetch_start.elapsed();
+        let rate = if elapsed.as_millis() > 0 {
+            (blocks.len() as u128 * 1000) / elapsed.as_millis()
+        } else {
+            blocks.len() as u128 * 1000
+        };
+
+        info!("✅ [ANY-FORMAT] Got {} blocks in {:?} ({} blocks/sec) for range {}..+{}",
+              blocks.len(), elapsed, rate, start_height, capped_limit);
+
+        Ok(blocks)
+    }
+
     /// Diagnostic: Scan RocksDB to find actual block height range
     /// This checks what qblock:height: keys actually exist in CF_BLOCKS
     /// Returns (lowest_height, highest_height, sample_count, total_estimate)
