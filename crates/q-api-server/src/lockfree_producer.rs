@@ -1280,8 +1280,9 @@ pub struct LockFreeProducerPool {
     /// could call produce_blocks() simultaneously, creating duplicate blocks at the same height.
     /// The BlockWriter's deduplication would drop one, causing gaps.
     /// Fix: Use atomic flag to serialize production calls.
-    production_in_progress: AtomicBool,
-    production_in_progress_since: AtomicU64,
+    /// v10.2.11: Made pub so the production watchdog can force-clear on stall
+    pub production_in_progress: AtomicBool,
+    pub production_in_progress_since: AtomicU64,
 
     /// 🚀 v2.3.15-beta: POOL-LEVEL DUPLICATE PREVENTION
     /// The per-producer last_produced_height doesn't work because multiple producers
@@ -1855,13 +1856,67 @@ impl LockFreeProducerPool {
             );
         }
 
+        // v10.2.11: Use spawn_blocking for ALL RocksDB calls to prevent tokio worker starvation.
+        //
+        // ROOT CAUSE of recurring production loop freeze (every few hours):
+        // The KVStore trait methods (get, put, etc.) are declared `async fn` but internally call
+        // synchronous RocksDB operations (get_cf, put_cf_opt). When RocksDB is doing compaction,
+        // block-pack serving, or heavy reads, these calls block the tokio WORKER thread for seconds.
+        // The previous v10.2.10 fix used tokio::time::timeout(), but timeout() races two futures
+        // on the SAME worker thread — if the inner future is blocking, the timeout timer never
+        // gets polled either, so the timeout never fires. Result: ALL workers eventually blocked,
+        // production loop task never gets scheduled, silent stall.
+        //
+        // FIX: spawn_blocking() moves the blocking RocksDB work to a DEDICATED blocking thread
+        // pool, freeing the tokio worker immediately. The timeout wrapper now works correctly
+        // because it runs on an unblocked worker thread.
         let storage_query_start = std::time::Instant::now();
-        let highest_height = storage.get_highest_contiguous_block().await?;
+        let storage_clone = Arc::clone(storage);
+        let highest_height = match timeout(Duration::from_secs(5), tokio::task::spawn_blocking({
+            let storage_ref = Arc::clone(&storage_clone);
+            move || {
+                tokio::runtime::Handle::current().block_on(storage_ref.get_highest_contiguous_block())
+            }
+        })).await {
+            Ok(Ok(Ok(h))) => h,
+            Ok(Ok(Err(e))) => {
+                error!("🚨 [SYNC-FROM-STORAGE] get_highest_contiguous_block() failed: {}", e);
+                return Err(e.into());
+            }
+            Ok(Err(join_err)) => {
+                error!("🚨 [SYNC-FROM-STORAGE] get_highest_contiguous_block() task panicked: {}", join_err);
+                return Err(anyhow::anyhow!("spawn_blocking panicked: get_highest_contiguous_block"));
+            }
+            Err(_) => {
+                error!("🚨 [SYNC-FROM-STORAGE] get_highest_contiguous_block() TIMED OUT after 5s — RocksDB may be stalled by compaction/block-pack I/O");
+                return Err(anyhow::anyhow!("RocksDB timeout: get_highest_contiguous_block"));
+            }
+        };
         let storage_query_duration = storage_query_start.elapsed();
 
         // v10.2.7: Also read the DB pointer for comparison
-        let db_pointer = storage.get_latest_qblock_height().await
-            .ok().flatten().unwrap_or(0);
+        // v10.2.11: spawn_blocking to prevent tokio worker starvation
+        let db_pointer = match timeout(Duration::from_secs(5), tokio::task::spawn_blocking({
+            let storage_ref = Arc::clone(&storage_clone);
+            move || {
+                tokio::runtime::Handle::current().block_on(storage_ref.get_latest_qblock_height())
+            }
+        })).await {
+            Ok(Ok(Ok(Some(h)))) => h,
+            Ok(Ok(Ok(None))) => 0,
+            Ok(Ok(Err(e))) => {
+                warn!("⚠️ [SYNC-FROM-STORAGE] get_latest_qblock_height() failed: {} — using 0", e);
+                0
+            }
+            Ok(Err(join_err)) => {
+                warn!("⚠️ [SYNC-FROM-STORAGE] get_latest_qblock_height() task panicked: {} — using 0", join_err);
+                0
+            }
+            Err(_) => {
+                warn!("⚠️ [SYNC-FROM-STORAGE] get_latest_qblock_height() TIMED OUT after 5s — using 0");
+                0
+            }
+        };
         info!(
             "🔍 [SYNC_FROM_STORAGE] height_cache={}, db_pointer(qblock:latest)={}, delta={}, query_time={:?}",
             highest_height, db_pointer,
@@ -1882,12 +1937,32 @@ impl LockFreeProducerPool {
         // v7.3.4: Handle decompression errors gracefully instead of propagating.
         // If the block can't be deserialized/decompressed, fall through to height-only mode
         // rather than aborting the entire sync (which prevents height advancement and stalls production).
-        let block_result = match storage.get_qblock_by_height(highest_height).await {
-            Ok(b) => b,
-            Err(e) => {
+        // v10.2.11: spawn_blocking to prevent tokio worker starvation from RocksDB blocking reads
+        let block_result = match timeout(Duration::from_secs(5), tokio::task::spawn_blocking({
+            let storage_ref = Arc::clone(&storage_clone);
+            move || {
+                tokio::runtime::Handle::current().block_on(storage_ref.get_qblock_by_height(highest_height))
+            }
+        })).await {
+            Ok(Ok(Ok(b))) => b,
+            Ok(Ok(Err(e))) => {
                 warn!(
                     "⚠️  [LOCK-FREE SYNC] Failed to load block at height {}: {} — using height-only mode",
                     highest_height, e
+                );
+                None
+            }
+            Ok(Err(join_err)) => {
+                warn!(
+                    "⚠️  [LOCK-FREE SYNC] get_qblock_by_height({}) task panicked: {} — using height-only mode",
+                    highest_height, join_err
+                );
+                None
+            }
+            Err(_) => {
+                warn!(
+                    "⚠️  [LOCK-FREE SYNC] get_qblock_by_height({}) TIMED OUT after 5s — using height-only mode",
+                    highest_height
                 );
                 None
             }

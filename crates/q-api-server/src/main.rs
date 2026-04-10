@@ -14951,6 +14951,20 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         });
     }
 
+    // v10.2.10: Production loop heartbeat — tracks when the production path last executed.
+    // A separate watchdog task monitors this and logs critical warnings if the loop stalls.
+    // This detects the silent freeze where tokio workers are all blocked by RocksDB I/O
+    // and the production loop task never gets scheduled.
+    static PRODUCTION_LOOP_HEARTBEAT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    // Initialize heartbeat to now
+    PRODUCTION_LOOP_HEARTBEAT_MS.store(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
+        std::sync::atomic::Ordering::SeqCst,
+    );
+
     // --- N PARALLEL SHARD PROCESSORS ---
     for (shard_id, mut mining_rx) in mining_rxs.into_iter().enumerate() {
         let app_state_mining = app_state.clone();
@@ -14988,6 +15002,14 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     }
                     Err(_) => {
                         // Timeout — no items in 5s. Process any buffered items and re-poll.
+                        // v10.2.10: Update production heartbeat even when idle — proves the loop is alive
+                        {
+                            let hb_now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64;
+                            PRODUCTION_LOOP_HEARTBEAT_MS.store(hb_now, std::sync::atomic::Ordering::SeqCst);
+                        }
                         if last_heartbeat.elapsed().as_secs() >= 60 {
                             info!("💓 [Shard {}] alive (idle) — {} submissions processed in {} batches, channel pending ~{}",
                                   shard_id, processed_count, batch_count, mining_rx.len());
@@ -15655,6 +15677,14 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     );
 
                     // PHASE 5: Check if we should produce blocks
+                    // v10.2.10: Update production loop heartbeat — watchdog monitors this
+                    {
+                        let hb_now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64;
+                        PRODUCTION_LOOP_HEARTBEAT_MS.store(hb_now, std::sync::atomic::Ordering::SeqCst);
+                    }
                     // v9.1.7: Rate-limit should_produce() to once per 200ms across ALL shards.
                     let should_produce = {
                         static LAST_PRODUCE_CHECK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -17272,6 +17302,82 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         });
     }
     info!("✅ Sharded mining pipeline started: {} shards × spawn_blocking VDF (v8.9.0)", num_mining_shards);
+
+    // ========================================
+    // v10.2.11: PRODUCTION LOOP WATCHDOG (improved)
+    // Detects when the production loop is frozen (tokio workers blocked by RocksDB)
+    // and logs critical diagnostics. With v10.2.11's spawn_blocking fix, the root cause
+    // (RocksDB blocking tokio workers) is addressed, but this watchdog remains as a
+    // safety net. Reduced fatal threshold from 6min to 4min for faster recovery.
+    // Also force-clears the production_in_progress atomic flag at the 90s mark
+    // to unstick any held semaphore/flag from a timed-out production cycle.
+    // ========================================
+    {
+        let app_state_watchdog = app_state.clone();
+        // v10.2.9: DEDICATED OS THREAD for watchdog — NOT a tokio task!
+        // Per external AI review: if the tokio runtime is starved, a tokio watchdog
+        // task would ALSO stall. A dedicated OS thread is independent and guarantees
+        // detection even if all tokio workers are blocked.
+        let pool_ref = app_state_watchdog.block_producer_pool.clone(); // Arc<LockFreeProducerPool>
+        let current_height_ref = app_state_watchdog.current_height_atomic.clone();
+        let network_height_ref = app_state_watchdog.highest_network_height.clone();
+        std::thread::spawn(move || {
+            eprintln!("🐕 [PROD-WATCHDOG] Production loop watchdog started on dedicated OS thread (checks every 10s, warn at 30s, critical at 60s, fatal at 120s)");
+            let mut consecutive_stalls = 0u64;
+            loop {
+                // OS thread uses std::thread::sleep, NOT tokio::time::sleep
+                // This guarantees the watchdog runs even if tokio runtime is completely starved
+                std::thread::sleep(std::time::Duration::from_secs(10));
+
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let last_hb = PRODUCTION_LOOP_HEARTBEAT_MS.load(std::sync::atomic::Ordering::SeqCst);
+                let stale_ms = now_ms.saturating_sub(last_hb);
+
+                // Read diagnostics via atomics (safe from OS thread)
+                let cur_h = current_height_ref.load(std::sync::atomic::Ordering::Relaxed);
+                let net_h = network_height_ref.load(std::sync::atomic::Ordering::Relaxed);
+                let prod_flag = pool_ref.production_in_progress.load(std::sync::atomic::Ordering::Relaxed);
+                let prod_since = pool_ref.production_in_progress_since.load(std::sync::atomic::Ordering::Relaxed);
+                let prod_age = if prod_flag && prod_since > 0 { now_ms.saturating_sub(prod_since) } else { 0 };
+
+                if stale_ms > 60_000 {
+                    consecutive_stalls += 1;
+                    // Use eprintln! — bypasses tracing/log mutex which may itself be blocked
+                    eprintln!("🚨🐕 [PROD-WATCHDOG] CRITICAL: Production loop FROZEN for {:.1}s! \
+                              consecutive_stalls={} cur_h={} net_h={} behind={} prod_in_progress={} prod_flag_age={}ms",
+                             stale_ms as f64 / 1000.0, consecutive_stalls, cur_h, net_h,
+                             net_h.saturating_sub(cur_h), prod_flag, prod_age);
+
+                    // Force-clear the production_in_progress flag
+                    pool_ref.production_in_progress.store(false, std::sync::atomic::Ordering::SeqCst);
+                    pool_ref.production_in_progress_since.store(0, std::sync::atomic::Ordering::SeqCst);
+                    eprintln!("🐕 [PROD-WATCHDOG] Force-cleared production_in_progress flag");
+
+                    // After 12 consecutive stalls (60s threshold, 10s interval = ~120s frozen),
+                    // exit to let systemd restart
+                    if consecutive_stalls >= 12 {
+                        eprintln!("🚨🐕 [PROD-WATCHDOG] FATAL: Production loop frozen for {}s — watchdog forcing restart",
+                                 consecutive_stalls * 10);
+                        std::process::exit(1);
+                    }
+                } else if stale_ms > 30_000 {
+                    consecutive_stalls += 1;
+                    eprintln!("⚠️🐕 [PROD-WATCHDOG] WARNING: Production heartbeat stale {:.1}s \
+                              consecutive={} cur_h={} net_h={} prod_flag={} prod_age={}ms",
+                             stale_ms as f64 / 1000.0, consecutive_stalls, cur_h, net_h, prod_flag, prod_age);
+                } else {
+                    if consecutive_stalls > 0 {
+                        eprintln!("✅🐕 [PROD-WATCHDOG] Production loop recovered after {} warnings (age: {:.1}s)",
+                                 consecutive_stalls, stale_ms as f64 / 1000.0);
+                    }
+                    consecutive_stalls = 0;
+                }
+            }
+        });
+    }
 
     // ========================================
     // 💓 MINING HEARTBEAT MONITOR (v0.8.9-beta)
