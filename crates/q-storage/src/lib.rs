@@ -2328,25 +2328,44 @@ impl QStorage {
         info!("🔍 [ANY-FORMAT] Fetching up to {} blocks from height {} (multi-format scan)",
               capped_limit, start_height);
 
-        // First, try the fast path: standard get_qblocks_range
-        // If it returns enough blocks, no need for the slow multi-format scan
+        // v10.2.9: Merge strategy (per external AI review)
+        // Fast path first, then supplement missing heights from DAG/binary formats
+        // Only skip slow path if fast path returned ALL requested blocks (100% fill)
         let fast_blocks = self.get_qblocks_range(start_height, capped_limit).await?;
-        if !fast_blocks.is_empty() {
-            info!("✅ [ANY-FORMAT] Fast path returned {} blocks, using those", fast_blocks.len());
+        if fast_blocks.len() == capped_limit {
+            // 100% fill — fast path got everything, no need for slow scan
+            info!("✅ [ANY-FORMAT] Fast path returned {}/{} blocks (100% fill)", fast_blocks.len(), capped_limit);
             return Ok(fast_blocks);
         }
 
-        // Slow path: try each height individually with all key formats
-        let mut blocks = Vec::with_capacity(capped_limit);
+        // Build a set of heights already found by fast path
+        let mut found_heights: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        let mut merged_blocks: Vec<q_types::block::QBlock> = Vec::with_capacity(capped_limit);
+        for block in &fast_blocks {
+            found_heights.insert(block.header.height);
+            merged_blocks.push(block.clone());
+        }
+        if !fast_blocks.is_empty() {
+            info!("🔍 [ANY-FORMAT] Fast path returned {}/{} blocks ({:.0}% fill) — scanning for gaps",
+                  fast_blocks.len(), capped_limit, fast_blocks.len() as f64 / capped_limit as f64 * 100.0);
+        }
+
+        // Slow path: supplement missing heights with DAG/binary format lookups
         let mut consecutive_failures: usize = 0;
-        const MAX_CONSECUTIVE_FAILURES: usize = 10;
+        const MAX_CONSECUTIVE_FAILURES: usize = 20; // Higher threshold for sparse data
 
         for i in 0..capped_limit as u64 {
             let height = start_height + i;
 
-            // Early abort after too many consecutive misses (same pattern as get_qblocks_range)
-            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES && blocks.is_empty() {
-                debug!("⚠️ [ANY-FORMAT] Aborting scan at height {} — {} consecutive misses with no blocks found",
+            // Skip heights already found by fast path
+            if found_heights.contains(&height) {
+                consecutive_failures = 0;
+                continue;
+            }
+
+            // Early abort after too many consecutive misses with no new blocks found
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES && merged_blocks.len() <= fast_blocks.len() {
+                debug!("⚠️ [ANY-FORMAT] Aborting gap scan at height {} — {} consecutive misses with no new blocks",
                        height, consecutive_failures);
                 break;
             }
@@ -2354,7 +2373,7 @@ impl QStorage {
             match self.get_qblock_any_format(height).await {
                 Ok(Some(block)) => {
                     consecutive_failures = 0;
-                    blocks.push(block);
+                    merged_blocks.push(block);
                 }
                 Ok(None) => {
                     consecutive_failures += 1;
@@ -2366,17 +2385,23 @@ impl QStorage {
             }
         }
 
+        // Sort by height for deterministic ordering (reviewer requirement)
+        merged_blocks.sort_by_key(|b| b.header.height);
+        // Deduplicate by height (keep first occurrence)
+        merged_blocks.dedup_by_key(|b| b.header.height);
+
         let elapsed = fetch_start.elapsed();
         let rate = if elapsed.as_millis() > 0 {
-            (blocks.len() as u128 * 1000) / elapsed.as_millis()
+            (merged_blocks.len() as u128 * 1000) / elapsed.as_millis()
         } else {
-            blocks.len() as u128 * 1000
+            merged_blocks.len() as u128 * 1000
         };
 
-        info!("✅ [ANY-FORMAT] Got {} blocks in {:?} ({} blocks/sec) for range {}..+{}",
-              blocks.len(), elapsed, rate, start_height, capped_limit);
+        info!("✅ [ANY-FORMAT] Got {} blocks in {:?} ({} blocks/sec) for range {}..+{} (fast={}, gap-fill={})",
+              merged_blocks.len(), elapsed, rate, start_height, capped_limit,
+              fast_blocks.len(), merged_blocks.len().saturating_sub(fast_blocks.len()));
 
-        Ok(blocks)
+        Ok(merged_blocks)
     }
 
     /// Diagnostic: Scan RocksDB to find actual block height range
