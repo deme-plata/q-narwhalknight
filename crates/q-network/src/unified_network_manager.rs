@@ -3440,16 +3440,46 @@ impl UnifiedNetworkManager {
                                         info!("🔍 [BLOCK-PACK-DEBUG] our_height(contiguous)={}, requested range={}-{}, computed limit={}",
                                               our_height, start_height, end_height, limit);
 
-                                        match storage.get_qblocks_range(start_height, limit).await {
-                                            Ok(blocks) => {
-                                                let actual_first = blocks.first().map(|b| b.header.height);
-                                                let actual_last = blocks.last().map(|b| b.header.height);
-                                                if blocks.is_empty() {
-                                                    warn!("⚠️ [BLOCK-PACK-DEBUG] ZERO BLOCKS returned for range {}-{} (limit={}, our_height={})",
-                                                          start_height, end_height, limit, our_height);
-                                                    warn!("   This means get_qblocks_range({}, {}) found nothing in RocksDB", start_height, limit);
+                                        // v10.2.9: Try fast path first, fall back to multi-format for sparse data
+                                        let blocks_result = storage.get_qblocks_range(start_height, limit).await;
+                                        let blocks = match blocks_result {
+                                            Ok(fast_blocks) if fast_blocks.len() == limit => {
+                                                // 100% fill — fast path got everything
+                                                info!("✅ [BLOCK-PACK] Fast path: {} blocks for {}", fast_blocks.len(), peer_clone);
+                                                fast_blocks
+                                            }
+                                            Ok(fast_blocks) => {
+                                                // Partial or empty — try multi-format fallback for sparse data
+                                                if fast_blocks.is_empty() {
+                                                    info!("🔍 [BLOCK-PACK] Fast path empty for {}-{}, trying multi-format scan...",
+                                                          start_height, start_height + limit as u64);
                                                 } else {
-                                                    info!("✅ [BLOCK-PACK] Async task fetched {} blocks (heights {:?}-{:?}) for {}",
+                                                    info!("🔍 [BLOCK-PACK] Fast path partial ({}/{}) for {}-{}, supplementing with multi-format...",
+                                                          fast_blocks.len(), limit, start_height, start_height + limit as u64);
+                                                }
+                                                match storage.get_qblocks_range_any_format(start_height, limit).await {
+                                                    Ok(any_blocks) if !any_blocks.is_empty() => {
+                                                        info!("✅ [BLOCK-PACK] Multi-format found {} blocks (fast={}, total={}) for {}",
+                                                              any_blocks.len(), fast_blocks.len(), any_blocks.len(), peer_clone);
+                                                        any_blocks
+                                                    }
+                                                    _ => fast_blocks // Fall back to whatever fast path had
+                                                }
+                                            }
+                                            Err(e) => {
+                                                error!("❌ [BLOCK-PACK] get_qblocks_range failed: {}", e);
+                                                vec![]
+                                            }
+                                        };
+                                        match Ok::<_, anyhow::Error>(blocks) {
+                                            Ok(blocks) => {
+                                                if blocks.is_empty() {
+                                                    debug!("⚠️ [BLOCK-PACK] No blocks found for range {}-{} in any format",
+                                                          start_height, end_height);
+                                                } else {
+                                                    let actual_first = blocks.first().map(|b| b.header.height);
+                                                    let actual_last = blocks.last().map(|b| b.header.height);
+                                                    info!("✅ [BLOCK-PACK] Serving {} blocks (heights {:?}-{:?}) for {}",
                                                           blocks.len(), actual_first, actual_last, peer_clone);
                                                 }
                                                 q_types::BlockPackResponse::from_blocks(blocks, end_height, our_height)
