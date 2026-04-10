@@ -5042,18 +5042,30 @@ impl TurboSyncManager {
 
                             let block_count = blocks.len() as u32;
 
-                            // v10.2.8: Treat 0-block responses as FAILURE, not success.
-                            // A peer claiming a high height but returning 0 blocks is broken/lying.
-                            // Without this check, empty responses count as "success" and the sync
-                            // stalls because it thinks the chunk was completed.
+                            // v10.2.9-fix: In DAG-Knight, sparse height ranges are normal.
+                            // A peer returning 0 blocks means "no blocks exist at these heights" —
+                            // this is valid for sparse DAGs where not every height has a block.
+                            // Previously (v10.2.8) this was treated as FAILURE, but combined with
+                            // v10.2.9's early-abort on missing blocks in get_qblocks_range(),
+                            // it created a deadlock: server returns 0 (by design) → client rejects 0 (by design).
                             let requested_size = end_height.saturating_sub(start_height) + 1;
                             if blocks.is_empty() && requested_size > 0 {
-                                warn!("🚫 [v10.2.8] Peer {} returned 0 blocks for range {}-{} (requested {}) — treating as FAILURE",
+                                info!("📭 [SPARSE-SYNC] Peer {} returned 0 blocks for range {}-{} (requested {}) — sparse DAG, advancing cursor",
                                       peer, start_height, end_height, requested_size);
+                                // Skip apply_blocks_vec — nothing to apply. Just advance past this range.
                                 self.metrics.active_parallel_streams.fetch_sub(1, Ordering::Relaxed);
-                                return Err(anyhow::anyhow!(
-                                    "Peer {} returned 0 blocks for range {}-{}", peer, start_height, end_height
-                                ));
+
+                                let chunk_time = chunk_start.elapsed();
+                                if self.config.enable_apollo_gravity_assist {
+                                    self.apollo_record_peer_serving(
+                                        &peer.to_string(),
+                                        start_height..end_height,
+                                        0,
+                                        chunk_time.as_millis() as u32,
+                                    );
+                                }
+
+                                return Ok(());
                             }
 
                             let actual_start = blocks.first().map(|b| b.header.height).unwrap_or(start_height);

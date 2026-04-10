@@ -2097,7 +2097,8 @@ impl QStorage {
         const MAX_CONSECUTIVE_FAILURES: usize = 10;
 
         for (idx, result) in results.into_iter().enumerate() {
-            // v10.2.9: Early abort if entire range is corrupt/missing
+            // v10.2.9: Early abort if entire range is CORRUPT (not merely missing/sparse).
+            // Only consecutive deserialization failures trigger this — missing blocks reset the counter.
             // Prevents I/O storm when syncing peers request blocks from corrupt height ranges
             // (e.g., heights 6-12M with thousands of corrupt entries from old format data)
             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES && blocks.is_empty() {
@@ -2159,7 +2160,11 @@ impl QStorage {
                     }
                 }
             } else {
-                consecutive_failures += 1;
+                // v10.2.9-fix: Missing blocks (None from multi_get) are NORMAL in a sparse DAG.
+                // Only corrupt blocks (deserialization failures) should count toward the abort threshold.
+                // Incrementing consecutive_failures here caused early-abort on sparse ranges,
+                // returning 0 blocks to syncing peers and triggering their "0 blocks = failure" check.
+                consecutive_failures = 0; // Reset — a missing block is not a corruption signal
                 missing_count += 1;
             }
         }
