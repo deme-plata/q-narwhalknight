@@ -21894,7 +21894,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         game.world.action_queue.extend(api_actions);
                     }
 
-                    let mut summary = crown_ash_sim::tick(&mut game.world, &block_hash);
+                    let mut summary = tokio::task::block_in_place(|| {
+                        crown_ash_sim::tick(&mut game.world, &block_hash)
+                    });
                     summary.block_height = boundary_height;
 
                     // Append to turn history (cap at 200 to bound memory).

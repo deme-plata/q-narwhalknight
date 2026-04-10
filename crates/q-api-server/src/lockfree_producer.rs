@@ -314,7 +314,16 @@ impl LockFreeProducer {
                 }
 
                 ProducerCommand::ProduceBlock(reply) => {
-                    let block = producer.produce_block().await;
+                    let block = match tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        producer.produce_block()
+                    ).await {
+                        Ok(block) => block,
+                        Err(_) => {
+                            error!("🚨 Producer #{}: produce_block() TIMED OUT after 30s — unblocking command loop", producer_id);
+                            None
+                        }
+                    };
                     if let Some(ref b) = block {
                         info!(
                             "✅ Producer #{}: Created block at height {}",
@@ -598,7 +607,16 @@ impl LockFreeProducer {
                 }
 
                 ProducerCommand::ProduceBlock(reply) => {
-                    let block = producer.produce_block().await;
+                    let block = match tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        producer.produce_block()
+                    ).await {
+                        Ok(block) => block,
+                        Err(_) => {
+                            error!("🚨 Producer #{}: produce_block() TIMED OUT after 30s — unblocking command loop", producer_id);
+                            None
+                        }
+                    };
                     if let Some(ref b) = block {
                         info!(
                             "✅ Producer #{}: Created block at height {}",
@@ -1263,6 +1281,7 @@ pub struct LockFreeProducerPool {
     /// The BlockWriter's deduplication would drop one, causing gaps.
     /// Fix: Use atomic flag to serialize production calls.
     production_in_progress: AtomicBool,
+    production_in_progress_since: AtomicU64,
 
     /// 🚀 v2.3.15-beta: POOL-LEVEL DUPLICATE PREVENTION
     /// The per-producer last_produced_height doesn't work because multiple producers
@@ -1307,6 +1326,7 @@ impl LockFreeProducerPool {
             round_robin_index: AtomicUsize::new(0),
             num_producers,
             production_in_progress: AtomicBool::new(false),
+            production_in_progress_since: AtomicU64::new(0),
             pool_last_produced_height: AtomicU64::new(0), // v2.3.15-beta: Pool-level duplicate prevention
         }
     }
@@ -1356,6 +1376,7 @@ impl LockFreeProducerPool {
             round_robin_index: AtomicUsize::new(0),
             num_producers,
             production_in_progress: AtomicBool::new(false),
+            production_in_progress_since: AtomicU64::new(0),
             pool_last_produced_height: AtomicU64::new(0), // v2.3.15-beta: Pool-level duplicate prevention
         })
     }
@@ -1414,6 +1435,19 @@ impl LockFreeProducerPool {
         info!("🔍 [PRODUCE_BLOCKS] ENTERED — num_producers={}, pool_last_produced={}",
               self.num_producers, self.pool_last_produced_height.load(Ordering::SeqCst));
 
+        // v10.2.9: Zombie flag detection — if stuck >120s, force-clear
+        if self.production_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
+            let set_at = self.production_in_progress_since.load(std::sync::atomic::Ordering::SeqCst);
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            if now_ms.saturating_sub(set_at) > 120_000 {
+                error!("🚨 [PRODUCE_BLOCKS] production_in_progress stuck >120s — force-clearing zombie flag");
+                self.production_in_progress.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
         // 🚀 v2.3.13-beta: RACE CONDITION FIX - Prevent concurrent production calls
         if self.production_in_progress.compare_exchange(
             false, true, Ordering::SeqCst, Ordering::SeqCst
@@ -1421,6 +1455,14 @@ impl LockFreeProducerPool {
             info!("❌ [PRODUCE_BLOCKS] EXIT: RACE PREVENTION — another call in progress");
             return Vec::new();
         }
+
+        self.production_in_progress_since.store(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+            std::sync::atomic::Ordering::SeqCst,
+        );
 
         // Use a guard pattern to ensure flag is always cleared
         struct ProductionGuard<'a>(&'a AtomicBool);
