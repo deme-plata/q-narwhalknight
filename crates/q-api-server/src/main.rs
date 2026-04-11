@@ -6845,14 +6845,17 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         let k_pool = state.block_producer_pool.clone();
 
         tokio::spawn(async move {
-            info!("📊 K-PARAM GAUGE: Starting (60s interval, formula: K = 2π √(ΔH · Δs · ℏ) / τ)");
+            info!("📊 K-PARAM GAUGE: Starting (60s interval, v10.3.0 Enhanced K-Gauge)");
             let mut engine = KParameterEngine::new();
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
             interval.tick().await; // skip first immediate tick
+            // Track the height at the start of each window for commitment depth (d_commit)
+            let mut prev_window_height = k_local_height.load(AtOrd::Relaxed);
 
             loop {
                 interval.tick().await;
 
+                let current_local = k_local_height.load(AtOrd::Relaxed);
                 let metrics = RawMetrics {
                     mining_submitted: k_submitted.load(AtOrd::Relaxed),
                     mining_accepted: k_accepted.load(AtOrd::Relaxed),
@@ -6862,9 +6865,13 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         .as_ref()
                         .map(|p| p.load(AtOrd::Relaxed) as u64)
                         .unwrap_or(0),
-                    local_height: k_local_height.load(AtOrd::Relaxed),
+                    local_height: current_local,
                     network_height: k_network_height.load(AtOrd::Relaxed),
+                    // v10.3.0: Height at start of this window — blocks since then = d_commit
+                    tip_height_at_window_start: prev_window_height,
                 };
+                // Update for next round
+                prev_window_height = current_local;
 
                 let (k, new_phase, prev_phase) = engine.compute_round(&metrics, &k_state);
 
@@ -22795,6 +22802,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/bitcoin/balance", get(q_api_server::bitcoin_bridge_api::get_btc_balance))
         // v9.6.5: Bitcoin wallet operations — TODO: implement get_btc_address, send_btc, get_btc_transactions
         .route("/api/v1/bitcoin/bridge/status", get(q_api_server::bitcoin_bridge_api::get_bridge_status))
+        // v10.2.11: Bitcoin Deposit Bridge — receive BTC on-chain, mint wBTC
+        .route("/api/v1/bitcoin/deposit/address", post(q_api_server::bitcoin_deposit_api::create_deposit_address))
+        .route("/api/v1/bitcoin/deposit/bridge-status", get(q_api_server::bitcoin_deposit_api::get_deposit_bridge_status))
+        .route("/api/v1/bitcoin/deposit/:id", get(q_api_server::bitcoin_deposit_api::get_deposit_status))
+        .route("/api/v1/bitcoin/deposits", get(q_api_server::bitcoin_deposit_api::list_deposits))
         // ═══ Zcash Shielded Bridge (v7.2.2) ═══
         .route("/api/v1/zcash/swap", post(q_api_server::zcash_bridge_api::create_zcash_swap))
         .route("/api/v1/zcash/swap/:id", get(q_api_server::zcash_bridge_api::get_zec_swap_status))

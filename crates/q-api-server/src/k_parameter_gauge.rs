@@ -1,15 +1,19 @@
-/// K-Parameter Network Health Gauge — v9.3.1
+/// K-Parameter Network Health Gauge — v10.3.0 (Enhanced K-Gauge, Whitepaper v4)
 ///
-/// Lightweight, always-on network health metric based on the quantum-inspired formula:
-///   K = 2π √(ΔH · Δs · ℏ) / τ
+/// Base K-gauge (Part IV of the whitepaper):
+///   K = 2π √(ΔH · Δs) / τ
 ///
-/// where:
-///   ΔH = energy variance (operational stress: mining rejection, traffic asymmetry, peer churn)
-///   Δs = entropy variance (network disorder: sync divergence, block rate deviation)
-///   ℏ  = reduced Planck constant (set to 1.0 — dimensionless scaling)
-///   τ  = round duration (60 seconds rolling window)
+/// Enhanced K-gauge (Part VI — Information-Theoretic Consensus Quality):
+///   K_enhanced = K_base / Λ_commit · (1 + (1 - Ω_node) · w_obs)
 ///
-/// This module is self-contained (~200 lines), zero external dependencies beyond `std` + `serde`.
+/// New v4 metrics:
+///   Ω_node     = 1 - exp(-n_peers / n_total)           — Observer Coverage Factor (Eq. 17)
+///   d_commit   = descendant count of chain tip           — Block Commitment Depth (Eq. 19)
+///   Λ_commit   = 1 - exp(-d_commit / (κ · τ_confirm))   — Commitment Irreversibility (Eq. 20)
+///   f_irrev    = |{v ∈ W : d_commit(v) > D_reorg}|/|W|  — Irreversibility Fraction (Eq. 23)
+///   D_reorg    = κ · ⌈log₂(1/ε)⌉ = 360 blocks           — Reorg Depth Bound (Eq. 24)
+///
+/// This module is self-contained, zero external dependencies beyond `std` + `serde`.
 /// It does NOT import `q-resonance` (which pulls OpenBLAS/ndarray-linalg = 1.7GB).
 
 use serde::Serialize;
@@ -38,6 +42,32 @@ const HBAR: f64 = 1.0;
 
 /// Round duration in seconds
 const TAU: f64 = 60.0;
+
+// ========================================
+// v4 Information-Theoretic Constants
+// ========================================
+
+/// Protocol parameter κ (DAG-Knight tolerance)
+const KAPPA: f64 = 18.0;
+
+/// Target confirmation depth τ_confirm (proposed protocol constant, Eq. 20)
+const TAU_CONFIRM: f64 = 100.0;
+
+/// Finality confidence ε = 10^-6 → D_reorg = κ · ⌈log₂(1/ε)⌉ = 18 × 20 = 360
+const REORG_DEPTH_BOUND: u64 = 360;
+
+/// Observer weight w_obs — how much low coverage inflates K (Eq. 18/25)
+const W_OBS: f64 = 1.0;
+
+/// Estimated total network size (hardcoded — paper L11 acknowledges this)
+/// TODO: Replace with DHT crawl estimator when available
+const N_TOTAL_ESTIMATE: f64 = 50.0;
+
+/// Maximum K_enhanced / K_base ratio to prevent divergence (paper Data Honesty Note, Eq. 25)
+const K_ENHANCED_MAX_RATIO: f64 = 100.0;
+
+/// Minimum Λ_commit to prevent division-by-zero (paper: clamp to [Λ_min, 1])
+const LAMBDA_COMMIT_MIN: f64 = 0.01;
 
 /// K-parameter phase
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -96,6 +126,18 @@ pub struct KParameterState {
     pub peer_churn_bits: AtomicU64,
     pub sync_divergence_bits: AtomicU64,
     pub block_rate_deviation_bits: AtomicU64,
+
+    // v10.3.0: Information-Theoretic Consensus Quality (Whitepaper v4, Part VI)
+    /// Observer Coverage Factor Ω_node = 1 - exp(-n_peers/n_total) (Eq. 17)
+    pub omega_node_bits: AtomicU64,
+    /// Block Commitment Depth d_commit (descendant count of chain tip) (Eq. 19)
+    pub d_commit: AtomicU64,
+    /// Commitment Irreversibility Λ_commit = 1 - exp(-d_commit/(κ·τ_confirm)) (Eq. 20)
+    pub lambda_commit_bits: AtomicU64,
+    /// Enhanced K-gauge: K_enhanced = K_base / Λ_commit · (1 + (1-Ω)·w_obs) (Eq. 25)
+    pub k_enhanced_bits: AtomicU64,
+    /// Irreversibility Fraction f_irrev (Eq. 23)
+    pub f_irrev_bits: AtomicU64,
 }
 
 impl Default for KParameterState {
@@ -122,6 +164,12 @@ impl Default for KParameterState {
             peer_churn_bits: AtomicU64::new(0_f64.to_bits()),
             sync_divergence_bits: AtomicU64::new(0_f64.to_bits()),
             block_rate_deviation_bits: AtomicU64::new(0_f64.to_bits()),
+            // v10.3.0: Information-Theoretic metrics
+            omega_node_bits: AtomicU64::new(0_f64.to_bits()),
+            d_commit: AtomicU64::new(0),
+            lambda_commit_bits: AtomicU64::new(0_f64.to_bits()),
+            k_enhanced_bits: AtomicU64::new(0_f64.to_bits()),
+            f_irrev_bits: AtomicU64::new(0_f64.to_bits()),
         }
     }
 }
@@ -135,6 +183,21 @@ impl KParameterState {
     /// Read current phase (lock-free)
     pub fn current_phase(&self) -> KPhase {
         KPhase::from_u8(self.phase.load(Ordering::Relaxed))
+    }
+
+    /// Read enhanced K value (lock-free) — v10.3.0
+    pub fn k_enhanced(&self) -> f64 {
+        f64::from_bits(self.k_enhanced_bits.load(Ordering::Relaxed))
+    }
+
+    /// Read observer coverage Ω_node (lock-free) — v10.3.0
+    pub fn omega_node(&self) -> f64 {
+        f64::from_bits(self.omega_node_bits.load(Ordering::Relaxed))
+    }
+
+    /// Read commitment irreversibility Λ_commit (lock-free) — v10.3.0
+    pub fn lambda_commit(&self) -> f64 {
+        f64::from_bits(self.lambda_commit_bits.load(Ordering::Relaxed))
     }
 
     /// Store zk-STARK commitment and phase proof (called by periodic task)
@@ -164,15 +227,26 @@ impl KParameterState {
                 verified: false,
             }));
 
+        let omega_node = f64::from_bits(self.omega_node_bits.load(Ordering::Relaxed));
+        let lambda_commit = f64::from_bits(self.lambda_commit_bits.load(Ordering::Relaxed));
+        let k_enhanced = f64::from_bits(self.k_enhanced_bits.load(Ordering::Relaxed));
+        let commitment_multiplier = if lambda_commit > LAMBDA_COMMIT_MIN {
+            1.0 / lambda_commit
+        } else {
+            1.0 / LAMBDA_COMMIT_MIN
+        };
+        let observer_correction = 1.0 + (1.0 - omega_node) * W_OBS;
+
         KParameterSnapshot {
             k_value: k,
+            k_enhanced,
             phase: phase.as_str().to_string(),
             max_solutions_per_block: self.tuned_max_solutions.load(Ordering::Relaxed),
             vdf_multiplier: self.tuned_vdf_multiplier_bps.load(Ordering::Relaxed) as f64 / 10_000.0,
             challenge_expiry_secs: self.tuned_challenge_expiry_secs.load(Ordering::Relaxed),
             last_computed_at: self.last_computed_at.load(Ordering::Relaxed),
             rounds_computed: self.rounds_computed.load(Ordering::Relaxed),
-            formula: "K = 2π √(ΔH · Δs · ℏ) / τ".to_string(),
+            formula: "K_enhanced = K_base / Λ_commit · (1 + (1-Ω)·w_obs)".to_string(),
             zk_commitment,
             zk_phase_proof,
             delta_h: f64::from_bits(self.delta_h_bits.load(Ordering::Relaxed)),
@@ -182,6 +256,15 @@ impl KParameterState {
             peer_churn: f64::from_bits(self.peer_churn_bits.load(Ordering::Relaxed)),
             sync_divergence: f64::from_bits(self.sync_divergence_bits.load(Ordering::Relaxed)),
             block_rate_deviation: f64::from_bits(self.block_rate_deviation_bits.load(Ordering::Relaxed)),
+            // v10.3.0: Information-Theoretic metrics
+            observer_coverage: omega_node,
+            commitment_depth: self.d_commit.load(Ordering::Relaxed),
+            lambda_commit,
+            commitment_multiplier,
+            observer_correction,
+            f_irrev: f64::from_bits(self.f_irrev_bits.load(Ordering::Relaxed)),
+            reorg_depth_bound: REORG_DEPTH_BOUND,
+            n_total_estimate: N_TOTAL_ESTIMATE as u64,
         }
     }
 }
@@ -189,7 +272,10 @@ impl KParameterState {
 /// JSON-serializable snapshot of K-parameter state
 #[derive(Debug, Serialize)]
 pub struct KParameterSnapshot {
+    /// Base K-gauge value (Part IV, Eq. 10)
     pub k_value: f64,
+    /// Enhanced K-gauge value (Part VI, Eq. 25) — primary metric for phase decisions
+    pub k_enhanced: f64,
     pub phase: String,
     pub max_solutions_per_block: u64,
     pub vdf_multiplier: f64,
@@ -198,9 +284,8 @@ pub struct KParameterSnapshot {
     pub rounds_computed: u64,
     pub formula: String,
     /// zk-STARK commitment: SHA3-256(raw_metrics || k_value || salt)
-    /// Proves K was computed from real metrics without revealing raw inputs
     pub zk_commitment: String,
-    /// Public proof: phase boundary membership (K∈[0,5) or K∈[5,10) or K∈[10,∞))
+    /// Public proof: phase boundary membership
     pub zk_phase_proof: ZkPhaseProof,
 
     // v9.3.2: Component breakdown for UI display
@@ -211,6 +296,24 @@ pub struct KParameterSnapshot {
     pub peer_churn: f64,
     pub sync_divergence: f64,
     pub block_rate_deviation: f64,
+
+    // v10.3.0: Information-Theoretic Consensus Quality (Whitepaper v4)
+    /// Observer Coverage Factor Ω_node ∈ [0,1] — how much of the network this node sees (Eq. 17)
+    pub observer_coverage: f64,
+    /// Block Commitment Depth — descendants built on top of the chain tip (Eq. 19)
+    pub commitment_depth: u64,
+    /// Commitment Irreversibility Λ_commit ∈ [0,1] — how settled the chain tip is (Eq. 20)
+    pub lambda_commit: f64,
+    /// K_enhanced decomposition: 1/Λ_commit multiplier
+    pub commitment_multiplier: f64,
+    /// K_enhanced decomposition: (1 + (1-Ω)·w_obs) observer correction
+    pub observer_correction: f64,
+    /// Irreversibility Fraction f_irrev ∈ [0,1] — fraction of recent blocks beyond reorg depth (Eq. 23)
+    pub f_irrev: f64,
+    /// Reorg Depth Bound D_reorg = κ·⌈log₂(1/ε)⌉ = 360 blocks (Eq. 24)
+    pub reorg_depth_bound: u64,
+    /// Estimated total network size (hardcoded until DHT crawl available)
+    pub n_total_estimate: u64,
 }
 
 /// zk-STARK-style phase membership proof
@@ -239,6 +342,9 @@ pub struct RawMetrics {
     pub peer_count: u64,
     pub local_height: u64,
     pub network_height: u64,
+    // v10.3.0: Additional inputs for Information-Theoretic metrics
+    /// Height of the block we're measuring commitment depth for (tip of last window)
+    pub tip_height_at_window_start: u64,
 }
 
 // ========================================
@@ -436,10 +542,57 @@ impl KParameterEngine {
         // Sanitize NaN/Inf → 0.0
         let k = if k.is_finite() { k } else { 0.0 };
 
-        // Determine phase
-        let new_phase = if k >= PHASE_CRITICAL_THRESHOLD {
+        // ========================================
+        // v10.3.0: Information-Theoretic Enhancements (Part VI)
+        // ========================================
+
+        // --- Observer Coverage Factor Ω_node (Eq. 17) ---
+        // Ω = 1 - exp(-n_peers / n_total)
+        let n_peers = current.peer_count as f64;
+        let omega_node = 1.0 - (-n_peers / N_TOTAL_ESTIMATE).exp();
+        let omega_node = if omega_node.is_finite() { omega_node } else { 0.0 };
+
+        // --- Block Commitment Depth d_commit (Eq. 19) ---
+        // Approximation: d_commit(tip_at_window_start) = current_height - tip_height
+        // This counts blocks built on top since the window started
+        let d_commit_val = if current.local_height > current.tip_height_at_window_start {
+            current.local_height - current.tip_height_at_window_start
+        } else {
+            0
+        };
+
+        // --- Commitment Irreversibility Λ_commit (Eq. 20) ---
+        // Λ = 1 - exp(-d_commit / (κ · τ_confirm))
+        let lambda_commit = 1.0 - (-(d_commit_val as f64) / (KAPPA * TAU_CONFIRM)).exp();
+        let lambda_commit = lambda_commit.max(0.0).min(1.0);
+
+        // --- Irreversibility Fraction f_irrev (Eq. 23) ---
+        // What fraction of blocks in the last window are beyond the reorg depth?
+        // At steady state: blocks produced in tau=60s window at ~3.46 bps ≈ 207 blocks
+        // Blocks with d_commit > D_reorg are those older than D_reorg/block_rate seconds
+        let blocks_in_window = height_delta.max(1);
+        let blocks_beyond_reorg = if d_commit_val > REORG_DEPTH_BOUND {
+            // Total blocks minus those within reorg depth of the tip
+            let blocks_within_reorg = REORG_DEPTH_BOUND.min(blocks_in_window);
+            blocks_in_window.saturating_sub(blocks_within_reorg)
+        } else {
+            0
+        };
+        let f_irrev = blocks_beyond_reorg as f64 / blocks_in_window as f64;
+        let f_irrev = if f_irrev.is_finite() { f_irrev.max(0.0).min(1.0) } else { 0.0 };
+
+        // --- Enhanced K-gauge (Eq. 25) ---
+        // K_enhanced = K_base / Λ_commit · (1 + (1 - Ω_node) · w_obs)
+        let lambda_clamped = lambda_commit.max(LAMBDA_COMMIT_MIN);
+        let observer_correction = 1.0 + (1.0 - omega_node) * W_OBS;
+        let k_enhanced = (k / lambda_clamped) * observer_correction;
+        let k_enhanced = k_enhanced.min(k * K_ENHANCED_MAX_RATIO); // Cap per paper
+        let k_enhanced = if k_enhanced.is_finite() { k_enhanced } else { k };
+
+        // Phase classification uses K_enhanced (v10.3.0)
+        let new_phase = if k_enhanced >= PHASE_CRITICAL_THRESHOLD {
             KPhase::Critical
-        } else if k >= PHASE_APPROACHING_THRESHOLD {
+        } else if k_enhanced >= PHASE_APPROACHING_THRESHOLD {
             KPhase::Approaching
         } else {
             KPhase::Stable
@@ -477,6 +630,12 @@ impl KParameterEngine {
         state.peer_churn_bits.store(peer_churn.to_bits(), Ordering::Relaxed);
         state.sync_divergence_bits.store(sync_divergence.to_bits(), Ordering::Relaxed);
         state.block_rate_deviation_bits.store(block_rate_deviation.to_bits(), Ordering::Relaxed);
+        // v10.3.0: Store Information-Theoretic metrics
+        state.omega_node_bits.store(omega_node.to_bits(), Ordering::Relaxed);
+        state.d_commit.store(d_commit_val, Ordering::Relaxed);
+        state.lambda_commit_bits.store(lambda_commit.to_bits(), Ordering::Relaxed);
+        state.k_enhanced_bits.store(k_enhanced.to_bits(), Ordering::Relaxed);
+        state.f_irrev_bits.store(f_irrev.to_bits(), Ordering::Relaxed);
         state.tuned_max_solutions.store(max_sol, Ordering::Relaxed);
         state
             .tuned_vdf_multiplier_bps

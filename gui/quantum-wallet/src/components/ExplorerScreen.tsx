@@ -1345,7 +1345,7 @@ const StatsModal = ({ networkStats, liveMetrics, hashpowerSecurity, postQuantumS
                 {/* Consensus Hamiltonian */}
                 <div className="group relative p-4 bg-gradient-to-br from-quantum-dark/40 to-quantum-purple/10 rounded-xl border border-quantum-purple/20 cursor-help">
                   <div className="text-xs text-gray-400 mb-1 font-mono flex items-center gap-1">
-                    H_DAG = H_p + H_a + H_b + H_vdf <Info className="w-3 h-3 text-gray-500" />
+                    H_DAG = H_p + H_a + H_b + H_vdf + H_c <Info className="w-3 h-3 text-gray-500" />
                   </div>
                   <div className="text-2xl font-bold text-quantum-cyan font-mono">
                     {parseFloat(physicsMetrics.consensus_hamiltonian?.H_total || '0').toLocaleString(undefined, { maximumFractionDigits: 0 })}
@@ -1356,6 +1356,7 @@ const StatsModal = ({ networkStats, liveMetrics, hashpowerSecurity, postQuantumS
                     <div className="text-yellow-400">H_anti: {parseFloat(physicsMetrics.consensus_hamiltonian?.H_anticone || '0').toFixed(2)}</div>
                     <div className="text-quantum-cyan">H_blue: {parseFloat(physicsMetrics.consensus_hamiltonian?.H_blue || '0').toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
                     <div className="text-purple-400">H_vdf: {parseFloat(physicsMetrics.consensus_hamiltonian?.H_vdf || '0').toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
+                    <div className="text-amber-400 col-span-2">H_commit: {parseFloat(physicsMetrics.consensus_hamiltonian?.H_commit || '0').toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
                   </div>
                   {/* Tooltip */}
                   <div className="absolute z-50 invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-all duration-200 bottom-full left-0 mb-2 w-80 p-4 bg-black/95 rounded-lg border border-quantum-purple/50 text-xs">
@@ -1624,14 +1625,161 @@ const StatsModal = ({ networkStats, liveMetrics, hashpowerSecurity, postQuantumS
                 </div>
               </div>
 
-              {/* Row 3: Equation Display */}
+              {/* Row 3: Information-Theoretic Consensus Quality (v4 — Part VI) */}
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+                {/* Enhanced K-Gauge */}
+                <div className="group relative p-4 bg-gradient-to-br from-quantum-dark/40 to-amber-900/10 rounded-xl border border-amber-500/20 cursor-help">
+                  <div className="text-xs text-gray-400 mb-1 flex items-center gap-1">
+                    Enhanced K-Gauge (v4) <Info className="w-3 h-3 text-gray-500" />
+                  </div>
+                  <div className="text-2xl font-bold text-amber-400 font-mono">
+                    {parseFloat(physicsMetrics.enhanced_k_gauge?.k_enhanced || '0').toFixed(3)}
+                  </div>
+                  <div className={`text-xs mt-1 font-semibold ${
+                    physicsMetrics.enhanced_k_gauge?.phase === 'stable' ? 'text-green-400' :
+                    physicsMetrics.enhanced_k_gauge?.phase === 'approaching' ? 'text-amber-400' : 'text-red-400'
+                  }`}>
+                    {(physicsMetrics.enhanced_k_gauge?.phase || 'stable').toUpperCase()}
+                  </div>
+                  <div className="mt-2 space-y-1 text-[10px] font-mono">
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">K_base:</span>
+                      <span className="text-blue-400">{physicsMetrics.enhanced_k_gauge?.k_base}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">1/{'\u039B'}_commit:</span>
+                      <span className="text-amber-400">{physicsMetrics.enhanced_k_gauge?.commitment_multiplier}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">{'\u03A9'}_correction:</span>
+                      <span className="text-cyan-400">{physicsMetrics.enhanced_k_gauge?.observer_correction}</span>
+                    </div>
+                  </div>
+                  <div className="absolute z-50 invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-all duration-200 bottom-full left-0 mb-2 w-80 p-4 bg-black/95 rounded-lg border border-amber-500/50 text-xs">
+                    <div className="font-bold text-amber-400 mb-2">Enhanced K-Gauge (Whitepaper v4, Eq. 25)</div>
+                    <div className="text-gray-300 leading-relaxed">
+                      K_enhanced = K_base / {'\u039B'}_commit {'\u00B7'} (1 + (1-{'\u03A9'}){'\u00B7'}w_obs). The base K-gauge only sees operational stress. The enhanced version adds two information-theoretic corrections: (1) if the chain tip is shallow (low {'\u039B'}_commit), K inflates — "don't trust unconfirmed blocks"; (2) if this node sees few peers (low {'\u03A9'}), K inflates — "don't trust a limited view." This catches Sybil partition attacks and fresh-restart scenarios that the base gauge misses entirely.
+                    </div>
+                    <div className="absolute bottom-0 left-4 transform translate-y-1/2 rotate-45 w-2 h-2 bg-black border-r border-b border-amber-500/50"></div>
+                  </div>
+                </div>
+
+                {/* Observer Coverage */}
+                <div className="group relative p-4 bg-gradient-to-br from-quantum-dark/40 to-cyan-900/10 rounded-xl border border-cyan-500/20 cursor-help">
+                  <div className="text-xs text-gray-400 mb-1 flex items-center gap-1">
+                    Observer Coverage {'\u03A9'}_node <Info className="w-3 h-3 text-gray-500" />
+                  </div>
+                  <div className="text-2xl font-bold text-cyan-400 font-mono">
+                    {parseFloat(physicsMetrics.observer_coverage?.omega_node || '0').toFixed(3)}
+                  </div>
+                  <div className={`text-xs mt-1 font-semibold ${
+                    parseFloat(physicsMetrics.observer_coverage?.omega_node || '0') > 0.8 ? 'text-green-400' :
+                    parseFloat(physicsMetrics.observer_coverage?.omega_node || '0') > 0.5 ? 'text-blue-400' : 'text-amber-400'
+                  }`}>
+                    {physicsMetrics.observer_coverage?.label || 'unknown'}
+                  </div>
+                  <div className="mt-2 space-y-1 text-[10px] font-mono">
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">n_peers:</span>
+                      <span className="text-white">{physicsMetrics.observer_coverage?.n_peers}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">n_total (est):</span>
+                      <span className="text-gray-500">{physicsMetrics.observer_coverage?.n_total_estimate}</span>
+                    </div>
+                  </div>
+                  {/* Progress bar */}
+                  <div className="mt-2 w-full bg-gray-800 rounded-full h-1.5">
+                    <div className={`h-1.5 rounded-full transition-all ${
+                      parseFloat(physicsMetrics.observer_coverage?.omega_node || '0') > 0.8 ? 'bg-green-400' :
+                      parseFloat(physicsMetrics.observer_coverage?.omega_node || '0') > 0.5 ? 'bg-blue-400' : 'bg-amber-400'
+                    }`} style={{ width: `${Math.min(parseFloat(physicsMetrics.observer_coverage?.omega_node || '0') * 100, 100)}%` }} />
+                  </div>
+                  <div className="absolute z-50 invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-all duration-200 bottom-full left-0 mb-2 w-80 p-4 bg-black/95 rounded-lg border border-cyan-500/50 text-xs">
+                    <div className="font-bold text-cyan-400 mb-2">Observer Coverage (Whitepaper v4, Eq. 17)</div>
+                    <div className="text-gray-300 leading-relaxed">
+                      {'\u03A9'}_node = 1 - exp(-n_peers/n_total). Measures what fraction of the network this node can "see." A node connected to 12 of 50 peers has {'\u03A9'} = 0.21. A node in a Sybil partition seeing only 2 adversary-controlled peers has {'\u03A9'} {'\u2248'} 0.04. Low coverage means the K-gauge reading is untrustworthy — the node might be seeing a fake, healthy-looking slice of the network.
+                    </div>
+                    <div className="absolute bottom-0 left-4 transform translate-y-1/2 rotate-45 w-2 h-2 bg-black border-r border-b border-cyan-500/50"></div>
+                  </div>
+                </div>
+
+                {/* Commitment Depth */}
+                <div className="group relative p-4 bg-gradient-to-br from-quantum-dark/40 to-yellow-900/10 rounded-xl border border-yellow-500/20 cursor-help">
+                  <div className="text-xs text-gray-400 mb-1 flex items-center gap-1">
+                    Commitment Depth d_commit <Info className="w-3 h-3 text-gray-500" />
+                  </div>
+                  <div className="text-2xl font-bold text-yellow-400 font-mono">
+                    {physicsMetrics.commitment_depth?.d_commit || 0}
+                  </div>
+                  <div className={`text-xs mt-1 font-semibold ${physicsMetrics.commitment_depth?.settled ? 'text-green-400' : 'text-yellow-400'}`}>
+                    {physicsMetrics.commitment_depth?.settled ? 'SETTLED' : 'SHALLOW'}
+                  </div>
+                  <div className="mt-2 space-y-1 text-[10px] font-mono">
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">{'\u039B'}_commit:</span>
+                      <span className="text-white">{physicsMetrics.commitment_depth?.lambda_commit}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">D_reorg:</span>
+                      <span className="text-red-400">{physicsMetrics.commitment_depth?.reorg_depth_bound} blocks</span>
+                    </div>
+                  </div>
+                  {/* Irreversibility bar: yellow → blue gradient */}
+                  <div className="mt-2 w-full bg-gray-800 rounded-full h-1.5">
+                    <div className="h-1.5 rounded-full transition-all bg-gradient-to-r from-yellow-400 to-blue-500" style={{ width: `${Math.min(parseFloat(physicsMetrics.commitment_depth?.lambda_commit || '0') * 100, 100)}%` }} />
+                  </div>
+                  <div className="absolute z-50 invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-all duration-200 bottom-full left-0 mb-2 w-80 p-4 bg-black/95 rounded-lg border border-yellow-500/50 text-xs">
+                    <div className="font-bold text-yellow-400 mb-2">Block Commitment Depth (Whitepaper v4, Eq. 19-20)</div>
+                    <div className="text-gray-300 leading-relaxed">
+                      d_commit counts how many blocks have been built on top of the chain tip. A fresh tip (d=5) has {'\u039B'}_commit {'\u2248'} 0.003 — almost no commitment. After 360+ descendants (the reorg boundary), {'\u039B'} approaches 1.0 — the ordering is effectively irreversible. Inspired by Seth Lloyd's insight that classicality emerges from irreversible computation.
+                    </div>
+                    <div className="absolute bottom-0 left-4 transform translate-y-1/2 rotate-45 w-2 h-2 bg-black border-r border-b border-yellow-500/50"></div>
+                  </div>
+                </div>
+
+                {/* Irreversibility Fraction */}
+                <div className="group relative p-4 bg-gradient-to-br from-quantum-dark/40 to-green-900/10 rounded-xl border border-green-500/20 cursor-help">
+                  <div className="text-xs text-gray-400 mb-1 flex items-center gap-1">
+                    Irreversibility f_irrev <Info className="w-3 h-3 text-gray-500" />
+                  </div>
+                  <div className="text-2xl font-bold text-green-400 font-mono">
+                    {(parseFloat(physicsMetrics.irreversibility?.f_irrev || '0') * 100).toFixed(1)}%
+                  </div>
+                  <div className="text-xs text-gray-500 mt-1">of recent blocks settled</div>
+                  <div className="mt-2 space-y-1 text-[10px] font-mono">
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">f_irrev:</span>
+                      <span className="text-white">{physicsMetrics.irreversibility?.f_irrev}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">H_commit:</span>
+                      <span className="text-amber-400">{parseFloat(physicsMetrics.consensus_hamiltonian?.H_commit || '0').toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+                    </div>
+                  </div>
+                  {/* Settled bar */}
+                  <div className="mt-2 w-full bg-gray-800 rounded-full h-1.5">
+                    <div className="h-1.5 rounded-full transition-all bg-green-400" style={{ width: `${Math.min(parseFloat(physicsMetrics.irreversibility?.f_irrev || '0') * 100, 100)}%` }} />
+                  </div>
+                  <div className="absolute z-50 invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-all duration-200 bottom-full left-0 mb-2 w-80 p-4 bg-black/95 rounded-lg border border-green-500/50 text-xs">
+                    <div className="font-bold text-green-400 mb-2">Irreversibility Fraction (Whitepaper v4, Eq. 23)</div>
+                    <div className="text-gray-300 leading-relaxed">
+                      f_irrev measures what fraction of blocks produced in the last 60 seconds are beyond the reorg depth (D_reorg = 360 blocks). At steady state, f_irrev {'\u2248'} 95% — nearly all recent blocks are irreversible. After a restart or during fast sync, f_irrev drops to 0% because the chain tip is shallow. This is the "how settled is the chain?" gauge.
+                    </div>
+                    <div className="absolute bottom-0 left-4 transform translate-y-1/2 rotate-45 w-2 h-2 bg-black border-r border-b border-green-500/50"></div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Row 4: Equation Display (updated with v4 equations) */}
               <div className="p-3 bg-quantum-dark/20 rounded-lg border border-quantum-purple/10 font-mono text-[11px] text-gray-400">
                 <div className="flex flex-wrap gap-x-6 gap-y-1 justify-center">
                   <span>F = {'<'}E{'>'} - T_eff{'\u00B7'}S</span>
                   <span>{'\u03BA'} = {'\u230A'}2{'\u03B4\u039B'}/D{'\u230B'}</span>
                   <span>T_eff = {'\u03B4\u039B'}/(1-f/n)</span>
-                  <span>{'\u2202\u03C1'}/{'\u2202'}t = D{'\u2207\u00B2\u03C1'}</span>
-                  <span>R_min {'\u2265'} {'\u0394'}E/T_eff</span>
+                  <span className="text-amber-400/70">K_enh = K/{'\u039B'}{'\u00B7'}(1+(1-{'\u03A9'}){'\u00B7'}w)</span>
+                  <span className="text-cyan-400/70">{'\u03A9'} = 1-e^(-n/N)</span>
+                  <span className="text-yellow-400/70">{'\u039B'} = 1-e^(-d/{'\u03BA\u03C4'})</span>
                 </div>
               </div>
             </motion.div>

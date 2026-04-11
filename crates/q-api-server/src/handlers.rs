@@ -14503,14 +14503,31 @@ pub async fn get_physics_metrics(
     let entropy = n_deg_log2;
     let free_energy = h_total - t_eff * entropy;
 
+    // --- v10.3.0: Information-Theoretic Consensus Quality (Part VI) ---
+    let k_state = &state.k_parameter_state;
+    let omega_node = k_state.omega_node();
+    let lambda_commit_val = k_state.lambda_commit();
+    let k_enhanced_val = k_state.k_enhanced();
+    let k_base_val = k_state.k_value();
+    let d_commit_val = k_state.d_commit.load(Ordering::Relaxed);
+    let f_irrev_val = f64::from_bits(k_state.f_irrev_bits.load(Ordering::Relaxed));
+    let d_reorg: u64 = 360; // κ · ⌈log₂(1/ε)⌉ = 18 × 20
+
+    // Fifth Hamiltonian term: H_commit = -μ · Σ log(1 + d_commit(v)) (Eq. 22)
+    // Approximation: -μ · log(1 + avg_d_commit) · height
+    let mu_commit = 0.01_f64; // weight (hardcoded, needs calibration — paper L12)
+    let h_commit = -mu_commit * (1.0 + d_commit_val as f64).ln() * current_height;
+    let h_total_v4 = h_total + h_commit;
+
     Ok(Json(ApiResponse::success(serde_json::json!({
         "consensus_hamiltonian": {
-            "H_total": format!("{:.2}", h_total),
+            "H_total": format!("{:.2}", h_total_v4),
             "H_parent": h_parent,
             "H_anticone": format!("{:.4}", h_anticone),
             "H_blue": format!("{:.2}", h_blue),
             "H_vdf": format!("{:.2}", h_vdf),
-            "description": "H_dag = H_parent + H_anticone + H_blue + H_VDF"
+            "H_commit": format!("{:.2}", h_commit),
+            "description": "H_dag = H_parent + H_anticone + H_blue + H_VDF + H_commit (v4)"
         },
         "k_parameter": {
             "kappa": k_param,
@@ -14581,6 +14598,35 @@ pub async fn get_physics_metrics(
             "lambda_eq": lambda_eq,
             "T_eff_eq": format!("{:.6}", t_eff_eq),
             "feedback": "Emission homeostasis stabilizes T_eff"
+        },
+        "observer_coverage": {
+            "omega_node": format!("{:.4}", omega_node),
+            "n_peers": peer_count as u64,
+            "n_total_estimate": 50,
+            "trustworthy": omega_node > 0.5,
+            "label": if omega_node > 0.8 { "representative" } else if omega_node > 0.5 { "adequate" } else { "limited view" },
+            "description": "Observer Coverage Factor (Eq. 17): Ω = 1 - exp(-n_peers/n_total)"
+        },
+        "commitment_depth": {
+            "d_commit": d_commit_val,
+            "lambda_commit": format!("{:.4}", lambda_commit_val),
+            "reorg_depth_bound": d_reorg,
+            "settled": d_commit_val > d_reorg,
+            "description": "Block Commitment Depth (Eq. 19-20): how irreversible is the chain tip"
+        },
+        "irreversibility": {
+            "f_irrev": format!("{:.4}", f_irrev_val),
+            "f_irrev_pct": format!("{:.1}%", f_irrev_val * 100.0),
+            "description": "Irreversibility Fraction (Eq. 23): what fraction of recent blocks are settled"
+        },
+        "enhanced_k_gauge": {
+            "k_base": format!("{:.4}", k_base_val),
+            "k_enhanced": format!("{:.4}", k_enhanced_val),
+            "commitment_multiplier": format!("{:.4}", if lambda_commit_val > 0.01 { 1.0 / lambda_commit_val } else { 100.0 }),
+            "observer_correction": format!("{:.4}", 1.0 + (1.0 - omega_node) * 1.0),
+            "phase": k_state.current_phase().as_str(),
+            "formula": "K_enhanced = K_base / Λ_commit · (1 + (1-Ω)·w_obs)",
+            "description": "Enhanced K-Gauge (Eq. 25): detects Sybil partition + shallow tip attacks"
         },
         "timestamp": chrono::Utc::now().timestamp()
     }))))
