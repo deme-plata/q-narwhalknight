@@ -261,6 +261,7 @@ impl<T> ApiResponse<T> {
 
 /// v5.1.1: Enhanced health check endpoint for Nginx load balancing and deploy verification
 /// v8.2.0: Added balance_state_hash, wallet_count, total_supply for cross-node verification
+/// v10.2.10: Added resource metrics for operational visibility (swap, memory, degradation)
 #[derive(Serialize)]
 pub struct HealthStatus {
     pub status: String,
@@ -272,6 +273,13 @@ pub struct HealthStatus {
     pub balance_state_hash: String,
     pub wallet_count: usize,
     pub total_supply_qug: String,
+    // v10.2.10: Resource observability
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_rss_mb: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub swap_used_percent: Option<u8>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub degraded_reasons: Vec<String>,
 }
 
 /// Cached balance state hash (recomputed max every 30s to avoid performance impact)
@@ -342,6 +350,53 @@ pub async fn health_check(
         total_supply / 1_000_000_000_000_000_000_000_000u128,
         total_supply % 1_000_000_000_000_000_000_000_000u128);
 
+    // v10.2.10: Gather resource metrics for operational visibility
+    let (memory_rss_mb, swap_used_percent, degraded_reasons) = {
+        let mut rss_mb = None;
+        let mut swap_pct = None;
+        let mut reasons = Vec::new();
+
+        // Read process RSS from /proc/self/status (Linux-only, zero-cost)
+        if let Ok(status_content) = tokio::fs::read_to_string("/proc/self/status").await {
+            for line in status_content.lines() {
+                if line.starts_with("VmRSS:") {
+                    if let Some(kb_str) = line.split_whitespace().nth(1) {
+                        if let Ok(kb) = kb_str.parse::<u64>() {
+                            rss_mb = Some(kb / 1024);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Read swap usage from /proc/meminfo
+        if let Ok(meminfo) = tokio::fs::read_to_string("/proc/meminfo").await {
+            let mut swap_total: u64 = 0;
+            let mut swap_free: u64 = 0;
+            for line in meminfo.lines() {
+                if line.starts_with("SwapTotal:") {
+                    if let Some(kb_str) = line.split_whitespace().nth(1) {
+                        swap_total = kb_str.parse().unwrap_or(0);
+                    }
+                } else if line.starts_with("SwapFree:") {
+                    if let Some(kb_str) = line.split_whitespace().nth(1) {
+                        swap_free = kb_str.parse().unwrap_or(0);
+                    }
+                }
+            }
+            if swap_total > 0 {
+                let used = swap_total.saturating_sub(swap_free);
+                let pct = ((used as f64 / swap_total as f64) * 100.0).min(100.0) as u8;
+                swap_pct = Some(pct);
+                if pct > 95 {
+                    reasons.push("swap_exhausted".to_string());
+                }
+            }
+        }
+
+        (rss_mb, swap_pct, reasons)
+    };
+
     Ok(Json(ApiResponse::success(HealthStatus {
         status,
         height: current_height,
@@ -352,6 +407,9 @@ pub async fn health_check(
         balance_state_hash: balance_hash_hex,
         wallet_count,
         total_supply_qug,
+        memory_rss_mb,
+        swap_used_percent: swap_used_percent,
+        degraded_reasons,
     })))
 }
 

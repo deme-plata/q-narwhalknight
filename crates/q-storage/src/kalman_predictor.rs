@@ -68,8 +68,11 @@ impl NetworkState {
         let timeout_ms = self.latency_ms + 4.0 * self.jitter_ms;
 
         // Clamp to reasonable range
+        // v10.2.10: Reduced max from 60s to 15s to match adaptive timeout ceiling.
+        // Prevents Kalman from independently converging to high values (e.g., 21.4s)
+        // that caused the 2026-04-11 Epsilon sync stall.
         let min_timeout = Duration::from_millis(100);
-        let max_timeout = Duration::from_secs(60);
+        let max_timeout = Duration::from_secs(15);
 
         Duration::from_millis(timeout_ms as u64).clamp(min_timeout, max_timeout)
     }

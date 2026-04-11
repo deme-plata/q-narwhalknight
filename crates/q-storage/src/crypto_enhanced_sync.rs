@@ -827,9 +827,14 @@ impl AdaptiveTimeout {
         // MAD is ~1.4826 times the stddev for normal distributions
         let calculated = (median as f64 + 3.0 * mad + 100.0) as u64;
 
+        // v10.2.10: Hard ceiling at 15s. The previous 30s max allowed timeout
+        // convergence to 21.4s which caused the 2026-04-11 Epsilon sync stall.
+        // 15s is still 3x typical chunk RTT (1-5s on 10Gbit).
+        let effective_max = 15_000u64.min(self.max_timeout_ms);
+
         self.current_timeout_ms = calculated
             .max(self.min_timeout_ms)
-            .min(self.max_timeout_ms);
+            .min(effective_max);
     }
 }
 

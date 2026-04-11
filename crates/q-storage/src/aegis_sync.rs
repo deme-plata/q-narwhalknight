@@ -113,8 +113,19 @@ pub struct PeerTrustMetrics {
     /// Trust score (0.0 - 1.0)
     pub trust_score: f64,
 
-    /// Last seen timestamp
+    /// Last seen timestamp (any interaction)
     pub last_seen: i64,
+
+    /// v10.2.10: Timestamp of most recent failure (for time-decay gating).
+    /// Distinct from last_seen which updates on any interaction.
+    /// Defaults to 0 for existing peers (immediately eligible for decay).
+    #[serde(default)]
+    pub last_failure_at: i64,
+
+    /// v10.2.10: Consecutive successful chunk downloads (resets on any failure).
+    /// Used for success-based trust recovery.
+    #[serde(default)]
+    pub consecutive_successes: u64,
 
     /// Peer's AEGIS-QL public key
     pub public_key: q_aegis_ql::PublicKey,
@@ -137,6 +148,8 @@ impl PeerTrustRegistry {
                 data_failures: 0,
                 trust_score: 0.5, // Start neutral
                 last_seen: chrono::Utc::now().timestamp(),
+                last_failure_at: 0,
+                consecutive_successes: 0,
                 public_key,
             }
         });
@@ -167,12 +180,16 @@ impl PeerTrustRegistry {
                 data_failures: 0,
                 trust_score: 0.5,
                 last_seen: chrono::Utc::now().timestamp(),
+                last_failure_at: 0,
+                consecutive_successes: 0,
                 public_key,
             }
         });
 
         entry.invalid_signatures += 1;
         entry.last_seen = chrono::Utc::now().timestamp();
+        entry.last_failure_at = chrono::Utc::now().timestamp();
+        entry.consecutive_successes = 0;
 
         // Severely penalize trust score for invalid signatures
         let total_interactions = entry.valid_packs + entry.invalid_signatures + entry.merkle_failures;
@@ -196,12 +213,16 @@ impl PeerTrustRegistry {
                 data_failures: 0,
                 trust_score: 0.5,
                 last_seen: chrono::Utc::now().timestamp(),
+                last_failure_at: 0,
+                consecutive_successes: 0,
                 public_key,
             }
         });
 
         entry.merkle_failures += 1;
         entry.last_seen = chrono::Utc::now().timestamp();
+        entry.last_failure_at = chrono::Utc::now().timestamp();
+        entry.consecutive_successes = 0;
 
         let total_failures = entry.invalid_signatures + entry.merkle_failures + entry.data_failures;
         let total_interactions = entry.valid_packs + total_failures;
@@ -226,6 +247,8 @@ impl PeerTrustRegistry {
                 data_failures: 0,
                 trust_score: 0.5,
                 last_seen: chrono::Utc::now().timestamp(),
+                last_failure_at: 0,
+                consecutive_successes: 0,
                 // Default empty key for unknown peers
                 public_key: q_aegis_ql::PublicKey { a: Vec::new(), t: Vec::new() },
             }
@@ -233,6 +256,8 @@ impl PeerTrustRegistry {
 
         entry.data_failures += 1;
         entry.last_seen = chrono::Utc::now().timestamp();
+        entry.last_failure_at = chrono::Utc::now().timestamp();
+        entry.consecutive_successes = 0; // v10.2.10: Reset on failure
 
         // v1.5.2-beta: Heavily penalize data failures (likely version mismatch)
         let total_failures = entry.invalid_signatures + entry.merkle_failures + entry.data_failures;
@@ -272,6 +297,90 @@ impl PeerTrustRegistry {
             .filter(|entry| entry.value().trust_score >= 0.8)
             .map(|entry| entry.key().clone())
             .collect()
+    }
+
+    /// v10.2.10: Record a successful chunk download from a peer.
+    /// After 5 consecutive successes, reduce failure counters by 1.
+    /// The consecutive_successes counter resets on any failure, so this only
+    /// triggers for peers that have genuinely recovered.
+    pub fn record_successful_chunk(&self, peer_id: &str) {
+        if let Some(mut entry) = self.peers.get_mut(peer_id) {
+            entry.valid_packs += 1;
+            entry.consecutive_successes += 1;
+            entry.last_seen = chrono::Utc::now().timestamp();
+
+            if entry.consecutive_successes >= 5 && entry.trust_score < 0.5 {
+                entry.invalid_signatures = entry.invalid_signatures.saturating_sub(1);
+                entry.merkle_failures = entry.merkle_failures.saturating_sub(1);
+                entry.data_failures = entry.data_failures.saturating_sub(1);
+                entry.consecutive_successes = 0; // Reset — next recovery needs 5 more
+
+                Self::recalculate_trust(&mut *entry);
+
+                tracing::info!(
+                    "🔄 [AEGIS-QL] Peer {} trust recovered to {:.2}% after 5 consecutive successes",
+                    &peer_id[..8.min(peer_id.len())],
+                    entry.trust_score * 100.0
+                );
+            } else {
+                Self::recalculate_trust(&mut *entry);
+            }
+        }
+    }
+
+    /// v10.2.10: Time-decay failure counters.
+    /// Halves failure counters for peers whose last failure was >5 minutes ago.
+    /// Uses last_failure_at (not last_seen) so actively-used peers with no
+    /// recent failures also benefit from decay.
+    pub fn apply_time_decay(&self) {
+        let now = chrono::Utc::now().timestamp();
+        let decay_threshold_secs = 300; // 5 minutes
+        let mut decayed_count = 0;
+
+        for mut entry in self.peers.iter_mut() {
+            let since_last_failure = now - entry.last_failure_at;
+            if since_last_failure > decay_threshold_secs && entry.trust_score < 0.5 {
+                entry.invalid_signatures /= 2;
+                entry.merkle_failures /= 2;
+                entry.data_failures /= 2;
+                Self::recalculate_trust(&mut *entry);
+                decayed_count += 1;
+            }
+        }
+
+        if decayed_count > 0 {
+            tracing::info!(
+                "🔄 [AEGIS-QL] Time-decay applied to {} peer(s) with stale failures",
+                decayed_count
+            );
+        }
+    }
+
+    /// v10.2.10: Remove peers not seen in over 1 hour.
+    pub fn cleanup_stale_peers(&self) {
+        let now = chrono::Utc::now().timestamp();
+        let before = self.peers.len();
+        self.peers.retain(|_, entry| (now - entry.last_seen) < 3600);
+        let removed = before - self.peers.len();
+        if removed > 0 {
+            tracing::info!(
+                "🧹 [AEGIS-QL] Cleaned up {} stale peer(s) (not seen in >1 hour)",
+                removed
+            );
+        }
+    }
+
+    /// v10.2.10: Recalculate trust score from current counters.
+    fn recalculate_trust(metrics: &mut PeerTrustMetrics) {
+        let weighted_valid = metrics.valid_packs as f64;
+        let weighted_failures = (metrics.invalid_signatures
+            + metrics.merkle_failures
+            + metrics.data_failures * 2) as f64;
+        metrics.trust_score = if weighted_valid + weighted_failures > 0.0 {
+            weighted_valid / (weighted_valid + weighted_failures)
+        } else {
+            0.5 // Reset to neutral if all counters decayed to 0
+        };
     }
 }
 

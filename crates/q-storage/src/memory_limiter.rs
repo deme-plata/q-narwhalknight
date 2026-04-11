@@ -36,8 +36,10 @@ const ACTIVE_SYNC_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 /// Maximum memory budget for sync operations (70% of available RAM)
 const DEFAULT_SYNC_MEMORY_BUDGET_PCT: f64 = 0.70;
 
-/// Memory pressure levels
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Memory pressure levels.
+/// v10.2.10: Added PartialOrd, Ord — declaration order matches severity (Low < Critical).
+/// This allows std::cmp::max(rss_pressure, swap_pressure) for combined pressure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MemoryPressure {
     Low,      // < 60% memory usage
     Medium,   // 60-80% memory usage
@@ -227,7 +229,7 @@ impl MemoryLimiter {
         self.total_memory_bytes.store(total, Ordering::Relaxed);
         self.available_memory_bytes.store(available, Ordering::Relaxed);
 
-        let pressure = if usage_ratio < self.config.low_threshold {
+        let ram_pressure = if usage_ratio < self.config.low_threshold {
             MemoryPressure::Low
         } else if usage_ratio < self.config.medium_threshold {
             MemoryPressure::Medium
@@ -237,18 +239,42 @@ impl MemoryLimiter {
             MemoryPressure::Critical
         };
 
+        // v10.2.10: Include swap in pressure calculation.
+        // The 2026-04-11 incident had 55% RSS but 100% swap exhaustion.
+        let swap_total = system.total_swap();
+        let swap_used = system.used_swap();
+        let swap_pressure = if swap_total == 0 {
+            MemoryPressure::Low // No swap configured
+        } else {
+            let swap_ratio = swap_used as f64 / swap_total as f64;
+            if swap_ratio < 0.60 {
+                MemoryPressure::Low
+            } else if swap_ratio < 0.80 {
+                MemoryPressure::Medium
+            } else if swap_ratio < 0.95 {
+                MemoryPressure::High
+            } else {
+                MemoryPressure::Critical
+            }
+        };
+
+        // Return the more severe of RAM and swap pressure
+        let pressure = std::cmp::max(ram_pressure, swap_pressure);
+
         let old_pressure = *self.current_pressure.read().await;
         if pressure != old_pressure {
             warn!(
-                "🧠 [MEMORY PRESSURE] Changed from {:?} to {:?} (usage: {:.1}%)",
+                "🧠 [MEMORY PRESSURE] Changed from {:?} to {:?} (RAM: {:.1}%, Swap: {:.1}%)",
                 old_pressure,
                 pressure,
-                usage_ratio * 100.0
+                usage_ratio * 100.0,
+                if swap_total > 0 { swap_used as f64 / swap_total as f64 * 100.0 } else { 0.0 }
             );
         } else {
             debug!(
-                "🧠 [MEMORY] Usage: {:.1}%, Pressure: {:?}, Available: {} GB",
+                "🧠 [MEMORY] RAM: {:.1}%, Swap: {:.1}%, Pressure: {:?}, Available: {} GB",
                 usage_ratio * 100.0,
+                if swap_total > 0 { swap_used as f64 / swap_total as f64 * 100.0 } else { 0.0 },
                 pressure,
                 available / (1024 * 1024 * 1024)
             );
@@ -276,6 +302,16 @@ impl MemoryLimiter {
             pressure: *self.current_pressure.read().await,
             current_batch_size: self.current_batch_size.load(Ordering::Relaxed),
         }
+    }
+
+    /// v10.2.10: Get swap usage as a percentage (0-100).
+    /// Returns 0 if no swap configured.
+    pub async fn get_swap_usage_percent(&self) -> u8 {
+        let system = self.system.read().await;
+        let swap_total = system.total_swap();
+        if swap_total == 0 { return 0; }
+        let swap_used = system.used_swap();
+        ((swap_used as f64 / swap_total as f64) * 100.0).min(100.0) as u8
     }
 
     /// Check if sync operation should pause due to memory pressure

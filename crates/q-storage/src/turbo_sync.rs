@@ -25,7 +25,7 @@ use libp2p::PeerId;
 use rayon::prelude::*;  // ✅ v0.9.41-beta: Parallel decompression
 use serde::{Deserialize, Serialize};
 use std::cmp::min;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -5425,28 +5425,72 @@ impl TurboSyncManager {
                 // v1.3.10-beta: Retry logic with DIFFERENT PEER on each attempt
                 let mut retry_count = 0;
                 let max_retries = 3;
+                // v10.2.10: Wall-clock deadline prevents infinite stall on a single chunk.
+                // If all retries burn 120s total, abandon and let outer loop reschedule.
+                let chunk_deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+                // v10.2.10: Per-chunk peer exclusion — avoid retrying same slow peer
+                // on transport/timeout failures. Validation failures go through AEGIS.
+                let mut excluded_peers: HashSet<String> = HashSet::new();
 
                 loop {
+                    // v10.2.10: Wall-clock circuit breaker
+                    if tokio::time::Instant::now() >= chunk_deadline {
+                        warn!("⏰ [CIRCUIT BREAKER] Chunk {}-{} exceeded 120s wall-clock limit — \
+                               abandoning attempt, will be rescheduled by outer sync loop",
+                              start, end);
+                        return Err(anyhow::anyhow!(
+                            "WALL_CLOCK_TIMEOUT: Chunk {}-{} exceeded 120s deadline", start, end
+                        ));
+                    }
+
+                    // v10.2.10: Filter out peers that already timed out on THIS chunk
+                    let available: Vec<_> = ordered_peers.iter()
+                        .filter(|p| !excluded_peers.contains(&p.to_string()))
+                        .cloned()
+                        .collect();
+
                     // v1.3.10-beta: Select DIFFERENT peer for each retry attempt
                     // v1.0.2: First attempt uses gravity-assist ordered peer (index 0)
-                    let peer_idx = (chunk_idx + retry_count as usize) % peer_count;
-                    let peer = if retry_count == 0 {
-                        ordered_peers[0] // Gravity-assist selected (or original first)
+                    let peer = if available.is_empty() {
+                        // All peers excluded — last resort, use any peer.
+                        // Wall-clock deadline will catch us if this also fails.
+                        ordered_peers[retry_count as usize % peer_count]
+                    } else if retry_count == 0 {
+                        available[0] // Gravity-assist selected (or original first)
                     } else {
-                        ordered_peers[peer_idx] // Round-robin for retries
+                        available[retry_count as usize % available.len()] // Round-robin non-excluded
                     };
 
                     if retry_count > 0 {
-                        info!("🔄 [RETRY] Chunk {}-{}: Using DIFFERENT peer {} (attempt {}/{})",
-                              start, end, peer, retry_count + 1, max_retries);
+                        info!("🔄 [RETRY] Chunk {}-{}: Using {} peer {} (attempt {}/{}, {} excluded)",
+                              start, end,
+                              if available.is_empty() { "LAST-RESORT" } else { "DIFFERENT" },
+                              peer, retry_count + 1, max_retries, excluded_peers.len());
                     }
 
                     match self_clone.download_and_apply_chunk(peer, start, end, retry_count).await {
                         Ok(()) => {
+                            // v10.2.10: Record success for AEGIS recovery
+                            let peer_str = peer.to_string();
+                            self_clone.peer_trust.record_successful_chunk(&peer_str);
                             return Ok((start, end));
                         }
                         Err(e) => {
                             retry_count += 1;
+
+                            // v10.2.10: Exclude peer on transport/timeout failures only.
+                            // Check if error looks like a timeout/transport issue.
+                            let err_msg = e.to_string();
+                            let is_transport_failure = err_msg.contains("timeout")
+                                || err_msg.contains("Timeout")
+                                || err_msg.contains("timed out")
+                                || err_msg.contains("connection")
+                                || err_msg.contains("transport")
+                                || err_msg.contains("P2P direct timeout");
+                            if is_transport_failure {
+                                excluded_peers.insert(peer.to_string());
+                            }
+
                             if retry_count >= max_retries {
                                 error!("❌ Failed chunk {}-{} after {} retries with {} different peers: {}",
                                        start, end, max_retries, max_retries.min(peer_count as u32), e);
@@ -5558,7 +5602,16 @@ impl TurboSyncManager {
                 }
                 Err(e) => {
                     self.metrics.failed_chunks.fetch_add(1, Ordering::Relaxed);
-                    error!("❌ Chunk failed: {}", e);
+                    let err_str = e.to_string();
+                    error!("❌ Chunk failed: {}", err_str);
+
+                    // v10.2.10: If chunk hit wall-clock deadline, cooldown 60s before
+                    // spawning more work to prevent hot-loop retries of stuck ranges.
+                    if err_str.contains("WALL_CLOCK_TIMEOUT") {
+                        warn!("⏳ [CIRCUIT BREAKER] Wall-clock timeout detected — cooling down 60s \
+                               before continuing to prevent hot-loop retries");
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                    }
 
                     // 🚀 v3.4.8-beta: Spawn next chunk even on failure to maintain parallelism
                     if let Some((next_idx, next_start, next_end)) = chunks_queue.pop_front() {
