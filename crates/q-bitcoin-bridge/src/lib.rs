@@ -38,6 +38,7 @@ pub mod zcash; // Zcash shielded stealth relayer // Axum API endpoints for atomi
 // Production implementations
 pub mod real_bitcoin_client;
 pub mod atomic_swap;
+pub mod deposit_bridge;
 
 // Re-export bitcoin types needed by consumers
 pub use bitcoin;

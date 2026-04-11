@@ -325,6 +325,7 @@ pub mod compute_api; // ✅ v9.5.0: Starship Endgame — Compute Orchestrator AP
 pub mod ai_api; // ✅ v9.5.0: Starship Endgame — AI Inference Pool API
 pub mod k_parameter_gauge; // ✅ v9.3.1: Lightweight K-parameter network health gauge (no q-resonance dep)
 pub mod bitcoin_bridge_api; // ✅ v7.2.0: Bitcoin atomic swap bridge (QNK ↔ BTC)
+pub mod bitcoin_deposit_api; // ✅ v10.2.11: Bitcoin deposit bridge — receive BTC, mint wBTC
 pub mod bitcoin_rpc; // ✅ v9.6.5: Bitcoin Knots RPC client (balance, address, send, txs)
 pub mod zcash_bridge_api; // ✅ v7.2.2: Zcash shielded atomic swap bridge (QNK ↔ ZEC)
 pub mod ironfish_bridge_api; // ✅ v7.2.4: Iron Fish privacy atomic swap bridge (QNK ↔ IRON)
@@ -1658,6 +1659,9 @@ pub struct AppState {
 
     // v7.2.0: Bitcoin atomic swap manager (QNK ↔ BTC via HTLC)
     pub atomic_swap_manager: Option<Arc<q_bitcoin_bridge::atomic_swap::AtomicSwapManager>>,
+
+    // v10.2.11: Bitcoin deposit bridge — receive BTC on-chain, mint wBTC
+    pub deposit_bridge: Option<Arc<q_bitcoin_bridge::deposit_bridge::DepositBridge>>,
 
     // v9.6.5: Bitcoin Knots RPC client for wallet operations (balance, address, send)
     pub bitcoin_rpc_client: Option<Arc<bitcoin_rpc::BitcoinRpcClient>>,
@@ -3215,6 +3219,8 @@ impl AppState {
             miner_link_registry: miner_link_api::new_registry(),
             // v7.2.0: Bitcoin bridge (initialized separately if configured)
             atomic_swap_manager: None,
+            // v10.2.11: Bitcoin deposit bridge (initialized below from BTC_RPC_* env vars)
+            deposit_bridge: None,
             // v9.6.5: Bitcoin Knots RPC client (initialized below)
             bitcoin_rpc_client: None,
             // v9.7.2: Zcash Zebra RPC client (initialized below)
@@ -4689,6 +4695,8 @@ impl AppState {
             miner_link_registry: miner_link_api::new_registry(),
             // v7.2.0: Bitcoin bridge (initialized separately if configured)
             atomic_swap_manager: None,
+            // v10.2.11: Bitcoin deposit bridge (initialized below from BTC_RPC_* env vars)
+            deposit_bridge: None,
             // v9.6.5: Bitcoin Knots RPC client (initialized below)
             bitcoin_rpc_client: None,
             // v9.7.2: Zcash Zebra RPC client (initialized below)
