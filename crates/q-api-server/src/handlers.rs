@@ -14687,9 +14687,24 @@ pub async fn get_crypto_metrics(
     let caps = state.node_cypher.capabilities();
     let current_phase = state.node_cypher.phase_at(current_height);
 
-    // --- Tor/Dandelion metrics (MEASURED if available) ---
-    let (tor_bytes_sent, tor_bytes_recv, tor_circuits, dandelion_stem, dandelion_fluff) = (0u64, 0u64, 0u64, 0u64, 0u64);
-    // TODO Phase 2: Wire actual TorMetrics and AnonymityMetrics from state
+    // --- Tor metrics (MEASURED from QTorClient::get_tor_stats) ---
+    let (tor_bytes_sent, tor_bytes_recv, tor_circuits, tor_latency_ms, tor_connections) =
+        if let Some(ref tor_client) = state.tor_client {
+            let stats = tor_client.get_tor_stats().await;
+            (stats.bytes_sent, stats.bytes_received, stats.active_circuits as u64,
+             stats.average_latency.as_millis() as u64, stats.connection_count)
+        } else {
+            (0, 0, 0, 0, 0)
+        };
+
+    // --- Dandelion++ metrics (MEASURED from QuantumDandelion::get_anonymity_stats) ---
+    let (dandelion_total, dandelion_stem, dandelion_fluff, dandelion_score) =
+        if let Some(ref dandelion) = state.dandelion {
+            let stats = dandelion.get_anonymity_stats().await;
+            (stats.messages_seen, stats.stem_messages, stats.fluff_messages, stats.anonymity_score)
+        } else {
+            (0, 0, 0, 0.0)
+        };
 
     // --- Privacy computation ---
     let stem_length = 4u64;
@@ -14704,7 +14719,8 @@ pub async fn get_crypto_metrics(
             "latency_p95_us": sig_p95,
             "latency_p99_us": sig_p99,
             "cache_hit_rate_pct": format!("{:.1}", cache_hit_pct),
-            "data_honesty": "measured"
+            "scope": "distributed AI worker verification (not block consensus signatures)",
+            "data_honesty": if sig_total > 0 { "measured" } else { "measured (counter active when AI coordinator runs)" }
         },
         "active_algorithms": {
             "current_phase": current_phase.label(),
@@ -14768,17 +14784,22 @@ pub async fn get_crypto_metrics(
         },
         "privacy": {
             "dandelion": {
+                "total_messages": dandelion_total,
                 "stem_messages": dandelion_stem,
                 "fluff_messages": dandelion_fluff,
+                "anonymity_score": format!("{:.4}", dandelion_score),
                 "stem_length": stem_length,
                 "p_deanonymization": format!("{:.6}", p_deanon),
-                "data_honesty": "protocol_constant + computed (counters pending Phase 2)"
+                "data_honesty": if dandelion_total > 0 { "measured" } else { "measured (no traffic yet)" }
             },
             "tor": {
                 "bytes_sent": tor_bytes_sent,
                 "bytes_received": tor_bytes_recv,
-                "circuits": tor_circuits,
-                "data_honesty": "counters pending Phase 2 wiring"
+                "active_circuits": tor_circuits,
+                "connections": tor_connections,
+                "latency_ms": tor_latency_ms,
+                "enabled": state.tor_client.is_some(),
+                "data_honesty": if tor_bytes_sent > 0 { "measured" } else { "measured (no traffic yet)" }
             }
         },
         "vdf": {

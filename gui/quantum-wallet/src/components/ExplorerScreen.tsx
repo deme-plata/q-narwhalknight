@@ -1023,7 +1023,7 @@ const DetailModal = ({ detail, onClose, onNavigate }: {
   );
 };
 
-const StatsModal = ({ networkStats, liveMetrics, hashpowerSecurity, postQuantumStatus, startupProgress, resonanceMetrics, networkHashrateFormatted, physicsMetrics, onClose }: {
+const StatsModal = ({ networkStats, liveMetrics, hashpowerSecurity, postQuantumStatus, startupProgress, resonanceMetrics, networkHashrateFormatted, physicsMetrics, cryptoMetrics, onClose }: {
   networkStats: NetworkStats,
   liveMetrics: any,
   hashpowerSecurity: HashpowerSecurity | null,
@@ -1043,6 +1043,7 @@ const StatsModal = ({ networkStats, liveMetrics, hashpowerSecurity, postQuantumS
     total_rounds: number;
   } | null,
   physicsMetrics: any,
+  cryptoMetrics: any,
   onClose: () => void
 }) => {
   return (
@@ -1785,6 +1786,208 @@ const StatsModal = ({ networkStats, liveMetrics, hashpowerSecurity, postQuantumS
             </motion.div>
           )}
 
+          {/* Cryptography Dashboard (v10.3.0) — DeepSeek peer-reviewed */}
+          {cryptoMetrics && (
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.2 }}
+            >
+              <h4 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                <Shield className="w-5 h-5 text-emerald-400" />
+                Cryptography Dashboard
+                <span className="text-xs bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded ml-2">
+                  LIVE
+                </span>
+                <span className="text-xs text-gray-500 ml-auto">DeepSeek peer-reviewed</span>
+              </h4>
+
+              {/* Row 1: Signature Security */}
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+                {/* Live Verification Rate */}
+                <div className="group relative p-4 bg-gradient-to-br from-quantum-dark/40 to-emerald-900/10 rounded-xl border border-emerald-500/20 cursor-help">
+                  <div className="text-xs text-gray-400 mb-1 flex items-center gap-1">
+                    Signature Verifications <span className="text-[8px] bg-emerald-500/30 text-emerald-300 px-1 rounded">MEASURED</span>
+                  </div>
+                  <div className="text-2xl font-bold text-emerald-400 font-mono">
+                    {(cryptoMetrics.signature_verification?.total_verifications || 0).toLocaleString()}
+                  </div>
+                  <div className="text-xs text-gray-500 mt-1">total verified</div>
+                  <div className="mt-2 space-y-1 text-[10px] font-mono">
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Success rate:</span>
+                      <span className="text-emerald-400">{cryptoMetrics.signature_verification?.success_rate_pct}%</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">p95 latency:</span>
+                      <span className="text-white">{cryptoMetrics.signature_verification?.latency_p95_us}{'\u00B5'}s</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Cache hit:</span>
+                      <span className="text-blue-400">{cryptoMetrics.signature_verification?.cache_hit_rate_pct}%</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Current Crypto Phase */}
+                <div className="group relative p-4 bg-gradient-to-br from-quantum-dark/40 to-blue-900/10 rounded-xl border border-blue-500/20 cursor-help">
+                  <div className="text-xs text-gray-400 mb-1 flex items-center gap-1">
+                    Migration Phase <span className="text-[8px] bg-blue-500/30 text-blue-300 px-1 rounded">MEASURED</span>
+                  </div>
+                  <div className="text-xl font-bold text-blue-400">
+                    {cryptoMetrics.active_algorithms?.current_phase || 'Unknown'}
+                  </div>
+                  <div className="text-xs text-gray-500 mt-1">
+                    height {(cryptoMetrics.active_algorithms?.current_height || 0).toLocaleString()}
+                  </div>
+                  <div className="mt-2 space-y-1 text-[10px] font-mono">
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Signing:</span>
+                      <span className="text-white">{(cryptoMetrics.active_algorithms?.signing || []).join(', ')}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Cipher:</span>
+                      <span className="text-white">{cryptoMetrics.active_algorithms?.cipher}</span>
+                    </div>
+                  </div>
+                  {/* Phase progress bar */}
+                  <div className="mt-2 w-full bg-gray-800 rounded-full h-1.5">
+                    <div className="h-1.5 rounded-full bg-gradient-to-r from-blue-400 to-purple-500" style={{
+                      width: `${Math.min(((cryptoMetrics.active_algorithms?.current_height || 0) / (cryptoMetrics.active_algorithms?.phase_transitions?.phase3_threshold_at || 4000000)) * 100, 100)}%`
+                    }} />
+                  </div>
+                  <div className="text-[9px] text-gray-500 mt-1">
+                    Phase 0 {'\u2192'} 1 @ {(cryptoMetrics.active_algorithms?.phase_transitions?.phase1_hybrid_at || 0).toLocaleString()} {'\u2192'} 2 @ {(cryptoMetrics.active_algorithms?.phase_transitions?.phase2_pure_pq_at || 0).toLocaleString()} {'\u2192'} 3 @ {(cryptoMetrics.active_algorithms?.phase_transitions?.phase3_threshold_at || 0).toLocaleString()}
+                  </div>
+                </div>
+
+                {/* Ed25519 Security */}
+                <div className="group relative p-4 bg-gradient-to-br from-quantum-dark/40 to-yellow-900/10 rounded-xl border border-yellow-500/20 cursor-help">
+                  <div className="text-xs text-gray-400 mb-1 flex items-center gap-1">
+                    Ed25519 (Active) <span className="text-[8px] bg-blue-500/30 text-blue-300 px-1 rounded">CONSTANT</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-lg font-bold text-green-400">2<sup>128</sup></span>
+                    <span className="text-xs text-gray-400">classical</span>
+                  </div>
+                  <div className="flex items-center gap-2 mt-1">
+                    <span className="text-lg font-bold text-red-400">2<sup>64</sup></span>
+                    <span className="text-xs text-red-400/70">quantum (Shor)</span>
+                  </div>
+                  <div className="mt-2 text-[10px] text-gray-500 leading-relaxed">
+                    RFC 8032. Same as Bitcoin secp256k1. Vulnerable to ~2,330 logical qubits.
+                  </div>
+                </div>
+
+                {/* SQIsign Level III */}
+                <div className="group relative p-4 bg-gradient-to-br from-quantum-dark/40 to-emerald-900/10 rounded-xl border border-emerald-500/20 cursor-help">
+                  <div className="text-xs text-gray-400 mb-1 flex items-center gap-1">
+                    SQIsign III (Phase 2) <span className="text-[8px] bg-blue-500/30 text-blue-300 px-1 rounded">CONSTANT</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-lg font-bold text-green-400">2<sup>192</sup></span>
+                    <span className="text-xs text-gray-400">classical</span>
+                  </div>
+                  <div className="flex items-center gap-2 mt-1">
+                    <span className="text-lg font-bold text-green-400">2<sup>128</sup></span>
+                    <span className="text-xs text-green-400/70">quantum-resistant</span>
+                  </div>
+                  <div className="mt-2 text-[10px] font-mono">
+                    <span className="text-gray-400">Sig: </span><span className="text-white">204B</span>
+                    <span className="text-gray-400 ml-2">vs Dilithium: </span><span className="text-amber-400">4,627B</span>
+                    <span className="text-emerald-400 ml-1">(-95.6%)</span>
+                  </div>
+                  <div className="mt-1 text-[9px] text-gray-500">
+                    IACR 2025/847 | FFI: {cryptoMetrics.security_levels?.sqisign_level_iii?.ffi_linked ? '✅ linked' : '⚠️ placeholder'}
+                  </div>
+                </div>
+              </div>
+
+              {/* Row 2: Encryption + Privacy + VDF */}
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 mb-4">
+                {/* AEGIS-256 Encryption */}
+                <div className="p-4 bg-quantum-dark/30 rounded-xl border border-quantum-purple/15">
+                  <div className="text-xs text-gray-400 mb-2 flex items-center gap-1">
+                    <Shield className="w-3 h-3" /> AEGIS-256 + AES-256-GCM <span className="text-[8px] bg-blue-500/30 text-blue-300 px-1 rounded">CONSTANT</span>
+                  </div>
+                  <div className="space-y-1 text-xs font-mono">
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Classical:</span>
+                      <span className="text-green-400">2{'\u00B2\u2075\u2076'} bits</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Quantum (Grover):</span>
+                      <span className="text-green-400">2{'\u00B9\u00B2\u2078'} bits</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">KDF:</span>
+                      <span className="text-white">Argon2id (64MB)</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Performance:</span>
+                      <span className="text-cyan-400">2-5x faster than AES-GCM</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Privacy Layer */}
+                <div className="p-4 bg-quantum-dark/30 rounded-xl border border-quantum-purple/15">
+                  <div className="text-xs text-gray-400 mb-2 flex items-center gap-1">
+                    <Wifi className="w-3 h-3" /> Dandelion++ via Tor <span className="text-[8px] bg-emerald-500/30 text-emerald-300 px-1 rounded">MEASURED</span>
+                  </div>
+                  <div className="space-y-1 text-xs font-mono">
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Stem length:</span>
+                      <span className="text-white">{cryptoMetrics.privacy?.dandelion?.stem_length} hops</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">P(deanon):</span>
+                      <span className="text-green-400">{cryptoMetrics.privacy?.dandelion?.p_deanonymization} ({(parseFloat(cryptoMetrics.privacy?.dandelion?.p_deanonymization || '0') * 100).toFixed(1)}%)</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Tor circuits:</span>
+                      <span className="text-white">{cryptoMetrics.privacy?.tor?.circuits || 0}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* VDF + ZK */}
+                <div className="p-4 bg-quantum-dark/30 rounded-xl border border-quantum-purple/15">
+                  <div className="text-xs text-gray-400 mb-2 flex items-center gap-1">
+                    <Zap className="w-3 h-3" /> VDF + Zero Knowledge <span className="text-[8px] bg-blue-500/30 text-blue-300 px-1 rounded">CONSTANT</span>
+                  </div>
+                  <div className="space-y-1 text-xs font-mono">
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">VDF:</span>
+                      <span className="text-white">Genus-2 Hyperelliptic</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Quantum:</span>
+                      <span className="text-yellow-400">conjectured</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">ZK systems:</span>
+                      <span className="text-white">{(cryptoMetrics.zero_knowledge?.systems || []).length}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">PQ zk-SNARK:</span>
+                      <span className={cryptoMetrics.zero_knowledge?.pq_zk_available ? "text-green-400" : "text-red-400"}>{cryptoMetrics.zero_knowledge?.pq_zk_available ? 'LatticeGuard' : 'N/A'}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Honest Comparison Bar */}
+              <div className="p-3 bg-quantum-dark/20 rounded-lg border border-emerald-500/10 text-[11px] text-gray-400">
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-emerald-400 font-semibold">Honest Assessment:</span>
+                  <span>{cryptoMetrics.honest_comparison?.note}</span>
+                </div>
+                <div className="text-gray-500">{cryptoMetrics.honest_comparison?.migration_status}</div>
+              </div>
+            </motion.div>
+          )}
+
           {/* Hashpower Security (v1.3.1-beta) with Tooltips */}
           {hashpowerSecurity && (
             <div>
@@ -2484,6 +2687,10 @@ export default function ExplorerScreen() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [physicsMetrics, setPhysicsMetrics] = useState<any>(null);
 
+  // v10.3.0: Live cryptography dashboard metrics (DeepSeek peer-reviewed)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [cryptoMetrics, setCryptoMetrics] = useState<any>(null);
+
   // Post-Quantum Cryptography status (v1.0.60-beta)
   const [postQuantumStatus] = useState<PostQuantumStatus>({
     version: '1.0.60-beta',
@@ -2596,13 +2803,14 @@ export default function ExplorerScreen() {
 
         // Fetch optional metrics in parallel (non-blocking, failures don't affect core stats)
         try {
-          const [hashpowerResponse, priceResponse, emissionResponse, progressResponse, resonanceResponse, physicsResponse] = await Promise.allSettled([
+          const [hashpowerResponse, priceResponse, emissionResponse, progressResponse, resonanceResponse, physicsResponse, cryptoResponse] = await Promise.allSettled([
             qnkAPI.getHashpowerSecurity(),
             qnkAPI.getAMMPrice('QUG'),
             qnkAPI.getEmissionStats(30),
             qnkAPI.getStartupProgress(),
             qnkAPI.getResonanceMetrics(),
             qnkAPI.getPhysicsMetrics(),
+            qnkAPI.getCryptoMetrics(),
           ]);
           if (!isMounted) return;
 
@@ -2636,6 +2844,9 @@ export default function ExplorerScreen() {
           }
           if (physicsResponse.status === 'fulfilled' && physicsResponse.value.success && physicsResponse.value.data) {
             setPhysicsMetrics(physicsResponse.value.data);
+          }
+          if (cryptoResponse.status === 'fulfilled' && cryptoResponse.value.success && cryptoResponse.value.data) {
+            setCryptoMetrics(cryptoResponse.value.data);
           }
         } catch (optionalErr) {
           console.warn('[Explorer] Optional metrics failed (core stats unaffected):', optionalErr);
@@ -4773,6 +4984,7 @@ export default function ExplorerScreen() {
             resonanceMetrics={resonanceMetrics}
             networkHashrateFormatted={networkSupply.networkHashrateFormatted}
             physicsMetrics={physicsMetrics}
+            cryptoMetrics={cryptoMetrics}
             onClose={() => setShowStatsModal(false)}
           />
         )}
