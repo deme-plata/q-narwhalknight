@@ -2469,6 +2469,46 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         node_name, config.port
     );
 
+    // v10.3.0: Startup configuration banner — never hide critical settings
+    {
+        let pruning_mode = std::env::var("Q_PRUNING_MODE").unwrap_or_else(|_| "disabled".to_string());
+        let cache_mb = std::env::var("ROCKSDB_BLOCK_CACHE_MB").unwrap_or_else(|_| "auto".to_string());
+        let network_id = std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "default".to_string());
+        let tor_timeout = std::env::var("Q_TOR_BOOTSTRAP_TIMEOUT").unwrap_or_else(|_| "120".to_string());
+        let total_ram_mb = sysinfo::System::new_all().total_memory() / 1024 / 1024;
+
+        // Read cgroup limits
+        let cgroup_high = std::fs::read_to_string("/sys/fs/cgroup/memory.high")
+            .ok().and_then(|s| s.trim().parse::<u64>().ok()).map(|b| format!("{:.0}G", b as f64 / 1e9)).unwrap_or_else(|| "unlimited".to_string());
+        let cgroup_max = std::fs::read_to_string("/sys/fs/cgroup/memory.max")
+            .ok().and_then(|s| s.trim().parse::<u64>().ok()).map(|b| format!("{:.0}G", b as f64 / 1e9)).unwrap_or_else(|| "unlimited".to_string());
+
+        info!("╔═══════════════════════════════════════════════════════════════╗");
+        info!("║              STARTUP CONFIGURATION (v10.3.0)                 ║");
+        info!("╠═══════════════════════════════════════════════════════════════╣");
+        info!("║  Network:       {:<46}║", network_id);
+        info!("║  Port:          {:<46}║", config.port);
+        info!("║  RAM:           {:<46}║", format!("{}MB physical", total_ram_mb));
+        info!("║  Cgroup high:   {:<46}║", cgroup_high);
+        info!("║  Cgroup max:    {:<46}║", cgroup_max);
+        info!("║  Block cache:   {:<46}║", format!("{}MB", cache_mb));
+        info!("║  Pruning:       {:<46}║", pruning_mode);
+        info!("║  Tor timeout:   {:<46}║", format!("{}s", tor_timeout));
+        info!("╚═══════════════════════════════════════════════════════════════╝");
+
+        // Warn about dangerous overrides
+        if let Ok(cache_val) = cache_mb.parse::<u64>() {
+            let cgroup_high_mb = std::fs::read_to_string("/sys/fs/cgroup/memory.high")
+                .ok().and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(u64::MAX) / 1024 / 1024;
+            if cache_val > cgroup_high_mb / 3 {
+                tracing::error!(
+                    "🚨 WARNING: ROCKSDB_BLOCK_CACHE_MB={} is more than 33% of cgroup memory.high ({}MB). This WILL cause memory pressure and P2P death!",
+                    cache_val, cgroup_high_mb
+                );
+            }
+        }
+    }
+
     // Generate node ID from config or generate new one
     let node_id: NodeId = config.node_id.unwrap_or_else(|| {
         let mut id = [0u8; 32];
@@ -6901,7 +6941,15 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     let max_sol = k_state.tuned_max_solutions.load(AtOrd::Relaxed) as usize;
                     k_pool.set_max_solutions_per_block(max_sol);
                 } else {
-                    tracing::info!("📊 K-PARAM GAUGE: K={:.4} phase={}", k, new_phase.as_str());
+                    let k_enh = k_state.k_enhanced();
+                    let omega = k_state.omega_node();
+                    let lambda = k_state.lambda_commit();
+                    let f_irr = f64::from_bits(k_state.f_irrev_bits.load(AtOrd::Relaxed));
+                    tracing::info!(
+                        "📊 K-GAUGE v10.3.0: K_base={:.4} K_enhanced={:.4} phase={} | Ω={:.3} Λ={:.3} f_irrev={:.1}% peers={} d_commit={}",
+                        k, k_enh, new_phase.as_str(), omega, lambda, f_irr * 100.0,
+                        metrics.peer_count, k_state.d_commit.load(AtOrd::Relaxed)
+                    );
                 }
 
                 // Store zk-STARK commitment and phase proof
@@ -6918,6 +6966,118 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             }
         });
         info!("✅ K-Parameter gauge spawned (60s periodic, lock-free reads, zk-STARK proofs)");
+    }
+
+    // ========================================
+    // v10.3.0: SYSTEM HEALTH WATCHDOG (memory + P2P + cgroup diagnostics)
+    // ========================================
+    {
+        let wd_peer_count = state.libp2p_peer_count.clone();
+        let wd_height = state.current_height_atomic.clone();
+        let wd_net_height = state.highest_network_height.clone();
+
+        tokio::spawn(async move {
+            info!("🏥 HEALTH WATCHDOG: Starting (300s interval, v10.3.0)");
+
+            // Read cgroup memory.high at startup (once)
+            let cgroup_high_bytes = tokio::fs::read_to_string("/sys/fs/cgroup/memory.high").await
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(0);
+            let cgroup_max_bytes = tokio::fs::read_to_string("/sys/fs/cgroup/memory.max").await
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(0);
+            let cgroup_high_gb = if cgroup_high_bytes > 0 { cgroup_high_bytes as f64 / 1_073_741_824.0 } else { 0.0 };
+            let cgroup_max_gb = if cgroup_max_bytes > 0 { cgroup_max_bytes as f64 / 1_073_741_824.0 } else { 0.0 };
+
+            info!("🏥 HEALTH WATCHDOG: cgroup memory.high={:.1}G memory.max={:.1}G", cgroup_high_gb, cgroup_max_gb);
+
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            let mut last_height: u64 = 0;
+            let mut stall_count: u32 = 0;
+            let mut zero_peer_count: u32 = 0;
+
+            loop {
+                interval.tick().await;
+
+                // --- Memory diagnostics ---
+                let rss_kb = tokio::fs::read_to_string("/proc/self/statm").await
+                    .ok()
+                    .and_then(|s| {
+                        let parts: Vec<&str> = s.split_whitespace().collect();
+                        parts.get(1).and_then(|p| p.parse::<u64>().ok())
+                    })
+                    .unwrap_or(0) * 4; // pages to KB
+                let rss_gb = rss_kb as f64 / 1_048_576.0;
+
+                let cgroup_current = tokio::fs::read_to_string("/sys/fs/cgroup/memory.current").await
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u64>().ok())
+                    .unwrap_or(0);
+                let cgroup_current_gb = cgroup_current as f64 / 1_073_741_824.0;
+
+                let cgroup_events_high = tokio::fs::read_to_string("/sys/fs/cgroup/memory.events").await
+                    .ok()
+                    .and_then(|s| {
+                        s.lines().find(|l| l.starts_with("high "))
+                            .and_then(|l| l.split_whitespace().nth(1))
+                            .and_then(|v| v.parse::<u64>().ok())
+                    })
+                    .unwrap_or(0);
+
+                let pressure_pct = if cgroup_high_bytes > 0 {
+                    (cgroup_current as f64 / cgroup_high_bytes as f64) * 100.0
+                } else {
+                    0.0
+                };
+
+                // --- P2P diagnostics ---
+                let peers = wd_peer_count.as_ref()
+                    .map(|p| p.load(std::sync::atomic::Ordering::Relaxed))
+                    .unwrap_or(0);
+                let height = wd_height.load(std::sync::atomic::Ordering::Relaxed);
+                let net_height = wd_net_height.load(std::sync::atomic::Ordering::SeqCst);
+                let height_gap = if net_height > height { net_height - height } else { 0 };
+
+                // Stall detection
+                if height == last_height && height > 0 {
+                    stall_count += 1;
+                } else {
+                    stall_count = 0;
+                }
+                last_height = height;
+
+                // Zero peer detection
+                if peers == 0 {
+                    zero_peer_count += 1;
+                } else {
+                    zero_peer_count = 0;
+                }
+
+                // --- Log level based on health ---
+                if pressure_pct > 90.0 || zero_peer_count >= 3 || stall_count >= 3 {
+                    tracing::error!(
+                        "🚨 HEALTH CRITICAL: RSS={:.1}G cgroup={:.1}G/{:.1}G ({:.0}%) high_events={} | peers={} height={} gap={} stall_count={} zero_peers_count={}",
+                        rss_gb, cgroup_current_gb, cgroup_high_gb, pressure_pct, cgroup_events_high,
+                        peers, height, height_gap, stall_count, zero_peer_count
+                    );
+                } else if pressure_pct > 75.0 || peers < 3 || stall_count >= 1 {
+                    tracing::warn!(
+                        "⚠️  HEALTH WARNING: RSS={:.1}G cgroup={:.1}G/{:.1}G ({:.0}%) high_events={} | peers={} height={} gap={} stall={}",
+                        rss_gb, cgroup_current_gb, cgroup_high_gb, pressure_pct, cgroup_events_high,
+                        peers, height, height_gap, stall_count
+                    );
+                } else {
+                    tracing::info!(
+                        "🏥 HEALTH OK: RSS={:.1}G cgroup={:.1}G/{:.1}G ({:.0}%) high_events={} | peers={} height={} gap={}",
+                        rss_gb, cgroup_current_gb, cgroup_high_gb, pressure_pct, cgroup_events_high,
+                        peers, height, height_gap
+                    );
+                }
+            }
+        });
+        info!("✅ System health watchdog spawned (300s periodic, cgroup-aware)");
     }
 
     // ========================================
@@ -20146,13 +20306,23 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     info!("🔍 DEBUG: Reached after database replication - continuing initialization");
 
     // ========================================
-    // ✂️ ADAPTIVE PRUNING SCHEDULER
+    // ✂️ PRUNING DISABLED (v10.3.0)
+    // Pruning was running silently on all nodes without opt-in.
+    // PruningConfig::default() was Adaptive (contradicting PruningMode::default() = Full).
+    // All block data must be preserved. If pruning is ever needed,
+    // it must be explicitly enabled via Q_PRUNING_MODE=adaptive env var.
     // ========================================
     {
         let app_state_pruning = app_state.clone();
 
         tokio::spawn(async move {
-            info!("✂️  Starting adaptive pruning scheduler (every 1 hour)...");
+            let pruning_mode = std::env::var("Q_PRUNING_MODE").unwrap_or_default();
+            if pruning_mode != "adaptive" && pruning_mode != "light" {
+                info!("🛡️  Block pruning is DISABLED (default). All blocks will be preserved.");
+                info!("   To enable pruning, set Q_PRUNING_MODE=adaptive");
+                return; // Exit the task — no pruning
+            }
+            warn!("✂️  Pruning ENABLED via Q_PRUNING_MODE={} — blocks older than 30 days will be deleted!", pruning_mode);
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600));
 
             loop {

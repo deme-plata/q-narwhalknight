@@ -56,7 +56,10 @@ pub struct PruningConfig {
 impl Default for PruningConfig {
     fn default() -> Self {
         Self {
-            mode: PruningMode::Adaptive,
+            // v10.3.0: FIXED — was Adaptive (contradicting PruningMode::default() = Full)
+            // Adaptive pruning silently deleted blocks on all nodes without being asked.
+            // Must be explicitly enabled via Q_PRUNING_MODE=adaptive env var.
+            mode: PruningMode::Full,
             retain_recent_blocks_days: 30,
             min_free_disk_space: 10 * 1024 * 1024 * 1024, // 10 GB
             target_storage_size: 0, // Unlimited
