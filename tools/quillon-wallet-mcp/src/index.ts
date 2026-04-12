@@ -45,6 +45,187 @@ const server = new McpServer({
 });
 
 // ============================================================
+// WELCOME / DISCOVERY
+// ============================================================
+
+server.resource(
+  "welcome",
+  "quillon://welcome",
+  async () => ({
+    contents: [{
+      uri: "quillon://welcome",
+      mimeType: "text/plain",
+      text: [
+        `Welcome to Quillon Graph — Post-Quantum Electronic Cash`,
+        ``,
+        `Available commands (just ask in natural language):`,
+        ``,
+        `  WALLET`,
+        `    "Create a wallet"              — New wallet with recovery phrase`,
+        `    "What's my balance?"            — Check any qnk... address`,
+        `    "Import wallet from mnemonic"   — Recover existing wallet`,
+        `    "Send 10 QUG to qnk..."         — Transfer funds`,
+        ``,
+        `  MINING`,
+        `    "Set up mining on this machine" — Download + configure miner`,
+        `    "Start mining"                  — Begin mining immediately`,
+        `    "How's my mining going?"        — Hashrate, rewards, stats`,
+        ``,
+        `  NETWORK`,
+        `    "Network status"                — Height, peers, block rate`,
+        ``,
+        `  SETUP`,
+        `    "Set up Claude Code integration" — Auto-configure MCP for another machine`,
+        ``,
+        `Everything is post-quantum ready. Ed25519 today, SQIsign tomorrow.`,
+        `No GPG signatures. No air-gapped computers. Just works.`,
+        ``,
+        `Network: quillon.xyz | Source: code.quillon.xyz`,
+      ].join("\n"),
+    }],
+  })
+);
+
+// Welcome prompt that Claude shows on first interaction
+server.prompt(
+  "welcome",
+  "Show available Quillon wallet and mining features",
+  async () => ({
+    messages: [{
+      role: "user",
+      content: {
+        type: "text",
+        text: [
+          `You have the Quillon Wallet & Mining tools available. Here's what you can help with:`,
+          ``,
+          `WALLET: Create wallets, check balances, send QUG, import from mnemonic`,
+          `MINING: Set up and start mining on Linux, check mining stats`,
+          `NETWORK: Check network status, block height, connected peers`,
+          ``,
+          `Ask anything naturally — "create a wallet for my friend" or "start mining on this server".`,
+          `Everything works with the Quillon Graph post-quantum blockchain at quillon.xyz.`,
+        ].join("\n"),
+      },
+    }],
+  })
+);
+
+// ============================================================
+// SETUP / AUTO-CONFIGURE
+// ============================================================
+
+server.tool(
+  "generate_mcp_setup_script",
+  "Generate a shell script that auto-configures the Quillon MCP server for Claude Code on any machine. The user just runs one command and gets wallet + mining tools in Claude Code.",
+  {},
+  async () => {
+    const script = [
+      `#!/bin/bash`,
+      `# Quillon Graph — Claude Code MCP Auto-Setup`,
+      `# Run: curl -fsSL https://quillon.xyz/setup-claude.sh | bash`,
+      `set -e`,
+      ``,
+      `echo "Setting up Quillon Graph for Claude Code..."`,
+      `echo ""`,
+      ``,
+      `# 1. Check prerequisites`,
+      `if ! command -v node &>/dev/null; then`,
+      `  echo "Node.js not found. Installing via nvm..."`,
+      `  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.0/install.sh | bash`,
+      `  export NVM_DIR="$HOME/.nvm"`,
+      `  [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"`,
+      `  nvm install --lts`,
+      `fi`,
+      ``,
+      `if ! command -v claude &>/dev/null; then`,
+      `  echo "Claude Code not found. Install it first:"`,
+      `  echo "  npm install -g @anthropic-ai/claude-code"`,
+      `  echo ""`,
+      `  echo "Then re-run this script."`,
+      `  exit 1`,
+      `fi`,
+      ``,
+      `# 2. Install Quillon MCP server`,
+      `INSTALL_DIR="$HOME/.quillon/mcp"`,
+      `mkdir -p "$INSTALL_DIR"`,
+      ``,
+      `echo "Downloading Quillon MCP server..."`,
+      `curl -fsSL https://quillon.xyz/downloads/quillon-wallet-mcp.tar.gz | tar xz -C "$INSTALL_DIR"`,
+      `cd "$INSTALL_DIR" && npm install --production 2>/dev/null`,
+      ``,
+      `# 3. Configure Claude Code`,
+      `SETTINGS_DIR="$HOME/.claude"`,
+      `mkdir -p "$SETTINGS_DIR"`,
+      `SETTINGS_FILE="$SETTINGS_DIR/settings.json"`,
+      ``,
+      `# Read existing settings or create new`,
+      `if [ -f "$SETTINGS_FILE" ]; then`,
+      `  # Add quillon-wallet to existing mcpServers`,
+      `  node -e "`,
+      `    const fs = require('fs');`,
+      `    const settings = JSON.parse(fs.readFileSync('$SETTINGS_FILE', 'utf8'));`,
+      `    if (!settings.mcpServers) settings.mcpServers = {};`,
+      `    settings.mcpServers['quillon-wallet'] = {`,
+      `      command: 'node',`,
+      `      args: ['$INSTALL_DIR/build/index.js'],`,
+      `      env: { QUILLON_API_URL: 'https://quillon.xyz/api/v1' }`,
+      `    };`,
+      `    fs.writeFileSync('$SETTINGS_FILE', JSON.stringify(settings, null, 2));`,
+      `  "`,
+      `else`,
+      `  cat > "$SETTINGS_FILE" << JSONEOF`,
+      `{`,
+      `  "mcpServers": {`,
+      `    "quillon-wallet": {`,
+      `      "command": "node",`,
+      `      "args": ["$INSTALL_DIR/build/index.js"],`,
+      `      "env": {`,
+      `        "QUILLON_API_URL": "https://quillon.xyz/api/v1"`,
+      `      }`,
+      `    }`,
+      `  }`,
+      `}`,
+      `JSONEOF`,
+      `fi`,
+      ``,
+      `echo ""`,
+      `echo "=== Quillon Graph + Claude Code Setup Complete ==="`,
+      `echo ""`,
+      `echo "Open Claude Code and try:"`,
+      `echo '  "Create a wallet"'`,
+      `echo '  "Start mining on this machine"'`,
+      `echo '  "What\\'s the network status?"'`,
+      `echo ""`,
+      `echo "Everything is post-quantum ready. No GPG required."`,
+      `echo ""`,
+    ].join("\n");
+
+    return {
+      content: [{
+        type: "text",
+        text: [
+          `Here's the auto-setup script for Claude Code + Quillon:\n`,
+          `\`\`\`bash`,
+          script,
+          `\`\`\``,
+          ``,
+          `Users can run a single command to get started:`,
+          `\`\`\``,
+          `curl -fsSL https://quillon.xyz/setup-claude.sh | bash`,
+          `\`\`\``,
+          ``,
+          `This:`,
+          `1. Installs Node.js if missing`,
+          `2. Downloads the Quillon MCP server`,
+          `3. Auto-configures Claude Code settings.json`,
+          `4. Done — user opens Claude Code and says "create a wallet"`,
+        ].join("\n"),
+      }],
+    };
+  }
+);
+
+// ============================================================
 // WALLET TOOLS
 // ============================================================
 

@@ -1074,6 +1074,38 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
             </span>
           </motion.button>
 
+          {/* AI Setup (Claude Code MCP) Icon */}
+          <motion.button
+            className="relative p-2 bg-violet-600/30 hover:bg-violet-600/50 border border-violet-400/50 rounded-full transition-all cursor-pointer group backdrop-blur-sm overflow-hidden"
+            whileHover={{ scale: 1.15, rotate: -8, y: -2 }}
+            whileTap={{ scale: 0.9, rotate: 5 }}
+            initial={{ opacity: 0, scale: 0, x: -20 }}
+            animate={{ opacity: 1, scale: 1, x: 0 }}
+            transition={{ delay: 0.4, type: "spring", stiffness: 260, damping: 15 }}
+            title="Setup with AI (Claude Code)"
+            onClick={() => {
+              const cmd = `curl -fsSL https://quillon.xyz/setup-claude.sh | bash`;
+              navigator.clipboard.writeText(cmd).then(() => {
+                alert(`Copied to clipboard! Paste in your terminal:\n\n${cmd}\n\nThis sets up Claude Code to manage your wallet and mining with natural language.`);
+              }).catch(() => {
+                prompt('Copy this command and run in your terminal:', cmd);
+              });
+            }}
+          >
+            {/* AI glow pulse */}
+            <motion.div
+              className="absolute inset-0 rounded-full border-2 border-violet-400/40"
+              animate={{ scale: [1, 1.5, 1], opacity: [0.5, 0, 0.5] }}
+              transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
+            />
+            <Sparkles className="w-7 h-7 text-violet-400 relative z-10" />
+            <div className="absolute inset-0 rounded-full bg-violet-500/0 group-hover:bg-violet-500/20 transition-all blur-md" />
+            {/* AI badge */}
+            <span className="absolute -top-1 -right-1 w-5 h-5 bg-violet-500 rounded-full flex items-center justify-center z-20 border border-violet-300/80">
+              <span className="text-[5px] font-black text-white leading-none">AI</span>
+            </span>
+          </motion.button>
+
           {/* Help Icon */}
           <motion.button
             className="p-3 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 rounded-full transition-all backdrop-blur-sm"
