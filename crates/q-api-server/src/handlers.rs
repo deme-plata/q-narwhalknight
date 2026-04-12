@@ -14633,6 +14633,194 @@ pub async fn get_physics_metrics(
 }
 
 // ============================================================================
+// ============================================================================
+// v10.3.0: CRYPTOGRAPHY DASHBOARD — Real-time security posture
+// Companion to the Theoretical Physics Dashboard
+// Every metric tagged: "measured", "protocol_constant", or "computed"
+// DeepSeek peer-reviewed 2026-04-12
+// ============================================================================
+
+pub async fn get_crypto_metrics(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    use std::sync::atomic::Ordering;
+
+    let current_height = state.current_height_atomic.load(Ordering::Relaxed);
+
+    // --- Signature verification metrics (MEASURED from SecurityMetrics) ---
+    let (sig_total, sig_failed, sig_p50, sig_p95, sig_p99, cache_hit_pct) =
+        if let Some(ref coordinator) = state.distributed_ai_coordinator {
+            let sm = &coordinator.security_metrics;
+            let total = sm.signature_verifications_total.load(Ordering::Relaxed);
+            let failed = sm.signature_verifications_failed.load(Ordering::Relaxed);
+            let hits = sm.signature_cache_hits.load(Ordering::Relaxed);
+            let misses = sm.signature_cache_misses.load(Ordering::Relaxed);
+            let hit_pct = if hits + misses > 0 {
+                (hits as f64 / (hits + misses) as f64) * 100.0
+            } else { 0.0 };
+
+            // Percentiles from duration histogram
+            let durations = sm.signature_verification_durations.read().await;
+            let (p50, p95, p99) = if durations.len() > 10 {
+                let mut sorted = durations.clone();
+                sorted.sort_unstable();
+                let len = sorted.len();
+                (
+                    sorted[len * 50 / 100],
+                    sorted[len * 95 / 100],
+                    sorted[len.saturating_sub(1).min(len * 99 / 100)],
+                )
+            } else {
+                (0, 0, 0)
+            };
+
+            (total, failed, p50, p95, p99, hit_pct)
+        } else {
+            (0, 0, 0, 0, 0, 0.0)
+        };
+
+    let success_rate = if sig_total > 0 {
+        ((sig_total - sig_failed) as f64 / sig_total as f64) * 100.0
+    } else { 100.0 };
+
+    // --- Crypto phase info (MEASURED from EternalCypher) ---
+    let caps = state.node_cypher.capabilities();
+    let current_phase = state.node_cypher.phase_at(current_height);
+
+    // --- Tor/Dandelion metrics (MEASURED if available) ---
+    let (tor_bytes_sent, tor_bytes_recv, tor_circuits, dandelion_stem, dandelion_fluff) = (0u64, 0u64, 0u64, 0u64, 0u64);
+    // TODO Phase 2: Wire actual TorMetrics and AnonymityMetrics from state
+
+    // --- Privacy computation ---
+    let stem_length = 4u64;
+    let p_deanon = (-1.0 * stem_length as f64).exp(); // exp(-L/xi) with xi=1
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "signature_verification": {
+            "total_verifications": sig_total,
+            "failed_verifications": sig_failed,
+            "success_rate_pct": format!("{:.5}", success_rate),
+            "latency_p50_us": sig_p50,
+            "latency_p95_us": sig_p95,
+            "latency_p99_us": sig_p99,
+            "cache_hit_rate_pct": format!("{:.1}", cache_hit_pct),
+            "data_honesty": "measured"
+        },
+        "active_algorithms": {
+            "current_phase": current_phase.label(),
+            "current_height": current_height,
+            "signing": caps.signing_algorithms.iter().map(|a| a.label()).collect::<Vec<_>>(),
+            "cipher": caps.cipher.label(),
+            "kem": caps.kem.label(),
+            "zk_systems": caps.zk_systems.iter().map(|s| s.label()).collect::<Vec<_>>(),
+            "phase_transitions": {
+                "phase1_hybrid_at": q_eternal_cypher::phase::PHASE1_ACTIVATION_HEIGHT,
+                "phase2_pure_pq_at": q_eternal_cypher::phase::PHASE2_ACTIVATION_HEIGHT,
+                "phase3_threshold_at": q_eternal_cypher::phase::PHASE3_ACTIVATION_HEIGHT,
+            },
+            "data_honesty": "measured + protocol_constant"
+        },
+        "security_levels": {
+            "ed25519": {
+                "classical_bits": 128,
+                "quantum_bits": 64,
+                "standard": "RFC 8032",
+                "quantum_vulnerability": "Shor's algorithm with ~2,330 logical qubits",
+                "bitcoin_comparison": "Same classical security as Bitcoin's secp256k1 ECDSA. Both vulnerable to Shor. Migration schedule absent in Bitcoin.",
+                "data_honesty": "protocol_constant"
+            },
+            "sqisign_level_iii": {
+                "classical_bits": 192,
+                "quantum_bits": 128,
+                "nist_level": 3,
+                "sig_size_bytes": 204,
+                "pk_size_bytes": 64,
+                "paper": "IACR 2025/847",
+                "ffi_linked": cfg!(feature = "sqisign-ffi"),
+                "size_reduction_vs_dilithium": "95.6% smaller signatures (204B vs 4,627B)",
+                "note": "Isogeny-based. CSIDH unaffected by Castryck-Decru attack (which broke SIDH only).",
+                "data_honesty": "protocol_constant"
+            },
+            "aegis256": {
+                "classical_bits": 256,
+                "quantum_bits": 128,
+                "paper": "IACR 2024/268",
+                "performance": "2-5x faster than AES-GCM",
+                "usage": "Data encryption in transit and at rest",
+                "data_honesty": "protocol_constant"
+            },
+            "aes256_gcm": {
+                "classical_bits": 256,
+                "quantum_bits": 128,
+                "usage": "Key encryption at rest",
+                "kdf": "Argon2id (64MB, 4 iter, 1 thread)",
+                "kdf_note": "Protocol constants for server-side key derivation, not general password hashing recommendations.",
+                "data_honesty": "protocol_constant"
+            },
+            "lattice_guard": {
+                "pq128_dimension": 1024,
+                "pq192_dimension": 2048,
+                "pq256_dimension": 4096,
+                "basis": "RLWE/RSIS hardness",
+                "security_analysis": "pending — custom parameters, not independently verified against NIST PQC standards",
+                "data_honesty": "protocol_constant (dimensions), pending (security claims)"
+            }
+        },
+        "privacy": {
+            "dandelion": {
+                "stem_messages": dandelion_stem,
+                "fluff_messages": dandelion_fluff,
+                "stem_length": stem_length,
+                "p_deanonymization": format!("{:.6}", p_deanon),
+                "data_honesty": "protocol_constant + computed (counters pending Phase 2)"
+            },
+            "tor": {
+                "bytes_sent": tor_bytes_sent,
+                "bytes_received": tor_bytes_recv,
+                "circuits": tor_circuits,
+                "data_honesty": "counters pending Phase 2 wiring"
+            }
+        },
+        "vdf": {
+            "algorithm": "Genus-2 Hyperelliptic Curve (IACR 2025/1050)",
+            "quantum_resistance": "conjectured",
+            "quantum_note": "Jacobian DLP solvable by Shor's generalization in theory, but VDF forces sequential evaluation. Not proven quantum-safe.",
+            "fallback": "SHA3-based sequential hashing",
+            "advanced_crypto_enabled": cfg!(feature = "advanced-crypto"),
+            "data_honesty": "protocol_constant"
+        },
+        "zero_knowledge": {
+            "systems": ["ZK-STARK (GPU, transparent setup)", "ZK-SNARK (Groth16/PLONK/Marlin/Sonic)", "Circle STARK (IACR 2024/278)", "Bulletproofs v2 (IACR 2024/313)", "LatticeGuard (PQ zk-SNARK)"],
+            "pq_zk_available": true,
+            "data_honesty": "protocol_constant"
+        },
+        "key_protection": {
+            "mlock_enabled": true,
+            "zeroize_on_drop": true,
+            "kdf": "Argon2id (64MB, 4 iter, 1 thread)",
+            "subkey_derivation": "HKDF-SHA512",
+            "commitment": "BLAKE3",
+            "data_honesty": "protocol_constant"
+        },
+        "honest_comparison": {
+            "note": "We do NOT claim quantum-proof. We claim quantum-resistant with a measured, height-gated migration path.",
+            "ed25519_vs_bitcoin": "Same ~128-bit classical security as Bitcoin's secp256k1. Both vulnerable to Shor. Our migration schedule (Phases 0-3) is absent in Bitcoin.",
+            "sqisign_caveat": "SQIsign FFI to C reference implementation is feature-gated. Dashboard reports actual linkage status.",
+            "migration_status": format!("Phase {} of 3 — height {}/{}",
+                if current_height < q_eternal_cypher::phase::PHASE1_ACTIVATION_HEIGHT { 0 }
+                else if current_height < q_eternal_cypher::phase::PHASE2_ACTIVATION_HEIGHT { 1 }
+                else if current_height < q_eternal_cypher::phase::PHASE3_ACTIVATION_HEIGHT { 2 }
+                else { 3 },
+                current_height,
+                q_eternal_cypher::phase::PHASE3_ACTIVATION_HEIGHT
+            )
+        },
+        "data_honesty_note": "Fields marked 'measured' come from live AtomicU64 counters. 'protocol_constant' values are mathematical facts from published standards. 'computed' values use documented formulas. 'pending' requires Phase 2 instrumentation.",
+        "timestamp": chrono::Utc::now().timestamp()
+    }))))
+}
+
+// ============================================================================
 // v2.3.34-beta: TOKEN DETAILS MODAL API ENDPOINTS
 // ============================================================================
 

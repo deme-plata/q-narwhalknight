@@ -22570,6 +22570,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/consensus/finality", get(handlers::get_finality_metrics))
         // 🔬 v7.0.0: Theoretical Physics Metrics - Live whitepaper data
         .route("/api/v1/physics/metrics", get(handlers::get_physics_metrics))
+        .route("/api/v1/crypto/metrics", get(handlers::get_crypto_metrics))
         // Quillon Resonance Consensus
         .route(
             "/api/v1/consensus/resonance/status",

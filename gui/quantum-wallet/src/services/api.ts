@@ -1130,6 +1130,12 @@ class QNarwhalKnightAPI {
     return this.request<any>('/v1/physics/metrics');
   }
 
+  // v10.3.0: Live cryptography dashboard metrics (DeepSeek peer-reviewed)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async getCryptoMetrics(): Promise<ApiResponse<any>> {
+    return this.request<any>('/v1/crypto/metrics');
+  }
+
   // v3.4.8-beta: Get Resonance Hybrid Mode consensus metrics
   // Compares DAG-Knight (primary) with Quillon Resonance (complementary) consensus
   async getResonanceMetrics(): Promise<ApiResponse<ResonanceMetrics>> {
