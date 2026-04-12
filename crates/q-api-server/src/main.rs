@@ -619,20 +619,17 @@ fn is_duplicate_balance_update(dedup_key: &str) -> bool {
             now.duration_since(*timestamp).as_secs() < DEDUP_CACHE_MAX_AGE_SECS
         });
 
-        // If still at hard limit after cleanup, evict a batch
+        // If still at hard limit after TTL cleanup, evict the OLDEST entries
+        // v10.3.0: Fixed — was evicting arbitrary entries (replay attack risk).
+        // Now evicts entries older than half the max age (12h instead of 24h).
         if BALANCE_UPDATE_DEDUP_CACHE.len() >= MAX_DEDUP_CACHE_ENTRIES {
-            // DashMap doesn't support sorted eviction efficiently, just remove expired
-            let evict_target = BALANCE_UPDATE_DEDUP_CACHE.len() / 10;
-            let mut evicted = 0;
-            BALANCE_UPDATE_DEDUP_CACHE.retain(|_, _| {
-                if evicted >= evict_target {
-                    true
-                } else {
-                    evicted += 1;
-                    false
-                }
+            let half_age = DEDUP_CACHE_MAX_AGE_SECS / 2; // 12 hours
+            let before = BALANCE_UPDATE_DEDUP_CACHE.len();
+            BALANCE_UPDATE_DEDUP_CACHE.retain(|_, timestamp| {
+                now.duration_since(*timestamp).as_secs() < half_age
             });
-            warn!("⚠️ DEDUP CACHE: Evicted {} entries (DoS protection)", evicted);
+            let evicted = before - BALANCE_UPDATE_DEDUP_CACHE.len();
+            warn!("⚠️ DEDUP CACHE: Evicted {} oldest entries (>12h) — remaining {}", evicted, BALANCE_UPDATE_DEDUP_CACHE.len());
         }
     }
 
