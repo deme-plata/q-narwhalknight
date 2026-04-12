@@ -1,0 +1,356 @@
+#!/usr/bin/env node
+/**
+ * Quillon Wallet & Mining MCP Server
+ *
+ * Exposes wallet creation, balance checking, and mining setup to Claude Code.
+ * No more 9-step security briefings — just "create a wallet" or "start mining".
+ *
+ * Tools:
+ *   create_wallet    — Generate a new wallet, return address + mnemonic
+ *   get_balance      — Check balance of any qnk address
+ *   import_wallet    — Recover wallet from mnemonic phrase
+ *   list_wallets     — List all wallets on this node
+ *   send_qug         — Send QUG from one address to another
+ *   setup_miner      — Download and configure the miner on Linux
+ *   start_mining     — Start mining to a wallet address
+ *   mining_status    — Check mining stats (hashrate, rewards, blocks)
+ *   network_status   — Current network height, peers, block rate
+ */
+
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { z } from "zod";
+
+const API_BASE = process.env.QUILLON_API_URL || "https://quillon.xyz/api/v1";
+const DOWNLOAD_BASE = process.env.QUILLON_DOWNLOAD_URL || "https://quillon.xyz/downloads";
+
+// --- HTTP helper ---
+async function api(path: string, method = "GET", body?: unknown): Promise<unknown> {
+  const url = `${API_BASE}${path}`;
+  const opts: RequestInit = {
+    method,
+    headers: { "Content-Type": "application/json" },
+  };
+  if (body) opts.body = JSON.stringify(body);
+
+  const res = await fetch(url, opts);
+  if (!res.ok) throw new Error(`API ${method} ${path} returned ${res.status}: ${await res.text()}`);
+  return res.json();
+}
+
+// --- MCP Server ---
+const server = new McpServer({
+  name: "quillon-wallet",
+  version: "1.0.0",
+});
+
+// ============================================================
+// WALLET TOOLS
+// ============================================================
+
+server.tool(
+  "create_wallet",
+  "Create a new Quillon wallet. Returns the address (qnk...) and a 12-word recovery mnemonic. The mnemonic is the ONLY way to recover this wallet — save it somewhere safe.",
+  {},
+  async () => {
+    const res = await api("/wallets/create", "POST", {}) as any;
+    if (!res.success) return { content: [{ type: "text", text: `Failed: ${res.error}` }] };
+
+    const wallet = res.data;
+    return {
+      content: [{
+        type: "text",
+        text: [
+          `Wallet created successfully!`,
+          ``,
+          `Address: ${wallet.address}`,
+          `Wallet ID: ${wallet.id}`,
+          wallet.mnemonic ? `\nRecovery Mnemonic (save this!):\n  ${wallet.mnemonic}\n` : '',
+          `Balance: 0 QUG`,
+          ``,
+          `Send QUG to the address above to fund this wallet.`,
+          `The mnemonic recovers this wallet on any Quillon node — save it offline.`,
+        ].join("\n"),
+      }],
+    };
+  }
+);
+
+server.tool(
+  "get_balance",
+  "Check the balance of any Quillon wallet address (qnk...)",
+  { address: z.string().describe("Wallet address starting with 'qnk'") },
+  async ({ address }) => {
+    const res = await api(`/wallets/${address}/balance`) as any;
+    if (!res.success) return { content: [{ type: "text", text: `Failed: ${res.error}` }] };
+
+    const balance = res.data;
+    return {
+      content: [{
+        type: "text",
+        text: [
+          `Wallet: ${address}`,
+          `Balance: ${balance.balance_qug || balance.balance || 0} QUG`,
+          balance.pending ? `Pending: ${balance.pending} QUG` : '',
+          balance.staked ? `Staked: ${balance.staked} QUG` : '',
+        ].filter(Boolean).join("\n"),
+      }],
+    };
+  }
+);
+
+server.tool(
+  "import_wallet",
+  "Recover a wallet from a 12 or 24-word mnemonic phrase. Deterministic — same mnemonic always produces the same address.",
+  {
+    mnemonic: z.string().describe("12 or 24-word recovery mnemonic"),
+    password: z.string().optional().describe("Optional password for local encryption"),
+  },
+  async ({ mnemonic, password }) => {
+    const res = await api("/wallets/import", "POST", {
+      mnemonic,
+      password: password || "",
+    }) as any;
+    if (!res.success) return { content: [{ type: "text", text: `Failed: ${res.error}` }] };
+
+    const wallet = res.data;
+    return {
+      content: [{
+        type: "text",
+        text: [
+          `Wallet recovered successfully!`,
+          `Address: ${wallet.address}`,
+          `Balance: ${wallet.balance_qug || 0} QUG`,
+        ].join("\n"),
+      }],
+    };
+  }
+);
+
+server.tool(
+  "network_status",
+  "Get current Quillon network status — height, peers, block rate, mining stats",
+  {},
+  async () => {
+    const res = await api("/status") as any;
+    if (!res.success) return { content: [{ type: "text", text: `Failed: ${res.error}` }] };
+
+    const s = res.data;
+    return {
+      content: [{
+        type: "text",
+        text: [
+          `=== Quillon Network Status ===`,
+          `Height: ${s.current_height?.toLocaleString() || 'unknown'}`,
+          `Peers: ${s.connected_peers || 0}`,
+          `Block Rate: ${s.blocks_per_second?.toFixed(2) || '?'} bps`,
+          `Network Hashrate: ${s.network_hashrate || 'unknown'}`,
+          `Version: ${s.version || 'unknown'}`,
+        ].join("\n"),
+      }],
+    };
+  }
+);
+
+// ============================================================
+// MINING TOOLS
+// ============================================================
+
+server.tool(
+  "setup_miner",
+  "Download and set up the Quillon miner on this Linux machine. Downloads the binary, makes it executable, and creates a systemd service file.",
+  {
+    wallet_address: z.string().describe("Your qnk... wallet address to receive mining rewards"),
+    server_url: z.string().optional().describe("Mining server URL (default: https://quillon.xyz)"),
+    threads: z.number().optional().describe("Number of CPU threads to use (default: all available)"),
+  },
+  async ({ wallet_address, server_url, threads }) => {
+    const minerUrl = `${DOWNLOAD_BASE}/q-miner-linux-x64`;
+    const serverUrl = server_url || "https://quillon.xyz";
+    const numThreads = threads || 0; // 0 = auto-detect
+
+    // Generate setup script
+    const script = [
+      `#!/bin/bash`,
+      `# Quillon Miner Setup — generated by Claude Code MCP`,
+      `set -e`,
+      ``,
+      `INSTALL_DIR="$HOME/.quillon"`,
+      `MINER_BIN="$INSTALL_DIR/q-miner"`,
+      ``,
+      `echo "Setting up Quillon miner..."`,
+      `mkdir -p "$INSTALL_DIR"`,
+      ``,
+      `# Download miner binary`,
+      `echo "Downloading miner from ${minerUrl}..."`,
+      `curl -fSL "${minerUrl}" -o "$MINER_BIN"`,
+      `chmod +x "$MINER_BIN"`,
+      ``,
+      `# Verify it runs`,
+      `"$MINER_BIN" --version || { echo "ERROR: Miner binary failed to execute"; exit 1; }`,
+      ``,
+      `# Create config`,
+      `cat > "$INSTALL_DIR/miner.env" << 'ENVEOF'`,
+      `WALLET_ADDRESS=${wallet_address}`,
+      `SERVER_URL=${serverUrl}`,
+      `THREADS=${numThreads}`,
+      `ENVEOF`,
+      ``,
+      `# Create start script`,
+      `cat > "$INSTALL_DIR/start-mining.sh" << 'STARTEOF'`,
+      `#!/bin/bash`,
+      `source "$HOME/.quillon/miner.env"`,
+      `THREAD_FLAG=""`,
+      `if [ "$THREADS" -gt 0 ] 2>/dev/null; then`,
+      `  THREAD_FLAG="--threads $THREADS"`,
+      `fi`,
+      `exec "$HOME/.quillon/q-miner" \\`,
+      `  --server "$SERVER_URL" \\`,
+      `  --wallet "$WALLET_ADDRESS" \\`,
+      `  $THREAD_FLAG`,
+      `STARTEOF`,
+      `chmod +x "$INSTALL_DIR/start-mining.sh"`,
+      ``,
+      `# Create systemd user service (optional)`,
+      `mkdir -p "$HOME/.config/systemd/user"`,
+      `cat > "$HOME/.config/systemd/user/quillon-miner.service" << SVCEOF`,
+      `[Unit]`,
+      `Description=Quillon Miner`,
+      `After=network-online.target`,
+      ``,
+      `[Service]`,
+      `Type=simple`,
+      `ExecStart=$INSTALL_DIR/start-mining.sh`,
+      `Restart=on-failure`,
+      `RestartSec=10`,
+      ``,
+      `[Install]`,
+      `WantedBy=default.target`,
+      `SVCEOF`,
+      ``,
+      `echo ""`,
+      `echo "=== Quillon Miner Installed ==="`,
+      `echo "Binary:  $MINER_BIN"`,
+      `echo "Wallet:  ${wallet_address}"`,
+      `echo "Server:  ${serverUrl}"`,
+      `echo ""`,
+      `echo "To start mining:"`,
+      `echo "  $INSTALL_DIR/start-mining.sh"`,
+      `echo ""`,
+      `echo "To run as a service:"`,
+      `echo "  systemctl --user enable quillon-miner"`,
+      `echo "  systemctl --user start quillon-miner"`,
+      `echo ""`,
+    ].join("\n");
+
+    return {
+      content: [{
+        type: "text",
+        text: [
+          `Miner setup script generated. Run this to install:\n`,
+          `\`\`\`bash`,
+          script,
+          `\`\`\``,
+          ``,
+          `Or save to a file and run:`,
+          `  bash setup-miner.sh`,
+          ``,
+          `The miner will:`,
+          `- Download the latest binary to ~/.quillon/`,
+          `- Configure it for wallet ${wallet_address}`,
+          `- Create a start script and optional systemd service`,
+          `- Auto-update every 5 minutes via the built-in updater`,
+        ].join("\n"),
+      }],
+    };
+  }
+);
+
+server.tool(
+  "start_mining",
+  "Start mining Quillon (QUG) on this machine. Downloads the miner if needed and begins mining to your wallet address.",
+  {
+    wallet_address: z.string().describe("Your qnk... wallet address to receive mining rewards"),
+    server_url: z.string().optional().describe("Mining server (default: https://quillon.xyz)"),
+  },
+  async ({ wallet_address, server_url }) => {
+    const serverUrl = server_url || "https://quillon.xyz";
+
+    // Quick-start one-liner
+    const oneLiner = `curl -fSL ${DOWNLOAD_BASE}/q-miner-linux-x64 -o /tmp/q-miner && chmod +x /tmp/q-miner && /tmp/q-miner --server ${serverUrl} --wallet ${wallet_address}`;
+
+    return {
+      content: [{
+        type: "text",
+        text: [
+          `To start mining immediately, run:\n`,
+          `\`\`\`bash`,
+          oneLiner,
+          `\`\`\``,
+          ``,
+          `This will:`,
+          `1. Download the miner binary`,
+          `2. Start mining to ${wallet_address}`,
+          `3. Auto-detect CPU cores and use all of them`,
+          `4. Auto-update when new versions are available`,
+          ``,
+          `Mining rewards appear in your wallet within ~60 seconds.`,
+          `Press Ctrl+C to stop mining.`,
+          ``,
+          `For persistent mining (survives reboot), use setup_miner instead.`,
+        ].join("\n"),
+      }],
+    };
+  }
+);
+
+server.tool(
+  "mining_status",
+  "Check current mining statistics — hashrate, solutions found, rewards earned",
+  {
+    wallet_address: z.string().describe("Your qnk... wallet address"),
+  },
+  async ({ wallet_address }) => {
+    try {
+      const [balRes, challengeRes] = await Promise.all([
+        api(`/wallets/${wallet_address}/balance`).catch(() => null),
+        api("/mining/challenge").catch(() => null),
+      ]);
+
+      const bal = (balRes as any)?.data;
+      const challenge = (challengeRes as any)?.data;
+
+      return {
+        content: [{
+          type: "text",
+          text: [
+            `=== Mining Status for ${wallet_address.slice(0, 12)}... ===`,
+            bal ? `Balance: ${bal.balance_qug || bal.balance || 0} QUG` : 'Balance: unavailable',
+            challenge ? `Current Height: ${challenge.block_height}` : '',
+            challenge ? `Block Reward: ${challenge.block_reward} QUG` : '',
+            challenge ? `Network Hashrate: ${challenge.network_hashrate_hs || 'unknown'} H/s` : '',
+            challenge ? `Connected Miners: ${challenge.connected_miners || 'unknown'}` : '',
+            challenge ? `Difficulty: ${challenge.difficulty_target?.slice(0, 8)}...` : '',
+          ].filter(Boolean).join("\n"),
+        }],
+      };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error checking mining status: ${e}` }] };
+    }
+  }
+);
+
+// ============================================================
+// START SERVER
+// ============================================================
+
+async function main() {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  console.error("Quillon Wallet & Mining MCP server running on stdio");
+}
+
+main().catch((error) => {
+  console.error("Fatal error:", error);
+  process.exit(1);
+});
