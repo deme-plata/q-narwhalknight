@@ -7075,9 +7075,27 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         peers, height, height_gap
                     );
                 }
+
+                // --- v10.3.0: Periodic cache cleanup (prevents unbounded memory growth) ---
+                // Bug #1: DUNE_QUERY_CACHE grows forever — evict entries older than TTL
+                let dune_before = DUNE_QUERY_CACHE.len();
+                DUNE_QUERY_CACHE.retain(|_, (cached_at, _)| cached_at.elapsed().as_secs() < DUNE_CACHE_TTL_SECS);
+                let dune_evicted = dune_before - DUNE_QUERY_CACHE.len();
+
+                // Bug #2: BALANCE_AMOUNT_LIMITS grows forever — evict entries older than 5 minutes
+                let bal_before = BALANCE_AMOUNT_LIMITS.len();
+                BALANCE_AMOUNT_LIMITS.retain(|_, (_, window_start)| window_start.elapsed().as_secs() < 300);
+                let bal_evicted = bal_before - BALANCE_AMOUNT_LIMITS.len();
+
+                if dune_evicted > 0 || bal_evicted > 0 {
+                    tracing::info!(
+                        "🧹 CACHE CLEANUP: DUNE_QUERY_CACHE evicted {} (remaining {}), BALANCE_AMOUNT_LIMITS evicted {} (remaining {})",
+                        dune_evicted, DUNE_QUERY_CACHE.len(), bal_evicted, BALANCE_AMOUNT_LIMITS.len()
+                    );
+                }
             }
         });
-        info!("✅ System health watchdog spawned (300s periodic, cgroup-aware)");
+        info!("✅ System health watchdog spawned (300s periodic, cgroup-aware, cache cleanup)");
     }
 
     // ========================================
