@@ -210,16 +210,17 @@ server.tool("create_wallet", "Create a new Quillon wallet. Returns the address (
     if (!res.success)
         return { content: [{ type: "text", text: `Failed: ${res.error}` }] };
     const wallet = res.data;
+    const address = wallet.address_formatted || wallet.address;
     return {
         content: [{
                 type: "text",
                 text: [
                     `Wallet created successfully!`,
                     ``,
-                    `Address: ${wallet.address}`,
-                    `Wallet ID: ${wallet.id}`,
-                    wallet.mnemonic ? `\nRecovery Mnemonic (save this!):\n  ${wallet.mnemonic}\n` : '',
-                    `Balance: 0 QUG`,
+                    `  Address:   ${address}`,
+                    `  Wallet ID: ${wallet.id}`,
+                    wallet.mnemonic ? `\n  Recovery Mnemonic (save this!):\n    ${wallet.mnemonic}\n` : '',
+                    `  Balance:   0 QUG`,
                     ``,
                     `Send QUG to the address above to fund this wallet.`,
                     `The mnemonic recovers this wallet on any Quillon node — save it offline.`,
@@ -265,6 +266,141 @@ server.tool("import_wallet", "Recover a wallet from a 12 or 24-word mnemonic phr
                 ].join("\n"),
             }],
     };
+});
+// --- Device auth state (in-memory, per MCP session) ---
+let activeDeviceCode = null;
+let activeWalletAddress = null;
+let authToken = null;
+server.tool("authenticate_wallet", "Authenticate your wallet using the device login flow. Opens a browser link where you approve access. Required before sending QUG.", {}, async () => {
+    try {
+        // Step 1: Request device code
+        const res = await api("/miner/device-login", "POST");
+        if (!res.success)
+            return { content: [{ type: "text", text: `Auth failed: ${res.error}` }] };
+        const { device_code, user_code, verification_url, expires_in } = res.data;
+        activeDeviceCode = device_code;
+        return {
+            content: [{
+                    type: "text",
+                    text: [
+                        `To authorize this AI to send from your wallet:`,
+                        ``,
+                        `  1. Open this URL in your browser:`,
+                        `     ${verification_url}`,
+                        ``,
+                        `  2. Your code: ${user_code}`,
+                        ``,
+                        `  3. Log in with your wallet and approve`,
+                        ``,
+                        `  4. Then say "check auth" and I'll confirm it worked`,
+                        ``,
+                        `This code expires in ${Math.floor(expires_in / 60)} minutes.`,
+                    ].join("\n"),
+                }],
+        };
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `Authentication failed: ${e.message}` }] };
+    }
+});
+server.tool("check_auth", "Check if wallet authentication is complete (after opening the browser link from authenticate_wallet)", {}, async () => {
+    if (!activeDeviceCode) {
+        return { content: [{ type: "text", text: `No pending authentication. Run "authenticate wallet" first.` }] };
+    }
+    try {
+        const res = await api(`/miner/device-login/${activeDeviceCode}`);
+        if (!res.success) {
+            activeDeviceCode = null;
+            return { content: [{ type: "text", text: `Auth expired or invalid. Run "authenticate wallet" again.` }] };
+        }
+        if (res.data.status === "complete") {
+            activeWalletAddress = res.data.wallet_address;
+            activeDeviceCode = null;
+            return {
+                content: [{
+                        type: "text",
+                        text: [
+                            `Wallet authenticated!`,
+                            ``,
+                            `  Wallet: ${activeWalletAddress}`,
+                            ``,
+                            `You can now send QUG. Say "send 10 QUG to qnk..."`,
+                        ].join("\n"),
+                    }],
+            };
+        }
+        else {
+            return {
+                content: [{
+                        type: "text",
+                        text: `Still waiting... Open the link in your browser and approve.\nSay "check auth" again after approving.`,
+                    }],
+            };
+        }
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `Auth check failed: ${e.message}` }] };
+    }
+});
+server.tool("send_qug", "Send QUG from your authenticated wallet to another address. Run 'authenticate wallet' first if you haven't already.", {
+    to_address: z.string().describe("Recipient qnk... address"),
+    amount: z.number().describe("Amount of QUG to send"),
+}, async ({ to_address, amount }) => {
+    if (!activeWalletAddress) {
+        return {
+            content: [{
+                    type: "text",
+                    text: [
+                        `Wallet not authenticated. To send QUG:`,
+                        ``,
+                        `  1. Say "authenticate wallet"`,
+                        `  2. Open the link in your browser and approve`,
+                        `  3. Say "check auth"`,
+                        `  4. Then "send ${amount} QUG to ${to_address}"`,
+                    ].join("\n"),
+                }],
+        };
+    }
+    try {
+        const res = await api("/transactions/send", "POST", {
+            from: activeWalletAddress,
+            to: to_address,
+            amount: Math.floor(amount * 1e24).toString(),
+        });
+        if (res.success) {
+            return {
+                content: [{
+                        type: "text",
+                        text: [
+                            `Transaction submitted!`,
+                            ``,
+                            `  From:   ${activeWalletAddress.slice(0, 16)}...`,
+                            `  To:     ${to_address.slice(0, 16)}...`,
+                            `  Amount: ${amount} QUG`,
+                            res.data?.tx_id ? `  TX ID:  ${res.data.tx_id}` : '',
+                            ``,
+                            `The transaction will be included in the next block (~1 second).`,
+                        ].filter(Boolean).join("\n"),
+                    }],
+            };
+        }
+        else {
+            return {
+                content: [{
+                        type: "text",
+                        text: `Transaction failed: ${res.error || 'Unknown error'}`,
+                    }],
+            };
+        }
+    }
+    catch (e) {
+        return {
+            content: [{
+                    type: "text",
+                    text: `Send failed: ${e.message}\n\nThe wallet may need re-authentication or have insufficient balance.`,
+                }],
+        };
+    }
 });
 server.tool("network_status", "Get current Quillon network status — height, peers, block rate, mining stats", {}, async () => {
     const res = await api("/status");
