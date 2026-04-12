@@ -604,25 +604,22 @@ impl SqiSignVerifier {
             ).map_err(|e| CryptoError::InternalError(format!("SQIsign FFI verify: {}", e)));
         }
 
-        // Hash-based fallback (existing scaffold verification)
-        let mut verify_hasher = Sha3_256::new();
-        verify_hasher.update(&signature.response);
-        verify_hasher.update(&public_key.compressed);
-        verify_hasher.update(message);
-        let _expected_commitment: [u8; 32] = verify_hasher.finalize().into();
-
-        if signature.response.len() != self.params.sig_size - 32 - 1 {
-            return Ok(false);
-        }
-
-        let mut check_hasher = Sha3_256::new();
-        check_hasher.update(&signature.commitment);
-        check_hasher.update(&signature.response);
-        check_hasher.update(&public_key.compressed);
-        check_hasher.update(message);
-        let _check: [u8; 32] = check_hasher.finalize().into();
-
-        Ok(true)
+        // v10.3.0: SCAFFOLD REMOVED — was returning Ok(true) for all signatures.
+        // That was a time bomb: any code path routing consensus verification through
+        // the scaffold would silently accept all signatures.
+        //
+        // The scaffold is now a hard error. To verify real SQIsign signatures,
+        // enable the 'sqisign-ffi' feature to link the C reference implementation.
+        //
+        // See: metzdowd cryptography mailing list, April 2026
+        // "A verify function that returns Ok(true) is a time bomb"
+        Err(CryptoError::InternalError(
+            "SQIsign scaffold verification is disabled (v10.3.0). \
+             The hash-based fallback previously returned Ok(true) for ALL signatures — \
+             a security vulnerability if used in consensus. \
+             Enable 'sqisign-ffi' feature to link the C reference implementation \
+             for real isogeny-based verification.".to_string()
+        ))
     }
 }
 
