@@ -393,28 +393,67 @@ module xcrypto_unit
     end
 
     // =========================================================================
+    // BLAKE3 flag constants for mining (single-chunk, single-block)
+    // =========================================================================
+    localparam logic [31:0] MINING_FLAGS = {24'd0,
+        BLAKE3_FLAG_CHUNK_START | BLAKE3_FLAG_CHUNK_END | BLAKE3_FLAG_ROOT};
+
+    // =========================================================================
     // Pipeline input control
     // =========================================================================
+    // CRITICAL (v4.1 fix): Quillon mining protocol requires:
+    //   H₀ = BLAKE3(input[40])  — CV = IV, message = scratchpad, block_len = 40
+    //   Hᵢ = BLAKE3(Hᵢ₋₁)     — CV = IV, message = prev hash || zeros, block_len = 32
+    //
+    // Every hash in the 100-round chain uses the BLAKE3 IV as chaining value.
+    // The previous hash output goes into the MESSAGE BLOCK (words 0-7), NOT
+    // the chaining value. This matches gpu.rs:199-208 (blake3_hash_32).
+    //
+    // All hashes use flags = CHUNK_START | CHUNK_END | ROOT (single chunk).
+    // Counter is always 0.
     always_comb begin
         pipe_in_valid  = 1'b0;
-        pipe_counter   = {lat_rs2, 32'd0};  // Upper 32 bits from rs2
-        pipe_block_len = 32'd64;             // Default: full 64-byte block
-        pipe_flags     = 32'd0;
+        pipe_counter   = 64'd0;             // Counter = 0 for all mining hashes
+        pipe_block_len = 32'd64;            // Default: full 64-byte block
+        pipe_flags     = MINING_FLAGS;      // Default: single-chunk mining flags
 
-        for (int i = 0; i < 8; i++)  pipe_cv[i]    = state_out[i];
+        // Default: IV as chaining value, scratchpad as message
+        for (int i = 0; i < 8; i++)  pipe_cv[i]    = BLAKE3_IV[i];
         for (int i = 0; i < 16; i++) pipe_block[i]  = msg_block_lat[i];
 
         if (fsm_state == S_COMPRESS) begin
             pipe_in_valid = 1'b1;
 
-            if (lat_funct7 == F7_CHAIN && chain_count > 7'd0) begin
-                // Chain iteration: use latched hash as chaining value
+            if (lat_funct7 == F7_CHAIN && chain_count == 7'd0) begin
+                // ── First iteration (H₀): hash the 40-byte mining input ──
+                // CV = BLAKE3 IV (already set by default above)
+                // Message = scratchpad contents (challenge[0:7] + nonce[8:9] + zeros[10:15])
+                // block_len = 40 (40 bytes of actual data in the 64-byte block)
+                pipe_block_len = 32'd40;
+                // pipe_block = msg_block_lat (already set by default)
+                // pipe_flags = MINING_FLAGS (already set by default)
+
+            end else if (lat_funct7 == F7_CHAIN && chain_count > 7'd0) begin
+                // ── Chain iterations (H₁..H₉₉): hash the 32-byte prev output ──
+                // CV = BLAKE3 IV (always! NOT the previous hash)
+                // Message = previous hash in words 0-7, zeros in words 8-15
+                // block_len = 32 (32 bytes of hash data)
                 for (int i = 0; i < 8; i++) begin
-                    pipe_cv[i] = hash_latched[i];
+                    pipe_block[i] = hash_latched[i];  // Prev hash → message
                 end
-                // For chain iterations after the first, the "message" is
-                // the same block (the original input being hashed repeatedly)
-                pipe_flags = 32'h0;  // No special flags for inner chain hashes
+                for (int i = 8; i < 16; i++) begin
+                    pipe_block[i] = 32'd0;            // Zero-pad
+                end
+                pipe_block_len = 32'd32;
+                // pipe_cv = BLAKE3_IV (already set by default)
+                // pipe_flags = MINING_FLAGS (already set by default)
+
+            end else begin
+                // ── Single blake3.round (non-chain): use state registers ──
+                // For non-chain round instruction, CV comes from state regs
+                for (int i = 0; i < 8; i++) pipe_cv[i] = state_out[i];
+                pipe_block_len = 32'd64;
+                pipe_flags     = 32'd0;
             end
         end
     end

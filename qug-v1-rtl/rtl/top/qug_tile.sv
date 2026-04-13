@@ -114,29 +114,47 @@ module qug_tile
     logic [31:0] xc_mem_block [0:15];
     logic        xc_mem_valid;
 
-    // For the simple tile, the xcrypto message block interface is stubbed:
-    // message words are fetched via the data memory port by the core before
-    // issuing blake3.round.  The mem_block input is tied to zero and mem_valid
-    // is pulsed one cycle after rd_en.  In a production tile, this would
-    // connect to a dedicated scratchpad or DMA engine.
-    logic xc_mem_valid_r;
+    // =========================================================================
+    // Xcrypto scratchpad: 512-bit tightly-coupled message block storage
+    // =========================================================================
+    // Replaces the zero-fill stub. The mining controller or CPU writes the
+    // message block (challenge[0:7] + nonce[8:9] + zeros[10:15]) via the
+    // narrow write port. Xcrypto reads all 16 words in one cycle.
+    //
+    // Scratchpad address decode: data memory writes to address range
+    // 0x0002_0000 - 0x0002_003F are routed to the scratchpad.
+    // Word index = dmem_addr[5:2] (16 words x 4 bytes = 64 bytes).
 
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n)
-            xc_mem_valid_r <= 1'b0;
-        else
-            xc_mem_valid_r <= xc_mem_rd_en;
+    localparam logic [31:0] SCRATCH_BASE = 32'h0002_0000;
+    localparam logic [31:0] SCRATCH_END  = 32'h0002_003F;
+
+    logic scratch_wr_en;
+    assign scratch_wr_en = dmem_req && (|dmem_we) &&
+                           (dmem_addr >= SCRATCH_BASE) &&
+                           (dmem_addr <= SCRATCH_END);
+
+    // Bulk write interface (active when mining controller is wired up)
+    logic [31:0] scratch_bulk_data [0:15];
+    logic        scratch_bulk_en;
+
+    // Default: no bulk write (mining controller will drive these when added)
+    always_comb begin
+        for (int i = 0; i < 16; i++) scratch_bulk_data[i] = 32'd0;
+        scratch_bulk_en = 1'b0;
     end
 
-    assign xc_mem_valid = xc_mem_valid_r;
-
-    // Zero-fill message block -- firmware must pre-load message words into
-    // the state via blake3.init / data memory before invoking blake3.round.
-    generate
-        for (genvar i = 0; i < 16; i++) begin : gen_msg_zero
-            assign xc_mem_block[i] = 32'd0;
-        end
-    endgenerate
+    xcrypto_scratchpad u_xc_scratch (
+        .clk          (clk),
+        .rst_n        (rst_n),
+        .wr_idx       (dmem_addr[5:2]),
+        .wr_data      (dmem_wdata),
+        .wr_en        (scratch_wr_en),
+        .bulk_wr_data (scratch_bulk_data),
+        .bulk_wr_en   (scratch_bulk_en),
+        .rd_en        (xc_mem_rd_en),
+        .rd_data      (xc_mem_block),
+        .rd_valid     (xc_mem_valid)
+    );
 
     // =========================================================================
     // Xlattice unit response signals

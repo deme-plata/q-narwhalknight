@@ -10,16 +10,25 @@
 //
 // Stores the 64-byte (16 x 32-bit) BLAKE3 message block for Xcrypto.
 //
+// Mining message layout (40 bytes of data in 16-word block):
+//   word[ 0..7] = challenge_hash[0..31]  (32 bytes, 8 LE u32 words)
+//   word[ 8..9] = nonce                  (8 bytes, LE u64 split into 2 words)
+//   word[10..15] = 0x00000000            (24 bytes zero padding)
+//
 // Two access modes:
 //   1. Narrow write port (32-bit): CPU/mining controller writes individual
-//      words to construct the message block (challenge || nonce || address).
+//      words to construct the message block.
 //   2. Wide read port (512-bit): Xcrypto reads all 16 words in a single
 //      cycle when blake3.round or blake3.chain is issued.
+//
+// Read model: SYNCHRONOUS — both rd_data and rd_valid are registered.
+// Data and valid change on the same clock edge. This prevents the
+// consumer from seeing stale data with a premature valid.
 //
 // This replaces the zero-fill stub in qug_tile.sv that caused all BLAKE3
 // chain hashes to compute on zero input.
 //
-// Resource estimate: 512 FF + ~50 LUT (write decode + read mux)
+// Resource estimate: 1024 FF + ~50 LUT (512 storage + 512 read reg + decode)
 // =============================================================================
 
 module xcrypto_scratchpad (
@@ -52,8 +61,11 @@ module xcrypto_scratchpad (
     // =========================================================================
     logic [31:0] mem [0:15];
 
-    // Read valid pipeline register (1-cycle latency to match BRAM timing)
-    logic rd_valid_r;
+    // =========================================================================
+    // Synchronous read registers (data + valid change on same clock edge)
+    // =========================================================================
+    logic [31:0] rd_data_r [0:15];
+    logic        rd_valid_r;
 
     // =========================================================================
     // Write logic: bulk write takes priority over narrow write
@@ -63,7 +75,6 @@ module xcrypto_scratchpad (
             for (int i = 0; i < 16; i++) begin
                 mem[i] <= 32'd0;
             end
-            rd_valid_r <= 1'b0;
         end else begin
             // Bulk write (from mining controller) has priority
             if (bulk_wr_en) begin
@@ -73,18 +84,32 @@ module xcrypto_scratchpad (
             end else if (wr_en) begin
                 mem[wr_idx] <= wr_data;
             end
-
-            // Read valid follows read enable by 1 cycle
-            rd_valid_r <= rd_en;
         end
     end
 
     // =========================================================================
-    // Combinational read: all 16 words always available
+    // Synchronous read: data and valid registered together
     // =========================================================================
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            for (int i = 0; i < 16; i++) begin
+                rd_data_r[i] <= 32'd0;
+            end
+            rd_valid_r <= 1'b0;
+        end else begin
+            rd_valid_r <= rd_en;
+            if (rd_en) begin
+                for (int i = 0; i < 16; i++) begin
+                    rd_data_r[i] <= mem[i];
+                end
+            end
+        end
+    end
+
+    // Output assignment
     always_comb begin
         for (int i = 0; i < 16; i++) begin
-            rd_data[i] = mem[i];
+            rd_data[i] = rd_data_r[i];
         end
     end
 
