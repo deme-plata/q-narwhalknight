@@ -1281,9 +1281,7 @@ impl BlockProducer {
         // when the coinbase transaction is processed.
 
         // v1.4.5-beta: Integer-only fee calculation for cross-platform determinism
-        // Using saturating_mul to prevent overflow (handled in next task)
         let dev_fee_amount = total_reward.saturating_mul(dev_fee_bps_val) / BPS_DIVISOR;
-        let miner_reward_per_solution = (total_reward.saturating_sub(dev_fee_amount)) / solutions.len() as u128;
 
         // v8.6.1: Split dev fee between founder and node operator
         let operator_promille = self.node_operator_fee_promille.load(std::sync::atomic::Ordering::Relaxed) as u128;
@@ -1702,8 +1700,57 @@ impl BlockProducer {
         } else { false };
 
         if !used_pplns {
-            // Fallback: per-solution rewards (existing behavior when no PPLNS shares)
+            // v10.3.0: Difficulty-weighted mining rewards (Phase A — Fair Share)
+            //
+            // Previously: equal split (miner_total / solutions.len())
+            // Now: weight by leading zero bits in solution hash
+            //   Weight = 2^(leading_zeros) — harder solutions get exponentially more
+            //   Uses integer-only arithmetic (division-first) to prevent u128 overflow
+            //   and ensure sum(rewards) == miner_total (no rounding leak)
+            //
+            // Tests: crates/q-mining/tests/mining_fairness_tests.rs (24 tests, all passing)
+            let difficulty_weights: Vec<u128> = solutions.iter().map(|s| {
+                // Count leading zero BITS in the solution hash
+                let mut zeros = 0u32;
+                for byte in s.hash.iter() {
+                    if *byte == 0 {
+                        zeros += 8;
+                    } else {
+                        zeros += byte.leading_zeros();
+                        break;
+                    }
+                }
+                // Weight = 2^zeros (capped at 2^64 to prevent u128 overflow in summation)
+                1u128 << zeros.min(64)
+            }).collect();
+
+            let total_weight: u128 = difficulty_weights.iter().sum();
+
+            // Calculate per-solution rewards using division-first integer arithmetic
+            // reward_i = (miner_total / total_weight) * weight_i + ((miner_total % total_weight) * weight_i) / total_weight
+            let mut miner_rewards: Vec<u128> = difficulty_weights.iter().map(|w| {
+                if total_weight == 0 { return miner_total / solutions.len() as u128; }
+                let quotient = miner_total / total_weight;
+                let remainder = miner_total % total_weight;
+                quotient * w + (remainder * w) / total_weight
+            }).collect();
+
+            // Assign rounding remainder to highest-weight miner (deterministic, no leak)
+            let distributed: u128 = miner_rewards.iter().sum();
+            let remainder = miner_total.saturating_sub(distributed);
+            if remainder > 0 {
+                let max_idx = difficulty_weights.iter()
+                    .enumerate()
+                    .max_by_key(|(_, w)| *w)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                miner_rewards[max_idx] += remainder;
+            }
+
             for (idx, solution) in solutions.iter().enumerate() {
+                let reward_amount = miner_rewards[idx];
+                let leading_zeros = difficulty_weights[idx].trailing_zeros(); // log2(weight) = leading zeros
+
                 let miner_tx_id = {
                     let mut hasher = Sha256::new();
                     hasher.update(b"MINER_REWARD");
@@ -1720,12 +1767,12 @@ impl BlockProducer {
                     id: miner_tx_id,
                     from: coinbase_from,
                     to: solution.miner_address,
-                    amount: miner_reward_per_solution,
+                    amount: reward_amount,
                     fee: 0,
                     nonce: idx as u64,
                     signature: vec![0xC0, 0x1B, 0xA5, 0xE], // "COINBASE" marker
                     timestamp,
-                    data: format!("Mining reward for solution #{}", solution.nonce).into_bytes(),
+                    data: format!("Mining reward #{} (difficulty: {} zero bits, weight: 2^{})", solution.nonce, leading_zeros, leading_zeros).into_bytes(),
                     token_type: TokenType::QUG,
                     fee_token_type: TokenType::QUGUSD,
                     tx_type: TransactionType::Coinbase,
@@ -1741,7 +1788,7 @@ impl BlockProducer {
 
                 if let Some(ref emitter) = self.event_emitter {
                     let miner_address_hex = hex::encode(solution.miner_address);
-                    let reward_qnk = miner_reward_per_solution as f64 / 1e24;
+                    let reward_qnk = reward_amount as f64 / 1e24;
                     let origin_node_id = self.local_peer_id.clone();
                     let origin_node_name = self.node_name.clone();
 
@@ -1769,7 +1816,7 @@ impl BlockProducer {
         // ✅ v0.9.99-beta: Enhanced logging for adaptive rewards
         let qug_total = total_reward as f64 / 1e24;
         let qug_dev_fee = dev_fee_amount as f64 / 1e24;
-        let qug_per_miner = miner_reward_per_solution as f64 / 1e24;
+        let qug_per_miner = if solutions.is_empty() { 0.0 } else { (miner_total / solutions.len() as u128) as f64 / 1e24 }; // avg for logging
 
         info!(
             "💎 [v7.1.2 ADAPTIVE] Created {} coinbase transactions{}:",
