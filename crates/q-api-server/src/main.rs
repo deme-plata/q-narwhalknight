@@ -10188,11 +10188,6 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 );
                                 } // end: known_count > total_sigs / 2
                             } // end: spectral signatures non-empty + not skipping for sync
-                            } else if block.quantum_metadata.spectral_signatures.is_empty() {
-                                // No signatures - acceptable for blocks from validators without PQC keys
-                                debug!("ℹ️  [PQC] Block {} has no spectral signatures (validator may not have PQC key)",
-                                      block_height);
-                            }
 
                             // v6.1.0: SEMAPHORE GATE - Limit concurrent block processing
                             // Without this, tasks accumulate unboundedly causing OOM
