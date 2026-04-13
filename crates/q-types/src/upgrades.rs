@@ -241,7 +241,7 @@ pub mod upgrades {
     /// Announce to miners 1 week before activation.
     pub const LWMA_DIFFICULTY_ADJUSTMENT: NetworkUpgrade = NetworkUpgrade {
         name: "lwma_difficulty_adjustment",
-        activation_height: u64::MAX, // NOT YET ACTIVATED — set after Delta canary validation
+        activation_height: 14_900_000, // Activates ~1 hour from height 14887114 (2026-04-13)
         description: "LWMA difficulty adjustment targeting 1.0 bps (Phase B.2)",
     };
 }
