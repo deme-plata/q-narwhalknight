@@ -88,7 +88,10 @@ module qug_pipeline
   // =========================================================================
   logic [31:0] alu_operand_a, alu_operand_b;
   logic [31:0] alu_result;
+  // ALU flags — currently unused, reserved for branch optimization
+  // verilator lint_off UNUSED
   logic        alu_zero, alu_carry, alu_overflow;
+  // verilator lint_on UNUSED
 
   // =========================================================================
   // Forwarded operand values (resolved in ID stage)

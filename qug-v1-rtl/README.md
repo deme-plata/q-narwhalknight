@@ -28,8 +28,14 @@ qug-v1-rtl/
     pkg/
       qug_pkg.sv             Global parameters, types, AXI4-Lite structs
       xcrypto_pkg.sv         BLAKE3 constants, Xcrypto instruction encodings
-    core/                    (planned) RISC-V pipeline stages
-    xcrypto/                 (planned) BLAKE3 execution unit
+    core/                    RISC-V pipeline stages (implemented)
+      qug_pipeline.sv        7-stage in-order pipeline with forwarding
+    memory/                  Memory subsystem (implemented)
+      bram_sp.sv             Single-port synchronous BRAM
+      bram_dp.sv             True dual-port synchronous BRAM
+    xcrypto/                 BLAKE3 execution unit (implemented)
+      blake3_round.sv        2-stage pipelined BLAKE3 round
+      xcrypto_unit.sv        Top-level Xcrypto extension unit with FSM
     xlattice/                (planned) NTT/polynomial execution unit
     tile/                    (planned) Tile wrapper (core + L1 + extensions)
     mesh/                    (planned) 4x4 mesh NoC + L2
@@ -48,10 +54,10 @@ qug-v1-rtl/
 
 | Mnemonic         | funct7  | Operands      | Description                                |
 |------------------|---------|---------------|--------------------------------------------|
-| `blake3.init`    | 0x00    | rd, rs1       | Load chaining value from memory[rs1] into state |
-| `blake3.round`   | 0x01    | rd, rs1, rs2  | Execute one BLAKE3 compression round       |
-| `blake3.chain`   | 0x02    | rd            | Read 32-bit chaining value word to rd      |
-| `blake3.finalize`| 0x03    | rd            | Finalize hash; write 32-bit output to rd   |
+| `blake3.init`    | 0x00    | rs1           | Load IV into state, reset pipeline (no rd writeback) |
+| `blake3.round`   | 0x01    | rd, rs1, rs2  | Fetch message from memory[rs1], run 7-round compression |
+| `blake3.chain`   | 0x02    | rd, rs1, rs2  | VDF chain: rs1=msg addr, rs2[6:0]=chain length |
+| `blake3.finalize`| 0x03    | rd, rs1       | Read hash word rs1[3:0] into rd            |
 | `blake3.ldmsg`   | 0x04    | rd, rs1       | Load 64-byte message block from memory[rs1]|
 | `blake3.status`  | 0x05    | rd            | Read engine status register to rd          |
 

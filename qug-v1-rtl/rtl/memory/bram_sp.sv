@@ -20,6 +20,7 @@ module bram_sp #(
     parameter int WIDTH = 32       // Bits per word
 ) (
     input  logic                    clk,
+    input  logic                    rst_n,
 
     input  logic                    en,      // Enable (read or write)
     input  logic                    we,      // Write enable
@@ -32,8 +33,10 @@ module bram_sp #(
     (* ram_style = "block" *)
     logic [WIDTH-1:0] mem [0:DEPTH-1];
 
-    always_ff @(posedge clk) begin
-        if (en) begin
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            rdata <= '0;
+        end else if (en) begin
             if (we) begin
                 mem[addr] <= wdata;
             end

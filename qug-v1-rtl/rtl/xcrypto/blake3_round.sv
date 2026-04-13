@@ -175,6 +175,10 @@ module blake3_round (
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             s1_valid <= 1'b0;
+            for (int j = 0; j < 16; j++) begin
+                s1_state[j] <= '0;
+                s1_msg[j]   <= '0;
+            end
         end else begin
             s1_valid <= in_valid;
             if (in_valid) begin
@@ -233,6 +237,9 @@ module blake3_round (
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             out_valid <= 1'b0;
+            for (int j = 0; j < 16; j++) begin
+                s2_state[j] <= '0;
+            end
         end else begin
             out_valid <= s1_valid;
             if (s1_valid) begin

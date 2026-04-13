@@ -24,8 +24,19 @@
 # ==============================================================================
 # Configuration
 # ==============================================================================
+# Supported FPGA parts:
+#   xc7k325tffg900-2   -- Kintex-7 325T (FFG900 package)
+#   xc7k355tffg901-2   -- Kintex-7 355T (FFG901 package, Dragon Ball board)
+#
+# Override from command line:
+#   vivado -mode batch -source fpga/scripts/synth_vivado.tcl -tclargs xc7k355tffg901-2
+
 set project_name    "qug_v1_fpga"
-set part            "xc7k325tffg900-2"
+if { $argc > 0 } {
+    set part [lindex $argv 0]
+} else {
+    set part "xc7k325tffg900-2"
+}
 set top_module      "fpga_top"
 set build_dir       "build"
 set report_dir      "${build_dir}/reports"
@@ -114,9 +125,14 @@ set_property file_type SystemVerilog [get_files *.sv]
 # ==============================================================================
 puts "Adding constraints..."
 
-add_files -fileset constrs_1 -norecurse [list \
-    ${rtl_root}/fpga/constraints/kintex7_325t.xdc \
-]
+# Auto-select constraints file based on target part
+if { [string match "*355t*" $part] } {
+    set xdc_file "${rtl_root}/fpga/constraints/kintex7_355t.xdc"
+} else {
+    set xdc_file "${rtl_root}/fpga/constraints/kintex7_325t.xdc"
+}
+puts "Using constraints: ${xdc_file}"
+add_files -fileset constrs_1 -norecurse [list ${xdc_file}]
 
 # ==============================================================================
 # Set top module and design properties

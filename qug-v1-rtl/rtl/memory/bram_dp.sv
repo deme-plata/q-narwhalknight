@@ -23,6 +23,7 @@ module bram_dp #(
     parameter int WIDTH = 32       // Bits per word
 ) (
     input  logic                    clk,
+    input  logic                    rst_n,
 
     // Port A — read/write (CPU)
     input  logic                    en_a,
@@ -42,8 +43,10 @@ module bram_dp #(
     logic [WIDTH-1:0] mem [0:DEPTH-1];
 
     // Port A: read/write
-    always_ff @(posedge clk) begin
-        if (en_a) begin
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            rdata_a <= '0;
+        end else if (en_a) begin
             if (we_a) begin
                 mem[addr_a] <= wdata_a;
             end
@@ -52,8 +55,10 @@ module bram_dp #(
     end
 
     // Port B: read-only
-    always_ff @(posedge clk) begin
-        if (en_b) begin
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            rdata_b <= '0;
+        end else if (en_b) begin
             rdata_b <= mem[addr_b];
         end
     end

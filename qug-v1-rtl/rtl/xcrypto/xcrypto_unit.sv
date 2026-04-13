@@ -37,7 +37,9 @@
 //   in a single cycle (message_block input port).
 // =============================================================================
 
-module xcrypto_unit (
+module xcrypto_unit
+    import xcrypto_pkg::*;
+(
     input  logic        clk,
     input  logic        rst_n,
 
@@ -132,6 +134,10 @@ module xcrypto_unit (
     // Pipeline completion flag (for single compression)
     logic        compress_started;
 
+    // FSM watchdog timeout counter
+    logic [9:0]  fsm_timeout_cnt;
+    logic        fsm_timeout_error;
+
     // =========================================================================
     // Submodule instantiation: BLAKE3 state register file
     // =========================================================================
@@ -177,52 +183,58 @@ module xcrypto_unit (
     always_comb begin
         fsm_next = fsm_state;
 
-        case (fsm_state)
-            S_IDLE: begin
-                if (req_valid) begin
-                    case (req_funct7)
-                        F7_INIT:     fsm_next = S_IDLE;       // Single-cycle
-                        F7_ROUND:    fsm_next = S_FETCH_MSG;  // Need message block
-                        F7_CHAIN:    fsm_next = S_FETCH_MSG;  // Need message block for chain
-                        F7_FINALIZE: fsm_next = S_FINALIZE;   // Single-cycle read
-                        default:     fsm_next = S_IDLE;
-                    endcase
-                end
-            end
-
-            S_FETCH_MSG: begin
-                if (mem_valid) begin
-                    fsm_next = S_COMPRESS;
-                end
-            end
-
-            S_COMPRESS: begin
-                // Compression launched into pipeline
-                fsm_next = S_WAIT_PIPELINE;
-            end
-
-            S_WAIT_PIPELINE: begin
-                if (pipe_out_valid) begin
-                    if (lat_funct7 == F7_CHAIN && chain_count < chain_target) begin
-                        // More chain iterations needed
-                        fsm_next = S_CHAIN_WRITEBACK;
-                    end else begin
-                        fsm_next = S_IDLE;
+        // Watchdog: force return to S_IDLE on timeout
+        if (fsm_timeout_cnt == 10'd1000 &&
+            (fsm_state == S_FETCH_MSG || fsm_state == S_WAIT_PIPELINE)) begin
+            fsm_next = S_IDLE;
+        end else begin
+            case (fsm_state)
+                S_IDLE: begin
+                    if (req_valid) begin
+                        case (req_funct7)
+                            F7_INIT:     fsm_next = S_IDLE;       // Single-cycle
+                            F7_ROUND:    fsm_next = S_FETCH_MSG;  // Need message block
+                            F7_CHAIN:    fsm_next = S_FETCH_MSG;  // Need message block for chain
+                            F7_FINALIZE: fsm_next = S_FINALIZE;   // Single-cycle read
+                            default:     fsm_next = S_IDLE;
+                        endcase
                     end
                 end
-            end
 
-            S_CHAIN_WRITEBACK: begin
-                // Write hash back to state as CV, then re-compress
-                fsm_next = S_COMPRESS;
-            end
+                S_FETCH_MSG: begin
+                    if (mem_valid) begin
+                        fsm_next = S_COMPRESS;
+                    end
+                end
 
-            S_FINALIZE: begin
-                fsm_next = S_IDLE;
-            end
+                S_COMPRESS: begin
+                    // Compression launched into pipeline
+                    fsm_next = S_WAIT_PIPELINE;
+                end
 
-            default: fsm_next = S_IDLE;
-        endcase
+                S_WAIT_PIPELINE: begin
+                    if (pipe_out_valid) begin
+                        if (lat_funct7 == F7_CHAIN && chain_count < chain_target) begin
+                            // More chain iterations needed
+                            fsm_next = S_CHAIN_WRITEBACK;
+                        end else begin
+                            fsm_next = S_IDLE;
+                        end
+                    end
+                end
+
+                S_CHAIN_WRITEBACK: begin
+                    // Write hash back to state as CV, then re-compress
+                    fsm_next = S_COMPRESS;
+                end
+
+                S_FINALIZE: begin
+                    fsm_next = S_IDLE;
+                end
+
+                default: fsm_next = S_IDLE;
+            endcase
+        end
     end
 
     // =========================================================================
@@ -238,8 +250,24 @@ module xcrypto_unit (
             chain_count    <= 7'd0;
             chain_target   <= 7'd0;
             compress_started <= 1'b0;
+            fsm_timeout_cnt  <= 10'd0;
+            fsm_timeout_error <= 1'b0;
         end else begin
             fsm_state <= fsm_next;
+
+            // Watchdog timeout counter
+            if (fsm_state == S_FETCH_MSG || fsm_state == S_WAIT_PIPELINE) begin
+                if (fsm_timeout_cnt < 10'd1000)
+                    fsm_timeout_cnt <= fsm_timeout_cnt + 10'd1;
+            end else begin
+                fsm_timeout_cnt <= 10'd0;
+            end
+
+            // Assert error on timeout, clear when FSM returns to idle
+            if (fsm_timeout_cnt == 10'd1000)
+                fsm_timeout_error <= 1'b1;
+            else if (fsm_state == S_IDLE)
+                fsm_timeout_error <= 1'b0;
 
             // Latch instruction on acceptance
             if (fsm_state == S_IDLE && req_valid) begin
