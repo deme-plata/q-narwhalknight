@@ -1238,6 +1238,13 @@ pub struct AppState {
     // Mining challenge response includes `recommended_threads` so miners auto-throttle.
     pub ai_active: Arc<std::sync::atomic::AtomicBool>,
 
+    // 🛡️ v10.3.1: DEX Safety Gate — blocks swaps until node is fully synced and reconciled.
+    // Starts `false`, set to `true` ONLY after balance_consensus replay + apply_dex_qug_adjustments().
+    // DeepSeek review: "node starts in DEX disabled / read-only mode; replay/reconciliation
+    // finishes; then swap endpoint becomes available."
+    // Uses AtomicBool (not RwLock) because execute_swap() is a hot path.
+    pub dex_ready: Arc<std::sync::atomic::AtomicBool>,
+
     // 🔄 v8.5.1: Admin notification email for update alerts
     // Set via POST /api/v1/admin/update/notification-email or Q_ADMIN_NOTIFICATION_EMAIL env
     pub admin_notification_email: Arc<tokio::sync::RwLock<Option<String>>>,
@@ -2777,6 +2784,7 @@ impl AppState {
             )), // 🔄 v8.5.1: Runtime auto-update toggle
             bootstrap_wallet_sync_done: Arc::new(std::sync::atomic::AtomicBool::new(false)), // 🚀 v8.8.2: Bootstrap sync (test mode: not done)
             ai_active: Arc::new(std::sync::atomic::AtomicBool::new(false)), // 🤖 v9.3.3: AI inference throttle
+            dex_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)), // 🛡️ v10.3.1: DEX gate (test mode: always ready)
             admin_notification_email: Arc::new(tokio::sync::RwLock::new(
                 std::env::var("Q_ADMIN_NOTIFICATION_EMAIL").ok()
             )), // 🔄 v8.5.1: Admin notification email
@@ -4155,6 +4163,7 @@ impl AppState {
                 storage_engine.has_migration_flag(crate::BOOTSTRAP_WALLET_SYNC_FLAG).await
             )), // 🚀 v8.8.2: One-time bootstrap wallet sync (loaded from RocksDB)
             ai_active: Arc::new(std::sync::atomic::AtomicBool::new(false)), // 🤖 v9.3.3: AI inference throttle
+            dex_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)), // 🛡️ v10.3.1: DEX gate (starts DISABLED — enabled after reconciliation in main.rs)
             admin_notification_email: Arc::new(tokio::sync::RwLock::new(
                 std::env::var("Q_ADMIN_NOTIFICATION_EMAIL").ok()
             )), // 🔄 v8.5.1: Admin notification email

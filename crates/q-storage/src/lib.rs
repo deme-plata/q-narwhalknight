@@ -8506,6 +8506,168 @@ impl BalanceStorage for QStorage {
 }
 
 // ============================================================================
+// v10.3.1: Atomic DEX balance methods — NOT part of the BalanceStorage trait.
+// These combine balance updates with DEX debit/credit counter tracking in a single
+// RocksDB WriteBatch for crash-safe atomicity (DeepSeek review requirement).
+// ============================================================================
+impl QStorage {
+    /// v10.3.1: Atomic subtract-balance + record-dex-debit in a single WriteBatch.
+    /// DeepSeek review: "subtract_balance and record_dex_qug_debit are TWO SEPARATE writes,
+    /// not atomic — if the process crashes between them, the debit counter is wrong."
+    ///
+    /// This method reads the current balance and debit counter, computes new values,
+    /// and writes BOTH in one atomic batch. Returns the new balance on success.
+    /// Uses saturating_sub to prevent underflow (DeepSeek recommendation).
+    pub async fn atomic_subtract_and_record_dex_debit(
+        &self,
+        wallet_hex: &str,
+        amount: u128,
+    ) -> Result<u128> {
+        // Step 1: Read current balance
+        let address_bytes = hex::decode(wallet_hex)
+            .context("Invalid hex address format")?;
+        if address_bytes.len() != 32 {
+            return Err(anyhow::anyhow!(
+                "Invalid address length: expected 32 bytes, got {}",
+                address_bytes.len()
+            ));
+        }
+        let mut addr_array = [0u8; 32];
+        addr_array.copy_from_slice(&address_bytes);
+
+        let current_balance = self.load_wallet_balance(&addr_array).await?.unwrap_or(0);
+
+        // Step 2: Insufficient balance check (fail fast before any writes)
+        if current_balance < amount {
+            return Err(anyhow::anyhow!(
+                "Insufficient balance: {} < {} for address {}",
+                current_balance, amount, &wallet_hex[..16.min(wallet_hex.len())]
+            ));
+        }
+
+        // Step 3: Compute new values
+        let new_balance = current_balance.saturating_sub(amount);
+
+        // Read current debit counter
+        let debit_key = format!("dex_qug_debited:{}", wallet_hex);
+        let current_debit = match self.hot_db.get(CF_MANIFEST, debit_key.as_bytes()).await? {
+            Some(bytes) if bytes.len() == 16 => u128::from_le_bytes(bytes[..16].try_into().unwrap()),
+            _ => 0u128,
+        };
+        let new_debit_total = current_debit.saturating_add(amount);
+
+        // Read current credit counter (for computing net applied adjustment)
+        let credit_key = format!("dex_qug_credited:{}", wallet_hex);
+        let current_credit = match self.hot_db.get(CF_MANIFEST, credit_key.as_bytes()).await? {
+            Some(bytes) if bytes.len() == 16 => u128::from_le_bytes(bytes[..16].try_into().unwrap()),
+            _ => 0u128,
+        };
+
+        // Compute new applied net: credited - new_debit_total (keeps idempotent tracker in sync)
+        let new_applied_net: i128 = current_credit as i128 - new_debit_total as i128;
+        let applied_key = format!("dex_applied_net:{}", wallet_hex);
+
+        // Step 4: Atomic write batch — balance, debit counter, AND applied-net tracker.
+        // If the process crashes here, NEITHER write is applied (RocksDB atomicity guarantee).
+        // The applied-net tracker ensures apply_dex_qug_adjustments() is idempotent on restart.
+        let balance_key = format!("wallet_balance_{}", wallet_hex);
+        let batch: Vec<(&str, Vec<u8>, Vec<u8>)> = vec![
+            (CF_MANIFEST, balance_key.as_bytes().to_vec(), new_balance.to_le_bytes().to_vec()),
+            (CF_MANIFEST, debit_key.as_bytes().to_vec(), new_debit_total.to_le_bytes().to_vec()),
+            (CF_MANIFEST, applied_key.as_bytes().to_vec(), new_applied_net.to_le_bytes().to_vec()),
+        ];
+        self.hot_db.write_batch(batch).await
+            .context("Atomic DEX debit write_batch failed")?;
+
+        info!(
+            "💸 [DEX ATOMIC v10.3.1] Wallet {}...: balance {} -> {} QUG, debit counter {} -> {} (amount: {})",
+            &wallet_hex[..16.min(wallet_hex.len())],
+            current_balance as f64 / 1e24,
+            new_balance as f64 / 1e24,
+            current_debit as f64 / 1e24,
+            new_debit_total as f64 / 1e24,
+            amount as f64 / 1e24,
+        );
+
+        Ok(new_balance)
+    }
+
+    /// v10.3.1: Atomic add-balance + record-dex-credit in a single WriteBatch.
+    /// DeepSeek review: "add_balance and record_dex_qug_credit are TWO SEPARATE writes,
+    /// not atomic — if the process crashes between them, the credit counter is wrong."
+    ///
+    /// This method reads the current balance and credit counter, computes new values,
+    /// and writes ALL THREE keys (balance, credit counter, applied-net tracker) in one
+    /// atomic batch. Returns the new balance on success.
+    /// Uses saturating_add to prevent overflow.
+    pub async fn atomic_add_and_record_dex_credit(
+        &self,
+        wallet_hex: &str,
+        amount: u128,
+    ) -> Result<u128> {
+        // Step 1: Read current balance
+        let address_bytes = hex::decode(wallet_hex)
+            .context("Invalid hex address format")?;
+        if address_bytes.len() != 32 {
+            return Err(anyhow::anyhow!(
+                "Invalid address length: expected 32 bytes, got {}",
+                address_bytes.len()
+            ));
+        }
+        let mut addr_array = [0u8; 32];
+        addr_array.copy_from_slice(&address_bytes);
+
+        let current_balance = self.load_wallet_balance(&addr_array).await?.unwrap_or(0);
+
+        // Step 2: Compute new balance
+        let new_balance = current_balance.saturating_add(amount);
+
+        // Step 3: Read current credit counter
+        let credit_key = format!("dex_qug_credited:{}", wallet_hex);
+        let current_credit = match self.hot_db.get(CF_MANIFEST, credit_key.as_bytes()).await? {
+            Some(bytes) if bytes.len() == 16 => u128::from_le_bytes(bytes[..16].try_into().unwrap()),
+            _ => 0u128,
+        };
+        let new_credit_total = current_credit.saturating_add(amount);
+
+        // Read current debit counter (for computing net applied adjustment)
+        let debit_key = format!("dex_qug_debited:{}", wallet_hex);
+        let current_debit = match self.hot_db.get(CF_MANIFEST, debit_key.as_bytes()).await? {
+            Some(bytes) if bytes.len() == 16 => u128::from_le_bytes(bytes[..16].try_into().unwrap()),
+            _ => 0u128,
+        };
+
+        // Compute new applied net: new_credit_total - debit (keeps idempotent tracker in sync)
+        let new_applied_net: i128 = new_credit_total as i128 - current_debit as i128;
+        let applied_key = format!("dex_applied_net:{}", wallet_hex);
+
+        // Step 4: Atomic write batch — balance, credit counter, AND applied-net tracker.
+        // If the process crashes here, NEITHER write is applied (RocksDB atomicity guarantee).
+        // The applied-net tracker ensures apply_dex_qug_adjustments() is idempotent on restart.
+        let balance_key = format!("wallet_balance_{}", wallet_hex);
+        let batch: Vec<(&str, Vec<u8>, Vec<u8>)> = vec![
+            (CF_MANIFEST, balance_key.as_bytes().to_vec(), new_balance.to_le_bytes().to_vec()),
+            (CF_MANIFEST, credit_key.as_bytes().to_vec(), new_credit_total.to_le_bytes().to_vec()),
+            (CF_MANIFEST, applied_key.as_bytes().to_vec(), new_applied_net.to_le_bytes().to_vec()),
+        ];
+        self.hot_db.write_batch(batch).await
+            .context("Atomic DEX credit write_batch failed")?;
+
+        info!(
+            "💰 [DEX ATOMIC v10.3.1] Wallet {}...: balance {} -> {} QUG, credit counter {} -> {} (amount: {})",
+            &wallet_hex[..16.min(wallet_hex.len())],
+            current_balance as f64 / 1e24,
+            new_balance as f64 / 1e24,
+            current_credit as f64 / 1e24,
+            new_credit_total as f64 / 1e24,
+            amount as f64 / 1e24,
+        );
+
+        Ok(new_balance)
+    }
+}
+
+// ============================================================================
 // v2.3.6-beta: Swap History Persistence (Token Details Modal)
 // ============================================================================
 impl QStorage {
@@ -8629,50 +8791,99 @@ impl QStorage {
     // ========================================================================
 
     /// Record a QUG debit from a DEX swap (user sold QUG)
-    /// Atomically increments the cumulative debit counter for this wallet.
+    /// v10.3.1: Atomically increments debit counter AND updates applied-net tracker
+    /// in a single WriteBatch for consistency with idempotent reconciliation.
+    /// NOTE: Prefer `atomic_subtract_and_record_dex_debit()` which also atomically
+    /// updates the balance in the same batch.
     pub async fn record_dex_qug_debit(&self, wallet_hex: &str, amount: u128) -> Result<()> {
-        let key = format!("dex_qug_debited:{}", wallet_hex);
-        let current = match self.hot_db.get(CF_MANIFEST, key.as_bytes()).await? {
+        let debit_key = format!("dex_qug_debited:{}", wallet_hex);
+        let current_debit = match self.hot_db.get(CF_MANIFEST, debit_key.as_bytes()).await? {
             Some(bytes) if bytes.len() == 16 => u128::from_le_bytes(bytes[..16].try_into().unwrap()),
             _ => 0u128,
         };
-        let new_total = current.saturating_add(amount);
-        self.hot_db.put_sync(CF_MANIFEST, key.as_bytes(), &new_total.to_le_bytes()).await?;
-        debug!("📉 [DEX ADJUST] Recorded QUG debit: {} += {} (total: {})",
-            &wallet_hex[..8.min(wallet_hex.len())], amount as f64 / 1e24, new_total as f64 / 1e24);
+        let new_debit_total = current_debit.saturating_add(amount);
+
+        // Read current credit counter (for computing net applied adjustment)
+        let credit_key = format!("dex_qug_credited:{}", wallet_hex);
+        let current_credit = match self.hot_db.get(CF_MANIFEST, credit_key.as_bytes()).await? {
+            Some(bytes) if bytes.len() == 16 => u128::from_le_bytes(bytes[..16].try_into().unwrap()),
+            _ => 0u128,
+        };
+
+        // Update applied-net tracker: credited - debited (keeps idempotent reconciliation in sync)
+        let new_applied_net: i128 = current_credit as i128 - new_debit_total as i128;
+        let applied_key = format!("dex_applied_net:{}", wallet_hex);
+
+        // Atomic write: debit counter + applied-net tracker
+        let batch: Vec<(&str, Vec<u8>, Vec<u8>)> = vec![
+            (CF_MANIFEST, debit_key.as_bytes().to_vec(), new_debit_total.to_le_bytes().to_vec()),
+            (CF_MANIFEST, applied_key.as_bytes().to_vec(), new_applied_net.to_le_bytes().to_vec()),
+        ];
+        self.hot_db.write_batch(batch).await?;
+
+        debug!("📉 [DEX ADJUST v10.3.1] Recorded QUG debit: {} += {} (total: {})",
+            &wallet_hex[..8.min(wallet_hex.len())], amount as f64 / 1e24, new_debit_total as f64 / 1e24);
         Ok(())
     }
 
     /// Record a QUG credit from a DEX swap (user bought QUG)
-    /// Atomically increments the cumulative credit counter for this wallet.
+    /// v10.3.1: Atomically increments credit counter AND updates applied-net tracker
+    /// in a single WriteBatch for consistency with idempotent reconciliation.
     pub async fn record_dex_qug_credit(&self, wallet_hex: &str, amount: u128) -> Result<()> {
-        let key = format!("dex_qug_credited:{}", wallet_hex);
-        let current = match self.hot_db.get(CF_MANIFEST, key.as_bytes()).await? {
+        let credit_key = format!("dex_qug_credited:{}", wallet_hex);
+        let current_credit = match self.hot_db.get(CF_MANIFEST, credit_key.as_bytes()).await? {
             Some(bytes) if bytes.len() == 16 => u128::from_le_bytes(bytes[..16].try_into().unwrap()),
             _ => 0u128,
         };
-        let new_total = current.saturating_add(amount);
-        self.hot_db.put_sync(CF_MANIFEST, key.as_bytes(), &new_total.to_le_bytes()).await?;
-        debug!("📈 [DEX ADJUST] Recorded QUG credit: {} += {} (total: {})",
-            &wallet_hex[..8.min(wallet_hex.len())], amount as f64 / 1e24, new_total as f64 / 1e24);
+        let new_credit_total = current_credit.saturating_add(amount);
+
+        // Read current debit counter (for computing net applied adjustment)
+        let debit_key = format!("dex_qug_debited:{}", wallet_hex);
+        let current_debit = match self.hot_db.get(CF_MANIFEST, debit_key.as_bytes()).await? {
+            Some(bytes) if bytes.len() == 16 => u128::from_le_bytes(bytes[..16].try_into().unwrap()),
+            _ => 0u128,
+        };
+
+        // Update applied-net tracker: credited - debited (keeps idempotent reconciliation in sync)
+        let new_applied_net: i128 = new_credit_total as i128 - current_debit as i128;
+        let applied_key = format!("dex_applied_net:{}", wallet_hex);
+
+        // Atomic write: credit counter + applied-net tracker
+        let batch: Vec<(&str, Vec<u8>, Vec<u8>)> = vec![
+            (CF_MANIFEST, credit_key.as_bytes().to_vec(), new_credit_total.to_le_bytes().to_vec()),
+            (CF_MANIFEST, applied_key.as_bytes().to_vec(), new_applied_net.to_le_bytes().to_vec()),
+        ];
+        self.hot_db.write_batch(batch).await?;
+
+        debug!("📈 [DEX ADJUST v10.3.1] Recorded QUG credit: {} += {} (total: {})",
+            &wallet_hex[..8.min(wallet_hex.len())], amount as f64 / 1e24, new_credit_total as f64 / 1e24);
         Ok(())
     }
 
-    /// Apply DEX QUG adjustments to wallet balances after a balance rebuild.
+    /// v10.3.1: Apply DEX QUG adjustments — IDEMPOTENT version (safe to call on every startup).
     ///
-    /// ONLY call this after a balance rebuild migration has run. On a normal restart
-    /// (no rebuild), subtract_balance()/add_balance() already maintain correct balances.
+    /// DeepSeek review: "derive final balance as chain_credits - persisted_dex_debits"
     ///
-    /// Formula: correct_balance = chain_rebuilt_balance + total_credited - total_debited
+    /// IDEMPOTENCY MECHANISM:
+    /// We track "last applied net adjustment" per wallet in `dex_applied_net:{wallet_hex}`.
+    /// On each call we compute `desired_net = credited - debited` (can be negative via i128).
+    /// The delta between desired_net and previously-applied net is what we actually adjust.
+    /// Running this N times produces the same final balance (no double-deduction).
+    ///
+    /// Formula: balance_delta = (credited - debited) - previously_applied_net
+    /// If delta == 0, nothing to do (idempotent).
+    /// Uses saturating_sub to prevent underflow (DeepSeek recommendation).
     pub async fn apply_dex_qug_adjustments(&self) -> Result<u64> {
-        info!("🔄 [DEX ADJUST v9.3.3] Applying DEX QUG adjustments after balance rebuild...");
+        info!("🔄 [DEX ADJUST v10.3.1] Applying idempotent DEX QUG adjustments...");
 
         // Load all debit counters
         let debit_entries = self.hot_db.scan_prefix(CF_MANIFEST, b"dex_qug_debited:").await?;
         let credit_entries = self.hot_db.scan_prefix(CF_MANIFEST, b"dex_qug_credited:").await?;
+        let applied_entries = self.hot_db.scan_prefix(CF_MANIFEST, b"dex_applied_net:").await?;
 
         let mut debit_map: HashMap<String, u128> = HashMap::new();
         let mut credit_map: HashMap<String, u128> = HashMap::new();
+        let mut applied_map: HashMap<String, i128> = HashMap::new();
 
         for (key, value) in debit_entries {
             if let Ok(key_str) = String::from_utf8(key) {
@@ -8698,13 +8909,24 @@ impl QStorage {
             }
         }
 
+        // Load previously-applied net adjustments (signed i128, stored as 16 bytes)
+        for (key, value) in applied_entries {
+            if let Ok(key_str) = String::from_utf8(key) {
+                let wallet_hex = key_str.trim_start_matches("dex_applied_net:").to_string();
+                if value.len() == 16 && !wallet_hex.is_empty() {
+                    let net = i128::from_le_bytes(value[..16].try_into().unwrap());
+                    applied_map.insert(wallet_hex, net);
+                }
+            }
+        }
+
         // Collect all wallets with any DEX activity
         let mut all_wallets: std::collections::HashSet<String> = std::collections::HashSet::new();
         for k in debit_map.keys() { all_wallets.insert(k.clone()); }
         for k in credit_map.keys() { all_wallets.insert(k.clone()); }
 
         if all_wallets.is_empty() {
-            info!("🔄 [DEX ADJUST v9.3.3] No DEX QUG adjustments to apply (no counters found)");
+            info!("🔄 [DEX ADJUST v10.3.1] No DEX QUG adjustments to apply (no counters found)");
             return Ok(0);
         }
 
@@ -8715,6 +8937,20 @@ impl QStorage {
             let debited = debit_map.get(wallet_hex).copied().unwrap_or(0);
             let credited = credit_map.get(wallet_hex).copied().unwrap_or(0);
 
+            // Desired net = credited - debited (signed, can be negative if user sold more QUG than bought)
+            let desired_net: i128 = credited as i128 - debited as i128;
+
+            // What we previously applied (0 if never applied before, e.g. after a balance rebuild
+            // that wipes balances but NOT the debit/credit counters)
+            let previously_applied: i128 = applied_map.get(wallet_hex).copied().unwrap_or(0);
+
+            // Delta = what we need to apply NOW to reach the desired state
+            let delta: i128 = desired_net - previously_applied;
+
+            if delta == 0 {
+                continue; // Already at correct state — idempotent, nothing to do
+            }
+
             let addr_bytes = match hex::decode(wallet_hex) {
                 Ok(b) if b.len() == 32 => {
                     let mut arr = [0u8; 32];
@@ -8724,20 +8960,41 @@ impl QStorage {
                 _ => continue,
             };
 
-            let chain_balance = self.load_wallet_balance(&addr_bytes).await?.unwrap_or(0);
-            let correct_balance = chain_balance.saturating_add(credited).saturating_sub(debited);
+            let current_balance = self.load_wallet_balance(&addr_bytes).await?.unwrap_or(0);
 
-            if correct_balance != chain_balance {
-                self.save_wallet_balance(&addr_bytes, correct_balance).await?;
-                adjusted += 1;
-                info!("  🔧 [DEX ADJUST] Wallet {}...: {} → {} QUG (credited: {}, debited: {})",
-                    &wallet_hex[..16.min(wallet_hex.len())],
-                    chain_balance / qug, correct_balance / qug,
-                    debited as f64 / 1e24, credited as f64 / 1e24);
-            }
+            // Apply delta to current balance (saturating to prevent underflow)
+            let new_balance = if delta < 0 {
+                // Need to subtract more from balance
+                let abs_delta = (-delta) as u128;
+                if abs_delta > current_balance {
+                    warn!("⚠️ [DEX ADJUST v10.3.1] Wallet {}...: DEX debits ({}) exceed balance ({}) + credits ({}) — clamping to 0",
+                        &wallet_hex[..16.min(wallet_hex.len())],
+                        debited as f64 / 1e24, current_balance as f64 / 1e24, credited as f64 / 1e24);
+                }
+                current_balance.saturating_sub(abs_delta)
+            } else {
+                // Need to add more to balance (rare: only if credits > debits somehow increased)
+                current_balance.saturating_add(delta as u128)
+            };
+
+            // Atomic write: balance + applied_net tracker in one batch
+            let balance_key = format!("wallet_balance_{}", wallet_hex);
+            let applied_key = format!("dex_applied_net:{}", wallet_hex);
+            let batch: Vec<(&str, Vec<u8>, Vec<u8>)> = vec![
+                (CF_MANIFEST, balance_key.as_bytes().to_vec(), new_balance.to_le_bytes().to_vec()),
+                (CF_MANIFEST, applied_key.as_bytes().to_vec(), desired_net.to_le_bytes().to_vec()),
+            ];
+            self.hot_db.write_batch(batch).await?;
+
+            adjusted += 1;
+            info!("  🔧 [DEX ADJUST v10.3.1] Wallet {}...: {} → {} QUG (delta: {}, debited: {}, credited: {})",
+                &wallet_hex[..16.min(wallet_hex.len())],
+                current_balance as f64 / 1e24, new_balance as f64 / 1e24,
+                delta as f64 / 1e24,
+                debited as f64 / 1e24, credited as f64 / 1e24);
         }
 
-        info!("✅ [DEX ADJUST v9.3.3] Applied adjustments to {} of {} DEX wallets", adjusted, all_wallets.len());
+        info!("✅ [DEX ADJUST v10.3.1] Applied adjustments to {} of {} DEX wallets", adjusted, all_wallets.len());
         Ok(adjusted)
     }
 

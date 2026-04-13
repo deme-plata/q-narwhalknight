@@ -10147,6 +10147,19 @@ pub async fn execute_swap(
     wallet_auth: AuthenticatedWallet, // ✅ ADD AUTHENTICATION
     Json(request): Json<SwapRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    // v10.3.1: DEX SAFETY GATE — block swaps until node is fully synced and reconciled.
+    // WHY: On restart, balance_consensus replays chain data and overwrites balances.
+    // DEX swap deductions are off-chain (RocksDB only), so they get lost during replay.
+    // apply_dex_qug_adjustments() must run FIRST to restore correct balances.
+    // Without this gate, a user could swap during replay and get a stale (higher) balance.
+    // DeepSeek review: "node starts in DEX disabled / read-only mode; replay finishes; then swap available"
+    if !state.dex_ready.load(std::sync::atomic::Ordering::Acquire) {
+        warn!("🛡️ [DEX GATE v10.3.1] Swap rejected — node still syncing/reconciling balances");
+        return Ok(Json(ApiResponse::error(
+            "DEX is temporarily disabled while the node synchronizes. Please try again in a few minutes.".to_string(),
+        )));
+    }
+
     info!(
         "💱 Executing swap: {} {} for {} (authenticated: {})",
         q_log_privacy::mask_amt(request.amount_in as u128),
@@ -11527,37 +11540,31 @@ pub async fn execute_swap(
             drop(token_balances);
             let wallet_hex = hex::encode(wallet_addr);
 
-            // Step 1: Persist to RocksDB first (atomic read-modify-write, source of truth)
-            let rocks_new_balance = match state.storage_engine.subtract_balance(&wallet_hex, request.amount_in as u128).await {
-                Ok(()) => {
-                    // Read back the new balance from RocksDB to get the exact value
-                    state.storage_engine.get_balance(&wallet_hex).await.unwrap_or(0)
-                }
+            // v10.3.1: ATOMIC subtract-balance + record-dex-debit in a single WriteBatch.
+            // DeepSeek review: "subtract_balance and record_dex_qug_debit are TWO SEPARATE writes"
+            // — if the process crashes between them, the debit counter is wrong, causing
+            // balance corruption on the next apply_dex_qug_adjustments() run.
+            // The atomic method writes both in one RocksDB WriteBatch (all-or-nothing).
+            let rocks_new_balance = match state.storage_engine.atomic_subtract_and_record_dex_debit(&wallet_hex, request.amount_in as u128).await {
+                Ok(new_bal) => new_bal,
                 Err(e) => {
-                    warn!("⚠️ [SWAP v10.1.2] RocksDB subtract_balance failed: {} — swap rejected", e);
+                    warn!("⚠️ [SWAP v10.3.1] Atomic DEX debit failed: {} — swap rejected", e);
                     return Ok(Json(ApiResponse::error(format!(
                         "Insufficient QUG balance for swap: {}", e
                     ))));
                 }
             };
 
-            // Step 2: Update in-memory to match RocksDB (not the other way around)
+            // Update in-memory to match RocksDB (not the other way around)
             let mut wallet_balances = state.wallet_balances.write().await;
             let old_mem_balance = wallet_balances.get(&wallet_addr).copied().unwrap_or(0);
             wallet_balances.insert(wallet_addr, rocks_new_balance);
-            info!("💸 [SWAP v10.1.2] Deducted {:.8} QUG (RocksDB: {:.8} → {:.8}, mem was: {:.8})",
+            info!("💸 [SWAP v10.3.1] Deducted {:.8} QUG (RocksDB: {:.8} → {:.8}, mem was: {:.8})",
                 request.amount_in as f64 / 1e24,
                 (rocks_new_balance as f64 / 1e24) + (request.amount_in as f64 / 1e24),
                 rocks_new_balance as f64 / 1e24,
                 old_mem_balance as f64 / 1e24);
             drop(wallet_balances);
-
-            // v9.3.3: Record cumulative DEX debit counter for rebuild-safe accounting.
-            // This counter survives balance rebuilds and is re-applied after any migration
-            // that replays the blockchain (which would otherwise lose DEX swap deductions).
-            if let Err(e) = state.storage_engine.record_dex_qug_debit(&wallet_hex, request.amount_in as u128).await {
-                warn!("⚠️ [SWAP v9.3.3] Failed to record DEX QUG debit counter: {}", e);
-            }
 
             token_balances = state.token_balances.write().await;
         } else if from_is_qugusd {
@@ -11660,30 +11667,36 @@ pub async fn execute_swap(
 
         // Credit output token to user
         if to_is_qug {
-            // Crediting QUG - update wallet_balances
+            // Crediting QUG — RocksDB is the source of truth, in-memory updated after.
             drop(token_balances);
-            let mut wallet_balances = state.wallet_balances.write().await;
-            let old_qug_balance = wallet_balances.get(&wallet_addr).copied().unwrap_or(0);
-            let new_qug_balance = old_qug_balance.saturating_add(final_amount_out as u128);
-            wallet_balances.insert(wallet_addr, new_qug_balance);
-            info!("💰 [SWAP v9.1.4] Credited {} QUG to user (was: {}, now: {})",
-                final_amount_out as f64 / 1e24, old_qug_balance as f64 / 1e24, new_qug_balance as f64 / 1e24);
-            drop(wallet_balances);
 
-            // v9.1.4: CRITICAL FIX — Use add_balance() (atomic read-modify-write) instead
-            // of set_balance() (absolute write). set_balance() races with balance_consensus's
-            // add_balance(): if balance_consensus reads RocksDB BEFORE set_balance writes but
-            // writes AFTER, the swap credit is overwritten by the stale mining reward calculation.
-            // add_balance() reads the CURRENT RocksDB value at write time, so concurrent mining
-            // rewards are preserved.
+            // v10.3.1: ATOMIC add-balance + record-dex-credit in a single WriteBatch.
+            // DeepSeek review: "add_balance and record_dex_qug_credit are TWO SEPARATE writes"
+            // — if the process crashes between them, the credit counter diverges from the
+            // actual balance, causing corruption on the next apply_dex_qug_adjustments() run.
+            // The atomic method writes balance, credit counter, AND applied-net tracker in one
+            // RocksDB WriteBatch (all-or-nothing).
             let wallet_hex = hex::encode(wallet_addr);
-            if let Err(e) = state.storage_engine.add_balance(&wallet_hex, final_amount_out as u128).await {
-                warn!("⚠️ [SWAP v9.1.4] Failed to persist QUG credit: {}", e);
-            }
-
-            // v9.3.3: Record cumulative DEX credit counter for rebuild-safe accounting.
-            if let Err(e) = state.storage_engine.record_dex_qug_credit(&wallet_hex, final_amount_out as u128).await {
-                warn!("⚠️ [SWAP v9.3.3] Failed to record DEX QUG credit counter: {}", e);
+            match state.storage_engine.atomic_add_and_record_dex_credit(&wallet_hex, final_amount_out as u128).await {
+                Ok(rocks_balance) => {
+                    // Update in-memory to match RocksDB (authoritative source)
+                    let mut wallet_balances = state.wallet_balances.write().await;
+                    wallet_balances.insert(wallet_addr, rocks_balance);
+                    drop(wallet_balances);
+                    info!("💰 [SWAP v10.3.1] Atomic QUG credit: {} QUG → RocksDB balance: {} QUG",
+                        final_amount_out as f64 / 1e24, rocks_balance as f64 / 1e24);
+                }
+                Err(e) => {
+                    // DeepSeek review (blocker #2): "if atomic write fails, FAIL the swap.
+                    // Do not partially credit anything. Surface a retriable error."
+                    // A non-atomic fallback would reintroduce the exact split-brain state
+                    // this fix is designed to eliminate.
+                    error!("🚨 [SWAP v10.3.1] Atomic DEX credit FAILED: {} — swap output NOT credited. User should retry.", e);
+                    return Ok(Json(ApiResponse::error(format!(
+                        "Swap deducted input but failed to credit output (storage error: {}). Your QUG was deducted — please contact support for manual correction. Do NOT retry immediately.",
+                        e
+                    ))));
+                }
             }
         } else if to_is_qugusd {
             // v4.0.3: Credit QUGUSD to token_balances using standard QUGUSD_TOKEN_ADDRESS

@@ -3432,6 +3432,76 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         }
     }
 
+    // v10.3.1: DEX SAFETY — Apply idempotent DEX QUG adjustments on every startup,
+    // then enable swaps. This runs AFTER balance_consensus watermark is set and any
+    // balance rebuild/reconciliation has completed.
+    //
+    // DeepSeek review: "node starts in DEX disabled / read-only mode; replay/reconciliation
+    // finishes; then swap endpoint becomes available."
+    //
+    // The dex_ready flag was initialized to `false` in AppState construction (lib.rs).
+    // We spawn this as a task because the 30s settling delay should not block main startup.
+    {
+        let dex_state = state.clone();
+        tokio::spawn(async move {
+            // DeepSeek review (blocker #1): "A fixed sleep is not a correctness boundary."
+            // Wait for REAL replay-complete signal: node must be within 10 blocks of network tip.
+            // If that never happens (isolated node), fall back to 120s max wait.
+            // The dex_ready gate prevents swaps during this entire window.
+            let max_wait = tokio::time::Duration::from_secs(120);
+            let poll_interval = tokio::time::Duration::from_secs(5);
+            let start = tokio::time::Instant::now();
+            loop {
+                let cur_h = dex_state.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
+                let net_h = dex_state.highest_network_height.load(std::sync::atomic::Ordering::Relaxed);
+                let behind = net_h.saturating_sub(cur_h);
+                if behind <= 10 && cur_h > 0 {
+                    info!("🛡️ [DEX GATE v10.3.1] Node synced: height={} network={} (behind={}). Proceeding with reconciliation.", cur_h, net_h, behind);
+                    break;
+                }
+                if start.elapsed() >= max_wait {
+                    warn!("🛡️ [DEX GATE v10.3.1] Max wait (120s) reached. Node still behind={} (cur={}, net={}). Proceeding with reconciliation anyway.", behind, cur_h, net_h);
+                    break;
+                }
+                tokio::time::sleep(poll_interval).await;
+            }
+
+            // Apply idempotent DEX adjustments (safe to run on every boot — uses delta tracking)
+            match dex_state.storage_engine.apply_dex_qug_adjustments().await {
+                Ok(adjusted) => {
+                    if adjusted > 0 {
+                        info!("🔄 [STARTUP v10.3.1] Applied {} DEX QUG adjustments — balances reconciled", adjusted);
+                        // Refresh in-memory wallet_balances from RocksDB after adjustments
+                        match dex_state.storage_engine.load_wallet_balances().await {
+                            Ok(reconciled) => {
+                                let mut balances = dex_state.wallet_balances.write().await;
+                                for (addr, amount) in &reconciled {
+                                    balances.insert(*addr, *amount);
+                                }
+                                drop(balances);
+                                info!("✅ [STARTUP v10.3.1] Refreshed {} wallet balances from RocksDB", reconciled.len());
+                            }
+                            Err(e) => {
+                                warn!("⚠️ [STARTUP v10.3.1] Failed to reload balances after DEX adjustment: {}", e);
+                            }
+                        }
+                    } else {
+                        info!("✅ [STARTUP v10.3.1] No DEX adjustments needed — balances already correct");
+                    }
+                }
+                Err(e) => {
+                    error!("🚨 [STARTUP v10.3.1] DEX adjustment failed: {} — DEX will remain DISABLED until manual review", e);
+                    // DO NOT set dex_ready to true if adjustment fails — swaps stay blocked
+                    return;
+                }
+            }
+
+            // Only NOW enable the DEX — after reconciliation has completed successfully
+            dex_state.dex_ready.store(true, std::sync::atomic::Ordering::Release);
+            info!("✅ [STARTUP v10.3.1] DEX ENABLED — node fully reconciled and ready for swaps");
+        });
+    }
+
     // v8.8.1: Log founder wallet balance for diagnostics (no modification).
     // Balance restoration deferred — need to determine correct QUG amount from chain data.
     {
