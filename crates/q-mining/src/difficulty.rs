@@ -194,6 +194,115 @@ pub struct LwmaDiagnostics {
     pub insufficient_data: bool,
 }
 
+/// Calculate difficulty for the next block — pure function of chain history.
+/// Same inputs → same output on every node. No stored mutable state.
+/// Called at: challenge endpoint, block template creation, block validation.
+///
+/// Mirrors the emission controller pattern: deterministic, chain-derived,
+/// with hard caps and fallback behavior.
+///
+/// # Arguments
+/// * `previous_difficulty_bits` - Current difficulty from the previous block header
+/// * `recent_timestamps` - Last N block timestamps (unix seconds, oldest first)
+/// * `activation_height` - Height at which LWMA activates
+/// * `next_height` - Height of the block being produced
+/// * `target_block_time_secs` - Target block interval in seconds (e.g., 1 for 1 bps)
+///
+/// # Returns
+/// Difficulty in leading zero bits for the next block
+pub fn calculate_difficulty_for_next_block(
+    previous_difficulty_bits: u32,
+    recent_timestamps: &[u64],
+    activation_height: u64,
+    next_height: u64,
+    target_block_time_secs: u64,
+) -> u32 {
+    // Before activation: legacy fixed difficulty
+    if next_height < activation_height {
+        return LEGACY_DIFFICULTY_BITS;
+    }
+
+    let n = recent_timestamps.len();
+
+    // Need one full window of post-activation data before adjusting
+    // Per reviewer feedback: require full window (120 blocks), not partial
+    if n < LWMA_WINDOW_SIZE {
+        return previous_difficulty_bits.max(MIN_DIFFICULTY_BITS);
+    }
+
+    let target_ms = (target_block_time_secs * 1000) as f64;
+    if target_ms <= 0.0 {
+        return previous_difficulty_bits.max(MIN_DIFFICULTY_BITS);
+    }
+
+    // LWMA: compute from the last N block timestamps
+    // Recent blocks weighted more heavily (linear: 1,2,3...N)
+    let window = n.min(LWMA_WINDOW_SIZE);
+    let sum_weights = (window * (window + 1) / 2) as f64;
+    let max_solvetime = target_ms * MAX_SOLVETIME_MULTIPLIER;
+
+    let mut sum_weighted = 0.0;
+    let start = n.saturating_sub(window);
+    for i in 1..window {
+        let idx = start + i;
+        if idx >= n || idx == 0 {
+            continue;
+        }
+        // Solvetime in milliseconds (timestamps are in seconds)
+        let solvetime_ms = (recent_timestamps[idx].saturating_sub(recent_timestamps[idx - 1])) as f64 * 1000.0;
+        let clamped = solvetime_ms.max(1.0).min(max_solvetime);
+        sum_weighted += (i as f64) * clamped;
+    }
+
+    if sum_weighted <= 0.0 {
+        return previous_difficulty_bits.max(MIN_DIFFICULTY_BITS);
+    }
+
+    // adjustment > 1.0 → blocks too slow → decrease difficulty
+    // adjustment < 1.0 → blocks too fast → increase difficulty
+    let adjustment = (target_ms * sum_weights) / sum_weighted;
+
+    // Clamp: max 2× change per step (prevents oscillation)
+    let clamped = adjustment.max(MIN_ADJUSTMENT_FACTOR).min(MAX_ADJUSTMENT_FACTOR);
+
+    // Apply adjustment to previous difficulty
+    let new_difficulty = (previous_difficulty_bits as f64 * clamped) as u32;
+
+    // Floor: never below minimum
+    let final_difficulty = new_difficulty.max(MIN_DIFFICULTY_BITS);
+
+    if final_difficulty != previous_difficulty_bits {
+        info!(
+            "⚙️ [LWMA-PURE] Difficulty: {} → {} bits (adjustment: {:.4}×, window: {}, avg_solvetime: {:.0}ms, target: {:.0}ms, height: {})",
+            previous_difficulty_bits, final_difficulty, clamped, window,
+            sum_weighted / sum_weights, target_ms, next_height
+        );
+    }
+
+    final_difficulty
+}
+
+/// LWMA window size (number of recent blocks to consider)
+/// Per v2 review: 120 blocks (up from 60 in v1)
+const LWMA_WINDOW_SIZE: usize = 120;
+
+/// Legacy difficulty before LWMA activation
+const LEGACY_DIFFICULTY_BITS: u32 = 16;
+
+/// Count leading zero bits in a 32-byte hash
+pub fn count_leading_zero_bits(hash: &[u8; 32]) -> u32 {
+    let mut count = 0u32;
+    for &byte in hash.iter() {
+        if byte == 0 {
+            count += 8;
+        } else {
+            count += byte.leading_zeros();
+            break;
+        }
+    }
+    count
+}
+
 /// Difficulty target for mining (byte-level representation)
 #[derive(Debug, Clone, Copy)]
 pub struct DifficultyTarget {

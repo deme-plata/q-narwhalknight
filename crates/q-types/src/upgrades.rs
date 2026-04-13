@@ -221,6 +221,29 @@ pub mod upgrades {
         activation_height: u64::MAX, // NOT YET ACTIVATED — set after testing
         description: "Replace BLAKE3 PoW with Genus-2 Jacobian VDF mining",
     };
+
+    /// Phase B.2: LWMA Difficulty Adjustment (v10.3.0)
+    ///
+    /// Replaces fixed 16-bit difficulty with LWMA (Linearly Weighted Moving Average)
+    /// targeting 1.0 blocks/second. Pure function of chain history — no background
+    /// timer, no mutable state. Same inputs → same output on every node.
+    ///
+    /// Follows the emission controller pattern:
+    /// - Called at: challenge endpoint, block template, block validation
+    /// - Inputs: recent 120 block timestamps from canonical chain
+    /// - Output: difficulty in leading zero bits
+    /// - Clamp: [0.5×, 2.0×] per step, floor at 16 bits
+    ///
+    /// Activation: Instant at fixed height. Before: hardcoded 16 bits.
+    /// After: LWMA dynamic, recalculated every block.
+    ///
+    /// Mainnet safety: Height-gated. Set to current_height + 50000 (~14h at 1bps).
+    /// Announce to miners 1 week before activation.
+    pub const LWMA_DIFFICULTY_ADJUSTMENT: NetworkUpgrade = NetworkUpgrade {
+        name: "lwma_difficulty_adjustment",
+        activation_height: u64::MAX, // NOT YET ACTIVATED — set after Delta canary validation
+        description: "LWMA difficulty adjustment targeting 1.0 bps (Phase B.2)",
+    };
 }
 
 /// Upgrade manager - checks if upgrades are active at given height

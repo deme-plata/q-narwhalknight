@@ -75,7 +75,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.2.8"  # v10.2.8: Fix corrupt block recovery after kill -9 (scan below tip + opportunistic cleanup)
+version = "10.3.0"  # v10.3.0: PQC auto-learn validator keys, K-Gauge v4, crypto dashboard, LWMA difficulty, mining fairness
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"

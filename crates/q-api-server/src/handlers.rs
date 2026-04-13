@@ -9471,9 +9471,56 @@ pub async fn get_mining_challenge(
     // Eliminates timestamp-based non-determinism - all nodes generate identical challenges
     let version = b"QNK/1.0.5";
 
-    let mut difficulty_target = [0xffu8; 32];
-    difficulty_target[0] = 0x00;
-    difficulty_target[1] = 0x00;
+    // ⚙️ v10.3.0 Phase B.2: LWMA dynamic difficulty (pure function of chain state)
+    // Before activation: hardcoded 16 bits (legacy behavior)
+    // After activation: LWMA computed from last 120 block timestamps
+    // Check env var override first (for Docker testing), then consensus constant
+    let lwma_activation = std::env::var("Q_LWMA_ACTIVATION_HEIGHT")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(network_upgrades::LWMA_DIFFICULTY_ADJUSTMENT.activation_height);
+    let lwma_active = block_height >= lwma_activation;
+    let difficulty_bits = if lwma_active {
+        // Fetch recent block timestamps from storage (last 120 blocks)
+        let window_size: u64 = 121; // Need N+1 timestamps for N intervals
+        let fetch_start = block_height.saturating_sub(window_size);
+        let timestamps = match state.storage_engine.get_qblocks_range(fetch_start, window_size as usize).await {
+            Ok(blocks) => {
+                let mut ts: Vec<u64> = blocks.iter().map(|b| b.header.timestamp).collect();
+                ts.sort(); // Ensure chronological order
+                ts
+            }
+            Err(e) => {
+                warn!("⚠️ [LWMA] Failed to fetch block timestamps: {} — using previous difficulty", e);
+                Vec::new()
+            }
+        };
+
+        // Previous block's difficulty (read from chain, default to 16 if unavailable)
+        let prev_difficulty = match state.storage_engine.get_qblock_by_height(block_height.saturating_sub(1)).await {
+            Ok(Some(prev_block)) => {
+                // Extract difficulty from previous block's mining solutions
+                // Count leading zero bits of the difficulty target
+                let target = &prev_block.mining_solutions.first()
+                    .map(|s| s.difficulty_target)
+                    .unwrap_or([0xFF; 32]);
+                q_mining::difficulty::count_leading_zero_bits(target)
+            }
+            _ => 16u32, // Conservative default
+        };
+
+        q_mining::difficulty::calculate_difficulty_for_next_block(
+            prev_difficulty,
+            &timestamps,
+            lwma_activation,
+            block_height,
+            1, // target: 1 second per block (1 bps)
+        )
+    } else {
+        16u32 // Legacy fixed difficulty
+    };
+
+    let difficulty_target = q_mining::difficulty::DifficultyTarget::from_leading_zeros(difficulty_bits).target_hash;
 
     let vdf_iterations = (100 + (block_height / 1000) * 10) as u32;
 

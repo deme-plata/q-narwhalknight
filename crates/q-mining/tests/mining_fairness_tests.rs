@@ -513,3 +513,151 @@ fn test_realistic_mining_scenario() {
     println!("Fair lane (5 CPU): {} total, {} avg per miner", fair_total, avg_cpu);
     println!("CPU/GPU reward ratio: {:.1}x", avg_cpu as f64 / avg_gpu as f64);
 }
+
+// ============================================================================
+// PHASE B.2: LWMA Pure Function (Emission Controller Pattern)
+// ============================================================================
+
+use q_mining::difficulty::calculate_difficulty_for_next_block;
+use q_mining::difficulty::count_leading_zero_bits;
+
+/// Generate timestamps for N blocks at a given rate (blocks per second)
+fn generate_timestamps(start: u64, count: usize, bps: f64) -> Vec<u64> {
+    let interval_secs = 1.0 / bps;
+    (0..count)
+        .map(|i| start + (i as f64 * interval_secs) as u64)
+        .collect()
+}
+
+#[test]
+fn test_pure_fn_before_activation_returns_legacy() {
+    // Before activation height: always returns legacy 16 bits
+    let timestamps = generate_timestamps(1000000, 200, 3.46);
+    let result = calculate_difficulty_for_next_block(16, &timestamps, 999999, 500, 1);
+    assert_eq!(result, 16, "Before activation height, should return legacy difficulty");
+}
+
+#[test]
+fn test_pure_fn_at_activation_insufficient_data() {
+    // At activation height but not enough timestamps: return previous difficulty
+    let timestamps = generate_timestamps(1000000, 50, 1.0); // Only 50, need 120
+    let result = calculate_difficulty_for_next_block(16, &timestamps, 100, 200, 1);
+    assert_eq!(result, 16, "With insufficient data, should return previous difficulty");
+}
+
+#[test]
+fn test_pure_fn_fast_blocks_increase_difficulty() {
+    // Blocks at 3.46 bps (too fast, target is 1 bps) → difficulty should increase
+    let timestamps = generate_timestamps(1000000, 130, 3.46);
+    let result = calculate_difficulty_for_next_block(16, &timestamps, 100, 200, 1);
+    assert!(result > 16,
+        "Fast blocks (3.46 bps) should increase difficulty: got {} (expected > 16)", result);
+}
+
+#[test]
+fn test_pure_fn_slow_blocks_decrease_difficulty() {
+    // Blocks at 0.3 bps (too slow, target is 1 bps) → difficulty should decrease
+    let timestamps = generate_timestamps(1000000, 130, 0.3);
+    let result = calculate_difficulty_for_next_block(20, &timestamps, 100, 200, 1);
+    assert!(result < 20,
+        "Slow blocks (0.3 bps) should decrease difficulty: got {} (expected < 20)", result);
+}
+
+#[test]
+fn test_pure_fn_stable_blocks_no_change() {
+    // Blocks at exactly 1 bps (on target) → difficulty should stay roughly the same
+    let timestamps = generate_timestamps(1000000, 130, 1.0);
+    let result = calculate_difficulty_for_next_block(16, &timestamps, 100, 200, 1);
+    assert_eq!(result, 16,
+        "At target rate, difficulty should remain stable: got {} (expected 16)", result);
+}
+
+#[test]
+fn test_pure_fn_deterministic() {
+    // Same inputs → same output (consensus safety)
+    let timestamps = generate_timestamps(1000000, 130, 2.5);
+    let r1 = calculate_difficulty_for_next_block(16, &timestamps, 100, 200, 1);
+    let r2 = calculate_difficulty_for_next_block(16, &timestamps, 100, 200, 1);
+    let r3 = calculate_difficulty_for_next_block(16, &timestamps, 100, 200, 1);
+    assert_eq!(r1, r2, "Must be deterministic: {} != {}", r1, r2);
+    assert_eq!(r2, r3, "Must be deterministic: {} != {}", r2, r3);
+}
+
+#[test]
+fn test_pure_fn_floor_never_below_16() {
+    // Even with extremely slow blocks, should never go below 16
+    let timestamps = generate_timestamps(1000000, 130, 0.01); // Very slow
+    let result = calculate_difficulty_for_next_block(16, &timestamps, 100, 200, 1);
+    assert!(result >= 16,
+        "Difficulty floor: got {} (expected >= 16)", result);
+}
+
+#[test]
+fn test_pure_fn_clamp_max_2x() {
+    // Even with extremely fast blocks, max 2× increase per step
+    let timestamps = generate_timestamps(1000000, 130, 100.0); // 100× too fast
+    let result = calculate_difficulty_for_next_block(16, &timestamps, 100, 200, 1);
+    assert!(result <= 32, // 16 * 2.0 = 32
+        "Difficulty should be clamped to max 2×: got {} (expected <= 32)", result);
+}
+
+#[test]
+fn test_pure_fn_convergence_simulation() {
+    // Simulate 500 blocks starting at 3.46 bps
+    // LWMA should converge block rate toward 1.0 bps
+    let mut difficulty = 16u32;
+    let mut timestamps: Vec<u64> = vec![1000000];
+    let activation = 0u64;
+    let target_bps = 1.0;
+
+    for i in 1..500 {
+        // Simulate: higher difficulty → slower blocks
+        // Approximate: actual_bps = base_bps / (2^(difficulty - 16))
+        let difficulty_factor = 2.0f64.powi((difficulty as i32 - 16).min(10));
+        let actual_bps = 3.46 / difficulty_factor;
+        let interval = (1.0 / actual_bps).max(0.1);
+        let next_ts = timestamps.last().unwrap() + interval as u64;
+        timestamps.push(next_ts);
+
+        if timestamps.len() > 120 {
+            difficulty = calculate_difficulty_for_next_block(
+                difficulty, &timestamps, activation, i as u64, 1,
+            );
+        }
+    }
+
+    // After 500 blocks, difficulty should have increased from 16
+    println!("=== Convergence Simulation ===");
+    println!("Start: difficulty=16, rate=3.46 bps");
+    println!("End: difficulty={}, timestamps={}", difficulty, timestamps.len());
+
+    assert!(difficulty > 16,
+        "After 500 blocks at 3.46 bps, difficulty should increase from 16: got {}", difficulty);
+}
+
+#[test]
+fn test_count_leading_zero_bits() {
+    let mut h16 = [0xFF; 32];
+    h16[0] = 0x00;
+    h16[1] = 0x00;
+    assert_eq!(count_leading_zero_bits(&h16), 16);
+
+    let mut h24 = [0xFF; 32];
+    h24[0] = 0x00;
+    h24[1] = 0x00;
+    h24[2] = 0x00;
+    assert_eq!(count_leading_zero_bits(&h24), 24);
+
+    let h0 = [0xFF; 32];
+    assert_eq!(count_leading_zero_bits(&h0), 0);
+
+    let h256 = [0x00; 32];
+    assert_eq!(count_leading_zero_bits(&h256), 256);
+
+    // Partial byte: 0b00001111 = 4 leading zeros in byte
+    let mut h20 = [0xFF; 32];
+    h20[0] = 0x00;
+    h20[1] = 0x00;
+    h20[2] = 0x0F; // 4 leading zeros
+    assert_eq!(count_leading_zero_bits(&h20), 20);
+}

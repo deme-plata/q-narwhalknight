@@ -2491,6 +2491,15 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         info!("║  Block cache:   {:<46}║", format!("{}MB", cache_mb));
         info!("║  Pruning:       {:<46}║", pruning_mode);
         info!("║  Tor timeout:   {:<46}║", format!("{}s", tor_timeout));
+        let lwma_activation = std::env::var("Q_LWMA_ACTIVATION_HEIGHT")
+            .ok().and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(u64::MAX);
+        let lwma_status = if lwma_activation == u64::MAX {
+            "DISABLED (u64::MAX)".to_string()
+        } else {
+            format!("ACTIVE at height {}", lwma_activation)
+        };
+        info!("║  LWMA diff:     {:<46}║", lwma_status);
         info!("╚═══════════════════════════════════════════════════════════════╝");
 
         // Warn about dangerous overrides
