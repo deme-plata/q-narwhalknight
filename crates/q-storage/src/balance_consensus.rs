@@ -1239,6 +1239,12 @@ impl BalanceConsensusEngine {
         // Calculate new balance with overflow protection
         let new_balance = current_balance.saturating_add(amount);
 
+        // 🔴 [BALANCE WRITE DEBUG] Log balance_consensus add_balance_tx
+        tracing::warn!(
+            "🔴 [BALANCE WRITE] add_balance_tx(): wallet={} old={} new={} delta=+{} caller=balance_consensus::add_balance_tx height=IN_TX",
+            &address[..16.min(address.len())], current_balance, new_balance, amount
+        );
+
         // Write new balance to transaction using wallet_balance_ key format (little-endian)
         tx.put(CF_MANIFEST, key.as_bytes(), &new_balance.to_le_bytes()).await?;
 
@@ -1288,6 +1294,12 @@ impl BalanceConsensusEngine {
 
         // Calculate new balance
         let new_balance = current_balance.saturating_sub(amount);
+
+        // 🔴 [BALANCE WRITE DEBUG] Log balance_consensus subtract_balance_tx (DECREASE = error level)
+        tracing::error!(
+            "🔴 [BALANCE WRITE] subtract_balance_tx(): wallet={} old={} new={} delta=-{} caller=balance_consensus::subtract_balance_tx height=IN_TX",
+            &address[..16.min(address.len())], current_balance, new_balance, amount
+        );
 
         // Write new balance
         tx.put(CF_MANIFEST, key.as_bytes(), &new_balance.to_le_bytes()).await?;

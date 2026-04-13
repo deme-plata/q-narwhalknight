@@ -3955,7 +3955,26 @@ impl QStorage {
     /// v2.5.0: Updated to u128 (16 bytes) for extreme precision
     pub async fn save_wallet_balance(&self, address: &[u8; 32], amount: u128) -> Result<()> {
         let key = format!("wallet_balance_{}", hex::encode(address));
+        let addr_hex = hex::encode(address);
         let value = amount.to_le_bytes(); // 16 bytes for u128
+
+        // 🔴 [BALANCE WRITE DEBUG] Read old value BEFORE overwrite
+        let old_balance = self.load_wallet_balance(address).await?.unwrap_or(0);
+        if old_balance != amount {
+            let delta_abs = if amount >= old_balance { amount - old_balance } else { old_balance - amount };
+            let direction = if amount >= old_balance { "+" } else { "-" };
+            if amount < old_balance {
+                error!(
+                    "🔴 [BALANCE WRITE] save_wallet_balance(): wallet={} old={} new={} delta={}{} caller=ABSOLUTE_OVERWRITE height=N/A",
+                    &addr_hex[..16.min(addr_hex.len())], old_balance, amount, direction, delta_abs
+                );
+            } else {
+                warn!(
+                    "🔴 [BALANCE WRITE] save_wallet_balance(): wallet={} old={} new={} delta={}{} caller=ABSOLUTE_OVERWRITE height=N/A",
+                    &addr_hex[..16.min(addr_hex.len())], old_balance, amount, direction, delta_abs
+                );
+            }
+        }
 
         // CRITICAL: Use synced write to guarantee data reaches disk (survives pkill -9)
         // This overrides the default set_sync(false) in write_options()
@@ -4106,7 +4125,26 @@ impl QStorage {
     pub async fn save_wallet_balances(&self, balances: &HashMap<[u8; 32], u128>) -> Result<()> {
         let mut batch_ops = Vec::new();
 
+        // 🔴 [BALANCE WRITE DEBUG] Log each wallet in batch with old-vs-new
         for (address, amount) in balances {
+            let addr_hex = hex::encode(address);
+            let old_balance = self.load_wallet_balance(address).await?.unwrap_or(0);
+            if old_balance != *amount {
+                let delta_abs = if *amount >= old_balance { *amount - old_balance } else { old_balance - *amount };
+                let direction = if *amount >= old_balance { "+" } else { "-" };
+                if *amount < old_balance {
+                    error!(
+                        "🔴 [BALANCE WRITE] save_wallet_balances(): wallet={} old={} new={} delta={}{} caller=BATCH_OVERWRITE height=N/A",
+                        &addr_hex[..16.min(addr_hex.len())], old_balance, amount, direction, delta_abs
+                    );
+                } else {
+                    warn!(
+                        "🔴 [BALANCE WRITE] save_wallet_balances(): wallet={} old={} new={} delta={}{} caller=BATCH_OVERWRITE height=N/A",
+                        &addr_hex[..16.min(addr_hex.len())], old_balance, amount, direction, delta_abs
+                    );
+                }
+            }
+
             let key = format!("wallet_balance_{}", hex::encode(address));
             let value = amount.to_le_bytes().to_vec(); // 16 bytes for u128
             batch_ops.push((CF_MANIFEST, key.into_bytes(), value));
@@ -8374,6 +8412,12 @@ impl BalanceStorage for QStorage {
         // Add amount (saturating to prevent overflow)
         let new_balance = current.saturating_add(amount);
 
+        // 🔴 [BALANCE WRITE DEBUG] Log add operation
+        warn!(
+            "🔴 [BALANCE WRITE] add_balance(): wallet={} old={} new={} delta=+{} caller=BalanceStorage::add_balance height=N/A",
+            &address[..16.min(address.len())], current, new_balance, amount
+        );
+
         // Save new balance
         self.save_wallet_balance(&addr_array, new_balance).await?;
 
@@ -8416,6 +8460,12 @@ impl BalanceStorage for QStorage {
         // Subtract amount
         let new_balance = current - amount;
 
+        // 🔴 [BALANCE WRITE DEBUG] Log subtract operation (always error-level since balance decreases)
+        error!(
+            "🔴 [BALANCE WRITE] subtract_balance(): wallet={} old={} new={} delta=-{} caller=BalanceStorage::subtract_balance height=N/A",
+            &address[..16.min(address.len())], current, new_balance, amount
+        );
+
         // Save new balance
         self.save_wallet_balance(&addr_array, new_balance).await?;
 
@@ -8450,6 +8500,33 @@ impl BalanceStorage for QStorage {
     /// Set wallet balance directly
     /// v2.5.0: balance is now u128
     async fn set_balance(&self, address: &str, balance: u128) -> Result<()> {
+        // 🔴 [BALANCE WRITE DEBUG] Read old value BEFORE set
+        {
+            let address_bytes_check = hex::decode(address);
+            if let Ok(ref ab) = address_bytes_check {
+                if ab.len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(ab);
+                    let old_balance = self.load_wallet_balance(&arr).await?.unwrap_or(0);
+                    if old_balance != balance {
+                        let delta_abs = if balance >= old_balance { balance - old_balance } else { old_balance - balance };
+                        let direction = if balance >= old_balance { "+" } else { "-" };
+                        if balance < old_balance {
+                            error!(
+                                "🔴 [BALANCE WRITE] set_balance(): wallet={} old={} new={} delta={}{} caller=BalanceStorage::set_balance height=N/A",
+                                &address[..16.min(address.len())], old_balance, balance, direction, delta_abs
+                            );
+                        } else {
+                            warn!(
+                                "🔴 [BALANCE WRITE] set_balance(): wallet={} old={} new={} delta={}{} caller=BalanceStorage::set_balance height=N/A",
+                                &address[..16.min(address.len())], old_balance, balance, direction, delta_abs
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         // Convert hex string address to [u8; 32]
         let address_bytes = hex::decode(address)
             .context("Invalid hex address format")?;
@@ -8579,6 +8656,12 @@ impl QStorage {
         self.hot_db.write_batch(batch).await
             .context("Atomic DEX debit write_batch failed")?;
 
+        // 🔴 [BALANCE WRITE DEBUG] Atomic DEX debit
+        error!(
+            "🔴 [BALANCE WRITE] atomic_subtract_and_record_dex_debit(): wallet={} old={} new={} delta=-{} caller=DEX_ATOMIC_DEBIT height=N/A",
+            &wallet_hex[..16.min(wallet_hex.len())], current_balance, new_balance, amount
+        );
+
         info!(
             "💸 [DEX ATOMIC v10.3.1] Wallet {}...: balance {} -> {} QUG, debit counter {} -> {} (amount: {})",
             &wallet_hex[..16.min(wallet_hex.len())],
@@ -8652,6 +8735,12 @@ impl QStorage {
         ];
         self.hot_db.write_batch(batch).await
             .context("Atomic DEX credit write_batch failed")?;
+
+        // 🔴 [BALANCE WRITE DEBUG] Atomic DEX credit
+        warn!(
+            "🔴 [BALANCE WRITE] atomic_add_and_record_dex_credit(): wallet={} old={} new={} delta=+{} caller=DEX_ATOMIC_CREDIT height=N/A",
+            &wallet_hex[..16.min(wallet_hex.len())], current_balance, new_balance, amount
+        );
 
         info!(
             "💰 [DEX ATOMIC v10.3.1] Wallet {}...: balance {} -> {} QUG, credit counter {} -> {} (amount: {})",

@@ -3442,7 +3442,12 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     // The dex_ready flag was initialized to `false` in AppState construction (lib.rs).
     // We spawn this as a task because the 30s settling delay should not block main startup.
     {
-        let dex_state = state.clone();
+        // Clone individual Arc fields — AppState is not Clone (not yet wrapped in Arc)
+        let dex_storage = state.storage_engine.clone();
+        let dex_wallet_balances = state.wallet_balances.clone();
+        let dex_ready_flag = state.dex_ready.clone();
+        let dex_current_height = state.current_height_atomic.clone();
+        let dex_network_height = state.highest_network_height.clone();
         tokio::spawn(async move {
             // DeepSeek review (blocker #1): "A fixed sleep is not a correctness boundary."
             // Wait for REAL replay-complete signal: node must be within 10 blocks of network tip.
@@ -3452,8 +3457,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             let poll_interval = tokio::time::Duration::from_secs(5);
             let start = tokio::time::Instant::now();
             loop {
-                let cur_h = dex_state.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
-                let net_h = dex_state.highest_network_height.load(std::sync::atomic::Ordering::Relaxed);
+                let cur_h = dex_current_height.load(std::sync::atomic::Ordering::Relaxed);
+                let net_h = dex_network_height.load(std::sync::atomic::Ordering::Relaxed);
                 let behind = net_h.saturating_sub(cur_h);
                 if behind <= 10 && cur_h > 0 {
                     info!("🛡️ [DEX GATE v10.3.1] Node synced: height={} network={} (behind={}). Proceeding with reconciliation.", cur_h, net_h, behind);
@@ -3467,14 +3472,14 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             }
 
             // Apply idempotent DEX adjustments (safe to run on every boot — uses delta tracking)
-            match dex_state.storage_engine.apply_dex_qug_adjustments().await {
+            match dex_storage.apply_dex_qug_adjustments().await {
                 Ok(adjusted) => {
                     if adjusted > 0 {
                         info!("🔄 [STARTUP v10.3.1] Applied {} DEX QUG adjustments — balances reconciled", adjusted);
                         // Refresh in-memory wallet_balances from RocksDB after adjustments
-                        match dex_state.storage_engine.load_wallet_balances().await {
+                        match dex_storage.load_wallet_balances().await {
                             Ok(reconciled) => {
-                                let mut balances = dex_state.wallet_balances.write().await;
+                                let mut balances = dex_wallet_balances.write().await;
                                 for (addr, amount) in &reconciled {
                                     balances.insert(*addr, *amount);
                                 }
@@ -3497,7 +3502,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             }
 
             // Only NOW enable the DEX — after reconciliation has completed successfully
-            dex_state.dex_ready.store(true, std::sync::atomic::Ordering::Release);
+            dex_ready_flag.store(true, std::sync::atomic::Ordering::Release);
             info!("✅ [STARTUP v10.3.1] DEX ENABLED — node fully reconciled and ready for swaps");
         });
     }
@@ -8872,6 +8877,16 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 (rocks_balance, new_balance)
                             };
 
+                            // 🔴 [BALANCE WRITE DEBUG] P2P gossipsub balance write
+                            {
+                                let p2p_addr_hex = hex::encode(&wallet_bytes);
+                                warn!(
+                                    "🔴 [BALANCE WRITE] p2p_gossipsub_balance(): wallet={} old={} new={} delta=+{} caller=P2P_GOSSIPSUB_BALANCE height={}",
+                                    &p2p_addr_hex[..16.min(p2p_addr_hex.len())], current, new_balance,
+                                    update.amount, update.block_height
+                                );
+                            }
+
                             // Persist to RocksDB
                             if let Err(e) = app_state_gossip.storage_engine
                                 .save_wallet_balance(&wallet_bytes, new_balance).await
@@ -9943,6 +9958,20 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 .saturating_add(new_amount);
 
                             if corrected_balance != current_balance {
+                                // 🔴 [BALANCE WRITE DEBUG] Balance reorg correction
+                                if corrected_balance < current_balance {
+                                    tracing::error!(
+                                        "🔴 [BALANCE WRITE] balance_reorg_set(): wallet={} old={} new={} delta=-{} caller=BALANCE_REORG height={}",
+                                        &address[..16.min(address.len())], current_balance, corrected_balance,
+                                        current_balance - corrected_balance, old_block.header.height
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        "🔴 [BALANCE WRITE] balance_reorg_set(): wallet={} old={} new={} delta=+{} caller=BALANCE_REORG height={}",
+                                        &address[..16.min(address.len())], current_balance, corrected_balance,
+                                        corrected_balance - current_balance, old_block.header.height
+                                    );
+                                }
                                 storage
                                     .as_ref()
                                     .set_balance(&address, corrected_balance)
@@ -18557,6 +18586,29 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
                         // v9.1.7: Persist to RocksDB OUTSIDE the write lock (prevents mining stall)
                         for (addr, balance) in &persist_queue {
+                            // 🔴 [BALANCE WRITE DEBUG] Block producer persist queue
+                            {
+                                let old_bp = app_state_block_producer.storage_engine
+                                    .load_wallet_balance(addr).await.ok().flatten().unwrap_or(0);
+                                let addr_hex_bp = hex::encode(addr);
+                                if old_bp != *balance {
+                                    let delta_abs = if *balance >= old_bp { *balance - old_bp } else { old_bp - *balance };
+                                    let direction = if *balance >= old_bp { "+" } else { "-" };
+                                    if *balance < old_bp {
+                                        error!(
+                                            "🔴 [BALANCE WRITE] block_producer_persist(): wallet={} old={} new={} delta={}{} caller=BLOCK_PRODUCER_PERSIST height={}",
+                                            &addr_hex_bp[..16.min(addr_hex_bp.len())], old_bp, balance, direction, delta_abs,
+                                            new_block.header.height
+                                        );
+                                    } else {
+                                        warn!(
+                                            "🔴 [BALANCE WRITE] block_producer_persist(): wallet={} old={} new={} delta={}{} caller=BLOCK_PRODUCER_PERSIST height={}",
+                                            &addr_hex_bp[..16.min(addr_hex_bp.len())], old_bp, balance, direction, delta_abs,
+                                            new_block.header.height
+                                        );
+                                    }
+                                }
+                            }
                             if let Err(e) = app_state_block_producer.storage_engine
                                 .save_wallet_balance(addr, *balance).await
                             {
@@ -20628,6 +20680,24 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             .get_balance(&addr_hex).await
                         {
                             if actual_balance != *current_in_memory {
+                                // 🔴 [BALANCE WRITE DEBUG] 15s sync task correcting HashMap from RocksDB
+                                let delta_abs = if actual_balance >= *current_in_memory {
+                                    actual_balance - *current_in_memory
+                                } else {
+                                    *current_in_memory - actual_balance
+                                };
+                                let direction = if actual_balance >= *current_in_memory { "+" } else { "-" };
+                                if actual_balance < *current_in_memory {
+                                    tracing::error!(
+                                        "🔴 [BALANCE WRITE] 15s_sync_hashmap_correction(): wallet={} hashmap={} rocksdb={} delta={}{} caller=PERIODIC_15S_SYNC height=N/A",
+                                        &addr_hex[..16.min(addr_hex.len())], current_in_memory, actual_balance, direction, delta_abs
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        "🔴 [BALANCE WRITE] 15s_sync_hashmap_correction(): wallet={} hashmap={} rocksdb={} delta={}{} caller=PERIODIC_15S_SYNC height=N/A",
+                                        &addr_hex[..16.min(addr_hex.len())], current_in_memory, actual_balance, direction, delta_abs
+                                    );
+                                }
                                 correction_map.push((*addr, actual_balance));
                             }
                         }

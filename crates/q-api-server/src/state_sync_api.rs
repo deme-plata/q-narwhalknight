@@ -821,6 +821,12 @@ async fn merge_p2p_response(
                         };
                         let current = balances.get(&addr_bytes).copied().unwrap_or(0);
                         if amount > current {
+                            // 🔴 [BALANCE WRITE DEBUG] Bootstrap sync overwrite
+                            let addr_hex_dbg = hex::encode(&addr_bytes);
+                            warn!(
+                                "🔴 [BALANCE WRITE] bootstrap_sync(): wallet={} old={} new={} delta=+{} caller=BOOTSTRAP_P2P_SYNC height={}",
+                                &addr_hex_dbg[..16], current, amount, amount - current, response.block_height
+                            );
                             if let Err(e) = app_state.storage_engine
                                 .save_wallet_balance(&addr_bytes, amount).await
                             {
@@ -1116,6 +1122,30 @@ async fn do_authoritative_balance_sync(app_state: &Arc<AppState>, authority_url:
         };
 
         let key = format!("wallet_balance_{}", address_hex);
+        // 🔴 [BALANCE WRITE DEBUG] Read old value BEFORE authority sync overwrite
+        let old_balance_authority = {
+            let addr_bytes_check: Option<[u8; 32]> = hex::decode(address_hex).ok().and_then(|b| {
+                if b.len() == 32 { let mut arr = [0u8; 32]; arr.copy_from_slice(&b); Some(arr) } else { None }
+            });
+            if let Some(ab) = addr_bytes_check {
+                app_state.storage_engine.load_wallet_balance(&ab).await.ok().flatten().unwrap_or(0)
+            } else { 0u128 }
+        };
+        if old_balance_authority != balance {
+            let delta_abs = if balance >= old_balance_authority { balance - old_balance_authority } else { old_balance_authority - balance };
+            let direction = if balance >= old_balance_authority { "+" } else { "-" };
+            if balance < old_balance_authority {
+                error!(
+                    "🔴 [BALANCE WRITE] authority_sync_db_put(): wallet={} old={} new={} delta={}{} caller=AUTHORITY_SYNC height={}",
+                    &address_hex[..16.min(address_hex.len())], old_balance_authority, balance, direction, delta_abs, snapshot.block_height
+                );
+            } else {
+                warn!(
+                    "🔴 [BALANCE WRITE] authority_sync_db_put(): wallet={} old={} new={} delta={}{} caller=AUTHORITY_SYNC height={}",
+                    &address_hex[..16.min(address_hex.len())], old_balance_authority, balance, direction, delta_abs, snapshot.block_height
+                );
+            }
+        }
         if let Err(e) = app_state.storage_engine.db_put("manifest", key.as_bytes(), &balance.to_le_bytes()).await {
             warn!("🔑 [AUTHORITY SYNC] Failed to write balance for {}: {}", &address_hex[..16], e);
             continue;
