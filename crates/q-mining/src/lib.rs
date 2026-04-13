@@ -44,7 +44,7 @@ pub mod vrf_mining;
 // Re-exports for convenience
 pub use block::{QuantumPoWBlock, MiningTemplate, BlockHeader};
 pub use miner::{QuantumMiner, MiningConfig, MiningResult};
-pub use difficulty::{DifficultyAdjuster, DifficultyTarget};
+pub use difficulty::{DifficultyAdjuster, DifficultyTarget, LwmaDiagnostics};
 pub use network::{MiningNetwork, MiningMessage, MinerConnection};
 pub use pool::{MiningPool, PoolManager, PoolWorker};
 pub use rewards::{RewardCalculator, RewardResult, RewardConfig, RewardStats};

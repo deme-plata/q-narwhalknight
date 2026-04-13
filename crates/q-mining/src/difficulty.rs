@@ -1,37 +1,200 @@
-/// Q-Mining Difficulty Adjustment Module
+/// Q-Mining Difficulty Adjustment Module — LWMA (v10.3.0)
 ///
-/// Handles dynamic difficulty adjustment for quantum-enhanced mining.
+/// Linearly Weighted Moving Average difficulty adjustment.
+/// Weights recent blocks more heavily for fast response to hashrate changes.
+/// Resistant to timestamp manipulation and oscillation.
+///
+/// Why LWMA over Dark Gravity Well:
+/// - DAG chains have inherently variable block times (concurrent miners)
+/// - DGW's 24-block window oscillates on DAG concurrency noise
+/// - LWMA's 60-block window smooths it out
+/// - Proven on Monero forks with similar hashrate volatility
+///
+/// Formula:
+///   sum_weighted = Σ(i=1..N) [ i × clamp(solvetime_i, 1, target×6) ]
+///   sum_weights = N × (N+1) / 2
+///   adjustment = (target × sum_weights) / sum_weighted
+///   new_difficulty = current × clamp(adjustment, 0.5, 2.0)
+///   new_difficulty = max(new_difficulty, MIN_DIFFICULTY)
+///
+/// Tests: crates/q-mining/tests/mining_fairness_tests.rs (7 LWMA tests passing)
 
 use anyhow::Result;
+use std::time::Duration;
+use tracing::{info, warn};
 
-/// Difficulty adjuster for dynamic mining difficulty
+/// Minimum difficulty in leading zero bits — never go below this
+const MIN_DIFFICULTY_BITS: u32 = 16;
+
+/// Default LWMA window size (number of recent blocks to consider)
+const DEFAULT_WINDOW_SIZE: u64 = 60;
+
+/// Maximum solvetime multiplier for clamping outliers (6× target)
+const MAX_SOLVETIME_MULTIPLIER: f64 = 6.0;
+
+/// Maximum single-step adjustment factor (prevents oscillation)
+const MAX_ADJUSTMENT_FACTOR: f64 = 2.0;
+
+/// Minimum single-step adjustment factor
+const MIN_ADJUSTMENT_FACTOR: f64 = 0.5;
+
+/// Minimum number of blocks needed before adjusting
+const MIN_BLOCKS_FOR_ADJUSTMENT: usize = 10;
+
+/// Difficulty adjuster using LWMA algorithm
 #[derive(Debug, Clone)]
 pub struct DifficultyAdjuster {
-    pub target_block_time: std::time::Duration,
+    pub target_block_time: Duration,
     pub adjustment_window: u64,
 }
 
 impl DifficultyAdjuster {
-    /// Create new difficulty adjuster
-    pub fn new(target_block_time: std::time::Duration, adjustment_window: u64) -> Self {
+    /// Create new LWMA difficulty adjuster
+    ///
+    /// target_block_time: desired block interval (e.g., 1 second for 1 bps)
+    /// adjustment_window: number of recent blocks to consider (default: 60)
+    pub fn new(target_block_time: Duration, adjustment_window: u64) -> Self {
         Self {
             target_block_time,
-            adjustment_window,
+            adjustment_window: if adjustment_window == 0 { DEFAULT_WINDOW_SIZE } else { adjustment_window },
         }
     }
 
-    /// Calculate next difficulty based on recent blocks
+    /// Calculate next difficulty using LWMA (Linearly Weighted Moving Average)
+    ///
+    /// current_difficulty: current difficulty in leading-zero-bits
+    /// recent_block_times: solve times of recent blocks (oldest first)
+    ///
+    /// Returns: new difficulty in leading-zero-bits
     pub fn calculate_next_difficulty(
         &self,
         current_difficulty: u32,
-        _recent_block_times: &[std::time::Duration],
+        recent_block_times: &[Duration],
     ) -> Result<u32> {
-        // TODO: Implement actual difficulty adjustment algorithm
-        Ok(current_difficulty)
+        let n = recent_block_times.len().min(self.adjustment_window as usize);
+
+        // Need minimum data points before adjusting
+        if n < MIN_BLOCKS_FOR_ADJUSTMENT {
+            return Ok(current_difficulty);
+        }
+
+        let target_ms = self.target_block_time.as_millis() as f64;
+        if target_ms <= 0.0 {
+            return Ok(current_difficulty);
+        }
+
+        // LWMA: sum of (weight × clamped_solvetime) where weight = position (1..N)
+        // Recent blocks have higher weight
+        let sum_weights = (n * (n + 1) / 2) as f64;
+        let max_solvetime = target_ms * MAX_SOLVETIME_MULTIPLIER;
+
+        let mut sum_weighted = 0.0;
+        for (i, duration) in recent_block_times.iter().take(n).enumerate() {
+            let solvetime_ms = duration.as_millis() as f64;
+            // Clamp: prevent extreme outliers from skewing the average
+            // Min 1ms (prevents division by zero), Max 6× target (prevents time warp)
+            let clamped = solvetime_ms.max(1.0).min(max_solvetime);
+            sum_weighted += (i as f64 + 1.0) * clamped;
+        }
+
+        if sum_weighted <= 0.0 {
+            return Ok(current_difficulty);
+        }
+
+        // adjustment > 1.0 → blocks too slow → decrease difficulty
+        // adjustment < 1.0 → blocks too fast → increase difficulty
+        let adjustment = (target_ms * sum_weights) / sum_weighted;
+
+        // Clamp to prevent wild oscillation (max 2× change per adjustment)
+        let clamped_adjustment = adjustment.max(MIN_ADJUSTMENT_FACTOR).min(MAX_ADJUSTMENT_FACTOR);
+
+        // Apply adjustment
+        let new_difficulty = (current_difficulty as f64 * clamped_adjustment) as u32;
+
+        // Enforce minimum difficulty floor
+        let final_difficulty = new_difficulty.max(MIN_DIFFICULTY_BITS);
+
+        if final_difficulty != current_difficulty {
+            info!(
+                "⚙️ [LWMA] Difficulty adjusted: {} → {} bits (adjustment: {:.4}×, window: {} blocks, avg_solvetime: {:.0}ms, target: {:.0}ms)",
+                current_difficulty, final_difficulty, clamped_adjustment, n,
+                sum_weighted / sum_weights, target_ms
+            );
+        }
+
+        Ok(final_difficulty)
+    }
+
+    /// Calculate LWMA with full diagnostics (for dashboard/API)
+    pub fn calculate_with_diagnostics(
+        &self,
+        current_difficulty: u32,
+        recent_block_times: &[Duration],
+    ) -> LwmaDiagnostics {
+        let n = recent_block_times.len().min(self.adjustment_window as usize);
+        let target_ms = self.target_block_time.as_millis() as f64;
+
+        if n < MIN_BLOCKS_FOR_ADJUSTMENT || target_ms <= 0.0 {
+            return LwmaDiagnostics {
+                current_difficulty,
+                proposed_difficulty: current_difficulty,
+                adjustment_factor: 1.0,
+                window_size: n,
+                avg_solvetime_ms: 0.0,
+                target_solvetime_ms: target_ms,
+                blocks_too_fast: false,
+                blocks_too_slow: false,
+                clamped: false,
+                insufficient_data: n < MIN_BLOCKS_FOR_ADJUSTMENT,
+            };
+        }
+
+        let sum_weights = (n * (n + 1) / 2) as f64;
+        let max_solvetime = target_ms * MAX_SOLVETIME_MULTIPLIER;
+
+        let mut sum_weighted = 0.0;
+        for (i, duration) in recent_block_times.iter().take(n).enumerate() {
+            let clamped = (duration.as_millis() as f64).max(1.0).min(max_solvetime);
+            sum_weighted += (i as f64 + 1.0) * clamped;
+        }
+
+        let avg_solvetime = sum_weighted / sum_weights;
+        let raw_adjustment = (target_ms * sum_weights) / sum_weighted;
+        let clamped_adjustment = raw_adjustment.max(MIN_ADJUSTMENT_FACTOR).min(MAX_ADJUSTMENT_FACTOR);
+        let proposed = ((current_difficulty as f64) * clamped_adjustment) as u32;
+        let final_diff = proposed.max(MIN_DIFFICULTY_BITS);
+
+        LwmaDiagnostics {
+            current_difficulty,
+            proposed_difficulty: final_diff,
+            adjustment_factor: clamped_adjustment,
+            window_size: n,
+            avg_solvetime_ms: avg_solvetime,
+            target_solvetime_ms: target_ms,
+            blocks_too_fast: avg_solvetime < target_ms * 0.8,
+            blocks_too_slow: avg_solvetime > target_ms * 1.2,
+            clamped: (raw_adjustment - clamped_adjustment).abs() > 0.001,
+            insufficient_data: false,
+        }
     }
 }
 
-/// Difficulty target for mining
+/// Diagnostics for LWMA calculation (for dashboard display)
+#[derive(Debug, Clone)]
+pub struct LwmaDiagnostics {
+    pub current_difficulty: u32,
+    pub proposed_difficulty: u32,
+    pub adjustment_factor: f64,
+    pub window_size: usize,
+    pub avg_solvetime_ms: f64,
+    pub target_solvetime_ms: f64,
+    pub blocks_too_fast: bool,
+    pub blocks_too_slow: bool,
+    pub clamped: bool,
+    pub insufficient_data: bool,
+}
+
+/// Difficulty target for mining (byte-level representation)
 #[derive(Debug, Clone, Copy)]
 pub struct DifficultyTarget {
     pub leading_zeros: u32,
@@ -45,12 +208,10 @@ impl DifficultyTarget {
         let full_bytes = (leading_zeros / 8) as usize;
         let remaining_bits = leading_zeros % 8;
 
-        // Set full zero bytes
         for i in 0..full_bytes.min(32) {
             target_hash[i] = 0x00;
         }
 
-        // Set partial byte if needed
         if full_bytes < 32 && remaining_bits > 0 {
             target_hash[full_bytes] = 0xFF >> remaining_bits;
         }
