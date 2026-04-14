@@ -916,36 +916,53 @@ async fn device_login_flow(server_url: &str, proxy_url: Option<&str>) -> Result<
     let qr_data = format!("quillon://miner-login?code={}&server={}", device_code, connected_url);
     let qr_lines = generate_login_qr(&qr_data);
 
+    let c = "\x1b[38;5;51m";   // cyan
+    let g = "\x1b[38;5;220m";  // gold
+    let w = "\x1b[1;37m";      // white bold
+    let d = "\x1b[2m";         // dim
+    let r = "\x1b[0m";         // reset
+    let ul = "\x1b[4;36m";     // underline cyan
+
     eprintln!();
-    eprintln!("\x1b[38;5;51m   ┌─────────────────────────────────────────────┐\x1b[0m");
-    eprintln!("\x1b[38;5;51m   │\x1b[0m  \x1b[1;37mLink Your Wallet\x1b[0m                            \x1b[38;5;51m│\x1b[0m");
-    eprintln!("\x1b[38;5;51m   ├─────────────────────────────────────────────┤\x1b[0m");
-    eprintln!("\x1b[38;5;51m   │\x1b[0m                                             \x1b[38;5;51m│\x1b[0m");
-    eprintln!("\x1b[38;5;51m   │\x1b[0m   Your code:  \x1b[1;33;43m {} \x1b[0m                     \x1b[38;5;51m│\x1b[0m", user_code);
-    eprintln!("\x1b[38;5;51m   │\x1b[0m                                             \x1b[38;5;51m│\x1b[0m");
-    eprintln!("\x1b[38;5;51m   │\x1b[0m   \x1b[2mOpen in browser or visit:\x1b[0m                  \x1b[38;5;51m│\x1b[0m");
-    eprintln!("\x1b[38;5;51m   │\x1b[0m   \x1b[4;36m{}\x1b[0m", verification_url);
-    eprintln!("\x1b[38;5;51m   │\x1b[0m                                             \x1b[38;5;51m│\x1b[0m");
+    eprintln!("  {c}╔══════════════════════════════════════════════════════╗{r}");
+    eprintln!("  {c}║{r}                                                      {c}║{r}");
+    eprintln!("  {c}║{r}   {w}LINK YOUR WALLET{r}                                   {c}║{r}");
+    eprintln!("  {c}║{r}                                                      {c}║{r}");
+    eprintln!("  {c}║{r}   {d}Step 1:{r} Enter this code on the website:             {c}║{r}");
+    eprintln!("  {c}║{r}                                                      {c}║{r}");
+    eprintln!("  {c}║{r}           {g}╔═══════════════════╗{r}                      {c}║{r}");
+    eprintln!("  {c}║{r}           {g}║{r}    {w}{}{r}    {g}║{r}                      {c}║{r}", user_code);
+    eprintln!("  {c}║{r}           {g}╚═══════════════════╝{r}                      {c}║{r}");
+    eprintln!("  {c}║{r}                                                      {c}║{r}");
+    eprintln!("  {c}║{r}   {d}Step 2:{r} Open this link:                             {c}║{r}");
+    eprintln!("  {c}║{r}                                                      {c}║{r}");
+    eprintln!("  {c}║{r}   {ul}{}{r}", verification_url);
+    eprintln!("  {c}║{r}                                                      {c}║{r}");
     // Display QR code for mobile scanning
     if !qr_lines.is_empty() {
-        eprintln!("\x1b[38;5;51m   │\x1b[0m   \x1b[2mOr scan with Quillon mobile app:\x1b[0m           \x1b[38;5;51m│\x1b[0m");
-        eprintln!("\x1b[38;5;51m   │\x1b[0m                                             \x1b[38;5;51m│\x1b[0m");
+        eprintln!("  {c}║{r}   {d}Or scan with your phone:{r}                         {c}║{r}");
+        eprintln!("  {c}║{r}                                                      {c}║{r}");
         for line in &qr_lines {
-            eprintln!("\x1b[38;5;51m   │\x1b[0m     {}  \x1b[38;5;51m\x1b[0m", line);
+            eprintln!("  {c}║{r}     {}  {r}", line);
         }
-        eprintln!("\x1b[38;5;51m   │\x1b[0m                                             \x1b[38;5;51m│\x1b[0m");
+        eprintln!("  {c}║{r}                                                      {c}║{r}");
     }
-    eprintln!("\x1b[38;5;51m   └─────────────────────────────────────────────┘\x1b[0m");
+    eprintln!("  {c}╠══════════════════════════════════════════════════════╣{r}");
+    eprintln!("  {c}║{r}                                                      {c}║{r}");
+    eprintln!("  {c}║{r}   {d}Once linked, your wallet receives mining rewards{r}    {c}║{r}");
+    eprintln!("  {c}║{r}   {d}from both GPU (BLAKE3) and CPU (VDF) lanes.{r}         {c}║{r}");
+    eprintln!("  {c}║{r}                                                      {c}║{r}");
+    eprintln!("  {c}║{r}   {d}Press Enter to skip (mines to default wallet){r}       {c}║{r}");
+    eprintln!("  {c}║{r}                                                      {c}║{r}");
+    eprintln!("  {c}╚══════════════════════════════════════════════════════╝{r}");
     eprintln!();
 
     let browser_opened = open_browser(verification_url);
     if browser_opened {
-        eprintln!("\x1b[32m   ✓ Browser opened — complete login there\x1b[0m");
+        eprintln!("  {c}  ✓ Browser opened — complete login there{r}");
     } else {
-        eprintln!("\x1b[33m   ! Copy the URL above or scan QR with Quillon app\x1b[0m");
+        eprintln!("  {g}  ! Copy the URL above or scan QR with your phone{r}");
     }
-    eprintln!();
-    eprintln!("\x1b[2m   Waiting for login... press Enter to skip\x1b[0m");
     eprintln!();
 
     // Step 3: Poll until user completes login OR presses Enter to skip
@@ -1259,23 +1276,48 @@ async fn main() -> Result<()> {
     }
 
     // Determine mining configuration
-    // v10.1.9: When --gpu is enabled, reduce CPU threads to 2 (challenge fetch + solution submit)
-    // to avoid saturating all cores and starving the GPU driver / OS.
-    // Users can override with --threads N.
+    let has_gpu = args.gpu && (hardware_info.cuda_devices > 0 || hardware_info.opencl_devices > 0);
     let cpu_threads = if args.threads > 0 {
         args.threads
-    } else if args.gpu {
-        // GPU mode: use only 2 CPU threads (supplementary mining)
-        // GPU does the heavy lifting; CPU threads waste power competing
+    } else if has_gpu {
         let gpu_cpu = 2.min(hardware_info.cpu_threads);
-        info!("🎮 GPU mode: using {} CPU threads (GPU handles primary mining)", gpu_cpu);
         gpu_cpu
     } else {
-        hardware_info.cpu_threads.max(1) // CPU-only: use all available cores
+        hardware_info.cpu_threads.max(1)
     };
-    if !args.gpu {
-        info!("🔥 Using all {} CPU cores for mining (use --threads N to limit)", cpu_threads);
+
+    // v10.3.4: Show mining lane configuration
+    let c = "\x1b[38;5;51m";
+    let g = "\x1b[38;5;220m";
+    let w = "\x1b[1;37m";
+    let d = "\x1b[2m";
+    let r = "\x1b[0m";
+    println!();
+    println!("  {c}╔══════════════════════════════════════════════════╗{r}");
+    println!("  {c}║{r}  {w}MINING CONFIGURATION{r}                              {c}║{r}");
+    println!("  {c}╠══════════════════════════════════════════════════╣{r}");
+    if has_gpu {
+        println!("  {c}║{r}                                                  {c}║{r}");
+        println!("  {c}║{r}   {g}GPU DETECTED{r}                                    {c}║{r}");
+        println!("  {c}║{r}                                                  {c}║{r}");
+        println!("  {c}║{r}   {g}BLAKE3 Lane{r}  {d}━━━━{r} GPU + {} CPU threads  {d}━━{r}  {g}50%{r}  {c}║{r}", cpu_threads);
+        println!("  {c}║{r}   {c}VDF Lane{r}    {d}━━━━{r} 1 dedicated CPU core  {d}━━{r}  {c}50%{r}  {c}║{r}");
+        println!("  {c}║{r}                                                  {c}║{r}");
+        println!("  {c}║{r}   {d}GPU handles parallel hashing (high throughput){r}   {c}║{r}");
+        println!("  {c}║{r}   {d}CPU computes sequential VDF (can't parallelize){r}  {c}║{r}");
+    } else {
+        println!("  {c}║{r}                                                  {c}║{r}");
+        println!("  {c}║{r}   {c}CPU ONLY{r}  {d}({} cores detected){r}                    {c}║{r}", hardware_info.cpu_threads);
+        println!("  {c}║{r}                                                  {c}║{r}");
+        println!("  {c}║{r}   {g}BLAKE3 Lane{r}  {d}━━━━{r} {} CPU threads        {d}━━{r}  {g}50%{r}  {c}║{r}", cpu_threads);
+        println!("  {c}║{r}   {c}VDF Lane{r}    {d}━━━━{r} 1 dedicated CPU core  {d}━━{r}  {c}50%{r}  {c}║{r}");
+        println!("  {c}║{r}                                                  {c}║{r}");
+        println!("  {c}║{r}   {d}VDF lane is CPU-fair: your laptop earns equally{r}  {c}║{r}");
+        println!("  {c}║{r}   {d}to a server — sequential work, no shortcuts{r}      {c}║{r}");
     }
+    println!("  {c}║{r}                                                  {c}║{r}");
+    println!("  {c}╚══════════════════════════════════════════════════╝{r}");
+    println!();
 
     if args.mode == "benchmark" || args.benchmark {
         info!("🏁 Running benchmark mode for {} seconds...", args.duration);
@@ -3928,37 +3970,34 @@ fn compute_dag_knight_hash_optimized(hash_input: &[u8; 40]) -> [u8; 32] {
 }
 
 fn print_banner() {
-    println!(
-        "{}",
-        style(
-            "
-██████╗     ███╗   ██╗ █████╗ ██████╗ ██╗    ██╗██╗  ██╗ █████╗ ██╗     
-██╔═══██╗    ████╗  ██║██╔══██╗██╔══██╗██║    ██║██║  ██║██╔══██╗██║     
-██║   ██║    ██╔██╗ ██║███████║██████╔╝██║ █╗ ██║███████║███████║██║     
-██║▄▄ ██║    ██║╚██╗██║██╔══██║██╔══██╗██║███╗██║██╔══██║██╔══██║██║     
-╚██████╔╝    ██║ ╚████║██║  ██║██║  ██║╚███╔███╔╝██║  ██║██║  ██║███████╗
- ╚══▀▀═╝     ╚═╝  ╚═══╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝
-                                                                          
-██╗  ██╗███╗   ██╗██╗ ██████╗ ██╗  ██╗████████╗                        
-██║ ██╔╝████╗  ██║██║██╔════╝ ██║  ██║╚══██╔══╝                        
-█████╔╝ ██╔██╗ ██║██║██║  ███╗███████║   ██║                           
-██╔═██╗ ██║╚██╗██║██║██║   ██║██╔══██║   ██║                           
-██║  ██╗██║ ╚████║██║╚██████╔╝██║  ██║   ██║                           
-╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝                           
-"
-        )
-        .green()
-        .bold()
-    );
+    // Gradient-style banner using ANSI 256-color
+    let cyan = "\x1b[38;5;51m";
+    let blue = "\x1b[38;5;33m";
+    let teal = "\x1b[38;5;43m";
+    let gold = "\x1b[38;5;220m";
+    let white = "\x1b[1;37m";
+    let dim = "\x1b[2m";
+    let reset = "\x1b[0m";
 
-    println!(
-        "{}",
-        style("    🌟 Quantum-Enhanced Anonymous Consensus Mining").cyan()
-    );
-    println!(
-        "{}",
-        style("    ⚛️  DAG-Knight • VDF-Secure • Production Ready").dim()
-    );
+    println!();
+    println!("  {cyan}╔══════════════════════════════════════════════════════════════╗{reset}");
+    println!("  {cyan}║{reset}                                                              {cyan}║{reset}");
+    println!("  {cyan}║{reset}   {teal}  ██████╗    {blue}███╗   ██╗ █████╗ ██████╗ ██╗    ██╗{reset}        {cyan}║{reset}");
+    println!("  {cyan}║{reset}   {teal}  ██╔═══██╗  {blue}████╗  ██║██╔══██╗██╔══██╗██║    ██║{reset}        {cyan}║{reset}");
+    println!("  {cyan}║{reset}   {teal}  ██║   ██║  {blue}██╔██╗ ██║███████║██████╔╝██║ █╗ ██║{reset}        {cyan}║{reset}");
+    println!("  {cyan}║{reset}   {teal}  ██║▄▄ ██║  {blue}██║╚██╗██║██╔══██║██╔══██╗██║███╗██║{reset}        {cyan}║{reset}");
+    println!("  {cyan}║{reset}   {teal}  ╚██████╔╝  {blue}██║ ╚████║██║  ██║██║  ██║╚███╔███╔╝{reset}        {cyan}║{reset}");
+    println!("  {cyan}║{reset}   {teal}   ╚══▀▀═╝   {blue}╚═╝  ╚═══╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚══╝╚══╝{reset}         {cyan}║{reset}");
+    println!("  {cyan}║{reset}                                                              {cyan}║{reset}");
+    println!("  {cyan}║{reset}   {white}DUAL-LANE MINER{reset}  {dim}v{}{reset}                                    {cyan}║{reset}", env!("CARGO_PKG_VERSION"));
+    println!("  {cyan}║{reset}                                                              {cyan}║{reset}");
+    println!("  {cyan}║{reset}   {gold}GPU{reset} {dim}BLAKE3 PoW ━━━━━━━━━━━━━━━━━━━━━━━━━━━━{reset} {gold}50%{reset}       {cyan}║{reset}");
+    println!("  {cyan}║{reset}   {teal}CPU{reset} {dim}Genus-2 VDF ━━━━━━━━━━━━━━━━━━━━━━━━━━━{reset} {teal}50%{reset}       {cyan}║{reset}");
+    println!("  {cyan}║{reset}                                                              {cyan}║{reset}");
+    println!("  {cyan}║{reset}   {dim}Quantum-Resistant Sequential Proof Mining{reset}                  {cyan}║{reset}");
+    println!("  {cyan}║{reset}   {dim}y{reset}{dim}2{reset} {dim}= x{reset}{dim}5{reset} {dim}+ x{reset}{dim}2{reset} {dim}- 1 over 256-bit prime field (pq128){reset}            {cyan}║{reset}");
+    println!("  {cyan}║{reset}                                                              {cyan}║{reset}");
+    println!("  {cyan}╚══════════════════════════════════════════════════════════════╝{reset}");
     println!();
 }
 
