@@ -15495,6 +15495,15 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     let p_genus2 = path_genus2.clone();
                     let p_blake3 = path_blake3.clone();
 
+                    // v10.3.3: Genus-2 VDF activation gate (computed once per batch, not per submission)
+                    let genus2_vdf_active = {
+                        let activation = std::env::var("Q_GENUS2_VDF_ACTIVATION_HEIGHT")
+                            .ok().and_then(|s| s.parse::<u64>().ok())
+                            .unwrap_or(u64::MAX);
+                        let cur_h = app_state_mining.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
+                        cur_h > 0 && cur_h >= activation
+                    };
+
                     let verified_result = match tokio::time::timeout(
                         std::time::Duration::from_secs(30),
                         tokio::task::spawn_blocking(move || {
@@ -15505,31 +15514,67 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                     // v1.0.5: Dual-path verification — Genus-2 VDF or legacy BLAKE3
                                     if submission.genus2_vdf_output.is_some() && submission.genus2_vdf_proof.is_some() {
                                         p_genus2.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                        // PATH A: Genus-2 Jacobian VDF
+                                        // PATH A: Genus-2 Jacobian VDF (real Wesolowski verification)
+                                        // v10.3.3: Replace stub with correct cryptographic verification
+
+                                        // Check activation gate (computed before spawn_blocking)
+                                        if !genus2_vdf_active {
+                                            // VDF lane not active yet — reject VDF submissions
+                                            r_genus2_proof.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                            return None;
+                                        }
+
                                         let vdf_output = submission.genus2_vdf_output.as_ref().unwrap();
                                         let vdf_proof = submission.genus2_vdf_proof.as_ref().unwrap();
-                                        let vdf_iters = submission.genus2_vdf_iterations.unwrap_or(5000);
+                                        let vdf_iters = submission.genus2_vdf_iterations.unwrap_or(4300);
 
                                         if let Some(ref challenge_bytes) = submission.challenge_hash_bytes {
-                                            use sha3::{Digest, Sha3_256};
+                                            use q_vdf::genus2_cantor::{CurveParams, JacElement, WesolowskiProof, verify_proof};
 
-                                            let mut hash_input = [0u8; 40];
-                                            hash_input[..32].copy_from_slice(challenge_bytes);
-                                            hash_input[32..].copy_from_slice(&submission.nonce.to_le_bytes());
-                                            let seed = blake3::hash(&hash_input);
+                                            // Thread-local curve params to avoid allocation per submission
+                                            thread_local! {
+                                                static CURVE: CurveParams = CurveParams::pq128();
+                                            }
 
-                                            let mut proof_hasher = Sha3_256::new();
-                                            proof_hasher.update(b"genus2-wesolowski-challenge");
-                                            proof_hasher.update(seed.as_bytes());
-                                            proof_hasher.update(vdf_output);
-                                            proof_hasher.update(&vdf_iters.to_le_bytes());
-                                            let expected_challenge = proof_hasher.finalize();
+                                            let valid = CURVE.with(|curve| -> bool {
+                                                // Derive seed: blake3(challenge_bytes || nonce)
+                                                let mut hash_input = [0u8; 40];
+                                                hash_input[..32].copy_from_slice(challenge_bytes);
+                                                hash_input[32..].copy_from_slice(&submission.nonce.to_le_bytes());
+                                                let seed = blake3::hash(&hash_input);
 
-                                            if vdf_proof.len() < 32 || &vdf_proof[..32] != expected_challenge.as_slice() {
+                                                // Deserialize generator from seed
+                                                let g = match JacElement::from_seed(seed.as_bytes(), curve) {
+                                                    Ok(g) => g,
+                                                    Err(_) => return false,
+                                                };
+
+                                                // Deserialize VDF output
+                                                let y = match JacElement::from_bytes(vdf_output, curve) {
+                                                    Ok(y) => y,
+                                                    Err(_) => return false,
+                                                };
+
+                                                // Deserialize Wesolowski proof
+                                                let proof = match WesolowskiProof::from_bytes(vdf_proof, curve) {
+                                                    Ok(p) => p,
+                                                    Err(_) => return false,
+                                                };
+
+                                                // Verify: [c]π + [r]g == y (O(log T) cost, ~11ms)
+                                                match verify_proof(&g, &y, &proof, vdf_iters, curve) {
+                                                    Ok(v) => v,
+                                                    Err(_) => false,
+                                                }
+                                            });
+
+                                            if !valid {
                                                 r_genus2_proof.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                                 return None;
                                             }
 
+                                            // Verify output hash consistency: SHA3(vdf_output) == submission.hash
+                                            use sha3::{Digest, Sha3_256};
                                             let mut sha3 = Sha3_256::new();
                                             sha3.update(vdf_output);
                                             let expected_hash = sha3.finalize();

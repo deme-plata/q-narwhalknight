@@ -38,6 +38,7 @@ pqcrypto-kyber = { workspace = true }
 num-bigint = { version = "0.4", features = ["serde", "rand"] }
 num-traits = "0.2"
 num-integer = "0.1"
+rand = { workspace = true }
 
 # Error handling
 anyhow = { workspace = true }

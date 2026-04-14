@@ -15,6 +15,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 pub mod conservative_adaptive_vdf;
+pub mod genus2_cantor;
 pub mod genus2_vdf;
 pub mod parameters;
 pub mod pietrzak;
