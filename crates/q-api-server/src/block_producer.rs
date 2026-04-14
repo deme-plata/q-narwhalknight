@@ -214,6 +214,56 @@ pub struct FinalityMetrics {
     pub user_txs_included: std::sync::atomic::AtomicU64,
 }
 
+/// v10.3.4: Distribute `total` among solutions proportional to their difficulty weight.
+/// Returns a Vec of rewards with sum == total (no rounding leak).
+/// Uses division-first integer arithmetic to prevent u128 overflow.
+///
+/// This is extracted from the Phase A difficulty-weighted distribution (line 1712-1748)
+/// to enable reuse in dual-lane mode (called once per lane).
+///
+/// INVARIANT: sum(result) == total (guaranteed by remainder assignment)
+fn distribute_weighted(solutions: &[&q_types::MiningSolution], total: u128) -> Vec<u128> {
+    if solutions.is_empty() {
+        return vec![];
+    }
+
+    // Count leading zero BITS in each solution's hash → weight = 2^zeros
+    let weights: Vec<u128> = solutions.iter().map(|s| {
+        let mut zeros = 0u32;
+        for byte in s.hash.iter() {
+            if *byte == 0 { zeros += 8; }
+            else { zeros += byte.leading_zeros(); break; }
+        }
+        1u128 << zeros.min(64)
+    }).collect();
+
+    let total_weight: u128 = weights.iter().sum();
+
+    // Division-first: reward_i = (total / total_weight) * w_i + ((total % total_weight) * w_i) / total_weight
+    let mut rewards: Vec<u128> = weights.iter().map(|w| {
+        if total_weight == 0 {
+            return total / solutions.len() as u128;
+        }
+        let q = total / total_weight;
+        let r = total % total_weight;
+        q * w + (r * w) / total_weight
+    }).collect();
+
+    // Assign rounding remainder to highest-weight solution (deterministic)
+    let distributed: u128 = rewards.iter().sum();
+    let remainder = total.saturating_sub(distributed);
+    if remainder > 0 {
+        let max_idx = weights.iter()
+            .enumerate()
+            .max_by_key(|(_, w)| *w)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        rewards[max_idx] += remainder;
+    }
+
+    rewards
+}
+
 impl BlockProducer {
     /// Create new block producer
     /// Phase 2.2: Initialize with lock-free SegQueue
@@ -1700,56 +1750,139 @@ impl BlockProducer {
         } else { false };
 
         if !used_pplns {
-            // v10.3.0: Difficulty-weighted mining rewards (Phase A — Fair Share)
+            // ═══════════════════════════════════════════════════════════════
+            // v10.3.4: Dual-lane reward split (Phase C — CPU-fair mining)
             //
-            // Previously: equal split (miner_total / solutions.len())
-            // Now: weight by leading zero bits in solution hash
-            //   Weight = 2^(leading_zeros) — harder solutions get exponentially more
-            //   Uses integer-only arithmetic (division-first) to prevent u128 overflow
-            //   and ensure sum(rewards) == miner_total (no rounding leak)
+            // Before activation: IDENTICAL to Phase A (single pool, difficulty-weighted)
+            // After activation: 50/50 split between BLAKE3 (GPU) and VDF (CPU) lanes
             //
-            // Tests: crates/q-mining/tests/mining_fairness_tests.rs (24 tests, all passing)
-            let difficulty_weights: Vec<u128> = solutions.iter().map(|s| {
-                // Count leading zero BITS in the solution hash
-                let mut zeros = 0u32;
-                for byte in s.hash.iter() {
-                    if *byte == 0 {
-                        zeros += 8;
+            // Uses extracted distribute_weighted() for both paths.
+            // All arithmetic integer-only with proven conservation laws.
+            // ═══════════════════════════════════════════════════════════════
+
+            let genus2_activation = std::env::var("Q_GENUS2_VDF_ACTIVATION_HEIGHT")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(u64::MAX);
+            let genus2_active = block_height >= genus2_activation;
+
+            // Build the list of (solution_ref, reward, lane_label) tuples
+            let rewarded_solutions: Vec<(&q_types::MiningSolution, u128, &str)> = if !genus2_active {
+                // ═══════════════════════════════════════════════════════════
+                // PRE-ACTIVATION: Single pool. Identical to Phase A behavior.
+                // ═══════════════════════════════════════════════════════════
+                let all_refs: Vec<&q_types::MiningSolution> = solutions.iter().collect();
+                let rewards = distribute_weighted(&all_refs, miner_total);
+                all_refs.into_iter().zip(rewards).map(|(s, r)| (s, r, "")).collect()
+            } else {
+                // ═══════════════════════════════════════════════════════════
+                // POST-ACTIVATION: Dual-lane split (50/50)
+                // ═══════════════════════════════════════════════════════════
+
+                // Partition solutions by lane
+                let blake3_refs: Vec<&q_types::MiningSolution> = solutions.iter()
+                    .filter(|s| s.vdf_output.is_none())
+                    .collect();
+                let vdf_refs: Vec<&q_types::MiningSolution> = solutions.iter()
+                    .filter(|s| s.vdf_output.is_some())
+                    .collect();
+
+                // Lane allocation (integer, no rounding leak)
+                const VDF_SHARE_BPS: u128 = 5000; // 50%
+                const BPS: u128 = 10_000;
+                let vdf_total = miner_total * VDF_SHARE_BPS / BPS;
+                let blake3_total = miner_total - vdf_total; // exact: blake3 + vdf == miner_total
+
+                // Grace period: first 100 blocks after activation
+                let blocks_since = block_height.saturating_sub(genus2_activation);
+                let in_grace = blocks_since < 100;
+
+                // Determine effective totals based on lane occupancy
+                let (eff_blake3, eff_vdf, burn_amount) = if vdf_refs.is_empty() {
+                    if in_grace {
+                        (miner_total, 0u128, 0u128) // grace: BLAKE3 gets 100%
                     } else {
-                        zeros += byte.leading_zeros();
-                        break;
+                        (blake3_total, 0u128, vdf_total) // post-grace: VDF portion burned
                     }
+                } else if blake3_refs.is_empty() {
+                    (0u128, miner_total, 0u128) // VDF gets 100% (unusual but valid)
+                } else {
+                    (blake3_total, vdf_total, 0u128) // normal: both lanes active
+                };
+
+                // Distribute within each lane
+                let b_rewards = distribute_weighted(&blake3_refs, eff_blake3);
+                let v_rewards = distribute_weighted(&vdf_refs, eff_vdf);
+
+                // Combine into ordered list: BLAKE3 first, then VDF (deterministic ordering)
+                let mut result: Vec<(&q_types::MiningSolution, u128, &str)> = Vec::new();
+                for (i, s) in blake3_refs.iter().enumerate() {
+                    result.push((s, b_rewards[i], "BLAKE3"));
                 }
-                // Weight = 2^zeros (capped at 2^64 to prevent u128 overflow in summation)
-                1u128 << zeros.min(64)
-            }).collect();
+                for (i, s) in vdf_refs.iter().enumerate() {
+                    result.push((s, v_rewards[i], "VDF"));
+                }
 
-            let total_weight: u128 = difficulty_weights.iter().sum();
+                // Explicit burn transaction (DeepSeek recommendation: auditability)
+                if burn_amount > 0 {
+                    let burn_tx_id = {
+                        let mut hasher = Sha256::new();
+                        hasher.update(b"VDF_BURN");
+                        hasher.update(&block_height.to_le_bytes());
+                        let hash = hasher.finalize();
+                        let mut tx_id = [0u8; 32];
+                        tx_id.copy_from_slice(&hash);
+                        tx_id
+                    };
+                    transactions.push(Transaction {
+                        id: burn_tx_id,
+                        from: coinbase_from,
+                        to: [0u8; 32], // null address = burn
+                        amount: burn_amount,
+                        fee: 0,
+                        nonce: 0,
+                        signature: vec![0xC0, 0x1B, 0xA5, 0xE],
+                        timestamp,
+                        data: format!("VDF lane unclaimed reward burn (block {})", block_height).into_bytes(),
+                        token_type: TokenType::QUG,
+                        fee_token_type: TokenType::QUGUSD,
+                        tx_type: TransactionType::Coinbase,
+                        pqc_signature: None,
+                        signature_phase: TxSignaturePhase::Phase0Ed25519,
+                        pqc_public_key: None,
+                        zk_proof_bundle: None,
+                        privacy_level: TransactionPrivacyLevel::Transparent,
+                        bulletproof: None,
+                        nullifier: None,
+                        memo: None,
+                    });
+                    info!("🔥 Block #{}: VDF burn {:.6} QUG (no CPU miners, post-grace)",
+                        block_height, burn_amount as f64 / 1e24);
+                }
 
-            // Calculate per-solution rewards using division-first integer arithmetic
-            // reward_i = (miner_total / total_weight) * weight_i + ((miner_total % total_weight) * weight_i) / total_weight
-            let mut miner_rewards: Vec<u128> = difficulty_weights.iter().map(|w| {
-                if total_weight == 0 { return miner_total / solutions.len() as u128; }
-                let quotient = miner_total / total_weight;
-                let remainder = miner_total % total_weight;
-                quotient * w + (remainder * w) / total_weight
-            }).collect();
+                if genus2_active {
+                    info!("⚡ Block #{}: Dual-lane — BLAKE3: {:.6} QUG ({} miners), VDF: {:.6} QUG ({} miners){}",
+                        block_height,
+                        eff_blake3 as f64 / 1e24, blake3_refs.len(),
+                        eff_vdf as f64 / 1e24, vdf_refs.len(),
+                        if in_grace && vdf_refs.is_empty() { " [GRACE]" } else { "" }
+                    );
+                }
 
-            // Assign rounding remainder to highest-weight miner (deterministic, no leak)
-            let distributed: u128 = miner_rewards.iter().sum();
-            let remainder = miner_total.saturating_sub(distributed);
-            if remainder > 0 {
-                let max_idx = difficulty_weights.iter()
-                    .enumerate()
-                    .max_by_key(|(_, w)| *w)
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                miner_rewards[max_idx] += remainder;
-            }
+                result
+            };
 
-            for (idx, solution) in solutions.iter().enumerate() {
-                let reward_amount = miner_rewards[idx];
-                let leading_zeros = difficulty_weights[idx].trailing_zeros(); // log2(weight) = leading zeros
+            // Create coinbase transactions for all rewarded solutions
+            for (idx, (solution, reward_amount, lane)) in rewarded_solutions.iter().enumerate() {
+                let reward_amount = *reward_amount;
+                if reward_amount == 0 { continue; }
+
+                // Count leading zeros for logging
+                let mut zeros = 0u32;
+                for byte in solution.hash.iter() {
+                    if *byte == 0 { zeros += 8; }
+                    else { zeros += byte.leading_zeros(); break; }
+                }
 
                 let miner_tx_id = {
                     let mut hasher = Sha256::new();
@@ -1763,6 +1896,14 @@ impl BlockProducer {
                     tx_id
                 };
 
+                let data_str = if lane.is_empty() {
+                    format!("Mining reward #{} (difficulty: {} zero bits, weight: 2^{})",
+                        solution.nonce, zeros, zeros)
+                } else {
+                    format!("Mining reward #{} {} lane (difficulty: {} zero bits, weight: 2^{})",
+                        solution.nonce, lane, zeros, zeros)
+                };
+
                 transactions.push(Transaction {
                     id: miner_tx_id,
                     from: coinbase_from,
@@ -1772,7 +1913,7 @@ impl BlockProducer {
                     nonce: idx as u64,
                     signature: vec![0xC0, 0x1B, 0xA5, 0xE], // "COINBASE" marker
                     timestamp,
-                    data: format!("Mining reward #{} (difficulty: {} zero bits, weight: 2^{})", solution.nonce, leading_zeros, leading_zeros).into_bytes(),
+                    data: data_str.into_bytes(),
                     token_type: TokenType::QUG,
                     fee_token_type: TokenType::QUGUSD,
                     tx_type: TransactionType::Coinbase,
