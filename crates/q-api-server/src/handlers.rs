@@ -11563,7 +11563,6 @@ pub async fn execute_swap(
             }
 
             info!("💸 [SWAP v10.3.2] QUG debit will be applied by balance_consensus when Swap tx is included in block (no direct deduction)");
-            drop(wallet_balances);
 
             token_balances = state.token_balances.write().await;
         } else if from_is_qugusd {
