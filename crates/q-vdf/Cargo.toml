@@ -40,6 +40,10 @@ num-traits = "0.2"
 num-integer = "0.1"
 rand = { workspace = true }
 
+# HTTP client (for test miner binary)
+ureq = "2.9"
+hex = "0.4"
+
 # Error handling
 anyhow = { workspace = true }
 thiserror = { workspace = true }
@@ -58,6 +62,11 @@ proptest = { workspace = true }
 criterion = { workspace = true }
 tokio-test = "0.4"
 num_cpus = "1.16"
+
+[[bin]]
+name = "vdf_test_miner"
+path = "src/bin/vdf_test_miner.rs"
+required-features = []
 
 [features]
 default = ["standard"]
