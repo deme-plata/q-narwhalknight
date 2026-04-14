@@ -126,8 +126,10 @@ fn main() -> Result<()> {
         "hash_rate": 0.5,
     });
 
+    let body_str = serde_json::to_string(&body)?;
     let submit_body = ureq::post(&submit_url)
-        .send_json(&body)?
+        .set("Content-Type", "application/json")
+        .send_string(&body_str)?
         .into_string()?;
     let submit_resp: serde_json::Value = serde_json::from_str(&submit_body)?;
 
