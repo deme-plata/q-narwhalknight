@@ -9401,6 +9401,13 @@ pub async fn get_mining_challenge(
         None
     };
 
+    // v10.3.4: Genus-2 VDF activation (computed early for cache-hit paths too)
+    let genus2_activation_early = std::env::var("Q_GENUS2_VDF_ACTIVATION_HEIGHT")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(u64::MAX);
+    let genus2_active_early = block_height >= genus2_activation_early;
+
     // When write-locked (challenge refresh/fork), skip cache and regenerate below.
     // Prevents 2800+ challenge requests from blocking on RwLock under heavy sync.
     {
@@ -9430,6 +9437,11 @@ pub async fn get_mining_challenge(
                         live_security_bits: cp_security,
                         recommended_threads: ai_recommended_threads,
                         backup_servers: Some(get_backup_servers()),
+                        vdf_lane_active: if genus2_active_early { Some(true) } else { None },
+                        vdf_curve_id: if genus2_active_early { Some("pq128".to_string()) } else { None },
+                        vdf_target_iterations: if genus2_active_early { Some(4300) } else { None },
+                        vdf_reward_share_bps: if genus2_active_early { Some(5000) } else { None },
+                        blake3_reward_share_bps: if genus2_active_early { Some(5000) } else { None },
                     })));
                 } else if age_seconds < 150 {
                     // Grace period (120-150s): Warn but still return cached challenge
@@ -9455,6 +9467,11 @@ pub async fn get_mining_challenge(
                         live_security_bits: cp_security,
                         recommended_threads: ai_recommended_threads,
                         backup_servers: Some(get_backup_servers()),
+                        vdf_lane_active: if genus2_active_early { Some(true) } else { None },
+                        vdf_curve_id: if genus2_active_early { Some("pq128".to_string()) } else { None },
+                        vdf_target_iterations: if genus2_active_early { Some(4300) } else { None },
+                        vdf_reward_share_bps: if genus2_active_early { Some(5000) } else { None },
+                        blake3_reward_share_bps: if genus2_active_early { Some(5000) } else { None },
                     })));
                 } else {
                     // Challenge is too old (>150s) - force regeneration
@@ -9492,6 +9509,7 @@ pub async fn get_mining_challenge(
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(network_upgrades::LWMA_DIFFICULTY_ADJUSTMENT.activation_height);
     let lwma_active = block_height >= lwma_activation;
+
     let difficulty_bits = if lwma_active {
         // Fetch recent block timestamps from storage (last 120 blocks)
         let window_size: u64 = 121; // Need N+1 timestamps for N intervals
@@ -9601,6 +9619,12 @@ pub async fn get_mining_challenge(
         live_security_bits: cp_security,
         recommended_threads: ai_recommended_threads,
         backup_servers: Some(get_backup_servers()),
+        // v10.3.4: VDF lane metadata (only present when active)
+        vdf_lane_active: if genus2_active_early { Some(true) } else { None },
+        vdf_curve_id: if genus2_active_early { Some("pq128".to_string()) } else { None },
+        vdf_target_iterations: if genus2_active_early { Some(4300) } else { None },
+        vdf_reward_share_bps: if genus2_active_early { Some(5000) } else { None },
+        blake3_reward_share_bps: if genus2_active_early { Some(5000) } else { None },
     })))
 }
 
@@ -9744,6 +9768,21 @@ pub struct MiningChallengeResponse {
     /// Miners can try these servers if the current one becomes unreachable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backup_servers: Option<Vec<String>>,
+    /// v10.3.4: Genus-2 VDF lane active (true after activation height)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vdf_lane_active: Option<bool>,
+    /// v10.3.4: VDF curve identifier ("pq128" = 256-bit field, 128-bit PQ security)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vdf_curve_id: Option<String>,
+    /// v10.3.4: Target VDF iteration count T (miner performs T sequential doublings)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vdf_target_iterations: Option<u64>,
+    /// v10.3.4: VDF lane reward share in basis points (5000 = 50%)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vdf_reward_share_bps: Option<u16>,
+    /// v10.3.4: BLAKE3 lane reward share in basis points (5000 = 50%)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blake3_reward_share_bps: Option<u16>,
 }
 
 /// Returns the list of backup server URLs for miner failover.
