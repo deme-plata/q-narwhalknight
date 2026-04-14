@@ -13,6 +13,13 @@ keepalive_timeout = "30s"
 connect_timeout = "5s"
 response_timeout = "30s"
 
+# v10.3.2: Cluster failover — when local backend is down (restart/OOM),
+# route miners to Beta/Gamma so hashrate stays at 1 TH/s instead of crashing to 10 GH/s.
+# q-flux already has failover code (upstream.rs:367-403) with passing tests.
+[cluster]
+peers = ["185.182.185.227:8080", "109.205.176.60:8808"]
+health_check_interval = "5s"
+
 [limits]
 max_connections = 100000
 max_conns_per_ip = 50

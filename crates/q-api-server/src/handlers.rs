@@ -6642,6 +6642,18 @@ pub async fn get_wallet_balance(
     axum::extract::Path(wallet_address): axum::extract::Path<String>,
     auth_wallet: Option<AuthenticatedWallet>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    // v10.3.2: Prevent ghost balance display during startup sync.
+    // Returns null balance with syncing flag instead of stale RocksDB values (e.g., 4200 QUG).
+    // DeepSeek review: "return null, not stale data, during sync window"
+    if !state.startup_sync_complete.load(std::sync::atomic::Ordering::Acquire) {
+        return Ok(Json(ApiResponse::success(serde_json::json!({
+            "balance": null,
+            "balance_display": null,
+            "syncing": true,
+            "message": "Node synchronizing — balance will be available in a few seconds"
+        }))));
+    }
+
     debug!("🔐 Privacy-enabled balance query for: {}", q_log_privacy::mask_addr(&wallet_address));
 
     // Parse requested wallet address first

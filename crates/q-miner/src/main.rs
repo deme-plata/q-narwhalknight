@@ -370,7 +370,15 @@ fn normalize_server_url(url: &str) -> String {
     with_scheme
 }
 
-/// Default fallback bootstrap server
+/// Default fallback bootstrap servers (v10.3.2: multi-server for resilience)
+/// If primary (quillon.xyz = Epsilon) is down, miner falls back to Beta/Gamma.
+/// DeepSeek review: "Change fallback to include multiple distinct physical nodes"
+const FALLBACK_BOOTSTRAP_URLS: &[&str] = &[
+    "https://quillon.xyz",          // Epsilon (primary, 10Gbit)
+    "http://185.182.185.227:8080",  // Beta (coordinator)
+    "http://109.205.176.60:8808",   // Gamma (backup)
+];
+// Keep old constant for backward compat (used in a few places)
 const FALLBACK_BOOTSTRAP_URL: &str = "https://quillon.xyz";
 
 // ═══════════════════════════════════════════════════════════════════

@@ -174,6 +174,11 @@ pub fn spawn_state_sync_task(app_state: Arc<AppState>, our_port: u16) {
             }
         }
 
+        // v10.3.2: Mark startup sync as complete — balance API can now return real values
+        // Before this point, balance API returns null/syncing to prevent ghost 4200 QUG display
+        app_state.startup_sync_complete.store(true, std::sync::atomic::Ordering::Release);
+        info!("✅ [STARTUP SYNC v10.3.2] Sync complete — balance API now serving authoritative values");
+
         // Periodic sync every 5 minutes
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(300));
         interval.tick().await; // consume the first immediate tick

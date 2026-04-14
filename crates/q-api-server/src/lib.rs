@@ -1245,6 +1245,11 @@ pub struct AppState {
     // Uses AtomicBool (not RwLock) because execute_swap() is a hot path.
     pub dex_ready: Arc<std::sync::atomic::AtomicBool>,
 
+    // 🛡️ v10.3.2: Startup sync complete — prevents ghost balance display.
+    // False until authority sync (or first periodic sync) completes.
+    // Balance API returns null/syncing when false to avoid showing stale 4200 QUG.
+    pub startup_sync_complete: Arc<std::sync::atomic::AtomicBool>,
+
     // 🔄 v8.5.1: Admin notification email for update alerts
     // Set via POST /api/v1/admin/update/notification-email or Q_ADMIN_NOTIFICATION_EMAIL env
     pub admin_notification_email: Arc<tokio::sync::RwLock<Option<String>>>,
@@ -2785,6 +2790,7 @@ impl AppState {
             bootstrap_wallet_sync_done: Arc::new(std::sync::atomic::AtomicBool::new(false)), // 🚀 v8.8.2: Bootstrap sync (test mode: not done)
             ai_active: Arc::new(std::sync::atomic::AtomicBool::new(false)), // 🤖 v9.3.3: AI inference throttle
             dex_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)), // 🛡️ v10.3.1: DEX gate (test mode: always ready)
+            startup_sync_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)), // v10.3.2: test mode: always synced
             admin_notification_email: Arc::new(tokio::sync::RwLock::new(
                 std::env::var("Q_ADMIN_NOTIFICATION_EMAIL").ok()
             )), // 🔄 v8.5.1: Admin notification email
@@ -4164,6 +4170,7 @@ impl AppState {
             )), // 🚀 v8.8.2: One-time bootstrap wallet sync (loaded from RocksDB)
             ai_active: Arc::new(std::sync::atomic::AtomicBool::new(false)), // 🤖 v9.3.3: AI inference throttle
             dex_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)), // 🛡️ v10.3.1: DEX gate (starts DISABLED — enabled after reconciliation in main.rs)
+            startup_sync_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)), // v10.3.2: starts false, set true after authority sync
             admin_notification_email: Arc::new(tokio::sync::RwLock::new(
                 std::env::var("Q_ADMIN_NOTIFICATION_EMAIL").ok()
             )), // 🔄 v8.5.1: Admin notification email
