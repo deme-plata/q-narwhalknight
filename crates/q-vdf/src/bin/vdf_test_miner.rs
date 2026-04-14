@@ -29,7 +29,8 @@ fn main() -> Result<()> {
     // Step 1: Fetch challenge
     println!("\n[1/5] Fetching mining challenge...");
     let challenge_url = format!("{}/api/v1/mining/challenge", server);
-    let resp: serde_json::Value = ureq::get(&challenge_url).call()?.into_json()?;
+    let resp_body = ureq::get(&challenge_url).call()?.into_string()?;
+    let resp: serde_json::Value = serde_json::from_str(&resp_body)?;
 
     let data = &resp["data"];
     let challenge_hash = data["challenge_hash"].as_str().unwrap();
@@ -125,9 +126,10 @@ fn main() -> Result<()> {
         "hash_rate": 0.5,
     });
 
-    let submit_resp: serde_json::Value = ureq::post(&submit_url)
+    let submit_body = ureq::post(&submit_url)
         .send_json(&body)?
-        .into_json()?;
+        .into_string()?;
+    let submit_resp: serde_json::Value = serde_json::from_str(&submit_body)?;
 
     println!("\n╔═══════════════════════════════════════════════════════════╗");
     println!("║                    SUBMISSION RESULT                      ║");
