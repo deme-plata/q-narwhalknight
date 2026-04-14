@@ -7963,6 +7963,11 @@ impl QStorage {
         self.hot_db.put(CF_MANIFEST, flag, b"done").await
     }
 
+    /// v10.3.2: Delete a migration flag (forces re-run on next startup)
+    pub async fn delete_migration_flag(&self, flag: &[u8]) -> Result<()> {
+        self.hot_db.delete(CF_MANIFEST, flag).await
+    }
+
     /// Execute adaptive pruning on the hot database
     /// This is a wrapper method that allows calling pruning without dealing with thread safety issues
     #[cfg(not(target_os = "windows"))]
