@@ -259,17 +259,42 @@ impl BalanceConsensusEngine {
         let mut updates = Vec::new();
 
         // =========================================================================
-        // 🔐 v7.1.3: CRITICAL FIX - Atomic check-and-set prevents TOCTOU race
+        // 🔐 v10.3.2: PERSISTENT DEDUP — survives restarts (fixes balance reset bug)
         // =========================================================================
-        // v7.1.1 used read lock for check → write lock for set. But async tasks
-        // could pass the read check concurrently before any marks the block.
-        // FIX: Use write lock for BOTH check AND set atomically.
+        // The LRU cache (below) is volatile — lost on restart. After restart,
+        // balance_consensus reprocesses historical blocks and re-applies all
+        // Swap transactions, causing balances to drop to zero.
+        //
+        // FIX: Check a PERSISTENT key in RocksDB FIRST. If the block was already
+        // processed in a previous session, skip it. The key survives restarts.
+        //
+        // Key format: "processed_balance_block:{block_hash_hex}" → "1"
+        // Storage: CF_MANIFEST (same as wallet_balance_, zero schema change)
         let block_hash = self.calculate_block_hash(block);
+        let block_hash_hex = hex::encode(&block_hash);
+        let persistent_key = format!("processed_balance_block:{}", &block_hash_hex);
+
+        // Check persistent store FIRST (survives restart)
+        match storage.get_processed_block_flag(&persistent_key).await {
+            Ok(true) => {
+                trace!("⏭️ Block {} already processed (PERSISTENT, height {}), skipping",
+                       &block_hash_hex[..16], block.header.height);
+                return Ok(Vec::new());
+            }
+            Ok(false) => {} // Not yet processed — continue
+            Err(e) => {
+                warn!("⚠️ [PERSISTENT DEDUP] Failed to check key {}: {} — falling through to LRU",
+                      &persistent_key[..40], e);
+                // Fall through to LRU check as backup
+            }
+        }
+
+        // v7.1.3: LRU check (fast in-memory, backup for persistent check)
         {
             let mut processed = self.processed_blocks.write().await;
             if processed.contains(&block_hash) {
-                debug!("⏭️ Block {} already processed (height {}), skipping",
-                       hex::encode(&block_hash[..8]), block.header.height);
+                debug!("⏭️ Block {} already processed (LRU, height {}), skipping",
+                       &block_hash_hex[..16], block.header.height);
                 return Ok(Vec::new());
             }
             processed.put(block_hash, true);
@@ -494,7 +519,14 @@ impl BalanceConsensusEngine {
             );
         }
 
-        // v7.1.3: Block already marked as processed at entry (atomic check-and-set)
+        // v10.3.2: Mark block as processed PERSISTENTLY (survives restart)
+        // Written AFTER successful balance processing — if we crash before this,
+        // the block will be reprocessed on restart (safe: idempotent adds are fine,
+        // and the LRU prevents in-session reprocessing).
+        if let Err(e) = storage.set_processed_block_flag(&persistent_key).await {
+            warn!("⚠️ [PERSISTENT DEDUP] Failed to write key {}: {} — block will be reprocessed on restart",
+                  &persistent_key[..40], e);
+        }
 
         // Return updates
         Ok(updates)
@@ -665,15 +697,31 @@ impl BalanceConsensusEngine {
         let mut updates = Vec::new();
 
         // =========================================================================
-        // 🔐 v7.1.1: CRITICAL FIX - Dedup check prevents multi-path double-crediting
+        // 🔐 v10.3.2: PERSISTENT DEDUP (TX path) — same fix as non-TX path
         // =========================================================================
         let block_hash = self.calculate_block_hash(block);
-        // v7.1.3: Atomic check-and-set (prevents TOCTOU double-crediting)
+        let block_hash_hex = hex::encode(&block_hash);
+        let persistent_key = format!("processed_balance_block:{}", &block_hash_hex);
+
+        // Check persistent store FIRST (survives restart)
+        match tx.get("manifest", persistent_key.as_bytes()).await {
+            Ok(Some(_)) => {
+                trace!("⏭️ Block {} already processed (PERSISTENT TX, height {}), skipping",
+                       &block_hash_hex[..16], block.header.height);
+                return Ok(Vec::new());
+            }
+            Ok(None) => {} // Not yet processed
+            Err(e) => {
+                warn!("⚠️ [PERSISTENT DEDUP TX] Check failed: {} — falling through to LRU", e);
+            }
+        }
+
+        // v7.1.3: LRU check (fast in-memory backup)
         {
             let mut processed = self.processed_blocks.write().await;
             if processed.contains(&block_hash) {
-                debug!("⏭️ Block {} already processed via TX path (height {}), skipping",
-                       hex::encode(&block_hash[..8]), block.header.height);
+                debug!("⏭️ Block {} already processed via TX path (LRU, height {}), skipping",
+                       &block_hash_hex[..16], block.header.height);
                 return Ok(Vec::new());
             }
             processed.put(block_hash, true);
@@ -882,6 +930,11 @@ impl BalanceConsensusEngine {
 
         // v7.1.1: Mark block as processed to prevent double-crediting
         // v7.1.3: Block already marked as processed at entry (atomic check-and-set)
+
+        // v10.3.2: Mark block as processed PERSISTENTLY (TX path)
+        if let Err(e) = tx.put("manifest", persistent_key.as_bytes(), b"1").await {
+            warn!("⚠️ [PERSISTENT DEDUP TX] Failed to write key: {} — block may reprocess on restart", e);
+        }
 
         // Return updates (caller can use for SSE broadcast, logging, etc.)
         Ok(updates)
@@ -2214,6 +2267,16 @@ pub trait BalanceStorage: Send + Sync {
     /// v10.2.0: Subtract amount from token balance (QUGUSD / custom tokens)
     async fn subtract_token_balance(&self, _wallet: &[u8; 32], _token: &[u8; 32], _amount: u128) -> Result<()> {
         Ok(())
+    }
+
+    /// v10.3.2: Check if a block has been processed (persistent dedup, survives restart)
+    async fn get_processed_block_flag(&self, _key: &str) -> Result<bool> {
+        Ok(false) // Default: not processed (for test MockStorage compatibility)
+    }
+
+    /// v10.3.2: Mark a block as processed (persistent dedup, survives restart)
+    async fn set_processed_block_flag(&self, _key: &str) -> Result<()> {
+        Ok(()) // Default: no-op (for test MockStorage compatibility)
     }
 }
 

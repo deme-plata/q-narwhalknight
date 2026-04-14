@@ -8580,6 +8580,20 @@ impl BalanceStorage for QStorage {
         );
         Ok(())
     }
+
+    /// v10.3.2: Check if a block has been processed (persistent, survives restart)
+    async fn get_processed_block_flag(&self, key: &str) -> Result<bool> {
+        match self.hot_db.get(CF_MANIFEST, key.as_bytes()).await {
+            Ok(Some(_)) => Ok(true),
+            Ok(None) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// v10.3.2: Mark a block as processed (persistent, survives restart)
+    async fn set_processed_block_flag(&self, key: &str) -> Result<()> {
+        self.hot_db.put(CF_MANIFEST, key.as_bytes(), b"1").await
+    }
 }
 
 // ============================================================================
