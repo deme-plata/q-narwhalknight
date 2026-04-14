@@ -11540,30 +11540,29 @@ pub async fn execute_swap(
             drop(token_balances);
             let wallet_hex = hex::encode(wallet_addr);
 
-            // v10.3.1: ATOMIC subtract-balance + record-dex-debit in a single WriteBatch.
-            // DeepSeek review: "subtract_balance and record_dex_qug_debit are TWO SEPARATE writes"
-            // — if the process crashes between them, the debit counter is wrong, causing
-            // balance corruption on the next apply_dex_qug_adjustments() run.
-            // The atomic method writes both in one RocksDB WriteBatch (all-or-nothing).
-            let rocks_new_balance = match state.storage_engine.atomic_subtract_and_record_dex_debit(&wallet_hex, request.amount_in as u128).await {
-                Ok(new_bal) => new_bal,
-                Err(e) => {
-                    warn!("⚠️ [SWAP v10.3.1] Atomic DEX debit failed: {} — swap rejected", e);
-                    return Ok(Json(ApiResponse::error(format!(
-                        "Insufficient QUG balance for swap: {}", e
-                    ))));
-                }
-            };
+            // v10.3.2: REMOVED direct balance deduction — ROOT CAUSE OF DOUBLE DEDUCTION BUG.
+            //
+            // HISTORY OF THIS BUG:
+            // - v3.6.8: Added direct subtract_balance() here for "instant balance update"
+            // - v2.4.0: Added consensus Swap transaction submitted to mempool
+            // - BOTH were active simultaneously → every swap deducted 2× the amount
+            // - User swaps 50% → balance goes to 0 (not 50%)
+            //
+            // FIX (DeepSeek + ChatGPT peer reviewed):
+            // Let balance_consensus handle ALL balance changes via the Swap transaction
+            // in the block. The handler only records the DEX counter (for tracking).
+            // This ensures: one deduction, replayable, auditable, sync-safe.
+            //
+            // The Swap transaction is created below (create_swap_transaction) and submitted
+            // to the mempool. When the block is produced, balance_consensus processes it
+            // and calls subtract_balance() ONCE (the only deduction).
+            //
+            // DEX counter still recorded for historical tracking (does NOT modify balance):
+            if let Err(e) = state.storage_engine.record_dex_qug_debit(&wallet_hex, request.amount_in as u128).await {
+                warn!("⚠️ [SWAP v10.3.2] Failed to record DEX debit counter: {} — continuing (counter only, not balance)", e);
+            }
 
-            // Update in-memory to match RocksDB (not the other way around)
-            let mut wallet_balances = state.wallet_balances.write().await;
-            let old_mem_balance = wallet_balances.get(&wallet_addr).copied().unwrap_or(0);
-            wallet_balances.insert(wallet_addr, rocks_new_balance);
-            info!("💸 [SWAP v10.3.1] Deducted {:.8} QUG (RocksDB: {:.8} → {:.8}, mem was: {:.8})",
-                request.amount_in as f64 / 1e24,
-                (rocks_new_balance as f64 / 1e24) + (request.amount_in as f64 / 1e24),
-                rocks_new_balance as f64 / 1e24,
-                old_mem_balance as f64 / 1e24);
+            info!("💸 [SWAP v10.3.2] QUG debit will be applied by balance_consensus when Swap tx is included in block (no direct deduction)");
             drop(wallet_balances);
 
             token_balances = state.token_balances.write().await;
@@ -11667,37 +11666,15 @@ pub async fn execute_swap(
 
         // Credit output token to user
         if to_is_qug {
-            // Crediting QUG — RocksDB is the source of truth, in-memory updated after.
+            // v10.3.2: REMOVED direct QUG credit — same double-deduction fix as debit side.
+            // balance_consensus will credit QUG when the Swap tx is processed from the block.
+            // Only record the DEX credit counter here (for tracking, does NOT modify balance).
             drop(token_balances);
-
-            // v10.3.1: ATOMIC add-balance + record-dex-credit in a single WriteBatch.
-            // DeepSeek review: "add_balance and record_dex_qug_credit are TWO SEPARATE writes"
-            // — if the process crashes between them, the credit counter diverges from the
-            // actual balance, causing corruption on the next apply_dex_qug_adjustments() run.
-            // The atomic method writes balance, credit counter, AND applied-net tracker in one
-            // RocksDB WriteBatch (all-or-nothing).
             let wallet_hex = hex::encode(wallet_addr);
-            match state.storage_engine.atomic_add_and_record_dex_credit(&wallet_hex, final_amount_out as u128).await {
-                Ok(rocks_balance) => {
-                    // Update in-memory to match RocksDB (authoritative source)
-                    let mut wallet_balances = state.wallet_balances.write().await;
-                    wallet_balances.insert(wallet_addr, rocks_balance);
-                    drop(wallet_balances);
-                    info!("💰 [SWAP v10.3.1] Atomic QUG credit: {} QUG → RocksDB balance: {} QUG",
-                        final_amount_out as f64 / 1e24, rocks_balance as f64 / 1e24);
-                }
-                Err(e) => {
-                    // DeepSeek review (blocker #2): "if atomic write fails, FAIL the swap.
-                    // Do not partially credit anything. Surface a retriable error."
-                    // A non-atomic fallback would reintroduce the exact split-brain state
-                    // this fix is designed to eliminate.
-                    error!("🚨 [SWAP v10.3.1] Atomic DEX credit FAILED: {} — swap output NOT credited. User should retry.", e);
-                    return Ok(Json(ApiResponse::error(format!(
-                        "Swap deducted input but failed to credit output (storage error: {}). Your QUG was deducted — please contact support for manual correction. Do NOT retry immediately.",
-                        e
-                    ))));
-                }
+            if let Err(e) = state.storage_engine.record_dex_qug_credit(&wallet_hex, final_amount_out as u128).await {
+                warn!("⚠️ [SWAP v10.3.2] Failed to record DEX credit counter: {} — continuing", e);
             }
+            info!("💰 [SWAP v10.3.2] QUG credit will be applied by balance_consensus when Swap tx is included in block");
         } else if to_is_qugusd {
             // v4.0.3: Credit QUGUSD to token_balances using standard QUGUSD_TOKEN_ADDRESS
             let qugusd_addr = q_types::QUGUSD_TOKEN_ADDRESS;
