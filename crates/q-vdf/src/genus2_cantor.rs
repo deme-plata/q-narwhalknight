@@ -247,15 +247,20 @@ impl MontField256 {
         }
 
         // Final conditional subtraction: if t >= p, subtract p
+        // Try subtracting p. If it underflows, keep original t.
         let mut borrow: u64 = 0;
         let mut tmp = [0u64; 4];
         for i in 0..4 {
-            let (diff, b1) = t[i].overflowing_sub(params.p[i]);
-            let (diff2, b2) = diff.overflowing_sub(borrow);
-            tmp[i] = diff2;
-            borrow = (b1 as u64) + (b2 as u64);
+            let a = t[i] as u128;
+            let b = params.p[i] as u128 + borrow as u128;
+            if a >= b {
+                tmp[i] = (a - b) as u64;
+                borrow = 0;
+            } else {
+                tmp[i] = (a + (1u128 << 64) - b) as u64;
+                borrow = 1;
+            }
         }
-
         if borrow == 0 {
             // t >= p, use t - p
             *z = tmp;
@@ -320,23 +325,19 @@ impl MontField256 {
 
     /// Modular inverse via Fermat's little theorem: a^(p-2) mod p.
     pub fn inv(&self, params: &MontgomeryParams) -> Self {
-        // Compute p-2 via BigUint for correctness (no borrow bugs)
+        // Use BigUint for the exponent to avoid bit-extraction bugs
         let p_biguint = MontgomeryParams::limbs_to_biguint(&params.p);
         let exp = &p_biguint - BigUint::from(2u32);
-        let exp_limbs = MontgomeryParams::biguint_to_limbs(&exp);
 
-        // Square-and-multiply in Montgomery form
+        // Square-and-multiply (right-to-left) using BigUint bit extraction
         let mut result = MontField256::from_bigint(&BigInt::one(), params);
         let mut base = *self;
-        for word_idx in 0..4 {
-            let mut word = exp_limbs[word_idx];
-            for _ in 0..64 {
-                if word & 1 == 1 {
-                    result = result.mul(&base, params);
-                }
-                base = base.mul(&base, params);
-                word >>= 1;
+        let bits = exp.bits();
+        for i in 0..bits {
+            if exp.bit(i) {
+                result = result.mul(&base, params);
             }
+            base = base.mul(&base, params);
         }
         result
     }
@@ -2175,21 +2176,33 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // TODO: Montgomery inverse has an accumulation bug in the exponentiation loop.
-    // Basic arithmetic (mul, add, sub) works correctly. Inverse needs debugging.
-    // This is a performance optimization — the VDF works without it at 424μs/doubling.
+    #[ignore] // Montgomery mul has subtle carry accumulation bug over 256 iterations.
+    // mul/add/sub work for short chains, but inverse (256 squarings) diverges.
+    // Root cause: likely in CIOS carry propagation or final reduction edge case.
+    // This is a performance optimization — VDF works without it at 402μs/doubling.
     fn test_montgomery_inverse() {
         let curve = CurveParams::pq128();
         let params = MontgomeryParams::from_prime(&curve.p);
 
+        // First test: a^2 via repeated mul
         let a = BigInt::from(42);
         let ma = MontField256::from_bigint(&a, &params);
-        let ma_inv = ma.inv(&params);
+        let ma2 = ma.mul(&ma, &params);
+        let a2_normal = ma2.to_bigint(&params);
+        let a2_expected = mod_p(&(&a * &a), &curve.p_bigint());
+        assert_eq!(a2_normal, a2_expected, "a^2 via Montgomery mul failed");
 
-        // a * a^{-1} should equal 1
+        // Test: a^4
+        let ma4 = ma2.mul(&ma2, &params);
+        let a4_normal = ma4.to_bigint(&params);
+        let a4_expected = mod_p(&(&a2_expected * &a2_expected), &curve.p_bigint());
+        assert_eq!(a4_normal, a4_expected, "a^4 via Montgomery mul failed");
+
+        // Test: a * a^{-1} should equal 1
+        let ma_inv = ma.inv(&params);
         let product = ma.mul(&ma_inv, &params);
         let one = product.to_bigint(&params);
-        assert_eq!(one, BigInt::one());
+        assert_eq!(one, BigInt::one(), "a * a^(-1) != 1");
     }
 
     /// Benchmark: compare double_fast vs double_jacobian on pq128.
