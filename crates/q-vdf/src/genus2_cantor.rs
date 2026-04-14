@@ -1484,7 +1484,7 @@ pub fn generate_proof(
     let mut pi = JacElement::identity();
 
     for i in (0..iterations).rev() {
-        r = mod_p(&(&r * BigInt::from(2)), &c_bigint);
+        r = &r * BigInt::from(2);
         pi = double_jacobian(&pi, curve)?;
         if r >= c_bigint {
             r -= &c_bigint;
