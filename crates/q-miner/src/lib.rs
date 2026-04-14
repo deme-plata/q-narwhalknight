@@ -15,6 +15,7 @@ pub mod solution_submitter;
 pub mod diagnostics;
 pub mod ui;
 pub mod utils;
+pub mod vdf_lane;
 
 pub use config::MinerConfig;
 pub use cpu::CpuMiner;

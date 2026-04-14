@@ -65,7 +65,7 @@ tikv-jemallocator = { version = "0.6", optional = true }
 # Networking for pool mining
 # v9.0.2: Use rustls with bundled Mozilla CA roots — works in Docker/minimal installs
 # without requiring system ca-certificates package
-reqwest = { version = "0.12", features = ["json", "socks", "stream", "rustls-tls-webpki-roots", "gzip", "brotli", "deflate"], default-features = false }
+reqwest = { version = "0.12", features = ["json", "blocking", "socks", "stream", "rustls-tls-webpki-roots", "gzip", "brotli", "deflate"], default-features = false }
 
 # LZ4 compression for bandwidth optimization
 lz4_flex = { workspace = true }

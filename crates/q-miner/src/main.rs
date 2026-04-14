@@ -1803,6 +1803,36 @@ async fn run_mining(
         })
         .collect();
 
+    // ═══════════════════════════════════════════════════════════════
+    // v10.3.4: VDF CPU mining lane — auto-detects activation
+    // Spawns 1 dedicated thread for Genus-2 Jacobian VDF computation.
+    // Runs alongside BLAKE3 threads (GPU or CPU).
+    // When VDF lane is not active, thread sleeps (polls every 30s).
+    // ═══════════════════════════════════════════════════════════════
+    let vdf_proofs_counter = Arc::new(AtomicU64::new(0));
+    let vdf_handle = {
+        let vdf_running = is_running.clone();
+        let vdf_wallet = wallet.clone();
+        let vdf_server = server_url.clone();
+        let vdf_counter = vdf_proofs_counter.clone();
+        let vdf_solution_tx = solution_submit_tx.clone();
+        let vdf_tokio = tokio_handle.clone();
+        std::thread::Builder::new()
+            .name("vdf-miner".to_string())
+            .spawn(move || {
+                q_miner::vdf_lane::vdf_mining_thread(
+                    vdf_running,
+                    vdf_wallet,
+                    vdf_server,
+                    vdf_counter,
+                    vdf_solution_tx,
+                    vdf_tokio,
+                );
+            })
+            .expect("Failed to spawn VDF mining thread")
+    };
+    info!("🧮 VDF lane: dedicated CPU thread spawned (auto-detects activation)");
+
     // Start hash rate monitor
     let monitor_counter = hash_counter.clone();
     let monitor_running = is_running.clone();
@@ -2145,10 +2175,11 @@ async fn run_mining(
     info!("🛑 Shutdown signal received, stopping mining...");
     is_running.store(false, Ordering::SeqCst);
 
-    // Wait for all OS mining threads to stop
+    // Wait for all OS mining threads to stop (BLAKE3 + VDF)
     for handle in handles {
         let _ = handle.join();
     }
+    let _ = vdf_handle.join(); // VDF lane thread
     monitor_handle.abort();
     if let Some(h) = sse_handle { h.abort(); }
     if let Some(h) = ml_handle { h.abort(); }
