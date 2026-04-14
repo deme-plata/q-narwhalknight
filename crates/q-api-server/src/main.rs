@@ -3314,7 +3314,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     //
     // This runs ONCE (sets a new flag). Safe: replays chain deterministically.
     {
-        let restore_flag = b"migration_v1032_balance_restore_done";
+        let restore_flag = b"migration_v1032_balance_restore_v2_done";
         if !state.storage_engine.has_migration_flag(restore_flag).await {
             warn!("🔧 [v10.3.2 EMERGENCY] Starting balance restoration — resetting rebuild + reconcile flags");
             // Delete old flags to force re-run
