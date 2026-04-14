@@ -1480,11 +1480,23 @@ pub fn generate_proof(
     //       π = π + g    (bit i of q is 1)
     //   At the end, π = [q]g and r = 2^T mod c.
     let c_bigint = c.to_bigint().unwrap();
-    let mut r = BigInt::zero();
-    let mut pi = JacElement::identity();
 
+    // Long division: compute q = floor(2^T / c) and π = [q]g simultaneously.
+    //
+    // 2^T in binary is 1 followed by T zeros. We process bits from MSB to LSB.
+    // r = running remainder, pi = [partial_q]g
+    //
+    // Process the leading '1' bit:
+    let mut r = BigInt::one();
+    let mut pi = JacElement::identity();
+    if r >= c_bigint {
+        r -= &c_bigint;
+        pi = add_jacobian(&pi, g, curve)?;
+    }
+
+    // Process the remaining T zero bits (from position T-1 down to 0):
     for i in (0..iterations).rev() {
-        r = &r * BigInt::from(2);
+        r = &r * BigInt::from(2);  // shift in a '0' bit
         pi = double_jacobian(&pi, curve)?;
         if r >= c_bigint {
             r -= &c_bigint;
