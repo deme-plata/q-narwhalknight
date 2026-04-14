@@ -1195,12 +1195,16 @@ async fn do_authoritative_balance_sync(app_state: &Arc<AppState>, authority_url:
         warn!("🔑 [AUTHORITY SYNC] Failed to update total_supply: {}", e);
     }
 
-    // v8.9.0: Also import token balances (QUGUSD, etc.) from authority peer
+    // v10.3.3: SKIP token balance import — protect QUGUSD ($24M) and all other tokens.
+    // DeepSeek + ChatGPT peer review: "If the incident scope is QUG wallet balances corrupted,
+    // token balances intact, then do not touch token state during emergency restoration."
+    // Token balances on Epsilon are already correct (reorg handler never touched them).
     let mut token_imported = 0usize;
     if !snapshot.token_balances.is_empty() {
-        info!("🔑 [AUTHORITY SYNC] Importing {} token balances...", snapshot.token_balances.len());
+        info!("🛡️ [AUTHORITY SYNC v10.3.3] SKIPPING {} token balances — QUGUSD/token protection active", snapshot.token_balances.len());
 
-        // Update in-memory token_balances
+        // v10.3.3: Token import DISABLED — protect QUGUSD and all tokens
+        if false { // DISABLED for QUGUSD protection
         let mut token_bals = app_state.token_balances.write().await;
         for (composite_key, balance_str) in &snapshot.token_balances {
             let balance: u128 = match balance_str.parse() {
@@ -1248,6 +1252,7 @@ async fn do_authoritative_balance_sync(app_state: &Arc<AppState>, authority_url:
         drop(token_bals);
 
         info!("🔑 [AUTHORITY SYNC] Imported {} token balances", token_imported);
+        } // end if false (DISABLED v10.3.3 — QUGUSD protection)
     }
 
     info!("🔑 [AUTHORITY SYNC] Complete: {} wallets + {} token balances imported, total supply: {} QUG",

@@ -3303,28 +3303,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     // because rebuilds replay the blockchain and overwrite DEX swap deductions.
     let mut any_balance_rebuild_this_boot = false;
 
-    // v10.3.2: EMERGENCY BALANCE RESTORATION
-    // The perform_balance_reorg() bug (saturating_sub zeroing balances) has been
-    // corrupting user balances since v0.9.31. To restore ALL users to correct balances:
-    // 1. Delete the old migration flags (forces rebuild + reconcile to re-run)
-    // 2. purge_and_rebuild_balances() replays chain → computes coinbase totals
-    // 3. reconcile_balances_with_dex_swaps() uses emission controller total for accuracy
-    // 4. apply_dex_qug_adjustments() subtracts DEX swap history
-    // 5. Reorg handler is DISABLED so balances won't be destroyed again
-    //
-    // This runs ONCE (sets a new flag). Safe: replays chain deterministically.
-    {
-        let restore_flag = b"migration_v1032_balance_restore_v2_done";
-        if !state.storage_engine.has_migration_flag(restore_flag).await {
-            warn!("🔧 [v10.3.2 EMERGENCY] Starting balance restoration — resetting rebuild + reconcile flags");
-            // Delete old flags to force re-run
-            let _ = state.storage_engine.delete_migration_flag(b"migration_balance_rebuild_v851_done").await;
-            let _ = state.storage_engine.delete_migration_flag(b"migration_balance_reconcile_v857b_done").await;
-            info!("🔧 [v10.3.2 EMERGENCY] Migration flags reset — rebuild and reconcile will run below");
-            // Set our flag so this only happens once
-            let _ = state.storage_engine.set_migration_flag(restore_flag).await;
-        }
-    }
+    // v10.3.3: REMOVED chain restoration code (crashed during block scan for unknown reason).
+    // Balance restoration uses Plan B: Beta's authority sync copies correct QUG balances.
+    // Reorg handler is DISABLED so balances won't be destroyed again.
 
     // v8.5.0: One-time testnet wallet purge + rebuild from mainnet blocks.
     // Pass emission controller total so balances are scaled to match reality.
