@@ -135,12 +135,12 @@ export default function DownloadNodeScreen() {
 
           <div className="space-y-3">
             <a
-              href="https://quillon.xyz/downloads/q-api-server-v10.2.2"
+              href="https://quillon.xyz/downloads/q-api-server-v10.3.5"
               download="q-api-server"
               className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-quantum-cyan to-quantum-purple rounded-xl font-bold text-white hover:shadow-lg hover:shadow-quantum-cyan/50 transition-all"
             >
               <Download className="w-5 h-5" />
-              Download Linux Binary (v10.2.2)
+              Download Linux Binary (v10.3.5)
             </a>
             <p className="text-center text-sm text-gray-200">
               Size: ~83 MB | Bitcoin-Style 21M Emission + P2P Gossipsub + DeFi Stack
@@ -151,9 +151,9 @@ export default function DownloadNodeScreen() {
           <div className="mt-6 p-4 bg-quantum-dark/50 rounded-xl border border-quantum-purple/20">
             <p className="text-sm font-mono text-gray-100 mb-2">Quick Start:</p>
             <pre className="text-xs text-quantum-cyan overflow-x-auto">
-{`wget https://quillon.xyz/downloads/q-api-server-v10.2.2
-chmod +x q-api-server-v10.2.2
-./q-api-server-v10.2.2 --port 8080 --tui --admin-wallet YOUR_WALLET_ADDRESS`}
+{`wget https://quillon.xyz/downloads/q-api-server-v10.3.5
+chmod +x q-api-server-v10.3.5
+./q-api-server-v10.3.5 --port 8080 --tui --admin-wallet YOUR_WALLET_ADDRESS`}
             </pre>
             <p className="text-xs text-quantum-green mt-2">
               WarpSync auto-discovers peers & syncs 900K+ blocks in minutes
@@ -212,7 +212,7 @@ chmod +x q-api-server-v10.2.2
 
           <div className="space-y-3">
             <a
-              href="https://quillon.xyz/downloads/q-api-server-v10.2.2-linux-arm64"
+              href="https://quillon.xyz/downloads/q-api-server-v10.3.5-linux-arm64"
               download="q-api-server-arm64"
               className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-emerald-500 to-quantum-green rounded-xl font-bold text-white hover:shadow-lg hover:shadow-emerald-500/50 transition-all"
             >
@@ -227,9 +227,9 @@ chmod +x q-api-server-v10.2.2
           <div className="mt-6 p-4 bg-quantum-dark/50 rounded-xl border border-emerald-500/20">
             <p className="text-sm font-mono text-gray-100 mb-2">Quick Start (ARM64):</p>
             <pre className="text-xs text-emerald-400 overflow-x-auto">
-{`wget https://quillon.xyz/downloads/q-api-server-v10.2.2-linux-arm64
-chmod +x q-api-server-v10.2.2-linux-arm64
-./q-api-server-v10.2.2-linux-arm64 --port 8080 --tui --admin-wallet YOUR_WALLET_ADDRESS`}
+{`wget https://quillon.xyz/downloads/q-api-server-v10.3.5-linux-arm64
+chmod +x q-api-server-v10.3.5-linux-arm64
+./q-api-server-v10.3.5-linux-arm64 --port 8080 --tui --admin-wallet YOUR_WALLET_ADDRESS`}
             </pre>
             <p className="text-xs text-gray-300 mt-2">
               Tested on: Raspberry Pi 4/5, AWS Graviton, Oracle Ampere, Apple M1/M2 (Linux VM)
@@ -280,8 +280,8 @@ chmod +x q-api-server-v10.2.2-linux-arm64
 
           <div className="space-y-3">
             <a
-              href="https://quillon.xyz/downloads/q-api-server-v10.2.2-windows-x64.exe"
-              download="q-api-server-v10.2.2-windows-x64.exe"
+              href="https://quillon.xyz/downloads/q-api-server-v10.3.5-windows-x64.exe"
+              download="q-api-server-v10.3.5-windows-x64.exe"
               className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-quantum-purple to-quantum-pink rounded-xl font-bold text-white hover:shadow-lg hover:shadow-quantum-purple/50 transition-all"
             >
               <Download className="w-5 h-5" />
@@ -297,7 +297,7 @@ chmod +x q-api-server-v10.2.2-linux-arm64
             <p className="text-sm font-mono text-gray-100 mb-2">Quick Start (PowerShell):</p>
             <pre className="text-xs text-quantum-purple overflow-x-auto">
 {`# Download from browser or PowerShell:
-Invoke-WebRequest -Uri https://quillon.xyz/downloads/q-api-server-v10.2.2-windows-x64.exe -OutFile q-api-server.exe
+Invoke-WebRequest -Uri https://quillon.xyz/downloads/q-api-server-v10.3.5-windows-x64.exe -OutFile q-api-server.exe
 .\\q-api-server.exe --port 8080 --tui --admin-wallet YOUR_WALLET_ADDRESS`}
             </pre>
             <p className="text-xs text-gray-100 mt-2">

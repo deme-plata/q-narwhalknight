@@ -1768,10 +1768,10 @@ export default function MiningDashboard() {
       >
         <h4 className="text-lg font-bold text-quantum-green mb-3 flex items-center gap-2">
           <Zap className="w-5 h-5" />
-          Download Optimized Miner v10.1.1
+          Download Dual-Lane Miner v10.3.5
         </h4>
         <p className="text-gray-300 text-sm mb-4">
-          v10.1.1: AVX2 SIMD + CPU core pinning + 2.5x faster hashing + P2P peer compute
+          v10.3.5: GPU BLAKE3 + CPU VDF dual-lane mining | 50/50 reward split | Genus-2 Jacobian VDF
         </p>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <a
