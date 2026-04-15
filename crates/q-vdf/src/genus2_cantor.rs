@@ -193,6 +193,17 @@ impl MontField256 {
         MontField256 { limbs: [0; 4] }
     }
 
+    pub fn is_zero(&self) -> bool {
+        self.limbs == [0; 4]
+    }
+
+    /// Negation: -a mod p = p - a (in Montgomery form, same operation)
+    #[inline]
+    pub fn neg(&self, params: &MontgomeryParams) -> Self {
+        if self.is_zero() { return *self; }
+        Self::sub(&Self::zero(), self, params)
+    }
+
     /// Convert from normal BigInt to Montgomery form.
     pub fn from_bigint(val: &BigInt, params: &MontgomeryParams) -> Self {
         let p_biguint = MontgomeryParams::limbs_to_biguint(&params.p);
@@ -1410,6 +1421,240 @@ pub fn double_fast(d: &JacElement, curve: &CurveParams) -> Result<JacElement> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// MONTGOMERY-INTEGRATED DOUBLING (Deliverable C)
+// All field ops use MontField256 — zero BigInt allocation in the hot loop.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Precomputed curve constants in Montgomery form for zero-alloc doubling.
+pub struct CurveMont {
+    pub a0: MontField256,
+    pub a2: MontField256,
+    pub a3: MontField256,
+    pub a4: MontField256,
+    pub one: MontField256,
+    pub two: MontField256,
+    pub params: MontgomeryParams,
+    /// p-2 exponent limbs (for Fermat inversion without BigUint alloc)
+    pub p_minus_2: [u64; 4],
+}
+
+impl CurveMont {
+    pub fn from_curve(curve: &CurveParams) -> Self {
+        let params = MontgomeryParams::from_prime(&curve.p);
+        let p = curve.p_bigint();
+        CurveMont {
+            a0: MontField256::from_bigint(&curve.a0, &params),
+            a2: MontField256::from_bigint(&curve.a2, &params),
+            a3: MontField256::from_bigint(&curve.a3, &params),
+            a4: MontField256::from_bigint(&curve.a4, &params),
+            one: MontField256::from_bigint(&BigInt::one(), &params),
+            two: MontField256::from_bigint(&BigInt::from(2), &params),
+            p_minus_2: {
+                let pm2 = &curve.p - BigUint::from(2u32);
+                MontgomeryParams::biguint_to_limbs(&pm2)
+            },
+            params,
+        }
+    }
+}
+
+/// Fast Fermat inversion using precomputed p-2 limbs (no BigUint allocation).
+#[inline]
+fn mont_inv(a: &MontField256, cm: &CurveMont) -> MontField256 {
+    let mut result = cm.one;
+    let mut base = *a;
+    for &limb in cm.p_minus_2.iter() {
+        for bit in 0..64 {
+            if (limb >> bit) & 1 == 1 {
+                result = result.mul(&base, &cm.params);
+            }
+            base = base.mul(&base, &cm.params);
+        }
+    }
+    result
+}
+
+/// Jacobian doubling entirely in Montgomery form.
+/// Returns None on degenerate case (caller should fall back to BigInt path).
+#[inline]
+fn double_mont(
+    u1: &MontField256, u0: &MontField256,
+    v1: &MontField256, v0: &MontField256,
+    cm: &CurveMont,
+) -> Option<(MontField256, MontField256, MontField256, MontField256)> {
+    let p = &cm.params;
+
+    // ── Step 1: Inline extended GCD via Cramer's rule ──
+    // Compute t such that t·(2v) ≡ 1 mod u
+    let two_v0 = MontField256::add(v0, v0, p);
+    let two_v1 = MontField256::add(v1, v1, p);
+
+    if two_v1.is_zero() {
+        if two_v0.is_zero() {
+            return None; // identity
+        }
+        // 2v is constant, degenerate on small fields — fallback
+        return None;
+    }
+
+    // Matrix [[a, b], [c, d]] · [t0, t1] = [1, 0]
+    // a = 2v0, b = -(2v1·u0), c = 2v1, d = 2v0 - 2v1·u1
+    let a = two_v0;
+    let b = two_v1.mul(u0, p).neg(p);       // -2v1·u0
+    let c = two_v1;
+    let dd = MontField256::sub(&two_v0, &two_v1.mul(u1, p), p); // 2v0 - 2v1·u1
+
+    // det = a·d - b·c
+    let det = MontField256::sub(&a.mul(&dd, p), &b.mul(&c, p), p);
+    if det.is_zero() {
+        return None; // degenerate
+    }
+    let inv_det = mont_inv(&det, cm);
+
+    // t0 = d/det, t1 = -c/det
+    let t0 = dd.mul(&inv_det, p);
+    let t1 = c.neg(p).mul(&inv_det, p);
+
+    // ── Step 2: k = (f - v²) / u via synthetic division ──
+    // f = x⁵ + a4·x⁴ + a3·x³ + a2·x² + a1·x + a0
+    // (f-v²) coefficients at x⁵=1, x⁴=a4, x³=a3, x²=a2-v1², x¹=a1-2v1v0, x⁰=a0-v0²
+    let v1_sq = v1.mul(v1, p);
+
+    // Synthetic division: k3=1, k2=a4-u1, k1=a3-u0-k2·u1, k0=(a2-v1²)-k2·u0-k1·u1
+    let k3 = cm.one;
+    let k2 = MontField256::sub(&cm.a4, u1, p);
+    let k1 = MontField256::sub(
+        &MontField256::sub(&cm.a3, u0, p),
+        &k2.mul(u1, p),
+        p,
+    );
+    let a2_v1sq = MontField256::sub(&cm.a2, &v1_sq, p);
+    let k0 = MontField256::sub(
+        &MontField256::sub(&a2_v1sq, &k2.mul(u0, p), p),
+        &k1.mul(u1, p),
+        p,
+    );
+
+    // ── Step 3: l = t·k mod u ──
+    // t·k coefficients (degree 4): p4=t1, p3=t1k2+t0, p2=t1k1+t0k2, p1=t1k0+t0k1, p0=t0k0
+    let p4 = t1;
+    let p3 = MontField256::add(&t1.mul(&k2, p), &t0, p);
+    let p2 = MontField256::add(&t1.mul(&k1, p), &t0.mul(&k2, p), p);
+    let p1_tk = MontField256::add(&t1.mul(&k0, p), &t0.mul(&k1, p), p);
+    let p0_tk = t0.mul(&k0, p);
+
+    // Reduce mod u: x² ≡ -u1·x - u0
+    // x³ ≡ (u1²-u0)·x + u1·u0
+    // x⁴ ≡ (-u1³+2u1u0)·x + (u0²-u0·u1²)
+    let u1_sq = u1.mul(u1, p);
+    let u0_sq = u0.mul(u0, p);
+    let u1_u0 = u1.mul(u0, p);
+    let x3_c1 = MontField256::sub(&u1_sq, u0, p);
+    let x3_c0 = u1_u0;
+    let u1_cu = u1_sq.mul(u1, p);
+    let x4_c1 = MontField256::sub(
+        &MontField256::add(&u1_u0, &u1_u0, p),
+        &u1_cu,
+        p,
+    );
+    let x4_c0 = MontField256::sub(&u0_sq, &u0.mul(&u1_sq, p), p);
+
+    let l1 = MontField256::add(
+        &MontField256::add(
+            &p4.mul(&x4_c1, p),
+            &p3.mul(&x3_c1, p),
+            p,
+        ),
+        &MontField256::sub(&p1_tk, &p2.mul(u1, p), p),
+        p,
+    );
+    let l0 = MontField256::add(
+        &MontField256::add(
+            &p4.mul(&x4_c0, p),
+            &p3.mul(&x3_c0, p),
+            p,
+        ),
+        &MontField256::sub(&p0_tk, &p2.mul(u0, p), p),
+        p,
+    );
+
+    // ── Step 4: u_comp = u² (coefficients uc3, uc2, uc1; uc4=1, uc0=u0²) ──
+    let uc3 = MontField256::add(u1, u1, p);
+    let uc2 = MontField256::add(&u1_sq, &MontField256::add(u0, u0, p), p);
+    let uc1 = MontField256::add(&u1_u0, &u1_u0, p);
+    // uc0 = u0_sq
+
+    // ── Step 5: v_comp = v + u·l ──
+    let vc3 = l1;
+    let vc2 = MontField256::add(&l0, &u1.mul(&l1, p), p);
+    let vc1 = MontField256::add(
+        &MontField256::add(&u0.mul(&l1, p), &u1.mul(&l0, p), p),
+        v1,
+        p,
+    );
+    let vc0 = MontField256::add(&u0.mul(&l0, p), v0, p);
+
+    // ── Step 6: H = f - v_comp² ──
+    let vc3_sq = vc3.mul(&vc3, p);
+    let vc3_vc2 = vc3.mul(&vc2, p);
+    let vc3_vc1 = vc3.mul(&vc1, p);
+    let vc2_sq = vc2.mul(&vc2, p);
+
+    // h6 = -vc3², h5 = 1 - 2·vc3·vc2, h4 = a4 - (2·vc3·vc1 + vc2²)
+    let h6 = vc3_sq.neg(p);
+    let h5 = MontField256::sub(
+        &cm.one,
+        &MontField256::add(&vc3_vc2, &vc3_vc2, p),
+        p,
+    );
+    let h4 = MontField256::sub(
+        &cm.a4,
+        &MontField256::add(&MontField256::add(&vc3_vc1, &vc3_vc1, p), &vc2_sq, p),
+        p,
+    );
+
+    // ── Step 7: Q = H / u_comp (synthetic division, degree 2) ──
+    let q2 = h6;
+    let q1 = MontField256::sub(&h5, &q2.mul(&uc3, p), p);
+    let q0 = MontField256::sub(
+        &MontField256::sub(&h4, &q2.mul(&uc2, p), p),
+        &q1.mul(&uc3, p),
+        p,
+    );
+
+    if q2.is_zero() {
+        return None; // degenerate
+    }
+    let inv_q2 = mont_inv(&q2, cm);
+    let u1_new = q1.mul(&inv_q2, p);
+    let u0_new = q0.mul(&inv_q2, p);
+
+    // ── Step 8: v_new = -v_comp mod u_new ──
+    let u1n_sq = u1_new.mul(&u1_new, p);
+    let u1n_u0n = u1_new.mul(&u0_new, p);
+    let x3n_c1 = MontField256::sub(&u1n_sq, &u0_new, p);
+    let x3n_c0 = u1n_u0n;
+
+    let nvc3 = vc3.neg(p);
+    let nvc2 = vc2.neg(p);
+    let nvc1 = vc1.neg(p);
+    let nvc0 = vc0.neg(p);
+
+    let v1_new = MontField256::add(
+        &MontField256::sub(&nvc3.mul(&x3n_c1, p), &nvc2.mul(&u1_new, p), p),
+        &nvc1,
+        p,
+    );
+    let v0_new = MontField256::add(
+        &MontField256::sub(&nvc3.mul(&x3n_c0, p), &nvc2.mul(&u0_new, p), p),
+        &nvc0,
+        p,
+    );
+
+    Some((u1_new, u0_new, v1_new, v0_new))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // VDF EVALUATION (with checkpointing — Request B)
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1491,9 +1736,67 @@ pub fn evaluate_vdf(
     curve: &CurveParams,
     log_interval: u64,
 ) -> Result<JacElement> {
-    let mut current = g.clone();
     let start = std::time::Instant::now();
 
+    // Use Montgomery fast path for degree-2 elements on pq128-sized primes
+    if g.degree == 2 && curve.p.bits() >= 200 {
+        let cm = CurveMont::from_curve(curve);
+        let p = &cm.params;
+
+        let mut mu1 = MontField256::from_bigint(&g.u1, p);
+        let mut mu0 = MontField256::from_bigint(&g.u0, p);
+        let mut mv1 = MontField256::from_bigint(&g.v1, p);
+        let mut mv0 = MontField256::from_bigint(&g.v0, p);
+
+        for i in 0..iterations {
+            match double_mont(&mu1, &mu0, &mv1, &mv0, &cm) {
+                Some((nu1, nu0, nv1, nv0)) => {
+                    mu1 = nu1; mu0 = nu0; mv1 = nv1; mv0 = nv0;
+                }
+                None => {
+                    // Degenerate — convert back to BigInt, do one step, convert back
+                    let elem = JacElement {
+                        u1: mu1.to_bigint(p), u0: mu0.to_bigint(p),
+                        v1: mv1.to_bigint(p), v0: mv0.to_bigint(p),
+                        degree: 2,
+                    };
+                    let doubled = double_jacobian(&elem, curve)?;
+                    mu1 = MontField256::from_bigint(&doubled.u1, p);
+                    mu0 = MontField256::from_bigint(&doubled.u0, p);
+                    mv1 = MontField256::from_bigint(&doubled.v1, p);
+                    mv0 = MontField256::from_bigint(&doubled.v0, p);
+                }
+            }
+
+            if log_interval > 0 && i > 0 && i % log_interval == 0 {
+                let elapsed = start.elapsed().as_secs_f64();
+                let rate = i as f64 / elapsed;
+                let remaining = (iterations - i) as f64 / rate;
+                debug!(
+                    "VDF progress: {}/{} ({:.1}%), {:.0} dbl/s, ~{:.1}s remaining",
+                    i, iterations,
+                    (i as f64 / iterations as f64) * 100.0,
+                    rate, remaining
+                );
+            }
+        }
+
+        let elapsed = start.elapsed();
+        info!(
+            "VDF evaluation complete (Montgomery): {} doublings in {:.3}s ({:.0} dbl/s)",
+            iterations, elapsed.as_secs_f64(),
+            iterations as f64 / elapsed.as_secs_f64()
+        );
+
+        return Ok(JacElement {
+            u1: mu1.to_bigint(p), u0: mu0.to_bigint(p),
+            v1: mv1.to_bigint(p), v0: mv0.to_bigint(p),
+            degree: 2,
+        });
+    }
+
+    // Fallback: BigInt path for small primes or non-degree-2 elements
+    let mut current = g.clone();
     for i in 0..iterations {
         current = double_fast(&current, curve)?;
 
@@ -1503,11 +1806,9 @@ pub fn evaluate_vdf(
             let remaining = (iterations - i) as f64 / rate;
             debug!(
                 "VDF progress: {}/{} ({:.1}%), {:.0} dbl/s, ~{:.1}s remaining",
-                i,
-                iterations,
+                i, iterations,
                 (i as f64 / iterations as f64) * 100.0,
-                rate,
-                remaining
+                rate, remaining
             );
         }
     }
@@ -1515,8 +1816,7 @@ pub fn evaluate_vdf(
     let elapsed = start.elapsed();
     info!(
         "VDF evaluation complete: {} doublings in {:.3}s ({:.0} dbl/s)",
-        iterations,
-        elapsed.as_secs_f64(),
+        iterations, elapsed.as_secs_f64(),
         iterations as f64 / elapsed.as_secs_f64()
     );
 
@@ -2100,6 +2400,31 @@ mod tests {
     }
 
     /// Benchmark: measure doubling speed on the real 256-bit pq128 curve.
+    /// Benchmark Montgomery-integrated VDF evaluation (the production hot path).
+    #[test]
+    fn bench_montgomery_vdf() {
+        let curve = CurveParams::pq128();
+        let g = JacElement::from_seed(b"bench-mont-seed-2026", &curve).unwrap();
+
+        let n = 500u64;
+        let start = std::time::Instant::now();
+        let y = evaluate_vdf(&g, n, &curve, 0).unwrap();
+        let elapsed = start.elapsed();
+
+        let per_dbl = elapsed.as_micros() as f64 / n as f64;
+        eprintln!("\n══════════════════════════════════════════════════════════");
+        eprintln!("  MONTGOMERY VDF BENCHMARK (T={}, pq128)", n);
+        eprintln!("══════════════════════════════════════════════════════════");
+        eprintln!("  {} doublings in {:.3}ms", n, elapsed.as_secs_f64() * 1000.0);
+        eprintln!("  Per doubling:    {:.1} μs", per_dbl);
+        eprintln!("  Throughput:      {:.0} doublings/sec", 1_000_000.0 / per_dbl);
+        eprintln!("──────────────────────────────────────────────────────────");
+        eprintln!("  Projected for T=4300: {:.3}s", per_dbl * 4300.0 / 1_000_000.0);
+        eprintln!("══════════════════════════════════════════════════════════");
+
+        assert!(y.degree == 2);
+    }
+
     /// This determines VDF feasibility and calibrates the iteration count T.
     #[test]
     fn bench_pq128_doubling() {
