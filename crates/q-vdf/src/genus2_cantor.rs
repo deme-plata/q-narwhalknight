@@ -216,29 +216,31 @@ impl MontField256 {
     }
 
     /// Montgomery multiplication: z = x * y * R^{-1} mod p (CIOS method).
+    /// Fix: uses u128 for t[4] to prevent carry loss over 256+ sequential muls.
     fn mont_mul(x: &[u64; 4], y: &[u64; 4], params: &MontgomeryParams, z: &mut [u64; 4]) {
-        let mut t = [0u64; 5];
+        // Use u128 for all accumulators to avoid carry overflow (the original bug).
+        let mut t = [0u128; 5];
         for i in 0..4 {
-            // Multiply-accumulate
-            let mut carry: u128 = 0;
+            // Multiply-accumulate: t += x * y[i]
+            let mut carry = 0u128;
             for j in 0..4 {
-                let prod = (x[j] as u128) * (y[i] as u128) + (t[j] as u128) + carry;
-                t[j] = prod as u64;
-                carry = prod >> 64;
+                let sum = (x[j] as u128) * (y[i] as u128) + t[j] + carry;
+                t[j] = sum & 0xFFFFFFFFFFFFFFFF;
+                carry = sum >> 64;
             }
-            t[4] = t[4].wrapping_add(carry as u64);
+            t[4] += carry;
 
-            // Montgomery reduction
-            let m = t[0].wrapping_mul(params.p_inv);
+            // Montgomery reduction: m = t[0] * p_inv mod 2^64
+            let m = (t[0] as u64).wrapping_mul(params.p_inv) as u128;
             carry = 0;
             for j in 0..4 {
-                let prod = (m as u128) * (params.p[j] as u128) + (t[j] as u128) + carry;
-                t[j] = prod as u64;
-                carry = prod >> 64;
+                let sum = m * (params.p[j] as u128) + t[j] + carry;
+                t[j] = sum & 0xFFFFFFFFFFFFFFFF;
+                carry = sum >> 64;
             }
-            t[4] = t[4].wrapping_add(carry as u64);
+            t[4] += carry;
 
-            // Shift right by one limb
+            // Shift right by one limb (drop t[0] which is now 0 mod 2^64)
             t[0] = t[1];
             t[1] = t[2];
             t[2] = t[3];
@@ -247,11 +249,10 @@ impl MontField256 {
         }
 
         // Final conditional subtraction: if t >= p, subtract p
-        // Try subtracting p. If it underflows, keep original t.
         let mut borrow: u64 = 0;
         let mut tmp = [0u64; 4];
         for i in 0..4 {
-            let a = t[i] as u128;
+            let a = t[i]; // u128
             let b = params.p[i] as u128 + borrow as u128;
             if a >= b {
                 tmp[i] = (a - b) as u64;
@@ -262,11 +263,12 @@ impl MontField256 {
             }
         }
         if borrow == 0 {
-            // t >= p, use t - p
             *z = tmp;
         } else {
-            // t < p, use t as-is
-            z.copy_from_slice(&t[..4]);
+            z[0] = t[0] as u64;
+            z[1] = t[1] as u64;
+            z[2] = t[2] as u64;
+            z[3] = t[3] as u64;
         }
     }
 
@@ -1252,6 +1254,10 @@ pub fn double_fast(d: &JacElement, curve: &CurveParams) -> Result<JacElement> {
 
         // det = a·d - b·c
         let det = (a * &dd - &b * c).mod_floor(&p);
+        if det.is_zero() {
+            // Degenerate: gcd(u, 2v) > 1, fall back to generic Cantor
+            return double_jacobian(d, curve);
+        }
         let inv_det = mod_inv(&det, &p)?;
 
         // Cramer's rule: t0 = d/det, t1 = -c/det
@@ -1279,61 +1285,120 @@ pub fn double_fast(d: &JacElement, curve: &CurveParams) -> Result<JacElement> {
         BigInt::one(),
     ];
 
-    // k = (f - v²) / u — exact division
-    let v_sq = pmul(&v_coeffs, &v_coeffs, &p);
-    let mut f_minus_vsq = vec![BigInt::zero(); 6];
-    for i in 0..6 { f_minus_vsq[i] = f[i].clone(); }
-    for i in 0..v_sq.len() {
-        f_minus_vsq[i] = (&f_minus_vsq[i] - &v_sq[i]).mod_floor(&p);
+    // ═══ Inline compose + reduce (no Vec allocation, explicit degree-2 formulas) ═══
+    // Based on DeepSeek's Deliverable B, corrected for 2v factor and H indices.
+
+    let t0 = t_coeffs.first().cloned().unwrap_or(BigInt::zero());
+    let t1 = t_coeffs.get(1).cloned().unwrap_or(BigInt::zero());
+
+    // Step 2: k = (f - v²) / u via synthetic division
+    // f - v² coefficients (degree 5): [a0-v0², a1-2v1v0, a2-v1², a3, a4, 1]
+    let v1_sq = (&v1 * &v1).mod_floor(&p);
+    let two_v1v0 = (&v1 * &v0 * BigInt::from(2)).mod_floor(&p);
+    let v0_sq = (&v0 * &v0).mod_floor(&p);
+
+    // Synthetic division: (f-v²) / (x² + u1·x + u0), quotient degree 3 = [k0,k1,k2,k3]
+    // k3 = 1 (leading of x⁵ / x² = x³)
+    let k3 = BigInt::one();
+    let k2 = (&f[4] - &u1).mod_floor(&p);                         // a4 - u1
+    let k1 = (&f[3] - &u0 - &k2 * &u1).mod_floor(&p);            // a3 - u0 - k2·u1
+    let k0 = (&f[2] - &v1_sq - &k2 * &u0 - &k1 * &u1).mod_floor(&p); // (a2-v1²) - k2·u0 - k1·u1
+
+    // Step 3: l = t · k mod u (reduce degree-≤4 product mod degree-2)
+    // t·k has coefficients p0..p4 where t=[t0,t1], k=[k0,k1,k2,k3=1]
+    let p4 = t1.clone(); // t1·k3 = t1
+    let p3 = (&t1 * &k2 + &t0).mod_floor(&p);      // t1·k2 + t0·k3
+    let p2 = (&t1 * &k1 + &t0 * &k2).mod_floor(&p);
+    let p1_tk = (&t1 * &k0 + &t0 * &k1).mod_floor(&p);
+    let p0_tk = (&t0 * &k0).mod_floor(&p);
+
+    // Reduce mod u using x² ≡ -u1·x - u0:
+    // x³ ≡ (u1²-u0)·x + u1·u0
+    // x⁴ ≡ (-u1³+2u1·u0)·x + (u0²-u0·u1²)
+    let u1_sq = (&u1 * &u1).mod_floor(&p);
+    let u0_sq = (&u0 * &u0).mod_floor(&p);
+    let u1_u0 = (&u1 * &u0).mod_floor(&p);
+    let x3_c1 = (&u1_sq - &u0).mod_floor(&p);
+    let x3_c0 = u1_u0.clone();
+    let u1_cu = (&u1_sq * &u1).mod_floor(&p);
+    let x4_c1 = (&u1_u0 * BigInt::from(2) - &u1_cu).mod_floor(&p);
+    let x4_c0 = (&u0_sq - &u0 * &u1_sq).mod_floor(&p);
+
+    let l1 = (&p4 * &x4_c1 + &p3 * &x3_c1 - &p2 * &u1 + &p1_tk).mod_floor(&p);
+    let l0 = (&p4 * &x4_c0 + &p3 * &x3_c0 - &p2 * &u0 + &p0_tk).mod_floor(&p);
+
+    // Step 4: u_comp = u² (degree 4): x⁴ + 2u1·x³ + (u1²+2u0)·x² + 2u0u1·x + u0²
+    let uc3 = (&u1 * BigInt::from(2)).mod_floor(&p);
+    let uc2 = (&u1_sq + &u0 * BigInt::from(2)).mod_floor(&p);
+    let uc1 = (&u1_u0 * BigInt::from(2)).mod_floor(&p);
+    // uc0 = u0_sq (already computed)
+
+    // Step 5: v_comp = v + u·l (degree ≤ 3)
+    // u·l = (x²+u1x+u0)(l1x+l0) = l1·x³ + (l0+u1l1)·x² + (u0l1+u1l0)·x + u0l0
+    let vc3 = l1.clone();
+    let vc2 = (&l0 + &u1 * &l1).mod_floor(&p);
+    let vc1 = (&u0 * &l1 + &u1 * &l0 + &v1).mod_floor(&p);
+    let vc0 = (&u0 * &l0 + &v0).mod_floor(&p);
+
+    // Step 6: H = f - v_comp² (degree ≤ 6)
+    // v_comp² cross-products (computed once, reused)
+    let vc3_sq = (&vc3 * &vc3).mod_floor(&p);
+    let vc3_vc2 = (&vc3 * &vc2).mod_floor(&p);
+    let vc3_vc1 = (&vc3 * &vc1).mod_floor(&p);
+    let vc3_vc0 = (&vc3 * &vc0).mod_floor(&p);
+    let vc2_sq = (&vc2 * &vc2).mod_floor(&p);
+    let vc2_vc1 = (&vc2 * &vc1).mod_floor(&p);
+    let vc2_vc0 = (&vc2 * &vc0).mod_floor(&p);
+    let vc1_sq = (&vc1 * &vc1).mod_floor(&p);
+    let vc1_vc0 = (&vc1 * &vc0).mod_floor(&p);
+    let vc0_sq = (&vc0 * &vc0).mod_floor(&p);
+
+    // f = [a0, a1, a2, a3, a4, 1] (coefficients low→high, leading coeff 1 for x⁵)
+    // H[6] = 0 - vc3²
+    // H[5] = 1 - 2·vc3·vc2           (leading coeff of f is 1 for x⁵!)
+    // H[4] = a4 - (2·vc3·vc1 + vc2²)
+    // H[3] = a3 - (2·vc3·vc0 + 2·vc2·vc1)
+    // H[2] = a2 - (2·vc2·vc0 + vc1²)
+    // H[1] = a1 - 2·vc1·vc0
+    // H[0] = a0 - vc0²
+    let h6 = (-&vc3_sq).mod_floor(&p);
+    let h5 = (BigInt::one() - &vc3_vc2 * BigInt::from(2)).mod_floor(&p);
+    let h4 = (&f[4] - &vc3_vc1 * BigInt::from(2) - &vc2_sq).mod_floor(&p);
+    let h3 = (&f[3] - &vc3_vc0 * BigInt::from(2) - &vc2_vc1 * BigInt::from(2)).mod_floor(&p);
+
+    // Step 7: Synthetic division H / u_comp → quotient Q (degree 2)
+    // u_comp = x⁴ + uc3·x³ + uc2·x² + uc1·x + uc0 (monic degree 4)
+    let q2 = h6;
+    let q1 = (&h5 - &q2 * &uc3).mod_floor(&p);
+    let q0 = (&h4 - &q2 * &uc2 - &q1 * &uc3).mod_floor(&p);
+
+    // Make monic: u_new = q / lc(q)
+    if q2.is_zero() {
+        // Degenerate: result not degree 2, fall back to generic Cantor
+        return double_jacobian(d, curve);
     }
-    let (k, _rem) = pdivrem(&f_minus_vsq, &u_coeffs, &p);
+    let inv_q2 = mod_inv(&q2, &p)?;
+    let u1_new = (&q1 * &inv_q2).mod_floor(&p);
+    let u0_new = (&q0 * &inv_q2).mod_floor(&p);
 
-    // l = t * k mod u (t is cofactor from inline extended GCD)
-    let tk = pmul(&t_coeffs, &k, &p);
-    let (_, l) = pdivrem(&tk, &u_coeffs, &p);
-    let l0 = l.first().cloned().unwrap_or(BigInt::zero());
-    let l1 = l.get(1).cloned().unwrap_or(BigInt::zero());
+    // Step 8: v_new = -v_comp mod u_new
+    // Reduce -v_comp (degree 3) mod (x² + u1_new·x + u0_new) using:
+    //   x² ≡ -u1_new·x - u0_new
+    //   x³ ≡ (u1_new² - u0_new)·x + u1_new·u0_new
+    let u1n_sq = (&u1_new * &u1_new).mod_floor(&p);
+    let u1n_u0n = (&u1_new * &u0_new).mod_floor(&p);
+    let x3n_c1 = (&u1n_sq - &u0_new).mod_floor(&p);
+    let x3n_c0 = u1n_u0n;
 
-    // Compose: u_comp = u², v_comp = v + u*l
-    let u_comp = pmul(&u_coeffs, &u_coeffs, &p);
-    let u_l = pmul(&u_coeffs, &[l0, l1], &p);
-    let mut v_comp = v_coeffs.to_vec();
-    while v_comp.len() < u_l.len() { v_comp.push(BigInt::zero()); }
-    for i in 0..u_l.len() {
-        v_comp[i] = (&v_comp[i] + &u_l[i]).mod_floor(&p);
-    }
+    let nvc3 = (-&vc3).mod_floor(&p);
+    let nvc2 = (-&vc2).mod_floor(&p);
+    let nvc1 = (-&vc1).mod_floor(&p);
+    let nvc0 = (-&vc0).mod_floor(&p);
 
-    // Reduce: u_new = (f - v_comp²) / u_comp, make monic
-    let vc_sq = pmul(&v_comp, &v_comp, &p);
-    let mut num = vec![BigInt::zero(); std::cmp::max(f.len(), vc_sq.len())];
-    for i in 0..f.len() { num[i] = f[i].clone(); }
-    for i in 0..vc_sq.len() { num[i] = (&num[i] - &vc_sq[i]).mod_floor(&p); }
-    let (mut u_new, _) = pdivrem(&num, &u_comp, &p);
+    let v1_new = (&nvc3 * &x3n_c1 - &nvc2 * &u1_new + &nvc1).mod_floor(&p);
+    let v0_new = (&nvc3 * &x3n_c0 - &nvc2 * &u0_new + &nvc0).mod_floor(&p);
 
-    // Make monic
-    while u_new.len() > 1 && u_new.last().map_or(false, |c| c.is_zero()) {
-        u_new.pop();
-    }
-    if u_new.len() >= 3 {
-        let inv_lc = mod_inv(u_new.last().unwrap(), &p)?;
-        for c in &mut u_new { *c = (c.clone() * &inv_lc).mod_floor(&p); }
-    }
-
-    // v_new = -v_comp mod u_new
-    let neg_vc: Vec<BigInt> = v_comp.iter().map(|c| (-c).mod_floor(&p)).collect();
-    let (_, mut v_new) = pdivrem(&neg_vc, &u_new, &p);
-    while v_new.len() > 1 && v_new.last().map_or(false, |c| c.is_zero()) {
-        v_new.pop();
-    }
-
-    // Extract coefficients
-    let u1_new = if u_new.len() > 1 { mod_p(&u_new[1], &p) } else { BigInt::zero() };
-    let u0_new = mod_p(u_new.first().unwrap_or(&BigInt::zero()), &p);
-    let v1_new = if v_new.len() > 1 { mod_p(&v_new[1], &p) } else { BigInt::zero() };
-    let v0_new = mod_p(v_new.first().unwrap_or(&BigInt::zero()), &p);
-
-    // u_new should be degree 2 (monic), so u_new[2] = 1
-    let degree = if u_new.len() >= 3 { 2 } else if u_new.len() == 2 { 1 } else { 0 };
+    let degree = 2; // Normal case for generic doubling
 
     Ok(JacElement {
         u1: u1_new,
@@ -2231,10 +2296,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Montgomery mul has subtle carry accumulation bug over 256 iterations.
-    // mul/add/sub work for short chains, but inverse (256 squarings) diverges.
-    // Root cause: likely in CIOS carry propagation or final reduction edge case.
-    // This is a performance optimization — VDF works without it at 402μs/doubling.
     fn test_montgomery_inverse() {
         let curve = CurveParams::pq128();
         let params = MontgomeryParams::from_prime(&curve.p);
