@@ -3156,33 +3156,70 @@ impl TurboSyncManager {
 
         (highest_found, has_gap_blocks)
     }
-
-    /// v10.3.5: Checkpoint Sync — discover the earliest available block via P2P.
+    /// v10.3.5: Checkpoint Sync — discover the earliest available block.
     ///
-    /// This is called only for fresh nodes (local_height < 100). It sends small probe
-    /// batches through the normal P2P download pipeline to find where blocks start.
+    /// Uses lightweight HTTP probes against known bootstrap peers to find where
+    /// blocks begin on the network. Only called once at startup for fresh nodes.
+    /// The actual block sync uses P2P — only this discovery step uses HTTP.
     ///
-    /// Strategy: download_chunks_parallel already handles empty responses gracefully.
-    /// We send 3 probe chunks at exponentially increasing heights. When a probe returns
-    /// blocks, we've found the checkpoint. Binary search narrows it down.
-    ///
-    /// Returns 0 if blocks exist from genesis, or the first available height.
+    /// Returns 0 if blocks exist from genesis (no gap), or the first available height.
     async fn probe_network_gap(
         &self,
         target_height: u64,
-        peers: &[PeerId],
+        _peers: &[PeerId],
     ) -> u64 {
-        if peers.is_empty() {
+        info!("🔗 [CHECKPOINT SYNC] Probing bootstrap peers for earliest available block...");
+
+        // Run blocking HTTP probes on a dedicated thread
+        let target = target_height;
+        match tokio::task::spawn_blocking(move || {
+            Self::probe_network_gap_blocking(target)
+        }).await {
+            Ok(result) => result,
+            Err(e) => {
+                warn!("🔗 [CHECKPOINT SYNC] Probe task failed: {} — syncing from genesis", e);
+                0
+            }
+        }
+    }
+
+    /// Blocking implementation of network gap probe (runs on spawn_blocking thread).
+    fn probe_network_gap_blocking(target_height: u64) -> u64 {
+        let bootstrap_urls = [
+            "http://185.182.185.227:8080",  // Beta
+            "http://89.149.241.126:8080",   // Epsilon
+        ];
+
+        // Probe helper: check if ANY peer has a block at height h
+        let probe = |height: u64| -> bool {
+            for url in &bootstrap_urls {
+                let block_url = format!("{}/api/v1/blocks/{}", url, height);
+                match ureq::get(&block_url)
+                    .timeout(std::time::Duration::from_secs(8))
+                    .call()
+                {
+                    Ok(resp) => {
+                        if let Ok(text) = resp.into_string() {
+                            if text.len() > 50 && text.contains("height") {
+                                return true;
+                            }
+                        }
+                    }
+                    Err(_) => continue,
+                }
+            }
+            false
+        };
+
+        // Step 1: Quick check — does block 1 exist?
+        if probe(1) {
+            info!("🔗 [CHECKPOINT SYNC] Genesis blocks available — full sync");
             return 0;
         }
 
-        info!("🔗 [CHECKPOINT SYNC] Probing {} peers for earliest available block...", peers.len());
-
-        let chunk_size = 500u64;
-
-        // Probe heights — exponential steps covering 0 to 14M
-        let probe_heights: Vec<u64> = vec![
-            1, 1_000, 10_000, 50_000, 100_000, 500_000,
+        // Step 2: Exponential probe
+        let heights: Vec<u64> = vec![
+            1_000, 10_000, 50_000, 100_000, 250_000, 500_000,
             1_000_000, 1_500_000, 2_000_000, 3_000_000, 5_000_000,
             7_000_000, 10_000_000, 12_000_000, 14_000_000,
         ].into_iter().filter(|&h| h < target_height).collect();
@@ -3190,58 +3227,21 @@ impl TurboSyncManager {
         let mut last_empty: u64 = 0;
         let mut first_found: u64 = 0;
 
-        // Send probe chunks through download_chunks_parallel, then check local DB
-        // for whether any blocks were written at the probed height.
-        for &probe_h in &probe_heights {
-            let probe_chunks = vec![(probe_h, probe_h + chunk_size - 1)];
-
-            // Download this single probe chunk via the normal P2P pipeline
-            if let Err(e) = self.download_chunks_parallel(probe_chunks, peers.to_vec()).await {
-                debug!("🔗 [CHECKPOINT SYNC] Probe at {} failed: {} — treating as empty", probe_h, e);
-                last_empty = probe_h;
-                continue;
-            }
-
-            // Check if any blocks were written at the probed height (direct DB lookup)
-            // Can't use contiguous height because it starts at 0 and won't advance
-            // when blocks are written far above it.
-            let has_blocks = match self.storage.get_qblock_by_height(probe_h).await {
-                Ok(Some(_)) => true,
-                _ => {
-                    // Try a few heights in the range (block might be at probe_h+1, +2, etc.)
-                    let mut found = false;
-                    for offset in 1..10u64 {
-                        if let Ok(Some(_)) = self.storage.get_qblock_by_height(probe_h + offset).await {
-                            found = true;
-                            break;
-                        }
-                    }
-                    found
-                }
-            };
-
-            if has_blocks {
-                first_found = probe_h;
-                info!("🔗 [CHECKPOINT SYNC] Blocks found at height {} via P2P", probe_h);
+        for &h in &heights {
+            if probe(h) {
+                first_found = h;
+                info!("🔗 [CHECKPOINT SYNC] Blocks found at height {}", h);
                 break;
-            } else {
-                last_empty = probe_h;
-                debug!("🔗 [CHECKPOINT SYNC] Height {} empty (P2P returned no blocks)", probe_h);
             }
+            last_empty = h;
         }
 
+        // If not found, try near-tip
         if first_found == 0 {
-            if last_empty == 0 {
-                info!("🔗 [CHECKPOINT SYNC] Genesis blocks available — full sync");
-                return 0;
-            }
-            // Try near-tip
             for offset in &[1_000_000u64, 500_000, 100_000, 10_000] {
                 let h = target_height.saturating_sub(*offset);
                 if h <= last_empty { continue; }
-                let probe_chunks = vec![(h, h + chunk_size - 1)];
-                let _ = self.download_chunks_parallel(probe_chunks, peers.to_vec()).await;
-                if let Ok(Some(_)) = self.storage.get_qblock_by_height(h).await {
+                if probe(h) {
                     first_found = h;
                     info!("🔗 [CHECKPOINT SYNC] Blocks found at height {} (near-tip)", h);
                     break;
@@ -3250,27 +3250,25 @@ impl TurboSyncManager {
         }
 
         if first_found == 0 {
-            warn!("🔗 [CHECKPOINT SYNC] No blocks found — syncing from genesis");
+            warn!("🔗 [CHECKPOINT SYNC] No blocks found on peers — syncing from genesis");
             return 0;
         }
 
-        // Binary search between last_empty and first_found (±5000 precision)
+        // Step 3: Binary search (±5000 precision)
         let mut lo = last_empty;
         let mut hi = first_found;
-
         while hi - lo > 5000 {
             let mid = lo + (hi - lo) / 2;
-            let probe_chunks = vec![(mid, mid + chunk_size - 1)];
-            let _ = self.download_chunks_parallel(probe_chunks, peers.to_vec()).await;
-            let has_block = self.storage.get_qblock_by_height(mid).await.map(|b| b.is_some()).unwrap_or(false);
-            if has_block {
-                hi = mid;
-            } else {
-                lo = mid;
-            }
+            if probe(mid) { hi = mid; } else { lo = mid; }
         }
 
-        info!("🔗 [CHECKPOINT SYNC] Network checkpoint at height {} (searched {}-{})", hi, last_empty, first_found);
+        // Step 4: Back-check
+        if !probe(hi) {
+            warn!("🔗 [CHECKPOINT SYNC] Back-check failed at {} — syncing from genesis", hi);
+            return 0;
+        }
+
+        info!("🔗 [CHECKPOINT SYNC] Network checkpoint at height {} (searched {}..{})", hi, last_empty, first_found);
         hi
     }
 

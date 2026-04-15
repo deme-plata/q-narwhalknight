@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 # Core dependencies
 tokio = { workspace = true }
+ureq = "2.9"  # v10.3.5: HTTP probe for checkpoint sync (one-time startup)
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
