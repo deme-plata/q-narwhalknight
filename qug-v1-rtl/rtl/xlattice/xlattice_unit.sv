@@ -95,6 +95,9 @@ module xlattice_unit
     localparam logic [6:0] F7_POLY_ADD   = 7'd2;   // Modular addition
     localparam logic [6:0] F7_POLY_MUL   = 7'd3;   // Modular multiplication
     localparam logic [6:0] F7_POLY_RED   = 7'd4;   // Barrett reduction (stub)
+    localparam logic [6:0] F7_MOD_SUB    = 7'd5;   // Modular subtraction
+    localparam logic [6:0] F7_MOD_SQR    = 7'd6;   // Modular squaring (a*a mod p)
+    localparam logic [6:0] F7_SET_MOD    = 7'd7;   // Set custom modulus from SRAM
 
     // =========================================================================
     // Curve25519 prime: p = 2^255 - 19
@@ -111,6 +114,8 @@ module xlattice_unit
         S_WAIT_OPS,         // Waiting for SRAM read valid
         S_EXEC_ADD,         // Execute modular addition
         S_WAIT_ADD,         // Wait for add result
+        S_EXEC_SUB,         // Execute modular subtraction
+        S_WAIT_SUB,         // Wait for sub result
         S_EXEC_MUL,         // Start modular multiplication
         S_WAIT_MUL,         // Wait for multiplication (12 cycles)
         S_WRITEBACK,        // Write result to SRAM
@@ -135,6 +140,11 @@ module xlattice_unit
     logic [255:0] operand_b;
 
     // =========================================================================
+    // Configurable modulus register (default: Curve25519)
+    // =========================================================================
+    logic [255:0] active_modulus;
+
+    // =========================================================================
     // mod_add_256 interface
     // =========================================================================
     logic         add_start;
@@ -147,7 +157,7 @@ module xlattice_unit
         .start   (add_start),
         .op_a    (operand_a),
         .op_b    (operand_b),
-        .modulus (CURVE25519_P),
+        .modulus (active_modulus),
         .result  (add_result),
         .done    (add_done)
     );
@@ -165,9 +175,27 @@ module xlattice_unit
         .start   (mul_start),
         .op_a    (operand_a),
         .op_b    (operand_b),
-        .modulus (CURVE25519_P),
+        .modulus (active_modulus),
         .result  (mul_result),
         .done    (mul_done)
+    );
+
+    // =========================================================================
+    // mod_sub_256 interface (Genus-2 VDF support)
+    // =========================================================================
+    logic         sub_start;
+    logic [255:0] sub_result;
+    logic         sub_done;
+
+    mod_sub_256 u_mod_sub (
+        .clk     (clk),
+        .rst_n   (rst_n),
+        .start   (sub_start),
+        .op_a    (operand_a),
+        .op_b    (operand_b),
+        .modulus (active_modulus),
+        .result  (sub_result),
+        .done    (sub_done)
     );
 
     // =========================================================================
@@ -189,7 +217,10 @@ module xlattice_unit
                         F7_NTT_INV,
                         F7_POLY_RED:  fsm_next = S_STUB_RESPOND;  // Stubs
                         F7_POLY_ADD,
-                        F7_POLY_MUL:  fsm_next = S_FETCH_OPS;     // Real ops
+                        F7_POLY_MUL,
+                        F7_MOD_SUB,
+                        F7_MOD_SQR:   fsm_next = S_FETCH_OPS;     // Real ops
+                        F7_SET_MOD:   fsm_next = S_FETCH_OPS;     // Load modulus from SRAM addr
                         default:      fsm_next = S_STUB_RESPOND;  // Unknown
                     endcase
                 end
@@ -203,7 +234,10 @@ module xlattice_unit
                 if (mem_rd_valid_a && mem_rd_valid_b) begin
                     case (lat_funct7)
                         F7_POLY_ADD: fsm_next = S_EXEC_ADD;
-                        F7_POLY_MUL: fsm_next = S_EXEC_MUL;
+                        F7_MOD_SUB:  fsm_next = S_EXEC_SUB;
+                        F7_POLY_MUL,
+                        F7_MOD_SQR:  fsm_next = S_EXEC_MUL;  // SQR uses mul with op_b=op_a
+                        F7_SET_MOD:  fsm_next = S_RESPOND;    // Just latch, no writeback
                         default:     fsm_next = S_RESPOND;
                     endcase
                 end
@@ -215,6 +249,14 @@ module xlattice_unit
 
             S_WAIT_ADD: begin
                 if (add_done) fsm_next = S_WRITEBACK;
+            end
+
+            S_EXEC_SUB: begin
+                fsm_next = S_WAIT_SUB;
+            end
+
+            S_WAIT_SUB: begin
+                if (sub_done) fsm_next = S_WRITEBACK;
             end
 
             S_EXEC_MUL: begin
@@ -246,14 +288,15 @@ module xlattice_unit
     // =========================================================================
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            fsm_state   <= S_IDLE;
-            lat_funct7  <= 7'd0;
-            lat_rs1     <= 32'd0;
-            lat_rs2     <= 32'd0;
-            lat_rd_addr <= 5'd0;
-            operand_a   <= 256'd0;
-            operand_b   <= 256'd0;
-            result_reg  <= 256'd0;
+            fsm_state      <= S_IDLE;
+            lat_funct7     <= 7'd0;
+            lat_rs1        <= 32'd0;
+            lat_rs2        <= 32'd0;
+            lat_rd_addr    <= 5'd0;
+            operand_a      <= 256'd0;
+            operand_b      <= 256'd0;
+            result_reg     <= 256'd0;
+            active_modulus <= 256'h7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFED; // Curve25519 default
         end else begin
             fsm_state <= fsm_next;
 
@@ -271,9 +314,22 @@ module xlattice_unit
                 operand_b <= mem_rd_data_b;
             end
 
+            // For squaring (mod_sqr), set operand_b = operand_a
+            if (fsm_state == S_WAIT_OPS && mem_rd_valid_a && mem_rd_valid_b && lat_funct7 == F7_MOD_SQR) begin
+                operand_b <= mem_rd_data_a;
+            end
+
+            // Latch custom modulus from operand A
+            if (fsm_state == S_WAIT_OPS && mem_rd_valid_a && mem_rd_valid_b && lat_funct7 == F7_SET_MOD) begin
+                active_modulus <= mem_rd_data_a;
+            end
+
             // Latch results
             if (fsm_state == S_WAIT_ADD && add_done) begin
                 result_reg <= add_result;
+            end
+            if (fsm_state == S_WAIT_SUB && sub_done) begin
+                result_reg <= sub_result;
             end
             if (fsm_state == S_WAIT_MUL && mul_done) begin
                 result_reg <= mul_result;
@@ -300,6 +356,7 @@ module xlattice_unit
     // =========================================================================
     always_comb begin
         add_start = (fsm_state == S_EXEC_ADD);
+        sub_start = (fsm_state == S_EXEC_SUB);
         mul_start = (fsm_state == S_EXEC_MUL);
     end
 

@@ -127,16 +127,23 @@ module xcrypto_unit
     logic [31:0] lat_rs2;
     logic [4:0]  lat_rd_addr;
 
-    // Chain counter — tracks VDF chain iteration
-    logic [6:0]  chain_count;
-    logic [6:0]  chain_target;
+    // Chain counter — widened to support Genus-2 VDF (up to 16,383 iterations)
+    logic [qug_pkg::VDF_CHAIN_DEPTH_W-1:0] chain_count;
+    logic [qug_pkg::VDF_CHAIN_DEPTH_W-1:0] chain_target;
 
     // Pipeline completion flag (for single compression)
     logic        compress_started;
 
-    // FSM watchdog timeout counter
-    logic [9:0]  fsm_timeout_cnt;
+    // FSM watchdog — widened for deep VDF chains (proportional to chain_target)
+    logic [19:0] fsm_timeout_cnt;
     logic        fsm_timeout_error;
+
+    // LWMA difficulty target register (written by firmware via SET_DIFFICULTY)
+    logic [qug_pkg::DIFFICULTY_REG_W-1:0] difficulty_target;
+
+    // Leading-zero counter output
+    logic [7:0]  lzc_count;
+    logic        solution_found;
 
     // =========================================================================
     // Submodule instantiation: BLAKE3 state register file
@@ -183,8 +190,8 @@ module xcrypto_unit
     always_comb begin
         fsm_next = fsm_state;
 
-        // Watchdog: force return to S_IDLE on timeout
-        if (fsm_timeout_cnt == 10'd1000 &&
+        // Watchdog: proportional to chain_target (chain_target * 16 cycles per iteration)
+        if (fsm_timeout_cnt == {chain_target, 6'd0} &&
             (fsm_state == S_FETCH_MSG || fsm_state == S_WAIT_PIPELINE)) begin
             fsm_next = S_IDLE;
         end else begin
@@ -247,24 +254,27 @@ module xcrypto_unit
             lat_rs1        <= 32'd0;
             lat_rs2        <= 32'd0;
             lat_rd_addr    <= 5'd0;
-            chain_count    <= 7'd0;
-            chain_target   <= 7'd0;
+            chain_count    <= '0;
+            chain_target   <= '0;
             compress_started <= 1'b0;
-            fsm_timeout_cnt  <= 10'd0;
+            fsm_timeout_cnt  <= 20'd0;
             fsm_timeout_error <= 1'b0;
+            difficulty_target <= '0;
+            lzc_count        <= 8'd0;
+            solution_found   <= 1'b0;
         end else begin
             fsm_state <= fsm_next;
 
             // Watchdog timeout counter
             if (fsm_state == S_FETCH_MSG || fsm_state == S_WAIT_PIPELINE) begin
-                if (fsm_timeout_cnt < 10'd1000)
-                    fsm_timeout_cnt <= fsm_timeout_cnt + 10'd1;
+                if (fsm_timeout_cnt < {chain_target, 6'd0})
+                    fsm_timeout_cnt <= fsm_timeout_cnt + 20'd1;
             end else begin
-                fsm_timeout_cnt <= 10'd0;
+                fsm_timeout_cnt <= 20'd0;
             end
 
             // Assert error on timeout, clear when FSM returns to idle
-            if (fsm_timeout_cnt == 10'd1000)
+            if (fsm_timeout_cnt == {chain_target, 6'd0})
                 fsm_timeout_error <= 1'b1;
             else if (fsm_state == S_IDLE)
                 fsm_timeout_error <= 1'b0;
@@ -277,9 +287,14 @@ module xcrypto_unit
                 lat_rd_addr <= req_rd_addr;
 
                 if (req_funct7 == F7_CHAIN) begin
-                    // rs2[6:0] = chain length (default 100 for mining)
-                    chain_target <= req_rs2[6:0];
-                    chain_count  <= 7'd0;
+                    // rs2[VDF_CHAIN_DEPTH_W-1:0] = chain length (100 legacy, up to 16383)
+                    chain_target <= req_rs2[qug_pkg::VDF_CHAIN_DEPTH_W-1:0];
+                    chain_count  <= '0;
+                end
+
+                // SET_DIFFICULTY: write LWMA difficulty target from rs1[7:0]
+                if (req_funct7 == 7'd7) begin
+                    difficulty_target <= req_rs1[qug_pkg::DIFFICULTY_REG_W-1:0];
                 end
             end
 
@@ -293,7 +308,7 @@ module xcrypto_unit
 
             // Increment chain counter on writeback
             if (fsm_state == S_CHAIN_WRITEBACK) begin
-                chain_count <= chain_count + 7'd1;
+                chain_count <= chain_count + 1'b1;
             end
         end
     end
@@ -459,6 +474,49 @@ module xcrypto_unit
     end
 
     // =========================================================================
+    // Leading-Zero Counter (LZC) for difficulty checking
+    // =========================================================================
+    // Counts leading zero BITS in the 256-bit hash output (big-endian).
+    // hash_latched[0] is the most significant word.
+    // After VDF chain completes, lzc_count = leading zero bits.
+    // solution_found = (lzc_count >= difficulty_target).
+
+    always_comb begin
+        lzc_count = 8'd0;
+        solution_found = 1'b0;
+
+        // Count leading zero bits across 8 words (big-endian: word 0 = MSW)
+        // Each word contributes 0-32 leading zeros
+        begin : lzc_block
+            logic done_lzc;
+            done_lzc = 1'b0;
+            for (int w = 0; w < 8; w++) begin
+                if (!done_lzc) begin
+                    if (hash_latched[w] == 32'd0) begin
+                        lzc_count = lzc_count + 8'd32;
+                    end else begin
+                        // Count leading zeros in this word (CLZ32)
+                        for (int b = 31; b >= 0; b--) begin
+                            if (!done_lzc) begin
+                                if (hash_latched[w][b] == 1'b0) begin
+                                    lzc_count = lzc_count + 8'd1;
+                                end else begin
+                                    done_lzc = 1'b1;
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        // Check if hash meets difficulty target
+        if (difficulty_target > 0) begin
+            solution_found = (lzc_count >= difficulty_target);
+        end
+    end
+
+    // =========================================================================
     // Core response interface
     // =========================================================================
     always_comb begin
@@ -491,7 +549,8 @@ module xcrypto_unit
                 // Pipeline completed — signal done for round/chain
                 if (pipe_out_valid && !(lat_funct7 == F7_CHAIN && chain_count < chain_target)) begin
                     resp_valid   = 1'b1;
-                    resp_data    = pipe_hash_out[0];  // First hash word as status
+                    // Return solution_found in bit 31, lzc_count in bits [7:0]
+                    resp_data    = {solution_found, 23'd0, lzc_count};
                     resp_rd_addr = lat_rd_addr;
                     resp_wr_en   = 1'b1;
                 end

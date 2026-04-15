@@ -234,4 +234,18 @@ package qug_pkg;
     EXC_ECALL             = 4'd9
   } exc_code_e;
 
+  // ===========================================================================
+  // Mining Algorithm Parameters (v10.3.0+ parity)
+  // ===========================================================================
+
+  // VDF chain depth — widened to support Genus-2 VDF (5K-10K iterations)
+  localparam int unsigned VDF_CHAIN_DEPTH_W   = 14;       // Supports up to 16,383 iterations
+  localparam int unsigned VDF_CHAIN_DEFAULT    = 100;      // Legacy BLAKE3 chain (Quillon v4.1)
+  localparam int unsigned VDF_CHAIN_GENUS2     = 5000;     // Genus-2 VDF minimum iterations
+  localparam int unsigned VDF_CHAIN_GENUS2_MAX = 10000;    // Genus-2 VDF maximum iterations
+
+  // LWMA difficulty adjustment — hardware stores result, software computes
+  localparam int unsigned DIFFICULTY_REG_W     = 8;        // Leading-zero-bit target (max 255)
+  localparam int unsigned LWMA_WINDOW_SIZE     = 60;       // Block window for LWMA (firmware ref)
+
 endpackage : qug_pkg

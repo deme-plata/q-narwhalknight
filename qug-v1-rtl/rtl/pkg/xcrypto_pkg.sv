@@ -132,6 +132,8 @@ package xcrypto_pkg;
   localparam logic [6:0] XCRYPTO_FINALIZE  = 7'b000_0011;  // funct7 = 3
   localparam logic [6:0] XCRYPTO_LOAD_MSG  = 7'b000_0100;  // funct7 = 4, load msg block
   localparam logic [6:0] XCRYPTO_STATUS    = 7'b000_0101;  // funct7 = 5, read engine status
+  localparam logic [6:0] XCRYPTO_SET_VDF_DEPTH = 7'b000_0110;  // funct7 = 6, set VDF depth
+  localparam logic [6:0] XCRYPTO_SET_DIFFICULTY = 7'b000_0111;  // funct7 = 7, set difficulty target
 
   // ===========================================================================
   // Xcrypto Engine Status Bits
@@ -187,5 +189,48 @@ package xcrypto_pkg;
   );
     return (x >> n) | (x << (32 - n));
   endfunction : rotr32
+
+  // ===========================================================================
+  // SHA-3 / Keccak-f[1600] Constants (v10.3.0 — Hybrid Mining Support)
+  // ===========================================================================
+
+  localparam int unsigned KECCAK_ROUNDS     = 24;
+  localparam int unsigned KECCAK_LANES      = 25;   // 5x5 grid
+  localparam int unsigned KECCAK_LANE_W     = 64;   // 64-bit lanes
+  localparam int unsigned SHA3_256_RATE     = 1088;  // Rate in bits (136 bytes)
+  localparam int unsigned SHA3_256_CAPACITY = 512;   // Capacity in bits
+  localparam int unsigned SHA3_256_OUTPUT   = 256;   // Output bits
+  localparam int unsigned SHA3_RATE_LANES   = 17;    // 1088 / 64 = 17 lanes
+
+  // Keccak round constants (RC[0..23])
+  localparam logic [63:0] KECCAK_RC [KECCAK_ROUNDS] = '{
+    64'h0000000000000001, 64'h0000000000008082,
+    64'h800000000000808A, 64'h8000000080008000,
+    64'h000000000000808B, 64'h0000000080000001,
+    64'h8000000080008081, 64'h8000000000008009,
+    64'h000000000000008A, 64'h0000000000000088,
+    64'h0000000080008009, 64'h000000008000000A,
+    64'h000000008000808B, 64'h800000000000008B,
+    64'h8000000000008089, 64'h8000000000008003,
+    64'h8000000000008002, 64'h8000000000000080,
+    64'h000000000000800A, 64'h800000008000000A,
+    64'h8000000080008081, 64'h8000000000008080,
+    64'h0000000080000001, 64'h8000000080008008
+  };
+
+  // Rho rotation offsets [x + 5*y] — how many bits to rotate each lane
+  localparam int unsigned KECCAK_RHO [KECCAK_LANES] = '{
+     0,  1, 62, 28, 27,   // y=0: x=0..4
+    36, 44,  6, 55, 20,   // y=1
+     3, 10, 43, 25, 39,   // y=2
+    41, 45, 15, 21,  8,   // y=3
+    18,  2, 61, 56, 14    // y=4
+  };
+
+  // Xcrypto funct7 encodings for SHA-3 (under funct3 = XCRYPTO_F3_KECCAK = 3'b011)
+  localparam logic [6:0] KECCAK_INIT    = 7'b000_0000;  // funct7 = 0: Zero state
+  localparam logic [6:0] KECCAK_ABSORB  = 7'b000_0001;  // funct7 = 1: XOR rate block
+  localparam logic [6:0] KECCAK_SQUEEZE = 7'b000_0010;  // funct7 = 2: Permute + extract
+  localparam logic [6:0] KECCAK_CHAIN   = 7'b000_0011;  // funct7 = 3: SHA-3 VDF chain
 
 endpackage : xcrypto_pkg
