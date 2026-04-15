@@ -75,7 +75,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.3.0"  # v10.3.0: PQC auto-learn validator keys, K-Gauge v4, crypto dashboard, LWMA difficulty, mining fairness
+version = "10.3.5"  # v10.3.5: Dual-lane VDF mining, Montgomery 200μs/dbl, Checkpoint Sync, 19× VDF optimization
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"
