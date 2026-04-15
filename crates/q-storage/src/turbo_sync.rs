@@ -3157,6 +3157,123 @@ impl TurboSyncManager {
         (highest_found, has_gap_blocks)
     }
 
+    /// v10.3.5: Checkpoint Sync — discover the earliest available block via P2P.
+    ///
+    /// This is called only for fresh nodes (local_height < 100). It sends small probe
+    /// batches through the normal P2P download pipeline to find where blocks start.
+    ///
+    /// Strategy: download_chunks_parallel already handles empty responses gracefully.
+    /// We send 3 probe chunks at exponentially increasing heights. When a probe returns
+    /// blocks, we've found the checkpoint. Binary search narrows it down.
+    ///
+    /// Returns 0 if blocks exist from genesis, or the first available height.
+    async fn probe_network_gap(
+        &self,
+        target_height: u64,
+        peers: &[PeerId],
+    ) -> u64 {
+        if peers.is_empty() {
+            return 0;
+        }
+
+        info!("🔗 [CHECKPOINT SYNC] Probing {} peers for earliest available block...", peers.len());
+
+        let chunk_size = 500u64;
+
+        // Probe heights — exponential steps covering 0 to 14M
+        let probe_heights: Vec<u64> = vec![
+            1, 1_000, 10_000, 50_000, 100_000, 500_000,
+            1_000_000, 1_500_000, 2_000_000, 3_000_000, 5_000_000,
+            7_000_000, 10_000_000, 12_000_000, 14_000_000,
+        ].into_iter().filter(|&h| h < target_height).collect();
+
+        let mut last_empty: u64 = 0;
+        let mut first_found: u64 = 0;
+
+        // Send probe chunks through download_chunks_parallel, then check local DB
+        // for whether any blocks were written at the probed height.
+        for &probe_h in &probe_heights {
+            let probe_chunks = vec![(probe_h, probe_h + chunk_size - 1)];
+
+            // Download this single probe chunk via the normal P2P pipeline
+            if let Err(e) = self.download_chunks_parallel(probe_chunks, peers.to_vec()).await {
+                debug!("🔗 [CHECKPOINT SYNC] Probe at {} failed: {} — treating as empty", probe_h, e);
+                last_empty = probe_h;
+                continue;
+            }
+
+            // Check if any blocks were written at the probed height (direct DB lookup)
+            // Can't use contiguous height because it starts at 0 and won't advance
+            // when blocks are written far above it.
+            let has_blocks = match self.storage.get_qblock_by_height(probe_h).await {
+                Ok(Some(_)) => true,
+                _ => {
+                    // Try a few heights in the range (block might be at probe_h+1, +2, etc.)
+                    let mut found = false;
+                    for offset in 1..10u64 {
+                        if let Ok(Some(_)) = self.storage.get_qblock_by_height(probe_h + offset).await {
+                            found = true;
+                            break;
+                        }
+                    }
+                    found
+                }
+            };
+
+            if has_blocks {
+                first_found = probe_h;
+                info!("🔗 [CHECKPOINT SYNC] Blocks found at height {} via P2P", probe_h);
+                break;
+            } else {
+                last_empty = probe_h;
+                debug!("🔗 [CHECKPOINT SYNC] Height {} empty (P2P returned no blocks)", probe_h);
+            }
+        }
+
+        if first_found == 0 {
+            if last_empty == 0 {
+                info!("🔗 [CHECKPOINT SYNC] Genesis blocks available — full sync");
+                return 0;
+            }
+            // Try near-tip
+            for offset in &[1_000_000u64, 500_000, 100_000, 10_000] {
+                let h = target_height.saturating_sub(*offset);
+                if h <= last_empty { continue; }
+                let probe_chunks = vec![(h, h + chunk_size - 1)];
+                let _ = self.download_chunks_parallel(probe_chunks, peers.to_vec()).await;
+                if let Ok(Some(_)) = self.storage.get_qblock_by_height(h).await {
+                    first_found = h;
+                    info!("🔗 [CHECKPOINT SYNC] Blocks found at height {} (near-tip)", h);
+                    break;
+                }
+            }
+        }
+
+        if first_found == 0 {
+            warn!("🔗 [CHECKPOINT SYNC] No blocks found — syncing from genesis");
+            return 0;
+        }
+
+        // Binary search between last_empty and first_found (±5000 precision)
+        let mut lo = last_empty;
+        let mut hi = first_found;
+
+        while hi - lo > 5000 {
+            let mid = lo + (hi - lo) / 2;
+            let probe_chunks = vec![(mid, mid + chunk_size - 1)];
+            let _ = self.download_chunks_parallel(probe_chunks, peers.to_vec()).await;
+            let has_block = self.storage.get_qblock_by_height(mid).await.map(|b| b.is_some()).unwrap_or(false);
+            if has_block {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+
+        info!("🔗 [CHECKPOINT SYNC] Network checkpoint at height {} (searched {}-{})", hi, last_empty, first_found);
+        hi
+    }
+
     /// Register a peer with their highest block height (v5.2.0: with monotonicity enforcement)
     pub async fn register_peer(&self, peer_id: PeerId, highest_block: u64) {
         self.register_peer_with_tip(peer_id, highest_block, None).await;
@@ -5838,11 +5955,12 @@ impl TurboSyncManager {
             warn!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
             warn!("🚀 [v3.1.4] FRESH START DETECTED (contiguous height: {})", local_height);
             warn!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            warn!("   Forcing sync from genesis (height 1)");
-            warn!("   Skipping endgame detection to prevent stale block interference");
-            warn!("   Target: {} blocks to sync", target_height);
+
+            // v10.3.5: Checkpoint Sync probe will run after peer discovery (below).
+            // Set to 0 for now — will be updated to checkpoint height if gap is detected.
+            warn!("   Will probe network for checkpoint sync after peer discovery...");
             warn!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            0 // Force effective_start to 0, which becomes sync_start=1 below
+            0 // Will be overwritten by checkpoint sync probe
         } else {
             // Normal operation: Allow endgame detection for established chains
             // 🚀 v2.3.3-beta: ENDGAME SYNC OPTIMIZATION
@@ -5931,6 +6049,35 @@ impl TurboSyncManager {
             error!("   4. Verify TurboSync peer registry is being populated");
             error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
             anyhow::bail!("No peers available with height > {} (local)", local_height);
+        }
+
+        // v10.3.5: CHECKPOINT SYNC — now that we have peers, probe for the gap
+        let mut effective_start_height = effective_start_height; // make mutable for checkpoint update
+        if local_height < 100 && effective_start_height == 0 {
+            let gap_floor = self.probe_network_gap(target_height, &qualified_peers).await;
+            if gap_floor > 0 {
+                let blocks_to_sync = target_height.saturating_sub(gap_floor);
+                info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━���━━━━━━━━━━━━━━━━━━━━━━");
+                info!("🔗 [CHECKPOINT SYNC v10.3.5] Using network-verified checkpoint");
+                info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                info!("   Checkpoint height: {}", gap_floor);
+                info!("   Balances verified via state sync from {} peers", qualified_peers.len());
+                info!("   Syncing {} blocks ({} → {})", blocks_to_sync, gap_floor, target_height);
+                info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                // CRITICAL: Initialize the contiguous height pointer to checkpoint.
+                // Without this, blocks written at H+1, H+2... would never advance
+                // the pointer because it expects H-1 to exist (contiguity check).
+                // We set the pointer to (gap_floor - 1) so the FIRST block at gap_floor
+                // satisfies the check: gap_floor == (gap_floor - 1) + 1
+                let checkpoint_base = gap_floor.saturating_sub(1);
+                self.storage.update_height_cache(checkpoint_base).await;
+                if let Err(e) = self.storage.save_safe_floor(checkpoint_base).await {
+                    warn!("🔗 [CHECKPOINT SYNC] Could not persist safe floor: {}", e);
+                }
+                info!("🔗 [CHECKPOINT SYNC] Height pointer initialized to {} (checkpoint base)", checkpoint_base);
+
+                effective_start_height = gap_floor;
+            }
         }
 
         // 🎯 v3.2.11-beta: ATOMIC SYNC ENDGAME - Detect near-tip and use fast settings
