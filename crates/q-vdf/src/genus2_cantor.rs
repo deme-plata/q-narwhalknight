@@ -487,9 +487,12 @@ impl Poly {
                 continue;
             }
             for (j, b) in other.coeffs.iter().enumerate() {
-                let prod = mod_p(&(a * b), &self.modulus);
-                coeffs[i + j] = mod_p(&(coeffs[i + j].clone() + &prod), &self.modulus);
+                coeffs[i + j] += a * b;
             }
+        }
+        // Single reduction pass at the end (instead of per-element)
+        for c in &mut coeffs {
+            *c = c.mod_floor(&self.modulus);
         }
         Poly {
             coeffs,
@@ -1202,15 +1205,68 @@ pub fn double_fast(d: &JacElement, curve: &CurveParams) -> Result<JacElement> {
         // and 2v is constant. Proceed with generic.
     }
 
-    // Extended GCD of u and 2v using Poly (needed for cofactor t)
-    // Since we're working with small degrees, use the Poly path for correctness
-    let u_poly = Poly { coeffs: u_coeffs.to_vec(), modulus: p.clone() };
-    let two_v_poly = Poly { coeffs: two_v.to_vec(), modulus: p.clone() };
-    let (d_poly, _s, t) = u_poly.gcd_extended(&two_v_poly);
+    // Inline extended GCD for deg(u)=2 monic, deg(2v)≤1
+    // Avoids Poly struct overhead entirely.
+    // We need cofactor t such that s·u + t·(2v) = gcd.
+    //
+    // If 2v1 ≠ 0: one Euclidean step gives u mod 2v = constant.
+    //   u = q·(2v) + r where q is linear, r is constant.
+    //   Then gcd(u, 2v) = gcd(2v, r).
+    //   If r ≠ 0 → gcd = 1 (generic case, >99.99% of the time).
+    //   Back-substitution gives t = inv(2v evaluated at tangent point).
+    //
+    // If 2v1 == 0 && 2v0 ≠ 0: gcd = 1 trivially (u monic deg 2, 2v constant).
+    //   t = inv(2v0).
 
-    if d_poly.degree() > 0 {
-        // Non-generic — fall back to full Cantor
-        return double_jacobian(d, curve);
+    let t_coeffs: Vec<BigInt>;
+    if !two_v[1].is_zero() {
+        // 2v = 2v1·x + 2v0, u = x² + u1·x + u0 (monic)
+        // Step 1: u mod (2v) — remainder is constant
+        // u = (x/(2v1) + (u1 - 2v0/(2v1))/(2v1)) · (2v) + r
+        // r = u0 - 2v0 · (u1·(2v1) - 2v0) / (2v1)²
+        // But simpler: just evaluate directly.
+        // u mod (2v): since 2v = 2v1·(x - root) where root = -2v0/2v1,
+        // u mod (2v) = u(root) = root² + u1·root + u0
+        let inv_2v1 = mod_inv(&two_v[1], &p)?;
+        let root = (&p - &((&two_v[0] * &inv_2v1).mod_floor(&p))).mod_floor(&p);
+        let r = (&root * &root + &u1 * &root + &u0).mod_floor(&p);
+
+        if r.is_zero() {
+            // Non-generic case: gcd > 1 → fall back to full Cantor
+            return double_jacobian(d, curve);
+        }
+
+        // gcd = 1 (generic). Compute t such that t·(2v) ≡ 1 mod u.
+        // t = [t0, t1] (degree ≤ 1), solving the 2x2 system:
+        //   (t0 + t1·x)(2v0 + 2v1·x) ≡ 1 mod (x² + u1·x + u0)
+        //
+        // Expanding and reducing x² = -u1·x - u0:
+        //   coeff of x⁰: 2v0·t0 - 2v1·u0·t1 = 1       ... (A)
+        //   coeff of x¹: 2v1·t0 + (2v0 - 2v1·u1)·t1 = 0 ... (B)
+        //
+        // Matrix form: [[a, b], [c, d]] · [t0, t1] = [1, 0]
+        let a = &two_v[0];                                          // 2v0
+        let b = (&p - &(&two_v[1] * &u0).mod_floor(&p)).mod_floor(&p); // -2v1·u0
+        let c = &two_v[1];                                          // 2v1
+        let dd = (&two_v[0] - &two_v[1] * &u1).mod_floor(&p);      // 2v0 - 2v1·u1
+
+        // det = a·d - b·c
+        let det = (a * &dd - &b * c).mod_floor(&p);
+        let inv_det = mod_inv(&det, &p)?;
+
+        // Cramer's rule: t0 = d/det, t1 = -c/det
+        let t0 = (&dd * &inv_det).mod_floor(&p);
+        let t1 = ((&p - c) * &inv_det).mod_floor(&p);
+
+        t_coeffs = vec![t0, t1];
+    } else if !two_v[0].is_zero() {
+        // 2v is a non-zero constant c. gcd(u, c) = 1 since u is monic.
+        // t·c ≡ 1 mod u → t = inv(c) (a constant)
+        let inv_c = mod_inv(&two_v[0], &p)?;
+        t_coeffs = vec![inv_c];
+    } else {
+        // 2v = 0 → tangent is vertical → identity
+        return Ok(JacElement::identity());
     }
 
     // f polynomial: [a0, a1, a2, a3, a4, 1]
@@ -1232,8 +1288,7 @@ pub fn double_fast(d: &JacElement, curve: &CurveParams) -> Result<JacElement> {
     }
     let (k, _rem) = pdivrem(&f_minus_vsq, &u_coeffs, &p);
 
-    // l = t * k mod u (t is cofactor from extended GCD)
-    let t_coeffs: Vec<BigInt> = t.coeffs.clone();
+    // l = t * k mod u (t is cofactor from inline extended GCD)
     let tk = pmul(&t_coeffs, &k, &p);
     let (_, l) = pdivrem(&tk, &u_coeffs, &p);
     let l0 = l.first().cloned().unwrap_or(BigInt::zero());
@@ -1492,16 +1547,16 @@ pub fn generate_proof(
     let mut pi = JacElement::identity();
     if r >= c_bigint {
         r -= &c_bigint;
-        pi = add_jacobian(&pi, g, curve)?;
+        pi = add_distinct(&pi, g, curve)?;
     }
 
     // Process the remaining T zero bits (from position T-1 down to 0):
     for i in (0..iterations).rev() {
         r = &r * BigInt::from(2);  // shift in a '0' bit
-        pi = double_jacobian(&pi, curve)?;
+        pi = double_fast(&pi, curve)?;
         if r >= c_bigint {
             r -= &c_bigint;
-            pi = add_jacobian(&pi, g, curve)?;
+            pi = add_distinct(&pi, g, curve)?;
         }
 
         if i % 100_000 == 0 && i > 0 {
