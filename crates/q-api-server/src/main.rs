@@ -3307,10 +3307,40 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     // Balance restoration uses Plan B: Beta's authority sync copies correct QUG balances.
     // Reorg handler is DISABLED so balances won't be destroyed again.
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // v10.3.6: CHAIN-SCANNING MIGRATIONS DISABLED
+    // ═══════════════════════════════════════════════════════════════════════
+    // rebuild_balances_from_chain() silently crashes after ~50s of CPU time
+    // when scanning partial databases (15M+ blocks). Root cause unknown —
+    // no panic, no OOM, no backtrace. Documented in:
+    //   docs/session-review-2026-04-13-14.md (P0)
+    //   docs/technical-review-plan-b-beta-balance-restore.md
+    //
+    // These migrations call rebuild_balances_from_chain() directly or
+    // indirectly, causing nodes to enter an unrecoverable restart loop
+    // where port 8080 never binds.
+    //
+    // FIX: All chain-scanning migrations are now disabled by default.
+    // Balances are obtained via P2P state sync (Q_BALANCE_AUTHORITY_PEER)
+    // or gossipsub balance-updates from connected peers.
+    //
+    // To re-enable for debugging: Q_ENABLE_CHAIN_REBUILD=1
+    // ═══════════════════════════════════════════════════════════════════════
+    let chain_rebuild_enabled = std::env::var("Q_ENABLE_CHAIN_REBUILD")
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(false);
+
+    if chain_rebuild_enabled {
+        warn!("⚠️  [v10.3.6] Q_ENABLE_CHAIN_REBUILD=1 — chain-scanning migrations ENABLED (dangerous on partial DBs!)");
+    } else {
+        info!("🛡️ [v10.3.6] Chain-scanning migrations DISABLED (safe default). Balances via P2P state sync.");
+        info!("   To re-enable: set Q_ENABLE_CHAIN_REBUILD=1 (only for debugging on Docker test nodes)");
+    }
+
     // v8.5.0: One-time testnet wallet purge + rebuild from mainnet blocks.
     // Pass emission controller total so balances are scaled to match reality.
     // Also load the balance watermark to prevent re-inflation on restart.
-    {
+    if chain_rebuild_enabled {
         let emission_total = match balance_engine.get_emission_summary().await {
             Ok(summary) => summary.total_supply,
             Err(_) => 0, // No emission state → skip scaling
@@ -3369,7 +3399,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     // v8.5.4: MONEY GLITCH FIX — Reconcile wallet balances with DEX swap history.
     // State sync was importing stale balances from peers, overwriting DEX swap debits.
     // This one-time migration rebuilds balances from chain + applies swap debits/credits.
-    {
+    if chain_rebuild_enabled {
         match state.storage_engine.reconcile_balances_with_dex_swaps().await {
             Ok(true) => {
                 // Reconciliation happened — refresh in-memory wallet_balances from RocksDB
@@ -3536,7 +3566,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     // v8.8.1: Full chain balance rebuild with proportional scaling.
     // Replays chain for correct relative proportions (coinbase + transfers), then
     // scales total to match emission controller (~69K QUG). Preserves proportional shares.
-    {
+    if chain_rebuild_enabled {
         let emission_total_for_rebuild = match balance_engine.get_emission_summary().await {
             Ok(summary) => summary.total_supply,
             Err(_) => 0,
@@ -3565,7 +3595,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     // v8.8.5: Deterministic full-chain transaction replay + proportional scaling.
     // Replays every block from genesis, computes expected emission from FIRST PRINCIPLES
     // (genesis + halving schedule), scales proportionally. Does NOT trust controller state.
-    {
+    if chain_rebuild_enabled {
         match state.storage_engine.deterministic_tx_replay_v885().await {
             Ok(true) => {
                 // Refresh in-memory balances from RocksDB
@@ -3680,7 +3710,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     // v1.0.3: Full state convergence migration — deterministic replay of QUG + vault state.
     // Replays entire chain to rebuild wallet balances AND CollateralVault from block data.
     // Runs ONCE per node (flag: migration_safe_convergence_v103_done).
-    {
+    if chain_rebuild_enabled {
         match state.storage_engine.safe_batched_convergence_v103().await {
             Ok(true) => {
                 let qug = 1_000_000_000_000_000_000_000_000u128;
