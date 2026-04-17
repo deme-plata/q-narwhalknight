@@ -1086,8 +1086,31 @@ impl BalanceConsensusEngine {
 
         let mut updates = Vec::new();
 
-        // Dedup check - don't double-credit
+        // =========================================================================
+        // v10.3.6: PERSISTENT DEDUP — fixes balance inflation on restart
+        // The identical pattern already runs in process_block_mining_rewards_tx()
+        // since v10.3.2. This function was missed, causing catch-up blocks
+        // after restart to be double-counted (406 QUG → 5000+).
+        // Uses tx.get/tx.put (same as process_block_mining_rewards_tx line 707).
+        // =========================================================================
         let block_hash = self.calculate_block_hash(block);
+        let block_hash_hex = hex::encode(&block_hash);
+        let persistent_key = format!("processed_balance_block:{}", &block_hash_hex);
+
+        // Check 1: Persistent RocksDB flag via transaction (survives restart)
+        match tx.get("manifest", persistent_key.as_bytes()).await {
+            Ok(Some(_)) => {
+                trace!("⏭️ Block {} already processed (PERSISTENT, height {}), skipping coinbase",
+                       &block_hash_hex[..16], block.header.height);
+                return Ok(Vec::new());
+            }
+            Ok(None) => {} // Not yet processed — continue
+            Err(e) => {
+                warn!("⚠️ [PERSISTENT DEDUP] Check failed: {} — falling through to LRU", e);
+            }
+        }
+
+        // Check 2: In-memory LRU (fast backup)
         {
             let mut processed = self.processed_blocks.write().await;
             if processed.contains(&block_hash) {
@@ -1237,7 +1260,13 @@ impl BalanceConsensusEngine {
             }
         }
 
-        // v7.1.3: Block already marked as processed at entry (atomic check-and-set)
+        // v10.3.6: Mark block as processed PERSISTENTLY via transaction (survives restart)
+        // Written AFTER successful balance processing — if we crash before this,
+        // the block will be reprocessed on restart (safe: balance writes already persisted).
+        if let Err(e) = tx.put("manifest", persistent_key.as_bytes(), b"1").await {
+            warn!("⚠️ [PERSISTENT DEDUP] Failed to write flag for block {} at height {}: {} — block may re-process on restart",
+                  &block_hash_hex[..16], block.header.height, e);
+        }
 
         Ok(updates)
     }
