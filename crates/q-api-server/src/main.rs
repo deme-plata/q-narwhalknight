@@ -23205,8 +23205,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/version", get(handlers::version_info))
         .route("/api/v1/crypto/capabilities", get(handlers::crypto_capabilities)) // v7.2.12: EternalCypher capabilities
         .route("/api/v1/blocks/:height", get(handlers::get_block_by_height)) // v0.9.59-beta: HTTP fallback sync
-        .route("/health", get(|| async { "OK" })) // v10.3.6: Health check for watchdog/k8s probes
-        .route("/healthz", get(|| async { "OK" })) // v10.3.6: Kubernetes-style health
+        .route("/healthz", get(|| async { "OK" })) // v10.3.6: Kubernetes-style health probe
         .route("/metrics", get(handlers::metrics))
         // v5.1.1: Deploy Admin Panel - master-wallet-only rolling deployment control
         .route("/api/v1/admin/deploy/status", get(q_api_server::deploy_admin_api::deploy_status))
