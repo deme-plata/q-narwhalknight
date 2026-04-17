@@ -739,13 +739,16 @@ pub async fn get_block_by_height(
 ) -> Result<Json<ApiResponse<q_types::QBlock>>, StatusCode> {
     debug!("📥 HTTP request for block at height {}", height);
 
-    match state.storage_engine.get_qblock_by_height(height).await {
+    // v10.3.6: Use get_qblock_any_format() to search BOTH qblock:height:{N}
+    // AND qblock:dag:{N}:{proposer} keys. Fixes checkpoint sync HTTP probe
+    // returning 404 for 545K blocks stored in DAG format.
+    match state.storage_engine.get_qblock_any_format(height).await {
         Ok(Some(block)) => {
-            debug!("✅ Serving block at height {}", height);
+            debug!("✅ Serving block at height {} (any-format)", height);
             Ok(Json(ApiResponse::success(block)))
         }
         Ok(None) => {
-            warn!("❌ Block not found at height {}", height);
+            debug!("Block not found at height {} (checked all formats)", height);
             Err(StatusCode::NOT_FOUND)
         }
         Err(e) => {
