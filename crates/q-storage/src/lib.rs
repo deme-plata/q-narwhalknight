@@ -2169,6 +2169,95 @@ impl QStorage {
             }
         }
 
+        // ═══════════════════════════════════════════════════════════════════
+        // v10.3.6: DAG KEY FALLBACK
+        // ═══════════════════════════════════════════════════════════════════
+        // 545,710 blocks are stored under "qblock:dag:{height}:{proposer}"
+        // from early chain history (gossipsub-received before turbo sync existed).
+        // The multi_get above only searches "qblock:height:{N}" and misses them.
+        //
+        // For each height that multi_get returned None, check if a DAG entry
+        // exists. This is a per-height prefix scan — O(log N) seek per height.
+        // For typical 200-block pack requests, this adds ~20ms on NVMe.
+        //
+        // READ-ONLY: no database writes. No key format changes. Just smarter reads.
+        // ═══════════════════════════════════════════════════════════════════
+        let height_found: std::collections::HashSet<u64> = blocks.iter()
+            .map(|b| b.header.height)
+            .collect();
+
+        let dag_needed: Vec<u64> = (start_height..=end_height)
+            .filter(|h| !height_found.contains(h))
+            .collect();
+
+        let mut dag_found = 0u64;
+        let mut dag_scanned = 0u64;
+        let mut dag_deser_errors = 0u64;
+
+        if !dag_needed.is_empty() {
+            debug!("🔍 [DAG FALLBACK] Checking {} missing heights for qblock:dag: entries (range {}..={})",
+                   dag_needed.len(), start_height, end_height);
+
+            for &height in &dag_needed {
+                dag_scanned += 1;
+
+                let dag_prefix = format!("qblock:dag:{}:", height);
+                let dag_entries = match self.hot_db.scan_prefix(CF_BLOCKS, dag_prefix.as_bytes()).await {
+                    Ok(entries) => entries,
+                    Err(e) => {
+                        debug!("⚠️ [DAG FALLBACK] scan_prefix error at height {}: {}", height, e);
+                        continue;
+                    }
+                };
+
+                // Take the first entry (deterministic: byte-order of proposer hash)
+                if let Some((_key, value)) = dag_entries.into_iter().next() {
+                    // Deserialize — handle compressed and legacy formats
+                    let deser_result = if precompressed_storage::is_precompressed(&value) {
+                        precompressed_storage::PrecompressedBlock::from_bytes(&value)
+                            .and_then(|c| c.decompress().map_err(|e| e.into()))
+                            .and_then(|raw| q_types::legacy::deserialize_qblock_with_fallback(&raw)
+                                .map_err(|e| anyhow::anyhow!("{}", e)))
+                    } else {
+                        q_types::legacy::deserialize_qblock_with_fallback(&value)
+                            .map_err(|e| anyhow::anyhow!("{}", e))
+                    };
+
+                    match deser_result {
+                        Ok(block) => {
+                            // Safety check: verify height matches key
+                            if block.header.height == height {
+                                blocks.push(block);
+                                dag_found += 1;
+                                missing_count = missing_count.saturating_sub(1);
+                            } else {
+                                warn!("⚠️ [DAG FALLBACK] Height mismatch at key qblock:dag:{}:* — key claims {} but block.header.height={}. Skipping.",
+                                      height, height, block.header.height);
+                            }
+                        }
+                        Err(e) => {
+                            dag_deser_errors += 1;
+                            if dag_deser_errors <= 3 {
+                                debug!("⚠️ [DAG FALLBACK] Deserialization failed at height {}: {}. Skipping (peer will try another node).",
+                                       height, e);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Re-sort by height after adding DAG blocks
+            if dag_found > 0 {
+                blocks.sort_by_key(|b| b.header.height);
+            }
+
+            // Log summary (not per-block — avoids spam during full sync)
+            if dag_found > 0 || dag_scanned >= 100 {
+                info!("🔍 [DAG FALLBACK] Scanned {} heights, found {} blocks from qblock:dag: format (errors: {}). Range: {}..={}",
+                      dag_scanned, dag_found, dag_deser_errors, start_height, end_height);
+            }
+        }
+
         let elapsed = fetch_start.elapsed();
         let rate = if elapsed.as_millis() > 0 {
             (blocks.len() as u128 * 1000) / elapsed.as_millis()
@@ -2176,8 +2265,8 @@ impl QStorage {
             blocks.len() as u128 * 1000
         };
 
-        info!("✅ [BATCH FETCH] Got {}/{} blocks in {:?} ({} blocks/sec, {} missing)",
-              blocks.len(), keys.len(), elapsed, rate, missing_count);
+        info!("✅ [BATCH FETCH] Got {}/{} blocks in {:?} ({} blocks/sec, {} missing, {} from DAG)",
+              blocks.len(), keys.len(), elapsed, rate, missing_count, dag_found);
 
         Ok(blocks)
     }
