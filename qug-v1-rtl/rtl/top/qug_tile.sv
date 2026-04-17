@@ -143,6 +143,7 @@ module qug_tile
         scratch_bulk_en = 1'b0;
     end
 
+    (* dont_touch = "true" *)
     xcrypto_scratchpad u_xc_scratch (
         .clk          (clk),
         .rst_n        (rst_n),
@@ -212,6 +213,7 @@ module qug_tile
     // =========================================================================
     // RISC-V Core
     // =========================================================================
+    (* dont_touch = "true" *)
     qug_core u_core (
         .clk             (clk),
         .rst_n           (rst_n),
@@ -250,6 +252,7 @@ module qug_tile
     // =========================================================================
     // Xcrypto Extension Unit (BLAKE3 hardware pipeline)
     // =========================================================================
+    (* dont_touch = "true" *)
     xcrypto_unit u_xcrypto (
         .clk           (clk),
         .rst_n         (rst_n),
@@ -276,6 +279,7 @@ module qug_tile
     // =========================================================================
     // Xlattice Extension Unit (256-bit field arithmetic)
     // =========================================================================
+    (* dont_touch = "true" *)
     xlattice_unit u_xlattice (
         .clk             (clk),
         .rst_n           (rst_n),

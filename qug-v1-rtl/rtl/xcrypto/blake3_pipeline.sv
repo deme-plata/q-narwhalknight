@@ -150,6 +150,7 @@ module blake3_pipeline #(
     logic round_out_valid [0:NUM_ROUNDS-1];
 
     genvar r;
+    (* dont_touch = "true" *)
     generate
         for (r = 0; r < NUM_ROUNDS; r++) begin : gen_rounds
             blake3_round u_round (

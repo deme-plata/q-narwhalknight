@@ -151,6 +151,7 @@ module xlattice_unit
     logic [255:0] add_result;
     logic         add_done;
 
+    (* dont_touch = "true" *)
     mod_add_256 u_mod_add (
         .clk     (clk),
         .rst_n   (rst_n),
@@ -169,6 +170,7 @@ module xlattice_unit
     logic [255:0] mul_result;
     logic         mul_done;
 
+    (* dont_touch = "true" *)
     mod_mul_256 u_mod_mul (
         .clk     (clk),
         .rst_n   (rst_n),
@@ -187,6 +189,7 @@ module xlattice_unit
     logic [255:0] sub_result;
     logic         sub_done;
 
+    (* dont_touch = "true" *)
     mod_sub_256 u_mod_sub (
         .clk     (clk),
         .rst_n   (rst_n),
