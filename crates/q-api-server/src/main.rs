@@ -17801,7 +17801,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
                     // After 12 consecutive stalls (60s threshold, 10s interval = ~120s frozen),
                     // exit to let systemd restart
-                    if consecutive_stalls >= 12 {
+                    // v10.3.6: Increased from 12 (120s) to 60 (600s) — node needs time
+                    // to catch up after restart before producing blocks. The old 120s
+                    // threshold caused a restart loop where catch-up never completed.
+                    if consecutive_stalls >= 60 {
                         eprintln!("🚨🐕 [PROD-WATCHDOG] FATAL: Production loop frozen for {}s — watchdog forcing restart",
                                  consecutive_stalls * 10);
                         std::process::exit(1);
