@@ -3191,16 +3191,22 @@ impl TurboSyncManager {
         ];
 
         // Probe helper: check if ANY peer has a block at height h
+        // v10.3.6: Uses /api/v1/sync/blocks?from_height=X&limit=1 instead of
+        // /api/v1/blocks/{height}. The blocks endpoint returns 404 for all heights
+        // due to high_performance_server route interception (pre-existing bug).
+        // The sync/blocks endpoint works correctly and returns block data.
         let probe = |height: u64| -> bool {
             for url in &bootstrap_urls {
-                let block_url = format!("{}/api/v1/blocks/{}", url, height);
-                match ureq::get(&block_url)
+                let sync_url = format!("{}/api/v1/sync/blocks?from_height={}&limit=1", url, height);
+                match ureq::get(&sync_url)
                     .timeout(std::time::Duration::from_secs(8))
                     .call()
                 {
                     Ok(resp) => {
                         if let Ok(text) = resp.into_string() {
-                            if text.len() > 50 && text.contains("height") {
+                            // Response: {"success":true,"data":{"blocks":[...],...}}
+                            // If blocks array is non-empty, block exists at this height
+                            if text.contains("\"blocks\":[{") {
                                 return true;
                             }
                         }
