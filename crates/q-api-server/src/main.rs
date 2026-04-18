@@ -8897,6 +8897,45 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 continue;
                             }
 
+                            // ═══════════════════════════════════════════════════════════
+                            // v10.3.7: BLOCK-LEVEL DEDUP for gossipsub balance updates
+                            // ═══════════════════════════════════════════════════════════
+                            // Prevents double-counting when the same block's effects
+                            // arrive via BOTH gossipsub balance-update (this path) AND
+                            // block processing (process_block_mining_rewards_tx).
+                            // Without this, 1 QUG transfer can become 2-3 QUG.
+                            // ═══════════════════════════════════════════════════════════
+                            {
+                                let gossip_dedup_key = format!(
+                                    "gossip_bal_dedup:{}:{}",
+                                    update.block_height,
+                                    &hex::encode(&wallet_bytes)[..16]
+                                );
+                                match app_state_gossip.storage_engine
+                                    .get_processed_block_flag(&gossip_dedup_key).await
+                                {
+                                    Ok(true) => {
+                                        debug!("⏭️ [P2P BALANCE] Block {}+wallet already applied via gossip, skipping",
+                                               update.block_height);
+                                        continue;
+                                    }
+                                    _ => {} // Not seen or error — proceed
+                                }
+
+                                // Also check if the block was already processed via block path
+                                let sol_hash_hex = hex::encode(&update.solution_hash);
+                                let block_dedup_key = format!(
+                                    "processed_balance_block:{}",
+                                    &sol_hash_hex
+                                );
+                                if let Ok(true) = app_state_gossip.storage_engine
+                                    .get_processed_block_flag(&block_dedup_key).await
+                                {
+                                    debug!("⏭️ [P2P BALANCE] Block already processed via block path, skipping gossip");
+                                    continue;
+                                }
+                            }
+
                             // v8.3.0: Read current balance from RocksDB (not HashMap) before adding.
                             // Previous: read stale HashMap → add → save back to RocksDB = corrupted truth.
                             // Now: read RocksDB → add → save → set HashMap. RocksDB stays authoritative.
@@ -8927,6 +8966,14 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             {
                                 error!("❌ [P2P BALANCE] Failed to persist: {}", e);
                             } else {
+                                // v10.3.7: Set gossip dedup flag AFTER successful persist
+                                let gossip_dedup_key = format!(
+                                    "gossip_bal_dedup:{}:{}",
+                                    update.block_height,
+                                    &hex::encode(&wallet_bytes)[..16]
+                                );
+                                let _ = app_state_gossip.storage_engine
+                                    .set_processed_block_flag(&gossip_dedup_key).await;
                                 info!("💰 [P2P BALANCE] ✅ Applied (v{}) from {}: {} +{} = {} (height {})",
                                       update.version,
                                       &update.origin_node_id[..12.min(update.origin_node_id.len())],
