@@ -17801,11 +17801,19 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
                     // After 12 consecutive stalls (60s threshold, 10s interval = ~120s frozen),
                     // exit to let systemd restart
-                    // v10.3.6: Increased from 12 (120s) to 60 (600s) — node needs time
-                    // to catch up after restart before producing blocks. The old 120s
-                    // threshold caused a restart loop where catch-up never completed.
-                    if consecutive_stalls >= 60 {
-                        eprintln!("🚨🐕 [PROD-WATCHDOG] FATAL: Production loop frozen for {}s — watchdog forcing restart",
+                    // v10.3.6: NEVER kill while syncing (cur_h < net_h).
+                    // The node can't produce blocks while catching up — that's normal,
+                    // not a stall. Only kill if we're AT tip and STILL frozen.
+                    let behind = net_h.saturating_sub(cur_h);
+                    if behind > 10 {
+                        // Still syncing — reset stall counter, don't kill
+                        if consecutive_stalls % 30 == 0 {
+                            eprintln!("🐕 [PROD-WATCHDOG] Still syncing ({} blocks behind) — not killing", behind);
+                        }
+                        consecutive_stalls = 0;
+                    } else if consecutive_stalls >= 60 {
+                        // At tip but frozen for 600s — genuine stall
+                        eprintln!("🚨🐕 [PROD-WATCHDOG] FATAL: At tip but production frozen for {}s — forcing restart",
                                  consecutive_stalls * 10);
                         std::process::exit(1);
                     }
