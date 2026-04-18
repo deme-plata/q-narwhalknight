@@ -21,8 +21,35 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
-const API_BASE = process.env.QUILLON_API_URL || "https://quillon.xyz/api/v1";
-const DOWNLOAD_BASE = process.env.QUILLON_DOWNLOAD_URL || "https://quillon.xyz/downloads";
+// ═══════════════════════════════════════════════════════════════
+// SECURITY FIX 5: API URL validation — prevent SSRF/phishing via env vars
+// ═══════════════════════════════════════════════════════════════
+const ALLOWED_API_DOMAINS = ["quillon.xyz", "localhost", "127.0.0.1"];
+
+function validateApiUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    // Enforce HTTPS for non-local URLs
+    if (parsed.hostname !== "localhost" && parsed.hostname !== "127.0.0.1") {
+      if (parsed.protocol !== "https:") {
+        console.error(`SECURITY: Rejecting non-HTTPS API URL: ${url}`);
+        return "https://quillon.xyz/api/v1";
+      }
+    }
+    // Validate domain against allowlist
+    if (!ALLOWED_API_DOMAINS.some(d => parsed.hostname === d || parsed.hostname.endsWith(`.${d}`))) {
+      console.error(`SECURITY: Rejecting untrusted API domain: ${parsed.hostname}`);
+      return "https://quillon.xyz/api/v1";
+    }
+    return url;
+  } catch {
+    console.error(`SECURITY: Invalid API URL: ${url}`);
+    return "https://quillon.xyz/api/v1";
+  }
+}
+
+const API_BASE = validateApiUrl(process.env.QUILLON_API_URL || "https://quillon.xyz/api/v1");
+const DOWNLOAD_BASE = validateApiUrl(process.env.QUILLON_DOWNLOAD_URL || "https://quillon.xyz/downloads");
 
 // --- HTTP helper ---
 async function api(path: string, method = "GET", body?: unknown): Promise<unknown> {
@@ -30,6 +57,7 @@ async function api(path: string, method = "GET", body?: unknown): Promise<unknow
   const opts: RequestInit = {
     method,
     headers: { "Content-Type": "application/json" },
+    redirect: "error", // SECURITY: Never follow redirects (prevents open redirect attacks)
   };
   if (body) opts.body = JSON.stringify(body);
 
@@ -309,10 +337,34 @@ server.tool(
   }
 );
 
-// --- Device auth state (in-memory, per MCP session) ---
+// ═══════════════════════════════════════════════════════════════
+// SECURITY FIX 4: Per-session wallet isolation with expiry
+// ═══════════════════════════════════════════════════════════════
+// Auth state expires after 30 minutes of inactivity. Each MCP stdio
+// session is already process-isolated, but token expiry prevents stale
+// sessions from accumulating risk.
+const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+
 let activeDeviceCode: string | null = null;
 let activeWalletAddress: string | null = null;
 let authToken: string | null = null;
+let sessionAuthenticatedAt: number | null = null;
+
+function isSessionValid(): boolean {
+  if (!activeWalletAddress || !sessionAuthenticatedAt) return false;
+  if (Date.now() - sessionAuthenticatedAt > SESSION_TIMEOUT_MS) {
+    // Session expired — clear all auth state
+    activeWalletAddress = null;
+    authToken = null;
+    sessionAuthenticatedAt = null;
+    return false;
+  }
+  return true;
+}
+
+function refreshSession(): void {
+  if (sessionAuthenticatedAt) sessionAuthenticatedAt = Date.now();
+}
 
 server.tool(
   "authenticate_wallet",
@@ -370,6 +422,8 @@ server.tool(
 
       if (res.data.status === "complete") {
         activeWalletAddress = res.data.wallet_address;
+        authToken = res.data.token || null;
+        sessionAuthenticatedAt = Date.now();
         activeDeviceCode = null;
         return {
           content: [{
@@ -405,12 +459,12 @@ server.tool(
     amount: z.number().describe("Amount of QUG to send"),
   },
   async ({ to_address, amount }) => {
-    if (!activeWalletAddress) {
+    if (!isSessionValid()) {
       return {
         content: [{
           type: "text",
           text: [
-            `Wallet not authenticated. To send QUG:`,
+            `Wallet not authenticated${sessionAuthenticatedAt ? ' (session expired)' : ''}. To send QUG:`,
             ``,
             `  1. Say "authenticate wallet"`,
             `  2. Open the link in your browser and approve`,
@@ -420,12 +474,73 @@ server.tool(
         }],
       };
     }
+    refreshSession(); // Keep session alive on activity
+
+    // ═══════════════════════════════════════════════════════════════
+    // SECURITY FIX 1: Validate wallet address format
+    // ═══════════════════════════════════════════════════════════════
+    if (!to_address.startsWith('qnk') || to_address.length !== 67 || !/^qnk[0-9a-f]{64}$/.test(to_address)) {
+      return {
+        content: [{
+          type: "text",
+          text: `Invalid recipient address. Must be 'qnk' + 64 hex characters (67 total). Got: ${to_address.slice(0, 20)}...`,
+        }],
+      };
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // SECURITY FIX 2: Require explicit confirmation for transactions
+    // ═══════════════════════════════════════════════════════════════
+    // Return a confirmation prompt instead of executing immediately.
+    // The AI must relay this to the user and get explicit approval.
+    if (!to_address.startsWith('qnk_CONFIRMED_')) {
+      return {
+        content: [{
+          type: "text",
+          text: [
+            `⚠️ TRANSACTION CONFIRMATION REQUIRED`,
+            ``,
+            `  From:   ${activeWalletAddress!.slice(0, 20)}...`,
+            `  To:     ${to_address.slice(0, 20)}...`,
+            `  Amount: ${amount} QUG`,
+            ``,
+            `Please confirm: do you want to send ${amount} QUG to ${to_address}?`,
+            `Reply "yes, send ${amount} QUG to ${to_address}" to proceed.`,
+            ``,
+            `⚠️ This action is irreversible. Verify the recipient address carefully.`,
+          ].join("\n"),
+        }],
+      };
+    }
+    // Strip confirmation prefix
+    const confirmed_address = to_address.replace('qnk_CONFIRMED_', 'qnk');
+
+    // ═══════════════════════════════════════════════════════════════
+    // SECURITY FIX 3: Spending limits
+    // ═══════════════════════════════════════════════════════════════
+    if (amount > 1000) {
+      return {
+        content: [{
+          type: "text",
+          text: `⚠️ Amount exceeds MCP spending limit (1000 QUG). For larger transfers, use the web wallet at quillon.xyz.`,
+        }],
+      };
+    }
+    if (amount <= 0) {
+      return {
+        content: [{
+          type: "text",
+          text: `Invalid amount: must be greater than 0.`,
+        }],
+      };
+    }
 
     try {
       const res = await api("/transactions/send", "POST", {
         from: activeWalletAddress,
-        to: to_address,
+        to: confirmed_address,
         amount: Math.floor(amount * 1e24).toString(),
+        ...(authToken ? { auth_token: authToken } : {}),
       }) as any;
 
       if (res.success) {
