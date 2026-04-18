@@ -3468,7 +3468,7 @@ impl QStorage {
         warn!("⚠️ [v10.3.7] Found {} blocks near tip that fail deserialization (lowest at {}). Preserved in DB — no pointers reset.",
               deleted_count, lowest_corrupt.unwrap());
 
-        Ok(Some(new_height))
+        Ok(None) // v10.3.7: no pointer changes, no deletions
     }
 
     /// Get the first missing height in blockchain (gap detection)
