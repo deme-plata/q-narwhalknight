@@ -2151,11 +2151,10 @@ impl QStorage {
                         if corrupt_count <= 1 || corrupt_count % 100 == 0 {
                             warn!("⚠️  Failed to deserialize QBlock at height {}: {} - treating as missing", height, e);
                         }
-                        // v10.2.8: Opportunistic cleanup — delete corrupt block so turbo sync can refill it
-                        let del_key = format!("qblock:height:{}", height);
-                        if let Err(del_err) = self.hot_db.delete(CF_BLOCKS, del_key.as_bytes()).await {
-                            error!("Failed to delete corrupt block at height {}: {}", height, del_err);
-                        }
+                        // v10.3.7: NEVER delete blocks that fail deserialization.
+                        // They may be from an older binary version with a different QBlock layout.
+                        // The old "opportunistic cleanup" was destroying valid blocks permanently.
+                        // Turbo sync cannot refill them if no peer has them either.
                         missing_count += 1;
                     }
                 }
@@ -3370,12 +3369,17 @@ impl QStorage {
                     q_types::legacy::deserialize_qblock_with_fallback(&block_data).is_ok()
                 };
                 if !is_valid {
-                    // Truly corrupt block found - delete it
-                    warn!("🗑️  Deleting corrupt block at height {} (backwards compatibility)", check_height);
-                    self.hot_db.delete(CF_BLOCKS, height_key.as_bytes()).await?;
+                    // v10.3.7: DO NOT delete — these may be blocks from an older binary version.
+                    // The old code permanently destroyed blocks that could have been read by a
+                    // future deserializer update. Log and skip instead.
+                    if deleted_count == 0 {
+                        warn!("⚠️ Block at height {} fails deserialization (older format?) — preserving in DB", check_height);
+                    }
+                    deleted_count += 1;
 
-                    // Also delete by hash if we can extract it (first 32 bytes might be the hash)
-                    if block_data.len() >= 32 {
+                    // DISABLED: was permanently destroying blocks
+                    // self.hot_db.delete(CF_BLOCKS, height_key.as_bytes()).await?;
+                    if false && block_data.len() >= 32 {
                         let potential_hash_key = format!("qblock:hash:{}", hex::encode(&block_data[0..32]));
                         let _ = self.hot_db.delete(CF_BLOCKS, potential_hash_key.as_bytes()).await;
                     }
@@ -3441,15 +3445,11 @@ impl QStorage {
             };
 
             if !is_valid {
-                error!("🚨 [v10.2.8] CORRUPT BLOCK at height {} ({} bytes) — deleting", height, block_data.len());
-                self.hot_db.delete(CF_BLOCKS, height_key.as_bytes()).await?;
-
-                // Also try to delete hash-keyed entry
-                if block_data.len() >= 32 {
-                    let hash_key = format!("qblock:hash:{}", hex::encode(&block_data[0..32]));
-                    let _ = self.hot_db.delete(CF_BLOCKS, hash_key.as_bytes()).await;
+                // v10.3.7: DO NOT delete — blocks may be from older binary version.
+                // Log only. The deserializer needs updating, not the data.
+                if deleted_count == 0 {
+                    warn!("⚠️ [v10.3.7] Block at height {} ({} bytes) fails deserialization — preserving (older format?)", height, block_data.len());
                 }
-
                 deleted_count += 1;
                 if lowest_corrupt.is_none() || height < lowest_corrupt.unwrap() {
                     lowest_corrupt = Some(height);
@@ -3462,24 +3462,11 @@ impl QStorage {
             return Ok(None);
         }
 
-        // Reset pointers to just below the first corrupt block
-        let new_height = lowest_corrupt.unwrap().saturating_sub(1);
-        warn!("🔧 [v10.2.8] Deleted {} corrupt blocks (lowest at {}). Resetting pointers to {}",
-              deleted_count, lowest_corrupt.unwrap(), new_height);
-
-        let height_bytes = new_height.to_be_bytes();
-        self.hot_db.put_sync(CF_BLOCKS, b"qblock:latest", &height_bytes).await
-            .context("Failed to reset qblock:latest after corruption cleanup")?;
-        self.hot_db.put_sync(CF_BLOCKS, b"qblock:safe_floor", &height_bytes).await
-            .context("Failed to reset qblock:safe_floor after corruption cleanup")?;
-        self.hot_db.put_sync(CF_BLOCKS, b"qblock:tip_height", &height_bytes).await
-            .context("Failed to reset qblock:tip_height after corruption cleanup")?;
-
-        // Update in-memory cache (force_set allows downward correction)
-        self.height_cache.force_set(new_height).await;
-
-        warn!("✅ [v10.2.8] Pointers reset to {}. Turbo sync will refill {} deleted blocks from peers.",
-              new_height, deleted_count);
+        // v10.3.7: No longer deleting blocks or resetting pointers.
+        // Blocks that fail deserialization are preserved — they may become readable
+        // after a deserializer update. DO NOT reset height pointers.
+        warn!("⚠️ [v10.3.7] Found {} blocks near tip that fail deserialization (lowest at {}). Preserved in DB — no pointers reset.",
+              deleted_count, lowest_corrupt.unwrap());
 
         Ok(Some(new_height))
     }
