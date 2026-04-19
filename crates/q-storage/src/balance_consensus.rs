@@ -1321,13 +1321,11 @@ impl BalanceConsensusEngine {
         // Calculate new balance with overflow protection
         let new_balance = current_balance.saturating_add(amount);
 
-        // 🔴 [BALANCE WRITE DEBUG] Log balance_consensus add_balance_tx
-        // v10.3.7: Show actual QUG amounts (not raw u128) for debugging balance bounce
-        tracing::warn!(
-            "🔴 [BALANCE WRITE] add_balance_tx(): wallet={} old={:.6}QUG new={:.6}QUG delta=+{:.6}QUG raw_old={} raw_new={} raw_delta={} caller=balance_consensus::add_balance_tx",
+        // v10.3.8: Balance write audit log (privacy-masked)
+        tracing::debug!(
+            "💰 [BALANCE] add: wallet={} delta=+{} caller=balance_consensus height=IN_TX",
             &address[..16.min(address.len())],
-            current_balance as f64 / 1e24, new_balance as f64 / 1e24, amount as f64 / 1e24,
-            current_balance, new_balance, amount
+            q_log_privacy::mask_amt(amount)
         );
 
         // Write new balance to transaction using wallet_balance_ key format (little-endian)
@@ -1380,13 +1378,11 @@ impl BalanceConsensusEngine {
         // Calculate new balance
         let new_balance = current_balance.saturating_sub(amount);
 
-        // 🔴 [BALANCE WRITE DEBUG] Log balance_consensus subtract_balance_tx (DECREASE = error level)
-        // v10.3.7: Show actual QUG amounts for debugging balance bounce
-        tracing::error!(
-            "🔴 [BALANCE WRITE] subtract_balance_tx(): wallet={} old={:.6}QUG new={:.6}QUG delta=-{:.6}QUG raw_old={} raw_new={} raw_delta={} caller=balance_consensus::subtract_balance_tx",
+        // v10.3.8: Balance write audit log (privacy-masked)
+        tracing::debug!(
+            "💸 [BALANCE] subtract: wallet={} delta=-{} caller=balance_consensus height=IN_TX",
             &address[..16.min(address.len())],
-            current_balance as f64 / 1e24, new_balance as f64 / 1e24, amount as f64 / 1e24,
-            current_balance, new_balance, amount
+            q_log_privacy::mask_amt(amount)
         );
 
         // Write new balance

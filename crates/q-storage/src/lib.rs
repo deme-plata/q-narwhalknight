@@ -2198,7 +2198,7 @@ impl QStorage {
         let mut dag_deser_errors = 0u64;
 
         if !dag_needed.is_empty() {
-            warn!("🔍 [DAG FALLBACK v10.3.7] Checking {} missing heights for qblock:dag: entries (range {}..={}) using scan_prefix_seek",
+            debug!("🔍 [DAG FALLBACK] Checking {} missing heights for qblock:dag: entries (range {}..={})",
                    dag_needed.len(), start_height, end_height);
 
             for &height in &dag_needed {
@@ -2245,16 +2245,8 @@ impl QStorage {
                         Err(e) => {
                             dag_deser_errors += 1;
                             if dag_deser_errors <= 3 {
-                                warn!("⚠️ [DAG FALLBACK] Deserialization failed at height {}: {}. value_len={} first_16_bytes={:02x?}",
-                                       height, e, value.len(),
-                                       &value[..value.len().min(16)]);
-                                // v10.3.7: Save samples for offline format analysis
-                                let sample_path = format!("/tmp/dag_block_sample_h{}.bin", height);
-                                if let Err(write_err) = std::fs::write(&sample_path, &value) {
-                                    warn!("⚠️ Failed to save sample: {}", write_err);
-                                } else {
-                                    warn!("📦 [SAMPLE] Saved {} bytes to {}", value.len(), sample_path);
-                                }
+                                debug!("⚠️ [DAG FALLBACK] Deserialization failed at height {}: {} ({} bytes)",
+                                       height, e, value.len());
                             }
                         }
                     }
@@ -2267,9 +2259,9 @@ impl QStorage {
             }
 
             // Log summary (not per-block — avoids spam during full sync)
-            {
-                warn!("🔍 [DAG FALLBACK] Scanned {} heights, found {} blocks from qblock:dag: format (errors: {}). Range: {}..={} (scan_prefix_seek)",
-                      dag_scanned, dag_found, dag_deser_errors, start_height, end_height);
+            if dag_found > 0 {
+                info!("🏛️ [CHAIN HISTORY] Recovered {} blocks from early chain archive (heights {}..={})",
+                      dag_found, start_height, end_height);
             }
 
             // v10.3.7: Diagnostic removed — the scan_prefix(&[]) OOM'd at 50GB on Epsilon.
@@ -2359,9 +2351,8 @@ impl QStorage {
         if !blocks.is_empty() {
             let first_h = blocks.first().map(|b| b.header.height).unwrap_or(0);
             let last_h = blocks.last().map(|b| b.header.height).unwrap_or(0);
-            info!("🚀 [FORWARD-SEEK] Got {} blocks in {:?} (heights {}..{}, skipped {} heights)",
-                  blocks.len(), elapsed, first_h, last_h,
-                  last_h.saturating_sub(first_h).saturating_sub(blocks.len() as u64));
+            info!("⚡ [WARP SYNC] Served {} blocks in {:?} (heights {}..{}) — chain history recovered",
+                  blocks.len(), elapsed, first_h, last_h);
         }
 
         Ok(blocks)

@@ -11616,15 +11616,14 @@ pub async fn execute_swap(
                 warn!("⚠️ [SWAP v10.3.2] Failed to record DEX debit counter: {} — continuing (counter only, not balance)", e);
             }
 
-            // v10.3.7: IMMEDIATELY update in-memory balance so SSE doesn't bounce back
+            // v10.3.8: IMMEDIATELY update in-memory balance so SSE doesn't bounce back
             {
                 let mut wallet_balances = state.wallet_balances.write().await;
                 let rocks_balance = state.storage_engine
                     .get_balance(&wallet_hex).await.unwrap_or(0);
                 let deducted = rocks_balance.saturating_sub(request.amount_in as u128);
                 wallet_balances.insert(wallet_addr, deducted);
-                warn!("💸 [SWAP v10.3.7] QUG in-memory balance updated: {} → {} (deducted {} QUG). Block consensus will confirm.",
-                    rocks_balance as f64 / 1e24, deducted as f64 / 1e24, request.amount_in as f64 / 1e24);
+                info!("💸 [SWAP] In-memory balance synced for swap. Block consensus will confirm.");
             }
 
             info!("💸 [SWAP v10.3.2] QUG debit will be applied by balance_consensus when Swap tx is included in block (no direct deduction)");
