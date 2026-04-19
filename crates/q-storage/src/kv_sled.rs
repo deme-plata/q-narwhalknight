@@ -291,6 +291,13 @@ impl KVStore for RocksDBKV {
         Ok(results)
     }
 
+    async fn scan_prefix_seek(&self, cf: &str, prefix: &[u8], limit: usize) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        // Sled doesn't have the bloom filter issue — just delegate to scan_prefix with limit
+        let all = self.scan_prefix(cf, prefix).await?;
+        let effective_limit = if limit == 0 { all.len() } else { limit };
+        Ok(all.into_iter().take(effective_limit).collect())
+    }
+
     async fn scan_all(&self, cf: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let tree = self.get_tree(cf)?;
         // Cap at 100K entries to prevent OOM from unbounded scans

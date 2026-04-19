@@ -55,6 +55,12 @@ pub trait KVStore: Send + Sync {
     /// Scan keys with prefix in column family
     async fn scan_prefix(&self, cf: &str, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
 
+    /// Seek-based prefix scan — works WITHOUT a prefix extractor on the CF.
+    /// Uses raw iterator seek (B-tree traversal) instead of prefix_iterator_cf
+    /// (which relies on bloom filters that give false negatives without extractor).
+    /// v10.3.7: Created to fix 545K invisible DAG blocks on CF_BLOCKS.
+    async fn scan_prefix_seek(&self, cf: &str, prefix: &[u8], limit: usize) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
+
     /// Scan all keys in column family (use with caution)
     async fn scan_all(&self, cf: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
 
@@ -1703,6 +1709,34 @@ impl KVStore for RocksDBKV {
             }
 
             results.push((key.to_vec(), value.to_vec()));
+        }
+
+        Ok(results)
+    }
+
+    async fn scan_prefix_seek(&self, cf: &str, prefix: &[u8], limit: usize) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let cf_handle = self.get_cf(cf)?;
+        let effective_limit = if limit == 0 { 10_000 } else { limit };
+        let mut results = Vec::with_capacity(effective_limit.min(1024));
+
+        // Use raw iterator with seek — does NOT consult bloom filters.
+        // This is the same method ldb scan uses internally.
+        // Required for CF_BLOCKS which has bloom filters but no prefix extractor,
+        // causing prefix_iterator_cf to give false negatives.
+        let iter = self.db.iterator_cf(
+            &cf_handle,
+            rocksdb::IteratorMode::From(prefix, rocksdb::Direction::Forward),
+        );
+
+        for item in iter {
+            let (key, value) = item.context("Iterator error in scan_prefix_seek")?;
+            if !key.starts_with(prefix) {
+                break;
+            }
+            results.push((key.to_vec(), value.to_vec()));
+            if results.len() >= effective_limit {
+                break;
+            }
         }
 
         Ok(results)

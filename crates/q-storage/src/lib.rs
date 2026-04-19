@@ -2205,7 +2205,11 @@ impl QStorage {
                 dag_scanned += 1;
 
                 let dag_prefix = format!("qblock:dag:{}:", height);
-                let dag_entries = match self.hot_db.scan_prefix(CF_BLOCKS, dag_prefix.as_bytes()).await {
+                // v10.3.7: Use scan_prefix_seek instead of scan_prefix.
+                // CF_BLOCKS has bloom filters but NO prefix extractor, causing
+                // prefix_iterator_cf to give false negatives. scan_prefix_seek
+                // uses raw iterator seek (B-tree traversal) which always works.
+                let dag_entries = match self.hot_db.scan_prefix_seek(CF_BLOCKS, dag_prefix.as_bytes(), 1).await {
                     Ok(entries) => entries,
                     Err(e) => {
                         debug!("⚠️ [DAG FALLBACK] scan_prefix error at height {}: {}", height, e);
@@ -2260,46 +2264,9 @@ impl QStorage {
                       dag_scanned, dag_found, dag_deser_errors, start_height, end_height);
             }
 
-            // v10.3.7: DIAGNOSTIC — if we found 0 blocks in BOTH formats, do a raw key scan
-            // to discover what format blocks are actually stored under on this node.
-            // Only runs once per process lifetime to avoid spam.
-            use std::sync::atomic::{AtomicBool, Ordering as AtomOrd};
-            static RAW_SCAN_DONE: AtomicBool = AtomicBool::new(false);
-            if blocks.is_empty() && !RAW_SCAN_DONE.load(AtomOrd::Relaxed) {
-                RAW_SCAN_DONE.store(true, AtomOrd::Relaxed);
-                let sample_height = start_height;
-                warn!("🔬 [KEY FORMAT DIAGNOSTIC] 0 blocks found at height {} in both formats. Scanning raw keys...", sample_height);
-
-                // Try Format 3: binary key (height.to_be_bytes())
-                let binary_prefix = sample_height.to_be_bytes();
-                match self.hot_db.scan_prefix(CF_BLOCKS, &binary_prefix).await {
-                    Ok(entries) => {
-                        warn!("🔬 [KEY FORMAT] Binary prefix scan (height.to_be_bytes() = {:?}): {} entries found",
-                              binary_prefix, entries.len());
-                        for (k, v) in entries.iter().take(3) {
-                            warn!("🔬 [KEY FORMAT]   key_len={} key_hex={} value_len={}", k.len(), hex::encode(&k[..k.len().min(32)]), v.len());
-                        }
-                    }
-                    Err(e) => warn!("🔬 [KEY FORMAT] Binary scan error: {}", e),
-                }
-
-                // Scan ALL keys in CF_BLOCKS with no prefix (sample first 20)
-                match self.hot_db.scan_prefix(CF_BLOCKS, &[]).await {
-                    Ok(entries) => {
-                        warn!("🔬 [KEY FORMAT] TOTAL keys in CF_BLOCKS: {} (scanning all with empty prefix)", entries.len());
-                        for (k, v) in entries.iter().take(20) {
-                            let key_str = String::from_utf8_lossy(k);
-                            let is_printable = k.iter().all(|&b| b >= 32 && b < 127);
-                            if is_printable {
-                                warn!("🔬 [KEY FORMAT]   STRING key: '{}' (len={}, val_len={})", key_str, k.len(), v.len());
-                            } else {
-                                warn!("🔬 [KEY FORMAT]   BINARY key: hex={} (len={}, val_len={})", hex::encode(&k[..k.len().min(40)]), k.len(), v.len());
-                            }
-                        }
-                    }
-                    Err(e) => warn!("🔬 [KEY FORMAT] Full scan error: {}", e),
-                }
-            }
+            // v10.3.7: Diagnostic removed — the scan_prefix(&[]) OOM'd at 50GB on Epsilon.
+            // Root cause found: prefix_iterator_cf returns false negatives without prefix extractor.
+            // Fix: scan_prefix_seek uses raw iterator seek instead.
         }
 
         let elapsed = fetch_start.elapsed();
@@ -2332,8 +2299,10 @@ impl QStorage {
         }
 
         // === Format 2: DAG layer "qblock:dag:{N}:{proposer_hex}" ===
+        // v10.3.7: Use scan_prefix_seek — CF_BLOCKS lacks prefix extractor,
+        // causing scan_prefix (prefix_iterator_cf) to return false negatives.
         let dag_prefix = format!("qblock:dag:{}:", height);
-        let dag_entries = self.hot_db.scan_prefix(CF_BLOCKS, dag_prefix.as_bytes()).await?;
+        let dag_entries = self.hot_db.scan_prefix_seek(CF_BLOCKS, dag_prefix.as_bytes(), 1).await?;
         if let Some((_key, value)) = dag_entries.into_iter().next() {
             // DAG layer blocks are stored as bincode-serialized QBlock
             // Try compressed first, then raw bincode with legacy fallback
@@ -2374,8 +2343,9 @@ impl QStorage {
         }
 
         // === Format 3: Old finalize_block binary key (height_be_bytes ++ hash) ===
+        // v10.3.7: Use scan_prefix_seek — same bloom filter issue as Format 2.
         let binary_prefix = height.to_be_bytes();
-        let binary_entries = self.hot_db.scan_prefix(CF_BLOCKS, &binary_prefix).await?;
+        let binary_entries = self.hot_db.scan_prefix_seek(CF_BLOCKS, &binary_prefix, 1).await?;
         if let Some((_key, value)) = binary_entries.into_iter().next() {
             // Old finalize_block stored bincode-serialized Block (not QBlock).
             // Try QBlock deserialization first (in case it was migrated), then Block.
