@@ -85,6 +85,17 @@ pub trait KVStore: Send + Sync {
     /// Scan all keys in column family (use with caution)
     async fn scan_all(&self, cf: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
 
+    /// v10.3.7: Forward iterate DAG blocks from start_height using lazy iterator.
+    /// Returns (height, key_bytes, value_bytes) tuples sorted by numeric height.
+    /// Default: returns empty (sled/Windows). RocksDB impl uses raw iterator.
+    async fn get_dag_blocks_forward(
+        &self,
+        _start_height: u64,
+        _limit: usize,
+    ) -> Result<Vec<(u64, Vec<u8>, Vec<u8>)>> {
+        Ok(vec![])
+    }
+
     /// Flush writes to disk
     async fn flush(&self) -> Result<()>;
 
@@ -1763,13 +1774,7 @@ impl KVStore for RocksDBKV {
         Ok(results)
     }
 
-    /// v10.3.7: Optimized forward iteration for DAG blocks.
-    /// Uses lazy RocksDB iterator — O(1) seek + O(limit) iterations.
-    /// Handles string-sort ordering by scanning all DAG keys and filtering by height.
-    /// Returns blocks sorted by numeric height.
-    ///
-    /// This is NOT on the KV trait because it's RocksDB-specific (uses raw iterator).
-    pub async fn get_dag_blocks_forward(
+    async fn get_dag_blocks_forward(
         &self,
         start_height: u64,
         limit: usize,
