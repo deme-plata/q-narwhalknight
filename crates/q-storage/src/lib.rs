@@ -2314,54 +2314,34 @@ impl QStorage {
         let mut blocks = Vec::with_capacity(limit);
         let mut seen_heights = std::collections::HashSet::with_capacity(limit);
 
-        // === DAG iterator: seek to "qblock:dag:{start_height}:" and walk forward ===
-        let dag_seek = format!("qblock:dag:{}:", start_height);
-        let dag_entries = self.hot_db.scan_prefix_seek(CF_BLOCKS, b"qblock:dag:", limit * 3).await;
+        // === v10.3.7: Use lazy RocksDB iterator instead of scan_prefix_seek ===
+        // scan_prefix_seek loaded ALL entries into a Vec (3.2s for 600 entries).
+        // get_dag_blocks_forward uses a lazy iterator — O(1) seek + O(limit) reads.
+        let dag_entries = self.hot_db.get_dag_blocks_forward(start_height, limit).await?;
 
-        if let Ok(entries) = dag_entries {
-            // Filter: we used scan_prefix_seek with the full "qblock:dag:" prefix
-            // but need to start from start_height. Since string sort ≠ numeric sort,
-            // collect all and filter by height >= start_height.
-            for (key, value) in entries {
-                if blocks.len() >= limit { break; }
+        for (height, _key, value) in dag_entries {
+            // Deserialize with all fallbacks (including manual old-DAG parser)
+            let deser_result = if precompressed_storage::is_precompressed(&value) {
+                precompressed_storage::PrecompressedBlock::from_bytes(&value)
+                    .and_then(|c| c.decompress().map_err(|e| e.into()))
+                    .and_then(|raw| deserialize_qblock_with_fallback(&raw)
+                        .map_err(|e| anyhow::anyhow!("{}", e)))
+            } else {
+                deserialize_qblock_with_fallback(&value)
+                    .map_err(|e| anyhow::anyhow!("{}", e))
+            };
 
-                let key_str = String::from_utf8_lossy(&key);
-                if !key_str.starts_with("qblock:dag:") { continue; }
-
-                // Parse height from "qblock:dag:{height}:{proposer}"
-                let parts: Vec<&str> = key_str.split(':').collect();
-                if parts.len() < 3 { continue; }
-                let height: u64 = match parts[2].parse() {
-                    Ok(h) => h,
-                    Err(_) => continue,
-                };
-
-                if height < start_height { continue; }
-                if seen_heights.contains(&height) { continue; }
-
-                // Deserialize with all fallbacks (including manual old-DAG parser)
-                let deser_result = if precompressed_storage::is_precompressed(&value) {
-                    precompressed_storage::PrecompressedBlock::from_bytes(&value)
-                        .and_then(|c| c.decompress().map_err(|e| e.into()))
-                        .and_then(|raw| deserialize_qblock_with_fallback(&raw)
-                            .map_err(|e| anyhow::anyhow!("{}", e)))
-                } else {
-                    deserialize_qblock_with_fallback(&value)
-                        .map_err(|e| anyhow::anyhow!("{}", e))
-                };
-
-                if let Ok(block) = deser_result {
-                    seen_heights.insert(height);
-                    blocks.push(block);
-                }
+            if let Ok(block) = deser_result {
+                seen_heights.insert(height);
+                blocks.push(block);
             }
         }
 
-        // === Height iterator: also collect any qblock:height: blocks in the same range ===
+        // Also merge any qblock:height: blocks in the same range
         if !blocks.is_empty() {
-            let max_dag_height = blocks.iter().map(|b| b.header.height).max().unwrap_or(start_height);
-            // Get height-format blocks in the range covered by DAG blocks
-            if let Ok(height_blocks) = self.get_qblocks_range(start_height, (max_dag_height - start_height + 1) as usize).await {
+            let max_h = blocks.iter().map(|b| b.header.height).max().unwrap_or(start_height);
+            let range = (max_h - start_height + 1).min(10_000) as usize;
+            if let Ok(height_blocks) = self.get_qblocks_range(start_height, range).await {
                 for block in height_blocks {
                     if !seen_heights.contains(&block.header.height) {
                         seen_heights.insert(block.header.height);
@@ -2371,7 +2351,6 @@ impl QStorage {
             }
         }
 
-        // Sort by height, deduplicate, truncate
         blocks.sort_by_key(|b| b.header.height);
         blocks.dedup_by_key(|b| b.header.height);
         blocks.truncate(limit);

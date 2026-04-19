@@ -21,6 +21,27 @@ use crate::{
     CF_NARWHAL_PAYLOADS, CF_PAYMENT_LOCKS, CF_PAYMENT_PROPOSALS, CF_PAYMENT_VOTES, CF_TRANSACTIONS,
 };
 
+/// Parse height from DAG key bytes without allocation.
+/// Format: b"qblock:dag:{height}:{proposer}"
+#[inline]
+fn parse_dag_key_height(key: &[u8]) -> Option<u64> {
+    const PREFIX: &[u8] = b"qblock:dag:";
+    if !key.starts_with(PREFIX) { return None; }
+    let mut pos = PREFIX.len();
+    let mut height: u64 = 0;
+    while pos < key.len() {
+        match key[pos] {
+            b':' => return Some(height),
+            b'0'..=b'9' => {
+                height = height.checked_mul(10)?.checked_add((key[pos] - b'0') as u64)?;
+                pos += 1;
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
 /// Async KV store trait for storage abstraction
 #[async_trait]
 pub trait KVStore: Send + Sync {
@@ -1738,6 +1759,60 @@ impl KVStore for RocksDBKV {
                 break;
             }
         }
+
+        Ok(results)
+    }
+
+    /// v10.3.7: Optimized forward iteration for DAG blocks.
+    /// Uses lazy RocksDB iterator — O(1) seek + O(limit) iterations.
+    /// Handles string-sort ordering by scanning all DAG keys and filtering by height.
+    /// Returns blocks sorted by numeric height.
+    ///
+    /// This is NOT on the KV trait because it's RocksDB-specific (uses raw iterator).
+    pub async fn get_dag_blocks_forward(
+        &self,
+        start_height: u64,
+        limit: usize,
+    ) -> Result<Vec<(u64, Vec<u8>, Vec<u8>)>> {
+        // Returns (height, key, value) tuples — caller does deserialization
+        const MAX_SCAN: usize = 100_000;
+        const MAX_LIMIT: usize = 2000;
+        let limit = limit.min(MAX_LIMIT);
+
+        let cf_handle = self.get_cf(CF_BLOCKS)?;
+        let iter = self.db.iterator_cf(
+            &cf_handle,
+            rocksdb::IteratorMode::From(b"qblock:dag:", rocksdb::Direction::Forward),
+        );
+
+        let mut results: Vec<(u64, Vec<u8>, Vec<u8>)> = Vec::with_capacity(limit);
+        let mut seen_heights = std::collections::HashSet::with_capacity(limit);
+        let mut scanned = 0usize;
+
+        for item in iter {
+            let (key, value) = item.context("Iterator error in get_dag_blocks_forward")?;
+            scanned += 1;
+
+            if scanned > MAX_SCAN { break; }
+            if !key.starts_with(b"qblock:dag:") { break; }
+
+            // Parse height from key bytes without allocation
+            let height = match parse_dag_key_height(&key) {
+                Some(h) => h,
+                None => continue,
+            };
+
+            if height < start_height { continue; }
+            if seen_heights.contains(&height) { continue; }
+
+            seen_heights.insert(height);
+            results.push((height, key.to_vec(), value.to_vec()));
+
+            if results.len() >= limit { break; }
+        }
+
+        // Sort by numeric height (iterator returns string-sorted order)
+        results.sort_by_key(|(h, _, _)| *h);
 
         Ok(results)
     }
