@@ -418,7 +418,7 @@ fn parse_old_dag_block_manual(data: &[u8]) -> Result<QBlock, bincode::Error> {
     // Helper: read Vec<u8> (u64 length prefix + bytes)
     let read_vec = |pos: &mut usize| -> Result<Vec<u8>, bincode::Error> {
         let len = read_u64(pos)? as usize;
-        if len > 10_000_000 {
+        if len > 1_000_000 { // v10.3.8: 1MB cap per vector (was 10MB — OOM risk with 3 vectors)
             return Err(Box::new(bincode::ErrorKind::Custom(
                 format!("Vec length {} too large at offset {}", len, *pos)
             )));

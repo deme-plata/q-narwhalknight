@@ -2332,7 +2332,7 @@ impl QStorage {
         // Also merge any qblock:height: blocks in the same range
         if !blocks.is_empty() {
             let max_h = blocks.iter().map(|b| b.header.height).max().unwrap_or(start_height);
-            let range = (max_h - start_height + 1).min(10_000) as usize;
+            let range = (max_h - start_height + 1).min(500) as usize; // v10.3.8: strict limit per audit
             if let Ok(height_blocks) = self.get_qblocks_range(start_height, range).await {
                 for block in height_blocks {
                     if !seen_heights.contains(&block.header.height) {

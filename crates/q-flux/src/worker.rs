@@ -844,12 +844,29 @@ async fn worker_loop(
                         .unwrap_or_default();
                     if !static_root.is_empty() {
                         // Try static file first
-                        let file_path = if path.is_empty() || path == "/" {
+                        let clean = path.split('?').next().unwrap_or(&path);
+                        // v10.3.8 SECURITY: Reject path traversal attempts
+                        let decoded_path = clean.replace("%2e", ".").replace("%2E", ".").replace("%2f", "/").replace("%2F", "/");
+                        if decoded_path.contains("..") || decoded_path.contains("//") {
+                            let _ = tcp_stream.write_all(
+                                b"HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                            ).await;
+                            return;
+                        }
+                        let file_path = if clean.is_empty() || clean == "/" {
                             format!("{}/index.html", static_root)
                         } else {
-                            let clean = path.split('?').next().unwrap_or(&path);
                             format!("{}{}", static_root, clean)
                         };
+                        // SECURITY: Verify resolved path stays within static_root
+                        if let Ok(canonical) = tokio::fs::canonicalize(&file_path).await {
+                            if !canonical.to_string_lossy().starts_with(&static_root) {
+                                let _ = tcp_stream.write_all(
+                                    b"HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                                ).await;
+                                return;
+                            }
+                        }
 
                         if let Ok(contents) = tokio::fs::read(&file_path).await {
                             let content_type = if file_path.ends_with(".html") { "text/html" }

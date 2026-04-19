@@ -26,12 +26,16 @@ use crate::{
 #[inline]
 fn parse_dag_key_height(key: &[u8]) -> Option<u64> {
     const PREFIX: &[u8] = b"qblock:dag:";
+    const MAX_HEIGHT: u64 = 1_000_000_000; // ~30,000 years at 1 bps
     if !key.starts_with(PREFIX) { return None; }
     let mut pos = PREFIX.len();
     let mut height: u64 = 0;
     while pos < key.len() {
         match key[pos] {
-            b':' => return Some(height),
+            b':' => {
+                if height > MAX_HEIGHT { return None; }
+                return Some(height);
+            }
             b'0'..=b'9' => {
                 height = height.checked_mul(10)?.checked_add((key[pos] - b'0') as u64)?;
                 pos += 1;
