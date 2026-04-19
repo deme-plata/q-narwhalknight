@@ -2076,9 +2076,9 @@ impl QStorage {
             let total_keys = keys.len();
             // v10.3.7: Always log (was >= 100), needed for checkpoint probe debugging
             if found_count == 0 || capped_limit <= 5 || capped_limit >= 100 {
-                info!("🔍 [BLOCK-RANGE-DEBUG] multi_get: {}/{} keys found for heights {}..={} (contiguous={}, tip={}, cached={})",
+                info!("🔍 [BLOCK-RANGE-DEBUG] multi_get: {}/{} keys found for heights {}..={} (cached_height={})",
                       found_count, total_keys, start_height, end_height,
-                      self.height_cache.get().await, self.height_cache.get().await, self.height_cache.get().await);
+                      self.height_cache.cached());
             }
         }
 
