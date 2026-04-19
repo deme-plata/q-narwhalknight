@@ -2245,8 +2245,16 @@ impl QStorage {
                         Err(e) => {
                             dag_deser_errors += 1;
                             if dag_deser_errors <= 3 {
-                                debug!("⚠️ [DAG FALLBACK] Deserialization failed at height {}: {}. Skipping (peer will try another node).",
-                                       height, e);
+                                warn!("⚠️ [DAG FALLBACK] Deserialization failed at height {}: {}. value_len={} first_16_bytes={:02x?}",
+                                       height, e, value.len(),
+                                       &value[..value.len().min(16)]);
+                                // v10.3.7: Save samples for offline format analysis
+                                let sample_path = format!("/tmp/dag_block_sample_h{}.bin", height);
+                                if let Err(write_err) = std::fs::write(&sample_path, &value) {
+                                    warn!("⚠️ Failed to save sample: {}", write_err);
+                                } else {
+                                    warn!("📦 [SAMPLE] Saved {} bytes to {}", value.len(), sample_path);
+                                }
                             }
                         }
                     }
