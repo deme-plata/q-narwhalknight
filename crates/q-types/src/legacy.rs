@@ -521,6 +521,8 @@ fn parse_old_dag_block_manual(data: &[u8]) -> Result<QBlock, bincode::Error> {
         dag_parents: vec![],
         quantum_metadata: QuantumMetadata::default(),
         transactions: vec![],
+        balance_updates: vec![],
+        size_bytes: data.len() as u64,
     })
 }
 
