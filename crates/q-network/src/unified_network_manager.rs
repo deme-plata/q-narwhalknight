@@ -3463,7 +3463,20 @@ impl UnifiedNetworkManager {
                                                               any_blocks.len(), fast_blocks.len(), any_blocks.len(), peer_clone);
                                                         any_blocks
                                                     }
-                                                    _ => fast_blocks // Fall back to whatever fast path had
+                                                    _ => {
+                                                        // v10.3.7: Forward-seek for sparse DAG ranges
+                                                        // Both fast path and multi-format returned empty.
+                                                        // Try forward-seek which does ONE RocksDB seek and
+                                                        // collects next N blocks regardless of height gaps.
+                                                        match storage.get_qblocks_forward(start_height, limit).await {
+                                                            Ok(fwd_blocks) if !fwd_blocks.is_empty() => {
+                                                                info!("🚀 [BLOCK-PACK] Forward-seek found {} blocks starting at {} for {}",
+                                                                      fwd_blocks.len(), fwd_blocks[0].header.height, peer_clone);
+                                                                fwd_blocks
+                                                            }
+                                                            _ => fast_blocks // Nothing found anywhere
+                                                        }
+                                                    }
                                                 }
                                             }
                                             Err(e) => {
