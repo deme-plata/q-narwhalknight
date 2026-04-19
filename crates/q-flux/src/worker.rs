@@ -835,6 +835,79 @@ async fn worker_loop(
                             b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
                         ).await;
                     }
+                } else if host.contains(".onion") || client_addr.ip().is_loopback() {
+                    // v10.3.8: Serve Tor onion requests directly over HTTP (no HTTPS redirect).
+                    // Tor hidden services don't have TLS certs — the Tor circuit provides encryption.
+                    // Also serves localhost requests directly for local development.
+                    let static_root = config.static_files.root.as_ref()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    if !static_root.is_empty() {
+                        // Try static file first
+                        let file_path = if path.is_empty() || path == "/" {
+                            format!("{}/index.html", static_root)
+                        } else {
+                            let clean = path.split('?').next().unwrap_or(&path);
+                            format!("{}{}", static_root, clean)
+                        };
+
+                        if let Ok(contents) = tokio::fs::read(&file_path).await {
+                            let content_type = if file_path.ends_with(".html") { "text/html" }
+                                else if file_path.ends_with(".js") { "application/javascript" }
+                                else if file_path.ends_with(".css") { "text/css" }
+                                else if file_path.ends_with(".json") { "application/json" }
+                                else if file_path.ends_with(".png") { "image/png" }
+                                else if file_path.ends_with(".svg") { "image/svg+xml" }
+                                else if file_path.ends_with(".ico") { "image/x-icon" }
+                                else if file_path.ends_with(".woff2") { "font/woff2" }
+                                else { "application/octet-stream" };
+                            let response = format!(
+                                "HTTP/1.1 200 OK\r\ncontent-type: {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                                content_type, contents.len()
+                            );
+                            let _ = tcp_stream.write_all(response.as_bytes()).await;
+                            let _ = tcp_stream.write_all(&contents).await;
+                        } else if path.starts_with("/api/") {
+                            // API request — forward to upstream
+                            let upstream_url = format!("http://127.0.0.1:8080{}", path);
+                            match reqwest::get(&upstream_url).await {
+                                Ok(resp) => {
+                                    let status = resp.status().as_u16();
+                                    let body = resp.bytes().await.unwrap_or_default();
+                                    let response = format!(
+                                        "HTTP/1.1 {} OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                                        status, body.len()
+                                    );
+                                    let _ = tcp_stream.write_all(response.as_bytes()).await;
+                                    let _ = tcp_stream.write_all(&body).await;
+                                }
+                                Err(_) => {
+                                    let _ = tcp_stream.write_all(
+                                        b"HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                                    ).await;
+                                }
+                            }
+                        } else {
+                            // SPA fallback — serve index.html
+                            let index = format!("{}/index.html", static_root);
+                            if let Ok(contents) = tokio::fs::read(&index).await {
+                                let response = format!(
+                                    "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                                    contents.len()
+                                );
+                                let _ = tcp_stream.write_all(response.as_bytes()).await;
+                                let _ = tcp_stream.write_all(&contents).await;
+                            } else {
+                                let _ = tcp_stream.write_all(
+                                    b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                                ).await;
+                            }
+                        }
+                    } else {
+                        let _ = tcp_stream.write_all(
+                            b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        ).await;
+                    }
                 } else {
                     let redirect = format!(
                         "HTTP/1.1 301 Moved Permanently\r\nlocation: https://{}{}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
