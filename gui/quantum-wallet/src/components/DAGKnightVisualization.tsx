@@ -97,24 +97,51 @@ export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisua
     { primary: '#f472b6', secondary: '#ec4899', glow: 'rgba(244, 114, 182, 0.6)' }, // Pink
   ];
 
-  // Create quantum particles around a block
+  // Create quantum particles around a block — enhanced with firework burst
   const createParticles = useCallback((x: number, y: number, color: string, count: number = 15) => {
     const newParticles: Particle[] = [];
+    // Main burst ring
     for (let i = 0; i < count; i++) {
-      const angle = (Math.PI * 2 * i) / count + Math.random() * 0.5;
-      const speed = 40 + Math.random() * 60;
+      const angle = (Math.PI * 2 * i) / count + Math.random() * 0.3;
+      const speed = 50 + Math.random() * 80;
       newParticles.push({
-        x,
-        y,
+        x, y,
         vx: Math.cos(angle) * speed,
         vy: Math.sin(angle) * speed,
         life: 0,
-        maxLife: 600 + Math.random() * 400,
+        maxLife: 700 + Math.random() * 500,
         color,
         size: 2 + Math.random() * 4,
       });
     }
-    particlesRef.current = [...particlesRef.current.slice(-100), ...newParticles]; // Keep max 100 particles
+    // Secondary sparkle ring (smaller, faster, gold)
+    for (let i = 0; i < 8; i++) {
+      const angle = (Math.PI * 2 * i) / 8 + Math.random() * 0.8;
+      const speed = 80 + Math.random() * 120;
+      newParticles.push({
+        x, y,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed - 30,
+        life: 0,
+        maxLife: 400 + Math.random() * 200,
+        color: '#FFD700',
+        size: 1 + Math.random() * 2,
+      });
+    }
+    // Quantum metadata trail sparks (tiny, long-lived, drift upward)
+    for (let i = 0; i < 5; i++) {
+      newParticles.push({
+        x: x + (Math.random() - 0.5) * 20,
+        y: y + (Math.random() - 0.5) * 10,
+        vx: (Math.random() - 0.5) * 15,
+        vy: -20 - Math.random() * 40,
+        life: 0,
+        maxLife: 1200 + Math.random() * 800,
+        color: '#00E5FF',
+        size: 1 + Math.random() * 1.5,
+      });
+    }
+    particlesRef.current = [...particlesRef.current.slice(-150), ...newParticles];
   }, []);
 
   // Listen for new blocks via SSE
@@ -506,17 +533,44 @@ export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisua
         });
       }
 
-      // Draw particles
+      // Draw particles — enhanced with trails and glow
       particlesRef.current.forEach(p => {
-        const alpha = Math.max(0, 1 - (p.life / p.maxLife));
-        const size = p.size * (1 - p.life / p.maxLife * 0.5);
+        const progress = p.life / p.maxLife;
+        const alpha = Math.max(0, 1 - progress);
+        const size = p.size * (1 - progress * 0.5);
 
-        ctx.shadowBlur = 15;
+        // Sparkle trail (fading tail behind particle)
+        if (alpha > 0.2 && size > 1.5) {
+          const tailLen = 3;
+          for (let t = 1; t <= tailLen; t++) {
+            const tailAlpha = alpha * (1 - t / tailLen) * 0.3;
+            const tailX = p.x - p.vx * t * 0.003;
+            const tailY = p.y - p.vy * t * 0.003;
+            ctx.fillStyle = p.color.includes('rgb')
+              ? p.color.replace('rgb', 'rgba').replace(')', `, ${tailAlpha})`)
+              : `${p.color}${Math.floor(tailAlpha * 255).toString(16).padStart(2, '0')}`;
+            ctx.beginPath();
+            ctx.arc(tailX, tailY, size * (1 - t * 0.2), 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+
+        // Outer glow
+        ctx.shadowBlur = size > 2 ? 20 : 10;
         ctx.shadowColor = p.color;
-        ctx.fillStyle = p.color.replace('rgb', 'rgba').replace(')', `, ${alpha})`);
+
+        // Core particle with bright center
+        const pGrad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, size * 1.5);
+        pGrad.addColorStop(0, `rgba(255,255,255,${alpha * 0.9})`);
+        pGrad.addColorStop(0.3, p.color.includes('rgb')
+          ? p.color.replace('rgb', 'rgba').replace(')', `, ${alpha * 0.8})`)
+          : p.color);
+        pGrad.addColorStop(1, 'transparent');
+        ctx.fillStyle = pGrad;
         ctx.beginPath();
-        ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
+        ctx.arc(p.x, p.y, size * 1.5, 0, Math.PI * 2);
         ctx.fill();
+
         ctx.shadowBlur = 0;
       });
 

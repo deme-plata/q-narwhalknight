@@ -261,39 +261,142 @@ export default function QuantumParticleCanvas({
         ctx.arc(p.x, p.y, pulseR, 0, Math.PI * 2);
         ctx.fill();
 
-        // Cross-spike for finalized particles
+        // Cross-spike for finalized particles — enhanced with 8-point starburst
         if (p.type === 'finalized' && alpha > 0.4) {
-          const sLen = pulseR * 2.5;
-          ctx.strokeStyle = `hsla(${hue}, 80%, 75%, ${alpha * 0.4})`;
-          ctx.lineWidth = 0.6;
+          const sLen = pulseR * 3;
+          ctx.strokeStyle = `hsla(${hue}, 90%, 80%, ${alpha * 0.5})`;
+          ctx.lineWidth = 0.8;
+          for (let ray = 0; ray < 8; ray++) {
+            const angle = (ray * Math.PI) / 4 + t * 0.3;
+            const len = ray % 2 === 0 ? sLen : sLen * 0.6;
+            ctx.beginPath();
+            ctx.moveTo(p.x, p.y);
+            ctx.lineTo(p.x + Math.cos(angle) * len, p.y + Math.sin(angle) * len);
+            ctx.stroke();
+          }
+        }
+
+        // Entangled particles — quantum orbital rings
+        if (p.type === 'entangled' && alpha > 0.3) {
+          ctx.strokeStyle = `hsla(${hue}, 85%, 70%, ${alpha * 0.25})`;
+          ctx.lineWidth = 0.5;
+          const orbitR = pulseR * 4;
+          ctx.save();
+          ctx.translate(p.x, p.y);
+          ctx.rotate(t * 0.5 + p.phase);
+          ctx.scale(1, 0.35);
           ctx.beginPath();
-          ctx.moveTo(p.x - sLen, p.y);
-          ctx.lineTo(p.x + sLen, p.y);
-          ctx.moveTo(p.x, p.y - sLen);
-          ctx.lineTo(p.x, p.y + sLen);
+          ctx.arc(0, 0, orbitR, 0, Math.PI * 2);
           ctx.stroke();
+          ctx.restore();
+          ctx.save();
+          ctx.translate(p.x, p.y);
+          ctx.rotate(-t * 0.4 + p.phase + 1.2);
+          ctx.scale(0.35, 1);
+          ctx.beginPath();
+          ctx.arc(0, 0, orbitR * 0.8, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.restore();
         }
         ctx.globalAlpha = 1;
       }
 
-      // Network pulses
+      // Firework bursts — triggered randomly every ~4 seconds
+      if (frame % 240 === 0 && Math.random() < 0.6) {
+        const fx = Math.random() * w * 0.6 + w * 0.2;
+        const fy = Math.random() * h * 0.4 + h * 0.1;
+        const burstHue = Math.random() * 360;
+        const burstCount = 20 + Math.floor(Math.random() * 15);
+        for (let b = 0; b < burstCount; b++) {
+          const angle = (b / burstCount) * Math.PI * 2 + Math.random() * 0.3;
+          const speed = 1.5 + Math.random() * 2.5;
+          const trail = Math.random() < 0.3;
+          particles.push({
+            x: fx, y: fy,
+            amplitude: 0.5 + Math.random() * 0.5,
+            frequency: 0.5,
+            phase: (burstHue / 360) * Math.PI * 2 + (trail ? Math.random() * 0.5 : 0),
+            mode: 1,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed - 0.5,
+            radius: trail ? 0.8 : 1.5 + Math.random() * 1.5,
+            life: 0.4 + Math.random() * 0.3,
+            type: 'finalized',
+          });
+        }
+        // Burst flash
+        pulses.push({
+          x: fx, y: fy,
+          radius: 0, maxRadius: 100 + Math.random() * 60,
+          alpha: 0.5, color: `hsl(${burstHue}, 90%, 75%)`,
+        });
+      }
+
+      // Quantum metadata streams — flowing data threads between particles
+      if (particles.length > 5) {
+        ctx.globalAlpha = 0.15;
+        ctx.lineWidth = 0.4;
+        for (let s = 0; s < Math.min(3, particles.length - 1); s++) {
+          const src = particles[s * 3 % particles.length];
+          const dst = particles[(s * 3 + 2) % particles.length];
+          if (!src || !dst) continue;
+          const srcHue = (src.phase / (Math.PI * 2)) * 360;
+          ctx.strokeStyle = `hsla(${srcHue}, 70%, 65%, 0.3)`;
+          ctx.beginPath();
+          ctx.moveTo(src.x, src.y);
+          // Flowing sine wave path between particles
+          const segments = 12;
+          for (let seg = 1; seg <= segments; seg++) {
+            const frac = seg / segments;
+            const mx = src.x + (dst.x - src.x) * frac;
+            const my = src.y + (dst.y - src.y) * frac +
+              Math.sin(frac * Math.PI * 3 + t * 2) * 8 * (1 - Math.abs(frac - 0.5) * 2);
+            ctx.lineTo(mx, my);
+          }
+          ctx.stroke();
+          // Data packet dots moving along the stream
+          const packetPos = (t * 0.3 + s * 0.33) % 1;
+          const px = src.x + (dst.x - src.x) * packetPos;
+          const py = src.y + (dst.y - src.y) * packetPos +
+            Math.sin(packetPos * Math.PI * 3 + t * 2) * 8 * (1 - Math.abs(packetPos - 0.5) * 2);
+          ctx.fillStyle = `hsla(${srcHue}, 90%, 80%, 0.6)`;
+          ctx.beginPath();
+          ctx.arc(px, py, 1.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      // Network pulses — enhanced with double-ring effect
       for (let i = pulses.length - 1; i >= 0; i--) {
         const pulse = pulses[i];
-        pulse.radius += 1.5;
-        pulse.alpha -= 0.004;
+        pulse.radius += 1.8;
+        pulse.alpha -= 0.005;
         if (pulse.alpha <= 0 || pulse.radius > pulse.maxRadius) {
           pulses.splice(i, 1); continue;
         }
-        if (pulse.color.startsWith('#')) {
-          const r = parseInt(pulse.color.slice(1, 3), 16);
-          const g = parseInt(pulse.color.slice(3, 5), 16);
-          const b = parseInt(pulse.color.slice(5, 7), 16);
-          ctx.strokeStyle = `rgba(${r},${g},${b},${pulse.alpha})`;
+        if (pulse.color.startsWith('#') || pulse.color.startsWith('hsl')) {
+          if (pulse.color.startsWith('#')) {
+            const r = parseInt(pulse.color.slice(1, 3), 16);
+            const g = parseInt(pulse.color.slice(3, 5), 16);
+            const b = parseInt(pulse.color.slice(5, 7), 16);
+            ctx.strokeStyle = `rgba(${r},${g},${b},${pulse.alpha})`;
+          } else {
+            ctx.strokeStyle = pulse.color.replace(')', `, ${pulse.alpha})`).replace('hsl(', 'hsla(');
+          }
         }
         ctx.lineWidth = 1.2;
         ctx.beginPath();
         ctx.arc(pulse.x, pulse.y, pulse.radius, 0, Math.PI * 2);
         ctx.stroke();
+        // Inner echo ring
+        if (pulse.radius > 15) {
+          ctx.globalAlpha = pulse.alpha * 0.3;
+          ctx.beginPath();
+          ctx.arc(pulse.x, pulse.y, pulse.radius * 0.6, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.globalAlpha = 1;
+        }
       }
 
       animationRef.current = requestAnimationFrame(draw);
