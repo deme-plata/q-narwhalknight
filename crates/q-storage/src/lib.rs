@@ -2071,11 +2071,15 @@ impl QStorage {
         // Use RocksDB multi_get for batch fetching
         let results = self.hot_db.multi_get(CF_BLOCKS, &keys).await?;
 
-        if capped_limit >= 100 {
+        {
             let found_count = results.iter().filter(|r| r.is_some()).count();
             let total_keys = keys.len();
-            info!("🔍 [BLOCK-RANGE-DEBUG] multi_get: {}/{} keys found for heights {}..={}",
-                  found_count, total_keys, start_height, end_height);
+            // v10.3.7: Always log (was >= 100), needed for checkpoint probe debugging
+            if found_count == 0 || capped_limit <= 5 || capped_limit >= 100 {
+                info!("🔍 [BLOCK-RANGE-DEBUG] multi_get: {}/{} keys found for heights {}..={} (contiguous={}, tip={}, cached={})",
+                      found_count, total_keys, start_height, end_height,
+                      self.height_cache.get().await, self.height_cache.get().await, self.height_cache.get().await);
+            }
         }
 
         // v7.3.1: Also batch-fetch quantum_metadata and transactions for reconstructing blocks
@@ -2254,6 +2258,47 @@ impl QStorage {
             if dag_found > 0 || dag_scanned >= 100 {
                 info!("🔍 [DAG FALLBACK] Scanned {} heights, found {} blocks from qblock:dag: format (errors: {}). Range: {}..={}",
                       dag_scanned, dag_found, dag_deser_errors, start_height, end_height);
+            }
+
+            // v10.3.7: DIAGNOSTIC — if we found 0 blocks in BOTH formats, do a raw key scan
+            // to discover what format blocks are actually stored under on this node.
+            // Only runs once per process lifetime to avoid spam.
+            use std::sync::atomic::{AtomicBool, Ordering as AtomOrd};
+            static RAW_SCAN_DONE: AtomicBool = AtomicBool::new(false);
+            if blocks.is_empty() && !RAW_SCAN_DONE.load(AtomOrd::Relaxed) {
+                RAW_SCAN_DONE.store(true, AtomOrd::Relaxed);
+                let sample_height = start_height;
+                warn!("🔬 [KEY FORMAT DIAGNOSTIC] 0 blocks found at height {} in both formats. Scanning raw keys...", sample_height);
+
+                // Try Format 3: binary key (height.to_be_bytes())
+                let binary_prefix = sample_height.to_be_bytes();
+                match self.hot_db.scan_prefix(CF_BLOCKS, &binary_prefix).await {
+                    Ok(entries) => {
+                        warn!("🔬 [KEY FORMAT] Binary prefix scan (height.to_be_bytes() = {:?}): {} entries found",
+                              binary_prefix, entries.len());
+                        for (k, v) in entries.iter().take(3) {
+                            warn!("🔬 [KEY FORMAT]   key_len={} key_hex={} value_len={}", k.len(), hex::encode(&k[..k.len().min(32)]), v.len());
+                        }
+                    }
+                    Err(e) => warn!("🔬 [KEY FORMAT] Binary scan error: {}", e),
+                }
+
+                // Scan ALL keys in CF_BLOCKS with no prefix (sample first 20)
+                match self.hot_db.scan_prefix(CF_BLOCKS, &[]).await {
+                    Ok(entries) => {
+                        warn!("🔬 [KEY FORMAT] TOTAL keys in CF_BLOCKS: {} (scanning all with empty prefix)", entries.len());
+                        for (k, v) in entries.iter().take(20) {
+                            let key_str = String::from_utf8_lossy(k);
+                            let is_printable = k.iter().all(|&b| b >= 32 && b < 127);
+                            if is_printable {
+                                warn!("🔬 [KEY FORMAT]   STRING key: '{}' (len={}, val_len={})", key_str, k.len(), v.len());
+                            } else {
+                                warn!("🔬 [KEY FORMAT]   BINARY key: hex={} (len={}, val_len={})", hex::encode(&k[..k.len().min(40)]), k.len(), v.len());
+                            }
+                        }
+                    }
+                    Err(e) => warn!("🔬 [KEY FORMAT] Full scan error: {}", e),
+                }
             }
         }
 

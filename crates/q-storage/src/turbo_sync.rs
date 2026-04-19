@@ -3204,14 +3204,29 @@ impl TurboSyncManager {
                 {
                     Ok(resp) => {
                         if let Ok(text) = resp.into_string() {
-                            // Response: {"success":true,"data":{"blocks":[...],...}}
-                            // If blocks array is non-empty, block exists at this height
-                            if text.contains("\"blocks\":[{") {
+                            // v10.3.7: Detailed probe debugging
+                            let has_blocks = text.contains("\"blocks\":[{");
+                            let count = if text.contains("\"count\":") {
+                                text.split("\"count\":").nth(1)
+                                    .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next())
+                                    .unwrap_or("?")
+                            } else { "?" };
+                            let latest = if text.contains("\"latest_height\":") {
+                                text.split("\"latest_height\":").nth(1)
+                                    .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next())
+                                    .unwrap_or("?")
+                            } else { "?" };
+                            info!("🔍 [CHECKPOINT PROBE] height={} peer={} has_blocks={} count={} latest_height={}",
+                                  height, url, has_blocks, count, latest);
+                            if has_blocks {
                                 return true;
                             }
                         }
                     }
-                    Err(_) => continue,
+                    Err(e) => {
+                        warn!("🔍 [CHECKPOINT PROBE] height={} peer={} ERROR: {}", height, url, e);
+                        continue;
+                    }
                 }
             }
             false
