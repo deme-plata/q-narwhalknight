@@ -339,10 +339,189 @@ pub fn deserialize_qblock_with_fallback(data: &[u8]) -> Result<QBlock, bincode::
             Ok(legacy_block.into())
         }
         Err(legacy_err) => {
-            // All formats failed - return the last error
+            // Try 5: Manual parse of old DAG block format (v7.x-v9.x)
+            // These blocks have the same header field order as current QBlock
+            // but diverge after VDFProof (missing fields added in v10.x).
+            // Manual parsing stops after verified fields and returns a minimal
+            // QBlock with empty transactions — sufficient for chain sync.
+            match parse_old_dag_block_manual(data) {
+                Ok(block) => {
+                    tracing::info!(
+                        "📦 Deserialized block at height {} using manual old-DAG parser (v10.3.7)",
+                        block.header.height
+                    );
+                    return Ok(block);
+                }
+                Err(manual_err) => {
+                    tracing::debug!(
+                        "📦 Manual old-DAG parser also failed: {}",
+                        manual_err
+                    );
+                }
+            }
+
+            // All formats failed
             Err(legacy_err)
         }
     }
+}
+
+/// Manual binary parser for old DAG blocks (v7.x-v9.x)
+///
+/// These blocks were stored via gossipsub as qblock:dag:{height}:{proposer}.
+/// The header field order matches the current BlockHeader up through VDFProof,
+/// but fields after VDFProof (producer_id, total_difficulty, producer_public_key,
+/// producer_signature, coinbase fields) were added in later versions and cause
+/// bincode deserialization to fail with "tag for enum is not valid".
+///
+/// This parser reads only the verified header fields (confirmed by hex dump
+/// analysis of height 100,441) and returns a minimal QBlock with empty
+/// transactions/solutions — sufficient for chain structure sync.
+///
+/// v10.3.7: Created after hex dump confirmed the binary layout.
+/// ZERO database writes. Read-only parser. Cannot corrupt anything.
+fn parse_old_dag_block_manual(data: &[u8]) -> Result<QBlock, bincode::Error> {
+    use crate::block::{BlockHeader, QBlock, QuantumMetadata, VDFProof};
+
+    if data.len() < 180 {
+        return Err(Box::new(bincode::ErrorKind::Custom(
+            format!("Old DAG block too short: {} bytes (need >=180)", data.len())
+        )));
+    }
+
+    let mut pos: usize = 0;
+
+    // Helper: read u64 LE
+    let read_u64 = |pos: &mut usize| -> Result<u64, bincode::Error> {
+        if *pos + 8 > data.len() {
+            return Err(Box::new(bincode::ErrorKind::Custom(
+                format!("EOF reading u64 at offset {}", *pos)
+            )));
+        }
+        let val = u64::from_le_bytes(data[*pos..*pos+8].try_into().unwrap());
+        *pos += 8;
+        Ok(val)
+    };
+
+    // Helper: read [u8; 32]
+    let read_hash = |pos: &mut usize| -> Result<[u8; 32], bincode::Error> {
+        if *pos + 32 > data.len() {
+            return Err(Box::new(bincode::ErrorKind::Custom(
+                format!("EOF reading hash at offset {}", *pos)
+            )));
+        }
+        let hash: [u8; 32] = data[*pos..*pos+32].try_into().unwrap();
+        *pos += 32;
+        Ok(hash)
+    };
+
+    // Helper: read Vec<u8> (u64 length prefix + bytes)
+    let read_vec = |pos: &mut usize| -> Result<Vec<u8>, bincode::Error> {
+        let len = read_u64(pos)? as usize;
+        if len > 10_000_000 {
+            return Err(Box::new(bincode::ErrorKind::Custom(
+                format!("Vec length {} too large at offset {}", len, *pos)
+            )));
+        }
+        if *pos + len > data.len() {
+            return Err(Box::new(bincode::ErrorKind::Custom(
+                format!("EOF reading Vec({}) at offset {}", len, *pos)
+            )));
+        }
+        let v = data[*pos..*pos+len].to_vec();
+        *pos += len;
+        Ok(v)
+    };
+
+    // === BlockHeader fields (verified by hex dump of height 100,441) ===
+
+    // 1. height: u64
+    let height = read_u64(&mut pos)?;
+
+    // 2. phase: u8
+    if pos >= data.len() {
+        return Err(Box::new(bincode::ErrorKind::Custom("EOF reading phase".into())));
+    }
+    let phase = data[pos];
+    pos += 1;
+
+    // 3. network_id: String (u64 len + utf8 bytes)
+    let nid_bytes = read_vec(&mut pos)?;
+    let network_id = String::from_utf8(nid_bytes).map_err(|e|
+        Box::new(bincode::ErrorKind::Custom(format!("Invalid network_id UTF-8: {}", e)))
+    )?;
+
+    // Quick sanity check — if network_id doesn't contain "mainnet" or "testnet",
+    // this probably isn't a valid old DAG block
+    if !network_id.contains("mainnet") && !network_id.contains("testnet") {
+        return Err(Box::new(bincode::ErrorKind::Custom(
+            format!("network_id '{}' doesn't look valid", network_id)
+        )));
+    }
+
+    // 4-7. Four 32-byte hashes
+    let prev_block_hash = read_hash(&mut pos)?;
+    let solutions_root = read_hash(&mut pos)?;
+    let tx_root = read_hash(&mut pos)?;
+    let state_root = read_hash(&mut pos)?;
+
+    // 8. timestamp: u64 (Unix seconds)
+    let timestamp = read_u64(&mut pos)?;
+
+    // 9. dag_round: u64
+    let dag_round = read_u64(&mut pos)?;
+
+    // === VDFProof fields ===
+    let vdf_output = read_vec(&mut pos)?;
+    let vdf_verification_proof = read_vec(&mut pos)?;
+    let vdf_iterations = read_u64(&mut pos)?;
+    let vdf_challenge = read_vec(&mut pos)?;
+    let vdf_generated_at = read_u64(&mut pos)?;
+
+    // === Stop here ===
+    // Fields after VDFProof (anchor_validator, proposer, producer_id,
+    // total_difficulty, etc.) diverge between versions. For chain sync,
+    // we have everything we need: height, hashes, timestamp, VDF proof.
+    //
+    // The proposer can be extracted from the key (qblock:dag:{h}:{proposer})
+    // by the caller if needed.
+
+    let vdf_proof = VDFProof {
+        output: vdf_output,
+        verification_proof: vdf_verification_proof,
+        iterations: vdf_iterations,
+        challenge: vdf_challenge,
+        generated_at: vdf_generated_at,
+        adaptive_params: None,
+    };
+
+    Ok(QBlock {
+        header: BlockHeader {
+            height,
+            phase,
+            network_id,
+            prev_block_hash,
+            solutions_root,
+            tx_root,
+            state_root,
+            timestamp,
+            dag_round,
+            vdf_proof,
+            anchor_validator: None,
+            proposer: [0u8; 32], // Will be filled from key if needed
+            producer_id: 0,
+            total_difficulty: 0,
+            producer_public_key: None,
+            producer_signature: None,
+            coinbase_merkle_root: None,
+            total_coinbase_reward: None,
+            coinbase_count: None,
+        },
+        mining_solutions: vec![],
+        dag_parents: vec![],
+        quantum_metadata: QuantumMetadata::default(),
+        transactions: vec![],
+    })
 }
 
 #[cfg(test)]
