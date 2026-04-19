@@ -8951,12 +8951,16 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             };
 
                             // 🔴 [BALANCE WRITE DEBUG] P2P gossipsub balance write
+                            // v10.3.7: Show actual QUG amounts for debugging balance bounce
                             {
                                 let p2p_addr_hex = hex::encode(&wallet_bytes);
                                 warn!(
-                                    "🔴 [BALANCE WRITE] p2p_gossipsub_balance(): wallet={} old={} new={} delta=+{} caller=P2P_GOSSIPSUB_BALANCE height={}",
-                                    &p2p_addr_hex[..16.min(p2p_addr_hex.len())], current, new_balance,
-                                    update.amount, update.block_height
+                                    "🔴 [BALANCE WRITE] p2p_gossipsub_balance(): wallet={} old={:.6}QUG new={:.6}QUG delta=+{:.6}QUG raw_old={} raw_new={} raw_delta={} caller=P2P_GOSSIPSUB height={} from={}",
+                                    &p2p_addr_hex[..16.min(p2p_addr_hex.len())],
+                                    current as f64 / 1e24, new_balance as f64 / 1e24, update.amount as f64 / 1e24,
+                                    current, new_balance, update.amount,
+                                    update.block_height,
+                                    &update.origin_node_id[..12.min(update.origin_node_id.len())]
                                 );
                             }
 
