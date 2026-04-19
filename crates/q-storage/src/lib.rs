@@ -2198,7 +2198,7 @@ impl QStorage {
         let mut dag_deser_errors = 0u64;
 
         if !dag_needed.is_empty() {
-            debug!("🔍 [DAG FALLBACK] Checking {} missing heights for qblock:dag: entries (range {}..={})",
+            warn!("🔍 [DAG FALLBACK v10.3.7] Checking {} missing heights for qblock:dag: entries (range {}..={}) using scan_prefix_seek",
                    dag_needed.len(), start_height, end_height);
 
             for &height in &dag_needed {
@@ -2259,8 +2259,8 @@ impl QStorage {
             }
 
             // Log summary (not per-block — avoids spam during full sync)
-            if dag_found > 0 || dag_scanned >= 100 {
-                info!("🔍 [DAG FALLBACK] Scanned {} heights, found {} blocks from qblock:dag: format (errors: {}). Range: {}..={}",
+            {
+                warn!("🔍 [DAG FALLBACK] Scanned {} heights, found {} blocks from qblock:dag: format (errors: {}). Range: {}..={} (scan_prefix_seek)",
                       dag_scanned, dag_found, dag_deser_errors, start_height, end_height);
             }
 
