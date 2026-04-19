@@ -75,7 +75,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.3.5"  # v10.3.5: Dual-lane VDF mining, Montgomery 200μs/dbl, Checkpoint Sync, 19× VDF optimization
+version = "10.3.8"  # v10.3.8: Full chain history restored — 545K DAG blocks unlocked, forward-seek sync, no more block deletion
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"
