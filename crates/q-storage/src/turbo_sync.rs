@@ -3197,7 +3197,10 @@ impl TurboSyncManager {
         // The sync/blocks endpoint works correctly and returns block data.
         let probe = |height: u64| -> bool {
             for url in &bootstrap_urls {
-                let sync_url = format!("{}/api/v1/sync/blocks?from_height={}&limit=1", url, height);
+                // v10.3.7: Use limit=1000 instead of limit=1.
+                // DAG blocks are sparse — a single height may have no block,
+                // but a 1000-height window will find nearby blocks.
+                let sync_url = format!("{}/api/v1/sync/blocks?from_height={}&limit=1000", url, height);
                 match ureq::get(&sync_url)
                     .timeout(std::time::Duration::from_secs(8))
                     .call()
