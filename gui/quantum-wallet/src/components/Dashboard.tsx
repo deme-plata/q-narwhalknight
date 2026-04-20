@@ -15,8 +15,7 @@ import LoanPaybackModal from './LoanPaybackModal';
 import ActiveLoansCard from './ActiveLoansCard';
 import WalletCardWithGraph from './WalletCardWithGraph';
 import PhaseTransitionModal from './PhaseTransitionModal';
-import WelcomeMainnetModal from './WelcomeMainnetModal';
-import BountyModal from './BountyModal';
+import MobileSetupModal, { MOBILE_SETUP_STORAGE_KEY } from './MobileSetupModal';
 import StakingModal from './StakingModal';
 import CustomTokensCard from './CustomTokensCard';
 import FinanceModal from './FinanceModal';
@@ -313,53 +312,14 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend, liveBalance }: Das
   // Phase transition modal state
   const [showPhaseModal, setShowPhaseModal] = useState(false); // Disabled - phase transition modal no longer needed
   const [showStakingModal, setShowStakingModal] = useState(false);
-  const [showMainnetWelcome, setShowMainnetWelcome] = useState(false);
-  const [showBountyModal, setShowBountyModal] = useState(false);
+  const [showMobileSetup, setShowMobileSetup] = useState(false);
 
-  // v8.5.10: Genie target ref — the TopBar bounty button
-  const bountyGenieRef = useRef<HTMLElement | null>(null);
+  // v10.3.0: Show mobile setup QR modal once (2s after load)
   useEffect(() => {
-    bountyGenieRef.current = document.getElementById('bounty-genie-target');
-  }, []);
-
-  // v8.5.10: Listen for TopBar bounty button clicks
-  useEffect(() => {
-    const handleOpenBounty = () => setShowBountyModal(true);
-    window.addEventListener('open-bounty-modal', handleOpenBounty);
-    return () => window.removeEventListener('open-bounty-modal', handleOpenBounty);
-  }, []);
-
-  // v7.1.4: Show welcome modal only ONCE. Versioned key + no polling interval.
-  useEffect(() => {
-    const key = 'mainnet-genesis_welcomed_v2';
-    if (localStorage.getItem(key) || localStorage.getItem('mainnetWelcomeSeen')) {
-      // Already seen — mark both keys (belt-and-suspenders) and bail
-      localStorage.setItem(key, 'true');
-      localStorage.setItem('mainnetWelcomeSeen', 'true');
-      return;
-    }
-    // Only show after Feb 22, 2026 11:00 UTC (12:00 GMT+1)
-    const launchDate = new Date('2026-02-22T11:00:00Z');
-    if (Date.now() < launchDate.getTime()) return;
-
-    // First time — show the modal
-    setShowMainnetWelcome(true);
-    // Pre-set both keys so even if user kills the tab, it won't show again
-    localStorage.setItem(key, 'true');
-    localStorage.setItem('mainnetWelcomeSeen', 'true');
-  }, []);
-
-  // v7.3.3: Show bounty modal once (3 seconds after load, only if welcome modal isn't showing)
-  useEffect(() => {
-    const bountyKey = 'bounty_modal_seen_v1';
-    if (localStorage.getItem(bountyKey)) return;
-    const timer = setTimeout(() => {
-      if (!showMainnetWelcome) {
-        setShowBountyModal(true);
-      }
-    }, 3000);
+    if (localStorage.getItem(MOBILE_SETUP_STORAGE_KEY)) return;
+    const timer = setTimeout(() => setShowMobileSetup(true), 2000);
     return () => clearTimeout(timer);
-  }, [showMainnetWelcome]);
+  }, []);
 
   // v8.5.5: Fetch unread email count on mount + listen for events
   useEffect(() => {
@@ -2541,16 +2501,9 @@ Provide a brief analysis (under 250 tokens) covering:
         <QuantumLoader backgroundOnly />
       </div>
 
-      {/* Welcome to Mainnet Modal */}
-      {showMainnetWelcome && (
-        <WelcomeMainnetModal onClose={() => setShowMainnetWelcome(false)} />
-      )}
-      {/* Bounty Campaign Modal — genie animates into TopBar button on close */}
-      {showBountyModal && (
-        <BountyModal
-          onClose={() => setShowBountyModal(false)}
-          genieTargetRef={bountyGenieRef}
-        />
+      {/* Mobile Setup QR Modal */}
+      {showMobileSetup && (
+        <MobileSetupModal onClose={() => setShowMobileSetup(false)} />
       )}
       {/* Phase Transition Modal (legacy) */}
       {showPhaseModal && (

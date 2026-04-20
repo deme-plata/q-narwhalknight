@@ -529,6 +529,10 @@ async fn worker_loop(
         let drain_rx = drain_rx.clone();
         let file_cache = file_cache.clone();
         let challenge_store = challenge_store.clone();
+        // Extract config fields needed inside spawn (config is &'_ not 'static)
+        let onion_static_root = config.static_files.root.as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
 
         tokio::spawn(async move {
             // ── LibP2P WebSocket proxy: separate path ──────────────────────
@@ -839,9 +843,7 @@ async fn worker_loop(
                     // v10.3.8: Serve Tor onion requests directly over HTTP (no HTTPS redirect).
                     // Tor hidden services don't have TLS certs — the Tor circuit provides encryption.
                     // Also serves localhost requests directly for local development.
-                    let static_root = config.static_files.root.as_ref()
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_default();
+                    let static_root = onion_static_root.clone();
                     if !static_root.is_empty() {
                         // Try static file first
                         let clean = path.split('?').next().unwrap_or(&path);

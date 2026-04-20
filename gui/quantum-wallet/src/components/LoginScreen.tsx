@@ -444,6 +444,8 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
   const [showMinerModal, setShowMinerModal] = useState(false);
   const [showNodeModal, setShowNodeModal] = useState(false);
   const [showSlintModal, setShowSlintModal] = useState(false);
+  const [showAIModal, setShowAIModal] = useState(false);
+  const [aiCopied, setAiCopied] = useState(false);
   const [showPapersLibrary, setShowPapersLibrary] = useState(false);
   const [isMetaMaskConnecting, setIsMetaMaskConnecting] = useState(false);
   const [hasMetaMask, setHasMetaMask] = useState(false);
@@ -950,70 +952,61 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
       {/* All content sits above the background + particles */}
       <div className="relative" style={{ zIndex: 3 }}>
 
-        {/* Help, Mining & Tor Icons - Top Right */}
+        {/* Quick Actions Bar - Top Right */}
         <div
-          className="absolute top-4 right-4 flex items-center gap-2 z-50"
+          className="absolute top-3 right-3 flex items-center gap-1.5 z-50"
           onMouseEnter={() => setMenuHovered(true)}
           onMouseLeave={() => setMenuHovered(false)}
         >
-          {/* Slint Native Wallet Icon */}
+          {/* Slint Native Wallet */}
           <motion.button
-            className="relative p-2 bg-emerald-600/30 hover:bg-emerald-600/50 border border-emerald-400/50 rounded-full transition-all cursor-pointer group backdrop-blur-sm overflow-hidden"
-            whileHover={{ scale: 1.15, rotate: 8, y: -2 }}
-            whileTap={{ scale: 0.9, rotate: -5 }}
-            initial={{ opacity: 0, scale: 0, x: 30 }}
-            animate={{ opacity: 1, scale: 1, x: 0 }}
-            transition={{ delay: 0.15, type: "spring", stiffness: 260, damping: 15 }}
-            title="Slint Native Wallet"
+            className="relative flex flex-col items-center gap-0.5 px-2.5 py-1.5 bg-emerald-600/20 hover:bg-emerald-600/40 border border-emerald-400/30 hover:border-emerald-400/60 rounded-xl transition-all cursor-pointer group backdrop-blur-md overflow-hidden"
+            whileHover={{ scale: 1.05, y: -2 }}
+            whileTap={{ scale: 0.95 }}
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.15, type: "spring", stiffness: 260, damping: 20 }}
             onClick={() => setShowSlintModal(true)}
           >
-            {/* Animated ring pulse */}
             <motion.div
-              className="absolute inset-0 rounded-full border-2 border-emerald-400/40"
-              animate={{ scale: [1, 1.4, 1], opacity: [0.6, 0, 0.6] }}
-              transition={{ duration: 2.5, repeat: Infinity, ease: "easeInOut" }}
+              className="absolute inset-0 rounded-xl bg-gradient-to-b from-emerald-400/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity"
             />
-            <Wallet className="w-7 h-7 text-emerald-400 relative z-10" />
-            <div className="absolute inset-0 rounded-full bg-emerald-500/0 group-hover:bg-emerald-500/20 transition-all blur-md" />
-            {/* NEW badge */}
-            <span className="absolute -top-1 -right-1 w-4 h-4 bg-emerald-500 rounded-full flex items-center justify-center z-20 border border-emerald-300/80">
-              <span className="text-[6px] font-black text-white leading-none">N</span>
-            </span>
+            <Wallet className="w-5 h-5 text-emerald-400 relative z-10" />
+            <span className="text-[9px] font-bold text-emerald-300/90 tracking-wider uppercase relative z-10">Wallet</span>
           </motion.button>
 
-          {/* Mining Download Icon */}
+          {/* Mining Download */}
           <motion.button
-            className="p-2 bg-amber-600/30 hover:bg-amber-600/50 border border-amber-400/50 rounded-full transition-all cursor-pointer group backdrop-blur-sm"
-            whileHover={{ scale: 1.15, rotate: -10 }}
+            className="relative flex flex-col items-center gap-0.5 px-2.5 py-1.5 bg-amber-600/20 hover:bg-amber-600/40 border border-amber-400/30 hover:border-amber-400/60 rounded-xl transition-all cursor-pointer group backdrop-blur-md"
+            whileHover={{ scale: 1.05, y: -2 }}
             whileTap={{ scale: 0.95 }}
-            initial={{ opacity: 0, scale: 0, rotate: 20 }}
-            animate={{ opacity: 1, scale: 1, rotate: 0 }}
-            transition={{ delay: 0.2, type: "spring", stiffness: 200 }}
-            title="Download Miner"
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.2, type: "spring", stiffness: 260, damping: 20 }}
             onClick={() => setShowMinerModal(true)}
           >
-            <Pickaxe className="w-7 h-7 text-amber-400" />
-            <div className="absolute inset-0 rounded-full bg-amber-500/0 group-hover:bg-amber-500/20 transition-all blur-md" />
+            <motion.div
+              className="absolute inset-0 rounded-xl bg-gradient-to-b from-amber-400/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity"
+            />
+            <Pickaxe className="w-5 h-5 text-amber-400 relative z-10" />
+            <span className="text-[9px] font-bold text-amber-300/90 tracking-wider uppercase relative z-10">Mine</span>
           </motion.button>
 
-          {/* Node Download Icon */}
+          {/* Node Download */}
           <motion.button
-            className="p-2 bg-cyan-600/30 hover:bg-cyan-600/50 border border-cyan-400/50 rounded-full transition-all cursor-pointer group backdrop-blur-sm"
-            whileHover={{ scale: 1.15, rotate: 8 }}
+            className="relative flex flex-col items-center gap-0.5 px-2.5 py-1.5 bg-cyan-600/20 hover:bg-cyan-600/40 border border-cyan-400/30 hover:border-cyan-400/60 rounded-xl transition-all cursor-pointer group backdrop-blur-md"
+            whileHover={{ scale: 1.05, y: -2 }}
             whileTap={{ scale: 0.95 }}
-            initial={{ opacity: 0, scale: 0, rotate: -15 }}
-            animate={{ opacity: 1, scale: 1, rotate: 0 }}
-            transition={{ delay: 0.25, type: "spring", stiffness: 200 }}
-            title="Download Full Node"
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.25, type: "spring", stiffness: 260, damping: 20 }}
             onClick={() => setShowNodeModal(true)}
           >
-            {/* Custom server/node SVG icon */}
-            <svg viewBox="0 0 100 100" className="w-7 h-7" fill="none">
-              {/* Server chassis */}
+            <motion.div className="absolute inset-0 rounded-xl bg-gradient-to-b from-cyan-400/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+            <svg viewBox="0 0 100 100" className="w-5 h-5 relative z-10" fill="none">
               <rect x="18" y="15" width="64" height="20" rx="4" fill="#06B6D4" opacity="0.9"/>
               <rect x="18" y="40" width="64" height="20" rx="4" fill="#0891B2" opacity="0.85"/>
               <rect x="18" y="65" width="64" height="20" rx="4" fill="#0E7490" opacity="0.8"/>
-              {/* LED dots */}
               <circle cx="30" cy="25" r="3" fill="#34D399"/>
               <circle cx="40" cy="25" r="3" fill="#34D399"/>
               <circle cx="30" cy="50" r="3" fill="#34D399"/>
@@ -1025,98 +1018,80 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
               <rect x="55" y="46" width="20" height="8" rx="1.5" fill="#164E63" opacity="0.6"/>
               <rect x="55" y="71" width="20" height="8" rx="1.5" fill="#164E63" opacity="0.6"/>
             </svg>
-            <div className="absolute inset-0 rounded-full bg-cyan-500/0 group-hover:bg-cyan-500/20 transition-all blur-md" />
+            <span className="text-[9px] font-bold text-cyan-300/90 tracking-wider uppercase relative z-10">Node</span>
           </motion.button>
 
-          {/* Tor Onion Icon */}
+          {/* Tor Onion */}
           <motion.button
-            className={`p-2 ${torActive ? 'bg-purple-600/30 hover:bg-purple-600/50 border-purple-400/50' : 'bg-gray-600/20 hover:bg-gray-600/30 border-gray-500/30'} border rounded-full transition-all cursor-pointer group backdrop-blur-sm relative`}
-            whileHover={{ scale: 1.15, rotate: 10 }}
+            className={`relative flex flex-col items-center gap-0.5 px-2.5 py-1.5 ${torActive ? 'bg-purple-600/20 hover:bg-purple-600/40 border-purple-400/30 hover:border-purple-400/60' : 'bg-gray-600/15 hover:bg-gray-600/30 border-gray-500/20 hover:border-gray-500/40'} border rounded-xl transition-all cursor-pointer group backdrop-blur-md`}
+            whileHover={{ scale: 1.05, y: -2 }}
             whileTap={{ scale: 0.95 }}
-            initial={{ opacity: 0, scale: 0, rotate: -20 }}
-            animate={{ opacity: 1, scale: 1, rotate: 0 }}
-            transition={{ delay: 0.3, type: "spring", stiffness: 200 }}
-            title={torActive ? "Open Tor version of Quillon Graph" : "Tor service offline - .onion address unavailable"}
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.3, type: "spring", stiffness: 260, damping: 20 }}
             onClick={openTorSite}
           >
-            {!torActive && (
-              <div className="absolute -top-1 -right-1 w-3 h-3 rounded-full bg-gray-500 border border-gray-400 flex items-center justify-center">
-                <span className="text-[7px] text-gray-200 font-bold">!</span>
-              </div>
-            )}
-            <svg viewBox="0 0 100 100" className="w-8 h-8" fill="none">
-              <ellipse cx="50" cy="55" rx="35" ry="40" fill="#7B4397" opacity="0.9"/>
-              <ellipse cx="50" cy="53" rx="28" ry="32" fill="#9B59B6"/>
-              <ellipse cx="50" cy="51" rx="21" ry="24" fill="#A569BD"/>
-              <ellipse cx="50" cy="49" rx="14" ry="16" fill="#BB8FCE"/>
-              <ellipse cx="50" cy="47" rx="7" ry="8" fill="#D7BDE2"/>
+            <motion.div className={`absolute inset-0 rounded-xl bg-gradient-to-b ${torActive ? 'from-purple-400/10' : 'from-gray-400/5'} to-transparent opacity-0 group-hover:opacity-100 transition-opacity`} />
+            <svg viewBox="0 0 100 100" className="w-5 h-5 relative z-10" fill="none">
+              <ellipse cx="50" cy="55" rx="35" ry="40" fill={torActive ? "#7B4397" : "#555"} opacity="0.9"/>
+              <ellipse cx="50" cy="53" rx="28" ry="32" fill={torActive ? "#9B59B6" : "#666"}/>
+              <ellipse cx="50" cy="51" rx="21" ry="24" fill={torActive ? "#A569BD" : "#777"}/>
+              <ellipse cx="50" cy="49" rx="14" ry="16" fill={torActive ? "#BB8FCE" : "#888"}/>
               <path d="M50 15 Q52 20 50 25 Q48 30 50 35" stroke="#5D4E37" strokeWidth="4" fill="none" strokeLinecap="round"/>
               <path d="M50 20 Q60 15 58 25 Q55 30 50 25" fill="#27AE60"/>
             </svg>
-            <div className="absolute inset-0 rounded-full bg-purple-500/0 group-hover:bg-purple-500/20 transition-all blur-md" />
+            <span className={`text-[9px] font-bold ${torActive ? 'text-purple-300/90' : 'text-gray-400/70'} tracking-wider uppercase relative z-10`}>Tor</span>
           </motion.button>
 
-          {/* Research Library Icon */}
+          {/* Research Library */}
           <motion.button
-            className="p-2 bg-amber-600/30 hover:bg-amber-600/50 border border-amber-400/50 rounded-full transition-all cursor-pointer group backdrop-blur-sm relative"
-            whileHover={{ scale: 1.15, rotate: -8 }}
+            className="relative flex flex-col items-center gap-0.5 px-2.5 py-1.5 bg-orange-600/20 hover:bg-orange-600/40 border border-orange-400/30 hover:border-orange-400/60 rounded-xl transition-all cursor-pointer group backdrop-blur-md"
+            whileHover={{ scale: 1.05, y: -2 }}
             whileTap={{ scale: 0.95 }}
-            initial={{ opacity: 0, scale: 0, rotate: 15 }}
-            animate={{ opacity: 1, scale: 1, rotate: 0 }}
-            transition={{ delay: 0.35, type: "spring", stiffness: 200 }}
-            title="Research Library — 78 Whitepapers"
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.35, type: "spring", stiffness: 260, damping: 20 }}
             onClick={() => setShowPapersLibrary(true)}
           >
-            <BookOpen className="w-7 h-7 text-amber-400" />
-            <div className="absolute inset-0 rounded-full bg-amber-500/0 group-hover:bg-amber-500/20 transition-all blur-md" />
-            <span className="absolute -top-1 -right-1 w-4 h-4 bg-amber-500 rounded-full flex items-center justify-center z-20 border border-amber-300/80">
-              <span className="text-[6px] font-black text-white leading-none">60</span>
-            </span>
+            <motion.div className="absolute inset-0 rounded-xl bg-gradient-to-b from-orange-400/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+            <BookOpen className="w-5 h-5 text-orange-400 relative z-10" />
+            <span className="text-[9px] font-bold text-orange-300/90 tracking-wider uppercase relative z-10">Papers</span>
           </motion.button>
 
-          {/* AI Setup (Claude Code MCP) Icon */}
+          {/* AI Setup */}
           <motion.button
-            className="relative p-2 bg-violet-600/30 hover:bg-violet-600/50 border border-violet-400/50 rounded-full transition-all cursor-pointer group backdrop-blur-sm overflow-hidden"
-            whileHover={{ scale: 1.15, rotate: -8, y: -2 }}
-            whileTap={{ scale: 0.9, rotate: 5 }}
-            initial={{ opacity: 0, scale: 0, x: -20 }}
-            animate={{ opacity: 1, scale: 1, x: 0 }}
-            transition={{ delay: 0.4, type: "spring", stiffness: 260, damping: 15 }}
-            title="Setup with AI (Claude Code)"
-            onClick={() => {
-              const cmd = `curl -fsSL https://quillon.xyz/setup-claude.sh | bash`;
-              navigator.clipboard.writeText(cmd).then(() => {
-                alert(`Copied to clipboard! Paste in your terminal:\n\n${cmd}\n\nThis sets up Claude Code to manage your wallet and mining with natural language.`);
-              }).catch(() => {
-                prompt('Copy this command and run in your terminal:', cmd);
-              });
-            }}
-          >
-            {/* AI glow pulse */}
-            <motion.div
-              className="absolute inset-0 rounded-full border-2 border-violet-400/40"
-              animate={{ scale: [1, 1.5, 1], opacity: [0.5, 0, 0.5] }}
-              transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
-            />
-            <Sparkles className="w-7 h-7 text-violet-400 relative z-10" />
-            <div className="absolute inset-0 rounded-full bg-violet-500/0 group-hover:bg-violet-500/20 transition-all blur-md" />
-            {/* AI badge */}
-            <span className="absolute -top-1 -right-1 w-5 h-5 bg-violet-500 rounded-full flex items-center justify-center z-20 border border-violet-300/80">
-              <span className="text-[5px] font-black text-white leading-none">AI</span>
-            </span>
-          </motion.button>
-
-          {/* Help Icon */}
-          <motion.button
-            className="p-3 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 rounded-full transition-all backdrop-blur-sm"
-            onClick={() => setShowInfoModal(true)}
-            whileHover={{ scale: 1.1 }}
+            className="relative flex flex-col items-center gap-0.5 px-2.5 py-1.5 bg-violet-600/20 hover:bg-violet-600/40 border border-violet-400/30 hover:border-violet-400/60 rounded-xl transition-all cursor-pointer group backdrop-blur-md overflow-hidden"
+            whileHover={{ scale: 1.05, y: -2 }}
             whileTap={{ scale: 0.95 }}
-            initial={{ opacity: 0, scale: 0 }}
-            animate={{ opacity: 1, scale: 1 }}
-            transition={{ delay: 0.5 }}
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.4, type: "spring", stiffness: 260, damping: 20 }}
+            onClick={() => setShowAIModal(true)}
           >
-            <HelpCircle className="w-5 h-5 text-amber-400" />
+            <motion.div className="absolute inset-0 rounded-xl bg-gradient-to-b from-violet-400/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+            {/* Subtle AI pulse */}
+            <motion.div
+              className="absolute inset-0 rounded-xl border border-violet-400/20"
+              animate={{ opacity: [0.3, 0.8, 0.3] }}
+              transition={{ duration: 2.5, repeat: Infinity, ease: "easeInOut" }}
+            />
+            <Sparkles className="w-5 h-5 text-violet-400 relative z-10" />
+            <span className="text-[9px] font-bold text-violet-300/90 tracking-wider uppercase relative z-10">AI</span>
+          </motion.button>
+
+          {/* Help */}
+          <motion.button
+            className="relative flex flex-col items-center gap-0.5 px-2.5 py-1.5 bg-gray-600/15 hover:bg-gray-600/30 border border-gray-500/20 hover:border-gray-500/40 rounded-xl transition-all cursor-pointer group backdrop-blur-md"
+            whileHover={{ scale: 1.05, y: -2 }}
+            whileTap={{ scale: 0.95 }}
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.45, type: "spring", stiffness: 260, damping: 20 }}
+            onClick={() => setShowInfoModal(true)}
+          >
+            <motion.div className="absolute inset-0 rounded-xl bg-gradient-to-b from-gray-400/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+            <HelpCircle className="w-5 h-5 text-gray-400 relative z-10" />
+            <span className="text-[9px] font-bold text-gray-400/80 tracking-wider uppercase relative z-10">Help</span>
           </motion.button>
         </div>
 
@@ -1670,6 +1645,131 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
 
       {/* Info Modal - What is Quillon Graph? */}
       <AnimatePresence>
+        {/* AI Setup Modal */}
+        {showAIModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-[100] overflow-y-auto py-8"
+            onClick={() => setShowAIModal(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.9, opacity: 0, y: 20 }}
+              className="bg-gradient-to-br from-slate-900 via-violet-950/30 to-slate-900 border-2 border-violet-500/30 rounded-2xl p-6 max-w-lg w-full mx-4 shadow-2xl"
+              onClick={(e) => e.stopPropagation()}
+              style={{ boxShadow: '0 0 80px rgba(139, 92, 246, 0.25)' }}
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-3">
+                  <div className="w-12 h-12 rounded-full bg-gradient-to-br from-violet-500/30 to-purple-500/30 border border-violet-500/50 flex items-center justify-center relative">
+                    <Sparkles className="w-7 h-7 text-violet-400" />
+                    <motion.div
+                      className="absolute inset-0 rounded-full border-2 border-violet-400/30"
+                      animate={{ scale: [1, 1.3, 1], opacity: [0.5, 0, 0.5] }}
+                      transition={{ duration: 2, repeat: Infinity }}
+                    />
+                  </div>
+                  <div>
+                    <h2 className="text-2xl font-bold bg-gradient-to-r from-violet-400 to-purple-400 bg-clip-text text-transparent">
+                      AI Setup
+                    </h2>
+                    <p className="text-violet-300/60 text-sm">Manage wallet & mining with natural language</p>
+                  </div>
+                </div>
+                <button onClick={() => setShowAIModal(false)} className="p-2 hover:bg-violet-500/20 rounded-lg transition-colors">
+                  <X className="w-6 h-6 text-violet-400" />
+                </button>
+              </div>
+
+              {/* What you can do */}
+              <div className="mb-5 p-4 bg-violet-500/5 border border-violet-500/15 rounded-xl">
+                <p className="text-violet-200/80 text-sm mb-3 font-medium">After setup, just say in natural language:</p>
+                <div className="space-y-2">
+                  {[
+                    { cmd: '"Create a wallet"', desc: 'Generate address + recovery phrase', icon: '🔐' },
+                    { cmd: '"Start mining"', desc: 'Download miner & begin earning QUG', icon: '⛏️' },
+                    { cmd: '"What\'s my balance?"', desc: 'Check any wallet instantly', icon: '💰' },
+                    { cmd: '"Send 10 QUG to qnk..."', desc: 'Transfer funds with one sentence', icon: '🚀' },
+                    { cmd: '"Network status"', desc: 'Height, peers, hashrate', icon: '📡' },
+                  ].map((item, i) => (
+                    <motion.div
+                      key={i}
+                      initial={{ opacity: 0, x: -10 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      transition={{ delay: 0.1 * i }}
+                      className="flex items-center gap-3 p-2 bg-slate-800/40 rounded-lg"
+                    >
+                      <span className="text-lg">{item.icon}</span>
+                      <div className="flex-1">
+                        <span className="text-violet-200 text-sm font-mono">{item.cmd}</span>
+                        <span className="text-violet-400/50 text-xs ml-2">— {item.desc}</span>
+                      </div>
+                    </motion.div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Setup Command */}
+              <div className="mb-5">
+                <p className="text-violet-300/70 text-xs mb-2 uppercase tracking-wider font-bold">One command to set up:</p>
+                <div className="relative group">
+                  <pre className="bg-black/60 border border-violet-500/20 rounded-xl p-4 text-sm font-mono text-violet-300 overflow-x-auto">
+                    curl -fsSL https://quillon.xyz/setup-ai.sh | bash
+                  </pre>
+                  <motion.button
+                    className={`absolute top-2 right-2 px-3 py-1.5 ${aiCopied ? 'bg-emerald-500/30 border-emerald-400/50' : 'bg-violet-500/20 border-violet-400/30 hover:bg-violet-500/40'} border rounded-lg text-xs font-bold transition-all`}
+                    whileTap={{ scale: 0.9 }}
+                    onClick={() => {
+                      navigator.clipboard.writeText('curl -fsSL https://quillon.xyz/setup-ai.sh | bash');
+                      setAiCopied(true);
+                      setTimeout(() => setAiCopied(false), 2000);
+                    }}
+                  >
+                    <span className={aiCopied ? 'text-emerald-300' : 'text-violet-300'}>
+                      {aiCopied ? '✓ Copied!' : 'Copy'}
+                    </span>
+                  </motion.button>
+                </div>
+              </div>
+
+              {/* How it works */}
+              <div className="flex items-center gap-3 mb-5">
+                {[
+                  { step: '1', label: 'Paste in terminal', color: 'violet' },
+                  { step: '2', label: 'Open AI assistant', color: 'purple' },
+                  { step: '3', label: 'Say "create a wallet"', color: 'fuchsia' },
+                ].map((s, i) => (
+                  <div key={i} className="flex-1 text-center">
+                    <div className={`w-8 h-8 rounded-full bg-${s.color}-500/20 border border-${s.color}-400/30 flex items-center justify-center mx-auto mb-1`}>
+                      <span className={`text-sm font-black text-${s.color}-400`}>{s.step}</span>
+                    </div>
+                    <span className="text-[10px] text-violet-300/60">{s.label}</span>
+                  </div>
+                ))}
+              </div>
+
+              {/* Supported AIs */}
+              <div className="p-3 bg-slate-800/40 rounded-xl border border-violet-500/10">
+                <p className="text-violet-300/50 text-[10px] uppercase tracking-wider font-bold mb-2">Supported AI Assistants</p>
+                <div className="flex items-center gap-2">
+                  <span className="px-2 py-0.5 bg-violet-500/20 border border-violet-400/30 rounded-full text-[10px] text-violet-300 font-bold">Claude Code</span>
+                  <span className="px-2 py-0.5 bg-gray-500/15 border border-gray-500/20 rounded-full text-[10px] text-gray-400">ChatGPT (coming soon)</span>
+                  <span className="px-2 py-0.5 bg-gray-500/15 border border-gray-500/20 rounded-full text-[10px] text-gray-400">More TBA</span>
+                </div>
+              </div>
+
+              {/* Footer */}
+              <p className="text-center text-violet-400/30 text-[10px] mt-4">
+                No GPG signatures. No air-gapped computers. Just works.
+              </p>
+            </motion.div>
+          </motion.div>
+        )}
+
         {showInfoModal && (
           <motion.div
             initial={{ opacity: 0 }}
@@ -1863,7 +1963,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
               <div className="space-y-3">
                 {/* Linux x64 */}
                 <a
-                  href="https://quillon.xyz/downloads/q-api-server-v10.1.1"
+                  href="https://quillon.xyz/downloads/q-api-server-v10.3.6"
                   download="q-api-server"
                   className="w-full p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-cyan-500/20 hover:border-cyan-500/40 rounded-xl transition-all flex items-center gap-4 group block"
                 >
@@ -1879,8 +1979,8 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
 
                 {/* Windows x64 */}
                 <a
-                  href="https://quillon.xyz/downloads/q-api-server-v10.1.1-windows-x64.exe"
-                  download="q-api-server-v10.1.1-windows-x64.exe"
+                  href="https://quillon.xyz/downloads/q-api-server-v10.3.6-windows-x64.exe"
+                  download="q-api-server-v10.3.6-windows-x64.exe"
                   className="w-full p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-cyan-500/20 hover:border-cyan-500/40 rounded-xl transition-all flex items-center gap-4 group block"
                 >
                   <div className="w-10 h-10 rounded-lg bg-blue-500/20 flex items-center justify-center shrink-0">
@@ -1888,7 +1988,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
                   </div>
                   <div className="text-left flex-1">
                     <div className="font-bold text-cyan-100">Windows x64</div>
-                    <div className="text-xs text-cyan-300/50">Windows 10/11 — Single EXE with TUI (v10.1.1)</div>
+                    <div className="text-xs text-cyan-300/50">Windows 10/11 — Single EXE with TUI (v10.3.6)</div>
                   </div>
                   <Download className="w-5 h-5 text-cyan-400/60 group-hover:text-cyan-400 transition-colors" />
                 </a>
@@ -1926,9 +2026,9 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
               <div className="mt-3 p-3 bg-slate-800/40 rounded-xl border border-cyan-500/10">
                 <h3 className="text-sm font-bold text-cyan-300 mb-2">Quick Start (Linux)</h3>
                 <code className="text-[11px] text-cyan-100/70 block whitespace-pre-wrap break-all font-mono leading-relaxed">
-{`wget https://quillon.xyz/downloads/q-api-server-v10.1.1
-chmod +x q-api-server-v10.1.1
-./q-api-server-v10.1.1 --port 8080`}
+{`wget https://quillon.xyz/downloads/q-api-server-v10.3.6
+chmod +x q-api-server-v10.3.6
+./q-api-server-v10.3.6 --port 8080`}
                 </code>
                 <div className="text-[10px] text-emerald-400/70 mt-2">WarpSync auto-discovers peers & syncs 900K+ blocks in minutes</div>
               </div>
@@ -2091,9 +2191,9 @@ cargo build --release --package q-api-server
               <div className="mt-5 p-4 bg-slate-800/40 rounded-xl border border-amber-500/10">
                 <h3 className="text-sm font-bold text-amber-300 mb-2">Quick Start (Linux)</h3>
                 <code className="text-xs text-amber-100/70 block whitespace-pre-wrap break-all font-mono">
-{`wget https://quillon.xyz/downloads/q-miner-v10.1.1
-chmod +x q-miner-v10.1.1
-./q-miner-v10.1.1 --mode solo --wallet YOUR_WALLET --threads 4 --server https://quillon.xyz`}
+{`wget https://quillon.xyz/downloads/q-miner-v10.3.6
+chmod +x q-miner-v10.3.6
+./q-miner-v10.3.6 --mode solo --wallet YOUR_WALLET --threads 4 --server https://quillon.xyz`}
                 </code>
               </div>
 

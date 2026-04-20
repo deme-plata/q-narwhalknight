@@ -1658,17 +1658,21 @@ export default function DexScreen() {
                   console.log(`📊 [API Token] Balance response for ${apiToken.symbol}:`, balanceResponse);
 
                   if (balanceResponse.success && balanceResponse.data) {
-                    // v4.1.0: Balance stored as display × 10^(2*decimals) due to double-conversion
-                    // Divide by 10^(2*decimals) to get display value matching supply
+                    // v10.3.6: Token balance decimal conversion
+                    // Raw balance from API is in base units (display × 10^decimals)
+                    // Divide by 10^decimals to get display value
+                    // Use string-based division to avoid BigInt→Number precision loss
                     const rawBalance = balanceResponse.data.balance || '0';
                     const balanceStr = typeof rawBalance === 'string' ? rawBalance : String(rawBalance);
                     try {
-                      const balanceBigInt = BigInt(balanceStr);
-                      const balDivisor = BigInt(10) ** BigInt(2 * decimals);
-                      tokenBalance = Number(balanceBigInt / balDivisor) + Number(balanceBigInt % balDivisor) / Number(balDivisor);
+                      // Try 1x decimals first (standard: raw = display × 10^decimals)
+                      const padded = balanceStr.padStart(decimals + 1, '0');
+                      const intPart = padded.slice(0, padded.length - decimals) || '0';
+                      const fracPart = padded.slice(padded.length - decimals);
+                      tokenBalance = parseFloat(`${intPart}.${fracPart}`);
+                      if (isNaN(tokenBalance)) tokenBalance = 0;
                     } catch {
                       tokenBalance = parseFloat(balanceStr) || 0;
-                      if (tokenBalance > 1e15) tokenBalance = tokenBalance / Math.pow(10, 2 * decimals);
                     }
                     console.log(`✅ [API Token] Converted ${apiToken.symbol} balance from ${rawBalance} to ${tokenBalance} (2×${decimals}dec)`);
                   } else {
@@ -4598,6 +4602,28 @@ export default function DexScreen() {
                         <span className="flex items-center gap-1"><DollarSign className="w-3 h-3" />You Receive</span>
                         <span className="text-green-400 font-medium">≈ {fmtUsd(receiveUsd)}</span>
                       </div>
+                      {/* v10.3.6: Sanity check — warn if output value is unrealistic */}
+                      {receiveUsd > 1_000_000 && (
+                        <div className="p-3 rounded-lg border bg-red-500/10 border-red-500/30 mt-2">
+                          <div className="text-xs font-bold text-red-400">
+                            ⚠️ UNREALISTIC SWAP VALUE
+                          </div>
+                          <div className="text-xs text-gray-400 mt-1">
+                            The estimated output exceeds $1M. This swap will likely fail or give you far less than quoted.
+                            The pool does not have sufficient liquidity for this trade. Try a much smaller amount.
+                          </div>
+                        </div>
+                      )}
+                      {payUsd > 0 && receiveUsd > 0 && Math.abs(receiveUsd - payUsd) / payUsd > 0.5 && (
+                        <div className="p-3 rounded-lg border bg-yellow-500/10 border-yellow-500/30 mt-1">
+                          <div className="text-xs font-bold text-yellow-400">
+                            ⚠️ Large price discrepancy
+                          </div>
+                          <div className="text-xs text-gray-400 mt-1">
+                            You pay {fmtUsd(payUsd)} but receive {fmtUsd(receiveUsd)} — a {((Math.abs(receiveUsd - payUsd) / payUsd) * 100).toFixed(0)}% difference.
+                          </div>
+                        </div>
+                      )}
                     </>
                   );
                 })()}
@@ -4633,12 +4659,35 @@ export default function DexScreen() {
                   if (reserveIn <= 0) return null;
                   const amountIn = parseFloat(swapAmount);
                   const impact = (amountIn / (reserveIn + amountIn)) * 100;
-                  const impactColor = impact > 10 ? 'text-red-400' : impact > 3 ? 'text-yellow-400' : 'text-green-400';
+                  const reserveOut = (isForward ? parseU128(matchingPool.reserve1) : parseU128(matchingPool.reserve0)) / 1e24;
+                  const amountOutEstimate = (amountIn * 0.997 * reserveOut) / (reserveIn + amountIn * 0.997);
+                  const wouldDrainPool = amountOutEstimate >= reserveOut * 0.95;
+                  const impactColor = impact > 50 ? 'text-red-500 font-bold' : impact > 10 ? 'text-red-400' : impact > 3 ? 'text-yellow-400' : 'text-green-400';
                   return (
-                    <div className="flex justify-between text-gray-400">
-                      <span>Price Impact</span>
-                      <span className={impactColor}>{impact < 0.01 ? '<0.01' : impact.toFixed(2)}%</span>
-                    </div>
+                    <>
+                      <div className="flex justify-between text-gray-400">
+                        <span>Price Impact</span>
+                        <span className={impactColor}>{impact < 0.01 ? '<0.01' : impact.toFixed(2)}%</span>
+                      </div>
+                      {impact > 10 && (
+                        <div className={`p-3 rounded-lg border ${impact > 50 ? 'bg-red-500/10 border-red-500/30' : 'bg-yellow-500/10 border-yellow-500/30'}`}>
+                          <div className={`text-xs font-bold ${impact > 50 ? 'text-red-400' : 'text-yellow-400'}`}>
+                            {impact > 50 ? '⚠️ EXTREME PRICE IMPACT' : '⚠️ High Price Impact'}
+                          </div>
+                          <div className="text-xs text-gray-400 mt-1">
+                            {wouldDrainPool
+                              ? `This swap would drain ${(amountOutEstimate / reserveOut * 100).toFixed(0)}% of the pool. You will receive far less than the quoted price.`
+                              : `You are swapping a large amount relative to pool liquidity. Consider reducing the amount.`
+                            }
+                          </div>
+                          {reserveOut > 0 && (
+                            <div className="text-xs text-gray-500 mt-1">
+                              Pool liquidity: {reserveOut < 1000 ? reserveOut.toFixed(2) : reserveOut.toLocaleString(undefined, {maximumFractionDigits: 0})} {swapTo}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </>
                   );
                 })()}
                 {/* v2.4.0: Price discrepancy warning when AMM rate differs from oracle */}

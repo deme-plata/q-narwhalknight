@@ -60,13 +60,17 @@ QUG is the native coin used for transactions, mining rewards, gas fees, and DEX 
 - Dev fee: 1% of mining rewards → founder wallet
 
 ## MINING
-- Algorithm: **BLAKE3 VDF** (100 sequential BLAKE3 hash rounds per nonce)
-- Anyone can mine with CPU or GPU (download q-miner from quillon.xyz/downloads)
-- GPU mining uses OpenCL (works with AMD and NVIDIA GPUs)
-- To mine: download binary, run `./q-miner --server https://quillon.xyz --wallet qnk<your-address>`
+- **Dual-lane mining** (v10.3.5+): GPU BLAKE3 lane + CPU VDF lane, 50/50 reward split
+- **GPU lane**: Massively parallel BLAKE3 hashing via OpenCL (AMD + NVIDIA GPUs)
+- **CPU VDF lane**: Sequential BLAKE3 × 4,300 iterations (Verifiable Delay Function) — \
+inherently sequential, so CPUs compete fairly regardless of GPU power. \
+This means **CPU-only miners can earn 50% of block rewards** even without a GPU.
+- VDF performance: ~200μs per doubling with Montgomery-integrated optimization
+- Difficulty: **LWMA** (Linear Weighted Moving Average) adjusts per-block for stable block times
+- Anyone can mine: download q-miner from quillon.xyz/downloads
+- To mine: `./q-miner --server https://quillon.xyz --wallet qnk<your-address>`
 - Mining rewards appear in your wallet within seconds via SSE (real-time)
-- Difficulty adjusts dynamically based on network hashrate
-- Upcoming: Genus-2 Jacobian VDF upgrade (quantum-resistant sequential PoW)
+- Upcoming: **Genus-2 Jacobian VDF** upgrade (quantum-resistant sequential PoW using hyperelliptic curves)
 
 ## WALLET
 - Create wallet: Click 'Create Wallet' in the app — generates Ed25519 keypair + mnemonic phrase

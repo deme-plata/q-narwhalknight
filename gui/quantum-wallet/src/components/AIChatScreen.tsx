@@ -1548,6 +1548,14 @@ RULES:
 - For non-financial questions, respond normally without ACTION tags.
 - Keep responses concise and helpful. Use markdown formatting.
 
+MINING KNOWLEDGE:
+- Quillon uses dual-lane mining (v10.3.5+): GPU BLAKE3 lane + CPU VDF lane, 50/50 reward split.
+- CPU VDF lane: sequential BLAKE3 × 4,300 iterations — CPUs compete fairly, no GPU needed for 50% of rewards.
+- GPU lane: massively parallel BLAKE3 hashing via OpenCL (AMD + NVIDIA).
+- Difficulty: LWMA (Linear Weighted Moving Average) per-block adjustment.
+- Download miner: quillon.xyz/downloads. Run: ./q-miner --server https://quillon.xyz --wallet <address>
+- Max supply: 21M QUG, ~2.6M/year emission (Era 0), 4-year halving like Bitcoin.
+
 EXAMPLES:
 User: "send 50 QUG to alice"
 Response: "I'll send **50 QUG** to **Alice** from your wallet.\n\n[ACTION:send amount=50 token=QUG to_name=alice]"

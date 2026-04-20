@@ -222,6 +222,19 @@ export function LibP2PProvider({
     }
 
     async function initNode() {
+      // v10.3.0: VISIBLE error reporting for P2P init debugging
+      const p2pDebugDiv = document.createElement('div')
+      p2pDebugDiv.id = 'p2p-debug'
+      p2pDebugDiv.style.cssText = 'position:fixed;bottom:10px;left:10px;background:rgba(0,0,0,0.85);color:#0f0;font-family:monospace;font-size:11px;padding:8px 12px;border-radius:6px;z-index:99999;max-width:500px;pointer-events:none;'
+      p2pDebugDiv.textContent = '🔄 P2P: Initializing...'
+      document.body.appendChild(p2pDebugDiv)
+
+      const p2pLog = (msg: string) => {
+        console.log(msg)
+        if (p2pDebugDiv) p2pDebugDiv.textContent = msg
+      }
+
+      p2pLog('🔄 P2P: Starting initNode()')
       console.log('🚀 [CONTEXT] Initializing browser P2P node...')
       console.log(`   Network: ${NETWORK_ID}`)
       console.log(`   Bootstrap peers: ${BOOTSTRAP_PEERS.length}`)
@@ -230,8 +243,10 @@ export function LibP2PProvider({
       setError(null)
 
       try {
+        p2pLog('🔄 P2P: Calling createBrowserNode()...')
         // Create the browser libp2p node
         const browserNode = await createBrowserNode()
+        p2pLog(`✅ P2P: Node created! PeerId: ${browserNode.peerId.toString().slice(0, 20)}...`)
 
         if (!mounted) {
           console.log('🛑 [CONTEXT] Component unmounted during init, stopping node')
@@ -294,7 +309,15 @@ export function LibP2PProvider({
         }, 5000)
 
       } catch (err) {
+        const errMsg = err instanceof Error ? `${err.message}\n${err.stack?.slice(0, 300)}` : String(err)
         console.error('❌ [CONTEXT] Failed to initialize P2P node:', err)
+        p2pLog(`❌ P2P ERROR: ${errMsg.slice(0, 200)}`)
+        // Keep the debug div visible for 30 seconds on error
+        if (p2pDebugDiv) {
+          p2pDebugDiv.style.color = '#f55'
+          p2pDebugDiv.style.pointerEvents = 'auto'
+          setTimeout(() => p2pDebugDiv?.remove(), 30000)
+        }
         if (mounted) {
           setError(err instanceof Error ? err : new Error(String(err)))
           setIsReady(false)
