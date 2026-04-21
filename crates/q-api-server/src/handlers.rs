@@ -598,10 +598,10 @@ fn detect_latest_node_version() -> Option<(String, Option<String>)> {
     }
 
     let mut best: Option<(u64, u64, u64, String, std::path::PathBuf)> = None;
+    // Scan all known download locations (Beta, Epsilon, relative path)
+    scan_dir(std::path::Path::new("/home/orobit/q-narwhalknight/dist-final/downloads"), &mut best);
+    scan_dir(std::path::Path::new("/opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads"), &mut best);
     scan_dir(std::path::Path::new("gui/quantum-wallet/dist-final/downloads"), &mut best);
-    if best.is_none() {
-        scan_dir(std::path::Path::new("/opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads"), &mut best);
-    }
 
     best.map(|(_, _, _, version, path)| {
         // Compute SHA-256 of the binary for auto-update verification
@@ -639,10 +639,9 @@ fn detect_latest_miner_version() -> Option<(String, Option<String>)> {
     }
 
     let mut best: Option<(u64, u64, u64, String, std::path::PathBuf)> = None;
+    scan_dir(std::path::Path::new("/home/orobit/q-narwhalknight/dist-final/downloads"), &mut best);
+    scan_dir(std::path::Path::new("/opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads"), &mut best);
     scan_dir(std::path::Path::new("gui/quantum-wallet/dist-final/downloads"), &mut best);
-    if best.is_none() {
-        scan_dir(std::path::Path::new("/opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads"), &mut best);
-    }
     best.map(|(_, _, _, version, path)| {
         let sha256 = std::fs::read(&path).ok().map(|data| {
             use sha2::{Digest, Sha256};
@@ -658,7 +657,7 @@ pub async fn version_info() -> Result<Json<ApiResponse<VersionInfo>>, StatusCode
     let (latest_node_version, latest_node_sha256, latest_node_download_url) =
         match detect_latest_node_version() {
             Some((version, sha256)) => {
-                let url = format!("https://dl.quillon.xyz/downloads/q-api-server-v{}", version);
+                let url = format!("https://quillon.xyz/downloads/q-api-server-v{}", version);
                 (Some(version), sha256, Some(url))
             }
             None => (None, None, None),
@@ -672,7 +671,7 @@ pub async fn version_info() -> Result<Json<ApiResponse<VersionInfo>>, StatusCode
     let (latest_miner_version, latest_miner_sha256, latest_miner_download_url) =
         match detect_latest_miner_version() {
             Some((version, sha256)) => {
-                let url = format!("https://dl.quillon.xyz/downloads/q-miner-v{}", version);
+                let url = format!("https://quillon.xyz/downloads/q-miner-v{}", version);
                 (Some(version), sha256, Some(url))
             }
             None => (None, None, None),
