@@ -75,7 +75,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.3.8"  # v10.3.8: Full chain history restored — 545K DAG blocks unlocked, forward-seek sync, no more block deletion
+version = "10.3.9"  # v10.3.9: Fix forward-seek string-sort early-exit + memory limiter host-swap false CRITICAL
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"

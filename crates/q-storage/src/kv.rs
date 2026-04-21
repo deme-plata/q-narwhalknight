@@ -1783,7 +1783,18 @@ impl KVStore for RocksDBKV {
         start_height: u64,
         limit: usize,
     ) -> Result<Vec<(u64, Vec<u8>, Vec<u8>)>> {
-        // Returns (height, key, value) tuples — caller does deserialization
+        // Returns (height, key, value) tuples — caller does deserialization.
+        //
+        // v10.3.9: String-sort fix. RocksDB sorts qblock:dag: keys lexicographically,
+        // NOT numerically. Keys with more digits sort BEFORE fewer digits because
+        // digits (0x30-0x39) are less than ':' (0x3A). So 8-digit heights (10M+)
+        // appear first in the iterator even when we want 7-digit heights (1M-9M).
+        //
+        // Old code: exited as soon as `limit` blocks collected → always returned
+        // 8-digit blocks (13M+) regardless of start_height.
+        //
+        // Fix: scan all MAX_SCAN entries without early exit, then sort numerically
+        // and return the `limit` blocks with LOWEST heights >= start_height.
         const MAX_SCAN: usize = 100_000;
         const MAX_LIMIT: usize = 2000;
         let limit = limit.min(MAX_LIMIT);
@@ -1794,8 +1805,8 @@ impl KVStore for RocksDBKV {
             rocksdb::IteratorMode::From(b"qblock:dag:", rocksdb::Direction::Forward),
         );
 
-        let mut results: Vec<(u64, Vec<u8>, Vec<u8>)> = Vec::with_capacity(limit);
-        let mut seen_heights = std::collections::HashSet::with_capacity(limit);
+        let mut results: Vec<(u64, Vec<u8>, Vec<u8>)> = Vec::with_capacity(limit * 4);
+        let mut seen_heights = std::collections::HashSet::with_capacity(limit * 4);
         let mut scanned = 0usize;
 
         for item in iter {
@@ -1816,12 +1827,13 @@ impl KVStore for RocksDBKV {
 
             seen_heights.insert(height);
             results.push((height, key.to_vec(), value.to_vec()));
-
-            if results.len() >= limit { break; }
+            // No early exit — must scan full MAX_SCAN to collect all digit-length
+            // groups before picking the lowest-height ones numerically.
         }
 
-        // Sort by numeric height (iterator returns string-sorted order)
+        // Sort numerically and return the limit lowest heights >= start_height.
         results.sort_by_key(|(h, _, _)| *h);
+        results.truncate(limit);
 
         Ok(results)
     }
