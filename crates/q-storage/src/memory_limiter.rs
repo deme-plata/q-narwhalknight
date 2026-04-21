@@ -241,10 +241,20 @@ impl MemoryLimiter {
 
         // v10.2.10: Include swap in pressure calculation.
         // The 2026-04-11 incident had 55% RSS but 100% swap exhaustion.
+        //
+        // v10.3.9: Skip host-level swap pressure when THIS process uses zero swap.
+        // Running inside Docker, sysinfo reads HOST /proc/meminfo for swap stats.
+        // If the host's swap is full (e.g. from other production processes) but
+        // this container process itself has VmSwap=0, host swap exhaustion cannot
+        // cause THIS process to crash — so don't throttle based on it.
+        let process_vm_swap_kb = Self::read_process_vm_swap_kb();
         let swap_total = system.total_swap();
         let swap_used = system.used_swap();
         let swap_pressure = if swap_total == 0 {
             MemoryPressure::Low // No swap configured
+        } else if process_vm_swap_kb == 0 {
+            // This process uses no swap — host swap pressure is irrelevant
+            MemoryPressure::Low
         } else {
             let swap_ratio = swap_used as f64 / swap_total as f64;
             if swap_ratio < 0.60 {
@@ -545,6 +555,23 @@ impl MemoryLimiter {
     /// Get current process RSS in bytes
     pub fn get_process_rss(&self) -> u64 {
         self.process_rss_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Read VmSwap from /proc/self/status (kB). Returns 0 on any error.
+    /// Used to detect whether THIS process is actually using swap (vs host swap).
+    fn read_process_vm_swap_kb() -> u64 {
+        let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+            return 0;
+        };
+        for line in status.lines() {
+            if let Some(rest) = line.strip_prefix("VmSwap:") {
+                return rest.split_whitespace()
+                    .next()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(0);
+            }
+        }
+        0
     }
 
     /// Get average block size estimate in bytes
