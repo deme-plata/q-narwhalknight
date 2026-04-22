@@ -58,6 +58,7 @@ module xcrypto_unit
     output logic [4:0]  resp_rd_addr,   // Destination register address
     output logic [31:0] resp_data,      // Result data for rd
     output logic        resp_wr_en,     // Write-back enable
+    output logic [31:0] hash_words_out [0:7], // Latest hash (for best-hash tracking in mining_controller)
 
     // =========================================================================
     // Message block interface (tightly-coupled SRAM / cache)
@@ -82,12 +83,13 @@ module xcrypto_unit
     // FSM states
     // =========================================================================
     typedef enum logic [2:0] {
-        S_IDLE,             // Waiting for instruction
-        S_FETCH_MSG,        // Waiting for message block from memory
-        S_COMPRESS,         // Pipeline compression running
-        S_WAIT_PIPELINE,    // Waiting for pipeline result
-        S_CHAIN_WRITEBACK,  // Writing chain result back to state
-        S_FINALIZE          // Reading hash word
+        S_IDLE            = 3'd0,  // Waiting for instruction
+        S_FETCH_MSG       = 3'd1,  // Waiting for message block from memory
+        S_COMPRESS        = 3'd2,  // Pipeline compression running (first iteration)
+        S_WAIT_PIPELINE   = 3'd3,  // Waiting for pipeline result
+        S_CHAIN_WRITEBACK = 3'd4,  // Legacy writeback (non-chain round)
+        S_FINALIZE        = 3'd5,  // Reading hash word
+        S_RELAUNCH        = 3'd6   // Approach B: 1-cycle chain re-launch (saves 1 cycle/iteration vs WRITEBACK+COMPRESS)
     } state_t;
 
     state_t fsm_state, fsm_next;
@@ -222,8 +224,9 @@ module xcrypto_unit
                 S_WAIT_PIPELINE: begin
                     if (pipe_out_valid) begin
                         if (lat_funct7 == F7_CHAIN && chain_count < chain_target) begin
-                            // More chain iterations needed
-                            fsm_next = S_CHAIN_WRITEBACK;
+                            // Approach B: 1-cycle S_RELAUNCH replaces S_CHAIN_WRITEBACK+S_COMPRESS
+                            // Saves 1 cycle per chain iteration (6.25% throughput gain at depth=100)
+                            fsm_next = S_RELAUNCH;
                         end else begin
                             fsm_next = S_IDLE;
                         end
@@ -231,8 +234,14 @@ module xcrypto_unit
                 end
 
                 S_CHAIN_WRITEBACK: begin
-                    // Write hash back to state as CV, then re-compress
+                    // Legacy path for non-chain blake3.round writeback
                     fsm_next = S_COMPRESS;
+                end
+
+                S_RELAUNCH: begin
+                    // 1-cycle re-launch: pipeline in_valid asserted this cycle,
+                    // then immediately back to S_WAIT_PIPELINE for 14 more cycles
+                    fsm_next = S_WAIT_PIPELINE;
                 end
 
                 S_FINALIZE: begin
@@ -306,8 +315,8 @@ module xcrypto_unit
                 compress_started <= 1'b0;
             end
 
-            // Increment chain counter on writeback
-            if (fsm_state == S_CHAIN_WRITEBACK) begin
+            // Increment chain counter on S_RELAUNCH (Approach B hot path) or legacy S_CHAIN_WRITEBACK
+            if (fsm_state == S_RELAUNCH || fsm_state == S_CHAIN_WRITEBACK) begin
                 chain_count <= chain_count + 1'b1;
             end
         end
@@ -465,40 +474,60 @@ module xcrypto_unit
 
             end else begin
                 // ── Single blake3.round (non-chain): use state registers ──
-                // For non-chain round instruction, CV comes from state regs
                 for (int i = 0; i < 8; i++) pipe_cv[i] = state_out[i];
                 pipe_block_len = 32'd64;
                 pipe_flags     = 32'd0;
             end
+        end
+
+        // ── S_RELAUNCH (Approach B): chain hot-path re-launch ──
+        // hash_latched was updated on the previous clock edge (when pipe_out_valid fired
+        // in S_WAIT_PIPELINE), so it now holds Hᵢ and is safe to use as message block.
+        if (fsm_state == S_RELAUNCH) begin
+            pipe_in_valid = 1'b1;
+            // CV = BLAKE3 IV (already set by default above)
+            for (int i = 0; i < 8; i++) begin
+                pipe_block[i] = hash_latched[i];  // Hᵢ → message words 0-7
+            end
+            for (int i = 8; i < 16; i++) begin
+                pipe_block[i] = 32'd0;             // Zero-pad words 8-15
+            end
+            pipe_block_len = 32'd32;
+            pipe_flags     = MINING_FLAGS;
         end
     end
 
     // =========================================================================
     // Leading-Zero Counter (LZC) for difficulty checking
     // =========================================================================
-    // Counts leading zero BITS in the 256-bit hash output (big-endian).
-    // hash_latched[0] is the most significant word.
-    // After VDF chain completes, lzc_count = leading zero bits.
-    // solution_found = (lzc_count >= difficulty_target).
+    // Timing fix: use pipe_hash_out directly when pipe_out_valid to avoid the
+    // 1-cycle lag that would otherwise read hash_latched BEFORE it is updated.
+    // hash_words_for_lzc[0] is the most significant word (big-endian convention).
+
+    // Select hash source: live pipeline output during valid cycle, else latch
+    logic [31:0] hash_words_for_lzc [0:7];
+    always_comb begin
+        for (int i = 0; i < 8; i++)
+            hash_words_for_lzc[i] = pipe_out_valid ? pipe_hash_out[i] : hash_latched[i];
+    end
 
     always_comb begin
         lzc_count = 8'd0;
         solution_found = 1'b0;
 
         // Count leading zero bits across 8 words (big-endian: word 0 = MSW)
-        // Each word contributes 0-32 leading zeros
         begin : lzc_block
             logic done_lzc;
             done_lzc = 1'b0;
             for (int w = 0; w < 8; w++) begin
                 if (!done_lzc) begin
-                    if (hash_latched[w] == 32'd0) begin
+                    if (hash_words_for_lzc[w] == 32'd0) begin
                         lzc_count = lzc_count + 8'd32;
                     end else begin
-                        // Count leading zeros in this word (CLZ32)
+                        // CLZ32 on first non-zero word
                         for (int b = 31; b >= 0; b--) begin
                             if (!done_lzc) begin
-                                if (hash_latched[w][b] == 1'b0) begin
+                                if (hash_words_for_lzc[w][b] == 1'b0) begin
                                     lzc_count = lzc_count + 8'd1;
                                 end else begin
                                     done_lzc = 1'b1;
@@ -510,10 +539,16 @@ module xcrypto_unit
             end
         end
 
-        // Check if hash meets difficulty target
         if (difficulty_target > 0) begin
             solution_found = (lzc_count >= difficulty_target);
         end
+    end
+
+    // hash_words_out: expose current hash to mining_controller for best-hash tracking
+    // Same timing-corrected source as LZC: live pipeline output during valid cycle
+    always_comb begin
+        for (int i = 0; i < 8; i++)
+            hash_words_out[i] = hash_words_for_lzc[i];
     end
 
     // =========================================================================
