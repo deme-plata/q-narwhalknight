@@ -75,7 +75,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.3.11"  # v10.3.11: Fix height pointer gap — small gaps no longer bypass turbo sync
+version = "10.3.12"  # v10.3.12: Fix LWMA difficulty runaway — cap at 32 bits, prevent turbo-sync difficulty trap
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"

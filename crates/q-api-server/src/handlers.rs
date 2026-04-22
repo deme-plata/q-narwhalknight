@@ -9552,6 +9552,22 @@ pub async fn get_mining_challenge(
         16u32 // Legacy fixed difficulty
     };
 
+    // v10.3.12: Emergency difficulty cap — prevents LWMA runaway from turbo-sync burst blocks
+    // Set Q_MAX_DIFFICULTY_BITS=N to cap difficulty (default: 32 bits, solvable at ~5 GH/s network)
+    let max_difficulty_bits: u32 = std::env::var("Q_MAX_DIFFICULTY_BITS")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(32);
+    let difficulty_bits = if difficulty_bits > max_difficulty_bits {
+        warn!(
+            "⚙️ [v10.3.12] Difficulty capped: {} → {} bits (Q_MAX_DIFFICULTY_BITS={})",
+            difficulty_bits, max_difficulty_bits, max_difficulty_bits
+        );
+        max_difficulty_bits
+    } else {
+        difficulty_bits
+    };
+
     let difficulty_target = q_mining::difficulty::DifficultyTarget::from_leading_zeros(difficulty_bits).target_hash;
 
     let vdf_iterations = (100 + (block_height / 1000) * 10) as u32;

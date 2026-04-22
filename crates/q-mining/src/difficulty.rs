@@ -268,8 +268,9 @@ pub fn calculate_difficulty_for_next_block(
     // Apply adjustment to previous difficulty
     let new_difficulty = (previous_difficulty_bits as f64 * clamped) as u32;
 
-    // Floor: never below minimum
-    let final_difficulty = new_difficulty.max(MIN_DIFFICULTY_BITS);
+    // Floor + ceiling: never below minimum, never above maximum
+    // MAX_DIFFICULTY_BITS prevents LWMA runaway from turbo-sync burst blocks
+    let final_difficulty = new_difficulty.max(MIN_DIFFICULTY_BITS).min(MAX_DIFFICULTY_BITS);
 
     if final_difficulty != previous_difficulty_bits {
         info!(
@@ -288,6 +289,10 @@ const LWMA_WINDOW_SIZE: usize = 120;
 
 /// Legacy difficulty before LWMA activation
 const LEGACY_DIFFICULTY_BITS: u32 = 16;
+
+/// Maximum difficulty LWMA can set — prevents runaway from turbo-sync burst blocks.
+/// 32 bits ≈ solvable at ~5 GH/s in ~1 second. Handlers.rs has Q_MAX_DIFFICULTY_BITS override.
+const MAX_DIFFICULTY_BITS: u32 = 32;
 
 /// Count leading zero bits in a 32-byte hash
 pub fn count_leading_zero_bits(hash: &[u8; 32]) -> u32 {
