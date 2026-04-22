@@ -414,11 +414,11 @@ pub fn compute_dag_knight_hash_batch(
         states[i] = (*h.as_bytes(), nonce);
     }
 
-    // 2. Interleaved VDF: 99 inner rounds across all nonces in the batch.
-    //    (1 initial hash + 99 inner = 100 total, matching GPU kernel)
+    // 2. Interleaved VDF: 100 inner rounds across all nonces in the batch.
+    //    (1 initial hash + 100 inner = 101 total, matching server verification)
     //    Each round is data-dependent (hash of previous), but rounds for
     //    *different* nonces are independent — the CPU can pipeline them.
-    for _ in 0..99 {
+    for _ in 0..100 {
         for s in states[..bs].iter_mut() {
             s.0 = *blake3::hash(&s.0).as_bytes();
         }

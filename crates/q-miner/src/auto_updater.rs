@@ -255,7 +255,19 @@ impl MinerAutoUpdater {
 
     /// Restart the miner process with the same arguments.
     pub fn restart() -> ! {
-        let exe = std::env::current_exe().expect("Cannot determine current exe");
+        // On Linux, after self_replace atomically swaps the binary via rename(),
+        // /proc/self/exe shows the OLD inode as "<path> (deleted)".
+        // Strip the suffix to get the actual filesystem path, which now
+        // points to the NEW binary placed there by the rename.
+        let exe_raw = std::env::current_exe().expect("Cannot determine current exe");
+        let exe = {
+            let s = exe_raw.to_string_lossy();
+            if let Some(stripped) = s.strip_suffix(" (deleted)") {
+                std::path::PathBuf::from(stripped)
+            } else {
+                exe_raw
+            }
+        };
         let args: Vec<String> = std::env::args().skip(1).collect();
         info!("Restarting miner: {:?} {:?}", exe, args);
 

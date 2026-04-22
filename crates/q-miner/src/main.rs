@@ -3241,7 +3241,7 @@ fn mining_thread(
                     input[..32].copy_from_slice(&challenge_hash);
                     input[32..].copy_from_slice(&n.to_le_bytes());
                     let mut h = *blake3::hash(&input).as_bytes();
-                    for _ in 0..99 { h = *blake3::hash(&h).as_bytes(); }
+                    for _ in 0..100 { h = *blake3::hash(&h).as_bytes(); }
                     batch_results[bi] = (n, h);
                 }
                 bs
