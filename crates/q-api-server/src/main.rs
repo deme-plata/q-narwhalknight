@@ -15756,6 +15756,20 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
                     let batch_size = batch_buffer.len();
                     if batch_size == 0 {
+                        // v10.3.9 FIX: Update heartbeat even when all solutions fail VDF/difficulty.
+                        // Previously the heartbeat was only updated in the idle-timeout path (no
+                        // submissions for 5s) or in PHASE 5 (solutions passed). When miners keep
+                        // submitting but all solutions fail (e.g. stale challenge, wrong difficulty
+                        // target), neither path fired → watchdog falsely concluded the loop was
+                        // frozen after 60s and called process::exit(1). This was the root cause of
+                        // all 39 watchdog-triggered restarts on Epsilon.
+                        {
+                            let hb_now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64;
+                            PRODUCTION_LOOP_HEARTBEAT_MS.store(hb_now, std::sync::atomic::Ordering::SeqCst);
+                        }
                         batch_buffer.clear();
                         last_batch_process = std::time::Instant::now();
                         last_batch_completed = std::time::Instant::now();

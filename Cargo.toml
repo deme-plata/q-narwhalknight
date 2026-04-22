@@ -75,7 +75,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.3.9"  # v10.3.9: Fix forward-seek string-sort early-exit + memory limiter host-swap false CRITICAL
+version = "10.3.10"  # v10.3.10: Fix watchdog false-positive kills when all mining solutions fail VDF/difficulty
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"
