@@ -5107,14 +5107,27 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             let cached_height = state.current_height_atomic.load(std::sync::atomic::Ordering::SeqCst);
             let actual_height = check_result.actual_highest_height;
 
-            if actual_height > cached_height && actual_height > 1000 {
-                warn!("🔧 [v1.5.0] CRITICAL: Height mismatch detected!");
+            // v10.3.11: Only apply the v1.5.0 "Swiss-cheese" fix for LARGE gaps (>= 10000 blocks).
+            // Small gaps (e.g., a single missing block from a previous turbo sync) must NOT have
+            // current_height_atomic set to actual_height — doing so makes turbo sync think the
+            // node is already at tip and skips the gap-filling sync entirely.
+            // For small gaps, keep current_height_atomic at contiguous_height so turbo sync
+            // requests the missing block(s), and the forward-probe in write_blocks_turbo_batch
+            // advances the pointer through any pre-existing blocks beyond the gap.
+            let gap = actual_height.saturating_sub(cached_height);
+            if gap >= 10_000 && actual_height > 1000 {
+                warn!("🔧 [v1.5.0] CRITICAL: Large height gap detected (gap={})!", gap);
                 warn!("   Cache shows: {} blocks", cached_height);
                 warn!("   Actual highest: {} blocks", actual_height);
                 warn!("   Gap in chain caused contiguous scan to return low value");
                 state.storage_engine.update_height_cache(actual_height).await;
                 state.current_height_atomic.store(actual_height, std::sync::atomic::Ordering::SeqCst);
                 warn!("🔧 [v1.5.0] Height cache and current_height_atomic FIXED to {}", actual_height);
+            } else if gap > 0 && gap < 10_000 && actual_height > 1000 {
+                info!("🔍 [v10.3.11] Small height gap detected (contiguous={}, tip={}, gap={})",
+                      cached_height, actual_height, gap);
+                info!("🔍 [v10.3.11] Keeping current_height_atomic at {} so turbo sync fills the gap",
+                      cached_height);
             }
 
             if check_result.is_corrupted
