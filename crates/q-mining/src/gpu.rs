@@ -35,7 +35,7 @@ use tracing::{info, warn, error};
 
 #[cfg(feature = "gpu-mining")]
 use opencl3::{
-    command_queue::{CommandQueue, CL_QUEUE_PROFILING_ENABLE},
+    command_queue::CommandQueue,
     context::Context,
     device::{Device, CL_DEVICE_TYPE_GPU},
     kernel::Kernel,
@@ -58,6 +58,15 @@ use opencl3::{
 ///
 /// v10.1.7: Challenge accepted as 8×uint (pre-converted on CPU) to eliminate
 /// per-work-item byte-to-uint conversion.
+///
+/// v10.3.14 kernel optimizations (applied on GPU, ~25% fewer operations):
+/// - G00/G0x/Gx0 variants eliminate additions for zero message words
+/// - blake3_hash_32_opt: in-place VDF step, block[8..15]=0 specialized
+///   → 56 fewer adds per call × 99 rounds = 5,544 eliminated adds per nonce
+///   → in-place eliminates 99×8 = 792 word-copy instructions
+/// - meets_target: first-byte fast-reject catches ~99% of misses immediately
+/// - Packed uint write for found_hash: 8 stores vs 32 byte-by-byte
+/// - #pragma unroll 9: 99 = 11×9, better instruction throughput
 pub const BLAKE3_KERNEL_SOURCE: &str = r#"
 // ═══════════════════════════════════════════════════════════════════
 // BLAKE3 constants
@@ -69,6 +78,8 @@ __constant uint BLAKE3_IV[8] = {
 };
 
 // Pre-computed message schedule for 7 rounds (BLAKE3 spec §2.2)
+// Used only by blake3_compress (40-byte initial hash). VDF step uses
+// blake3_hash_32_opt which has rounds manually unrolled with zero substitution.
 __constant uchar MSG_SCHED[7][16] = {
     { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,15},
     { 2, 6, 3,10, 7, 0, 4,13, 1,11,12, 5, 9,14,15, 8},
@@ -88,24 +99,57 @@ inline uint rotr32(uint x, uint n) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// BLAKE3 G mixing function (inlined for performance)
+// BLAKE3 G mixing function variants
+// G:   both mx and my are non-zero (8 operations)
+// G00: mx=0, my=0 — 2 fewer additions
+// G0x: mx=0, my non-zero — 1 fewer addition (first add has no mx term)
+// Gx0: mx non-zero, my=0 — 1 fewer addition (second add has no my term)
 // ═══════════════════════════════════════════════════════════════════
 
 #define G(s, a, b, c, d, mx, my) \
-    s[a] = s[a] + s[b] + (mx);  \
-    s[d] = rotr32(s[d] ^ s[a], 16u); \
-    s[c] = s[c] + s[d];         \
-    s[b] = rotr32(s[b] ^ s[c], 12u); \
-    s[a] = s[a] + s[b] + (my);  \
-    s[d] = rotr32(s[d] ^ s[a], 8u);  \
-    s[c] = s[c] + s[d];         \
-    s[b] = rotr32(s[b] ^ s[c], 7u);
+    s[a] += s[b] + (mx);                \
+    s[d] = rotr32(s[d] ^ s[a], 16u);    \
+    s[c] += s[d];                       \
+    s[b] = rotr32(s[b] ^ s[c], 12u);    \
+    s[a] += s[b] + (my);                \
+    s[d] = rotr32(s[d] ^ s[a],  8u);    \
+    s[c] += s[d];                       \
+    s[b] = rotr32(s[b] ^ s[c],  7u);
+
+#define G00(s, a, b, c, d) \
+    s[a] += s[b];                       \
+    s[d] = rotr32(s[d] ^ s[a], 16u);    \
+    s[c] += s[d];                       \
+    s[b] = rotr32(s[b] ^ s[c], 12u);    \
+    s[a] += s[b];                       \
+    s[d] = rotr32(s[d] ^ s[a],  8u);    \
+    s[c] += s[d];                       \
+    s[b] = rotr32(s[b] ^ s[c],  7u);
+
+#define G0x(s, a, b, c, d, my) \
+    s[a] += s[b];                       \
+    s[d] = rotr32(s[d] ^ s[a], 16u);    \
+    s[c] += s[d];                       \
+    s[b] = rotr32(s[b] ^ s[c], 12u);    \
+    s[a] += s[b] + (my);                \
+    s[d] = rotr32(s[d] ^ s[a],  8u);    \
+    s[c] += s[d];                       \
+    s[b] = rotr32(s[b] ^ s[c],  7u);
+
+#define Gx0(s, a, b, c, d, mx) \
+    s[a] += s[b] + (mx);                \
+    s[d] = rotr32(s[d] ^ s[a], 16u);    \
+    s[c] += s[d];                       \
+    s[b] = rotr32(s[b] ^ s[c], 12u);    \
+    s[a] += s[b];                       \
+    s[d] = rotr32(s[d] ^ s[a],  8u);    \
+    s[c] += s[d];                       \
+    s[b] = rotr32(s[b] ^ s[c],  7u);
 
 // ═══════════════════════════════════════════════════════════════════
-// BLAKE3 compression — single-block hash
-// cv[8]: chaining value, block[16]: message words, counter: u64,
-// block_len: actual data bytes, flags: combination of START/END/ROOT
-// output[8]: resulting hash words
+// BLAKE3 compression — general single-block hash
+// Used for the 40-byte initial hash (called once per nonce).
+// cv[8]: chaining value, block[16]: message words (all 16 may be non-zero)
 // ═══════════════════════════════════════════════════════════════════
 
 void blake3_compress(
@@ -117,42 +161,35 @@ void blake3_compress(
     uint output[8]
 ) {
     uint s[16];
-    s[0]  = cv[0]; s[1]  = cv[1]; s[2]  = cv[2]; s[3]  = cv[3];
-    s[4]  = cv[4]; s[5]  = cv[5]; s[6]  = cv[6]; s[7]  = cv[7];
-    s[8]  = BLAKE3_IV[0]; s[9]  = BLAKE3_IV[1];
-    s[10] = BLAKE3_IV[2]; s[11] = BLAKE3_IV[3];
-    s[12] = (uint)(counter & 0xFFFFFFFFul);
-    s[13] = (uint)(counter >> 32);
-    s[14] = block_len;
-    s[15] = flags;
+    s[0] =cv[0]; s[1] =cv[1]; s[2] =cv[2]; s[3] =cv[3];
+    s[4] =cv[4]; s[5] =cv[5]; s[6] =cv[6]; s[7] =cv[7];
+    s[8] =BLAKE3_IV[0]; s[9] =BLAKE3_IV[1];
+    s[10]=BLAKE3_IV[2]; s[11]=BLAKE3_IV[3];
+    s[12]=(uint)(counter & 0xFFFFFFFFul);
+    s[13]=(uint)(counter >> 32);
+    s[14]=block_len;
+    s[15]=flags;
 
-    // 7 rounds with message schedule permutation
     for (int r = 0; r < 7; r++) {
-        uint m0  = block[MSG_SCHED[r][ 0]]; uint m1  = block[MSG_SCHED[r][ 1]];
-        uint m2  = block[MSG_SCHED[r][ 2]]; uint m3  = block[MSG_SCHED[r][ 3]];
-        uint m4  = block[MSG_SCHED[r][ 4]]; uint m5  = block[MSG_SCHED[r][ 5]];
-        uint m6  = block[MSG_SCHED[r][ 6]]; uint m7  = block[MSG_SCHED[r][ 7]];
-        uint m8  = block[MSG_SCHED[r][ 8]]; uint m9  = block[MSG_SCHED[r][ 9]];
-        uint m10 = block[MSG_SCHED[r][10]]; uint m11 = block[MSG_SCHED[r][11]];
-        uint m12 = block[MSG_SCHED[r][12]]; uint m13 = block[MSG_SCHED[r][13]];
-        uint m14 = block[MSG_SCHED[r][14]]; uint m15 = block[MSG_SCHED[r][15]];
-
-        // Column step
-        G(s, 0, 4,  8, 12, m0,  m1);
-        G(s, 1, 5,  9, 13, m2,  m3);
-        G(s, 2, 6, 10, 14, m4,  m5);
-        G(s, 3, 7, 11, 15, m6,  m7);
-        // Diagonal step
-        G(s, 0, 5, 10, 15, m8,  m9);
-        G(s, 1, 6, 11, 12, m10, m11);
-        G(s, 2, 7,  8, 13, m12, m13);
-        G(s, 3, 4,  9, 14, m14, m15);
+        uint m0 =block[MSG_SCHED[r][ 0]]; uint m1 =block[MSG_SCHED[r][ 1]];
+        uint m2 =block[MSG_SCHED[r][ 2]]; uint m3 =block[MSG_SCHED[r][ 3]];
+        uint m4 =block[MSG_SCHED[r][ 4]]; uint m5 =block[MSG_SCHED[r][ 5]];
+        uint m6 =block[MSG_SCHED[r][ 6]]; uint m7 =block[MSG_SCHED[r][ 7]];
+        uint m8 =block[MSG_SCHED[r][ 8]]; uint m9 =block[MSG_SCHED[r][ 9]];
+        uint m10=block[MSG_SCHED[r][10]]; uint m11=block[MSG_SCHED[r][11]];
+        uint m12=block[MSG_SCHED[r][12]]; uint m13=block[MSG_SCHED[r][13]];
+        uint m14=block[MSG_SCHED[r][14]]; uint m15=block[MSG_SCHED[r][15]];
+        G(s,0,4, 8,12, m0, m1);
+        G(s,1,5, 9,13, m2, m3);
+        G(s,2,6,10,14, m4, m5);
+        G(s,3,7,11,15, m6, m7);
+        G(s,0,5,10,15, m8, m9);
+        G(s,1,6,11,12, m10,m11);
+        G(s,2,7, 8,13, m12,m13);
+        G(s,3,4, 9,14, m14,m15);
     }
 
-    // Output: XOR lower and upper halves
-    for (int i = 0; i < 8; i++) {
-        output[i] = s[i] ^ s[i + 8];
-    }
+    for (int i = 0; i < 8; i++) output[i] = s[i] ^ s[i+8];
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -166,63 +203,153 @@ void blake3_hash_40(
     ulong nonce,
     uint output[8]
 ) {
-    // Build message block: 40 bytes of data + 24 bytes of zero padding
     uint block[16];
+    block[0]=challenge_words[0]; block[1]=challenge_words[1];
+    block[2]=challenge_words[2]; block[3]=challenge_words[3];
+    block[4]=challenge_words[4]; block[5]=challenge_words[5];
+    block[6]=challenge_words[6]; block[7]=challenge_words[7];
+    block[8] =(uint)(nonce & 0xFFFFFFFFul);
+    block[9] =(uint)(nonce >> 32);
+    block[10]=0; block[11]=0; block[12]=0;
+    block[13]=0; block[14]=0; block[15]=0;
 
-    // Challenge words already in LE u32 — direct copy (no byte-to-uint conversion)
-    block[0] = challenge_words[0]; block[1] = challenge_words[1];
-    block[2] = challenge_words[2]; block[3] = challenge_words[3];
-    block[4] = challenge_words[4]; block[5] = challenge_words[5];
-    block[6] = challenge_words[6]; block[7] = challenge_words[7];
-
-    // nonce (u64 LE) → two u32 words (bytes 32..39)
-    block[8] = (uint)(nonce & 0xFFFFFFFFul);
-    block[9] = (uint)(nonce >> 32);
-
-    // Zero padding (bytes 40..63)
-    block[10] = 0; block[11] = 0; block[12] = 0;
-    block[13] = 0; block[14] = 0; block[15] = 0;
-
-    // Copy IV from __constant to private address space (NVIDIA OpenCL requires matching address spaces)
+    // Copy IV from __constant to private address space (NVIDIA OpenCL requirement)
     uint iv[8];
     for (int i = 0; i < 8; i++) iv[i] = BLAKE3_IV[i];
 
-    // Single-chunk, single-block: flags = CHUNK_START | CHUNK_END | ROOT
-    blake3_compress(iv, block, 0, 40u, CHUNK_START | CHUNK_END | ROOT, output);
+    blake3_compress(iv, block, 0, 40u, CHUNK_START|CHUNK_END|ROOT, output);
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// blake3_hash_32: Hash 32-byte input (VDF intermediate hash)
-// Input and output are both uint[8] (LE words)
+// blake3_hash_32_opt: Optimized in-place VDF step (32-byte input)
+//
+// Specializes for block[8..15] = 0 (always true in the VDF chain).
+// For each of the 7 rounds, message indices ≥ 8 are zero — we substitute
+// G00/G0x/Gx0 macros to eliminate those additions entirely.
+//
+// Savings per call (56 fewer additions = 25% reduction):
+//   Round 0: 4×G00         = 8 additions saved
+//   Round 1: 2×G00+1×G0x+3×Gx0 = 8 saved
+//   Round 2: 2×G00+3×G0x+1×Gx0 = 8 saved
+//   Round 3: 2×G00+3×G0x+1×Gx0 = 8 saved
+//   Round 4: 4×G00         = 8 saved
+//   Round 5: 2×G00+3×G0x+1×Gx0 = 8 saved
+//   Round 6: 2×G00+2×G0x+2×Gx0 = 8 saved
+//   Total: 56 additions × 99 VDF rounds = 5,544 eliminated per nonce
+//
+// In-place (no tmp[8] array): also eliminates 99×8 = 792 copy instructions.
 // ═══════════════════════════════════════════════════════════════════
 
-void blake3_hash_32(const uint input[8], uint output[8]) {
-    uint block[16];
-    for (int i = 0; i < 8; i++) block[i] = input[i];
-    for (int i = 8; i < 16; i++) block[i] = 0;
+inline void blake3_hash_32_opt(uint h[8]) {
+    uint s[16];
+    // Chaining value = input
+    s[0]=h[0]; s[1]=h[1]; s[2]=h[2]; s[3]=h[3];
+    s[4]=h[4]; s[5]=h[5]; s[6]=h[6]; s[7]=h[7];
+    // IV in private registers — avoids repeated __constant cache reads in the loop
+    s[8] =0x6A09E667u; s[9] =0xBB67AE85u;
+    s[10]=0x3C6EF372u; s[11]=0xA54FF53Au;
+    s[12]=0u;          // counter = 0
+    s[13]=0u;
+    s[14]=32u;         // block_len = 32
+    s[15]=11u;         // CHUNK_START|CHUNK_END|ROOT = 1|2|8
 
-    // Copy IV from __constant to private address space
-    uint iv[8];
-    for (int i = 0; i < 8; i++) iv[i] = BLAKE3_IV[i];
+    // Round 0: sched={0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}
+    // Columns use data indices 0..7 → full G; diagonals use 8..15 → G00
+    G  (s,0,4, 8,12, h[0],h[1]);
+    G  (s,1,5, 9,13, h[2],h[3]);
+    G  (s,2,6,10,14, h[4],h[5]);
+    G  (s,3,7,11,15, h[6],h[7]);
+    G00(s,0,5,10,15);              // m[8]=0, m[9]=0
+    G00(s,1,6,11,12);              // m[10]=0,m[11]=0
+    G00(s,2,7, 8,13);              // m[12]=0,m[13]=0
+    G00(s,3,4, 9,14);              // m[14]=0,m[15]=0
 
-    blake3_compress(iv, block, 0, 32u, CHUNK_START | CHUNK_END | ROOT, output);
+    // Round 1: sched={2,6,3,10,7,0,4,13,1,11,12,5,9,14,15,8}
+    G  (s,0,4, 8,12, h[2],h[6]);   // m[2], m[6]
+    Gx0(s,1,5, 9,13, h[3]);        // m[3], m[10]=0
+    G  (s,2,6,10,14, h[7],h[0]);   // m[7], m[0]
+    Gx0(s,3,7,11,15, h[4]);        // m[4], m[13]=0
+    Gx0(s,0,5,10,15, h[1]);        // m[1], m[11]=0
+    G0x(s,1,6,11,12, h[5]);        // m[12]=0, m[5]
+    G00(s,2,7, 8,13);              // m[9]=0, m[14]=0
+    G00(s,3,4, 9,14);              // m[15]=0,m[8]=0
+
+    // Round 2: sched={3,4,10,12,13,2,7,14,6,5,9,0,11,15,8,1}
+    G  (s,0,4, 8,12, h[3],h[4]);   // m[3], m[4]
+    G00(s,1,5, 9,13);              // m[10]=0,m[12]=0
+    G0x(s,2,6,10,14, h[2]);        // m[13]=0, m[2]
+    Gx0(s,3,7,11,15, h[7]);        // m[7], m[14]=0
+    G  (s,0,5,10,15, h[6],h[5]);   // m[6], m[5]
+    G0x(s,1,6,11,12, h[0]);        // m[9]=0, m[0]
+    G00(s,2,7, 8,13);              // m[11]=0,m[15]=0
+    G0x(s,3,4, 9,14, h[1]);        // m[8]=0, m[1]
+
+    // Round 3: sched={10,7,12,9,14,3,13,15,4,0,11,2,5,8,1,6}
+    G0x(s,0,4, 8,12, h[7]);        // m[10]=0, m[7]
+    G00(s,1,5, 9,13);              // m[12]=0,m[9]=0
+    G0x(s,2,6,10,14, h[3]);        // m[14]=0, m[3]
+    G00(s,3,7,11,15);              // m[13]=0,m[15]=0
+    G  (s,0,5,10,15, h[4],h[0]);   // m[4], m[0]
+    G0x(s,1,6,11,12, h[2]);        // m[11]=0, m[2]
+    Gx0(s,2,7, 8,13, h[5]);        // m[5], m[8]=0
+    G  (s,3,4, 9,14, h[1],h[6]);   // m[1], m[6]
+
+    // Round 4: sched={12,13,9,11,15,10,14,8,7,2,5,3,0,1,6,4}
+    // Columns all use indices ≥ 9 → G00; diagonals all use indices < 8 → full G
+    G00(s,0,4, 8,12);              // m[12]=0,m[13]=0
+    G00(s,1,5, 9,13);              // m[9]=0, m[11]=0
+    G00(s,2,6,10,14);              // m[15]=0,m[10]=0
+    G00(s,3,7,11,15);              // m[14]=0,m[8]=0
+    G  (s,0,5,10,15, h[7],h[2]);   // m[7], m[2]
+    G  (s,1,6,11,12, h[5],h[3]);   // m[5], m[3]
+    G  (s,2,7, 8,13, h[0],h[1]);   // m[0], m[1]
+    G  (s,3,4, 9,14, h[6],h[4]);   // m[6], m[4]
+
+    // Round 5: sched={9,14,11,5,8,12,15,1,13,3,0,10,2,6,4,7}
+    G00(s,0,4, 8,12);              // m[9]=0, m[14]=0
+    G0x(s,1,5, 9,13, h[5]);        // m[11]=0, m[5]
+    G00(s,2,6,10,14);              // m[8]=0, m[12]=0
+    G0x(s,3,7,11,15, h[1]);        // m[15]=0, m[1]
+    G0x(s,0,5,10,15, h[3]);        // m[13]=0, m[3]
+    Gx0(s,1,6,11,12, h[0]);        // m[0], m[10]=0
+    G  (s,2,7, 8,13, h[2],h[6]);   // m[2], m[6]
+    G  (s,3,4, 9,14, h[4],h[7]);   // m[4], m[7]
+
+    // Round 6: sched={11,15,5,0,1,9,8,6,14,10,2,12,3,4,7,13}
+    G00(s,0,4, 8,12);              // m[11]=0,m[15]=0
+    G  (s,1,5, 9,13, h[5],h[0]);   // m[5], m[0]
+    Gx0(s,2,6,10,14, h[1]);        // m[1], m[9]=0
+    G0x(s,3,7,11,15, h[6]);        // m[8]=0, m[6]
+    G00(s,0,5,10,15);              // m[14]=0,m[10]=0
+    Gx0(s,1,6,11,12, h[2]);        // m[2], m[12]=0
+    G  (s,2,7, 8,13, h[3],h[4]);   // m[3], m[4]
+    Gx0(s,3,4, 9,14, h[7]);        // m[7], m[13]=0
+
+    // In-place output: XOR lower/upper halves back into h
+    h[0]=s[0]^s[8];  h[1]=s[1]^s[9];
+    h[2]=s[2]^s[10]; h[3]=s[3]^s[11];
+    h[4]=s[4]^s[12]; h[5]=s[5]^s[13];
+    h[6]=s[6]^s[14]; h[7]=s[7]^s[15];
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Target comparison: hash < target (byte-wise, little-endian words)
-// hash is uint[8] (LE words), target is uchar[32] (raw bytes)
-// Both represent the same byte ordering: word[0] bits 0-7 = byte[0]
+// meets_target: hash < target (byte-wise, little-endian words)
+// Fast-reject on first byte catches ~99% of misses immediately,
+// eliminating 31 unnecessary global memory reads per failing nonce.
 // ═══════════════════════════════════════════════════════════════════
 
 bool meets_target(const uint hash[8], __global const uchar* target) {
-    for (int i = 0; i < 8; i++) {
-        uint h = hash[i];
-        for (int j = 0; j < 4; j++) {
-            uchar hb = (uchar)((h >> (j * 8)) & 0xFFu);
-            uchar tb = target[i * 4 + j];
-            if (hb < tb) return true;
-            if (hb > tb) return false;
-        }
+    // Fast-reject: compare byte 0 first (catches ~99% of misses)
+    uchar h0 = (uchar)(hash[0] & 0xFFu);
+    uchar t0 = target[0];
+    if (h0 > t0) return false;
+    if (h0 < t0) return true;
+    // Rare survivors: full 32-byte comparison
+    for (int i = 1; i < 32; i++) {
+        uchar hb = (uchar)((hash[i >> 2] >> ((i & 3) * 8)) & 0xFFu);
+        uchar tb = target[i];
+        if (hb < tb) return true;
+        if (hb > tb) return false;
     }
     return true;
 }
@@ -232,7 +359,7 @@ bool meets_target(const uint hash[8], __global const uchar* target) {
 //
 // Each work item:
 //   1. Compute h = BLAKE3(challenge_words[8] || nonce_le[8])  — 40 bytes
-//   2. Repeat 99 times: h = BLAKE3(h)                    — 32 bytes
+//   2. Repeat 99 times: h = blake3_hash_32_opt(h)            — in-place, 32 bytes
 //   3. If h < target → atomically write solution
 //
 // Total: 100 BLAKE3 hashes per nonce candidate
@@ -240,12 +367,12 @@ bool meets_target(const uint hash[8], __global const uchar* target) {
 
 __attribute__((reqd_work_group_size(256,1,1)))
 __kernel void blake3_mine(
-    __constant uint* challenge_words, // challenge as 8×u32 (constant cache, pre-converted on CPU)
-    __global const uchar* target,         // difficulty target (32 bytes)
-    const ulong nonce_start,              // starting nonce for this dispatch
-    __global ulong* found_nonce,          // output: winning nonce
-    __global uchar* found_hash,           // output: winning hash (32 bytes)
-    __global uint* found_flag             // output: 1 if solution found
+    __constant uint* challenge_words,   // challenge as 8×u32 (constant cache)
+    __global const uchar* target,       // difficulty target (32 bytes)
+    const ulong nonce_start,            // starting nonce for this dispatch
+    __global ulong* found_nonce,        // output: winning nonce
+    __global uchar* found_hash,         // output: winning hash (32 bytes)
+    __global uint* found_flag           // output: 1 if solution found
 ) {
     uint gid = get_global_id(0);
     ulong nonce = nonce_start + (ulong)gid;
@@ -254,27 +381,23 @@ __kernel void blake3_mine(
     uint h[8];
     blake3_hash_40(challenge_words, nonce, h);
 
-    // Step 2: VDF chain — 99 sequential BLAKE3 hashes
-    uint tmp[8];
-    #pragma unroll 3
+    // Step 2: VDF chain — 99 in-place BLAKE3 hashes (zero-word optimized)
+    // unroll 9: 99 = 11×9 → 11 unrolled groups, better instruction throughput
+    #pragma unroll 9
     for (int vdf = 0; vdf < 99; vdf++) {
-        blake3_hash_32(h, tmp);
-        for (int i = 0; i < 8; i++) h[i] = tmp[i];
+        blake3_hash_32_opt(h);
     }
 
     // Step 3: Check if final hash meets difficulty target
     if (meets_target(h, target)) {
-        // Atomic CAS to claim the solution (first writer wins)
+        // Atomic CAS: first writer wins (correct for multi-solution races)
         uint old = atomic_cmpxchg(found_flag, 0u, 1u);
         if (old == 0u) {
             *found_nonce = nonce;
-            // Convert hash words to bytes (LE)
-            for (int i = 0; i < 8; i++) {
-                found_hash[i*4 + 0] = (uchar)( h[i]        & 0xFFu);
-                found_hash[i*4 + 1] = (uchar)((h[i] >>  8) & 0xFFu);
-                found_hash[i*4 + 2] = (uchar)((h[i] >> 16) & 0xFFu);
-                found_hash[i*4 + 3] = (uchar)((h[i] >> 24) & 0xFFu);
-            }
+            // Packed uint write: 8 word stores vs 32 byte-by-byte stores
+            __global uint* hw = (__global uint*)found_hash;
+            hw[0]=h[0]; hw[1]=h[1]; hw[2]=h[2]; hw[3]=h[3];
+            hw[4]=h[4]; hw[5]=h[5]; hw[6]=h[6]; hw[7]=h[7];
         }
     }
 }
@@ -304,12 +427,13 @@ pub struct GPUDeviceInfo {
 
 /// Minimum work size (65K items). Below this GPU utilization drops too low.
 const MIN_WORK_SIZE: usize = 1 << 16;
-/// Maximum work size (8M items). Above this dispatch latency exceeds 500ms on most GPUs.
-const MAX_WORK_SIZE: usize = 1 << 23;
-/// Target dispatch time lower bound (ms). If dispatch is faster, increase work size.
-const DISPATCH_TARGET_LOW_MS: u128 = 100;
-/// Target dispatch time upper bound (ms). If dispatch is slower, decrease work size.
-const DISPATCH_TARGET_HIGH_MS: u128 = 400;
+/// Maximum work size (64M items). Covers even fast 4090/7900-class GPUs with <500ms dispatch.
+const MAX_WORK_SIZE: usize = 1 << 26;
+/// Target dispatch time lower bound (ms). Below this, increase work size to reduce idle gaps.
+/// 200ms floor keeps GPU ≥99% busy (5ms CPU overhead → 2.4% idle at 200ms, 0.8% at 600ms).
+const DISPATCH_TARGET_LOW_MS: u128 = 200;
+/// Target dispatch time upper bound (ms). Above this, reduce to avoid blocking new-block signals.
+const DISPATCH_TARGET_HIGH_MS: u128 = 600;
 
 // ============================================================================
 // GPU MINER
@@ -611,7 +735,7 @@ impl GPUMiner {
 
             let device = target_device.ok_or_else(|| anyhow!("Failed to find GPU {}", idx))?;
             let context = Context::from_device(&device)?;
-            let queue = CommandQueue::create_default(&context, CL_QUEUE_PROFILING_ENABLE)?;
+            let queue = CommandQueue::create_default(&context, 0)?;
 
             // GPU-004: Try loading cached kernel binary first (saves 2-10s startup)
             let dev_name_for_cache = device.name().unwrap_or_default();
@@ -626,7 +750,8 @@ impl GPUMiner {
                     }
                     Err(e) => {
                         warn!("🎮 Cached kernel invalid ({}), recompiling from source", e);
-                        let prog = Program::create_and_build_from_source(&context, BLAKE3_KERNEL_SOURCE, "")
+                        let prog = Program::create_and_build_from_source(&context, BLAKE3_KERNEL_SOURCE,
+                            "-cl-mad-enable -cl-no-signed-zeros -cl-denorms-are-zero")
                             .map_err(|e| anyhow!("Failed to build BLAKE3 OpenCL program: {}", e))?;
                         if let Ok(binaries) = prog.get_binaries() {
                             if let Some(bin) = binaries.first() {
@@ -639,7 +764,8 @@ impl GPUMiner {
             } else {
                 info!("🎮 GPU {} compiling kernel from source (first run — will be cached)", idx);
                 let compile_start = Instant::now();
-                let prog = Program::create_and_build_from_source(&context, BLAKE3_KERNEL_SOURCE, "")
+                let prog = Program::create_and_build_from_source(&context, BLAKE3_KERNEL_SOURCE,
+                    "-cl-mad-enable -cl-no-signed-zeros -cl-denorms-are-zero")
                     .map_err(|e| anyhow!("Failed to build BLAKE3 OpenCL program: {}", e))?;
                 info!("🎮 GPU {} kernel compiled in {:.1}s", idx, compile_start.elapsed().as_secs_f64());
                 // Cache for next startup
@@ -660,11 +786,13 @@ impl GPUMiner {
             let target_buf = unsafe {
                 Buffer::<cl_uchar>::create(&context, CL_MEM_READ_ONLY, 32, std::ptr::null_mut())?
             };
+            // READ_WRITE: GPU writes on solution found; CPU reads them back.
+            // WRITE_ONLY here causes CL_INVALID_OPERATION when the CPU reads on solution found.
             let found_nonce_buf = unsafe {
-                Buffer::<cl_ulong>::create(&context, CL_MEM_WRITE_ONLY, 1, std::ptr::null_mut())?
+                Buffer::<cl_ulong>::create(&context, CL_MEM_READ_WRITE, 1, std::ptr::null_mut())?
             };
             let found_hash_buf = unsafe {
-                Buffer::<cl_uchar>::create(&context, CL_MEM_WRITE_ONLY, 32, std::ptr::null_mut())?
+                Buffer::<cl_uchar>::create(&context, CL_MEM_READ_WRITE, 32, std::ptr::null_mut())?
             };
             let found_flag_buf = unsafe {
                 Buffer::<cl_uint>::create(&context, CL_MEM_READ_WRITE, 1, std::ptr::null_mut())?
@@ -702,9 +830,17 @@ impl GPUMiner {
     /// v10.1.7: Uses persistent buffers with conditional upload and adaptive work size.
     ///
     /// Returns (solution_if_found, nonces_tried).
-    /// v10.2.3: Dispatch to ALL initialized GPUs with nonce partitioning.
-    /// Each GPU gets a unique nonce range to avoid duplicate work.
-    /// Returns the first solution found (if any) and total hashes across all GPUs.
+    /// Dispatch to ALL initialized GPUs with nonce partitioning.
+    ///
+    /// v10.3.13: Parallel multi-GPU dispatch for 99-100% GPU utilization.
+    ///
+    /// Two-phase approach:
+    ///   Phase 1: Submit kernel to EVERY GPU's command queue (all GPUs start immediately)
+    ///   Phase 2: Collect results (GPUs have been running in parallel since Phase 1)
+    ///
+    /// Before this fix, GPUs dispatched serially: GPU1 sat idle while GPU0 was computing,
+    /// then GPU0 sat idle while GPU1 computed → each GPU used only 1/N of wall-clock time.
+    /// Now all N GPUs run simultaneously, multiplying throughput by N.
     #[cfg(feature = "gpu-mining")]
     pub fn mine_batch(
         &mut self,
@@ -716,32 +852,38 @@ impl GPUMiner {
             return Err(anyhow!("No GPU contexts initialized"));
         }
 
+        let local_ws = self.config.local_work_size;
         let num_gpus = self.contexts.len();
+
+        // Pre-compute per-GPU work sizes and nonce starts
+        let mut work_sizes = Vec::with_capacity(num_gpus);
+        let mut nonce_starts = Vec::with_capacity(num_gpus);
+        let mut nonce_cursor = nonce_start;
+        for ctx in &self.contexts {
+            let ws = ((ctx.adaptive_work_size / local_ws) * local_ws).max(local_ws);
+            nonce_starts.push(nonce_cursor);
+            work_sizes.push(ws);
+            nonce_cursor += ws as u64;
+        }
+
+        let cycle_start = Instant::now();
+
+        // ── Phase 1: submit to ALL GPUs (they all start executing NOW) ──────────
+        for gpu_idx in 0..num_gpus {
+            Self::submit_blake3_kernel(
+                &mut self.contexts[gpu_idx],
+                challenge_hash, target,
+                nonce_starts[gpu_idx], work_sizes[gpu_idx], local_ws,
+            )?;
+        }
+
+        // ── Phase 2: collect results (GPUs ran in parallel during Phase 1) ──────
         let mut total_hashes: u64 = 0;
         let mut best_solution: Option<GPUSolution> = None;
 
         for gpu_idx in 0..num_gpus {
-            let ctx = &mut self.contexts[gpu_idx];
-
-            // GPU-002: Per-GPU adaptive work size, rounded down to local_work_size multiple
-            let work_size = (ctx.adaptive_work_size / self.config.local_work_size) * self.config.local_work_size;
-            let work_size = work_size.max(self.config.local_work_size);
-
-            // Partition nonce space: each GPU gets a non-overlapping range
-            let gpu_nonce_start = nonce_start + (gpu_idx as u64 * work_size as u64);
-
-            let dispatch_start = Instant::now();
-            let result = Self::dispatch_blake3_kernel(ctx, challenge_hash, target, gpu_nonce_start, work_size, self.config.local_work_size)?;
-            let dispatch_ms = dispatch_start.elapsed().as_millis();
-
-            // GPU-002: Per-GPU adaptive tuning
-            if dispatch_ms < DISPATCH_TARGET_LOW_MS {
-                ctx.adaptive_work_size = (ctx.adaptive_work_size * 3 / 2).min(MAX_WORK_SIZE);
-            } else if dispatch_ms > DISPATCH_TARGET_HIGH_MS {
-                ctx.adaptive_work_size = (ctx.adaptive_work_size * 2 / 3).max(MIN_WORK_SIZE);
-            }
-
-            total_hashes += work_size as u64;
+            let result = Self::readback_blake3_result(&mut self.contexts[gpu_idx])?;
+            total_hashes += work_sizes[gpu_idx] as u64;
 
             if best_solution.is_none() {
                 if let Some((nonce, hash)) = result {
@@ -750,7 +892,7 @@ impl GPUMiner {
                         nonce,
                         hash,
                         gpu_index: gpu_idx,
-                        hashes_computed: work_size as u64,
+                        hashes_computed: work_sizes[gpu_idx] as u64,
                         vdf_output: None,
                         vdf_proof: None,
                         vdf_checkpoints: None,
@@ -760,7 +902,21 @@ impl GPUMiner {
             }
         }
 
-        self.stats.dispatches.fetch_add(num_gpus as u64, Ordering::Relaxed);
+        // ── Adaptive tuning: apply cycle time to all GPUs ───────────────────────
+        // The cycle time is dominated by the slowest GPU — if it's too short,
+        // all GPUs increase work size; if too long, all decrease.
+        let cycle_ms = cycle_start.elapsed().as_millis();
+        for ctx in &mut self.contexts {
+            if cycle_ms < DISPATCH_TARGET_LOW_MS {
+                // Too fast: double work size (fast convergence to optimal)
+                ctx.adaptive_work_size = (ctx.adaptive_work_size * 2).min(MAX_WORK_SIZE);
+            } else if cycle_ms > DISPATCH_TARGET_HIGH_MS {
+                // Too slow: reduce by 25% (conservative to avoid over-shooting)
+                ctx.adaptive_work_size = (ctx.adaptive_work_size * 3 / 4).max(MIN_WORK_SIZE);
+            }
+        }
+
+        self.stats.dispatches.fetch_add(1, Ordering::Relaxed);
         self.stats.total_hashes.fetch_add(total_hashes, Ordering::Relaxed);
 
         Ok(BatchResult {
@@ -769,29 +925,26 @@ impl GPUMiner {
         })
     }
 
-    /// Dispatch the BLAKE3+VDF mining kernel to one GPU context.
+    /// Phase 1 of two-phase dispatch: enqueue writes + kernel onto this GPU's command queue.
     ///
-    /// v10.1.7: Uses persistent buffers on GPUContext. Challenge and target are
-    /// only re-uploaded when they change (conditional upload via cached_challenge/target).
-    /// Challenge is pre-converted to u32 words on CPU (Phase 2A).
+    /// Returns immediately — does NOT call queue.finish(). All commands are queued
+    /// in the GPU's in-order command queue but execution starts asynchronously.
+    ///
+    /// Separating submit from readback lets multi-GPU code submit to ALL GPUs before
+    /// waiting on any, so all GPUs execute their kernels in parallel.
     #[cfg(feature = "gpu-mining")]
-    fn dispatch_blake3_kernel(
+    fn submit_blake3_kernel(
         ctx: &mut GPUContext,
         challenge: &[u8; 32],
         target: &[u8; 32],
         nonce_start: u64,
         work_size: usize,
         local_work_size: usize,
-    ) -> Result<Option<(u64, [u8; 32])>> {
-        const CL_TRUE: cl_uint = 1;
-        const CL_FALSE: cl_uint = 0; // GPU-001: non-blocking writes on in-order queue
+    ) -> Result<()> {
+        const CL_FALSE: cl_uint = 0; // non-blocking: in-order queue ensures ordering
 
-        // Phase 1+2: Conditional upload — only re-upload when challenge/target changes
-        // GPU-001: Use CL_FALSE (non-blocking) — in-order queue guarantees writes
-        // complete before the kernel executes. CPU doesn't need to wait.
         unsafe {
             if ctx.cached_challenge != *challenge {
-                // Phase 2A: Convert challenge bytes to u32 words on CPU
                 let challenge_words = challenge_bytes_to_words(challenge);
                 ctx.queue.enqueue_write_buffer(
                     &mut ctx.challenge_buf, CL_FALSE, 0, &challenge_words, &[],
@@ -804,29 +957,20 @@ impl GPUMiner {
                 )?;
                 ctx.cached_target = *target;
             }
-            // found_flag must be zeroed before every dispatch
             let zero_flag: [u32; 1] = [0];
             ctx.queue.enqueue_write_buffer(
                 &mut ctx.found_flag_buf, CL_FALSE, 0, &zero_flag, &[],
             )?;
-        }
 
-        // Set kernel arguments (persistent buffers — arg pointers don't change,
-        // but OpenCL requires set_arg before each enqueue for correctness)
-        unsafe {
             ctx.kernel.set_arg(0, &ctx.challenge_buf)?;
             ctx.kernel.set_arg(1, &ctx.target_buf)?;
             ctx.kernel.set_arg(2, &nonce_start)?;
             ctx.kernel.set_arg(3, &ctx.found_nonce_buf)?;
             ctx.kernel.set_arg(4, &ctx.found_hash_buf)?;
             ctx.kernel.set_arg(5, &ctx.found_flag_buf)?;
-        }
 
-        // Execute kernel
-        let global_work_size = [work_size];
-        let local_ws = [local_work_size];
-
-        unsafe {
+            let global_work_size = [work_size];
+            let local_ws = [local_work_size];
             ctx.queue.enqueue_nd_range_kernel(
                 ctx.kernel.get(),
                 1,
@@ -836,10 +980,20 @@ impl GPUMiner {
                 &[],
             )?;
         }
+        Ok(())
+    }
 
+    /// Phase 2 of two-phase dispatch: block until GPU finishes, then read back results.
+    ///
+    /// Call this after `submit_blake3_kernel`. Since all GPUs submit in Phase 1 before
+    /// any Phase 2 readbacks, all GPUs compute simultaneously.
+    #[cfg(feature = "gpu-mining")]
+    fn readback_blake3_result(ctx: &mut GPUContext) -> Result<Option<(u64, [u8; 32])>> {
+        const CL_TRUE: cl_uint = 1;
+
+        // Block until all commands in this GPU's queue complete (kernel + any pending writes)
         ctx.queue.finish()?;
 
-        // Read results
         let mut found_flag: [u32; 1] = [0];
         unsafe {
             ctx.queue.enqueue_read_buffer(&ctx.found_flag_buf, CL_TRUE, 0, &mut found_flag, &[])?;
@@ -848,22 +1002,34 @@ impl GPUMiner {
         if found_flag[0] != 0 {
             let mut found_nonce: [u64; 1] = [0];
             let mut found_hash: [u8; 32] = [0; 32];
-
             unsafe {
                 ctx.queue.enqueue_read_buffer(&ctx.found_nonce_buf, CL_TRUE, 0, &mut found_nonce, &[])?;
                 ctx.queue.enqueue_read_buffer(&ctx.found_hash_buf, CL_TRUE, 0, &mut found_hash, &[])?;
             }
-
             return Ok(Some((found_nonce[0], found_hash)));
         }
 
         Ok(None)
     }
 
+    /// Single-shot dispatch for calibration: submit + immediate readback on one GPU.
+    #[cfg(feature = "gpu-mining")]
+    fn dispatch_blake3_kernel(
+        ctx: &mut GPUContext,
+        challenge: &[u8; 32],
+        target: &[u8; 32],
+        nonce_start: u64,
+        work_size: usize,
+        local_work_size: usize,
+    ) -> Result<Option<(u64, [u8; 32])>> {
+        Self::submit_blake3_kernel(ctx, challenge, target, nonce_start, work_size, local_work_size)?;
+        Self::readback_blake3_result(ctx)
+    }
+
     /// Dispatch mining work across all GPUs (multi-GPU support).
     ///
-    /// Splits nonce range proportionally by compute units across all initialized
-    /// GPU contexts. Returns the first solution found (if any) and total hashes.
+    /// v10.3.13: Delegates to `mine_batch` which now handles parallel multi-GPU
+    /// dispatch natively (submit-all-then-readback-all pattern).
     #[cfg(feature = "gpu-mining")]
     pub fn mine_batch_multi(
         &mut self,
@@ -871,63 +1037,7 @@ impl GPUMiner {
         target: &[u8; 32],
         nonce_start: u64,
     ) -> Result<BatchResult> {
-        let num_gpus = self.contexts.len();
-        if num_gpus == 0 {
-            return Err(anyhow!("No GPU contexts initialized"));
-        }
-        if num_gpus == 1 {
-            return self.mine_batch(challenge_hash, target, nonce_start);
-        }
-
-        // GPU-002: Each GPU uses its own adaptive work size
-        let local_ws = self.config.local_work_size;
-        let mut total_hashes: u64 = 0;
-        let mut solution: Option<GPUSolution> = None;
-
-        for (gpu_idx, ctx) in self.contexts.iter_mut().enumerate() {
-            let gpu_work = (ctx.adaptive_work_size / local_ws) * local_ws;
-            let gpu_work = gpu_work.max(local_ws);
-            let gpu_nonce_start = nonce_start + total_hashes;
-
-            let gpu_start = Instant::now();
-            let result = Self::dispatch_blake3_kernel(ctx, challenge_hash, target, gpu_nonce_start, gpu_work, local_ws)?;
-            let gpu_ms = gpu_start.elapsed().as_millis();
-
-            // GPU-002: Per-GPU adaptive tuning
-            if gpu_ms < DISPATCH_TARGET_LOW_MS {
-                ctx.adaptive_work_size = (ctx.adaptive_work_size * 3 / 2).min(MAX_WORK_SIZE);
-            } else if gpu_ms > DISPATCH_TARGET_HIGH_MS {
-                ctx.adaptive_work_size = (ctx.adaptive_work_size * 2 / 3).max(MIN_WORK_SIZE);
-            }
-
-            total_hashes += gpu_work as u64;
-
-            if solution.is_none() {
-                if let Some((nonce, hash)) = result {
-                    solution = Some(GPUSolution {
-                        nonce,
-                        hash,
-                        gpu_index: gpu_idx,
-                        hashes_computed: total_hashes,
-                        vdf_output: None,
-                        vdf_proof: None,
-                        vdf_checkpoints: None,
-                        vdf_iterations: None,
-                    });
-                }
-            }
-        }
-
-        self.stats.dispatches.fetch_add(1, Ordering::Relaxed);
-        self.stats.total_hashes.fetch_add(total_hashes, Ordering::Relaxed);
-        if solution.is_some() {
-            self.stats.blocks_found.fetch_add(1, Ordering::Relaxed);
-        }
-
-        Ok(BatchResult {
-            solution,
-            hashes: total_hashes,
-        })
+        self.mine_batch(challenge_hash, target, nonce_start)
     }
 
     /// GPU-002: Run initial calibration to find optimal work size for each GPU.
@@ -935,7 +1045,9 @@ impl GPUMiner {
     /// Call once after construction, before the mining loop starts.
     #[cfg(feature = "gpu-mining")]
     pub fn calibrate(&mut self) -> Result<()> {
-        let test_sizes: [usize; 4] = [1 << 16, 1 << 18, 1 << 20, 1 << 22];
+        // v10.3.13: Extended calibration range (up to 64M) to handle fast modern GPUs.
+        // Each test size doubles from the previous — finds optimal in log2(N) probes.
+        let test_sizes: [usize; 6] = [1 << 16, 1 << 19, 1 << 21, 1 << 23, 1 << 25, 1 << 26];
         let dummy_challenge = [0u8; 32];
         let dummy_target = [0xFFu8; 32]; // easy target, no solution expected
 

@@ -75,7 +75,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.3.12"  # v10.3.12: Fix LWMA difficulty runaway — cap at 32 bits, prevent turbo-sync difficulty trap
+version = "10.3.14"  # v10.3.14: GPU kernel opt — zero-word G variants, in-place VDF, fast-reject target, #unroll 9
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"

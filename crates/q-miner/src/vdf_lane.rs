@@ -36,6 +36,9 @@ pub fn get_vdf_iterations(challenge_json: &serde_json::Value) -> u64 {
 /// - `server_url`: API server URL
 /// - `vdf_proofs_counter`: atomic counter for TUI stats
 /// - `solution_tx`: channel to submit solutions to the centralized submitter
+/// - `new_block_signal`: incremented by the SSE listener on every new block arrival.
+///   Checked before and after VDF computation to avoid wasted work on stale challenges.
+///   Using this instead of an HTTP re-check saves ~10-50ms latency per cycle.
 pub fn vdf_mining_thread(
     is_running: Arc<AtomicBool>,
     wallet: String,
@@ -43,6 +46,7 @@ pub fn vdf_mining_thread(
     vdf_proofs_counter: Arc<AtomicU64>,
     solution_tx: tokio::sync::mpsc::UnboundedSender<crate::solution_submitter::SolutionMessage>,
     tokio_handle: tokio::runtime::Handle,
+    new_block_signal: Arc<AtomicU64>,
 ) {
     info!("🧮 VDF mining thread started (Genus-2 Jacobian, pq128 curve)");
     info!("   This thread uses exactly 1 CPU core — sequential computation");
@@ -108,6 +112,10 @@ pub fn vdf_mining_thread(
         let block_height = data["block_height"].as_u64().unwrap_or(0);
         let vdf_iters = get_vdf_iterations(&resp_json);
 
+        // Snapshot the new-block signal before starting computation.
+        // If it changes by the time we finish, a new block arrived mid-compute.
+        let block_signal_before = new_block_signal.load(Ordering::Relaxed);
+
         // ── Compute VDF ──────────────────────────────────────────
         nonce += 1;
         let challenge_bytes = match hex::decode(&challenge_hash) {
@@ -140,19 +148,11 @@ pub fn vdf_mining_thread(
         };
         let eval_time = eval_start.elapsed();
 
-        // Check if block changed during computation
-        // (If a new block arrived, our challenge is stale — skip proof generation)
-        // We do a quick re-check of block height
-        if let Ok(r) = client.get(&challenge_url).send() {
-            if let Ok(t) = r.text() {
-                if let Ok(j) = serde_json::from_str::<serde_json::Value>(&t) {
-                    let new_height = j["data"]["block_height"].as_u64().unwrap_or(0);
-                    if new_height != block_height {
-                        debug!("🧮 VDF: block changed during eval ({} → {}), restarting", block_height, new_height);
-                        continue;
-                    }
-                }
-            }
+        // Check if a new block arrived during computation using the shared signal.
+        // Avoids an HTTP round-trip (10-50ms) — this is a nanosecond atomic load.
+        if new_block_signal.load(Ordering::Relaxed) != block_signal_before {
+            debug!("🧮 VDF: new block arrived during eval (H:{}), restarting", block_height);
+            continue;
         }
 
         // ── Generate proof ───────────────────────────────────────

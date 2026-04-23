@@ -1859,6 +1859,7 @@ async fn run_mining(
         let vdf_counter = vdf_proofs_counter.clone();
         let vdf_solution_tx = solution_submit_tx.clone();
         let vdf_tokio = tokio_handle.clone();
+        let vdf_block_signal = new_block_signal.clone();
         std::thread::Builder::new()
             .name("vdf-miner".to_string())
             .spawn(move || {
@@ -1869,6 +1870,7 @@ async fn run_mining(
                     vdf_counter,
                     vdf_solution_tx,
                     vdf_tokio,
+                    vdf_block_signal,
                 );
             })
             .expect("Failed to spawn VDF mining thread")
