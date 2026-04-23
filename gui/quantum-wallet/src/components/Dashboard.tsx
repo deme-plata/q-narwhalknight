@@ -179,7 +179,7 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend, liveBalance }: Das
     let qugHistory: { timestamp: number; balance: number }[] = [];
     let qugusdHistory: { timestamp: number; balance: number }[] = [];
     try {
-      const storedHistory = localStorage.getItem('walletBalanceHistory');
+      const storedHistory = localStorage.getItem('qnk_balance_long_v1') || localStorage.getItem('walletBalanceHistory');
       if (storedHistory) {
         const parsed = JSON.parse(storedHistory);
         qugHistory = parsed['QUG'] || [];
@@ -267,10 +267,14 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend, liveBalance }: Das
     }
   }, []); // Run once on mount
 
-  // Balance history tracking (keep last 20 data points per wallet) - load from localStorage
+  // Balance history tracking — v10.3.15: keep up to 10080 points (7 days) in new key
+  // Old key 'walletBalanceHistory' kept for migration; new key stores full long-term history.
   const [_balanceHistory, setBalanceHistory] = useState<Record<string, BalanceHistoryPoint[]>>(() => {
     try {
-      const saved = localStorage.getItem('walletBalanceHistory');
+      // Try new long-term key first, fall back to legacy 20-point key
+      const longTerm = localStorage.getItem('qnk_balance_long_v1');
+      if (longTerm) return JSON.parse(longTerm);
+      const saved = localStorage.getItem('qnk_balance_long_v1') || localStorage.getItem('walletBalanceHistory');
       return saved ? JSON.parse(saved) : {};
     } catch {
       return {};
@@ -693,7 +697,7 @@ Provide a brief analysis (under 250 tokens) covering:
       // Load saved history from localStorage
       let savedHistory: Record<string, BalanceHistoryPoint[]> = {};
       try {
-        const saved = localStorage.getItem('walletBalanceHistory');
+        const saved = localStorage.getItem('qnk_balance_long_v1') || localStorage.getItem('walletBalanceHistory');
         savedHistory = saved ? JSON.parse(saved) : {};
       } catch {
         savedHistory = {};
@@ -709,9 +713,9 @@ Provide a brief analysis (under 250 tokens) covering:
         || (qugLastPoint.balance === 0 && qugBalance > 0)
         || (now - qugLastPoint.timestamp > 10000 && qugBalance !== qugLastPoint.balance);
       if (qugShouldAdd) {
-        qugHistory = [...qugSavedHistory, { timestamp: now, balance: qugBalance }].slice(-20);
+        qugHistory = [...qugSavedHistory, { timestamp: now, balance: qugBalance }].slice(-10080);
       } else {
-        qugHistory = qugSavedHistory.length >= 2 ? qugSavedHistory : [...qugSavedHistory, { timestamp: now, balance: qugBalance }].slice(-20);
+        qugHistory = qugSavedHistory.length >= 2 ? qugSavedHistory : [...qugSavedHistory, { timestamp: now, balance: qugBalance }].slice(-10080);
       }
 
       // Ensure at least 2 points for graph rendering
@@ -791,7 +795,7 @@ Provide a brief analysis (under 250 tokens) covering:
       const qugusdHistory: BalanceHistoryPoint[] = [
         ...qugusdSavedHistory,
         { timestamp: now, balance: qugUsdBalance }
-      ].slice(-20);
+      ].slice(-10080);
 
       balances.push({
         symbol: 'QUGUSD',
@@ -826,7 +830,7 @@ Provide a brief analysis (under 250 tokens) covering:
         const qusdHistory: BalanceHistoryPoint[] = [
           ...qusdSavedHistory,
           { timestamp: now, balance: qusdBalance }
-        ].slice(-20);
+        ].slice(-10080);
 
         balances.push({
           symbol: 'QUSD',
@@ -869,7 +873,7 @@ Provide a brief analysis (under 250 tokens) covering:
       const usdHistory: BalanceHistoryPoint[] = [
         ...usdSavedHistory,
         { timestamp: now, balance: usdValue }
-      ].slice(-20);
+      ].slice(-10080);
 
       balances.push({
         symbol: 'USD',
@@ -1679,7 +1683,7 @@ Provide a brief analysis (under 250 tokens) covering:
               // Always add for DEX swaps (big changes), skip tiny noise
               const newHistory = (pctDiff < 0.005 && last && Date.now() - last.timestamp < 3000)
                 ? prev
-                : [...prev, { timestamp: Date.now(), balance: newBalance }].slice(-20);
+                : [...prev, { timestamp: Date.now(), balance: newBalance }].slice(-10080);
               return {
                 ...wallet,
                 balance: newBalance,
@@ -1829,7 +1833,7 @@ Provide a brief analysis (under 250 tokens) covering:
                   if (last && pctDiff < 0.005 && Date.now() - last.timestamp < 3000) {
                     return prev;
                   }
-                  return [...prev, { timestamp: Date.now(), balance: incomingBalance }].slice(-20);
+                  return [...prev, { timestamp: Date.now(), balance: incomingBalance }].slice(-10080);
                 })()
               };
             }
@@ -1847,9 +1851,9 @@ Provide a brief analysis (under 250 tokens) covering:
             return prev;
           }
           const newPoint: BalanceHistoryPoint = { timestamp: Date.now(), balance: incomingBalance };
-          const updatedHistory = [...history, newPoint].slice(-20);
+          const updatedHistory = [...history, newPoint].slice(-10080);
           try {
-            localStorage.setItem('walletBalanceHistory', JSON.stringify({ ...prev, [symbol]: updatedHistory }));
+            localStorage.setItem('qnk_balance_long_v1', JSON.stringify({ ...prev, [symbol]: updatedHistory }));
           } catch {}
           return { ...prev, [symbol]: updatedHistory };
         });
@@ -1903,12 +1907,12 @@ Provide a brief analysis (under 250 tokens) covering:
           timestamp: Date.now(),
           balance: validatedBalance
         };
-        const updatedHistory = [...history, newPoint].slice(-20);
+        const updatedHistory = [...history, newPoint].slice(-10080);
         const newHistoryState = { ...prev, [symbol]: updatedHistory };
 
         // Save to localStorage
         try {
-          localStorage.setItem('walletBalanceHistory', JSON.stringify(newHistoryState));
+          localStorage.setItem('qnk_balance_long_v1', JSON.stringify(newHistoryState));
         } catch (error) {
           console.warn('Failed to save balance history to localStorage:', error);
         }
@@ -2113,7 +2117,7 @@ Provide a brief analysis (under 250 tokens) covering:
         // Preserve existing history instead of wiping it
         let savedHistory: Record<string, BalanceHistoryPoint[]> = {};
         try {
-          const saved = localStorage.getItem('walletBalanceHistory');
+          const saved = localStorage.getItem('qnk_balance_long_v1') || localStorage.getItem('walletBalanceHistory');
           savedHistory = saved ? JSON.parse(saved) : {};
         } catch { savedHistory = {}; }
 
@@ -2122,7 +2126,7 @@ Provide a brief analysis (under 250 tokens) covering:
         // Only add point if meaningfully different
         const qugNeedNew = !qugLast || Math.abs(qugBalance - qugLast.balance) / Math.max(qugLast.balance, 0.001) > 0.005;
         const qugHistory = qugNeedNew
-          ? [...qugSaved, { timestamp: now, balance: qugBalance }].slice(-20)
+          ? [...qugSaved, { timestamp: now, balance: qugBalance }].slice(-10080)
           : (qugSaved.length >= 2 ? qugSaved : [{ timestamp: now - 60000, balance: qugBalance }, { timestamp: now, balance: qugBalance }]);
 
         const balances: WalletBalance[] = [
@@ -2156,7 +2160,7 @@ Provide a brief analysis (under 250 tokens) covering:
               const usdLast = usdSaved[usdSaved.length - 1];
               const usdNeedNew = !usdLast || Math.abs(usdValue - usdLast.balance) > 0.01;
               const usdHistory = usdNeedNew
-                ? [...usdSaved, { timestamp: now, balance: usdValue }].slice(-20)
+                ? [...usdSaved, { timestamp: now, balance: usdValue }].slice(-10080)
                 : (usdSaved.length >= 2 ? usdSaved : [{ timestamp: now - 60000, balance: usdValue }, { timestamp: now, balance: usdValue }]);
 
               balances.push({
@@ -2214,7 +2218,7 @@ Provide a brief analysis (under 250 tokens) covering:
           const qugusdLast = qugusdSaved[qugusdSaved.length - 1];
           const qugusdNeedNew = !qugusdLast || Math.abs(qugusdBalance - qugusdLast.balance) > 0.01;
           const qugusdHistory = qugusdNeedNew
-            ? [...qugusdSaved, { timestamp: now, balance: qugusdBalance }].slice(-20)
+            ? [...qugusdSaved, { timestamp: now, balance: qugusdBalance }].slice(-10080)
             : (qugusdSaved.length >= 2 ? qugusdSaved : [{ timestamp: now - 60000, balance: qugusdBalance }, { timestamp: now, balance: qugusdBalance }]);
 
           balances.push({
@@ -2248,7 +2252,7 @@ Provide a brief analysis (under 250 tokens) covering:
           const qusdLast = qusdSaved[qusdSaved.length - 1];
           const qusdNeedNew = !qusdLast || Math.abs(qusdRefreshBalance - qusdLast.balance) > 0.01;
           const qusdHistory = qusdNeedNew
-            ? [...qusdSaved, { timestamp: now, balance: qusdRefreshBalance }].slice(-20)
+            ? [...qusdSaved, { timestamp: now, balance: qusdRefreshBalance }].slice(-10080)
             : (qusdSaved.length >= 2 ? qusdSaved : [{ timestamp: now - 60000, balance: qusdRefreshBalance }, { timestamp: now, balance: qusdRefreshBalance }]);
 
           balances.push({

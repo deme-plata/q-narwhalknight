@@ -1,8 +1,21 @@
-import { motion } from 'framer-motion';
-import { Wallet, TrendingUp, TrendingDown } from 'lucide-react';
-import { memo, useMemo, useRef, useEffect, useState } from 'react';
+// WalletCardWithGraph.tsx — v10.3.15
+// Enhanced wallet card with:
+//   • Long-term balance history (7 days, persisted in qnk_balance_long_v1)
+//   • Time horizon tabs: 1H | 6H | 24H | 7D
+//   • Canvas-based sparkline with gradient fill + hover crosshair
+//   • "Wealth Velocity" radial gauge (Times-magazine quality second visual)
 
-interface BalanceHistoryPoint {
+import { motion, AnimatePresence } from 'framer-motion';
+import { Wallet, TrendingUp, TrendingDown, ChevronUp, BarChart2 } from 'lucide-react';
+import {
+  memo, useMemo, useRef, useEffect, useState, useCallback
+} from 'react';
+
+// ──────────────────────────────────────────────────────────────
+// Types
+// ──────────────────────────────────────────────────────────────
+
+export interface BalanceHistoryPoint {
   timestamp: number;
   balance: number;
 }
@@ -25,259 +38,351 @@ interface WalletCardProps {
   children?: React.ReactNode;
 }
 
-// Lightweight SVG sparkline component with quantum glow
-const MiniGraph = memo(function MiniGraph({
-  data,
-  color,
-  width = 200,
-  height = 60
-}: {
-  data: BalanceHistoryPoint[];
-  color: string;
-  width?: number;
-  height?: number;
-}) {
-  const { path, gradient, trend, percentChange, plotData } = useMemo(() => {
-    if (data.length < 2) {
-      return { path: '', gradient: '', trend: 0, percentChange: 0, plotData: [] as BalanceHistoryPoint[] };
-    }
+// ──────────────────────────────────────────────────────────────
+// Time horizon config
+// ──────────────────────────────────────────────────────────────
 
-    // Sort by timestamp and deduplicate near-identical balance points
-    // This prevents zigzag from tiny mining increments
-    const sorted = [...data].sort((a, b) => a.timestamp - b.timestamp);
-    const deduped: BalanceHistoryPoint[] = [];
-    for (const point of sorted) {
-      if (deduped.length === 0) {
-        deduped.push(point);
-        continue;
-      }
-      const last = deduped[deduped.length - 1];
-      const pctDiff = last.balance > 0
-        ? Math.abs(point.balance - last.balance) / last.balance
-        : (point.balance !== last.balance ? 1 : 0);
-      // Only keep point if balance changed by >0.5% or >5 seconds apart with any change
-      if (pctDiff > 0.005 || (pctDiff > 0 && point.timestamp - last.timestamp > 5000)) {
-        deduped.push(point);
-      }
-    }
-    // Always include the latest point so graph shows current balance
-    const lastSorted = sorted[sorted.length - 1];
-    if (deduped.length > 0 && deduped[deduped.length - 1].timestamp !== lastSorted.timestamp) {
-      deduped.push(lastSorted);
-    }
-    // Need at least 2 unique points
-    const plotData = deduped.length >= 2 ? deduped : sorted;
-    if (plotData.length < 2) {
-      return { path: '', gradient: '', trend: 0, percentChange: 0 };
-    }
+type Horizon = '1H' | '6H' | '24H' | '7D';
+const HORIZONS: Horizon[] = ['1H', '6H', '24H', '7D'];
+const HORIZON_MS: Record<Horizon, number> = {
+  '1H':  3_600_000,
+  '6H':  21_600_000,
+  '24H': 86_400_000,
+  '7D':  604_800_000,
+};
 
-    const values = plotData.map(d => d.balance);
-    const min = Math.min(...values);
-    const max = Math.max(...values);
-    const range = max - min || 1;
+// ──────────────────────────────────────────────────────────────
+// Helpers
+// ──────────────────────────────────────────────────────────────
 
-    // Calculate trend and percentage change
-    const firstValue = values[0] || 0;
-    const lastValue = values[values.length - 1] || 0;
-    const change = lastValue - firstValue;
-    const pctChange = firstValue !== 0 ? (change / firstValue) * 100 : 0;
-    const trendDirection = change > 0 ? 1 : change < 0 ? -1 : 0;
+function fmtBalance(amount: number, symbol: string): string {
+  if (symbol === 'QUGUSD' || symbol === 'USD') {
+    return amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+  if (amount >= 1000) return amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (amount >= 1) return amount.toLocaleString('en-US', { minimumFractionDigits: 4, maximumFractionDigits: 4 });
+  if (amount >= 0.0001) return amount.toLocaleString('en-US', { minimumFractionDigits: 6, maximumFractionDigits: 6 });
+  return amount.toLocaleString('en-US', { minimumFractionDigits: 8, maximumFractionDigits: 8 });
+}
 
-    // Create SVG path points
-    const points = plotData.map((d, i) => {
-      const x = (i / (plotData.length - 1)) * width;
-      const y = height - ((d.balance - min) / range) * (height - 10) - 5;
-      return { x, y };
-    });
+function filterByHorizon(data: BalanceHistoryPoint[], horizon: Horizon): BalanceHistoryPoint[] {
+  const cutoff = Date.now() - HORIZON_MS[horizon];
+  const filtered = data.filter((p) => p.timestamp >= cutoff);
+  // Always include the oldest point just before the cutoff for a complete left edge
+  if (filtered.length < data.length) {
+    const before = data.filter((p) => p.timestamp < cutoff);
+    if (before.length > 0) filtered.unshift(before[before.length - 1]);
+  }
+  return filtered;
+}
 
-    // Build smooth bezier curve path
-    let pathData = `M ${points[0].x},${points[0].y}`;
+// ──────────────────────────────────────────────────────────────
+// Canvas Sparkline
+// ──────────────────────────────────────────────────────────────
 
-    for (let i = 0; i < points.length - 1; i++) {
-      const curr = points[i];
-      const next = points[i + 1];
-      const midX = (curr.x + next.x) / 2;
+function drawSparkline(
+  canvas: HTMLCanvasElement,
+  data: BalanceHistoryPoint[],
+  mouseX: number | null,
+  positive: boolean
+) {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
 
-      // Smooth bezier curve
-      pathData += ` Q ${curr.x},${curr.y} ${midX},${(curr.y + next.y) / 2}`;
-      pathData += ` Q ${next.x},${next.y} ${next.x},${next.y}`;
-    }
-
-    // Create gradient fill area
-    const lastPoint = points[points.length - 1];
-    const gradientPath = `${pathData} L ${lastPoint.x},${height} L ${points[0].x},${height} Z`;
-
-    return {
-      path: pathData,
-      gradient: gradientPath,
-      trend: trendDirection,
-      percentChange: pctChange,
-      plotData
-    };
-  }, [data, width, height]);
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.clientWidth || 260;
+  const H = canvas.clientHeight || 72;
+  if (canvas.width !== W * dpr || canvas.height !== H * dpr) {
+    canvas.width = W * dpr;
+    canvas.height = H * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  ctx.clearRect(0, 0, W, H);
 
   if (data.length < 2) {
-    return (
-      <div className="flex items-center justify-center h-full text-gray-500 text-xs">
-        Accumulating data...
-      </div>
-    );
+    ctx.font = '10px sans-serif';
+    ctx.fillStyle = 'rgba(148,163,184,0.3)';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('Accumulating data…', W / 2, H / 2);
+    return;
   }
 
-  // Extract color values for gradient
-  const isPositive = trend >= 0;
-  const gradientColor = isPositive
-    ? 'rgba(34, 197, 94, 0.3)' // green
-    : 'rgba(239, 68, 68, 0.3)'; // red
-  const strokeColor = isPositive ? '#22c55e' : '#ef4444';
-  const glowColor = isPositive ? '#86efac' : '#fca5a5';
+  const pad = { l: 2, r: 2, t: 8, b: 4 };
+  const cW = W - pad.l - pad.r;
+  const cH = H - pad.t - pad.b;
 
-  return (
-    <div className="relative">
-      {/* Percentage change badge */}
-      <div className={`absolute -top-1 right-0 px-2 py-0.5 rounded-full text-xs font-bold flex items-center gap-1 ${
-        isPositive ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
-      }`}>
-        {isPositive ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
-        {Math.abs(percentChange).toFixed(1)}%
-      </div>
+  const t0 = data[0].timestamp;
+  const tN = data[data.length - 1].timestamp;
+  const tRange = tN - t0 || 1;
 
-      <svg
-        width={width}
-        height={height}
-        className="overflow-visible"
-        style={{ filter: 'drop-shadow(0 0 4px rgba(255, 255, 255, 0.1))' }}
-      >
-        <defs>
-          {/* Gradient fill */}
-          <linearGradient id={`graphGradient-${color}`} x1="0%" y1="0%" x2="0%" y2="100%">
-            <stop offset="0%" stopColor={gradientColor} stopOpacity="0.8" />
-            <stop offset="100%" stopColor={gradientColor} stopOpacity="0.05" />
-          </linearGradient>
+  const vals = data.map((d) => d.balance);
+  let minV = Math.min(...vals);
+  let maxV = Math.max(...vals);
+  const spread = maxV - minV;
+  // Add 10% padding vertically; if flat line add tiny spread for visibility
+  minV -= spread * 0.1 + (spread === 0 ? maxV * 0.01 : 0);
+  maxV += spread * 0.1 + (spread === 0 ? maxV * 0.01 : 0);
+  const vRange = maxV - minV || 1;
 
-          {/* Glow filter for quantum effect */}
-          <filter id={`glow-${color}`}>
-            <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
-            <feMerge>
-              <feMergeNode in="coloredBlur"/>
-              <feMergeNode in="SourceGraphic"/>
-            </feMerge>
-          </filter>
-        </defs>
+  const px = (d: BalanceHistoryPoint) => pad.l + ((d.timestamp - t0) / tRange) * cW;
+  const py = (d: BalanceHistoryPoint) => pad.t + cH - ((d.balance - minV) / vRange) * cH;
 
-        {/* Gradient fill area */}
-        <motion.path
-          d={gradient}
-          fill={`url(#graphGradient-${color})`}
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ duration: 0.5 }}
-        />
+  const lineColor = positive ? '#22c55e' : '#ef4444';
+  const gradTop   = positive ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)';
+  const glowColor = positive ? '#86efac' : '#fca5a5';
 
-        {/* Main line with quantum glow */}
-        <motion.path
-          d={path}
-          fill="none"
-          stroke={strokeColor}
-          strokeWidth="2.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          filter={`url(#glow-${color})`}
-          initial={{ pathLength: 0 }}
-          animate={{ pathLength: 1 }}
-          transition={{ duration: 1, ease: "easeOut" }}
-        />
+  // Gradient fill
+  const grad = ctx.createLinearGradient(0, pad.t, 0, pad.t + cH);
+  grad.addColorStop(0, gradTop);
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
 
-        {/* Glowing dots at deduped data points (matches the path curve) */}
-        {(plotData || []).map((d, i) => {
-          const pts = plotData || [];
-          const values = pts.map(p => p.balance);
-          const min = Math.min(...values);
-          const max = Math.max(...values);
-          const range = max - min || 1;
-          const x = (i / (pts.length - 1)) * width;
-          const y = height - ((d.balance - min) / range) * (height - 10) - 5;
+  ctx.beginPath();
+  for (let i = 0; i < data.length; i++) {
+    i === 0 ? ctx.moveTo(px(data[i]), py(data[i])) : ctx.lineTo(px(data[i]), py(data[i]));
+  }
+  const lp = data[data.length - 1];
+  ctx.lineTo(px(lp), pad.t + cH);
+  ctx.lineTo(pad.l, pad.t + cH);
+  ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
 
-          return (
-            <motion.circle
-              key={i}
-              cx={x}
-              cy={y}
-              r="2.5"
-              fill={glowColor}
-              initial={{ scale: 0, opacity: 0 }}
-              animate={{ scale: 1, opacity: 0.8 }}
-              transition={{ delay: i * 0.05, duration: 0.3 }}
-              style={{
-                filter: `drop-shadow(0 0 3px ${glowColor})`,
-              }}
-            />
-          );
-        })}
-      </svg>
+  // Main line
+  ctx.shadowColor = glowColor;
+  ctx.shadowBlur = 5;
+  ctx.beginPath();
+  for (let i = 0; i < data.length; i++) {
+    i === 0 ? ctx.moveTo(px(data[i]), py(data[i])) : ctx.lineTo(px(data[i]), py(data[i]));
+  }
+  ctx.strokeStyle = lineColor;
+  ctx.lineWidth = 2;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.stroke();
+  ctx.shadowBlur = 0;
 
-      {/* Animated grid lines */}
-      <div className="absolute inset-0 pointer-events-none opacity-10">
-        {[...Array(4)].map((_, i) => (
-          <motion.div
-            key={i}
-            className="absolute left-0 right-0 border-t border-gray-400"
-            style={{ top: `${(i + 1) * 20}%` }}
-            initial={{ scaleX: 0 }}
-            animate={{ scaleX: 1 }}
-            transition={{ delay: 0.2 + i * 0.1, duration: 0.5 }}
-          />
-        ))}
-      </div>
-    </div>
-  );
-});
+  // Hover crosshair
+  if (mouseX !== null && mouseX >= pad.l && mouseX <= pad.l + cW) {
+    const tAtM = t0 + ((mouseX - pad.l) / cW) * tRange;
+    let ni = 0, nd = Infinity;
+    for (let i = 0; i < data.length; i++) {
+      const d = Math.abs(data[i].timestamp - tAtM);
+      if (d < nd) { nd = d; ni = i; }
+    }
+    const dp = data[ni];
+    const dpX = px(dp), dpY = py(dp);
+
+    ctx.setLineDash([2, 3]);
+    ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(dpX, pad.t); ctx.lineTo(dpX, pad.t + cH); ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.shadowColor = glowColor; ctx.shadowBlur = 6;
+    ctx.beginPath(); ctx.arc(dpX, dpY, 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = lineColor; ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // Tooltip
+    const balStr = fmtBalance(dp.balance, '');
+    const timeStr = new Date(dp.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const bW = 96, bH = 34;
+    let bx = dpX + 6;
+    if (bx + bW > W - pad.r) bx = dpX - bW - 6;
+    const by = Math.max(pad.t, dpY - bH - 4);
+    ctx.fillStyle = 'rgba(8,12,24,0.92)';
+    ctx.strokeStyle = positive ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.3)';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.roundRect(bx, by, bW, bH, 4); ctx.fill(); ctx.stroke();
+    ctx.font = '9px sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    ctx.fillStyle = 'rgba(148,163,184,0.6)'; ctx.fillText(timeStr, bx + 6, by + 4);
+    ctx.fillStyle = lineColor; ctx.fillText(balStr, bx + 6, by + 16);
+  }
+}
+
+// ──────────────────────────────────────────────────────────────
+// Wealth Velocity Gauge (radial, Times-magazine quality)
+// ──────────────────────────────────────────────────────────────
+
+function drawVelocityGauge(
+  canvas: HTMLCanvasElement,
+  data: BalanceHistoryPoint[],
+  currentBalance: number
+) {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.clientWidth || 80;
+  const H = canvas.clientHeight || 80;
+  if (canvas.width !== W * dpr || canvas.height !== H * dpr) {
+    canvas.width = W * dpr;
+    canvas.height = H * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  ctx.clearRect(0, 0, W, H);
+
+  const cx = W / 2, cy = H / 2;
+  const R = Math.min(W, H) * 0.42;
+
+  // Compute velocity: balance growth rate over the available window
+  // Expressed as % change per day, clamped to [-100%, +200%]
+  let velocityPct = 0;
+  if (data.length >= 2) {
+    const oldest = data[0];
+    const newest = data[data.length - 1];
+    const dtDays = (newest.timestamp - oldest.timestamp) / 86_400_000;
+    if (dtDays > 0 && oldest.balance > 0) {
+      velocityPct = ((newest.balance - oldest.balance) / oldest.balance) * (1 / dtDays) * 100;
+    }
+  }
+
+  // All-time-high from the full stored history
+  const ath = data.length > 0 ? Math.max(...data.map((d) => d.balance), currentBalance) : currentBalance;
+  const athPct = ath > 0 ? Math.min(currentBalance / ath, 1) : 0;
+
+  // ── Outer ATH arc (full circle, muted track + colored fill)
+  const startAngle = -Math.PI * 0.75; // start bottom-left
+  const sweepTotal = Math.PI * 1.5;   // 270° sweep
+
+  // Track
+  ctx.beginPath();
+  ctx.arc(cx, cy, R, startAngle, startAngle + sweepTotal);
+  ctx.strokeStyle = 'rgba(255,255,255,0.07)';
+  ctx.lineWidth = R * 0.18;
+  ctx.lineCap = 'round';
+  ctx.stroke();
+
+  // ATH fill — green to gold gradient
+  const athSweep = sweepTotal * athPct;
+  if (athSweep > 0.05) {
+    const athGrad = ctx.createLinearGradient(cx - R, cy, cx + R, cy);
+    athGrad.addColorStop(0, 'rgba(34,197,94,0.7)');
+    athGrad.addColorStop(1, 'rgba(212,175,55,0.9)');
+    ctx.beginPath();
+    ctx.arc(cx, cy, R, startAngle, startAngle + athSweep);
+    ctx.shadowColor = athPct > 0.9 ? '#d4af37' : '#22c55e';
+    ctx.shadowBlur = 6;
+    ctx.strokeStyle = athGrad;
+    ctx.lineWidth = R * 0.18;
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+  }
+
+  // ── Inner circle background
+  const innerGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, R * 0.7);
+  innerGrad.addColorStop(0, 'rgba(10,16,36,0.97)');
+  innerGrad.addColorStop(1, 'rgba(4,8,20,0.95)');
+  ctx.beginPath(); ctx.arc(cx, cy, R * 0.72, 0, Math.PI * 2);
+  ctx.fillStyle = innerGrad; ctx.fill();
+
+  // ── Velocity needle (small, inside)
+  const velClamped = Math.max(-1, Math.min(2, velocityPct / 100)); // -100% to +200%
+  const needleAngle = startAngle + sweepTotal * ((velClamped + 1) / 3); // map [-1,2] → [0,1]
+  const needleLen = R * 0.48;
+  const needleX = cx + Math.cos(needleAngle) * needleLen;
+  const needleY = cy + Math.sin(needleAngle) * needleLen;
+  const needleColor = velocityPct >= 0 ? '#4ade80' : '#f87171';
+
+  ctx.shadowColor = needleColor; ctx.shadowBlur = 4;
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(needleX, needleY);
+  ctx.strokeStyle = needleColor; ctx.lineWidth = 1.5; ctx.lineCap = 'round'; ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // Center dot
+  ctx.beginPath(); ctx.arc(cx, cy, 2.5, 0, Math.PI * 2);
+  ctx.fillStyle = needleColor; ctx.fill();
+
+  // ── Center text: ATH%
+  ctx.font = `bold ${Math.round(R * 0.38)}px sans-serif`;
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(`${Math.round(athPct * 100)}%`, cx, cy - R * 0.05);
+
+  // Sub-label
+  ctx.font = `${Math.round(R * 0.2)}px sans-serif`;
+  ctx.fillStyle = 'rgba(148,163,184,0.45)';
+  ctx.fillText('of ATH', cx, cy + R * 0.33);
+}
+
+// ──────────────────────────────────────────────────────────────
+// WalletCardWithGraph
+// ──────────────────────────────────────────────────────────────
 
 const WalletCardWithGraph = memo(function WalletCardWithGraph({
   wallet,
   index,
   isAnimating,
   onCardClick,
-  children
+  children,
 }: WalletCardProps) {
-  // v10.2.0: Stable balance display — debounced like TopBar to prevent flickering
-  // The parent (Dashboard) already handles DEX lock overrides, so we just stabilize here.
   const [stableBalance, setStableBalance] = useState(wallet.balance);
   const lastUpdateRef = useRef(Date.now());
   const stableRef = useRef(wallet.balance);
+  const [horizon, setHorizon] = useState<Horizon>('24H');
+  const [showGauge, setShowGauge] = useState(false);
 
+  const sparkRef = useRef<HTMLCanvasElement>(null);
+  const gaugeRef = useRef<HTMLCanvasElement>(null);
+  const sparkAnimRef = useRef<number>(0);
+  const gaugeAnimRef = useRef<number>(0);
+  const mouseXRef = useRef<number | null>(null);
+
+  // Stable balance debounce
   useEffect(() => {
     const incoming = wallet.balance;
     const current = stableRef.current;
     const timeSince = Date.now() - lastUpdateRef.current;
     const delta = Math.abs(incoming - current);
-
-    // Always accept: first real value, significant changes (>0.01 QUG), or after 2s stability window
-    const isSignificant = delta > 0.01;
-    const isStabilityWindowPassed = timeSince > 2000 && delta > 0.000001;
-    const isFirstValue = current === 0 && incoming > 0;
-
-    if (isFirstValue || isSignificant || isStabilityWindowPassed) {
+    if (current === 0 && incoming > 0 || delta > 0.01 || (timeSince > 2000 && delta > 0.000001)) {
       stableRef.current = incoming;
       lastUpdateRef.current = Date.now();
       setStableBalance(incoming);
     }
   }, [wallet.balance]);
 
-  const displayBalance = stableBalance;
+  // Filter data by horizon
+  const filteredData = useMemo(() => {
+    const raw = wallet.history ?? [];
+    return filterByHorizon(raw, horizon);
+  }, [wallet.history, horizon]);
 
-  // v10.2.0: Consistent formatter — always show fixed decimal places per tier
-  // Prevents flickering from floating-point artifacts like 1234.5600000001
-  const formatBalance = (amount: number) => {
-    if (wallet.symbol === 'QUGUSD' || wallet.symbol === 'USD') {
-      return amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  // Trend
+  const { trend, pctChange } = useMemo(() => {
+    if (filteredData.length < 2) return { trend: 0, pctChange: 0 };
+    const first = filteredData[0].balance;
+    const last = filteredData[filteredData.length - 1].balance;
+    const pct = first > 0 ? ((last - first) / first) * 100 : 0;
+    return { trend: last >= first ? 1 : -1, pctChange: pct };
+  }, [filteredData]);
+
+  const positive = trend >= 0;
+
+  // Sparkline animation loop
+  const drawSpark = useCallback(() => {
+    if (sparkRef.current) {
+      drawSparkline(sparkRef.current, filteredData, mouseXRef.current, positive);
     }
-    // QUG and others: consistent decimals per magnitude tier
-    if (amount >= 1000) return amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    if (amount >= 1) return amount.toLocaleString('en-US', { minimumFractionDigits: 4, maximumFractionDigits: 4 });
-    if (amount >= 0.0001) return amount.toLocaleString('en-US', { minimumFractionDigits: 6, maximumFractionDigits: 6 });
-    return amount.toLocaleString('en-US', { minimumFractionDigits: 8, maximumFractionDigits: 8 });
-  };
+    sparkAnimRef.current = requestAnimationFrame(drawSpark);
+  }, [filteredData, positive]);
+
+  useEffect(() => {
+    sparkAnimRef.current = requestAnimationFrame(drawSpark);
+    return () => { if (sparkAnimRef.current) cancelAnimationFrame(sparkAnimRef.current); };
+  }, [drawSpark]);
+
+  // Gauge (static, redraws on data/balance change)
+  useEffect(() => {
+    if (showGauge && gaugeRef.current) {
+      drawVelocityGauge(gaugeRef.current, wallet.history ?? [], stableBalance);
+    }
+  }, [showGauge, wallet.history, stableBalance]);
+
+  const handleCanvasMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    mouseXRef.current = e.clientX - e.currentTarget.getBoundingClientRect().left;
+  }, []);
+  const handleCanvasMouseLeave = useCallback(() => { mouseXRef.current = null; }, []);
 
   return (
     <motion.div
@@ -285,22 +390,19 @@ const WalletCardWithGraph = memo(function WalletCardWithGraph({
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: 0.1 * index }}
-      className="p-4 rounded-xl cursor-pointer group relative overflow-hidden"
+      className="p-4 rounded-xl cursor-pointer group relative overflow-hidden select-none"
       style={{
-        background: `linear-gradient(135deg, rgba(30, 20, 60, 0.8), rgba(50, 30, 80, 0.8))`,
-        border: `2px solid rgba(212, 175, 55, ${wallet.comingSoon ? '0.1' : '0.3'})`,
+        background: `linear-gradient(135deg, rgba(30,20,60,0.8), rgba(50,30,80,0.8))`,
+        border: `2px solid rgba(212,175,55,${wallet.comingSoon ? '0.1' : '0.3'})`,
       }}
-      whileHover={{ scale: wallet.comingSoon ? 1 : 1.02 }}
+      whileHover={{ scale: wallet.comingSoon ? 1 : 1.01 }}
       onClick={onCardClick}
     >
-      {/* Coming Soon Badge */}
       {wallet.comingSoon && (
         <div className="absolute top-2 right-2 px-2 py-1 rounded-lg text-xs font-bold bg-gradient-to-r from-purple-500/30 to-pink-500/30 border border-purple-400/30 text-purple-300">
           Coming Soon
         </div>
       )}
-
-      {/* Shielded Badge */}
       {wallet.shieldedOnly && (
         <div className="absolute bottom-2 right-2 px-2 py-1 rounded-lg text-xs font-bold bg-gradient-to-r from-green-500/30 to-emerald-500/30 border border-green-400/30 text-green-300 flex items-center gap-1">
           <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 16 16">
@@ -310,7 +412,7 @@ const WalletCardWithGraph = memo(function WalletCardWithGraph({
         </div>
       )}
 
-      {/* Header: Icon + Name */}
+      {/* Header */}
       <div className="flex items-start justify-between mb-3">
         <div className={`p-2 rounded-lg bg-gradient-to-br ${wallet.color}`}>
           {(wallet.icon === 'qug' || wallet.icon === 'usd') && (
@@ -320,12 +422,7 @@ const WalletCardWithGraph = memo(function WalletCardWithGraph({
                 padding: '1px'
               }}>
                 <div className="w-full h-full bg-gradient-to-b from-slate-900 via-blue-950 to-slate-900 rounded-full flex items-center justify-center p-0.5">
-                  <img
-                    src="/quillon-logo.png"
-                    alt="Quillon"
-                    className="w-full h-full object-contain"
-                    style={{ filter: 'invert(1)' }}
-                  />
+                  <img src="/quillon-logo.png" alt="Quillon" className="w-full h-full object-contain" style={{ filter: 'invert(1)' }} />
                 </div>
               </div>
             </div>
@@ -338,73 +435,168 @@ const WalletCardWithGraph = memo(function WalletCardWithGraph({
         </div>
       </div>
 
-      {/* Balance Display */}
-      {/* 🚨 v2.3.7-beta: Show loading state only when history is undefined (not yet fetched) */}
-      <div className={`mb-3 ${wallet.comingSoon ? 'text-gray-500' : ''}`}>
+      {/* Balance */}
+      <div className={`mb-2 ${wallet.comingSoon ? 'text-gray-500' : ''}`}>
         {wallet.comingSoon ? (
           <div className="text-2xl font-bold text-gray-500">0.00</div>
-        ) : displayBalance === 0 && wallet.history === undefined ? (
+        ) : stableBalance === 0 && wallet.history === undefined ? (
           <div className="text-2xl font-bold text-amber-300/60 animate-pulse">Loading...</div>
         ) : (
           <motion.div
             className="text-2xl font-bold text-white"
             animate={isAnimating ? {
               textShadow: [
-                '0 0 10px rgba(255, 215, 0, 0.8)',
-                '0 0 20px rgba(255, 107, 0, 0.8)',
-                '0 0 20px rgba(16, 185, 129, 0.8)',
-                '0 0 10px rgba(255, 215, 0, 0.8)',
+                '0 0 10px rgba(255,215,0,0.8)', '0 0 20px rgba(255,107,0,0.8)',
+                '0 0 20px rgba(16,185,129,0.8)', '0 0 10px rgba(255,215,0,0.8)',
               ],
             } : {}}
             transition={{ duration: 1.5, repeat: isAnimating ? 1 : 0 }}
           >
-            {formatBalance(displayBalance)}
+            {fmtBalance(stableBalance, wallet.symbol)}
           </motion.div>
         )}
         {wallet.usdValue !== undefined && !wallet.comingSoon && (
-          <div className="text-xs text-gray-400 mt-1">
-            ≈ ${wallet.usdValue.toFixed(2)} USD
-          </div>
+          <div className="text-xs text-gray-400 mt-0.5">≈ ${wallet.usdValue.toFixed(2)} USD</div>
         )}
       </div>
 
-      {/* Balance History Graph */}
-      {!wallet.comingSoon && wallet.history && wallet.history.length >= 2 ? (
-        <div className="mt-3 mb-2 h-16 relative">
-          <MiniGraph
-            data={wallet.history}
-            color={wallet.symbol}
-            width={200}
-            height={60}
-          />
-        </div>
-      ) : !wallet.comingSoon && (
-        <div className="mt-3 mb-2 h-16 relative flex items-center justify-center text-xs text-gray-500">
-          {wallet.history && wallet.history.length === 0
-            ? 'Click to open bridge'
-            : wallet.history
-              ? `Waiting for data (${wallet.history.length}/2 points)`
-              : 'No history data'}
+      {/* Graph section */}
+      {!wallet.comingSoon && (
+        <div onClick={(e) => e.stopPropagation()}>
+          {/* Controls row: time tabs + gauge toggle */}
+          <div className="flex items-center justify-between mb-1.5">
+            {/* Time horizon tabs */}
+            <div className="flex gap-0.5">
+              {HORIZONS.map((h) => (
+                <button
+                  key={h}
+                  onClick={() => setHorizon(h)}
+                  className={`px-1.5 py-0.5 rounded text-[9px] font-mono transition-colors ${
+                    horizon === h
+                      ? (positive ? 'bg-green-500/25 text-green-400' : 'bg-red-500/25 text-red-400')
+                      : 'text-gray-600 hover:text-gray-400 hover:bg-white/5'
+                  }`}
+                >
+                  {h}
+                </button>
+              ))}
+            </div>
+
+            {/* Trend badge + gauge toggle */}
+            <div className="flex items-center gap-1.5">
+              {filteredData.length >= 2 && (
+                <span className={`flex items-center gap-0.5 text-[9px] font-bold px-1.5 py-0.5 rounded-full ${
+                  positive ? 'bg-green-500/15 text-green-400' : 'bg-red-500/15 text-red-400'
+                }`}>
+                  {positive ? <TrendingUp className="w-2.5 h-2.5" /> : <TrendingDown className="w-2.5 h-2.5" />}
+                  {Math.abs(pctChange).toFixed(1)}%
+                </span>
+              )}
+              <button
+                onClick={() => setShowGauge((v) => !v)}
+                title="Wealth Velocity Gauge"
+                className={`p-0.5 rounded transition-colors ${showGauge ? 'text-yellow-400' : 'text-gray-600 hover:text-gray-400'}`}
+              >
+                <BarChart2 className="w-3 h-3" />
+              </button>
+            </div>
+          </div>
+
+          {/* Canvas sparkline */}
+          <AnimatePresence mode="wait">
+            {!showGauge ? (
+              <motion.div
+                key="spark"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.2 }}
+                className="relative bg-white/[0.02] rounded-lg overflow-hidden"
+                style={{ height: 72 }}
+              >
+                <canvas
+                  ref={sparkRef}
+                  className="w-full h-full"
+                  onMouseMove={handleCanvasMouseMove}
+                  onMouseLeave={handleCanvasMouseLeave}
+                />
+                {/* Min / max labels */}
+                {filteredData.length >= 2 && (() => {
+                  const vals = filteredData.map((d) => d.balance);
+                  const mn = Math.min(...vals);
+                  const mx = Math.max(...vals);
+                  return (
+                    <>
+                      <span className="absolute top-1 left-1.5 text-[8px] text-gray-600 font-mono pointer-events-none">
+                        {fmtBalance(mx, wallet.symbol)}
+                      </span>
+                      <span className="absolute bottom-1 left-1.5 text-[8px] text-gray-600 font-mono pointer-events-none">
+                        {fmtBalance(mn, wallet.symbol)}
+                      </span>
+                    </>
+                  );
+                })()}
+              </motion.div>
+            ) : (
+              /* ── Wealth Velocity Gauge ── */
+              <motion.div
+                key="gauge"
+                initial={{ opacity: 0, scale: 0.85 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.85 }}
+                transition={{ duration: 0.25 }}
+                className="flex items-center gap-3 bg-white/[0.02] rounded-lg p-2"
+                style={{ height: 72 }}
+              >
+                <canvas ref={gaugeRef} className="flex-shrink-0" style={{ width: 68, height: 68 }} />
+                <div className="flex flex-col gap-1 text-[9px] font-mono">
+                  <div>
+                    <div className="text-gray-600 uppercase tracking-wider">ATH</div>
+                    <div className="text-yellow-400">
+                      {fmtBalance(
+                        wallet.history && wallet.history.length > 0
+                          ? Math.max(...wallet.history.map((d) => d.balance), stableBalance)
+                          : stableBalance,
+                        wallet.symbol
+                      )}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-gray-600 uppercase tracking-wider">Velocity</div>
+                    <div className={positive ? 'text-green-400' : 'text-red-400'}>
+                      {pctChange >= 0 ? '+' : ''}{pctChange.toFixed(2)}% / {horizon}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-gray-600 uppercase tracking-wider">Points</div>
+                    <div className="text-gray-400">{filteredData.length} stored</div>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Expand hint */}
+          {showGauge && (
+            <div className="flex items-center justify-center gap-1 mt-1 text-[8px] text-gray-700">
+              <ChevronUp className="w-2.5 h-2.5" />
+              ATH gauge — {horizon} window
+            </div>
+          )}
         </div>
       )}
 
-      {/* Action Buttons (children slot) */}
+      {/* Action Buttons */}
       {children && <div className="mt-3">{children}</div>}
 
       {/* Quantum shimmer overlay on hover */}
       <motion.div
         className="absolute inset-0 opacity-0 group-hover:opacity-100 pointer-events-none"
         style={{
-          background: 'linear-gradient(135deg, transparent 30%, rgba(212, 175, 55, 0.1) 50%, transparent 70%)',
+          background: 'linear-gradient(135deg, transparent 30%, rgba(212,175,55,0.08) 50%, transparent 70%)',
         }}
-        animate={{
-          x: ['-100%', '200%'],
-        }}
-        transition={{
-          duration: 1.5,
-          repeat: Infinity,
-          repeatDelay: 2,
-        }}
+        animate={{ x: ['-100%', '200%'] }}
+        transition={{ duration: 1.5, repeat: Infinity, repeatDelay: 2 }}
       />
     </motion.div>
   );
