@@ -48,9 +48,9 @@ struct Args {
     #[arg(short, long, default_value = "0")]
     threads: usize,
 
-    /// Enable GPU mining
+    /// Disable GPU mining (GPU is auto-detected and used by default when available)
     #[arg(long)]
-    gpu: bool,
+    no_gpu: bool,
 
     /// Mining intensity (1-10)
     #[arg(short, long, default_value = "7")]
@@ -1276,7 +1276,7 @@ async fn main() -> Result<()> {
     }
 
     // Determine mining configuration
-    let has_gpu = args.gpu && (hardware_info.cuda_devices > 0 || hardware_info.opencl_devices > 0);
+    let has_gpu = !args.no_gpu && (hardware_info.cuda_devices > 0 || hardware_info.opencl_devices > 0);
     let cpu_threads = if args.threads > 0 {
         args.threads
     } else if has_gpu {
@@ -1440,7 +1440,7 @@ async fn main() -> Result<()> {
                     };
                     #[cfg(not(feature = "p2p"))]
                     let (no_p2p_flag, p2p_port_val) = (true, 0u16);
-                    let _ = run_mining(cpu_threads, args.intensity, args.gpu, &wallet, &args.server, args.miner_name.as_deref(), enable_tui, args.bandwidth_limit, proxy_url.clone(), no_p2p_flag, p2p_port_val, args.no_auto_update, server_list.clone(), tui_rx).await;
+                    let _ = run_mining(cpu_threads, args.intensity, !args.no_gpu, &wallet, &args.server, args.miner_name.as_deref(), enable_tui, args.bandwidth_limit, proxy_url.clone(), no_p2p_flag, p2p_port_val, args.no_auto_update, server_list.clone(), tui_rx).await;
                 }
                 #[cfg(not(feature = "tui"))]
                 {
@@ -1452,7 +1452,7 @@ async fn main() -> Result<()> {
                     };
                     #[cfg(not(feature = "p2p"))]
                     let (no_p2p_flag, p2p_port_val) = (true, 0u16);
-                    let _ = run_mining(cpu_threads, args.intensity, args.gpu, &wallet, &args.server, args.miner_name.as_deref(), false, args.bandwidth_limit, proxy_url.clone(), no_p2p_flag, p2p_port_val, args.no_auto_update, server_list.clone(), ()).await;
+                    let _ = run_mining(cpu_threads, args.intensity, !args.no_gpu, &wallet, &args.server, args.miner_name.as_deref(), false, args.bandwidth_limit, proxy_url.clone(), no_p2p_flag, p2p_port_val, args.no_auto_update, server_list.clone(), ()).await;
                 }
             }
 
