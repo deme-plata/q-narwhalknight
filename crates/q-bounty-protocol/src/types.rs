@@ -418,3 +418,90 @@ pub struct LeaderboardEntry {
     pub tier: BountyTier,
     pub category_scores: CategoryScores,
 }
+
+// ── Tasks / Endeavours ────────────────────────────────────────────────────────
+
+/// A task or endeavour that community members can complete for rewards.
+/// Admin-defined (vs bug reports which are user-initiated).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BountyTask {
+    pub id: Uuid,
+    pub title: String,
+    pub description: String,
+    /// QUG reward on completion
+    pub reward_qug: f64,
+    /// Bounty score points awarded
+    pub reward_score: f64,
+    pub difficulty: TaskDifficulty,
+    pub category: TaskCategory,
+    pub status: TaskStatus,
+    /// None = unlimited completions allowed
+    pub max_claims: Option<u32>,
+    pub approved_claims: u32,
+    /// Unix timestamp deadline, None = no deadline
+    pub deadline: Option<i64>,
+    pub created_at: i64,
+    pub created_by: String,
+    /// Human-readable description of what proof to submit
+    pub proof_requirements: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TaskDifficulty {
+    Easy,
+    Medium,
+    Hard,
+    Expert,
+}
+
+impl TaskDifficulty {
+    pub fn score_multiplier(&self) -> f64 {
+        match self {
+            TaskDifficulty::Easy   => 1.0,
+            TaskDifficulty::Medium => 2.0,
+            TaskDifficulty::Hard   => 4.0,
+            TaskDifficulty::Expert => 8.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TaskCategory {
+    NodeOperation,
+    Testing,
+    BugHunting,
+    Development,
+    Documentation,
+    Community,
+    Security,
+    Research,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TaskStatus {
+    Open,
+    Closed,
+    Archived,
+}
+
+/// A user's claim that they have completed a task.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskClaim {
+    pub id: Uuid,
+    pub task_id: Uuid,
+    pub user_id: Uuid,
+    pub wallet_address: String,
+    pub proof_url: Option<String>,
+    pub proof_text: String,
+    pub status: TaskClaimStatus,
+    pub submitted_at: i64,
+    pub reviewed_at: Option<i64>,
+    pub reviewer_notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TaskClaimStatus {
+    Pending,
+    Approved,
+    Rejected,
+}

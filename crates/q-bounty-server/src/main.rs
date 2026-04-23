@@ -18,7 +18,8 @@ use axum::{
 };
 use clap::Parser;
 use q_aegis_ql::{AegisAccessControl, PublicKey, access_control::AccessLevel};
-use q_bounty_protocol::{BountyStorage, ScoringEngine, TestnetUser, BountyTier, CategoryScores};
+use q_bounty_protocol::{BountyStorage, ScoringEngine, TestnetUser, BountyTier, CategoryScores,
+    BountyTask, TaskClaim, TaskDifficulty, TaskCategory, TaskStatus, TaskClaimStatus};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
@@ -891,13 +892,260 @@ async fn admin_stats(
     let pending_bugs = bugs.iter().filter(|b| matches!(b.status, q_bounty_protocol::BugStatus::Submitted)).count();
     let pending_socials = socials.iter().filter(|s| !s.verified).count();
 
+    let tasks = state.storage.get_all_tasks().await.unwrap_or_default();
+    let task_claims = state.storage.get_all_task_claims().await.unwrap_or_default();
+    let open_tasks = tasks.iter().filter(|t| t.status == TaskStatus::Open).count();
+    let pending_claims = task_claims.iter().filter(|c| c.status == TaskClaimStatus::Pending).count();
+
     Ok(Json(serde_json::json!({
         "total_users": users.len(),
         "total_bug_reports": bugs.len(),
         "pending_bug_reports": pending_bugs,
         "total_social_activities": socials.len(),
         "pending_social_activities": pending_socials,
+        "total_tasks": tasks.len(),
+        "open_tasks": open_tasks,
+        "total_task_claims": task_claims.len(),
+        "pending_task_claims": pending_claims,
     })))
+}
+
+// ============================================================================
+// TASKS / ENDEAVOURS
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+struct CreateTaskRequest {
+    title: String,
+    description: String,
+    reward_qug: f64,
+    reward_score: f64,
+    difficulty: String,   // "easy" | "medium" | "hard" | "expert"
+    category: String,     // "node_operation" | "testing" | "bug_hunting" | "development" | "documentation" | "community" | "security" | "research"
+    max_claims: Option<u32>,
+    deadline: Option<i64>,
+    proof_requirements: String,
+}
+
+fn parse_difficulty(s: &str) -> TaskDifficulty {
+    match s.to_lowercase().as_str() {
+        "hard"   => TaskDifficulty::Hard,
+        "expert" => TaskDifficulty::Expert,
+        "medium" => TaskDifficulty::Medium,
+        _        => TaskDifficulty::Easy,
+    }
+}
+
+fn parse_task_category(s: &str) -> TaskCategory {
+    match s.to_lowercase().replace('-', "_").as_str() {
+        "node_operation" | "node"          => TaskCategory::NodeOperation,
+        "testing" | "test"                  => TaskCategory::Testing,
+        "bug_hunting" | "bug"               => TaskCategory::BugHunting,
+        "development" | "dev"               => TaskCategory::Development,
+        "documentation" | "docs"            => TaskCategory::Documentation,
+        "security"                          => TaskCategory::Security,
+        "research"                          => TaskCategory::Research,
+        _                                   => TaskCategory::Community,
+    }
+}
+
+async fn admin_create_task(
+    headers: axum::http::HeaderMap,
+    State(state): State<AppState>,
+    Json(req): Json<CreateTaskRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let admin_wallet = verify_admin_wallet(&headers)?;
+
+    let task = BountyTask {
+        id: Uuid::new_v4(),
+        title: req.title,
+        description: req.description,
+        reward_qug: req.reward_qug,
+        reward_score: req.reward_score,
+        difficulty: parse_difficulty(&req.difficulty),
+        category: parse_task_category(&req.category),
+        status: TaskStatus::Open,
+        max_claims: req.max_claims,
+        approved_claims: 0,
+        deadline: req.deadline,
+        created_at: chrono::Utc::now().timestamp(),
+        created_by: admin_wallet,
+        proof_requirements: req.proof_requirements,
+    };
+
+    let id = state.storage.create_task(task).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({ "task_id": id, "status": "created" })))
+}
+
+async fn list_tasks(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let tasks = state.storage.get_all_tasks().await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(tasks))
+}
+
+async fn get_task(
+    Path(task_id): Path<Uuid>,
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    match state.storage.get_task(&task_id).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))? {
+        Some(task) => Ok(Json(serde_json::json!(task))),
+        None => Err((StatusCode::NOT_FOUND, "Task not found".to_string())),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SubmitTaskClaimRequest {
+    task_id: Uuid,
+    wallet_address: String,
+    proof_text: String,
+    proof_url: Option<String>,
+}
+
+async fn submit_task_claim(
+    State(state): State<AppState>,
+    Json(req): Json<SubmitTaskClaimRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let task = state.storage.get_task(&req.task_id).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Task not found".to_string()))?;
+
+    if task.status != TaskStatus::Open {
+        return Err((StatusCode::BAD_REQUEST, "Task is not open".to_string()));
+    }
+    if let Some(deadline) = task.deadline {
+        if chrono::Utc::now().timestamp() > deadline {
+            return Err((StatusCode::BAD_REQUEST, "Task deadline has passed".to_string()));
+        }
+    }
+    if let Some(max) = task.max_claims {
+        if task.approved_claims >= max {
+            return Err((StatusCode::BAD_REQUEST, "Task has reached max completions".to_string()));
+        }
+    }
+
+    let addr_bytes = parse_address_flexible(&req.wallet_address)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    let user = state.storage.get_user_by_address(&addr_bytes).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Wallet not registered in bounty program".to_string()))?;
+
+    let claim = TaskClaim {
+        id: Uuid::new_v4(),
+        task_id: req.task_id,
+        user_id: user.user_id,
+        wallet_address: req.wallet_address,
+        proof_url: req.proof_url,
+        proof_text: req.proof_text,
+        status: TaskClaimStatus::Pending,
+        submitted_at: chrono::Utc::now().timestamp(),
+        reviewed_at: None,
+        reviewer_notes: None,
+    };
+
+    let claim_id = state.storage.submit_task_claim(claim).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "claim_id": claim_id,
+        "task_id": req.task_id,
+        "status": "pending",
+        "message": "Claim submitted — admin will review and approve/reject"
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewTaskClaimRequest {
+    task_id: Uuid,
+    claim_id: Uuid,
+    approved: bool,
+    notes: Option<String>,
+}
+
+async fn admin_review_task_claim(
+    headers: axum::http::HeaderMap,
+    State(state): State<AppState>,
+    Json(req): Json<ReviewTaskClaimRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    verify_admin_wallet(&headers)?;
+
+    let mut claim = state.storage.get_task_claim(&req.task_id, &req.claim_id).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Claim not found".to_string()))?;
+
+    claim.status = if req.approved { TaskClaimStatus::Approved } else { TaskClaimStatus::Rejected };
+    claim.reviewed_at = Some(chrono::Utc::now().timestamp());
+    claim.reviewer_notes = req.notes;
+
+    state.storage.update_task_claim(&claim).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // If approved, credit score and update task counter
+    if req.approved {
+        if let Ok(Some(task)) = state.storage.get_task(&req.task_id).await {
+            let _ = state.storage.update_user_score(
+                &claim.user_id,
+                task.reward_score,
+                q_bounty_protocol::ActivityCategory::CommunityContributions,
+            ).await;
+
+            // Increment approved_claims counter
+            let mut t = task;
+            t.approved_claims += 1;
+            if let Some(max) = t.max_claims {
+                if t.approved_claims >= max {
+                    t.status = TaskStatus::Closed;
+                }
+            }
+            let _ = state.storage.update_task(&t).await;
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "claim_id": req.claim_id,
+        "status": if req.approved { "approved" } else { "rejected" }
+    })))
+}
+
+async fn admin_list_task_claims(
+    headers: axum::http::HeaderMap,
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    verify_admin_wallet(&headers)?;
+    let claims = state.storage.get_all_task_claims().await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(claims))
+}
+
+async fn admin_update_task_status(
+    headers: axum::http::HeaderMap,
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    verify_admin_wallet(&headers)?;
+    let task_id: Uuid = body["task_id"].as_str()
+        .and_then(|s| s.parse().ok())
+        .ok_or((StatusCode::BAD_REQUEST, "Missing task_id".to_string()))?;
+    let status_str = body["status"].as_str().unwrap_or("closed");
+
+    let mut task = state.storage.get_task(&task_id).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Task not found".to_string()))?;
+
+    task.status = match status_str {
+        "open"     => TaskStatus::Open,
+        "archived" => TaskStatus::Archived,
+        _          => TaskStatus::Closed,
+    };
+
+    state.storage.update_task(&task).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "task_id": task_id, "status": status_str })))
 }
 
 // ============================================================================
@@ -963,6 +1211,14 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/admin/social-activities", get(admin_list_social_activities))
         .route("/v1/admin/bug-report/update", post(admin_update_bug_report))
         .route("/v1/admin/social-activity/update", post(admin_update_social_activity))
+        // Tasks / Endeavours
+        .route("/v1/tasks", get(list_tasks))
+        .route("/v1/tasks/:task_id", get(get_task))
+        .route("/v1/testnet/task/claim", post(submit_task_claim))
+        .route("/v1/admin/task/create", post(admin_create_task))
+        .route("/v1/admin/task/review", post(admin_review_task_claim))
+        .route("/v1/admin/task/claims", get(admin_list_task_claims))
+        .route("/v1/admin/task/status", post(admin_update_task_status))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -991,6 +1247,13 @@ async fn main() -> anyhow::Result<()> {
     info!("  GET  /v1/admin/social-activities (Admin - List all social activities)");
     info!("  POST /v1/admin/bug-report/update (Admin - Update bug report status)");
     info!("  POST /v1/admin/social-activity/update (Admin - Update social activity)");
+    info!("  GET  /v1/tasks (List all tasks/endeavours)");
+    info!("  GET  /v1/tasks/:id (Get specific task)");
+    info!("  POST /v1/testnet/task/claim (Submit task completion proof)");
+    info!("  POST /v1/admin/task/create (Admin - Create new task/endeavour)");
+    info!("  POST /v1/admin/task/review (Admin - Approve/reject claim)");
+    info!("  GET  /v1/admin/task/claims (Admin - List all task claims)");
+    info!("  POST /v1/admin/task/status (Admin - Open/close/archive task)");
 
     axum::serve(listener, app).await?;
 

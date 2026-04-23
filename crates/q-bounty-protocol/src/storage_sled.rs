@@ -387,4 +387,108 @@ impl BountyStorage {
 
         Ok(campaigns)
     }
+
+    // ── Tasks / Endeavours ────────────────────────────────────────────────────
+
+    pub async fn create_task(&self, task: BountyTask) -> Result<Uuid> {
+        let tree = self.tree("tasks")?;
+        let key = format!("task:{}", task.id);
+        let bytes = Self::serialize(&task)?;
+        tree.insert(key.as_bytes(), bytes)?;
+        info!(task_id = %task.id, title = %task.title, "Task created");
+        Ok(task.id)
+    }
+
+    pub async fn get_task(&self, task_id: &Uuid) -> Result<Option<BountyTask>> {
+        let tree = self.tree("tasks")?;
+        let key = format!("task:{}", task_id);
+        if let Some(bytes) = tree.get(key.as_bytes())? {
+            Ok(Some(Self::deserialize(&bytes)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn update_task(&self, task: &BountyTask) -> Result<()> {
+        let tree = self.tree("tasks")?;
+        let key = format!("task:{}", task.id);
+        let bytes = Self::serialize(task)?;
+        tree.insert(key.as_bytes(), bytes)?;
+        Ok(())
+    }
+
+    pub async fn get_all_tasks(&self) -> Result<Vec<BountyTask>> {
+        let tree = self.tree("tasks")?;
+        let mut tasks = Vec::new();
+        for item in tree.iter() {
+            let (key, value) = item?;
+            if let Ok(k) = std::str::from_utf8(&key) {
+                if k.starts_with("task:") {
+                    if let Ok(t) = Self::deserialize::<BountyTask>(&value) {
+                        tasks.push(t);
+                    }
+                }
+            }
+        }
+        tasks.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        Ok(tasks)
+    }
+
+    pub async fn submit_task_claim(&self, claim: TaskClaim) -> Result<Uuid> {
+        let tree = self.tree("task_claims")?;
+        let key = format!("claim:{}:{}", claim.task_id, claim.id);
+        let bytes = Self::serialize(&claim)?;
+        tree.insert(key.as_bytes(), bytes)?;
+        info!(claim_id = %claim.id, task_id = %claim.task_id, user_id = %claim.user_id, "Task claim submitted");
+        Ok(claim.id)
+    }
+
+    pub async fn get_task_claim(&self, task_id: &Uuid, claim_id: &Uuid) -> Result<Option<TaskClaim>> {
+        let tree = self.tree("task_claims")?;
+        let key = format!("claim:{}:{}", task_id, claim_id);
+        if let Some(bytes) = tree.get(key.as_bytes())? {
+            Ok(Some(Self::deserialize(&bytes)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn update_task_claim(&self, claim: &TaskClaim) -> Result<()> {
+        let tree = self.tree("task_claims")?;
+        let key = format!("claim:{}:{}", claim.task_id, claim.id);
+        let bytes = Self::serialize(claim)?;
+        tree.insert(key.as_bytes(), bytes)?;
+        Ok(())
+    }
+
+    pub async fn get_claims_for_task(&self, task_id: &Uuid) -> Result<Vec<TaskClaim>> {
+        let tree = self.tree("task_claims")?;
+        let prefix = format!("claim:{}:", task_id);
+        let mut claims = Vec::new();
+        for item in tree.scan_prefix(prefix.as_bytes()) {
+            let (_, value) = item?;
+            if let Ok(c) = Self::deserialize::<TaskClaim>(&value) {
+                claims.push(c);
+            }
+        }
+        Ok(claims)
+    }
+
+    pub async fn get_all_task_claims(&self) -> Result<Vec<TaskClaim>> {
+        let tree = self.tree("task_claims")?;
+        let mut claims = Vec::new();
+        for item in tree.iter() {
+            let (_, value) = item?;
+            if let Ok(c) = Self::deserialize::<TaskClaim>(&value) {
+                claims.push(c);
+            }
+        }
+        claims.sort_by(|a, b| b.submitted_at.cmp(&a.submitted_at));
+        Ok(claims)
+    }
+
+    pub async fn get_user_task_claims(&self, user_id: &Uuid) -> Result<Vec<TaskClaim>> {
+        let all = self.get_all_task_claims().await?;
+        Ok(all.into_iter().filter(|c| c.user_id == *user_id).collect())
+    }
 }
