@@ -4287,6 +4287,37 @@ impl QStorage {
         Ok(balances)
     }
 
+    /// Find a wallet whose hex address starts with the given prefix.
+    /// Falls back to a DB scan when the in-memory wallet_balances cache doesn't contain it
+    /// (e.g. wallet was just funded, cache not yet refreshed).
+    pub async fn find_wallet_by_prefix(&self, prefix: &str) -> Result<Option<[u8; 32]>> {
+        if prefix.len() < 8 || !prefix.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Ok(None);
+        }
+        let scan_prefix = format!("wallet_balance_{}", prefix);
+        match self.hot_db.scan_prefix(CF_MANIFEST, scan_prefix.as_bytes()).await {
+            Ok(entries) => {
+                for (key, _) in entries {
+                    if let Ok(key_str) = String::from_utf8(key) {
+                        if let Some(hex_addr) = key_str.strip_prefix("wallet_balance_") {
+                            if hex_addr.starts_with(prefix) {
+                                if let Ok(bytes) = hex::decode(hex_addr) {
+                                    if bytes.len() == 32 {
+                                        let mut addr = [0u8; 32];
+                                        addr.copy_from_slice(&bytes);
+                                        return Ok(Some(addr));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(None)
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
     /// Save multiple wallet balances atomically with SYNC to guarantee disk write
     /// v2.5.0: Accepts u128 balances (16 bytes each)
     pub async fn save_wallet_balances(&self, balances: &HashMap<[u8; 32], u128>) -> Result<()> {
@@ -8118,6 +8149,22 @@ impl QStorage {
     /// This returns the concrete RocksDBKV type which supports pruning operations
     pub fn get_hot_db(&self) -> Arc<RocksDBKV> {
         self.hot_db_concrete.clone()
+    }
+
+    /// v10.3.15: Background re-indexer — copies all qblock:dag:{N}:{proposer} keys
+    /// to qblock:height:{N} so that get_qblocks_range() (fast multi_get path) can
+    /// serve early-history blocks to syncing nodes.
+    ///
+    /// Idempotent: sets a migration flag on completion, skips on subsequent startups.
+    /// Non-fatal: returns Ok(0) if already complete or on Windows.
+    #[cfg(not(target_os = "windows"))]
+    pub async fn reindex_dag_blocks_to_height_keys(&self) -> Result<u64> {
+        self.hot_db_concrete.reindex_dag_blocks_to_height_keys().await
+    }
+
+    #[cfg(target_os = "windows")]
+    pub async fn reindex_dag_blocks_to_height_keys(&self) -> Result<u64> {
+        Ok(0) // RocksDB not available on Windows
     }
 
     /// v8.5.6: Check if a migration flag is set in CF_MANIFEST

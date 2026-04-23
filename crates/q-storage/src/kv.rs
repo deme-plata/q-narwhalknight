@@ -2082,6 +2082,119 @@ impl KVStore for RocksDBKV {
 /// RocksDB write options optimized for Narwhal workloads
 #[cfg(not(target_os = "windows"))]
 impl RocksDBKV {
+    /// v10.3.15: Re-index all qblock:dag:{N}:{proposer} keys to qblock:height:{N}.
+    ///
+    /// 545,710 early-history blocks exist only as DAG-format keys. The
+    /// get_dag_blocks_forward() scan budget (100K entries) fills with 10M+ blocks
+    /// first due to string-sort ordering (8-digit keys starting with '1' precede
+    /// 7-digit keys because ':' (0x3A) > '0' (0x30)), so 1M-range blocks are never
+    /// returned when a fresh node requests them — keeping contiguous pointer at 0.
+    ///
+    /// Fix: alias each qblock:dag:{N}:{proposer} to qblock:height:{N} so that
+    /// get_qblocks_range() (multi_get fast path) finds them without any iterator.
+    ///
+    /// Properties: idempotent (skips existing height keys), additive (never deletes),
+    /// self-checkpointing (CF_MANIFEST migration flag prevents re-run on restart).
+    pub async fn reindex_dag_blocks_to_height_keys(&self) -> Result<u64> {
+        // Check migration flag in a scoped block so BoundColumnFamily is dropped
+        // before the spawn_blocking await (required for Send bound).
+        {
+            let cf = self.get_cf(CF_MANIFEST)?;
+            if self.db.get_cf(&cf, b"dag_height_reindex_v1").unwrap_or(None).is_some() {
+                info!("✅ [REINDEX] DAG→height re-index already complete, skipping");
+                return Ok(0);
+            }
+        } // cf dropped here — nothing non-Send held across the await below
+
+        let db = self.db.clone();
+
+        let written = tokio::task::spawn_blocking(move || -> Result<u64> {
+            let cf_blocks = db.cf_handle(CF_BLOCKS)
+                .ok_or_else(|| anyhow::anyhow!("CF_BLOCKS not found in DAG reindex"))?;
+            let cf_manifest = db.cf_handle(CF_MANIFEST)
+                .ok_or_else(|| anyhow::anyhow!("CF_MANIFEST not found in DAG reindex"))?;
+
+            info!("🔄 [REINDEX] DAG→height re-index starting (one-time, may take a few minutes)...");
+            let start = std::time::Instant::now();
+
+            let iter = db.iterator_cf(
+                &cf_blocks,
+                rocksdb::IteratorMode::From(b"qblock:dag:", rocksdb::Direction::Forward),
+            );
+
+            let mut scanned = 0u64;
+            let mut written = 0u64;
+            let mut skipped_exists = 0u64;
+            let mut write_batch = WriteBatch::default();
+            let mut batch_size = 0usize;
+
+            for item in iter {
+                let (key, value) = match item {
+                    Ok(kv) => kv,
+                    Err(e) => { warn!("⚠️ [REINDEX] Iterator error: {}", e); continue; }
+                };
+
+                if !key.starts_with(b"qblock:dag:") { break; }
+                scanned += 1;
+
+                let height = match parse_dag_key_height(&key) {
+                    Some(h) => h,
+                    None => continue,
+                };
+
+                let height_key = format!("qblock:height:{}", height);
+
+                // Skip heights already present as height keys
+                match db.get_cf(&cf_blocks, height_key.as_bytes()) {
+                    Ok(Some(_)) => { skipped_exists += 1; continue; }
+                    Ok(None) => {}
+                    Err(_) => continue,
+                }
+
+                write_batch.put_cf(&cf_blocks, height_key.as_bytes(), &value);
+                batch_size += 1;
+
+                if batch_size >= 500 {
+                    let mut wo = rocksdb::WriteOptions::default();
+                    wo.set_sync(false);
+                    wo.disable_wal(false);
+                    db.write_opt(std::mem::replace(&mut write_batch, WriteBatch::default()), &wo)
+                        .context("write_batch failed in DAG reindex")?;
+                    written += batch_size as u64;
+                    batch_size = 0;
+
+                    if written % 5000 < 500 {
+                        info!("🔄 [REINDEX] scanned={} written={} skipped={} elapsed={:?}",
+                              scanned, written, skipped_exists, start.elapsed());
+                    }
+                }
+            }
+
+            // Final partial batch with fsync
+            if batch_size > 0 {
+                let mut wo = rocksdb::WriteOptions::default();
+                wo.set_sync(true);
+                wo.disable_wal(false);
+                db.write_opt(write_batch, &wo)
+                    .context("final write_batch failed in DAG reindex")?;
+                written += batch_size as u64;
+            }
+
+            info!("✅ [REINDEX] Complete: scanned={} written={} skipped_exists={} elapsed={:?}",
+                  scanned, written, skipped_exists, start.elapsed());
+
+            // Persist migration flag (fsync) so this never re-runs
+            let mut fo = rocksdb::WriteOptions::default();
+            fo.set_sync(true);
+            db.put_cf_opt(&cf_manifest, b"dag_height_reindex_v1", b"done", &fo)
+                .context("Failed to write DAG reindex migration flag")?;
+
+            Ok(written)
+        }).await??;
+
+        Ok(written)
+    }
+
     /// Get optimized write options
     fn write_options() -> rocksdb::WriteOptions {
         let mut opts = rocksdb::WriteOptions::default();

@@ -75,7 +75,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.3.14"  # v10.3.14: GPU kernel opt — zero-word G variants, in-place VDF, fast-reject target, #unroll 9
+version = "10.3.15"  # v10.3.15: DAG→height re-index — 545K early-history blocks made visible to get_qblocks_range()
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"
