@@ -1,0 +1,83 @@
+[server]
+listen = ["0.0.0.0:443", "0.0.0.0:80"]
+workers = 0  # auto-detect cores
+
+[tls]
+cert = "/etc/letsencrypt/live/beta.quillon.xyz/fullchain.pem"
+key  = "/etc/letsencrypt/live/beta.quillon.xyz/privkey.pem"
+
+[upstream]
+backends = ["127.0.0.1:8080"]
+max_conns_per_worker = 32
+keepalive_timeout = "30s"
+connect_timeout = "5s"
+response_timeout = "120s"
+
+# Cluster failover: prefer Epsilon (10Gbit) → local → Delta → Gamma
+[cluster]
+peers = ["89.149.241.126:8080", "5.79.79.158:8080", "109.205.176.60:8080"]
+health_check_interval = "15s"
+
+[static_files]
+root = "/opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final"
+spa_fallback = true
+gzip = true
+
+[limits]
+max_connections = 50000
+max_conns_per_ip = 50
+request_body_limit = 26214400  # 25MB
+
+[logging]
+level = "info"
+access_log = "/var/log/q-flux/access.log"
+
+# ── beta.quillon.xyz ─────────────────────────────────────────────────────────
+# Main wallet UI — SPA + cluster-load-balanced API backend
+[[vhosts]]
+domains = ["beta.quillon.xyz"]
+cert = "/etc/letsencrypt/live/beta.quillon.xyz/fullchain.pem"
+key  = "/etc/letsencrypt/live/beta.quillon.xyz/privkey.pem"
+backend = "127.0.0.1:8080"
+static_root = "/opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final"
+spa_fallback = true
+
+# ── bounty.quillon.xyz ───────────────────────────────────────────────────────
+# Bounty campaign — SPA frontend + bounty API on :8083
+[[vhosts]]
+domains = ["bounty.quillon.xyz"]
+cert = "/etc/letsencrypt/live/bounty.quillon.xyz/fullchain.pem"
+key  = "/etc/letsencrypt/live/bounty.quillon.xyz/privkey.pem"
+backend = "127.0.0.1:8083"
+static_root = "/var/www/bounty.quillon.xyz"
+spa_fallback = true
+proxy_paths = ["/v1", "/health"]
+
+# ── code.quillon.xyz ─────────────────────────────────────────────────────────
+# Source code viewer — SPA + code-viewer API on :3002, git backend on :8090
+[[vhosts]]
+domains = ["code.quillon.xyz"]
+cert = "/etc/letsencrypt/live/code.quillon.xyz/fullchain.pem"
+key  = "/etc/letsencrypt/live/code.quillon.xyz/privkey.pem"
+backend = "127.0.0.1:3002"
+static_root = "/opt/orobit/shared/q-narwhalknight/github-viewer/dist"
+spa_fallback = true
+proxy_paths = ["/repo.git", "/mcp"]
+
+# ── technical-deepdive.quillon.xyz ───────────────────────────────────────────
+# Presentation site — static only
+[[vhosts]]
+domains = ["technical-deepdive.quillon.xyz"]
+cert = "/etc/letsencrypt/live/technical-deepdive.quillon.xyz/fullchain.pem"
+key  = "/etc/letsencrypt/live/technical-deepdive.quillon.xyz/privkey.pem"
+static_root = "/opt/orobit/shared/q-narwhalknight/presentation-app/dist"
+spa_fallback = true
+
+# ── api.quillon.xyz ───────────────────────────────────────────────────────────
+# API documentation — static only
+[[vhosts]]
+domains = ["api.quillon.xyz"]
+cert = "/etc/letsencrypt/live/api.quillon.xyz/fullchain.pem"
+key  = "/etc/letsencrypt/live/api.quillon.xyz/privkey.pem"
+static_root = "/opt/orobit/shared/q-narwhalknight/api-docs/dist"
+spa_fallback = true

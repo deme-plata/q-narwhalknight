@@ -361,6 +361,7 @@ async fn worker_loop(
                     cache_max_file_size: config.static_files.cache_max_file_size,
                     cache_max_total: config.static_files.cache_max_total,
                     proxy_compression: config.static_files.proxy_compression,
+                    proxy_paths: vhost.proxy_paths.clone(),
                 });
                 for domain in &vhost.domains {
                     map.insert(domain.to_lowercase(), vh_static.clone());

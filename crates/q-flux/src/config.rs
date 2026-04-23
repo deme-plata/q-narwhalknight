@@ -36,6 +36,11 @@ pub struct VhostConfig {
     /// Serve index.html for unmatched paths (SPA mode). Default: true.
     #[serde(default = "default_spa_fallback")]
     pub spa_fallback: bool,
+    /// Additional path prefixes that must always be proxied to the backend,
+    /// even when a static_root is set. Useful for API paths on vhosts that
+    /// also serve static files (e.g. `["/v1", "/health"]` for bounty site).
+    #[serde(default)]
+    pub proxy_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -190,6 +195,10 @@ pub struct StaticConfig {
     /// Default: true.
     #[serde(default = "default_true")]
     pub proxy_compression: bool,
+    /// Additional path prefixes to always proxy, bypassing static file serving.
+    /// Populated from VhostConfig.proxy_paths at startup.
+    #[serde(default)]
+    pub proxy_paths: Vec<String>,
 }
 
 /// IP access control configuration (Issue #027).
@@ -460,6 +469,7 @@ impl Default for StaticConfig {
             cache_max_file_size: default_cache_max_file_size(),
             cache_max_total: default_cache_max_total(),
             proxy_compression: default_true(),
+            proxy_paths: Vec::new(),
         }
     }
 }

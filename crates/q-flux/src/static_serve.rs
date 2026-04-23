@@ -239,6 +239,13 @@ pub fn route(path: &str, config: &StaticConfig) -> RouteResult {
         return RouteResult::Proxy;
     }
 
+    // Per-vhost additional proxy paths (e.g. "/v1" for bounty site)
+    for prefix in &config.proxy_paths {
+        if clean == prefix.as_str() || clean.starts_with(&format!("{}/", prefix)) {
+            return RouteResult::Proxy;
+        }
+    }
+
     // Downloads directory
     if clean.starts_with("/downloads/") {
         let rel = clean.strip_prefix('/').unwrap_or(clean);
