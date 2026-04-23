@@ -67,7 +67,7 @@ module xcrypto_unit
     // Address comes from rs1; assume single-cycle 512-bit read
     output logic [31:0] mem_addr,       // Message block base address
     output logic        mem_rd_en,      // Memory read enable
-    input  logic [31:0] mem_block [0:15], // 512-bit message block data
+    input  logic [511:0] mem_block,        // 512-bit message block data (packed)
     input  logic        mem_valid       // Memory data valid
 );
 
@@ -126,6 +126,9 @@ module xcrypto_unit
     // Latched instruction fields
     logic [6:0]  lat_funct7;
     logic [31:0] lat_rs1;
+    // Pre-computed slice — iverilog 11 does not support constant part-selects inside always_comb
+    logic [3:0]  lat_rs1_lo4;
+    assign lat_rs1_lo4 = lat_rs1[3:0];
     logic [31:0] lat_rs2;
     logic [4:0]  lat_rd_addr;
 
@@ -182,9 +185,42 @@ module xcrypto_unit
         .flags          (pipe_flags),
         .in_valid       (pipe_in_valid),
         .in_ready       (pipe_in_ready),
-        .hash_out       (pipe_hash_out),
+        .hash_out       (pipe_hash_out),  // unconnected — pipe_hash_live used below
         .out_valid      (pipe_out_valid)
     );
+
+    // =========================================================================
+    // iverilog 11: unpacked-array output-port connections never propagate.
+    // pipe_hash_out stays X; bypass by reading u_pipeline.u_r6.s2_state directly
+    // through scalar bridges (single-element hierarchical assigns confirmed to
+    // track NBA updates; XOR pairs of scalars to get BLAKE3 finalized output).
+    // =========================================================================
+    logic [31:0] pr6s0,  pr6s1,  pr6s2,  pr6s3;
+    logic [31:0] pr6s4,  pr6s5,  pr6s6,  pr6s7;
+    logic [31:0] pr6s8,  pr6s9,  pr6s10, pr6s11;
+    logic [31:0] pr6s12, pr6s13, pr6s14, pr6s15;
+
+    assign pr6s0  = u_pipeline.u_r6.s2_state[ 0]; assign pr6s8  = u_pipeline.u_r6.s2_state[ 8];
+    assign pr6s1  = u_pipeline.u_r6.s2_state[ 1]; assign pr6s9  = u_pipeline.u_r6.s2_state[ 9];
+    assign pr6s2  = u_pipeline.u_r6.s2_state[ 2]; assign pr6s10 = u_pipeline.u_r6.s2_state[10];
+    assign pr6s3  = u_pipeline.u_r6.s2_state[ 3]; assign pr6s11 = u_pipeline.u_r6.s2_state[11];
+    assign pr6s4  = u_pipeline.u_r6.s2_state[ 4]; assign pr6s12 = u_pipeline.u_r6.s2_state[12];
+    assign pr6s5  = u_pipeline.u_r6.s2_state[ 5]; assign pr6s13 = u_pipeline.u_r6.s2_state[13];
+    assign pr6s6  = u_pipeline.u_r6.s2_state[ 6]; assign pr6s14 = u_pipeline.u_r6.s2_state[14];
+    assign pr6s7  = u_pipeline.u_r6.s2_state[ 7]; assign pr6s15 = u_pipeline.u_r6.s2_state[15];
+
+    // iverilog 11: continuous assign to unpacked-array elements does not propagate.
+    // Use individual scalars instead.
+    logic [31:0] pipe_hash_live0, pipe_hash_live1, pipe_hash_live2, pipe_hash_live3;
+    logic [31:0] pipe_hash_live4, pipe_hash_live5, pipe_hash_live6, pipe_hash_live7;
+    assign pipe_hash_live0 = pr6s0 ^ pr6s8;
+    assign pipe_hash_live1 = pr6s1 ^ pr6s9;
+    assign pipe_hash_live2 = pr6s2 ^ pr6s10;
+    assign pipe_hash_live3 = pr6s3 ^ pr6s11;
+    assign pipe_hash_live4 = pr6s4 ^ pr6s12;
+    assign pipe_hash_live5 = pr6s5 ^ pr6s13;
+    assign pipe_hash_live6 = pr6s6 ^ pr6s14;
+    assign pipe_hash_live7 = pr6s7 ^ pr6s15;
 
     // =========================================================================
     // FSM: next state logic
@@ -332,18 +368,30 @@ module xcrypto_unit
 
     // =========================================================================
     // Latched message block register (hold message for chain iterations)
+    // iverilog 11: continuous assign reading from unpacked array element does
+    // not re-trigger — use 16 scalar FFs so always_comb sensitivity works.
     // =========================================================================
-    logic [31:0] msg_block_lat [0:15];
+    logic [31:0] mb0,  mb1,  mb2,  mb3;
+    logic [31:0] mb4,  mb5,  mb6,  mb7;
+    logic [31:0] mb8,  mb9,  mb10, mb11;
+    logic [31:0] mb12, mb13, mb14, mb15;
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            for (int i = 0; i < 16; i++) begin
-                msg_block_lat[i] <= 32'd0;
-            end
+            mb0  <= 32'd0; mb1  <= 32'd0; mb2  <= 32'd0; mb3  <= 32'd0;
+            mb4  <= 32'd0; mb5  <= 32'd0; mb6  <= 32'd0; mb7  <= 32'd0;
+            mb8  <= 32'd0; mb9  <= 32'd0; mb10 <= 32'd0; mb11 <= 32'd0;
+            mb12 <= 32'd0; mb13 <= 32'd0; mb14 <= 32'd0; mb15 <= 32'd0;
         end else if (fsm_state == S_FETCH_MSG && mem_valid) begin
-            for (int i = 0; i < 16; i++) begin
-                msg_block_lat[i] <= mem_block[i];
-            end
+            // mem_block is 512-bit packed: word i = bits [32*i+31 : 32*i]
+            mb0  <= mem_block[ 31:  0]; mb1  <= mem_block[ 63: 32];
+            mb2  <= mem_block[ 95: 64]; mb3  <= mem_block[127: 96];
+            mb4  <= mem_block[159:128]; mb5  <= mem_block[191:160];
+            mb6  <= mem_block[223:192]; mb7  <= mem_block[255:224];
+            mb8  <= mem_block[287:256]; mb9  <= mem_block[319:288];
+            mb10 <= mem_block[351:320]; mb11 <= mem_block[383:352];
+            mb12 <= mem_block[415:384]; mb13 <= mem_block[447:416];
+            mb14 <= mem_block[479:448]; mb15 <= mem_block[511:480];
         end
     end
 
@@ -351,16 +399,24 @@ module xcrypto_unit
     // Latched hash output (for chain feedback)
     // =========================================================================
     logic [31:0] hash_latched [0:7];
+    // Scalar bridges — always_comb sensitivity fix (iverilog 11)
+    logic [31:0] hl0, hl1, hl2, hl3, hl4, hl5, hl6, hl7;
+    assign hl0 = hash_latched[0]; assign hl1 = hash_latched[1];
+    assign hl2 = hash_latched[2]; assign hl3 = hash_latched[3];
+    assign hl4 = hash_latched[4]; assign hl5 = hash_latched[5];
+    assign hl6 = hash_latched[6]; assign hl7 = hash_latched[7];
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            for (int i = 0; i < 8; i++) begin
-                hash_latched[i] <= 32'd0;
-            end
+            hash_latched[0] <= 32'd0; hash_latched[1] <= 32'd0;
+            hash_latched[2] <= 32'd0; hash_latched[3] <= 32'd0;
+            hash_latched[4] <= 32'd0; hash_latched[5] <= 32'd0;
+            hash_latched[6] <= 32'd0; hash_latched[7] <= 32'd0;
         end else if (pipe_out_valid) begin
-            for (int i = 0; i < 8; i++) begin
-                hash_latched[i] <= pipe_hash_out[i];
-            end
+            hash_latched[0] <= pipe_hash_live0; hash_latched[1] <= pipe_hash_live1;
+            hash_latched[2] <= pipe_hash_live2; hash_latched[3] <= pipe_hash_live3;
+            hash_latched[4] <= pipe_hash_live4; hash_latched[5] <= pipe_hash_live5;
+            hash_latched[6] <= pipe_hash_live6; hash_latched[7] <= pipe_hash_live7;
         end
     end
 
@@ -377,8 +433,18 @@ module xcrypto_unit
         state_counter   = 64'd0;
         state_block_len = 32'd0;
         state_flags     = 32'd0;
-        for (int i = 0; i < 16; i++) state_bulk_in[i] = 32'd0;
-        for (int i = 0; i < 8; i++)  state_cv_in[i] = 32'd0;
+        state_bulk_in[ 0] = 32'd0; state_bulk_in[ 1] = 32'd0;
+        state_bulk_in[ 2] = 32'd0; state_bulk_in[ 3] = 32'd0;
+        state_bulk_in[ 4] = 32'd0; state_bulk_in[ 5] = 32'd0;
+        state_bulk_in[ 6] = 32'd0; state_bulk_in[ 7] = 32'd0;
+        state_bulk_in[ 8] = 32'd0; state_bulk_in[ 9] = 32'd0;
+        state_bulk_in[10] = 32'd0; state_bulk_in[11] = 32'd0;
+        state_bulk_in[12] = 32'd0; state_bulk_in[13] = 32'd0;
+        state_bulk_in[14] = 32'd0; state_bulk_in[15] = 32'd0;
+        state_cv_in[0] = 32'd0; state_cv_in[1] = 32'd0;
+        state_cv_in[2] = 32'd0; state_cv_in[3] = 32'd0;
+        state_cv_in[4] = 32'd0; state_cv_in[5] = 32'd0;
+        state_cv_in[6] = 32'd0; state_cv_in[7] = 32'd0;
 
         case (fsm_state)
             S_IDLE: begin
@@ -390,31 +456,55 @@ module xcrypto_unit
             S_CHAIN_WRITEBACK: begin
                 // Load hash output as new chaining value
                 state_op = 3'd2;  // OP_LOAD_CV
-                for (int i = 0; i < 8; i++) begin
-                    state_cv_in[i] = hash_latched[i];
-                end
+                state_cv_in[0] = hl0; state_cv_in[1] = hl1;
+                state_cv_in[2] = hl2; state_cv_in[3] = hl3;
+                state_cv_in[4] = hl4; state_cv_in[5] = hl5;
+                state_cv_in[6] = hl6; state_cv_in[7] = hl7;
             end
 
             S_FINALIZE: begin
                 // Read state register for finalize — rs1[3:0] selects word
                 state_op     = 3'd4;  // OP_READ
-                state_rd_idx = lat_rs1[3:0];
+                state_rd_idx = lat_rs1_lo4;
             end
 
             S_WAIT_PIPELINE: begin
                 // When pipeline produces output and we are done, update state
                 if (pipe_out_valid && !(lat_funct7 == F7_CHAIN && chain_count < chain_target)) begin
                     state_bulk_wr_en = 1'b1;
-                    for (int i = 0; i < 8; i++) begin
-                        state_bulk_in[i]     = pipe_hash_out[i];
-                        state_bulk_in[i + 8] = 32'd0;
-                    end
+                    state_bulk_in[0] = pipe_hash_live0; state_bulk_in[8]  = 32'd0;
+                    state_bulk_in[1] = pipe_hash_live1; state_bulk_in[9]  = 32'd0;
+                    state_bulk_in[2] = pipe_hash_live2; state_bulk_in[10] = 32'd0;
+                    state_bulk_in[3] = pipe_hash_live3; state_bulk_in[11] = 32'd0;
+                    state_bulk_in[4] = pipe_hash_live4; state_bulk_in[12] = 32'd0;
+                    state_bulk_in[5] = pipe_hash_live5; state_bulk_in[13] = 32'd0;
+                    state_bulk_in[6] = pipe_hash_live6; state_bulk_in[14] = 32'd0;
+                    state_bulk_in[7] = pipe_hash_live7; state_bulk_in[15] = 32'd0;
                 end
             end
 
             default: ;
         endcase
     end
+
+    // =========================================================================
+    // BLAKE3 IV — local copy for tool compatibility (matches xcrypto_pkg scalars)
+    // =========================================================================
+`ifdef SYNTHESIS
+    localparam logic [31:0] BLAKE3_IV [0:7] = '{
+        32'h6A09E667, 32'hBB67AE85, 32'h3C6EF372, 32'hA54FF53A,
+        32'h510E527F, 32'h9B05688C, 32'h1F83D9AB, 32'h5BE0CD19
+    };
+`else
+    // iverilog 11 does not support array localparams in module scope
+    reg [31:0] BLAKE3_IV [0:7];
+    initial begin
+        BLAKE3_IV[0] = 32'h6A09E667; BLAKE3_IV[1] = 32'hBB67AE85;
+        BLAKE3_IV[2] = 32'h3C6EF372; BLAKE3_IV[3] = 32'hA54FF53A;
+        BLAKE3_IV[4] = 32'h510E527F; BLAKE3_IV[5] = 32'h9B05688C;
+        BLAKE3_IV[6] = 32'h1F83D9AB; BLAKE3_IV[7] = 32'h5BE0CD19;
+    end
+`endif
 
     // =========================================================================
     // BLAKE3 flag constants for mining (single-chunk, single-block)
@@ -442,8 +532,20 @@ module xcrypto_unit
         pipe_flags     = MINING_FLAGS;      // Default: single-chunk mining flags
 
         // Default: IV as chaining value, scratchpad as message
-        for (int i = 0; i < 8; i++)  pipe_cv[i]    = BLAKE3_IV[i];
-        for (int i = 0; i < 16; i++) pipe_block[i]  = msg_block_lat[i];
+        // BLAKE3_IV inlined — iverilog 11 does not re-trigger always_comb on reg+initial writes
+        pipe_cv[0] = 32'h6A09E667; pipe_cv[1] = 32'hBB67AE85;
+        pipe_cv[2] = 32'h3C6EF372; pipe_cv[3] = 32'hA54FF53A;
+        pipe_cv[4] = 32'h510E527F; pipe_cv[5] = 32'h9B05688C;
+        pipe_cv[6] = 32'h1F83D9AB; pipe_cv[7] = 32'h5BE0CD19;
+        // Scalar FFs — iverilog 11 always_comb sensitivity fix
+        pipe_block[ 0] = mb0;  pipe_block[ 1] = mb1;
+        pipe_block[ 2] = mb2;  pipe_block[ 3] = mb3;
+        pipe_block[ 4] = mb4;  pipe_block[ 5] = mb5;
+        pipe_block[ 6] = mb6;  pipe_block[ 7] = mb7;
+        pipe_block[ 8] = mb8;  pipe_block[ 9] = mb9;
+        pipe_block[10] = mb10; pipe_block[11] = mb11;
+        pipe_block[12] = mb12; pipe_block[13] = mb13;
+        pipe_block[14] = mb14; pipe_block[15] = mb15;
 
         if (fsm_state == S_COMPRESS) begin
             pipe_in_valid = 1'b1;
@@ -462,19 +564,24 @@ module xcrypto_unit
                 // CV = BLAKE3 IV (always! NOT the previous hash)
                 // Message = previous hash in words 0-7, zeros in words 8-15
                 // block_len = 32 (32 bytes of hash data)
-                for (int i = 0; i < 8; i++) begin
-                    pipe_block[i] = hash_latched[i];  // Prev hash → message
-                end
-                for (int i = 8; i < 16; i++) begin
-                    pipe_block[i] = 32'd0;            // Zero-pad
-                end
+                pipe_block[0] = hl0; pipe_block[1] = hl1;
+                pipe_block[2] = hl2; pipe_block[3] = hl3;
+                pipe_block[4] = hl4; pipe_block[5] = hl5;
+                pipe_block[6] = hl6; pipe_block[7] = hl7;
+                pipe_block[ 8] = 32'd0; pipe_block[ 9] = 32'd0;
+                pipe_block[10] = 32'd0; pipe_block[11] = 32'd0;
+                pipe_block[12] = 32'd0; pipe_block[13] = 32'd0;
+                pipe_block[14] = 32'd0; pipe_block[15] = 32'd0;
                 pipe_block_len = 32'd32;
                 // pipe_cv = BLAKE3_IV (already set by default)
                 // pipe_flags = MINING_FLAGS (already set by default)
 
             end else begin
                 // ── Single blake3.round (non-chain): use state registers ──
-                for (int i = 0; i < 8; i++) pipe_cv[i] = state_out[i];
+                pipe_cv[0] = state_out[0]; pipe_cv[1] = state_out[1];
+                pipe_cv[2] = state_out[2]; pipe_cv[3] = state_out[3];
+                pipe_cv[4] = state_out[4]; pipe_cv[5] = state_out[5];
+                pipe_cv[6] = state_out[6]; pipe_cv[7] = state_out[7];
                 pipe_block_len = 32'd64;
                 pipe_flags     = 32'd0;
             end
@@ -486,12 +593,14 @@ module xcrypto_unit
         if (fsm_state == S_RELAUNCH) begin
             pipe_in_valid = 1'b1;
             // CV = BLAKE3 IV (already set by default above)
-            for (int i = 0; i < 8; i++) begin
-                pipe_block[i] = hash_latched[i];  // Hᵢ → message words 0-7
-            end
-            for (int i = 8; i < 16; i++) begin
-                pipe_block[i] = 32'd0;             // Zero-pad words 8-15
-            end
+            pipe_block[0] = hl0; pipe_block[1] = hl1;
+            pipe_block[2] = hl2; pipe_block[3] = hl3;
+            pipe_block[4] = hl4; pipe_block[5] = hl5;
+            pipe_block[6] = hl6; pipe_block[7] = hl7;
+            pipe_block[ 8] = 32'd0; pipe_block[ 9] = 32'd0;
+            pipe_block[10] = 32'd0; pipe_block[11] = 32'd0;
+            pipe_block[12] = 32'd0; pipe_block[13] = 32'd0;
+            pipe_block[14] = 32'd0; pipe_block[15] = 32'd0;
             pipe_block_len = 32'd32;
             pipe_flags     = MINING_FLAGS;
         end
@@ -504,12 +613,18 @@ module xcrypto_unit
     // 1-cycle lag that would otherwise read hash_latched BEFORE it is updated.
     // hash_words_for_lzc[0] is the most significant word (big-endian convention).
 
-    // Select hash source: live pipeline output during valid cycle, else latch
+    // Select hash source: live pipeline output during valid cycle, else latch.
+    // Individual continuous assigns (not always_comb) to avoid iverilog 11
+    // dynamic-index sensitivity issues with unpacked arrays.
     logic [31:0] hash_words_for_lzc [0:7];
-    always_comb begin
-        for (int i = 0; i < 8; i++)
-            hash_words_for_lzc[i] = pipe_out_valid ? pipe_hash_out[i] : hash_latched[i];
-    end
+    assign hash_words_for_lzc[0] = pipe_out_valid ? pipe_hash_live0 : hash_latched[0];
+    assign hash_words_for_lzc[1] = pipe_out_valid ? pipe_hash_live1 : hash_latched[1];
+    assign hash_words_for_lzc[2] = pipe_out_valid ? pipe_hash_live2 : hash_latched[2];
+    assign hash_words_for_lzc[3] = pipe_out_valid ? pipe_hash_live3 : hash_latched[3];
+    assign hash_words_for_lzc[4] = pipe_out_valid ? pipe_hash_live4 : hash_latched[4];
+    assign hash_words_for_lzc[5] = pipe_out_valid ? pipe_hash_live5 : hash_latched[5];
+    assign hash_words_for_lzc[6] = pipe_out_valid ? pipe_hash_live6 : hash_latched[6];
+    assign hash_words_for_lzc[7] = pipe_out_valid ? pipe_hash_live7 : hash_latched[7];
 
     always_comb begin
         lzc_count = 8'd0;
@@ -547,8 +662,10 @@ module xcrypto_unit
     // hash_words_out: expose current hash to mining_controller for best-hash tracking
     // Same timing-corrected source as LZC: live pipeline output during valid cycle
     always_comb begin
-        for (int i = 0; i < 8; i++)
-            hash_words_out[i] = hash_words_for_lzc[i];
+        hash_words_out[0] = hash_words_for_lzc[0]; hash_words_out[1] = hash_words_for_lzc[1];
+        hash_words_out[2] = hash_words_for_lzc[2]; hash_words_out[3] = hash_words_for_lzc[3];
+        hash_words_out[4] = hash_words_for_lzc[4]; hash_words_out[5] = hash_words_for_lzc[5];
+        hash_words_out[6] = hash_words_for_lzc[6]; hash_words_out[7] = hash_words_for_lzc[7];
     end
 
     // =========================================================================

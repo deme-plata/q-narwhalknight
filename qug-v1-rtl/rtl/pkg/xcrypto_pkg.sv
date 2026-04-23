@@ -25,30 +25,29 @@ package xcrypto_pkg;
   // These are the first 32 bits of the fractional parts of the square roots
   // of the first 8 prime numbers (2, 3, 5, 7, 11, 13, 17, 19).
 
-  localparam int unsigned BLAKE3_NUM_IV = 8;
-
-  localparam logic [31:0] BLAKE3_IV [BLAKE3_NUM_IV] = '{
-    32'h6A09E667,   // IV[0] = sqrt(2)
-    32'hBB67AE85,   // IV[1] = sqrt(3)
-    32'h3C6EF372,   // IV[2] = sqrt(5)
-    32'hA54FF53A,   // IV[3] = sqrt(7)
-    32'h510E527F,   // IV[4] = sqrt(11)
-    32'h9B05688C,   // IV[5] = sqrt(13)
-    32'h1F83D9AB,   // IV[6] = sqrt(17)
-    32'h5BE0CD19    // IV[7] = sqrt(19)
-  };
+  localparam int BLAKE3_NUM_IV = 8;
+  // BLAKE3_IV defined as individual scalars for tool compatibility.
+  // Modules that need the array form define it locally (same values).
+  localparam logic [31:0] BLAKE3_IV_0 = 32'h6A09E667; // sqrt(2)
+  localparam logic [31:0] BLAKE3_IV_1 = 32'hBB67AE85; // sqrt(3)
+  localparam logic [31:0] BLAKE3_IV_2 = 32'h3C6EF372; // sqrt(5)
+  localparam logic [31:0] BLAKE3_IV_3 = 32'hA54FF53A; // sqrt(7)
+  localparam logic [31:0] BLAKE3_IV_4 = 32'h510E527F; // sqrt(11)
+  localparam logic [31:0] BLAKE3_IV_5 = 32'h9B05688C; // sqrt(13)
+  localparam logic [31:0] BLAKE3_IV_6 = 32'h1F83D9AB; // sqrt(17)
+  localparam logic [31:0] BLAKE3_IV_7 = 32'h5BE0CD19; // sqrt(19)
 
   // ===========================================================================
   // BLAKE3 State Dimensions
   // ===========================================================================
 
-  localparam int unsigned BLAKE3_STATE_WORDS  = 16;  // 4x4 matrix of 32-bit words
-  localparam int unsigned BLAKE3_STATE_BYTES  = BLAKE3_STATE_WORDS * 4;  // 64 bytes
-  localparam int unsigned BLAKE3_MSG_WORDS    = 16;  // 16 message words per block
-  localparam int unsigned BLAKE3_BLOCK_BYTES  = 64;  // 64-byte input block
-  localparam int unsigned BLAKE3_KEY_WORDS    = 8;
-  localparam int unsigned BLAKE3_OUT_WORDS    = 8;   // 256-bit output (words 0..7)
-  localparam int unsigned BLAKE3_ROUNDS       = 7;
+  localparam int BLAKE3_STATE_WORDS  = 16;  // 4x4 matrix of 32-bit words
+  localparam int BLAKE3_STATE_BYTES  = BLAKE3_STATE_WORDS * 4;  // 64 bytes
+  localparam int BLAKE3_MSG_WORDS    = 16;  // 16 message words per block
+  localparam int BLAKE3_BLOCK_BYTES  = 64;  // 64-byte input block
+  localparam int BLAKE3_KEY_WORDS    = 8;
+  localparam int BLAKE3_OUT_WORDS    = 8;   // 256-bit output (words 0..7)
+  localparam int BLAKE3_ROUNDS       = 7;
 
   // ===========================================================================
   // BLAKE3 Domain Separation Flags
@@ -71,10 +70,10 @@ package xcrypto_pkg;
   //   a = a + b + my;  d = (d ^ a) >>> R3;
   //   c = c + d;       b = (b ^ c) >>> R4;
 
-  localparam int unsigned BLAKE3_ROT_1 = 16;
-  localparam int unsigned BLAKE3_ROT_2 = 12;
-  localparam int unsigned BLAKE3_ROT_3 =  8;
-  localparam int unsigned BLAKE3_ROT_4 =  7;
+  localparam int BLAKE3_ROT_1 = 16;
+  localparam int BLAKE3_ROT_2 = 12;
+  localparam int BLAKE3_ROT_3 =  8;
+  localparam int BLAKE3_ROT_4 =  7;
 
   // ===========================================================================
   // BLAKE3 Message Schedule Permutation
@@ -89,29 +88,7 @@ package xcrypto_pkg;
   // in the given round. Round 0 uses identity (0,1,2,...,15), subsequent
   // rounds apply the permutation cumulatively.
 
-  localparam int unsigned MSG_PERM [16] = '{
-    2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8
-  };
-
-  // Pre-computed cumulative permutations for all 7 rounds.
-  // Round 0: identity ordering
-  // Round N: apply MSG_PERM to round N-1 ordering
-  localparam int unsigned MSG_SCHEDULE [BLAKE3_ROUNDS][16] = '{
-    // Round 0 (identity)
-    '{ 0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15},
-    // Round 1 (apply permutation once)
-    '{ 2,  6,  3, 10,  7,  0,  4, 13,  1, 11, 12,  5,  9, 14, 15,  8},
-    // Round 2
-    '{ 3,  4, 10, 12,  13, 2,  7, 14,  6,  5, 9,   0, 11, 15,  8,  1},
-    // Round 3
-    '{10,  7, 12,  9,  14, 3, 13, 15,  4,  0, 11,  2,  5,  8,  1,  6},
-    // Round 4
-    '{12, 13,  9, 11,  15, 10, 14,  8,  7,  2,  5,  3,  0,  1,  6,  4},
-    // Round 5
-    '{ 9, 14, 11,  5,   8, 12, 15,  1, 13,  3,  0, 10,  2,  6,  4,  7},
-    // Round 6
-    '{11, 15,  5,  0,   1,  9,  8,  6, 14, 10,  2, 12,  3,  4,  7, 13}
-  };
+  // MSG_PERM and MSG_SCHEDULE defined locally in blake3_round.sv for tool compatibility.
 
   // ===========================================================================
   // Xcrypto Instruction Encodings (funct7 field)
@@ -160,8 +137,8 @@ package xcrypto_pkg;
   //   | v8  v9  v10 v11 |     IV[0..3]          — constants
   //   | v12 v13 v14 v15 |     counter_lo, counter_hi, block_len, flags
 
-  typedef logic [31:0] blake3_state_t [BLAKE3_STATE_WORDS];
-  typedef logic [31:0] blake3_msg_t   [BLAKE3_MSG_WORDS];
+  typedef logic [31:0] blake3_state_t [0:15];
+  typedef logic [31:0] blake3_msg_t   [0:15];
 
   // Packed 256-bit hash output
   typedef logic [255:0] blake3_hash_t;
@@ -185,7 +162,7 @@ package xcrypto_pkg;
 
   function automatic logic [31:0] rotr32(
     input logic [31:0] x,
-    input int unsigned n
+    input int n
   );
     return (x >> n) | (x << (32 - n));
   endfunction : rotr32
@@ -194,38 +171,15 @@ package xcrypto_pkg;
   // SHA-3 / Keccak-f[1600] Constants (v10.3.0 — Hybrid Mining Support)
   // ===========================================================================
 
-  localparam int unsigned KECCAK_ROUNDS     = 24;
-  localparam int unsigned KECCAK_LANES      = 25;   // 5x5 grid
-  localparam int unsigned KECCAK_LANE_W     = 64;   // 64-bit lanes
-  localparam int unsigned SHA3_256_RATE     = 1088;  // Rate in bits (136 bytes)
-  localparam int unsigned SHA3_256_CAPACITY = 512;   // Capacity in bits
-  localparam int unsigned SHA3_256_OUTPUT   = 256;   // Output bits
-  localparam int unsigned SHA3_RATE_LANES   = 17;    // 1088 / 64 = 17 lanes
+  localparam int KECCAK_ROUNDS     = 24;
+  localparam int KECCAK_LANES      = 25;   // 5x5 grid
+  localparam int KECCAK_LANE_W     = 64;   // 64-bit lanes
+  localparam int SHA3_256_RATE     = 1088;  // Rate in bits (136 bytes)
+  localparam int SHA3_256_CAPACITY = 512;   // Capacity in bits
+  localparam int SHA3_256_OUTPUT   = 256;   // Output bits
+  localparam int SHA3_RATE_LANES   = 17;    // 1088 / 64 = 17 lanes
 
-  // Keccak round constants (RC[0..23])
-  localparam logic [63:0] KECCAK_RC [KECCAK_ROUNDS] = '{
-    64'h0000000000000001, 64'h0000000000008082,
-    64'h800000000000808A, 64'h8000000080008000,
-    64'h000000000000808B, 64'h0000000080000001,
-    64'h8000000080008081, 64'h8000000000008009,
-    64'h000000000000008A, 64'h0000000000000088,
-    64'h0000000080008009, 64'h000000008000000A,
-    64'h000000008000808B, 64'h800000000000008B,
-    64'h8000000000008089, 64'h8000000000008003,
-    64'h8000000000008002, 64'h8000000000000080,
-    64'h000000000000800A, 64'h800000008000000A,
-    64'h8000000080008081, 64'h8000000000008080,
-    64'h0000000080000001, 64'h8000000080008008
-  };
-
-  // Rho rotation offsets [x + 5*y] — how many bits to rotate each lane
-  localparam int unsigned KECCAK_RHO [KECCAK_LANES] = '{
-     0,  1, 62, 28, 27,   // y=0: x=0..4
-    36, 44,  6, 55, 20,   // y=1
-     3, 10, 43, 25, 39,   // y=2
-    41, 45, 15, 21,  8,   // y=3
-    18,  2, 61, 56, 14    // y=4
-  };
+  // KECCAK_RC and KECCAK_RHO defined locally in sha3_keccak.sv for tool compatibility.
 
   // Xcrypto funct7 encodings for SHA-3 (under funct3 = XCRYPTO_F3_KECCAK = 3'b011)
   localparam logic [6:0] KECCAK_INIT    = 7'b000_0000;  // funct7 = 0: Zero state

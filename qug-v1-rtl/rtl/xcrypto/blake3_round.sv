@@ -7,17 +7,14 @@
 //   Stage 1 (clk edge): Latch column quarter-round results
 //   Stage 2 (clk edge): Latch diagonal quarter-round results
 //
-// This halves the combinational depth vs the single-stage version (~6 levels
-// of 32-bit add per stage instead of ~12), meeting 100 MHz on Kintex-7.
-//
 // BLAKE3 state layout (16 x 32-bit words):
 //   [ v0  v1  v2  v3 ]   <- a row
 //   [ v4  v5  v6  v7 ]   <- b row
 //   [ v8  v9  v10 v11]   <- c row
 //   [ v12 v13 v14 v15]   <- d row
 //
-// Column round operates on columns:  (0,4,8,12) (1,5,9,13) (2,6,10,14) (3,7,11,15)
-// Diagonal round operates on diags:  (0,5,10,15) (1,6,11,12) (2,7,8,13) (3,4,9,14)
+// Column round:   (0,4,8,12) (1,5,9,13) (2,6,10,14) (3,7,11,15)
+// Diagonal round: (0,5,10,15) (1,6,11,12) (2,7,8,13) (3,4,9,14)
 //
 // Each quarter-round (G function):
 //   a = a + b + mx;  d = (d ^ a) >>> 16;
@@ -26,235 +23,268 @@
 //   c = c + d;       b = (b ^ c) >>> 7;
 //
 // Latency: 2 clock cycles per round.
+//
+// iverilog 11 compatibility notes:
+//   - Dynamic array indexing in always_* not supported → case statement for sigma
+//   - Function calls + part-selects in always_* broken → use assign statements
 // =============================================================================
 
 module blake3_round (
     input  logic        clk,
     input  logic        rst_n,
 
-    // Input state: 16 x 32-bit words
     input  logic [31:0] state_in  [0:15],
-    // Message words for this round: 16 x 32-bit
     input  logic [31:0] msg       [0:15],
-    // Round index (0-6) — selects message schedule permutation
     input  logic [2:0]  round_idx,
-    // Input valid — indicates state_in/msg/round_idx are valid
     input  logic        in_valid,
 
-    // Output state: 16 x 32-bit words (after both column + diagonal)
     output logic [31:0] state_out [0:15],
-    // Output valid — high for 1 cycle when state_out is ready
     output logic        out_valid
 );
 
     // =========================================================================
-    // BLAKE3 message schedule permutations
+    // Message schedule — case on round_idx (avoids dynamic 2D array indexing)
     // =========================================================================
-    // Pre-computed permutation tables for all 7 rounds.
-    // sigma[round][i] gives the message word index for position i.
-
-    logic [3:0] sigma [0:6][0:15];
-
-    always_comb begin
-        // Round 0: identity
-        sigma[0][ 0] = 4'd0;  sigma[0][ 1] = 4'd1;  sigma[0][ 2] = 4'd2;  sigma[0][ 3] = 4'd3;
-        sigma[0][ 4] = 4'd4;  sigma[0][ 5] = 4'd5;  sigma[0][ 6] = 4'd6;  sigma[0][ 7] = 4'd7;
-        sigma[0][ 8] = 4'd8;  sigma[0][ 9] = 4'd9;  sigma[0][10] = 4'd10; sigma[0][11] = 4'd11;
-        sigma[0][12] = 4'd12; sigma[0][13] = 4'd13; sigma[0][14] = 4'd14; sigma[0][15] = 4'd15;
-
-        // Round 1
-        sigma[1][ 0] = 4'd2;  sigma[1][ 1] = 4'd6;  sigma[1][ 2] = 4'd3;  sigma[1][ 3] = 4'd10;
-        sigma[1][ 4] = 4'd7;  sigma[1][ 5] = 4'd0;  sigma[1][ 6] = 4'd4;  sigma[1][ 7] = 4'd13;
-        sigma[1][ 8] = 4'd1;  sigma[1][ 9] = 4'd11; sigma[1][10] = 4'd12; sigma[1][11] = 4'd5;
-        sigma[1][12] = 4'd9;  sigma[1][13] = 4'd14; sigma[1][14] = 4'd15; sigma[1][15] = 4'd8;
-
-        // Round 2
-        sigma[2][ 0] = 4'd3;  sigma[2][ 1] = 4'd4;  sigma[2][ 2] = 4'd10; sigma[2][ 3] = 4'd12;
-        sigma[2][ 4] = 4'd13; sigma[2][ 5] = 4'd2;  sigma[2][ 6] = 4'd7;  sigma[2][ 7] = 4'd14;
-        sigma[2][ 8] = 4'd6;  sigma[2][ 9] = 4'd5;  sigma[2][10] = 4'd9;  sigma[2][11] = 4'd0;
-        sigma[2][12] = 4'd11; sigma[2][13] = 4'd15; sigma[2][14] = 4'd8;  sigma[2][15] = 4'd1;
-
-        // Round 3
-        sigma[3][ 0] = 4'd10; sigma[3][ 1] = 4'd7;  sigma[3][ 2] = 4'd12; sigma[3][ 3] = 4'd9;
-        sigma[3][ 4] = 4'd14; sigma[3][ 5] = 4'd3;  sigma[3][ 6] = 4'd13; sigma[3][ 7] = 4'd15;
-        sigma[3][ 8] = 4'd4;  sigma[3][ 9] = 4'd0;  sigma[3][10] = 4'd11; sigma[3][11] = 4'd2;
-        sigma[3][12] = 4'd5;  sigma[3][13] = 4'd8;  sigma[3][14] = 4'd1;  sigma[3][15] = 4'd6;
-
-        // Round 4
-        sigma[4][ 0] = 4'd12; sigma[4][ 1] = 4'd13; sigma[4][ 2] = 4'd9;  sigma[4][ 3] = 4'd11;
-        sigma[4][ 4] = 4'd15; sigma[4][ 5] = 4'd10; sigma[4][ 6] = 4'd14; sigma[4][ 7] = 4'd8;
-        sigma[4][ 8] = 4'd7;  sigma[4][ 9] = 4'd2;  sigma[4][10] = 4'd5;  sigma[4][11] = 4'd3;
-        sigma[4][12] = 4'd0;  sigma[4][13] = 4'd1;  sigma[4][14] = 4'd6;  sigma[4][15] = 4'd4;
-
-        // Round 5
-        sigma[5][ 0] = 4'd9;  sigma[5][ 1] = 4'd14; sigma[5][ 2] = 4'd11; sigma[5][ 3] = 4'd5;
-        sigma[5][ 4] = 4'd8;  sigma[5][ 5] = 4'd12; sigma[5][ 6] = 4'd15; sigma[5][ 7] = 4'd1;
-        sigma[5][ 8] = 4'd13; sigma[5][ 9] = 4'd3;  sigma[5][10] = 4'd0;  sigma[5][11] = 4'd10;
-        sigma[5][12] = 4'd2;  sigma[5][13] = 4'd6;  sigma[5][14] = 4'd4;  sigma[5][15] = 4'd7;
-
-        // Round 6
-        sigma[6][ 0] = 4'd11; sigma[6][ 1] = 4'd15; sigma[6][ 2] = 4'd5;  sigma[6][ 3] = 4'd0;
-        sigma[6][ 4] = 4'd1;  sigma[6][ 5] = 4'd9;  sigma[6][ 6] = 4'd8;  sigma[6][ 7] = 4'd6;
-        sigma[6][ 8] = 4'd14; sigma[6][ 9] = 4'd10; sigma[6][10] = 4'd2;  sigma[6][11] = 4'd12;
-        sigma[6][12] = 4'd3;  sigma[6][13] = 4'd4;  sigma[6][14] = 4'd7;  sigma[6][15] = 4'd13;
-    end
-
-    // =========================================================================
-    // Scheduled message words for this round
+    // BLAKE3 permutation: {2,6,3,10,7,0,4,13,1,11,12,5,9,14,15,8} applied
+    // cumulatively each round. Pre-computed for rounds 0-6.
     // =========================================================================
     logic [31:0] m [0:15];
 
     always_comb begin
-        for (int i = 0; i < 16; i++) begin
-            m[i] = msg[sigma[round_idx][i]];
-        end
+        case (round_idx)
+            3'd0: begin  // identity
+                m[ 0] = msg[ 0]; m[ 1] = msg[ 1]; m[ 2] = msg[ 2]; m[ 3] = msg[ 3];
+                m[ 4] = msg[ 4]; m[ 5] = msg[ 5]; m[ 6] = msg[ 6]; m[ 7] = msg[ 7];
+                m[ 8] = msg[ 8]; m[ 9] = msg[ 9]; m[10] = msg[10]; m[11] = msg[11];
+                m[12] = msg[12]; m[13] = msg[13]; m[14] = msg[14]; m[15] = msg[15];
+            end
+            3'd1: begin  // perm^1: {2,6,3,10,7,0,4,13,1,11,12,5,9,14,15,8}
+                m[ 0] = msg[ 2]; m[ 1] = msg[ 6]; m[ 2] = msg[ 3]; m[ 3] = msg[10];
+                m[ 4] = msg[ 7]; m[ 5] = msg[ 0]; m[ 6] = msg[ 4]; m[ 7] = msg[13];
+                m[ 8] = msg[ 1]; m[ 9] = msg[11]; m[10] = msg[12]; m[11] = msg[ 5];
+                m[12] = msg[ 9]; m[13] = msg[14]; m[14] = msg[15]; m[15] = msg[ 8];
+            end
+            3'd2: begin  // perm^2
+                m[ 0] = msg[ 3]; m[ 1] = msg[ 4]; m[ 2] = msg[10]; m[ 3] = msg[12];
+                m[ 4] = msg[13]; m[ 5] = msg[ 2]; m[ 6] = msg[ 7]; m[ 7] = msg[14];
+                m[ 8] = msg[ 6]; m[ 9] = msg[ 5]; m[10] = msg[ 9]; m[11] = msg[ 0];
+                m[12] = msg[11]; m[13] = msg[15]; m[14] = msg[ 8]; m[15] = msg[ 1];
+            end
+            3'd3: begin  // perm^3
+                m[ 0] = msg[10]; m[ 1] = msg[ 7]; m[ 2] = msg[12]; m[ 3] = msg[ 9];
+                m[ 4] = msg[14]; m[ 5] = msg[ 3]; m[ 6] = msg[13]; m[ 7] = msg[15];
+                m[ 8] = msg[ 4]; m[ 9] = msg[ 0]; m[10] = msg[11]; m[11] = msg[ 2];
+                m[12] = msg[ 5]; m[13] = msg[ 8]; m[14] = msg[ 1]; m[15] = msg[ 6];
+            end
+            3'd4: begin  // perm^4
+                m[ 0] = msg[12]; m[ 1] = msg[13]; m[ 2] = msg[ 9]; m[ 3] = msg[11];
+                m[ 4] = msg[15]; m[ 5] = msg[10]; m[ 6] = msg[14]; m[ 7] = msg[ 8];
+                m[ 8] = msg[ 7]; m[ 9] = msg[ 2]; m[10] = msg[ 5]; m[11] = msg[ 3];
+                m[12] = msg[ 0]; m[13] = msg[ 1]; m[14] = msg[ 6]; m[15] = msg[ 4];
+            end
+            3'd5: begin  // perm^5
+                m[ 0] = msg[ 9]; m[ 1] = msg[14]; m[ 2] = msg[11]; m[ 3] = msg[ 5];
+                m[ 4] = msg[ 8]; m[ 5] = msg[12]; m[ 6] = msg[15]; m[ 7] = msg[ 1];
+                m[ 8] = msg[13]; m[ 9] = msg[ 3]; m[10] = msg[ 0]; m[11] = msg[10];
+                m[12] = msg[ 2]; m[13] = msg[ 6]; m[14] = msg[ 4]; m[15] = msg[ 7];
+            end
+            default: begin  // round 6: perm^6
+                m[ 0] = msg[11]; m[ 1] = msg[15]; m[ 2] = msg[ 5]; m[ 3] = msg[ 0];
+                m[ 4] = msg[ 1]; m[ 5] = msg[ 9]; m[ 6] = msg[ 8]; m[ 7] = msg[ 6];
+                m[ 8] = msg[14]; m[ 9] = msg[10]; m[10] = msg[ 2]; m[11] = msg[12];
+                m[12] = msg[ 3]; m[13] = msg[ 4]; m[14] = msg[ 7]; m[15] = msg[13];
+            end
+        endcase
     end
 
     // =========================================================================
-    // Quarter-round G function (pure combinational)
+    // Quarter-round G function (pure combinational, returns {a,b,c,d} packed)
     // =========================================================================
     function automatic logic [127:0] quarter_round(
         input logic [31:0] a, b, c, d, mx, my
     );
-        logic [31:0] a1, b1, c1, d1;
-        logic [31:0] a2, b2, c2, d2;
-
-        // Step 1
-        a1 = a + b + mx;
-        d1 = {(d ^ a1)[15:0], (d ^ a1)[31:16]};  // ror32 by 16
-        c1 = c + d1;
-        b1 = {(b ^ c1)[11:0], (b ^ c1)[31:12]};  // ror32 by 12
-
-        // Step 2
-        a2 = a1 + b1 + my;
-        d2 = {(d1 ^ a2)[7:0], (d1 ^ a2)[31:8]};  // ror32 by 8
-        c2 = c1 + d2;
-        b2 = {(b1 ^ c2)[6:0], (b1 ^ c2)[31:7]};  // ror32 by 7
-
+        logic [31:0] a1, b1, c1, d1, a2, b2, c2, d2, tmp;
+        a1  = a + b + mx;
+        tmp = d ^ a1;  d1 = {tmp[15:0], tmp[31:16]};
+        c1  = c + d1;
+        tmp = b ^ c1;  b1 = {tmp[11:0], tmp[31:12]};
+        a2  = a1 + b1 + my;
+        tmp = d1 ^ a2; d2 = {tmp[7:0],  tmp[31:8]};
+        c2  = c1 + d2;
+        tmp = b1 ^ c2; b2 = {tmp[6:0],  tmp[31:7]};
         quarter_round = {a2, b2, c2, d2};
     endfunction
 
     // =========================================================================
-    // Stage 1: Column quarter-rounds (combinational)
+    // Stage 1: Column quarter-rounds
     // =========================================================================
-    // Column 0: G(v0, v4, v8,  v12, m[0],  m[1])
-    // Column 1: G(v1, v5, v9,  v13, m[2],  m[3])
-    // Column 2: G(v2, v6, v10, v14, m[4],  m[5])
-    // Column 3: G(v3, v7, v11, v15, m[6],  m[7])
+    // Use continuous assigns (not always_comb) to avoid iverilog 11 issues
+    // with function calls and constant part-selects inside always_* blocks.
+    //
+    // iverilog 11 bug: continuous assigns that read multiple elements of the
+    // same NBA-driven (always_ff) unpacked array do not re-evaluate when those
+    // elements are written by NBA — only the first element triggers sensitivity.
+    // state_in is an input port connected to NBA-driven state_s0 in the pipeline.
+    // Fix: route each element through an individual scalar wire first.
+    // =========================================================================
+    logic [31:0] si0,  si1,  si2,  si3;
+    logic [31:0] si4,  si5,  si6,  si7;
+    logic [31:0] si8,  si9,  si10, si11;
+    logic [31:0] si12, si13, si14, si15;
 
+    assign si0  = state_in[ 0]; assign si1  = state_in[ 1];
+    assign si2  = state_in[ 2]; assign si3  = state_in[ 3];
+    assign si4  = state_in[ 4]; assign si5  = state_in[ 5];
+    assign si6  = state_in[ 6]; assign si7  = state_in[ 7];
+    assign si8  = state_in[ 8]; assign si9  = state_in[ 9];
+    assign si10 = state_in[10]; assign si11 = state_in[11];
+    assign si12 = state_in[12]; assign si13 = state_in[13];
+    assign si14 = state_in[14]; assign si15 = state_in[15];
+
+    logic [127:0] col0_r, col1_r, col2_r, col3_r;
+
+    assign col0_r = quarter_round(si0,  si4,  si8,  si12, m[ 0], m[ 1]);
+    assign col1_r = quarter_round(si1,  si5,  si9,  si13, m[ 2], m[ 3]);
+    assign col2_r = quarter_round(si2,  si6,  si10, si14, m[ 4], m[ 5]);
+    assign col3_r = quarter_round(si3,  si7,  si11, si15, m[ 6], m[ 7]);
+
+    // Unpack column results into col_state: {a,b,c,d} = [127:96],[95:64],[63:32],[31:0]
     logic [31:0] col_state [0:15];
-    logic [127:0] col0_result, col1_result, col2_result, col3_result;
-
-    always_comb begin
-        col0_result = quarter_round(state_in[ 0], state_in[ 4], state_in[ 8], state_in[12], m[ 0], m[ 1]);
-        col1_result = quarter_round(state_in[ 1], state_in[ 5], state_in[ 9], state_in[13], m[ 2], m[ 3]);
-        col2_result = quarter_round(state_in[ 2], state_in[ 6], state_in[10], state_in[14], m[ 4], m[ 5]);
-        col3_result = quarter_round(state_in[ 3], state_in[ 7], state_in[11], state_in[15], m[ 6], m[ 7]);
-
-        // Unpack column results: {a, b, c, d}
-        col_state[ 0] = col0_result[127:96]; col_state[ 4] = col0_result[95:64];
-        col_state[ 8] = col0_result[ 63:32]; col_state[12] = col0_result[31: 0];
-
-        col_state[ 1] = col1_result[127:96]; col_state[ 5] = col1_result[95:64];
-        col_state[ 9] = col1_result[ 63:32]; col_state[13] = col1_result[31: 0];
-
-        col_state[ 2] = col2_result[127:96]; col_state[ 6] = col2_result[95:64];
-        col_state[10] = col2_result[ 63:32]; col_state[14] = col2_result[31: 0];
-
-        col_state[ 3] = col3_result[127:96]; col_state[ 7] = col3_result[95:64];
-        col_state[11] = col3_result[ 63:32]; col_state[15] = col3_result[31: 0];
-    end
+    assign col_state[ 0] = col0_r[127:96]; assign col_state[ 4] = col0_r[ 95:64];
+    assign col_state[ 8] = col0_r[ 63:32]; assign col_state[12] = col0_r[ 31: 0];
+    assign col_state[ 1] = col1_r[127:96]; assign col_state[ 5] = col1_r[ 95:64];
+    assign col_state[ 9] = col1_r[ 63:32]; assign col_state[13] = col1_r[ 31: 0];
+    assign col_state[ 2] = col2_r[127:96]; assign col_state[ 6] = col2_r[ 95:64];
+    assign col_state[10] = col2_r[ 63:32]; assign col_state[14] = col2_r[ 31: 0];
+    assign col_state[ 3] = col3_r[127:96]; assign col_state[ 7] = col3_r[ 95:64];
+    assign col_state[11] = col3_r[ 63:32]; assign col_state[15] = col3_r[ 31: 0];
 
     // =========================================================================
-    // Stage 1 pipeline register: latch column results + message words
+    // Stage 1 pipeline register
     // =========================================================================
     logic [31:0] s1_state [0:15];
     logic [31:0] s1_msg   [0:15];
     logic        s1_valid;
 
+    // iverilog 11: for-loop NBA assignments to unpacked arrays in always_ff
+    // do not execute — unrolled to individual statements.
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            s1_valid <= 1'b0;
-            for (int j = 0; j < 16; j++) begin
-                s1_state[j] <= '0;
-                s1_msg[j]   <= '0;
-            end
+            s1_valid      <= 1'b0;
+            s1_state[ 0]  <= '0; s1_state[ 1]  <= '0; s1_state[ 2]  <= '0; s1_state[ 3]  <= '0;
+            s1_state[ 4]  <= '0; s1_state[ 5]  <= '0; s1_state[ 6]  <= '0; s1_state[ 7]  <= '0;
+            s1_state[ 8]  <= '0; s1_state[ 9]  <= '0; s1_state[10]  <= '0; s1_state[11]  <= '0;
+            s1_state[12]  <= '0; s1_state[13]  <= '0; s1_state[14]  <= '0; s1_state[15]  <= '0;
+            s1_msg[ 0]    <= '0; s1_msg[ 1]    <= '0; s1_msg[ 2]    <= '0; s1_msg[ 3]    <= '0;
+            s1_msg[ 4]    <= '0; s1_msg[ 5]    <= '0; s1_msg[ 6]    <= '0; s1_msg[ 7]    <= '0;
+            s1_msg[ 8]    <= '0; s1_msg[ 9]    <= '0; s1_msg[10]    <= '0; s1_msg[11]    <= '0;
+            s1_msg[12]    <= '0; s1_msg[13]    <= '0; s1_msg[14]    <= '0; s1_msg[15]    <= '0;
         end else begin
             s1_valid <= in_valid;
             if (in_valid) begin
-                for (int j = 0; j < 16; j++) begin
-                    s1_state[j] <= col_state[j];
-                    s1_msg[j]   <= m[j];
-                end
+                s1_state[ 0] <= col_state[ 0]; s1_state[ 1] <= col_state[ 1];
+                s1_state[ 2] <= col_state[ 2]; s1_state[ 3] <= col_state[ 3];
+                s1_state[ 4] <= col_state[ 4]; s1_state[ 5] <= col_state[ 5];
+                s1_state[ 6] <= col_state[ 6]; s1_state[ 7] <= col_state[ 7];
+                s1_state[ 8] <= col_state[ 8]; s1_state[ 9] <= col_state[ 9];
+                s1_state[10] <= col_state[10]; s1_state[11] <= col_state[11];
+                s1_state[12] <= col_state[12]; s1_state[13] <= col_state[13];
+                s1_state[14] <= col_state[14]; s1_state[15] <= col_state[15];
+                s1_msg[ 0]  <= m[ 0]; s1_msg[ 1]  <= m[ 1];
+                s1_msg[ 2]  <= m[ 2]; s1_msg[ 3]  <= m[ 3];
+                s1_msg[ 4]  <= m[ 4]; s1_msg[ 5]  <= m[ 5];
+                s1_msg[ 6]  <= m[ 6]; s1_msg[ 7]  <= m[ 7];
+                s1_msg[ 8]  <= m[ 8]; s1_msg[ 9]  <= m[ 9];
+                s1_msg[10]  <= m[10]; s1_msg[11]  <= m[11];
+                s1_msg[12]  <= m[12]; s1_msg[13]  <= m[13];
+                s1_msg[14]  <= m[14]; s1_msg[15]  <= m[15];
             end
         end
     end
 
     // =========================================================================
-    // Stage 2: Diagonal quarter-rounds (combinational, fed from s1 regs)
+    // Stage 2: Diagonal quarter-rounds
     // =========================================================================
-    // Diag 0: G(v0, v5, v10, v15, m[8],  m[9])
-    // Diag 1: G(v1, v6, v11, v12, m[10], m[11])
-    // Diag 2: G(v2, v7, v8,  v13, m[12], m[13])
-    // Diag 3: G(v3, v4, v9,  v14, m[14], m[15])
+    // iverilog 11 bug: continuous assigns that read multiple elements of the
+    // same NBA-driven (always_ff) unpacked array do not re-evaluate when those
+    // elements are written by NBA — the sensitivity list is not updated for
+    // post-NBA array element changes. Fix: route each element through an
+    // individual scalar wire first; single-element array-to-scalar assigns
+    // (e.g. "assign s = arr[i]") are confirmed to track NBA updates correctly.
+    logic [31:0] s1s_0,  s1s_1,  s1s_2,  s1s_3;
+    logic [31:0] s1s_4,  s1s_5,  s1s_6,  s1s_7;
+    logic [31:0] s1s_8,  s1s_9,  s1s_10, s1s_11;
+    logic [31:0] s1s_12, s1s_13, s1s_14, s1s_15;
+    logic [31:0] s1m_8,  s1m_9,  s1m_10, s1m_11;
+    logic [31:0] s1m_12, s1m_13, s1m_14, s1m_15;
+
+    assign s1s_0  = s1_state[ 0]; assign s1s_1  = s1_state[ 1];
+    assign s1s_2  = s1_state[ 2]; assign s1s_3  = s1_state[ 3];
+    assign s1s_4  = s1_state[ 4]; assign s1s_5  = s1_state[ 5];
+    assign s1s_6  = s1_state[ 6]; assign s1s_7  = s1_state[ 7];
+    assign s1s_8  = s1_state[ 8]; assign s1s_9  = s1_state[ 9];
+    assign s1s_10 = s1_state[10]; assign s1s_11 = s1_state[11];
+    assign s1s_12 = s1_state[12]; assign s1s_13 = s1_state[13];
+    assign s1s_14 = s1_state[14]; assign s1s_15 = s1_state[15];
+
+    assign s1m_8  = s1_msg[ 8]; assign s1m_9  = s1_msg[ 9];
+    assign s1m_10 = s1_msg[10]; assign s1m_11 = s1_msg[11];
+    assign s1m_12 = s1_msg[12]; assign s1m_13 = s1_msg[13];
+    assign s1m_14 = s1_msg[14]; assign s1m_15 = s1_msg[15];
+
+    logic [127:0] diag0_r, diag1_r, diag2_r, diag3_r;
+
+    assign diag0_r = quarter_round(s1s_0,  s1s_5,  s1s_10, s1s_15, s1m_8,  s1m_9);
+    assign diag1_r = quarter_round(s1s_1,  s1s_6,  s1s_11, s1s_12, s1m_10, s1m_11);
+    assign diag2_r = quarter_round(s1s_2,  s1s_7,  s1s_8,  s1s_13, s1m_12, s1m_13);
+    assign diag3_r = quarter_round(s1s_3,  s1s_4,  s1s_9,  s1s_14, s1m_14, s1m_15);
 
     logic [31:0] diag_state [0:15];
-    logic [127:0] diag0_result, diag1_result, diag2_result, diag3_result;
-
-    always_comb begin
-        diag0_result = quarter_round(s1_state[ 0], s1_state[ 5], s1_state[10], s1_state[15], s1_msg[ 8], s1_msg[ 9]);
-        diag1_result = quarter_round(s1_state[ 1], s1_state[ 6], s1_state[11], s1_state[12], s1_msg[10], s1_msg[11]);
-        diag2_result = quarter_round(s1_state[ 2], s1_state[ 7], s1_state[ 8], s1_state[13], s1_msg[12], s1_msg[13]);
-        diag3_result = quarter_round(s1_state[ 3], s1_state[ 4], s1_state[ 9], s1_state[14], s1_msg[14], s1_msg[15]);
-
-        // Unpack diagonal results back into linear state
-        diag_state[ 0] = diag0_result[127:96];
-        diag_state[ 5] = diag0_result[ 95:64];
-        diag_state[10] = diag0_result[ 63:32];
-        diag_state[15] = diag0_result[ 31: 0];
-
-        diag_state[ 1] = diag1_result[127:96];
-        diag_state[ 6] = diag1_result[ 95:64];
-        diag_state[11] = diag1_result[ 63:32];
-        diag_state[12] = diag1_result[ 31: 0];
-
-        diag_state[ 2] = diag2_result[127:96];
-        diag_state[ 7] = diag2_result[ 95:64];
-        diag_state[ 8] = diag2_result[ 63:32];
-        diag_state[13] = diag2_result[ 31: 0];
-
-        diag_state[ 3] = diag3_result[127:96];
-        diag_state[ 4] = diag3_result[ 95:64];
-        diag_state[ 9] = diag3_result[ 63:32];
-        diag_state[14] = diag3_result[ 31: 0];
-    end
+    assign diag_state[ 0] = diag0_r[127:96]; assign diag_state[ 5] = diag0_r[ 95:64];
+    assign diag_state[10] = diag0_r[ 63:32]; assign diag_state[15] = diag0_r[ 31: 0];
+    assign diag_state[ 1] = diag1_r[127:96]; assign diag_state[ 6] = diag1_r[ 95:64];
+    assign diag_state[11] = diag1_r[ 63:32]; assign diag_state[12] = diag1_r[ 31: 0];
+    assign diag_state[ 2] = diag2_r[127:96]; assign diag_state[ 7] = diag2_r[ 95:64];
+    assign diag_state[ 8] = diag2_r[ 63:32]; assign diag_state[13] = diag2_r[ 31: 0];
+    assign diag_state[ 3] = diag3_r[127:96]; assign diag_state[ 4] = diag3_r[ 95:64];
+    assign diag_state[ 9] = diag3_r[ 63:32]; assign diag_state[14] = diag3_r[ 31: 0];
 
     // =========================================================================
-    // Stage 2 pipeline register: latch diagonal results (final output)
+    // Stage 2 pipeline register
     // =========================================================================
     logic [31:0] s2_state [0:15];
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            out_valid <= 1'b0;
-            for (int j = 0; j < 16; j++) begin
-                s2_state[j] <= '0;
-            end
+            out_valid     <= 1'b0;
+            s2_state[ 0]  <= '0; s2_state[ 1]  <= '0; s2_state[ 2]  <= '0; s2_state[ 3]  <= '0;
+            s2_state[ 4]  <= '0; s2_state[ 5]  <= '0; s2_state[ 6]  <= '0; s2_state[ 7]  <= '0;
+            s2_state[ 8]  <= '0; s2_state[ 9]  <= '0; s2_state[10]  <= '0; s2_state[11]  <= '0;
+            s2_state[12]  <= '0; s2_state[13]  <= '0; s2_state[14]  <= '0; s2_state[15]  <= '0;
         end else begin
             out_valid <= s1_valid;
             if (s1_valid) begin
-                for (int j = 0; j < 16; j++) begin
-                    s2_state[j] <= diag_state[j];
-                end
+                s2_state[ 0] <= diag_state[ 0]; s2_state[ 1] <= diag_state[ 1];
+                s2_state[ 2] <= diag_state[ 2]; s2_state[ 3] <= diag_state[ 3];
+                s2_state[ 4] <= diag_state[ 4]; s2_state[ 5] <= diag_state[ 5];
+                s2_state[ 6] <= diag_state[ 6]; s2_state[ 7] <= diag_state[ 7];
+                s2_state[ 8] <= diag_state[ 8]; s2_state[ 9] <= diag_state[ 9];
+                s2_state[10] <= diag_state[10]; s2_state[11] <= diag_state[11];
+                s2_state[12] <= diag_state[12]; s2_state[13] <= diag_state[13];
+                s2_state[14] <= diag_state[14]; s2_state[15] <= diag_state[15];
             end
         end
     end
 
-    // Output assignment
-    always_comb begin
-        for (int i = 0; i < 16; i++) begin
-            state_out[i] = s2_state[i];
-        end
-    end
+    // Output — individual assigns: iverilog 11 always_comb for-loop does not
+    // track array element sensitivity correctly.
+    assign state_out[ 0] = s2_state[ 0]; assign state_out[ 1] = s2_state[ 1];
+    assign state_out[ 2] = s2_state[ 2]; assign state_out[ 3] = s2_state[ 3];
+    assign state_out[ 4] = s2_state[ 4]; assign state_out[ 5] = s2_state[ 5];
+    assign state_out[ 6] = s2_state[ 6]; assign state_out[ 7] = s2_state[ 7];
+    assign state_out[ 8] = s2_state[ 8]; assign state_out[ 9] = s2_state[ 9];
+    assign state_out[10] = s2_state[10]; assign state_out[11] = s2_state[11];
+    assign state_out[12] = s2_state[12]; assign state_out[13] = s2_state[13];
+    assign state_out[14] = s2_state[14]; assign state_out[15] = s2_state[15];
 
 endmodule

@@ -16,26 +16,26 @@ package qug_pkg;
   // Global Parameters
   // ===========================================================================
 
-  localparam int unsigned NUM_CORES         = 16;       // 4x4 mesh of tiles
-  localparam int unsigned MESH_ROWS         = 4;
-  localparam int unsigned MESH_COLS         = 4;
-  localparam int unsigned XLEN              = 32;       // RV32IMC base ISA
-  localparam int unsigned ILEN              = 32;       // Instruction width
-  localparam int unsigned BLAKE3_ROUNDS     = 7;        // BLAKE3 compression rounds
-  localparam int unsigned NTT_DEPTH         = 256;      // NTT butterfly depth
-  localparam int unsigned RF_ADDR_W         = 5;        // Register file address width (x0..x31)
-  localparam int unsigned PHYS_ADDR_W       = 32;       // Physical address width
-  localparam int unsigned L1I_SIZE_KB       = 8;        // L1 instruction cache per tile
-  localparam int unsigned L1D_SIZE_KB       = 8;        // L1 data cache per tile
-  localparam int unsigned L1_LINE_BYTES     = 32;       // Cache line size
-  localparam int unsigned L2_SIZE_KB        = 256;      // Shared L2 cache
-  localparam int unsigned AXI_DATA_W        = 32;       // AXI data bus width
-  localparam int unsigned AXI_ADDR_W        = 32;       // AXI address bus width
-  localparam int unsigned AXI_STRB_W        = AXI_DATA_W / 8;
-  localparam int unsigned PIPELINE_STAGES   = 7;        // IF-ID-IS-EX-M1-M2-WB
+  localparam int NUM_CORES         = 16;       // 4x4 mesh of tiles
+  localparam int MESH_ROWS         = 4;
+  localparam int MESH_COLS         = 4;
+  localparam int XLEN              = 32;       // RV32IMC base ISA
+  localparam int ILEN              = 32;       // Instruction width
+  localparam int BLAKE3_ROUNDS     = 7;        // BLAKE3 compression rounds
+  localparam int NTT_DEPTH         = 256;      // NTT butterfly depth
+  localparam int RF_ADDR_W         = 5;        // Register file address width (x0..x31)
+  localparam int PHYS_ADDR_W       = 32;       // Physical address width
+  localparam int L1I_SIZE_KB       = 8;        // L1 instruction cache per tile
+  localparam int L1D_SIZE_KB       = 8;        // L1 data cache per tile
+  localparam int L1_LINE_BYTES     = 32;       // Cache line size
+  localparam int L2_SIZE_KB        = 256;      // Shared L2 cache
+  localparam int AXI_DATA_W        = 32;       // AXI data bus width
+  localparam int AXI_ADDR_W        = 32;       // AXI address bus width
+  localparam int AXI_STRB_W        = AXI_DATA_W / 8;
+  localparam int PIPELINE_STAGES   = 7;        // IF-ID-IS-EX-M1-M2-WB
 
   // Target clock frequency (Hz)
-  localparam int unsigned CLK_FREQ_HZ       = 100_000_000; // 100 MHz FPGA prototype
+  localparam int CLK_FREQ_HZ       = 100_000_000; // 100 MHz FPGA prototype
 
   // ===========================================================================
   // Common Types
@@ -239,13 +239,13 @@ package qug_pkg;
   // ===========================================================================
 
   // VDF chain depth — widened to support Genus-2 VDF (5K-10K iterations)
-  localparam int unsigned VDF_CHAIN_DEPTH_W   = 14;       // Supports up to 16,383 iterations
-  localparam int unsigned VDF_CHAIN_DEFAULT    = 100;      // Legacy BLAKE3 chain (Quillon v4.1)
-  localparam int unsigned VDF_CHAIN_GENUS2     = 5000;     // Genus-2 VDF minimum iterations
-  localparam int unsigned VDF_CHAIN_GENUS2_MAX = 10000;    // Genus-2 VDF maximum iterations
+  localparam int VDF_CHAIN_DEPTH_W   = 14;       // Supports up to 16,383 iterations
+  localparam int VDF_CHAIN_DEFAULT    = 100;      // Legacy BLAKE3 chain (Quillon v4.1)
+  localparam int VDF_CHAIN_GENUS2     = 5000;     // Genus-2 VDF minimum iterations
+  localparam int VDF_CHAIN_GENUS2_MAX = 10000;    // Genus-2 VDF maximum iterations
 
   // LWMA difficulty adjustment — hardware stores result, software computes
-  localparam int unsigned DIFFICULTY_REG_W     = 8;        // Leading-zero-bit target (max 255)
-  localparam int unsigned LWMA_WINDOW_SIZE     = 60;       // Block window for LWMA (firmware ref)
+  localparam int DIFFICULTY_REG_W     = 8;        // Leading-zero-bit target (max 255)
+  localparam int LWMA_WINDOW_SIZE     = 60;       // Block window for LWMA (firmware ref)
 
 endpackage : qug_pkg

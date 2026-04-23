@@ -8,7 +8,7 @@ CORE_DIR := $(RTL_DIR)/core
 XCRY_DIR := $(RTL_DIR)/xcrypto
 
 # SystemVerilog source files (order matters for packages)
-PKG_FILES := $(PKG_DIR)/qug_pkg.sv $(PKG_DIR)/xcrypto_pkg.sv $(CORE_DIR)/qug_pkg.sv
+PKG_FILES := $(PKG_DIR)/qug_pkg.sv $(PKG_DIR)/xcrypto_pkg.sv $(CORE_DIR)/qug_core_pkg.sv
 XCRY_FILES := $(XCRY_DIR)/blake3_round.sv $(XCRY_DIR)/blake3_state.sv $(XCRY_DIR)/blake3_pipeline.sv $(XCRY_DIR)/xcrypto_unit.sv
 CORE_FILES := $(CORE_DIR)/qug_regfile.sv $(CORE_DIR)/qug_alu.sv $(CORE_DIR)/qug_decoder.sv $(CORE_DIR)/qug_pipeline.sv $(CORE_DIR)/qug_core.sv
 
@@ -41,7 +41,7 @@ blake3: $(TB_DIR)/blake3_tb.sv $(XCRY_FILES) $(PKG_FILES)
 core: $(TB_DIR)/core_tb.sv $(CORE_FILES) $(PKG_FILES)
 	@echo "═══ RISC-V Core Test ═══"
 	iverilog -g2012 -o core_tb.vvp \
-		$(PKG_DIR)/qug_pkg.sv $(PKG_DIR)/xcrypto_pkg.sv $(CORE_DIR)/qug_pkg.sv \
+		$(PKG_DIR)/qug_pkg.sv $(PKG_DIR)/xcrypto_pkg.sv $(CORE_DIR)/qug_core_pkg.sv \
 		$(CORE_FILES) $(TB_DIR)/core_tb.sv
 	vvp core_tb.vvp
 	@echo ""
