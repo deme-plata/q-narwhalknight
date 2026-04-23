@@ -1568,6 +1568,54 @@ pub async fn get_emission_stats(
     Ok(Json(ApiResponse::success(response)))
 }
 
+/// v10.3.15: Attosecond opto-physics emission diagnostics
+pub async fn get_emission_attophysics(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let m = state.balance_consensus_engine.get_attophysics_metrics().await;
+
+    let response = serde_json::json!({
+        "model": "Attosecond Opto-Physics Emission Layer v10.3.15",
+        "cpa_envelope": {
+            "description": "Chirped-Pulse Amplification continuous halving envelope",
+            "theoretical_annual_qug": m.cpa_envelope_qug_per_year,
+            "actual_annual_qug": m.actual_annual_rate_qug,
+            "deviation_pct": m.cpa_deviation_pct,
+            "chirp_rate_qug_per_yr_per_sec": m.chirp_rate_qug_per_yr_per_sec,
+            "t_half_years": q_storage::emission_controller::CPA_THHALF_YEARS,
+        },
+        "uncertainty_principle": {
+            "description": "Economic Heisenberg: ΔR × Δt ≥ ħ_econ",
+            "hbar_econ_qug": m.hbar_econ_qug,
+            "pid_correction_factor": m.pid_correction_factor,
+            "uncertainty_product_qug_sec": m.uncertainty_product_qug_sec,
+            "uncertainty_margin": m.uncertainty_margin,
+            "stable": m.uncertainty_margin >= 1.0,
+        },
+        "phase_locked_oscillator": {
+            "description": "Validator ensemble mode-lock quality",
+            "mode_lock_quality": m.mode_lock_quality,
+            "omega_rep_rad_per_sec": m.omega_rep_rad_per_sec,
+            "interpretation": if m.mode_lock_quality > 0.9 { "near-perfect phase lock" }
+                              else if m.mode_lock_quality > 0.7 { "good synchrony" }
+                              else if m.mode_lock_quality > 0.5 { "moderate jitter" }
+                              else { "high timing variance" },
+        },
+        "era_state": {
+            "current_era": m.current_era,
+            "era_phase_fraction": m.era_phase_fraction,
+            "pulse_energy_per_block_qug": m.pulse_energy_per_block_qug,
+            "era_boundary_integrity_pct": m.era_boundary_integrity_pct,
+        },
+        "constants": {
+            "chirp_rate_constant": q_storage::emission_controller::CHIRP_RATE_QUG_PER_YR_PER_SEC,
+            "hbar_econ_era0_1bps": q_storage::emission_controller::HBAR_ECON_QUG,
+        }
+    });
+
+    Ok(Json(ApiResponse::success(response)))
+}
+
 /// Get libp2p peer ID endpoint (for dynamic bootstrap peer discovery)
 pub async fn get_peer_id(
     State(state): State<Arc<AppState>>,

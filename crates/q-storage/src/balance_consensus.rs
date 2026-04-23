@@ -1694,6 +1694,12 @@ impl BalanceConsensusEngine {
         controller.get_rate_diagnostics()
     }
 
+    /// v10.3.15: Get attosecond opto-physics emission diagnostics
+    pub async fn get_attophysics_metrics(&self) -> crate::emission_controller::AttoPhysicsMetrics {
+        let controller = self.emission_controller.read().await;
+        controller.get_attophysics_metrics()
+    }
+
     /// v8.8.4: Get mutable access to emission controller for migration sync
     pub async fn emission_controller_write(&self) -> tokio::sync::RwLockWriteGuard<'_, crate::emission_controller::EmissionController> {
         self.emission_controller.write().await
