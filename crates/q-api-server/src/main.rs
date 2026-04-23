@@ -499,11 +499,11 @@ const HTTP_BOOTSTRAP_PEERS: &[&str] = &[
 /// When gossipsub mesh is broken, HTTP fallback discovers peer heights but needs
 /// peer IDs to register them in turbo sync. This mapping enables that.
 fn bootstrap_peer_id_for_url(url: &str) -> Option<&'static str> {
-    if url.contains("89.149.241.126") { Some("12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM") }      // Epsilon
+    if url.contains("89.149.241.126") { Some("12D3KooWAbrVw892T8RSenWy1j89NBrd7p4aXKsSMKAYpH47YbgD") }      // Epsilon
     else if url.contains("5.79.79.158") { Some("12D3KooWLJJRvqo6mBoHLpgxVbGKfW3Jv39ziU4kz1adKFv93JbK") }     // Delta
     else if url.contains("109.205.176.60") { Some("12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH") }  // Gamma
     else if url.contains("185.182.185.227") { Some("12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH") } // Beta
-    else if url.contains("quillon.xyz") { Some("12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM") }    // quillon.xyz = Epsilon
+    else if url.contains("quillon.xyz") { Some("12D3KooWAbrVw892T8RSenWy1j89NBrd7p4aXKsSMKAYpH47YbgD") }    // quillon.xyz = Epsilon
     else { None }
 }
 
@@ -4553,13 +4553,40 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     // 📊 v10.3.0: UNIFIED HASHRATE HISTORY SAMPLER
     // Samples network hashrate (local miners + P2P peers) every 60s into ring buffer.
     // Works in BOTH pool and solo mode. Max 1440 entries = 24h.
+    // v10.3.15: Persists history to disk (./data/hashrate_history.json) to survive restarts.
     // ========================================
     {
+        // Load persisted history from disk on startup (safe: JSON file, not DB)
+        // Stored under {Q_DB_PATH}/analytics/ alongside the database for organized backups.
+        let db_base = std::env::var("Q_DB_PATH").unwrap_or_else(|_| "./data".to_string());
+        let history_file = std::path::PathBuf::from(&db_base).join("analytics").join("hashrate_history.json");
+        if history_file.exists() {
+            match std::fs::read_to_string(&history_file) {
+                Ok(json_str) => {
+                    match serde_json::from_str::<Vec<pool_api::HashrateEntry>>(&json_str) {
+                        Ok(mut loaded) => {
+                            let cutoff = chrono::Utc::now().timestamp() - 86400; // 24h
+                            loaded.retain(|e| e.timestamp >= cutoff);
+                            let count = loaded.len();
+                            let mut history = state.pool_hashrate_history.write().await;
+                            *history = loaded;
+                            info!("📊 Loaded {} hashrate history entries from disk", count);
+                        }
+                        Err(e) => warn!("⚠️ Could not parse hashrate history file: {}", e),
+                    }
+                }
+                Err(e) => warn!("⚠️ Could not read hashrate history file: {}", e),
+            }
+        }
+
         let sampler_mining_stats = state.mining_statistics.clone();
         let sampler_hashrate_history = state.pool_hashrate_history.clone();
         tokio::spawn(async move {
             info!("📊 Hashrate history sampler started (60s interval, local+P2P)");
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            let mut tick_count: u32 = 0;
+            let db_base_inner = std::env::var("Q_DB_PATH").unwrap_or_else(|_| "./data".to_string());
+            let history_file = std::path::PathBuf::from(&db_base_inner).join("analytics").join("hashrate_history.json");
             loop {
                 interval.tick().await;
                 // Calculate network hashrate (local miners + P2P peers)
@@ -4598,6 +4625,27 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 history.push(entry);
                 if history.len() > 1440 {
                     history.remove(0);
+                }
+
+                // Persist to disk every 5 minutes (every 5 ticks)
+                tick_count += 1;
+                if tick_count % 5 == 0 {
+                    let snapshot: Vec<pool_api::HashrateEntry> = history.clone();
+                    drop(history);
+                    let hf = history_file.clone();
+                    tokio::task::spawn_blocking(move || {
+                        if let Some(parent) = hf.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        match serde_json::to_string(&snapshot) {
+                            Ok(json) => {
+                                if let Err(e) = std::fs::write(&hf, json) {
+                                    tracing::warn!("⚠️ Failed to persist hashrate history: {}", e);
+                                }
+                            }
+                            Err(e) => tracing::warn!("⚠️ Failed to serialize hashrate history: {}", e),
+                        }
+                    });
                 }
             }
         });
@@ -5293,6 +5341,26 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         async move {
             if let Err(e) = storage.debug_scan_block_range().await {
                 tracing::error!("🔍 [DB-SCAN] Diagnostic scan failed: {}", e);
+            }
+        }
+    });
+
+    // v10.3.15: DAG→height key re-index (background, idempotent)
+    // Copies 545K early-history blocks from qblock:dag:{N}:{proposer} to
+    // qblock:height:{N} so get_qblocks_range() serves them to syncing nodes.
+    // Without this, fresh nodes get stuck at height 0: the 100K scan budget
+    // in get_dag_blocks_forward fills with 10M+ blocks (string-sort ordering)
+    // and never returns the 1M-range blocks a new node needs to build contiguity.
+    tokio::spawn({
+        let storage = state.storage_engine.clone();
+        async move {
+            // Brief startup delay so the re-indexer doesn't contend with
+            // initial block production and peer connection setup.
+            tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
+            match storage.reindex_dag_blocks_to_height_keys().await {
+                Ok(0) => info!("✅ [REINDEX] DAG→height index already complete"),
+                Ok(n) => info!("✅ [REINDEX] DAG→height index wrote {} new keys — fresh node sync now possible", n),
+                Err(e) => warn!("⚠️ [REINDEX] DAG→height index failed (non-fatal): {}", e),
             }
         }
     });
