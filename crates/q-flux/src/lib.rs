@@ -32,3 +32,6 @@ pub mod libp2p_aware;
 
 // OCSP auto-fetch
 pub mod ocsp_fetch;
+
+// Virtual host routing (SNI cert selection + per-domain backend/static overrides)
+pub mod vhost;

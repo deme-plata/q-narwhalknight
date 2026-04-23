@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -14,7 +15,7 @@ use crate::access_control::AccessControl;
 use crate::access_log::AccessLogger;
 use crate::acceptor::SharedTlsConfig;
 use crate::acme::ChallengeStore;
-use crate::config::FluxConfig;
+use crate::config::{FluxConfig, StaticConfig, UpstreamConfig};
 use crate::h2_proxy;
 use crate::health::HealthMap;
 use crate::libp2p_aware::{BandwidthLimiter, PeerTracker};
@@ -317,9 +318,57 @@ async fn worker_loop(
         metrics.clone(),
         health_map.clone(),
         config.cluster.peers.clone(),
-        global_upstream_semaphore,
-        global_backend_counters,
+        global_upstream_semaphore.clone(),
+        global_backend_counters.clone(),
     ));
+
+    // Per-vhost upstream pools: each [[vhosts]] entry with a `backend` gets its own
+    // connection pool. Keyed by lowercase domain name. Shares the global semaphore.
+    let vhost_upstream_map: Arc<HashMap<String, Arc<UpstreamPool>>> = {
+        let mut map = HashMap::new();
+        for vhost in &config.vhosts {
+            if let Some(ref backend) = vhost.backend {
+                let vh_cfg = UpstreamConfig {
+                    backends: vec![backend.clone()],
+                    ..config.upstream.clone()
+                };
+                let pool = Arc::new(UpstreamPool::new_with_counters(
+                    &vh_cfg,
+                    metrics.clone(),
+                    health_map.clone(),
+                    vec![],
+                    global_upstream_semaphore.clone(),
+                    global_backend_counters.clone(),
+                ));
+                for domain in &vhost.domains {
+                    map.insert(domain.to_lowercase(), pool.clone());
+                }
+            }
+        }
+        Arc::new(map)
+    };
+
+    // Per-vhost static configs: each [[vhosts]] entry with a `static_root` gets its
+    // own StaticConfig. Keyed by lowercase domain name.
+    let vhost_static_map: Arc<HashMap<String, Arc<StaticConfig>>> = {
+        let mut map = HashMap::new();
+        for vhost in &config.vhosts {
+            if let Some(ref root) = vhost.static_root {
+                let vh_static = Arc::new(StaticConfig {
+                    root: Some(root.clone()),
+                    spa_fallback: vhost.spa_fallback,
+                    gzip: config.static_files.gzip,
+                    cache_max_file_size: config.static_files.cache_max_file_size,
+                    cache_max_total: config.static_files.cache_max_total,
+                    proxy_compression: config.static_files.proxy_compression,
+                });
+                for domain in &vhost.domains {
+                    map.insert(domain.to_lowercase(), vh_static.clone());
+                }
+            }
+        }
+        Arc::new(map)
+    };
 
     // Spawn adaptive concurrency adjuster (AIMD) — runs every 1s, adjusting
     // the effective permit limit based on upstream response latency.
@@ -529,6 +578,8 @@ async fn worker_loop(
         let drain_rx = drain_rx.clone();
         let file_cache = file_cache.clone();
         let challenge_store = challenge_store.clone();
+        let vhost_upstream_map = vhost_upstream_map.clone();
+        let vhost_static_map = vhost_static_map.clone();
         // Extract config fields needed inside spawn (config is &'_ not 'static)
         let onion_static_root = config.static_files.root.as_ref()
             .map(|p| p.to_string_lossy().to_string())
@@ -604,6 +655,9 @@ async fn worker_loop(
                 match tls_result {
                     Ok(Ok(mut tls_stream)) => {
                         metrics.tls_handshake_ok();
+                        // Extract SNI for vhost routing before any borrow issues
+                        let sni_443 = tls_stream.get_ref().1
+                            .server_name().map(|s| s.to_lowercase());
                         let is_h2 = tls_stream.get_ref().1
                             .alpn_protocol()
                             .map(|p| p == b"h2")
@@ -656,6 +710,13 @@ async fn worker_loop(
                                             return;
                                         }
                                     };
+                                    // Vhost routing for the non-WS fallback path
+                                    let eff_up443 = sni_443.as_deref()
+                                        .and_then(|s| vhost_upstream_map.get(s))
+                                        .cloned().unwrap_or_else(|| upstream.clone());
+                                    let eff_st443 = sni_443.as_deref()
+                                        .and_then(|s| vhost_static_map.get(s))
+                                        .cloned().unwrap_or_else(|| static_config.clone());
                                     const MAX_CONN_443: std::time::Duration =
                                         std::time::Duration::from_secs(300);
                                     let handler = async {
@@ -663,18 +724,18 @@ async fn worker_loop(
                                         match access_logger {
                                             Some(ref logger) => {
                                                 proxy::handle_connection_logged(
-                                                    prefixed, client_addr, &upstream, &metrics,
+                                                    prefixed, client_addr, &eff_up443, &metrics,
                                                     body_limit, streaming_body_threshold,
-                                                    &static_config, logger,
+                                                    &eff_st443, logger,
                                                     &peer_tracker, &bandwidth_limiter,
                                                     drain_rx.clone(), cache_ref,
                                                 ).await;
                                             }
                                             None => {
                                                 proxy::handle_connection(
-                                                    prefixed, client_addr, &upstream, &metrics,
+                                                    prefixed, client_addr, &eff_up443, &metrics,
                                                     body_limit, streaming_body_threshold,
-                                                    &static_config,
+                                                    &eff_st443,
                                                     &peer_tracker, &bandwidth_limiter,
                                                     drain_rx.clone(), cache_ref,
                                                 ).await;
@@ -702,12 +763,18 @@ async fn worker_loop(
                                 return;
                             }
                         };
+                        let eff_up_h2 = sni_443.as_deref()
+                            .and_then(|s| vhost_upstream_map.get(s))
+                            .cloned().unwrap_or_else(|| upstream.clone());
+                        let eff_st_h2 = sni_443.as_deref()
+                            .and_then(|s| vhost_static_map.get(s))
+                            .cloned().unwrap_or_else(|| static_config.clone());
                         const MAX_CONN_H2: std::time::Duration =
                             std::time::Duration::from_secs(300);
                         let handler = async {
                             h2_proxy::handle_h2_connection(
-                                tls_stream, client_addr, upstream.clone(),
-                                metrics.clone(), body_limit, static_config.clone(),
+                                tls_stream, client_addr, eff_up_h2.clone(),
+                                metrics.clone(), body_limit, eff_st_h2.clone(),
                                 access_logger.clone(),
                             ).await;
                         };
@@ -757,6 +824,20 @@ async fn worker_loop(
                     Ok(Ok(tls_stream)) => {
                         metrics.tls_handshake_ok();
 
+                        // SNI-based vhost routing: select per-domain upstream pool
+                        // and static root when [[vhosts]] are configured.
+                        let sni = tls_stream.get_ref().1
+                            .server_name()
+                            .map(|s| s.to_lowercase());
+                        let eff_upstream = sni.as_deref()
+                            .and_then(|s| vhost_upstream_map.get(s))
+                            .cloned()
+                            .unwrap_or_else(|| upstream.clone());
+                        let eff_static = sni.as_deref()
+                            .and_then(|s| vhost_static_map.get(s))
+                            .cloned()
+                            .unwrap_or_else(|| static_config.clone());
+
                         // ALPN-based protocol routing (Phase 3):
                         // If client negotiated "h2", handle via HTTP/2 multiplexed proxy.
                         // Otherwise, fall through to HTTP/1.1 proxy.
@@ -767,8 +848,8 @@ async fn worker_loop(
 
                         if is_h2 {
                             h2_proxy::handle_h2_connection(
-                                tls_stream, client_addr, upstream.clone(),
-                                metrics.clone(), body_limit, static_config.clone(),
+                                tls_stream, client_addr, eff_upstream.clone(),
+                                metrics.clone(), body_limit, eff_static.clone(),
                                 access_logger.clone(),
                             ).await;
                         } else {
@@ -777,18 +858,18 @@ async fn worker_loop(
                             match access_logger {
                                 Some(ref logger) => {
                                     proxy::handle_connection_logged(
-                                        tls_stream, client_addr, &upstream, &metrics,
+                                        tls_stream, client_addr, &eff_upstream, &metrics,
                                         body_limit, streaming_body_threshold,
-                                        &static_config, logger,
+                                        &eff_static, logger,
                                         &peer_tracker, &bandwidth_limiter,
                                         drain_rx.clone(), cache_ref,
                                     ).await;
                                 }
                                 None => {
                                     proxy::handle_connection(
-                                        tls_stream, client_addr, &upstream, &metrics,
+                                        tls_stream, client_addr, &eff_upstream, &metrics,
                                         body_limit, streaming_body_threshold,
-                                        &static_config,
+                                        &eff_static,
                                         &peer_tracker, &bandwidth_limiter,
                                         drain_rx.clone(), cache_ref,
                                     ).await;

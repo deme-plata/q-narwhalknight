@@ -37,6 +37,7 @@ mod quic_proxy;
 #[allow(dead_code)]
 mod libp2p_aware;
 mod ocsp_fetch;
+mod vhost;
 
 #[derive(Parser)]
 #[command(name = "q-flux", about = "High-performance reverse proxy for Q-NarwhalKnight")]
@@ -126,10 +127,23 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
-    // Build TLS config (shared across all workers, hot-reloadable)
-    let tls_config = acceptor::build_tls_config(&config.tls)?;
-    let shared_tls = acceptor::SharedTlsConfig::new(tls_config);
-    tracing::info!("TLS config loaded from {} / {}", config.tls.cert.display(), config.tls.key.display());
+    // Build TLS config (shared across all workers, hot-reloadable).
+    // With vhosts configured, use SNI-based cert selection so each domain
+    // gets its own certificate during the TLS handshake.
+    let shared_tls = if config.vhosts.is_empty() {
+        let tls_config = acceptor::build_tls_config(&config.tls)?;
+        tracing::info!("TLS config loaded from {} / {}", config.tls.cert.display(), config.tls.key.display());
+        acceptor::SharedTlsConfig::new(tls_config)
+    } else {
+        let vhost_router = vhost::VhostRouter::from_config(&config.tls, &config.vhosts)?;
+        let tls_config = acceptor::build_tls_config_with_vhosts(vhost_router)?;
+        tracing::info!(
+            "TLS config with SNI routing: default {} + {} vhost cert(s)",
+            config.tls.cert.display(),
+            config.vhosts.len(),
+        );
+        acceptor::SharedTlsConfig::new(tls_config)
+    };
 
     // Issue #017: kTLS kernel offload detection
     if config.tls.enable_ktls {

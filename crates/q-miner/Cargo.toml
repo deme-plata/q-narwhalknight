@@ -161,7 +161,7 @@ tempfile = { workspace = true }
 tokio-test = "0.4"
 
 [features]
-default = ["cpu-mining", "network", "cli", "jemalloc", "tui", "tor-support", "p2p", "vendored-openssl"]
+default = ["cpu-mining", "opencl-mining", "network", "cli", "jemalloc", "tui", "tor-support", "p2p", "vendored-openssl"]
 vendored-openssl = ["openssl/vendored"]  # v10.1.9: Statically link OpenSSL for portable binaries
 
 # Mining backends

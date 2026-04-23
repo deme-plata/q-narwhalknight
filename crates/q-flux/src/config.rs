@@ -2,6 +2,42 @@ use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
+/// Virtual host configuration — per-domain TLS cert, backend, and static root.
+///
+/// Use `[[vhosts]]` in q-flux.toml to add entries. Each vhost must have
+/// its own TLS cert/key. The `backend` and `static_root` fields override
+/// the defaults for requests matching the listed `domains`.
+///
+/// Example:
+/// ```toml
+/// [[vhosts]]
+/// domains = ["bounty.quillon.xyz"]
+/// cert = "/etc/letsencrypt/live/bounty.quillon.xyz/fullchain.pem"
+/// key  = "/etc/letsencrypt/live/bounty.quillon.xyz/privkey.pem"
+/// backend     = "127.0.0.1:8083"
+/// static_root = "/var/www/bounty.quillon.xyz"
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+pub struct VhostConfig {
+    /// Domain names for SNI matching (e.g. `["bounty.quillon.xyz"]`).
+    pub domains: Vec<String>,
+    /// TLS certificate file (PEM, full chain).
+    pub cert: PathBuf,
+    /// TLS private key file (PEM).
+    pub key: PathBuf,
+    /// Backend address (`host:port`) to proxy API requests to.
+    /// Falls back to the main `[upstream]` backends if absent.
+    #[serde(default)]
+    pub backend: Option<String>,
+    /// Static files root directory.
+    /// Falls back to `[static_files].root` if absent.
+    #[serde(default)]
+    pub static_root: Option<PathBuf>,
+    /// Serve index.html for unmatched paths (SPA mode). Default: true.
+    #[serde(default = "default_spa_fallback")]
+    pub spa_fallback: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct FluxConfig {
     pub server: ServerConfig,
@@ -27,6 +63,10 @@ pub struct FluxConfig {
     /// ACME certificate automation (Issue #021).
     #[serde(default)]
     pub acme: AcmeConfig,
+    /// Virtual hosts: per-domain TLS cert + optional backend/static overrides.
+    /// Uses SNI during TLS handshake to select the right certificate.
+    #[serde(default)]
+    pub vhosts: Vec<VhostConfig>,
     /// LibP2P WebSocket proxy: browser js-libp2p connects via WSS on a dedicated
     /// port (e.g. 9443), and q-flux does TLS termination + raw TCP proxy to the
     /// libp2p WebSocket listener (e.g. 127.0.0.1:9002). No HTTP parsing — just
@@ -128,7 +168,7 @@ pub struct ClusterConfig {
     pub health_check_timeout: std::time::Duration,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct StaticConfig {
     pub root: Option<PathBuf>,
     #[serde(default = "default_spa_fallback")]
@@ -411,6 +451,19 @@ impl Default for IoUringSection {
     }
 }
 
+impl Default for StaticConfig {
+    fn default() -> Self {
+        Self {
+            root: None,
+            spa_fallback: default_spa_fallback(),
+            gzip: default_true(),
+            cache_max_file_size: default_cache_max_file_size(),
+            cache_max_total: default_cache_max_total(),
+            proxy_compression: default_true(),
+        }
+    }
+}
+
 impl Default for LimitsConfig {
     fn default() -> Self {
         Self {
@@ -458,6 +511,19 @@ impl FluxConfig {
                 anyhow::bail!("Static files root not found: {}", root.display());
             }
         }
+        for (i, vhost) in config.vhosts.iter().enumerate() {
+            if !vhost.cert.exists() {
+                anyhow::bail!("vhosts[{}] cert not found: {}", i, vhost.cert.display());
+            }
+            if !vhost.key.exists() {
+                anyhow::bail!("vhosts[{}] key not found: {}", i, vhost.key.display());
+            }
+            if let Some(ref root) = vhost.static_root {
+                if !root.exists() {
+                    anyhow::bail!("vhosts[{}] static_root not found: {}", i, root.display());
+                }
+            }
+        }
         Ok(config)
     }
 
@@ -472,6 +538,14 @@ impl FluxConfig {
         }
         for p in &self.cluster.peers {
             Self::validate_host_port(p, "cluster peer")?;
+        }
+        for (i, vhost) in self.vhosts.iter().enumerate() {
+            if vhost.domains.is_empty() {
+                anyhow::bail!("vhosts[{}] must have at least one domain", i);
+            }
+            if let Some(ref b) = vhost.backend {
+                Self::validate_host_port(b, &format!("vhosts[{}] backend", i))?;
+            }
         }
 
         // --- listen addresses ---
@@ -605,6 +679,8 @@ mod tests {
             io_uring: IoUringSection::default(),
             access_control: AccessControlConfig::default(),
             acme: AcmeConfig::default(),
+            vhosts: Vec::new(),
+            libp2p_ws: Libp2pWsConfig::default(),
         }
     }
 

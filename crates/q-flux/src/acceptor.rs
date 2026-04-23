@@ -182,6 +182,28 @@ pub fn build_tls_config(tls: &TlsConfig) -> Result<Arc<ServerConfig>> {
     Ok(Arc::new(config))
 }
 
+/// Build a TLS config that uses SNI-based certificate selection for virtual hosting.
+///
+/// When the client sends an SNI extension in the ClientHello, rustls calls
+/// `VhostRouter::resolve()` which returns the matching vhost cert. Falls back to
+/// the default cert if no vhost matches. Inherits all other settings (session tickets,
+/// ALPN, session cache) from the standard build.
+pub fn build_tls_config_with_vhosts(
+    vhost_router: Arc<crate::vhost::VhostRouter>,
+) -> Result<Arc<ServerConfig>> {
+    let mut config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_cert_resolver(vhost_router);
+
+    config.ticketer = rustls::crypto::ring::Ticketer::new()
+        .map_err(|e| anyhow::anyhow!("Failed to create TLS ticketer: {}", e))?;
+    config.session_storage = rustls::server::ServerSessionMemoryCache::new(1_048_576);
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+
+    tracing::info!("TLS config with vhost SNI routing: session tickets, ALPN [h2, http/1.1]");
+    Ok(Arc::new(config))
+}
+
 /// Build a TLS config that only advertises HTTP/1.1 (no h2).
 /// Used for the libp2p WebSocket proxy port where the browser must use
 /// HTTP/1.1 for the WebSocket upgrade handshake.
