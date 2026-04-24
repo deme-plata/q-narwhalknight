@@ -3282,7 +3282,14 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     match state.storage_engine.load_emission_state().await {
         Ok(Some(bytes)) => {
             if let Err(e) = balance_engine.restore_emission_state(&bytes).await {
-                warn!("⚠️ Failed to restore emission state (starting fresh): {}", e);
+                // Persisted bytes exist but failed to deserialize (schema change / corruption).
+                // Apply time-based fallback so the node starts from the correct supply baseline
+                // rather than total_cumulative_emission = 0.
+                warn!("⚠️ Failed to restore emission state ({}), applying time-based fallback", e);
+                let fallback = q_storage::emission_controller::EmissionController::from_time_based_fallback(active_genesis);
+                if let Ok(fb_bytes) = fallback.serialize_state() {
+                    let _ = balance_engine.restore_emission_state(&fb_bytes).await;
+                }
             } else {
                 if let Ok(summary) = balance_engine.get_emission_summary().await {
                     let total_qug = summary.total_supply as f64 / 1_000_000_000_000_000_000_000_000.0f64;
@@ -3295,7 +3302,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             // Error ≤ 0.15% vs actual; PID self-corrects within hours.
             // Phase 2B will upgrade this to Bracha BRB once testnet-validated.
             let fallback = q_storage::emission_controller::EmissionController::from_time_based_fallback(
-                q_storage::emission_controller::GENESIS_TIMESTAMP,
+                active_genesis,  // respects Q_NETWORK_ID, not hardcoded
             );
             match fallback.serialize_state() {
                 Ok(bytes) => {
@@ -3310,7 +3317,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             }
         }
         Err(e) => {
-            warn!("⚠️ Error loading emission state: {}", e);
+            warn!("⚠️ Error loading emission state ({}), applying time-based fallback", e);
+            let fallback = q_storage::emission_controller::EmissionController::from_time_based_fallback(active_genesis);
+            if let Ok(fb_bytes) = fallback.serialize_state() {
+                let _ = balance_engine.restore_emission_state(&fb_bytes).await;
+            }
         }
     }
 

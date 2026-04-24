@@ -470,6 +470,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
   const [minerCount, setMinerCount] = useState(0);
   const [networkHashrate, setNetworkHashrate] = useState('');
   const explorerTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const explorerContainerRef = useRef<HTMLDivElement>(null);
 
   // SSE connection for real-time block/node-status updates (works without auth)
   useEffect(() => {
@@ -572,13 +573,17 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
     return () => { cancelled = true; clearInterval(interval); };
   }, [showExplorerDropdown]);
 
-  const handleExplorerEnter = () => {
-    if (explorerTimeoutRef.current) clearTimeout(explorerTimeoutRef.current);
-    setShowExplorerDropdown(true);
-  };
-  const handleExplorerLeave = () => {
-    explorerTimeoutRef.current = setTimeout(() => setShowExplorerDropdown(false), 300);
-  };
+  // Click-outside closes the explorer dropdown
+  useEffect(() => {
+    if (!showExplorerDropdown) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (explorerContainerRef.current && !explorerContainerRef.current.contains(e.target as Node)) {
+        setShowExplorerDropdown(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showExplorerDropdown]);
 
   const formatTimeAgo = (timestamp: number) => {
     const seconds = Math.floor(Date.now() / 1000 - timestamp);
@@ -1104,12 +1109,11 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
 
         {/* Explorer Search Bar + Live Data Dropdown */}
         <motion.div
+          ref={explorerContainerRef}
           className="pt-6 pb-4"
           initial={{ opacity: 0, y: -20 }}
           animate={{ opacity: menuHovered ? 0 : 1, y: 0 }}
           transition={{ duration: 0.3 }}
-          onMouseEnter={handleExplorerEnter}
-          onMouseLeave={handleExplorerLeave}
         >
           <div
             className="flex items-center justify-center gap-3 mb-2 cursor-pointer group"
@@ -1143,8 +1147,6 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
                   boxShadow: '0 20px 60px rgba(0,0,0,0.5), 0 0 40px rgba(212,175,55,0.1), inset 0 1px 0 rgba(255,255,255,0.05)',
                   transformOrigin: 'top center',
                 }}
-                onMouseEnter={handleExplorerEnter}
-                onMouseLeave={handleExplorerLeave}
               >
                 {/* Network Stats Bar - SSE-driven live data */}
                 {(explorerData.health || liveBlockHeight > 0) && (
@@ -1438,14 +1440,24 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
             >
               <div className="space-y-6">
                 <div>
-                  <label className="block text-sm font-medium text-amber-200 mb-2">
-                    BIP39 Seed Phrase
-                  </label>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="block text-sm font-medium text-amber-200">
+                      BIP39 Seed Phrase
+                    </label>
+                    <button
+                      type="button"
+                      onClick={generateQuantumSeed}
+                      className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-emerald-300 bg-emerald-900/30 hover:bg-emerald-800/50 border border-emerald-500/30 hover:border-emerald-400/60 rounded-lg transition-all"
+                    >
+                      <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+                      Generate new
+                    </button>
+                  </div>
                   <textarea
                     value={seedPhrase}
                     onChange={(e) => setSeedPhrase(e.target.value)}
                     className="w-full h-24 px-4 py-3 bg-slate-900/70 border-2 border-amber-500/30 rounded-xl text-amber-50 placeholder-slate-400 focus:outline-none focus:border-amber-400 focus:shadow-[0_0_15px_rgba(251,191,36,0.3)] transition-all resize-none backdrop-blur-sm"
-                    placeholder="Enter your 12-word seed phrase..."
+                    placeholder="Enter your 12-word seed phrase, or click 'Generate new' to create one..."
                   />
                   {/* Word count hint */}
                   {seedPhrase && (
