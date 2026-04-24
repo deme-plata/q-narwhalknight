@@ -359,16 +359,14 @@ export default function GlobalTopBar({ authenticated = false }: GlobalTopBarProp
             <div className="flex items-center gap-4">
               <NetworkSelector />
 
-              <motion.a
-                href="https://bounty.quillon.xyz"
-                target="_blank"
-                rel="noopener noreferrer"
+              <motion.button
+                onClick={() => window.dispatchEvent(new CustomEvent('open-bounty-modal'))}
                 whileHover={{ scale: 1.05 }}
                 className="flex items-center gap-2 bg-gradient-to-r from-amber-500/20 to-yellow-500/20 border border-amber-500/40 rounded-lg px-3 py-1.5 cursor-pointer transition-all hover:from-amber-500/30 hover:to-yellow-500/30"
               >
                 <Gift className="w-4 h-4 text-amber-400" />
                 <span className="text-amber-300 text-sm font-semibold">Bounty Campaign</span>
-              </motion.a>
+              </motion.button>
 
               <motion.button
                 onClick={() => setShowVideoModal(true)}

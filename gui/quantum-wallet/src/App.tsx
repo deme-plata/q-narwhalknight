@@ -28,6 +28,7 @@ const AnalyticsScreen = lazy(() => import('./components/AnalyticsScreen'));
 const DeployControlPanel = lazy(() => import('./components/DeployControlPanel'));
 const NodeSettingsModal = lazy(() => import('./components/NodeSettingsModal'));
 const AIWheelButton = lazy(() => import('./components/AIWheelButton'));
+const BountyModal = lazy(() => import('./components/BountyModal'));
 
 // Loading spinner for lazy-loaded screen transitions
 const LoadingSpinner = () => (
@@ -178,6 +179,14 @@ function App() {
 
   // v5.6.0: Track server version for refresh banner after deploys
   const [newVersionBanner, setNewVersionBanner] = useState<string | null>(null);
+
+  // Bounty modal — opened by TopBar/GlobalTopBar button via custom event
+  const [showBountyModal, setShowBountyModal] = useState(false);
+  useEffect(() => {
+    const handler = () => setShowBountyModal(true);
+    window.addEventListener('open-bounty-modal', handler);
+    return () => window.removeEventListener('open-bounty-modal', handler);
+  }, []);
 
   // v2.3.11-beta: Track when DEX swap just happened to ignore stale SSE updates
   // SSE balance updates from server can be stale and overwrite correct DEX swap balance
@@ -810,6 +819,12 @@ function App() {
           <Suspense fallback={null}><DeployControlPanel /></Suspense>
           {/* v7.3.0: Node Settings Modal - admin wallet OAuth2 + node info */}
           <Suspense fallback={null}><NodeSettingsModal /></Suspense>
+          {/* Bounty Campaign Modal */}
+          {showBountyModal && (
+            <Suspense fallback={null}>
+              <BountyModal onClose={() => setShowBountyModal(false)} />
+            </Suspense>
+          )}
           {/* Token Bar - Below TopBar */}
           <TokenBar onTokenClick={handleTokenClick} />
 
