@@ -141,6 +141,10 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
   const [liveBlockHeight, setLiveBlockHeight] = useState(blockHeight);
   const [livePeers, setLivePeers] = useState(peers);
   const [personalHashrate, setPersonalHashrate] = useState<number>(0);
+
+  // Network power + miners (polled from /api/v1/network/supply)
+  const [networkHashrate, setNetworkHashrate] = useState<number>(0);
+  const [networkMiners, setNetworkMiners] = useState<number>(0);
   const [isTorConnected, setIsTorConnected] = useState(false);
   const [torOnionUrl, setTorOnionUrl] = useState("http://ca3jpub2haxboxjw4ws6run36ekdh3pv7pneqg2tbac5rxzvxhd2i5id.onion");
   const [minerLinkCount, setMinerLinkCount] = useState(0);
@@ -518,6 +522,13 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
       if (normalizedMiner === normalizedWallet && data.avg_hash_rate) {
         setPersonalHashrate(data.avg_hash_rate);
       }
+      // Capture network-level fields if present
+      if (typeof data?.network_hashrate_hs === 'number' && data.network_hashrate_hs > 0) {
+        setNetworkHashrate(data.network_hashrate_hs);
+      }
+      if (typeof data?.total_miners === 'number' && data.total_miners > 0) {
+        setNetworkMiners(data.total_miners);
+      }
     }));
 
     // Also listen for block height from mining rewards
@@ -724,6 +735,26 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
     const interval = setInterval(fetchInbox, 60000);
     return () => clearInterval(interval);
   }, [walletAddr]);
+
+  // Network power + miners — same source as MiningDashboard (/api/v1/network/supply)
+  useEffect(() => {
+    const fetchNetworkPower = async () => {
+      try {
+        const res = await fetch('/api/v1/network/supply');
+        if (!res.ok) return;
+        const d = await res.json();
+        const data = d?.data ?? d;
+        // Only update if non-zero (don't clobber a good value with a stale 0)
+        if (typeof data?.network_hashrate === 'number' && data.network_hashrate > 0)
+          setNetworkHashrate(data.network_hashrate);
+        if (typeof data?.connected_miners === 'number' && data.connected_miners > 0)
+          setNetworkMiners(data.connected_miners);
+      } catch {}
+    };
+    fetchNetworkPower();
+    const interval = setInterval(fetchNetworkPower, 15000);
+    return () => clearInterval(interval);
+  }, []);
 
   // v3.9.2-beta: Copy wallet address to clipboard
   const copyWalletAddress = () => {
@@ -1162,38 +1193,81 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
               </motion.div>
             )}
 
+            {/* ── Network Stats Strip ─────────────────────────────────── */}
+            {/* Online dot */}
             <motion.div
-              className={`w-2 h-2 rounded-full ${isOnline ? 'bg-green-400' : 'bg-red-500'}`}
+              className={`w-2 h-2 rounded-full flex-shrink-0 ${isOnline ? 'bg-green-400' : 'bg-red-500'}`}
               animate={isOnline ? { scale: [1, 1.2, 1], opacity: [0.7, 1, 0.7] } : {}}
               transition={{ duration: 2, repeat: Infinity }}
             />
-            <div className="text-amber-100 text-sm font-medium">
-              Block #{liveBlockHeight.toLocaleString()} •{' '}
-              <motion.button
-                className="inline-flex items-center gap-1 px-2 py-0.5 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 rounded-lg transition-colors cursor-pointer"
-                onClick={() => setShowNetworkMap(true)}
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                title="Click to view P2P network map with Tor visualization"
-              >
-                <Globe className="w-3 h-3 text-amber-400" />
-                <span>{livePeers} peers</span>
-              </motion.button>
+
+            {/* Block height */}
+            <div className="flex flex-col items-center px-3 py-1 rounded-xl bg-amber-500/8 border border-amber-500/20 min-w-[72px]">
+              <span className="text-amber-100 text-sm font-bold font-mono leading-tight">#{liveBlockHeight.toLocaleString()}</span>
+              <span className="text-amber-400/50 text-[9px] font-semibold uppercase tracking-wider">Block</span>
             </div>
 
-            {/* v3.4.16-beta: Personal hashrate display — click opens miner modal */}
+            {/* Peers — clickable */}
+            <motion.button
+              onClick={() => setShowNetworkMap(true)}
+              whileHover={{ scale: 1.06 }}
+              whileTap={{ scale: 0.94 }}
+              className="flex flex-col items-center px-3 py-1 rounded-xl border transition-all min-w-[60px]"
+              style={{ background: 'rgba(251,191,36,0.06)', borderColor: 'rgba(251,191,36,0.2)' }}
+              title="View P2P network map"
+            >
+              <span className="flex items-center gap-1 text-amber-200 text-sm font-bold leading-tight">
+                <Globe className="w-3 h-3 text-amber-400" />{livePeers}
+              </span>
+              <span className="text-amber-400/50 text-[9px] font-semibold uppercase tracking-wider">Peers</span>
+            </motion.button>
+
+            {/* Network power — always visible */}
+            <motion.div
+              className="flex flex-col items-center px-3 py-1 rounded-xl min-w-[72px]"
+              style={{ background: 'rgba(139,92,246,0.1)', border: '1px solid rgba(139,92,246,0.28)' }}
+              animate={{ borderColor: networkHashrate > 0 ? 'rgba(139,92,246,0.45)' : 'rgba(139,92,246,0.2)' }}
+              title="Total Network Mining Power"
+            >
+              <span className="flex items-center gap-1 text-violet-200 text-sm font-bold leading-tight">
+                <motion.span animate={{ scale: [1, 1.15, 1] }} transition={{ duration: 1.8, repeat: Infinity }}>
+                  <Zap className="w-3 h-3 text-violet-400" />
+                </motion.span>
+                {networkHashrate > 0 ? formatHashrate(networkHashrate) : '—'}
+              </span>
+              <span className="text-violet-400/50 text-[9px] font-semibold uppercase tracking-wider">Net Power</span>
+            </motion.div>
+
+            {/* Miners count — always visible */}
+            <motion.div
+              className="flex flex-col items-center px-3 py-1 rounded-xl min-w-[60px]"
+              style={{ background: 'rgba(249,115,22,0.08)', border: '1px solid rgba(249,115,22,0.25)' }}
+              animate={{ borderColor: networkMiners > 0 ? 'rgba(249,115,22,0.4)' : 'rgba(249,115,22,0.18)' }}
+              title="Active Miners on Network"
+            >
+              <span className="flex items-center gap-1 text-orange-200 text-sm font-bold leading-tight">
+                <Pickaxe className="w-3 h-3 text-orange-400" />
+                {networkMiners > 0 ? networkMiners.toLocaleString() : '—'}
+              </span>
+              <span className="text-orange-400/50 text-[9px] font-semibold uppercase tracking-wider">Miners</span>
+            </motion.div>
+
+            {/* Personal hashrate — only when active, click to manage */}
             {personalHashrate > 0 && (
               <motion.div
-                className="flex items-center gap-1.5 px-2 py-1 bg-cyan-500/20 border border-cyan-500/40 rounded-lg cursor-pointer"
+                className="flex flex-col items-center px-3 py-1 rounded-xl cursor-pointer min-w-[72px]"
+                style={{ background: 'rgba(6,182,212,0.1)', border: '1px solid rgba(6,182,212,0.35)' }}
                 initial={{ opacity: 0, x: -10 }}
                 animate={{ opacity: 1, x: 0 }}
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
+                whileHover={{ scale: 1.06 }}
+                whileTap={{ scale: 0.94 }}
                 title="Your Personal Mining Hashrate — Click to manage miners"
                 onClick={() => setShowMinerLinkModal(true)}
               >
-                <Zap className="w-3.5 h-3.5 text-cyan-400" />
-                <span className="text-cyan-300 text-xs font-medium">{formatHashrate(personalHashrate)}</span>
+                <span className="flex items-center gap-1 text-cyan-200 text-sm font-bold leading-tight">
+                  <Zap className="w-3 h-3 text-cyan-400" />{formatHashrate(personalHashrate)}
+                </span>
+                <span className="text-cyan-400/50 text-[9px] font-semibold uppercase tracking-wider">My Power</span>
               </motion.div>
             )}
           </div>
@@ -1430,8 +1504,8 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -10, scale: 0.95 }}
             transition={{ duration: 0.15 }}
-            className="fixed top-16 right-4 w-80 bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 border-2 border-amber-500/30 rounded-2xl shadow-2xl z-[10001] overflow-hidden"
-            style={{ boxShadow: '0 0 40px rgba(212, 175, 55, 0.15)' }}
+            className="fixed right-4 w-80 bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 border-2 border-amber-500/30 rounded-2xl shadow-2xl z-[10001] overflow-hidden flex flex-col"
+            style={{ top: 'calc(var(--topbar-height, 4rem) + 4px)', maxHeight: 'calc(100vh - var(--topbar-height, 4rem) - 12px)', boxShadow: '0 0 40px rgba(212, 175, 55, 0.15)' }}
           >
             {/* Wallet Section */}
             <div className="p-4 border-b border-amber-500/20">
@@ -1441,16 +1515,25 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
                 </div>
                 <div className="flex-1 min-w-0">
                   <h3 className="text-base font-bold text-amber-100">My Wallet</h3>
-                  <div className="flex items-center gap-2">
-                    <span className="text-amber-300/60 text-xs font-mono truncate">
-                      {walletAddr ? `${walletAddr.slice(0, 12)}...${walletAddr.slice(-6)}` : 'Not connected'}
-                    </span>
-                    {walletAddr && (
-                      <button onClick={copyWalletAddress} className="text-amber-400 hover:text-amber-300 transition-colors flex-shrink-0">
-                        {copiedWallet ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-                      </button>
-                    )}
-                  </div>
+                  {/* Full-row address copy button */}
+                  {walletAddr ? (
+                    <motion.button
+                      onClick={copyWalletAddress}
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.97 }}
+                      className="mt-1 w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-slate-800/70 hover:bg-amber-500/10 border border-slate-700/50 hover:border-amber-500/40 transition-all group"
+                      title="Click to copy full address"
+                    >
+                      <span className="text-amber-300/70 text-xs font-mono truncate flex-1 text-left">
+                        {walletAddr.slice(0, 14)}…{walletAddr.slice(-8)}
+                      </span>
+                      <span className="flex-shrink-0 text-amber-400/50 group-hover:text-amber-400 transition-colors">
+                        {copiedWallet ? <Check className="w-3.5 h-3.5 text-green-400" /> : <Copy className="w-3.5 h-3.5" />}
+                      </span>
+                    </motion.button>
+                  ) : (
+                    <span className="text-slate-500 text-xs">Not connected</span>
+                  )}
                 </div>
               </div>
               <div className="flex items-center justify-between bg-slate-800/60 rounded-lg p-3">
@@ -1596,101 +1679,78 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
               </div>
             )}
 
-            {/* Quick Links */}
-            <div className="p-2">
-              <button
-                onClick={() => { onNavigate?.('transactions'); setShowProfileModal(false); }}
-                className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-slate-700/50 text-slate-300 hover:text-amber-100 transition-colors text-sm"
-              >
-                <Clock className="w-4 h-4 text-amber-400/70" />
-                <span>Transaction History</span>
-              </button>
-              <button
-                onClick={() => { onNavigate?.('dex'); setShowProfileModal(false); }}
-                className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-slate-700/50 text-slate-300 hover:text-amber-100 transition-colors text-sm"
-              >
-                <ArrowRight className="w-4 h-4 text-amber-400/70" />
-                <span>DEX Trading</span>
-              </button>
-              <button
-                onClick={() => { onNavigate?.('mining'); setShowProfileModal(false); }}
-                className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-slate-700/50 text-slate-300 hover:text-amber-100 transition-colors text-sm"
-              >
-                <Zap className="w-4 h-4 text-amber-400/70" />
-                <span>Mining</span>
-              </button>
-              <button
-                onClick={() => { setShowThemeChooser(true); setShowProfileModal(false); }}
-                className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-slate-700/50 text-slate-300 hover:text-amber-100 transition-colors text-sm"
-              >
-                <Palette className="w-4 h-4 text-purple-400/70" />
-                <span>Theme</span>
-              </button>
-              <button
-                onClick={() => { onNavigate?.('settings'); setShowProfileModal(false); }}
-                className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-slate-700/50 text-slate-300 hover:text-amber-100 transition-colors text-sm"
-              >
-                <Shield className="w-4 h-4 text-amber-400/70" />
-                <span>Settings</span>
-              </button>
-              <button
-                onClick={() => { setShowTaxModal(true); setShowProfileModal(false); }}
-                className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-slate-700/50 text-slate-300 hover:text-emerald-100 transition-colors text-sm"
-              >
-                <FileText className="w-4 h-4 text-emerald-400/70" />
-                <span>Tax Report</span>
-              </button>
+            {/* Quick Links — login-screen icon+label grid style */}
+            <div className="p-3 overflow-y-auto flex-1">
+              {/* Nav grid */}
+              <div className="grid grid-cols-3 gap-2 mb-3">
+                {[
+                  { label: 'History', icon: <Clock className="w-5 h-5" />, color: 'amber', onClick: () => { onNavigate?.('transactions'); setShowProfileModal(false); } },
+                  { label: 'DEX', icon: <ArrowRight className="w-5 h-5" />, color: 'cyan', onClick: () => { onNavigate?.('dex'); setShowProfileModal(false); } },
+                  { label: 'Mining', icon: <Zap className="w-5 h-5" />, color: 'yellow', onClick: () => { onNavigate?.('mining'); setShowProfileModal(false); } },
+                  { label: 'Theme', icon: <Palette className="w-5 h-5" />, color: 'purple', onClick: () => { setShowThemeChooser(true); setShowProfileModal(false); } },
+                  { label: 'Settings', icon: <Settings className="w-5 h-5" />, color: 'blue', onClick: () => { onNavigate?.('settings'); setShowProfileModal(false); } },
+                  { label: 'Tax', icon: <FileText className="w-5 h-5" />, color: 'emerald', onClick: () => { setShowTaxModal(true); setShowProfileModal(false); } },
+                ].map(item => {
+                  const colorMap: {[k:string]:string} = {
+                    amber: 'bg-amber-600/20 hover:bg-amber-600/40 border-amber-400/30 hover:border-amber-400/60 text-amber-400',
+                    cyan: 'bg-cyan-600/20 hover:bg-cyan-600/40 border-cyan-400/30 hover:border-cyan-400/60 text-cyan-400',
+                    yellow: 'bg-yellow-600/20 hover:bg-yellow-600/40 border-yellow-400/30 hover:border-yellow-400/60 text-yellow-400',
+                    purple: 'bg-purple-600/20 hover:bg-purple-600/40 border-purple-400/30 hover:border-purple-400/60 text-purple-400',
+                    blue: 'bg-blue-600/20 hover:bg-blue-600/40 border-blue-400/30 hover:border-blue-400/60 text-blue-400',
+                    emerald: 'bg-emerald-600/20 hover:bg-emerald-600/40 border-emerald-400/30 hover:border-emerald-400/60 text-emerald-400',
+                  };
+                  const c = colorMap[item.color] ?? '';
+                  return (
+                    <motion.button
+                      key={item.label}
+                      onClick={item.onClick}
+                      whileHover={{ scale: 1.05, y: -1 }}
+                      whileTap={{ scale: 0.95 }}
+                      className={`relative flex flex-col items-center gap-0.5 px-2 py-2.5 border rounded-xl transition-all cursor-pointer backdrop-blur-md ${c}`}
+                    >
+                      {item.icon}
+                      <span className="text-[9px] font-bold tracking-wider uppercase opacity-90">{item.label}</span>
+                    </motion.button>
+                  );
+                })}
+              </div>
 
-              {/* Subdomain Links */}
-              <div className="border-t border-slate-700/50 mt-1 pt-1">
-                <a
-                  href="https://api.quillon.xyz"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="w-full flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-slate-700/50 text-slate-400 hover:text-cyan-300 transition-colors text-sm"
-                >
-                  <Globe className="w-4 h-4 text-cyan-400/60" />
-                  <span>API Docs</span>
-                  <ExternalLink className="w-3 h-3 ml-auto opacity-40" />
-                </a>
-                <a
-                  href="https://code.quillon.xyz"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="w-full flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-slate-700/50 text-slate-400 hover:text-purple-300 transition-colors text-sm"
-                >
-                  <Code className="w-4 h-4 text-purple-400/60" />
-                  <span>Source Code</span>
-                  <ExternalLink className="w-3 h-3 ml-auto opacity-40" />
-                </a>
-                <button
-                  onClick={() => { setShowPapersLibrary(true); setShowProfileModal(false); }}
-                  className="w-full flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-slate-700/50 text-slate-400 hover:text-amber-300 transition-colors text-sm"
-                >
-                  <BookOpen className="w-4 h-4 text-amber-400/60" />
-                  <span>Research Library</span>
-                  <span className="ml-auto text-[10px] text-amber-500/50 font-mono">78</span>
-                </button>
-                <a
-                  href="https://technical-deepdive.quillon.xyz/"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="w-full flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-slate-700/50 text-slate-400 hover:text-emerald-300 transition-colors text-sm"
-                >
-                  <BookOpen className="w-4 h-4 text-emerald-400/60" />
-                  <span>Technical Deep Dive</span>
-                  <ExternalLink className="w-3 h-3 ml-auto opacity-40" />
-                </a>
-                <a
-                  href={torOnionUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="w-full flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-slate-700/50 text-slate-400 hover:text-purple-300 transition-colors text-sm"
-                >
-                  <span className="w-4 h-4 text-purple-400/60 flex items-center justify-center text-base">🧅</span>
-                  <span>Tor Hidden Service</span>
-                  <ExternalLink className="w-3 h-3 ml-auto opacity-40" />
-                </a>
+              {/* Subdomain links grid */}
+              <div className="border-t border-slate-700/50 pt-2 mb-2">
+                <p className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider px-1 mb-2">Resources</p>
+                <div className="grid grid-cols-3 gap-2">
+                  {[
+                    { label: 'API Docs', icon: <Globe className="w-5 h-5" />, color: 'cyan', href: 'https://api.quillon.xyz' },
+                    { label: 'Source', icon: <Code className="w-5 h-5" />, color: 'purple', href: 'https://code.quillon.xyz' },
+                    { label: 'Papers', icon: <BookOpen className="w-5 h-5" />, color: 'amber', onClick: () => { setShowPapersLibrary(true); setShowProfileModal(false); } },
+                    { label: 'Deep Dive', icon: <BookOpen className="w-5 h-5" />, color: 'emerald', href: 'https://technical-deepdive.quillon.xyz/' },
+                    { label: 'Tor', icon: <span className="text-xl leading-none">🧅</span>, color: 'purple', href: torOnionUrl },
+                    { label: 'Download', icon: <Download className="w-5 h-5" />, color: 'blue', onClick: () => { onNavigate?.('download'); setShowProfileModal(false); } },
+                  ].map(item => {
+                    const colorMap2: {[k:string]:string} = {
+                      amber: 'bg-amber-600/15 hover:bg-amber-600/30 border-amber-400/25 hover:border-amber-400/50 text-amber-400',
+                      cyan: 'bg-cyan-600/15 hover:bg-cyan-600/30 border-cyan-400/25 hover:border-cyan-400/50 text-cyan-400',
+                      purple: 'bg-purple-600/15 hover:bg-purple-600/30 border-purple-400/25 hover:border-purple-400/50 text-purple-400',
+                      emerald: 'bg-emerald-600/15 hover:bg-emerald-600/30 border-emerald-400/25 hover:border-emerald-400/50 text-emerald-400',
+                      blue: 'bg-blue-600/15 hover:bg-blue-600/30 border-blue-400/25 hover:border-blue-400/50 text-blue-400',
+                    };
+                    const c = colorMap2[item.color] ?? '';
+                    const Wrap = item.href ? 'a' : motion.button as any;
+                    const props = item.href
+                      ? { href: item.href, target: '_blank', rel: 'noopener noreferrer' }
+                      : { onClick: item.onClick, whileHover: { scale: 1.05, y: -1 }, whileTap: { scale: 0.95 } };
+                    return (
+                      <Wrap
+                        key={item.label}
+                        {...props}
+                        className={`flex flex-col items-center gap-0.5 px-2 py-2.5 border rounded-xl transition-all cursor-pointer backdrop-blur-md ${c}`}
+                      >
+                        {item.icon}
+                        <span className="text-[9px] font-bold tracking-wider uppercase opacity-90">{item.label}</span>
+                      </Wrap>
+                    );
+                  })}
+                </div>
               </div>
 
               {/* Social Links */}

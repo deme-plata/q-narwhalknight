@@ -2611,6 +2611,24 @@ class QNarwhalKnightAPI {
     return this.authenticatedRequest<any>('/v1/bitcoin/swaps');
   }
 
+  async createDepositAddress(params?: { amount_hint_sats?: number }): Promise<ApiResponse<{
+    btc_address: string; deposit_id: string; expires_in_secs?: number; qr_uri?: string;
+  }>> {
+    return this.authenticatedRequest<any>('/v1/bitcoin/deposit/address', {
+      method: 'POST', body: JSON.stringify(params ?? {}),
+    });
+  }
+
+  async listDeposits(): Promise<ApiResponse<{ deposits: any[]; total: number }>> {
+    return this.authenticatedRequest<any>('/v1/bitcoin/deposits');
+  }
+
+  async sendBitcoin(params: { to: string; amount_sats: number; fee_priority: string }): Promise<ApiResponse<{ txid: string }>> {
+    return this.authenticatedRequest<any>('/v1/bitcoin/send', {
+      method: 'POST', body: JSON.stringify(params),
+    });
+  }
+
   // ═══ Zcash Shielded Bridge API (v7.2.2) ═══
 
   async getZcashBridgeStatus(): Promise<ApiResponse<{

@@ -77,6 +77,7 @@ interface Transaction {
   amountOut?: string;
   tokenIn?: string;
   tokenOut?: string;
+  memo?: string;
 }
 
 interface BalanceHistoryPoint {
@@ -1079,6 +1080,7 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
                 amountOut: tx.amount_out,
                 tokenIn: tx.token_in,
                 tokenOut: tx.token_out,
+                memo: tx.memo || undefined,
               };
             });
 
@@ -2817,6 +2819,8 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
       </AnimatePresence>
 
       {activeDashboardTab === 'wallet' && <>
+      <div className="grid grid-cols-1 xl:grid-cols-[1fr_380px] gap-6 items-start">
+      <div className="flex flex-col gap-6">
       {/* Multi-Wallet Card */}
       <motion.div
         className="backdrop-blur-xl rounded-3xl p-6 relative overflow-hidden"
@@ -3158,87 +3162,69 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
         </div>
       </motion.div>
 
-      <div className="grid grid-cols-1 gap-8">
-        {/* Recent Activity */}
+      </div>{/* /left-column */}
+      {/* ── RIGHT COLUMN: Sticky live transaction history ── */}
+      <div className="flex flex-col">
         <motion.div
-          className="backdrop-blur-xl rounded-3xl p-8"
+          className="backdrop-blur-xl rounded-3xl p-5 flex flex-col"
           style={{
-            background: 'linear-gradient(135deg, rgba(15, 15, 25, 0.9) 0%, rgba(25, 25, 40, 0.9) 100%)',
+            background: 'linear-gradient(135deg, rgba(15, 15, 25, 0.92) 0%, rgba(25, 25, 40, 0.92) 100%)',
             border: '2px solid rgba(212, 175, 55, 0.2)',
-            boxShadow: '0 0 30px rgba(212, 175, 55, 0.1)'
+            boxShadow: '0 0 30px rgba(212, 175, 55, 0.1)',
+            position: 'sticky',
+            top: '1rem',
+            maxHeight: 'calc(100vh - 2rem)',
+            overflowY: 'auto'
           }}
           initial={{ opacity: 0, x: 20 }}
           animate={{ opacity: 1, x: 0 }}
           transition={{ delay: 0.3 }}
         >
-          {/* Header with Filters */}
-          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 mb-6">
-            <div className="flex items-center gap-3">
-              <Zap className="w-6 h-6 text-amber-400" />
-              <h3 className="text-xl font-semibold text-amber-100">Recent Activity</h3>
-              <span className="text-sm text-amber-300/60">
-                {filteredAndSortedTransactions.length} transaction{filteredAndSortedTransactions.length !== 1 ? 's' : ''}
-              </span>
+          {/* Header row with live indicator */}
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <Zap className="w-4 h-4 text-amber-400" />
+              <h3 className="text-sm font-semibold text-amber-100">Recent Activity</h3>
+              <span className="text-xs text-amber-300/50">{filteredAndSortedTransactions.length}</span>
             </div>
+            <div className="flex items-center gap-1.5">
+              <motion.div
+                className="w-1.5 h-1.5 rounded-full"
+                style={{ background: sseConnected ? '#10B981' : '#6B7280' }}
+                animate={sseConnected ? { scale: [1, 1.4, 1], opacity: [0.6, 1, 0.6] } : {}}
+                transition={{ duration: 2, repeat: Infinity }}
+              />
+              <span className="text-xs text-amber-300/40">{sseConnected ? 'Live' : 'Polling'}</span>
+            </div>
+          </div>
 
-            {/* Filter Controls */}
-            <div className="flex flex-wrap items-center gap-3">
-              {/* Type Filter */}
-              <div className="flex items-center gap-2 p-1 rounded-lg"
-                style={{
-                  background: 'rgba(15, 15, 25, 0.7)',
-                  border: '1px solid rgba(212, 175, 55, 0.2)'
-                }}
+          {/* Compact filter chips */}
+          <div className="flex items-center gap-1.5 mb-3 flex-wrap">
+            {(['all', 'receive', 'send', 'mining', 'swap'] as const).map((type) => (
+              <motion.button
+                key={type}
+                onClick={() => setFilterType(type)}
+                className={`px-2 py-0.5 rounded text-xs font-medium transition-all ${
+                  filterType === type ? 'text-slate-900' : 'text-amber-300/60 hover:text-amber-200'
+                }`}
+                style={filterType === type ? {
+                  background: 'linear-gradient(135deg, #D4AF37, #FFD700)',
+                } : { background: 'rgba(212,175,55,0.07)', border: '1px solid rgba(212,175,55,0.12)' }}
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
               >
-                {(['all', 'receive', 'send', 'mining', 'swap'] as const).map((type) => (
-                  <motion.button
-                    key={type}
-                    onClick={() => setFilterType(type)}
-                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
-                      filterType === type ? 'text-slate-900' : 'text-amber-300/60 hover:text-amber-200'
-                    }`}
-                    style={filterType === type ? {
-                      background: 'linear-gradient(135deg, #D4AF37, #FFD700)',
-                      boxShadow: '0 0 15px rgba(212, 175, 55, 0.3)'
-                    } : {}}
-                    whileHover={{ scale: 1.05 }}
-                    whileTap={{ scale: 0.95 }}
-                  >
-                    {type === 'all' ? 'All' : type === 'receive' ? '↓ Received' : type === 'send' ? '↑ Sent' : type === 'mining' ? '⛏️ Mining' : '⇄ Swaps'}
-                  </motion.button>
-                ))}
-              </div>
-
-              {/* Sort Controls */}
-              <div className="flex items-center gap-2">
-                <motion.button
-                  onClick={() => setSortBy(sortBy === 'date' ? 'amount' : 'date')}
-                  className="px-4 py-2 rounded-lg text-sm font-medium text-amber-100 flex items-center gap-2"
-                  style={{
-                    background: 'rgba(212, 175, 55, 0.15)',
-                    border: '1px solid rgba(212, 175, 55, 0.3)'
-                  }}
-                  whileHover={{ scale: 1.05 }}
-                  whileTap={{ scale: 0.95 }}
-                >
-                  {sortBy === 'date' ? <Calendar className="w-4 h-4" /> : <DollarSign className="w-4 h-4" />}
-                  {sortBy === 'date' ? 'Date' : 'Amount'}
-                </motion.button>
-
-                <motion.button
-                  onClick={() => setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')}
-                  className="px-3 py-2 rounded-lg text-amber-100"
-                  style={{
-                    background: 'rgba(212, 175, 55, 0.15)',
-                    border: '1px solid rgba(212, 175, 55, 0.3)'
-                  }}
-                  whileHover={{ scale: 1.05 }}
-                  whileTap={{ scale: 0.95 }}
-                >
-                  {sortOrder === 'asc' ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
-                </motion.button>
-              </div>
-            </div>
+                {type === 'all' ? 'All' : type === 'receive' ? '↓ In' : type === 'send' ? '↑ Out' : type === 'mining' ? '⛏' : '⇄'}
+              </motion.button>
+            ))}
+            <motion.button
+              onClick={() => setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')}
+              className="ml-auto px-2 py-0.5 rounded text-amber-300/50 text-xs"
+              style={{ background: 'rgba(212,175,55,0.07)', border: '1px solid rgba(212,175,55,0.12)' }}
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+            >
+              {sortOrder === 'desc' ? '↓ Newest' : '↑ Oldest'}
+            </motion.button>
           </div>
 
           {/* Transaction List */}
@@ -3296,6 +3282,11 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
                         {new Date(tx.timestamp).toLocaleString()} •
                         <span className="font-mono">{tx.txHash?.slice(0, 8) || 'N/A'}...</span>
                       </div>
+                      {tx.memo && (
+                        <div className="text-xs text-amber-200/60 mt-0.5 italic truncate max-w-[180px]">
+                          "{tx.memo}"
+                        </div>
+                      )}
                     </div>
                   </div>
                   <div
@@ -3397,7 +3388,8 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
             </div>
           )}
         </motion.div>
-      </div>
+      </div>{/* /right-column */}
+      </div>{/* /two-column-grid */}
 
       {/* Transaction Details Modal */}
       <TransactionDetailsModal

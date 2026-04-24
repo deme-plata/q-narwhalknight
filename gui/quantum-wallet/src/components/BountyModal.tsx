@@ -4,12 +4,172 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Trophy, Bug, Globe, Users, Pickaxe, Zap, X, Shield, Target, Flame,
   Gift, CheckCircle, Loader, ArrowRight, Star, Twitter, MessageCircle, Github,
+  ExternalLink, Maximize2, Minimize2,
 } from 'lucide-react';
+
+// ─── Bounty Site Iframe Modal ────────────────────────────────────────────────
+export const BountySiteModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
+  const [loaded, setLoaded] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+
+  return createPortal(
+    <AnimatePresence>
+      <motion.div
+        key="bounty-site-overlay"
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        className="fixed inset-0 z-[10002] flex items-center justify-center"
+        style={{ background: 'rgba(2,4,12,0.88)', backdropFilter: 'blur(18px)' }}
+        onClick={e => e.target === e.currentTarget && onClose()}
+      >
+        {/* Animated border container */}
+        <motion.div
+          initial={{ scale: 0.88, opacity: 0, y: 40 }}
+          animate={{ scale: 1, opacity: 1, y: 0 }}
+          exit={{ scale: 0.92, opacity: 0, y: 20 }}
+          transition={{ type: 'spring', damping: 22, stiffness: 260 }}
+          className="relative"
+          style={{
+            width: expanded ? '98vw' : 'min(920px, 92vw)',
+            height: expanded ? '96vh' : 'min(680px, 88vh)',
+            borderRadius: 22,
+            padding: 2,
+            background: 'linear-gradient(135deg, #10B981, #06B6D4, #8B5CF6, #F43F5E, #10B981)',
+            backgroundSize: '300% 300%',
+            animation: 'bountyBorderSpin 4s linear infinite',
+            boxShadow: '0 0 60px rgba(16,185,129,0.35), 0 0 120px rgba(139,92,246,0.2), 0 30px 80px rgba(0,0,0,0.7)',
+          }}
+        >
+          <style>{`
+            @keyframes bountyBorderSpin {
+              0% { background-position: 0% 50%; }
+              50% { background-position: 100% 50%; }
+              100% { background-position: 0% 50%; }
+            }
+          `}</style>
+
+          {/* Inner shell */}
+          <div
+            className="relative w-full h-full flex flex-col overflow-hidden"
+            style={{ borderRadius: 20, background: 'linear-gradient(180deg, #060c18 0%, #0a1428 100%)' }}
+          >
+            {/* Chrome bar */}
+            <div
+              className="flex items-center gap-3 px-4 py-3 flex-shrink-0"
+              style={{
+                background: 'linear-gradient(90deg, rgba(16,185,129,0.1), rgba(139,92,246,0.1))',
+                borderBottom: '1px solid rgba(255,255,255,0.07)',
+              }}
+            >
+              {/* Traffic lights */}
+              <div className="flex gap-1.5">
+                <button onClick={onClose} className="w-3 h-3 rounded-full bg-red-500 hover:bg-red-400 transition-colors" title="Close" />
+                <div className="w-3 h-3 rounded-full bg-yellow-500 opacity-60" />
+                <button onClick={() => setExpanded(e => !e)} className="w-3 h-3 rounded-full bg-green-500 hover:bg-green-400 transition-colors" title="Expand" />
+              </div>
+
+              {/* URL bar */}
+              <div
+                className="flex-1 flex items-center gap-2 px-3 py-1 rounded-lg text-xs"
+                style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)' }}
+              >
+                <Shield className="w-3 h-3 text-emerald-400 flex-shrink-0" />
+                <span className="text-gray-300 font-mono truncate">https://bounty.quillon.xyz</span>
+              </div>
+
+              {/* Controls */}
+              <div className="flex items-center gap-1">
+                <motion.button
+                  whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.92 }}
+                  onClick={() => setExpanded(e => !e)}
+                  className="p-1.5 rounded-lg text-gray-400 hover:text-white transition-colors"
+                  style={{ background: 'rgba(255,255,255,0.05)' }}
+                >
+                  {expanded ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+                </motion.button>
+                <motion.a
+                  href="https://bounty.quillon.xyz"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.92 }}
+                  className="p-1.5 rounded-lg text-gray-400 hover:text-white transition-colors"
+                  style={{ background: 'rgba(255,255,255,0.05)' }}
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </motion.a>
+                <motion.button
+                  whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.92 }}
+                  onClick={onClose}
+                  className="p-1.5 rounded-lg text-gray-400 hover:text-red-400 transition-colors ml-1"
+                  style={{ background: 'rgba(255,255,255,0.05)' }}
+                >
+                  <X className="w-3.5 h-3.5" />
+                </motion.button>
+              </div>
+            </div>
+
+            {/* Iframe + loader */}
+            <div className="relative flex-1 overflow-hidden">
+              {!loaded && (
+                <div className="absolute inset-0 flex flex-col items-center justify-center gap-4" style={{ background: '#060c18' }}>
+                  {/* Animated logo */}
+                  <motion.div
+                    animate={{ rotate: 360 }}
+                    transition={{ duration: 2, repeat: Infinity, ease: 'linear' }}
+                    className="w-14 h-14 rounded-full"
+                    style={{
+                      background: 'conic-gradient(from 0deg, #10B981, #06B6D4, #8B5CF6, #10B981)',
+                      padding: 3,
+                    }}
+                  >
+                    <div className="w-full h-full rounded-full flex items-center justify-center" style={{ background: '#060c18' }}>
+                      <Trophy className="w-6 h-6 text-emerald-400" />
+                    </div>
+                  </motion.div>
+                  <div className="text-center">
+                    <p className="text-white font-bold text-sm">Loading Bounty Portal</p>
+                    <p className="text-gray-500 text-xs mt-1">bounty.quillon.xyz</p>
+                  </div>
+                  {/* Shimmer bar */}
+                  <div className="w-48 h-1 rounded-full overflow-hidden" style={{ background: 'rgba(255,255,255,0.06)' }}>
+                    <motion.div
+                      className="h-full rounded-full"
+                      style={{ background: 'linear-gradient(90deg, #10B981, #06B6D4)' }}
+                      animate={{ x: ['-100%', '200%'] }}
+                      transition={{ duration: 1.2, repeat: Infinity, ease: 'easeInOut' }}
+                    />
+                  </div>
+                </div>
+              )}
+              <iframe
+                src="https://bounty.quillon.xyz"
+                className="w-full h-full border-0"
+                style={{ display: loaded ? 'block' : 'none', colorScheme: 'dark' }}
+                onLoad={() => setLoaded(true)}
+                title="Quillon Bounty Portal"
+                sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
+              />
+            </div>
+
+            {/* Bottom glow bar */}
+            <div
+              className="h-0.5 flex-shrink-0"
+              style={{ background: 'linear-gradient(90deg, #10B981, #06B6D4, #8B5CF6, #F43F5E, #10B981)', backgroundSize: '300% 100%', animation: 'bountyBorderSpin 3s linear infinite' }}
+            />
+          </div>
+        </motion.div>
+      </motion.div>
+    </AnimatePresence>,
+    document.body
+  );
+};
 
 const BOUNTY_REGISTER_URL = '/bounty-api/v1/testnet/register';
 
 interface BountyModalProps {
   onClose: () => void;
+  onStartEarning?: () => void;
   genieTargetRef?: React.RefObject<HTMLElement | null>;
 }
 
@@ -71,7 +231,7 @@ const Pill: React.FC<{ icon: React.ReactNode; label: string; pts: string; color:
 );
 
 // ═══════════════════════════════════════════════════════════════════════════
-export default function BountyModal({ onClose }: BountyModalProps) {
+export default function BountyModal({ onClose, onStartEarning }: BountyModalProps) {
   const walletAddress = localStorage.getItem('walletAddress') || '';
   const [address, setAddress] = useState(walletAddress);
   const [twitter, setTwitter] = useState('');
@@ -189,7 +349,14 @@ export default function BountyModal({ onClose }: BountyModalProps) {
                     </div>
                   ))}
                 </div>
-                <motion.button onClick={onClose} whileHover={{ scale: 1.04 }} whileTap={{ scale: 0.97 }} className="w-full py-2.5 rounded-xl font-bold text-sm text-white" style={{ background: 'linear-gradient(135deg, #10B981, #06B6D4)', boxShadow: '0 4px 18px rgba(16,185,129,0.3)' }}>
+                <motion.button
+                  onClick={() => { onClose(); onStartEarning?.(); }}
+                  whileHover={{ scale: 1.04 }}
+                  whileTap={{ scale: 0.97 }}
+                  className="w-full py-2.5 rounded-xl font-bold text-sm text-white flex items-center justify-center gap-2"
+                  style={{ background: 'linear-gradient(135deg, #10B981, #06B6D4)', boxShadow: '0 4px 18px rgba(16,185,129,0.3)' }}
+                >
+                  <Trophy className="w-4 h-4" />
                   Start Earning →
                 </motion.button>
               </motion.div>

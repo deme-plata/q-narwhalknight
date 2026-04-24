@@ -6,10 +6,11 @@
 //   • "Wealth Velocity" radial gauge (Times-magazine quality second visual)
 
 import { motion, AnimatePresence } from 'framer-motion';
-import { Wallet, TrendingUp, TrendingDown, ChevronUp, BarChart2 } from 'lucide-react';
+import { Wallet, TrendingUp, TrendingDown, ChevronUp, BarChart2, Maximize2, X, Activity } from 'lucide-react';
 import {
   memo, useMemo, useRef, useEffect, useState, useCallback
 } from 'react';
+import { createPortal } from 'react-dom';
 
 // ──────────────────────────────────────────────────────────────
 // Types
@@ -307,6 +308,146 @@ function drawVelocityGauge(
 }
 
 // ──────────────────────────────────────────────────────────────
+// Momentum Oscilloscope — Times Square worthy second graph
+// Shows rate-of-change as glowing vertical bars from center axis
+// ──────────────────────────────────────────────────────────────
+
+function drawMomentumOscilloscope(
+  canvas: HTMLCanvasElement,
+  data: BalanceHistoryPoint[],
+  scanOffset: number  // 0..1 animated scan line
+) {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.clientWidth || 600;
+  const H = canvas.clientHeight || 200;
+  if (canvas.width !== W * dpr || canvas.height !== H * dpr) {
+    canvas.width = W * dpr;
+    canvas.height = H * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  // Background — deep space dark
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, 'rgba(2,6,18,1)');
+  bg.addColorStop(1, 'rgba(4,10,28,1)');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+
+  // Grid lines
+  ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+  ctx.lineWidth = 1;
+  for (let i = 1; i < 4; i++) {
+    const y = (H / 4) * i;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+  for (let i = 1; i < 8; i++) {
+    const x = (W / 8) * i;
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+  }
+
+  const cy = H / 2;
+
+  // Center axis
+  ctx.strokeStyle = 'rgba(148,163,184,0.2)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath(); ctx.moveTo(0, cy); ctx.lineTo(W, cy); ctx.stroke();
+  ctx.setLineDash([]);
+
+  if (data.length < 2) {
+    // Flat line when no data
+    ctx.strokeStyle = 'rgba(148,163,184,0.3)';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(0, cy); ctx.lineTo(W, cy); ctx.stroke();
+    ctx.font = 'bold 13px monospace';
+    ctx.fillStyle = 'rgba(148,163,184,0.4)';
+    ctx.textAlign = 'center';
+    ctx.fillText('Collecting balance data...', W / 2, cy - 14);
+    return;
+  }
+
+  // Downsample to at most MAX_BARS points so individual bars remain visible
+  const MAX_BARS = Math.max(60, Math.floor(W / 3));
+  const step = Math.max(1, Math.floor((data.length - 1) / MAX_BARS));
+  const sampled: typeof data = [];
+  for (let i = 0; i < data.length; i += step) sampled.push(data[i]);
+  if (sampled[sampled.length - 1] !== data[data.length - 1]) sampled.push(data[data.length - 1]);
+
+  // Compute deltas (% change between consecutive sampled points)
+  const deltas: { x: number; pct: number; ts: number }[] = [];
+  for (let i = 1; i < sampled.length; i++) {
+    const prev = sampled[i - 1];
+    const cur = sampled[i];
+    const pct = prev.balance > 0 ? ((cur.balance - prev.balance) / prev.balance) * 100 : 0;
+    const xFrac = (i - 1) / (sampled.length - 2 || 1);
+    deltas.push({ x: xFrac * W, pct, ts: cur.timestamp });
+  }
+
+  // Max absolute delta for scaling (use reduce to avoid spread stack overflow on large arrays)
+  const maxAbs = deltas.reduce((m, d) => Math.max(m, Math.abs(d.pct)), 0.001);
+  const barW = Math.max(2, (W / deltas.length) * 0.7);
+  const halfH = cy * 0.82;
+
+  deltas.forEach(({ x, pct }) => {
+    const norm = Math.max(-1, Math.min(1, pct / maxAbs));
+    const barH = Math.abs(norm) * halfH;
+    const barY = norm >= 0 ? cy - barH : cy;
+    const alpha = 0.4 + Math.abs(norm) * 0.6;
+
+    // Glow
+    if (Math.abs(norm) > 0.05) {
+      const glowColor = norm >= 0 ? `rgba(74,222,128,${alpha * 0.35})` : `rgba(248,113,113,${alpha * 0.35})`;
+      ctx.shadowColor = norm >= 0 ? '#4ade80' : '#f87171';
+      ctx.shadowBlur = 8 + Math.abs(norm) * 12;
+      ctx.fillStyle = glowColor;
+      ctx.fillRect(x - barW / 2 - 3, barY - 2, barW + 6, barH + 4);
+      ctx.shadowBlur = 0;
+    }
+
+    // Bar
+    const grad = ctx.createLinearGradient(0, barY, 0, barY + (norm >= 0 ? -barH : barH));
+    if (norm >= 0) {
+      grad.addColorStop(0, `rgba(74,222,128,${alpha})`);
+      grad.addColorStop(1, `rgba(16,185,129,${alpha * 0.6})`);
+    } else {
+      grad.addColorStop(0, `rgba(248,113,113,${alpha * 0.6})`);
+      grad.addColorStop(1, `rgba(239,68,68,${alpha})`);
+    }
+    ctx.fillStyle = grad;
+    ctx.fillRect(x - barW / 2, norm >= 0 ? cy - barH : cy, barW, barH);
+  });
+
+  // Animated scan line
+  const scanX = scanOffset * W;
+  const scanGrad = ctx.createLinearGradient(scanX - 60, 0, scanX + 20, 0);
+  scanGrad.addColorStop(0, 'rgba(212,175,55,0)');
+  scanGrad.addColorStop(0.7, 'rgba(212,175,55,0.15)');
+  scanGrad.addColorStop(1, 'rgba(212,175,55,0.6)');
+  ctx.fillStyle = scanGrad;
+  ctx.fillRect(scanX - 60, 0, 80, H);
+
+  ctx.strokeStyle = 'rgba(212,175,55,0.8)';
+  ctx.lineWidth = 1.5;
+  ctx.shadowColor = '#d4af37';
+  ctx.shadowBlur = 6;
+  ctx.beginPath(); ctx.moveTo(scanX, 0); ctx.lineTo(scanX, H); ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // Labels
+  ctx.font = `bold 10px monospace`;
+  ctx.fillStyle = 'rgba(74,222,128,0.6)';
+  ctx.textAlign = 'left';
+  ctx.fillText(`+${maxAbs.toFixed(3)}%`, 6, 14);
+  ctx.fillStyle = 'rgba(248,113,113,0.6)';
+  ctx.fillText(`-${maxAbs.toFixed(3)}%`, 6, H - 5);
+  ctx.fillStyle = 'rgba(148,163,184,0.3)';
+  ctx.fillText('MOMENTUM OSCILLOSCOPE', W / 2 - 80, H - 5);
+}
+
+// ──────────────────────────────────────────────────────────────
 // WalletCardWithGraph
 // ──────────────────────────────────────────────────────────────
 
@@ -322,12 +463,22 @@ const WalletCardWithGraph = memo(function WalletCardWithGraph({
   const stableRef = useRef(wallet.balance);
   const [horizon, setHorizon] = useState<Horizon>('24H');
   const [showGauge, setShowGauge] = useState(false);
+  const [showModal, setShowModal] = useState(false);
+  const [modalHorizon, setModalHorizon] = useState<Horizon>('24H');
+  const [modalShowGauge, setModalShowGauge] = useState(false);
+  const scanOffsetRef = useRef(0);
 
   const sparkRef = useRef<HTMLCanvasElement>(null);
   const gaugeRef = useRef<HTMLCanvasElement>(null);
+  const modalSparkRef = useRef<HTMLCanvasElement>(null);
+  const modalGaugeRef = useRef<HTMLCanvasElement>(null);
+  const oscilloRef = useRef<HTMLCanvasElement>(null);
   const sparkAnimRef = useRef<number>(0);
   const gaugeAnimRef = useRef<number>(0);
+  const modalAnimRef = useRef<number>(0);
+  const oscilloAnimRef = useRef<number>(0);
   const mouseXRef = useRef<number | null>(null);
+  const modalMouseXRef = useRef<number | null>(null);
 
   // Stable balance debounce
   useEffect(() => {
@@ -379,10 +530,67 @@ const WalletCardWithGraph = memo(function WalletCardWithGraph({
     }
   }, [showGauge, wallet.history, stableBalance]);
 
+  // Modal filtered data
+  const modalFilteredData = useMemo(() => {
+    const raw = wallet.history ?? [];
+    return filterByHorizon(raw, modalHorizon);
+  }, [wallet.history, modalHorizon]);
+
+  const { trend: modalTrend, pctChange: modalPctChange } = useMemo(() => {
+    if (modalFilteredData.length < 2) return { trend: 0, pctChange: 0 };
+    const first = modalFilteredData[0].balance;
+    const last = modalFilteredData[modalFilteredData.length - 1].balance;
+    const pct = first > 0 ? ((last - first) / first) * 100 : 0;
+    return { trend: last >= first ? 1 : -1, pctChange: pct };
+  }, [modalFilteredData]);
+  const modalPositive = modalTrend >= 0;
+
+  // Modal sparkline loop
+  const drawModalSpark = useCallback(() => {
+    if (modalSparkRef.current) {
+      drawSparkline(modalSparkRef.current, modalFilteredData, modalMouseXRef.current, modalPositive);
+    }
+    modalAnimRef.current = requestAnimationFrame(drawModalSpark);
+  }, [modalFilteredData, modalPositive]);
+
+  // Oscilloscope loop
+  const drawOscillo = useCallback(() => {
+    scanOffsetRef.current = (scanOffsetRef.current + 0.002) % 1;
+    if (oscilloRef.current) {
+      drawMomentumOscilloscope(oscilloRef.current, wallet.history ?? [], scanOffsetRef.current);
+    }
+    oscilloAnimRef.current = requestAnimationFrame(drawOscillo);
+  }, [wallet.history]);
+
+  useEffect(() => {
+    if (showModal) {
+      modalAnimRef.current = requestAnimationFrame(drawModalSpark);
+      oscilloAnimRef.current = requestAnimationFrame(drawOscillo);
+      if (modalShowGauge && modalGaugeRef.current) {
+        drawVelocityGauge(modalGaugeRef.current, wallet.history ?? [], stableBalance);
+      }
+    }
+    return () => {
+      if (modalAnimRef.current) cancelAnimationFrame(modalAnimRef.current);
+      if (oscilloAnimRef.current) cancelAnimationFrame(oscilloAnimRef.current);
+    };
+  }, [showModal, drawModalSpark, drawOscillo, modalShowGauge, wallet.history, stableBalance]);
+
+  useEffect(() => {
+    if (!showModal) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setShowModal(false); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [showModal]);
+
   const handleCanvasMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     mouseXRef.current = e.clientX - e.currentTarget.getBoundingClientRect().left;
   }, []);
   const handleCanvasMouseLeave = useCallback(() => { mouseXRef.current = null; }, []);
+  const handleModalMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    modalMouseXRef.current = e.clientX - e.currentTarget.getBoundingClientRect().left;
+  }, []);
+  const handleModalMouseLeave = useCallback(() => { modalMouseXRef.current = null; }, []);
 
   return (
     <motion.div
@@ -499,6 +707,13 @@ const WalletCardWithGraph = memo(function WalletCardWithGraph({
               >
                 <BarChart2 className="w-3 h-3" />
               </button>
+              <button
+                onClick={() => setShowModal(true)}
+                title="Expand chart"
+                className="p-1 rounded transition-all text-amber-500/70 hover:text-amber-400 hover:bg-amber-400/10 border border-amber-500/20 hover:border-amber-400/40"
+              >
+                <Maximize2 className="w-3.5 h-3.5" />
+              </button>
             </div>
           </div>
 
@@ -598,6 +813,190 @@ const WalletCardWithGraph = memo(function WalletCardWithGraph({
         animate={{ x: ['-100%', '200%'] }}
         transition={{ duration: 1.5, repeat: Infinity, repeatDelay: 2 }}
       />
+
+      {/* ── Expanded Chart Modal ── */}
+      {showModal && createPortal(
+        <AnimatePresence>
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            style={{ position: 'fixed', inset: 0, zIndex: 99999, overflowY: 'auto', background: 'rgba(2,4,16,0.92)' }}
+            onClick={() => setShowModal(false)}
+          >
+            <div className="flex min-h-full items-center justify-center p-3 sm:p-6">
+              <motion.div
+                initial={{ scale: 0.93, opacity: 0, y: 24 }}
+                animate={{ scale: 1, opacity: 1, y: 0 }}
+                exit={{ scale: 0.93, opacity: 0 }}
+                transition={{ type: 'spring', stiffness: 280, damping: 26 }}
+                className="w-full max-w-4xl rounded-2xl overflow-hidden"
+                style={{
+                  background: 'linear-gradient(145deg, rgba(10,12,30,0.98), rgba(18,20,50,0.98))',
+                  border: '1.5px solid rgba(212,175,55,0.25)',
+                  boxShadow: '0 0 80px rgba(212,175,55,0.12), 0 40px 80px rgba(0,0,0,0.7)',
+                }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                {/* Modal header */}
+                <div className="flex items-center justify-between px-5 py-4 border-b border-white/[0.06]">
+                  <div className="flex items-center gap-3">
+                    <div className={`p-2 rounded-lg bg-gradient-to-br ${wallet.color}`}>
+                      <Wallet className="w-4 h-4 text-white" />
+                    </div>
+                    <div>
+                      <div className="text-white font-bold text-lg leading-none">{wallet.symbol}</div>
+                      <div className="text-gray-500 text-xs mt-0.5">{wallet.name}</div>
+                    </div>
+                    <div className="ml-3 pl-3 border-l border-white/10">
+                      <div className="text-2xl font-bold text-white">{fmtBalance(stableBalance, wallet.symbol)}</div>
+                      {wallet.usdValue !== undefined && (
+                        <div className="text-xs text-gray-400">≈ ${wallet.usdValue.toFixed(2)} USD</div>
+                      )}
+                    </div>
+                    {modalFilteredData.length >= 2 && (
+                      <span className={`ml-2 flex items-center gap-1 text-sm font-bold px-2.5 py-1 rounded-full ${
+                        modalPositive ? 'bg-green-500/15 text-green-400' : 'bg-red-500/15 text-red-400'
+                      }`}>
+                        {modalPositive ? <TrendingUp className="w-3.5 h-3.5" /> : <TrendingDown className="w-3.5 h-3.5" />}
+                        {modalPctChange >= 0 ? '+' : ''}{modalPctChange.toFixed(2)}%
+                      </span>
+                    )}
+                  </div>
+                  <button onClick={() => setShowModal(false)} className="p-2 rounded-lg hover:bg-white/10 text-gray-400 hover:text-white transition-colors">
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                <div className="p-5 space-y-5">
+                  {/* Controls row */}
+                  <div className="flex items-center justify-between">
+                    <div className="flex gap-1.5">
+                      {HORIZONS.map((h) => (
+                        <button
+                          key={h}
+                          onClick={() => setModalHorizon(h)}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-mono font-bold transition-all ${
+                            modalHorizon === h
+                              ? (modalPositive
+                                  ? 'bg-green-500/20 text-green-400 border border-green-500/40'
+                                  : 'bg-red-500/20 text-red-400 border border-red-500/40')
+                              : 'text-gray-500 hover:text-gray-300 hover:bg-white/5 border border-transparent'
+                          }`}
+                        >
+                          {h}
+                        </button>
+                      ))}
+                    </div>
+                    <button
+                      onClick={() => setModalShowGauge((v) => !v)}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all border ${
+                        modalShowGauge
+                          ? 'bg-yellow-500/15 text-yellow-400 border-yellow-500/30'
+                          : 'text-gray-500 hover:text-gray-300 border-white/10 hover:border-white/20'
+                      }`}
+                    >
+                      <BarChart2 className="w-3.5 h-3.5" />
+                      Wealth Gauge
+                    </button>
+                  </div>
+
+                  {/* Big sparkline or gauge */}
+                  <AnimatePresence mode="wait">
+                    {!modalShowGauge ? (
+                      <motion.div
+                        key="modal-spark"
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        className="relative rounded-xl overflow-hidden"
+                        style={{ height: 240, background: 'rgba(255,255,255,0.015)' }}
+                      >
+                        <canvas
+                          ref={modalSparkRef}
+                          className="w-full h-full"
+                          onMouseMove={handleModalMouseMove}
+                          onMouseLeave={handleModalMouseLeave}
+                        />
+                        {modalFilteredData.length >= 2 && (() => {
+                          const vals = modalFilteredData.map((d) => d.balance);
+                          const mn = Math.min(...vals);
+                          const mx = Math.max(...vals);
+                          const oldest = modalFilteredData[0];
+                          const newest = modalFilteredData[modalFilteredData.length - 1];
+                          return (
+                            <>
+                              <span className="absolute top-2 left-3 text-[10px] text-gray-500 font-mono">{fmtBalance(mx, wallet.symbol)}</span>
+                              <span className="absolute bottom-2 left-3 text-[10px] text-gray-500 font-mono">{fmtBalance(mn, wallet.symbol)}</span>
+                              <span className="absolute bottom-2 left-1/2 -translate-x-1/2 text-[10px] text-gray-600 font-mono">
+                                {new Date(oldest.timestamp).toLocaleTimeString()} → {new Date(newest.timestamp).toLocaleTimeString()}
+                              </span>
+                              <span className="absolute top-2 right-3 text-[10px] text-gray-600 font-mono">{modalFilteredData.length} points</span>
+                            </>
+                          );
+                        })()}
+                      </motion.div>
+                    ) : (
+                      <motion.div
+                        key="modal-gauge"
+                        initial={{ opacity: 0, scale: 0.9 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0, scale: 0.9 }}
+                        className="flex items-center justify-center gap-8 rounded-xl py-6"
+                        style={{ background: 'rgba(255,255,255,0.015)', height: 240 }}
+                      >
+                        <canvas ref={modalGaugeRef} style={{ width: 180, height: 180 }} />
+                        <div className="grid grid-cols-2 gap-4 text-sm font-mono">
+                          {[
+                            { label: 'ATH', value: fmtBalance(wallet.history && wallet.history.length > 0 ? wallet.history.reduce((m, d) => Math.max(m, d.balance), stableBalance) : stableBalance, wallet.symbol), color: 'text-yellow-400' },
+                            { label: 'Current', value: fmtBalance(stableBalance, wallet.symbol), color: 'text-white' },
+                            { label: `Change ${modalHorizon}`, value: `${modalPctChange >= 0 ? '+' : ''}${modalPctChange.toFixed(3)}%`, color: modalPositive ? 'text-green-400' : 'text-red-400' },
+                            { label: 'Data Points', value: `${modalFilteredData.length}`, color: 'text-gray-300' },
+                            { label: 'Window', value: modalHorizon, color: 'text-amber-400' },
+                            { label: 'Symbol', value: wallet.symbol, color: 'text-gray-300' },
+                          ].map(({ label, value, color }) => (
+                            <div key={label}>
+                              <div className="text-gray-600 text-[10px] uppercase tracking-widest mb-0.5">{label}</div>
+                              <div className={`${color} font-bold`}>{value}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+
+                  {/* Stats row */}
+                  <div className="grid grid-cols-4 gap-3">
+                    {[
+                      { label: 'ALL-TIME HIGH', value: fmtBalance(wallet.history && wallet.history.length > 0 ? wallet.history.reduce((m, d) => Math.max(m, d.balance), stableBalance) : stableBalance, wallet.symbol), color: 'text-yellow-400', sub: 'from history' },
+                      { label: `CHANGE ${modalHorizon}`, value: `${modalPctChange >= 0 ? '+' : ''}${modalPctChange.toFixed(3)}%`, color: modalPositive ? 'text-green-400' : 'text-red-400', sub: modalPositive ? 'growing' : 'declining' },
+                      { label: 'DATA POINTS', value: `${(wallet.history ?? []).length}`, color: 'text-cyan-400', sub: 'stored history' },
+                      { label: 'USD VALUE', value: wallet.usdValue !== undefined ? `$${wallet.usdValue.toFixed(2)}` : '—', color: 'text-emerald-400', sub: 'estimated' },
+                    ].map(({ label, value, color, sub }) => (
+                      <div key={label} className="rounded-xl p-3" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)' }}>
+                        <div className="text-[9px] text-gray-600 uppercase tracking-widest mb-1">{label}</div>
+                        <div className={`text-base font-bold font-mono ${color}`}>{value}</div>
+                        <div className="text-[9px] text-gray-700 mt-0.5">{sub}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Times Square Oscilloscope */}
+                  <div className="rounded-xl overflow-hidden" style={{ border: '1px solid rgba(212,175,55,0.12)' }}>
+                    <div className="flex items-center gap-2 px-4 py-2.5 border-b" style={{ borderColor: 'rgba(255,255,255,0.05)', background: 'rgba(212,175,55,0.04)' }}>
+                      <Activity className="w-3.5 h-3.5 text-amber-400" />
+                      <span className="text-[10px] font-bold text-amber-400/80 uppercase tracking-widest">Momentum Oscilloscope</span>
+                      <span className="text-[9px] text-gray-700 ml-2">Rate of change between consecutive balance snapshots</span>
+                    </div>
+                    <canvas ref={oscilloRef} className="w-full" style={{ height: 160 }} />
+                  </div>
+                </div>
+              </motion.div>
+            </div>
+          </motion.div>
+        </AnimatePresence>,
+        document.getElementById('modal-root') ?? document.body
+      )}
     </motion.div>
   );
 });

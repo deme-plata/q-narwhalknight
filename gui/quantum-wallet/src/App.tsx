@@ -29,6 +29,9 @@ const DeployControlPanel = lazy(() => import('./components/DeployControlPanel'))
 const NodeSettingsModal = lazy(() => import('./components/NodeSettingsModal'));
 const AIWheelButton = lazy(() => import('./components/AIWheelButton'));
 const BountyModal = lazy(() => import('./components/BountyModal'));
+const BountySiteModal = lazy(() => import('./components/BountyModal').then(m => ({ default: m.BountySiteModal })));
+const MapScreen = lazy(() => import('./components/MapScreen'));
+const BankScreen = lazy(() => import('./components/BankScreen'));
 
 // Loading spinner for lazy-loaded screen transitions
 const LoadingSpinner = () => (
@@ -72,7 +75,7 @@ function safeCacheBalance(balance: number): void {
   }
 }
 
-type Screen = 'dashboard' | 'transactions' | 'explorer' | 'dex' | 'mining' | 'vm' | 'rwamarket' | 'gameitems' | 'download' | 'aichat' | 'email' | 'analytics' | 'settings';
+type Screen = 'dashboard' | 'transactions' | 'explorer' | 'dex' | 'mining' | 'vm' | 'rwamarket' | 'gameitems' | 'download' | 'aichat' | 'email' | 'analytics' | 'settings' | 'map' | 'bank';
 
 function App() {
   console.log('🚀 App function executing - TOP OF FUNCTION');
@@ -182,6 +185,7 @@ function App() {
 
   // Bounty modal — opened by TopBar/GlobalTopBar button via custom event
   const [showBountyModal, setShowBountyModal] = useState(false);
+  const [showBountySite, setShowBountySite] = useState(false);
   useEffect(() => {
     const handler = () => setShowBountyModal(true);
     window.addEventListener('open-bounty-modal', handler);
@@ -822,7 +826,16 @@ function App() {
           {/* Bounty Campaign Modal */}
           {showBountyModal && (
             <Suspense fallback={null}>
-              <BountyModal onClose={() => setShowBountyModal(false)} />
+              <BountyModal
+                onClose={() => setShowBountyModal(false)}
+                onStartEarning={() => setShowBountySite(true)}
+              />
+            </Suspense>
+          )}
+          {/* Bounty Site Modal — rendered at top level above all other modals */}
+          {showBountySite && (
+            <Suspense fallback={null}>
+              <BountySiteModal onClose={() => setShowBountySite(false)} />
             </Suspense>
           )}
           {/* Token Bar - Below TopBar */}
@@ -855,6 +868,8 @@ function App() {
                 {currentScreen === 'explorer' && <ExplorerScreen />}
                 {currentScreen === 'mining' && <MiningScreen />}
                 {currentScreen === 'vm' && <VittuaVMScreen />}
+                {currentScreen === 'map' && <MapScreen />}
+                {currentScreen === 'bank' && <BankScreen />}
                 {currentScreen === 'rwamarket' && <RwaMarketplaceScreen />}
                 {currentScreen === 'gameitems' && <GameItemsScreen />}
                 {currentScreen === 'email' && <EmailScreen />}
