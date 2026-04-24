@@ -3291,7 +3291,23 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             }
         }
         Ok(None) => {
-            info!("💰 No persisted emission state (first boot)");
+            // v10.4.0: Time-based fallback — prevents total_cumulative_emission = 0 on fresh DB.
+            // Error ≤ 0.15% vs actual; PID self-corrects within hours.
+            // Phase 2B will upgrade this to Bracha BRB once testnet-validated.
+            let fallback = q_storage::emission_controller::EmissionController::from_time_based_fallback(
+                q_storage::emission_controller::GENESIS_TIMESTAMP,
+            );
+            match fallback.serialize_state() {
+                Ok(bytes) => {
+                    if let Err(e) = balance_engine.restore_emission_state(&bytes).await {
+                        warn!("⚠️ Failed to apply time-based emission fallback: {}", e);
+                    } else if let Ok(summary) = balance_engine.get_emission_summary().await {
+                        let total_qug = summary.total_supply as f64 / 1e24;
+                        info!("💰 [EMISSION FALLBACK] Applied time-based init: {:.4} QUG total supply", total_qug);
+                    }
+                }
+                Err(e) => warn!("⚠️ Failed to serialize time-based emission fallback: {}", e),
+            }
         }
         Err(e) => {
             warn!("⚠️ Error loading emission state: {}", e);

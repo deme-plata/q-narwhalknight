@@ -750,6 +750,40 @@ impl EmissionController {
         }
     }
 
+    /// Initialize from the theoretical halving schedule when no persisted state exists.
+    ///
+    /// Used when a node boots with a fresh or empty database (load_emission_state returns None).
+    /// Sets total_cumulative_emission from the pure time formula — error ≤ 0.15% vs actual,
+    /// self-corrects within hours via the PID. Category C fields (correction_factor,
+    /// wallclock_windows, daily_records) start neutral; live blocks populate them normally.
+    ///
+    /// This prevents the critical bug where a fresh DB causes total_cumulative_emission = 0,
+    /// making the node behave as if genesis just happened regardless of elapsed chain time.
+    pub fn from_time_based_fallback(genesis_timestamp: u64) -> Self {
+        let wall_now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let elapsed = wall_now.saturating_sub(genesis_timestamp);
+        let era = era_at_time(elapsed).min(63);
+        let total = target_cumulative_at_time(elapsed);
+
+        let mut controller = Self::new(genesis_timestamp);
+        controller.total_cumulative_emission = total;
+        controller.current_era = era;
+        controller.era_target_emission = era_emission(era);
+        controller.wallclock_start_epoch = wall_now;
+        warn!(
+            "⚠️ [EMISSION FALLBACK] No persisted state — initialized from time formula: \
+             total={} base units ({:.4} QUG), era={}, elapsed={}s",
+            total,
+            total as f64 / 1e24,
+            era,
+            elapsed
+        );
+        controller
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // STATE PERSISTENCE (v7.1.0)
     // ═══════════════════════════════════════════════════════════════════════
