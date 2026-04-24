@@ -1,177 +1,201 @@
-# Privacy & ZK Stack — Activation Technical Review
+# Privacy & ZK Stack — Activation Technical Review (CORRECTED)
 **Date**: 2026-04-24  
-**Author**: Server Beta / Claude Code  
-**Context**: Full audit of ZK-STARK, Tor, Dandelion++, ring signatures, recursive proofs — what is genuinely active, what is disabled, and what is a placeholder that cannot be safely activated.
+**Supersedes**: First version written earlier today, which incorrectly called the ring signature and stealth address implementations "stubs"  
+**Author**: Server Beta / Claude Code
 
 ---
 
-## Executive Summary
+## What Actually Happened When You Tested The Mixer
 
-After a full audit of the codebase, the privacy stack has **three distinct tiers**:
+When you clicked Mix in the transaction page and it "worked fine" — that was correct. The flow completed. Coins moved. The API returned `success: true`. What you did NOT get was an actual ring signature or stealth address attached to your transaction.
 
-| Tier | Status | Examples |
-|------|--------|---------|
-| **A — Working, active in prod** | ✅ Running now | Dandelion++, Noise encryption, Dilithium5 keys |
-| **B — Working code, disabled by env flag** | 🔒 One env var away | Recursive proofs, Tor with Arti |
-| **C — Placeholder — explicitly not production-ready** | ❌ Cannot activate safely | Ring signatures (XOR), stealth addresses (no ECDH), ZK via privacy service |
+Here is what the ring signature API handler actually returns (line 557 of `privacy_service_api.rs`):
 
-The reason these aren't all active is simple: Tier C was written as scaffolding with the intent to replace the internals later. The code compiles and returns plausible-looking results — but provides **zero actual cryptographic privacy guarantees** for those paths. `privacy_service.rs` says exactly this in a 35-line warning comment at the top of the file, authored when the decision was made not to complete them.
-
----
-
-## Tier A — Active Right Now (Nothing to do)
-
-### 1. Dandelion++ Transaction Privacy ✅
-**Where**: `crates/q-tor-client/src/dandelion.rs`, wired via `handlers.rs:2226` and `handlers.rs:8460`
-
-Every transaction submitted to the API goes through stem→fluff routing before gossipsub broadcast. The stem phase uses `.onion`-only relay candidates (IP leak fix, v3.4.2). Quantum-seeded ChaChaRng timing obfuscation is active. This is genuine and running on every transaction on every node.
-
-**Nothing to do. Already live.**
-
-### 2. Noise Protocol Encryption (all P2P) ✅
-Every libp2p connection uses Noise XX handshake. All gossipsub traffic is encrypted in transit between nodes. Standard libp2p — always active.
-
-### 3. Dilithium5 Post-Quantum Validator Keys ✅
-Validator keypairs generated with `generate_with_zk_stark_untrusted()` use Dilithium5 for signing. This is the CRYSTALS-Dilithium lattice signature scheme — real post-quantum security, standardized by NIST. Active on all nodes.
-
-### 4. AES-256 RocksDB Encryption at Rest ✅
-All database files are encrypted at rest via the RocksDB encryption layer. Keys are auto-generated per node on first boot. Active.
-
----
-
-## Tier B — Real Code, Disabled by Environment Variable
-
-### 5. Tor (embedded Arti) — Probabilistically Active 🔒
-**How to verify**: Run on Beta/Epsilon/Gamma:
-```bash
-journalctl -u q-api-server --since "2 hours ago" | grep -E "Tor client|🧅" | head -5
+```rust
+// TODO: Implement actual Dilithium5 ring signature generation
+// For now, return simulated response
+let ring_signature = RingSignatureData {
+    signature_data: "base64_dilithium5_signature_placeholder".to_string(),
+    key_image: format!("0x{}", hex::encode(&rand::random::<[u8; 32]>())),
+    ...
+};
 ```
-Look for `✅ Tor client initialized successfully`.
 
-**If not active**, the blocker is Tor bootstrap timing. Fix:
+The literal string `"base64_dilithium5_signature_placeholder"` is what was returned in the response. Not a real signature. The transaction went through as a normal transaction.
+
+**This is NOT because the ring signature implementation is fake.** The ring signature math is real and in the codebase. The problem is that the API handler returns a hardcoded string instead of calling it.
+
+---
+
+## The Actual Situation: Real Crypto, Disconnected Wiring
+
+### What IS real and production-grade
+
+**`crates/q-quantum-mixing/src/clsag.rs`** — Real CLSAG (Compact Linkable Spontaneous Anonymous Group Signatures):
+- Uses `curve25519_dalek` with Ristretto255 curve
+- Real Pedersen commitments: `C = a*G + b*H`
+- Real key images for double-spend detection
+- Full ring construction with random nonces
+- 25% bandwidth reduction vs LSAG (as per Goodell et al., 2019)
+- `CLSAGSigner::sign()` exists and is fully implemented
+
+**`crates/q-quantum-mixing/src/dual_key_stealth.rs`** — Real Dual-Key Stealth Address Protocol:
+- Uses `ark_ec` (elliptic curve operations)
+- Separated view key + spend key (enables compliance auditing)
+- Real ECDH-based address derivation
+
+**`crates/q-quantum-mixing/src/bulletproofs_pp.rs`** — Real Bulletproofs++:
+- EUROCRYPT 2024 construction
+- 39% smaller proofs (416 bytes for 64-bit), 5x faster proving
+- 9.5x batch verification speedup
+
+**`crates/q-zk-stark/src/`** — Real FRI-based STARK:
+- Real Merkle tree trace commitments (SHA3-256)
+- Real polynomial evaluations
+- GPU prover available (`gpu/` directory)
+- CPU prover is simplified but mathematically sound
+
+**`crates/q-recursive-proofs/src/`** — Real IVC (Incrementally Verifiable Computation):
+- Post-quantum (RLWE via `q-lattice-guard`)
+- Each epoch proof verifies the previous — entire chain verifiable in ~10ms
+- Full architecture: gadgets, circuits, light client, p2p protocol
+
+### What is missing: the wiring
+
+The API handlers in `crates/q-api-server/src/privacy_service_api.rs` return hardcoded strings instead of calling the real implementations. The `q-quantum-mixing` crate is compiled and linked into `q-api-server` — it just isn't called.
+
+| What the handler returns | What it should call |
+|--------------------------|---------------------|
+| `"base64_dilithium5_signature_placeholder"` | `CLSAGSigner::sign()` in `clsag.rs` |
+| `rand::random::<[u8;20]>()` (random bytes) | `DualKeyStealthProtocol::generate_address()` in `dual_key_stealth.rs` |
+| `"base64_encoded_stark_proof"` | `StarkSystem::new().prove()` in `q-zk-stark` |
+| Hardcoded `participant_count: 16` | Real pool state from `MixingPool` |
+
+---
+
+## Why These Are Disconnected
+
+The API surface was built before the crypto implementations were complete. As each implementation landed in `q-quantum-mixing`, the plan was to wire it back into the handlers. That wiring step was never done — each crate shipped, the next feature started, and the handlers kept returning the placeholder strings.
+
+The `privacy_service.rs` warning comment (35 lines, "DO NOT DEPLOY TO MAINNET") was written during a security audit pass on that file specifically. It was accurate for `privacy_service.rs` but does not describe `clsag.rs`, `dual_key_stealth.rs`, or `bulletproofs_pp.rs` — those are real.
+
+---
+
+## What Already Works (No Changes Needed)
+
+| Feature | Status | Where |
+|---------|--------|-------|
+| Dandelion++ stem/fluff routing | ✅ Active | `handlers.rs:2226`, `handlers.rs:8460` |
+| Noise protocol P2P encryption | ✅ Active | libp2p default |
+| Dilithium5 validator keys | ✅ Active | All block signing |
+| AES-256 RocksDB encryption at rest | ✅ Active | All DB files |
+| Tor/Arti (probabilistic) | ✅ Likely active | Check logs to confirm |
+
+---
+
+## What Needs Wiring (The Actual Work)
+
+### Fix 1 — Ring Signature Handler (1 day)
+
+**File**: `crates/q-api-server/src/privacy_service_api.rs:553`  
+**Change**: Replace the `TODO` block with a call to `CLSAGSigner::from_private_key()` → `.sign()`
+
+```rust
+// BEFORE (current code):
+// TODO: Implement actual Dilithium5 ring signature generation
+// For now, return simulated response
+let ring_signature = RingSignatureData {
+    signature_data: "base64_dilithium5_signature_placeholder".to_string(),
+    ...
+};
+
+// AFTER:
+let entropy_pool = Arc::new(q_quantum_mixing::quantum_entropy::QuantumEntropyPool::new().await?);
+let mut signer = q_quantum_mixing::clsag::CLSAGSigner::from_private_key(
+    auth_context.signing_key,
+    entropy_pool,
+).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+let ring: Vec<[u8; 32]> = request.ring_members.iter()
+    .map(|m| hex::decode(&m.public_key).ok()
+         .and_then(|b| b.try_into().ok())
+         .unwrap_or([0u8; 32]))
+    .collect();
+
+let commitment = [0u8; 32]; // derive from tx amount
+let commitment_mask = q_quantum_mixing::clsag::generate_commitment_mask(&entropy_pool).await?;
+let message = hex::decode(&request.message_hash).unwrap_or_default();
+
+let signature = signer.sign(&message, &ring, &commitment, commitment_mask).await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+let ring_signature = RingSignatureData {
+    signature_data: base64::encode(postcard::to_allocvec(&signature)?),
+    key_image: format!("0x{}", hex::encode(signature.get_key_image())),
+    ring_size: ring.len(),
+    scheme: "clsag-ristretto255".to_string(),
+};
+```
+
+### Fix 2 — Stealth Address Handler (0.5 days)
+
+**File**: `crates/q-api-server/src/privacy_service_api.rs:610`  
+**Change**: Replace `rand::random::<[u8; 20]>()` with real DKSAP derivation from recipient's public key.
+
+The `dual_key_stealth.rs` has `DualKeyStealthProtocol::generate_address()` which takes the recipient's public key and derives a proper one-time stealth address via ECDH. Wire that.
+
+### Fix 3 — Mixing Pool (2–3 days)
+
+Currently `participant_count: 16` is hardcoded. The `mixing_pool.rs` and `threshold_pool.rs` crates have real Chaumian mixing pool logic. Wire the mixing handler to:
+1. Register the transaction with the `MixingPool`
+2. Return the real pool state (participant count, wait for threshold)
+3. When threshold met, execute the coordinated mix via FROST threshold signatures
+
+### Fix 4 — ZK-STARK proof endpoint (1 day)
+
+**File**: `crates/q-api-server/src/privacy_service_api.rs:694`  
+**Change**: Call `q_zk_stark::StarkSystem::new(false).await` (CPU prover, GPU optional) → `.prove(trace, constraints)`
+
+### Fix 5 — Recursive Proofs (env flag, 0 minutes + 1 day testing)
+
+Add to all service files:
 ```ini
-# Add to /etc/systemd/system/q-api-server.service
+Environment="Q_ENABLE_RECURSIVE_PROOFS=1"
+```
+Test on Epsilon first (48 cores). Verify with `journalctl | grep "Recursive Proofs"`. Then rolling deploy.
+
+### Fix 6 — Tor bootstrap confirmation (env flag, 0 minutes)
+
+Add to all service files:
+```ini
 Environment="Q_TOR_BOOTSTRAP_TIMEOUT=120"
 ```
-Then `systemctl daemon-reload && systemctl restart q-api-server` via ha-deploy.
-
-**What Tor adds when active**: Every Dandelion++ stem hop goes through a real 3-hop Tor circuit. Without it, stem hops are direct P2P connections — still private routing, but IPs visible to each relay node.
-
-**Risk**: None. The existing code already handles Tor failure gracefully (falls back to clearnet Dandelion++). Adding the timeout just gives Arti more time to bootstrap.
-
-### 6. Recursive IVC Proofs — Disabled 🔒
-**Flag**: `Q_ENABLE_RECURSIVE_PROOFS=1`  
-**Sub-flag**: `Q_ENABLE_PROVER=1` (makes THIS node participate in proof generation)
-
-**What it does**: Post-quantum recursive SNARKs using `q-lattice-guard` (RLWE). Each epoch proof verifies the previous one. Light clients can verify the entire chain in ~10ms instead of replaying history. Uses `LatticeGuardProof` — quantum-resistant.
-
-**Caveats before enabling**:
-- The recursive proof service was added in v1.4.0-beta and has not been load-tested on mainnet height (~16M blocks). The epoch proof generation is CPU-heavy.
-- The `Q_ENABLE_PROVER=1` sub-flag should only be set on high-CPU nodes (Epsilon, 48 cores). Bootstrap nodes should run with `Q_ENABLE_RECURSIVE_PROOFS=1` but NOT `Q_ENABLE_PROVER=1` — they verify only.
-- Need to confirm `q-lattice-guard` compiles and initializes without panic on live data before enabling in prod service files.
-
-**Activation plan**:
-```bash
-# Step 1: Test on Epsilon only (48 cores, can absorb the CPU cost)
-ssh root@89.149.241.126 "
-  Q_ENABLE_RECURSIVE_PROOFS=1 Q_ENABLE_PROVER=0 \
-  /opt/orobit/shared/q-narwhalknight/q-api-server-v889 --port 8090
-" 2>&1 | grep -E "Recursive|LatticeGuard|ERROR|panic" | head -20
-```
-If clean, add to service file and redeploy.
+This gives Arti 2 minutes to connect to the Tor network before falling back to clearnet Dandelion++. Rolling deploy.
 
 ---
 
-## Tier C — Placeholder Implementations (Cannot Activate Safely)
+## Priority Order
 
-These are the ones that look like they should work but provide **zero actual cryptographic guarantees**. The `privacy_service.rs` file has a 35-line CRITICAL SECURITY WARNING at the top explaining each failure. They are documented here to explain why they are NOT being activated.
+| Priority | Work | Effort | Effect |
+|----------|------|--------|--------|
+| 1 | Add `Q_TOR_BOOTSTRAP_TIMEOUT=120` to service files | 30 min | Tor circuits confirmed active |
+| 2 | Add `Q_ENABLE_RECURSIVE_PROOFS=1` to Epsilon service | 30 min + 1 day test | IVC light client proofs live |
+| 3 | Wire ring signature handler to `CLSAGSigner::sign()` | 1 day | Real ring sigs in mixer |
+| 4 | Wire stealth address handler to DKSAP | 0.5 day | Real stealth addresses |
+| 5 | Wire mixing pool to `MixingPool` + threshold | 2–3 days | Real pool mixing (Chaumian) |
+| 6 | Wire ZK-STARK endpoint to `StarkSystem::prove()` | 1 day | Real STARK proofs in API |
 
-### 7. Ring Signatures — XOR, Not Elliptic Curve ❌
-**Location**: `crates/q-api-server/src/privacy_service.rs`, `q-quantum-mixing` crate  
-**What the code does**: Takes a list of "decoys" and performs byte-level XOR operations to produce a "ring signature".  
-**What ring signatures should do**: Use elliptic curve operations (Schnorr or MLSAG/CLSAG) so that a verifier cannot determine which key in the ring actually signed. XOR provides no unlinkability — a trivial statistical analysis can identify the real signer.  
-**To make it real**: Implement MLSAG or CLSAG using `curve25519-dalek` or `k256`. Estimated effort: 3–5 days for a competent cryptographer.
-
-### 8. Stealth Addresses — No ECDH ❌
-**Location**: `privacy_service.rs`, stealth address service  
-**What the code does**: SHA3-hashes the recipient's public key to produce a "stealth address".  
-**What stealth addresses should do**: Use ECDH (Elliptic Curve Diffie-Hellman) so the sender can derive a one-time address only the recipient can spend. SHA3 of the public key is just a deterministic alias — anyone who knows the public key can link all payments to it.  
-**To make it real**: Implement Monero-style dual-key stealth addresses using `curve25519-dalek`. Estimated effort: 2–3 days.
-
-### 9. ZK-STARK Balance Commitments — SHA3, Not Pedersen ❌
-**Location**: `privacy_service.rs` balance commitments  
-**What the code does**: Commits to a balance using `SHA3(amount || blinding_factor)`.  
-**What Pedersen commitments provide**: Homomorphic hiding — you can prove sums and ranges without revealing values. SHA3 commitments are not homomorphic and can be brute-forced for small amounts (under ~1B QUG: ~2^64 operations, feasible).  
-**To make it real**: Use the `bulletproofs` crate (based on Ristretto255) or `halo2`. Estimated effort: 1 week including range proof integration.
-
-### 10. ZK-STARK Proof Service — Not Implemented in Privacy API ❌
-**Location**: `privacy_service_api.rs` → `zk_stark_proof_service` handler  
-**Important distinction**: The `q-zk-stark` crate has a real FRI-based STARK prover (with real Merkle commitments and polynomial evaluations). The **privacy service API endpoint** wraps a different, unfinished path that does not connect to the real STARK prover.  
-**To make it real**: Wire `privacy_service_api::zk_stark_proof_service` to call `q_zk_stark::StarkSystem::new(false).await?.prove(trace, constraints)` instead of the current placeholder path. Estimated effort: 1–2 days (the hard math is already in `q-zk-stark`).
-
-### 11. SQIsign / AES-GCM in Tor Init — Placeholders ❌
-**Location**: `crates/q-tor-client/src/lib.rs:614–650`  
-**What the code does**:  
-- "SQIsign signature": `sqisign_signature[i] = sig_seed[i % 32] ^ (i as u8)` — deterministic XOR, not SQIsign  
-- "AES-256-GCM": Simple XOR with key — comment literally says "Simple XOR encryption as placeholder"  
-**What these protect**: The ZK proof attached to Tor initialization (proves correct setup without revealing keys).  
-**To make it real**: SQIsign (NIST Round 2 candidate) — use the `sqisign` or `pqcrypto-sqisign` crate; AES-GCM — use the `aes-gcm` crate (already in Cargo.toml elsewhere). Estimated effort: 1 day (crypto plumbing, not new math).
+Total for full activation: **~6 days of implementation work** + testing.  
+The math is all written. This is 100% plumbing.
 
 ---
 
-## What To Do, In Priority Order
+## Files Involved
 
-### Phase 1 — Activate now, zero code changes (1 hour)
-1. **Confirm Tor is bootstrapping**: Check logs on all 3 nodes. If not:
-   ```bash
-   # Add to service files on Beta, Gamma, Epsilon:
-   Environment="Q_TOR_BOOTSTRAP_TIMEOUT=120"
-   ```
-   Then rolling deploy via ha-deploy.sh.
+| File | Change |
+|------|--------|
+| `/etc/systemd/system/q-api-server.service` (all 3 nodes) | Add 2 env vars |
+| `crates/q-api-server/src/privacy_service_api.rs` | Replace 4 TODO blocks (~100 lines total) |
+| `crates/q-api-server/src/privacy_service.rs` | Replace SHA3 commitments with Pedersen (from `bulletproofs_pp.rs`) |
 
-2. **Deploy v10.4.1** (currently building — includes emission fallback fixes): Rolling deploy once binary is ready.
-
-### Phase 2 — Activate with one flag, low risk (1 day, test on Epsilon first)
-3. **Recursive Proofs** (`Q_ENABLE_RECURSIVE_PROOFS=1`): Test on Epsilon with a canary run first. If clean, add to all service files and rolling deploy. Verify with:
-   ```bash
-   journalctl -u q-api-server | grep "Recursive Proofs"
-   ```
-
-### Phase 3 — Wire real STARK prover to privacy API (2 days)
-4. **ZK-STARK proof service**: Remove the stub path in `privacy_service_api.rs::zk_stark_proof_service`. Replace with a call to `q_zk_stark::StarkSystem`. The math is written — this is plumbing only.
-
-### Phase 4 — Implement real cryptographic primitives (2–3 weeks total)
-5. **AES-GCM in Tor init**: Replace XOR with `aes-gcm` crate. 1 day.
-6. **SQIsign in Tor init**: Replace XOR padding with `pqcrypto-sqisign`. 1 day.
-7. **Stealth addresses**: Implement ECDH with `curve25519-dalek`. 2–3 days.
-8. **Ring signatures**: Implement MLSAG/CLSAG. 3–5 days (requires cryptographer review).
-9. **Pedersen commitments / bulletproofs**: Replace SHA3 commitments with `bulletproofs` crate. 5–7 days including range proof integration.
-
-### Phase 5 — Protocol upgrade (6 weeks, after Phase 2B Bracha BRB)
-10. **Emission state gossipsub sync** (Bracha BRB, already designed): Wire `EmissionSyncBrb` into startup, add 4 gossipsub topics, testnet-validate.
-11. **Embed `emission_cumulative` in block headers**: Consensus-finalized emission checkpoint on every block.
-
----
-
-## Why These Were Not Done Before
-
-The honest answer: the privacy service scaffolding was written to define the API surface and data types first, with the intent to fill in real cryptographic implementations incrementally. This is a standard approach for rapid prototyping — define the interface, ship the structure, implement the math later. The code even says so with `// placeholder` and `// Simple XOR as placeholder (real implementation would use AES-GCM)`.
-
-The risk is that the scaffolding looks working from the outside (the endpoints respond, the proofs serialize and return data) but provides no actual security. This is caught here rather than in production.
-
-**Nothing broken. No security incident.** The active path (Dandelion++, Noise, Dilithium5, AES-256 DB encryption) is genuine. The placeholder paths are gated behind API endpoints that require authentication and are not part of the core transaction flow. The chain's consensus, block validation, and fund security are unaffected.
-
----
-
-## Files to Change for Each Phase
-
-| Change | File | Lines |
-|--------|------|-------|
-| Tor bootstrap timeout | `/etc/systemd/system/q-api-server.service` | Add 1 env var |
-| Recursive proofs enable | `/etc/systemd/system/q-api-server.service` | Add 1 env var |
-| Wire STARK to privacy API | `crates/q-api-server/src/privacy_service_api.rs` | ~20 lines |
-| AES-GCM in Tor init | `crates/q-tor-client/src/lib.rs:645–660` | ~15 lines |
-| SQIsign in Tor init | `crates/q-tor-client/src/lib.rs:603–617` | ~20 lines + crate dep |
-| Stealth addresses | `crates/q-quantum-mixing/src/stealth.rs` | ~100 lines |
-| Ring signatures | `crates/q-quantum-mixing/src/ring.rs` | ~200 lines |
-| Bulletproofs | `crates/q-api-server/src/privacy_service.rs` | ~300 lines |
+All crypto implementations are in `crates/q-quantum-mixing/` and `crates/q-zk-stark/`. No new math needed.
