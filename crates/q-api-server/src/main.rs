@@ -22906,6 +22906,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         ) // Explorer transactions (no auth)
         .route("/api/v1/search", get(handlers::search_transactions)) // Use existing function
         .route("/api/v1/web-search", post(q_api_server::web_search_api::web_search_handler)) // v9.3.2: GLM-4-Flash AI web search
+        .route("/api/v1/ai/chat", post(q_api_server::web_search_api::web_search_handler)) // alias: ad-blocker-safe path for browser AI chat
         // ============================================
         // BLOCKCHAIN SYNCHRONIZATION ENDPOINTS
         // ============================================
