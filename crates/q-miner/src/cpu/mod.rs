@@ -1,7 +1,8 @@
-use crate::{MiningEngine, MiningAlgorithm, MiningStats, WorkUnit, Solution, algorithms::DagKnightVDF};
+use crate::{MiningEngine, MiningAlgorithm, MiningStats, WorkUnit, algorithms::DagKnightVDF};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::{Arc, atomic::{AtomicU64, AtomicBool, Ordering}};
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{info, debug, error, warn};
 
@@ -15,26 +16,30 @@ pub struct CpuMiner {
     hash_counter: Arc<AtomicU64>,
     is_running: Arc<AtomicBool>,
     worker_threads: Vec<tokio::task::JoinHandle<()>>,
+    /// API server base URL for solution submission
+    server_url: String,
+    /// Wallet address for mining rewards
+    wallet_address: String,
 }
 
 impl CpuMiner {
-    pub async fn new(thread_count: usize, intensity: u8) -> Result<Self> {
+    pub async fn new(thread_count: usize, intensity: u8, server_url: String, wallet_address: String) -> Result<Self> {
         info!("🔥 Initializing CPU miner with {} threads, intensity {}", thread_count, intensity);
-        
+
         // Detect CPU capabilities
         let cpu_info = detect_cpu_capabilities();
-        info!("💻 CPU: {} ({} cores, {} threads)", 
+        info!("💻 CPU: {} ({} cores, {} threads)",
             cpu_info.brand, cpu_info.physical_cores, cpu_info.logical_threads);
-        
+
         if cpu_info.has_avx2 {
             info!("⚡ AVX2 acceleration enabled");
         }
         if cpu_info.has_avx512 {
             info!("🚀 AVX-512 acceleration enabled");
         }
-        
+
         let algorithm = Arc::new(DagKnightVDF::new(1000)); // Base difficulty
-        
+
         Ok(Self {
             thread_count,
             intensity,
@@ -44,6 +49,8 @@ impl CpuMiner {
             hash_counter: Arc::new(AtomicU64::new(0)),
             is_running: Arc::new(AtomicBool::new(false)),
             worker_threads: Vec::new(),
+            server_url,
+            wallet_address,
         })
     }
     
@@ -59,9 +66,11 @@ impl CpuMiner {
             let hash_counter = self.hash_counter.clone();
             let algorithm = self.algorithm.clone();
             let intensity = self.intensity;
-            
+            let server_url = self.server_url.clone();
+            let wallet_address = self.wallet_address.clone();
+
             let handle = tokio::spawn(async move {
-                cpu_mining_thread(thread_id, is_running, current_work, hash_counter, algorithm, intensity).await;
+                cpu_mining_thread(thread_id, is_running, current_work, hash_counter, algorithm, intensity, server_url, wallet_address).await;
             });
             
             self.worker_threads.push(handle);
@@ -120,42 +129,66 @@ async fn cpu_mining_thread(
     hash_counter: Arc<AtomicU64>,
     algorithm: Arc<DagKnightVDF>,
     intensity: u8,
+    server_url: String,
+    wallet_address: String,
 ) {
     info!("🔥 CPU mining thread {} started", thread_id);
-    
+
     let mut nonce_base = thread_id as u64 * 1_000_000;
     let batch_size = (intensity as u64) * 10_000; // Adjust batch size by intensity
-    
+
+    let http_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let submit_url = format!("{}/api/v1/mining/submit", server_url);
+
     while is_running.load(Ordering::SeqCst) {
         // Get current work
         let work = {
             let work_guard = current_work.read().await;
             work_guard.clone()
         };
-        
+
         if let Some(work) = work {
             // Mine a batch of nonces
             for nonce_offset in 0..batch_size {
                 let nonce = nonce_base + nonce_offset;
-                
+
                 // Compute hash using DAG-Knight VDF algorithm
                 if let Ok(hash) = algorithm.as_ref().compute_hash(&work.extra_data, nonce).await {
                     hash_counter.fetch_add(1, Ordering::Relaxed);
 
                     // Check if solution meets difficulty
                     if algorithm.as_ref().verify_solution(&hash, &work.difficulty_target).await {
-                        info!("💎 CPU Thread {} found solution! Nonce: {}", thread_id, nonce);
-                        
-                        // In a real implementation, submit solution to pool/network
-                        let _solution = Solution {
-                            job_id: work.job_id.clone(),
-                            nonce,
-                            hash,
-                            timestamp: chrono::Utc::now().timestamp() as u64,
-                            worker_id: format!("cpu_{}", thread_id),
-                        };
-                        
-                        // TODO: Submit solution
+                        let hex_hash = hex::encode(&hash);
+                        info!("💎 Solution submitted: nonce={} hash={:.8}...", nonce, hex_hash);
+
+                        // Build submission payload
+                        let submission = serde_json::json!({
+                            "nonce": nonce,
+                            "hash": hex_hash,
+                            "wallet_address": wallet_address,
+                            "difficulty": 0u64,
+                        });
+
+                        // HTTP POST to server
+                        match http_client
+                            .post(&submit_url)
+                            .json(&submission)
+                            .send()
+                            .await
+                        {
+                            Ok(resp) if resp.status().is_success() => {
+                                info!("✅ CPU Thread {} solution accepted by server", thread_id);
+                            }
+                            Ok(resp) => {
+                                warn!("⚠️ CPU Thread {} solution submit returned HTTP {}", thread_id, resp.status());
+                            }
+                            Err(e) => {
+                                warn!("⚠️ CPU Thread {} solution submit failed: {}", thread_id, e);
+                            }
+                        }
                     }
                 }
                 

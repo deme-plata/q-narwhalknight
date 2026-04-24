@@ -4423,7 +4423,11 @@ async fn miner_link_task(
         // SOCKS5 proxy for WebSocket: tunnel TCP through SOCKS5 before WS handshake
         if let Some(ref proxy) = proxy_url {
             if proxy.starts_with("socks5://") {
-                let parsed = url::Url::parse(proxy).unwrap_or_else(|_| url::Url::parse("socks5://127.0.0.1:9050").unwrap());
+                let parsed = url::Url::parse(proxy).unwrap_or_else(|e| {
+                    warn!("Invalid proxy URL '{}': {} — falling back to socks5://127.0.0.1:9050", proxy, e);
+                    // SAFETY: this literal is valid and will never fail
+                    url::Url::parse("socks5://127.0.0.1:9050").expect("hardcoded fallback URL is valid")
+                });
                 let proxy_addr = format!("{}:{}", parsed.host_str().unwrap_or("127.0.0.1"), parsed.port().unwrap_or(9050));
                 let target = url::Url::parse(&ws_url.replace("wss://", "https://").replace("ws://", "http://"))
                     .unwrap_or_else(|_| url::Url::parse("http://localhost:8080").unwrap());

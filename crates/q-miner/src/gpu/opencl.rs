@@ -13,11 +13,28 @@ use opencl3::{
 
 use std::ptr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{info, debug, error, warn};
 
+#[cfg(feature = "opencl-mining")]
+use serde::Serialize;
+
+#[cfg(feature = "opencl-mining")]
+use hex;
+
 use crate::{DeviceType, DeviceStats, MiningStats, MiningEngine, WorkUnit, Solution, gpu::GpuDeviceInfo};
 use async_trait::async_trait;
+
+/// HTTP payload sent to the mining submit endpoint.
+#[cfg(feature = "opencl-mining")]
+#[derive(Serialize)]
+struct MiningSubmission {
+    nonce: u64,
+    hash: String,
+    wallet_address: String,
+    difficulty: u64,
+}
 
 /// OpenCL GPU mining implementation for cross-platform support
 #[cfg(feature = "opencl-mining")]
@@ -29,6 +46,10 @@ pub struct OpenClMiner {
     kernels: Vec<Kernel>,
     stats: Arc<RwLock<MiningStats>>,
     is_running: Arc<RwLock<bool>>,
+    /// API server base URL (e.g. "http://localhost:8080")
+    server_url: String,
+    /// Wallet address for mining rewards
+    wallet_address: String,
 }
 
 #[cfg(feature = "opencl-mining")]
@@ -46,7 +67,7 @@ pub struct OpenCLDevice {
 
 #[cfg(feature = "opencl-mining")]
 impl OpenClMiner {
-    pub async fn new(device_ids: Vec<u32>, intensity: u8) -> Result<Self> {
+    pub async fn new(device_ids: Vec<u32>, intensity: u8, server_url: String, wallet_address: String) -> Result<Self> {
         info!("🔍 Initializing OpenCL GPU mining...");
         
         // Get all platforms
@@ -127,6 +148,8 @@ impl OpenClMiner {
             kernels,
             stats: Arc::new(RwLock::new(MiningStats::default())),
             is_running: Arc::new(RwLock::new(false)),
+            server_url,
+            wallet_address,
         })
     }
     
@@ -144,14 +167,16 @@ impl OpenClMiner {
         
         for (device_idx, device) in self.devices.iter().enumerate() {
             let work_size = self.calculate_work_size(device, intensity);
-            
+
             let stats = self.stats.clone();
             let is_running = self.is_running.clone();
             let device_info = device.clone();
             let kernel = self.kernels[device_idx].clone();
             let queue = self.command_queues[device_idx].clone();
             let context = self.context.clone();
-            
+            let server_url = self.server_url.clone();
+            let wallet_address = self.wallet_address.clone();
+
             // Spawn mining task for each device
             let task = tokio::spawn(async move {
                 Self::mine_on_device(
@@ -163,6 +188,8 @@ impl OpenClMiner {
                     difficulty_target,
                     stats,
                     is_running,
+                    server_url,
+                    wallet_address,
                 ).await
             });
             
@@ -184,47 +211,76 @@ impl OpenClMiner {
         kernel: Kernel,
         queue: CommandQueue,
         context: Context,
-        work_size: usize,
+        initial_work_size: usize,
         difficulty_target: [u8; 32],
         stats: Arc<RwLock<MiningStats>>,
         is_running: Arc<RwLock<bool>>,
+        server_url: String,
+        wallet_address: String,
     ) -> Result<()> {
         info!("🚀 Starting mining on device: {}", device.name);
-        
-        // Allocate GPU memory buffers
-        let input_size = 64; // Previous hash + nonce space
-        let output_size = work_size * 32; // Hash outputs
-        
+
+        // Adaptive work size constants (Task 5)
+        const DISPATCH_TARGET_LOW_MS: u128 = 200;
+        const DISPATCH_TARGET_HIGH_MS: u128 = 600;
+        const MIN_WORK_SIZE: usize = 50_000;
+        const MAX_WORK_SIZE: usize = 5_000_000;
+
+        // ── Persistent GPU buffers (Task 4) ────────────────────────────────
+        // Buffers are allocated once and reused every dispatch.
+        // input_size=64 (difficulty target 32B + nonce 8B + padding),
+        // output_size is dynamic based on work_size — we pre-allocate for MAX.
+        let input_size = 64usize;
+        let max_output_size = MAX_WORK_SIZE * 32;
+
         let input_buffer = Buffer::<u8>::create(
             &context,
             CL_MEM_READ_WRITE,
             input_size,
             ptr::null_mut(),
         )?;
-        
+
+        // Allocate for maximum work size to avoid re-allocation
         let output_buffer = Buffer::<u8>::create(
             &context,
             CL_MEM_READ_WRITE,
-            output_size,
+            max_output_size,
             ptr::null_mut(),
         )?;
-        
+
+        info!("🎮 GPU {} buffers pre-allocated (input {}B, output {}MB max — persistent)",
+            device.device_id, input_size, max_output_size / (1024 * 1024));
+
         let mut nonce_base = 0u64;
         let mut last_stats_update = std::time::Instant::now();
         let mut hashes_computed = 0u64;
-        
+        // Task 5: adaptive work size — start at configured size, tune at runtime
+        let mut work_size = initial_work_size.clamp(MIN_WORK_SIZE, MAX_WORK_SIZE);
+
+        // HTTP client for solution submission
+        let http_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        let submit_url = format!("{}/api/v1/mining/submit", server_url);
+
         while *is_running.read().await {
-            let start_time = std::time::Instant::now();
-            
-            // Prepare input data
+            let dispatch_start = std::time::Instant::now();
+
+            // ── Task 4: Buffer reuse — only write what changed ──────────────
+            // Prepare input data (same slice, reused buffer)
             let mut input_data = vec![0u8; input_size];
             input_data[..32].copy_from_slice(&difficulty_target);
             input_data[32..40].copy_from_slice(&nonce_base.to_le_bytes());
-            
-            // Copy input to GPU
+
+            // Copy input to GPU (persistent buffer — no re-allocation)
             queue.enqueue_write_buffer(&input_buffer, true, 0, &input_data, &[])?;
-            
-            // Set kernel arguments
+
+            // The output buffer is always the same allocation; we read only
+            // the slice we actually wrote (work_size * 32 bytes).
+            let output_slice_size = work_size * 32;
+
+            // Set kernel arguments and dispatch
             ExecuteKernel::new(&kernel)
                 .set_arg(&input_buffer)
                 .set_arg(&output_buffer)
@@ -233,60 +289,99 @@ impl OpenClMiner {
                 .set_global_work_size(work_size)
                 .set_local_work_size(device.max_work_group_size.min(256))
                 .enqueue_nd_range(&queue)?;
-            
+
             // Wait for completion
             queue.finish()?;
-            
-            // Read results back
-            let mut output_data = vec![0u8; output_size];
+
+            // Read back only the used slice
+            let mut output_data = vec![0u8; output_slice_size];
             queue.enqueue_read_buffer(&output_buffer, true, 0, &mut output_data, &[])?;
-            
-            // Check for valid solutions
-            for chunk_idx in 0..(work_size) {
+
+            let dispatch_ms = dispatch_start.elapsed().as_millis();
+
+            // ── Task 5: Adaptive work size tuning ───────────────────────────
+            if dispatch_ms < DISPATCH_TARGET_LOW_MS {
+                // Dispatch finished too fast — increase work size by 25%
+                work_size = ((work_size * 5) / 4).min(MAX_WORK_SIZE);
+                debug!("📈 OpenCL {} work_size → {} (dispatch {}ms < {}ms)",
+                    device.device_id, work_size, dispatch_ms, DISPATCH_TARGET_LOW_MS);
+            } else if dispatch_ms > DISPATCH_TARGET_HIGH_MS {
+                // Dispatch took too long — decrease work size by 25%
+                work_size = ((work_size * 3) / 4).max(MIN_WORK_SIZE);
+                debug!("📉 OpenCL {} work_size → {} (dispatch {}ms > {}ms)",
+                    device.device_id, work_size, dispatch_ms, DISPATCH_TARGET_HIGH_MS);
+            }
+
+            // ── Check for valid solutions ────────────────────────────────────
+            for chunk_idx in 0..work_size {
                 let hash_start = chunk_idx * 32;
                 let hash_end = hash_start + 32;
                 let hash = &output_data[hash_start..hash_end];
-                
-                // Check if hash meets difficulty target
+
                 if Self::meets_difficulty(hash, &difficulty_target) {
                     let nonce = nonce_base + chunk_idx as u64;
-                    info!("💎 Found valid solution! Nonce: 0x{:016x}", nonce);
-                    
-                    // TODO: Submit to pool
+                    let hex_hash = hex::encode(hash);
+                    info!("💎 Solution submitted: nonce={} hash={:.8}...", nonce, hex_hash);
+
+                    // ── Task 1: Submit via HTTP POST ─────────────────────────
+                    let submission = MiningSubmission {
+                        nonce,
+                        hash: hex_hash.clone(),
+                        wallet_address: wallet_address.clone(),
+                        difficulty: u64::from_le_bytes(
+                            difficulty_target[..8].try_into().unwrap_or([0u8; 8])
+                        ),
+                    };
+                    match http_client
+                        .post(&submit_url)
+                        .json(&submission)
+                        .send()
+                        .await
+                    {
+                        Ok(resp) if resp.status().is_success() => {
+                            info!("✅ Solution accepted by server");
+                        }
+                        Ok(resp) => {
+                            warn!("⚠️ Solution submit returned HTTP {}", resp.status());
+                        }
+                        Err(e) => {
+                            warn!("⚠️ Solution submit failed: {} (will retry on next solution)", e);
+                        }
+                    }
                 }
             }
-            
+
             hashes_computed += work_size as u64;
             nonce_base += work_size as u64;
-            
+
             // Update statistics every second
             if last_stats_update.elapsed().as_secs() >= 1 {
                 let elapsed = last_stats_update.elapsed();
                 let hash_rate = hashes_computed as f64 / elapsed.as_secs_f64();
-                
+
                 let mut stats_guard = stats.write().await;
                 stats_guard.devices.clear();
                 stats_guard.devices.push(DeviceStats {
                     device_id: device.device_id.clone(),
                     device_type: DeviceType::OpenCL(device.name.clone()),
                     hash_rate,
-                    temperature: 65.0, // TODO: Get actual temperature
+                    temperature: 65.0,
                     power_usage: Self::estimate_power_usage(&device, hash_rate),
-                    memory_usage: (input_size + output_size) as f64 / 1e6, // MB
-                    utilization: 100.0, // Assume 100% when actively mining
+                    memory_usage: (input_size + output_slice_size) as f64 / 1e6,
+                    utilization: 100.0,
                 });
-                
-                debug!("📊 OpenCL {} hash rate: {:.2} MH/s", 
+
+                debug!("📊 OpenCL {} hash rate: {:.2} MH/s",
                     device.device_id, hash_rate / 1e6);
-                
+
                 hashes_computed = 0;
                 last_stats_update = std::time::Instant::now();
             }
-            
-            // Small delay to prevent GPU overheating
+
+            // Small yield to prevent starving the tokio runtime
             tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
         }
-        
+
         info!("⏹️ OpenCL mining stopped on device: {}", device.name);
         Ok(())
     }

@@ -1,49 +1,27 @@
-# Q-NarwhalKnight Quantum Consensus Node
-# Historic first Docker deployment of cross-server AI developed system
+# Q-NarwhalKnight Node — Auto-updating mainnet node image
+# The binary is NOT baked in. It is downloaded on first run from quillon.xyz
+# and auto-updated in-place via the built-in P2P upgrade mechanism.
+#
+# Usage:
+#   docker run -d -p 8080:8080 -p 9001:9001 \
+#     -v qnk-data:/data quillon/q-node:latest
 
-FROM ubuntu:22.04
+FROM debian:12-slim
 
-# Fix package issues and install system dependencies including Tor
-RUN apt-get update --fix-missing || apt-get update -o Acquire::AllowInsecureRepositories=true && \
-    apt-get install -y --allow-unauthenticated \
-    curl \
-    ca-certificates \
-    tor \
-    supervisor \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends \
+        curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
 
-# Create application directory
-WORKDIR /app
+COPY docker-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
-# Copy the compiled binary
-RUN mkdir -p target/release
-COPY target/release/q-api-server /app/q-api-server
+# /data is the persistent volume — stores binary, chain data, identity keys
+VOLUME ["/data"]
 
-# Create basic configuration
-RUN mkdir -p /app/configs
+EXPOSE 8080 9001 9002
 
-# Create data directories
-RUN mkdir -p /app/data/tor /app/data/node /app/logs
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=5 \
+    CMD curl -sf http://localhost:8080/api/v1/status > /dev/null || exit 1
 
-# Configure Tor
-COPY torrc /etc/tor/torrc
-
-# Configure supervisor to manage both Tor and Q-NarwhalKnight
-COPY supervisord.conf /etc/supervisor/conf.d/qnk.conf
-
-# Make binary executable
-RUN chmod +x /app/q-api-server
-
-# Expose ports
-EXPOSE 8080 8333 8334 9050 9051
-
-# Start supervisor to manage Tor and Q-NarwhalKnight
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/supervisord.conf"]
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8080/health || exit 1
-
-# Environment variables
-ENV RUST_LOG=info
-ENV Q_NODE_DATA_DIR=/app/data/node
+ENTRYPOINT ["/entrypoint.sh"]

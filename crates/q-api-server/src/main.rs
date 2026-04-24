@@ -3870,7 +3870,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         let btc_rpc_user = std::env::var("BTC_RPC_USER")
             .unwrap_or_else(|_| "qnk".to_string());
         let btc_rpc_pass = std::env::var("BTC_RPC_PASS")
-            .unwrap_or_else(|_| "QnkBtcBridge2026".to_string());
+            .unwrap_or_default();
 
         match q_bitcoin_bridge::atomic_swap::AtomicSwapManager::new(
             btc_rpc_url.clone(),
@@ -3893,7 +3893,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             q_api_server::bitcoin_rpc::BitcoinRpcConfig {
                 rpc_url: btc_rpc_url.clone(),
                 rpc_user: std::env::var("BTC_RPC_USER").unwrap_or_else(|_| "qnk".to_string()),
-                rpc_password: std::env::var("BTC_RPC_PASS").unwrap_or_else(|_| "QnkBtcBridge2026".to_string()),
+                rpc_password: std::env::var("BTC_RPC_PASS").unwrap_or_default(),
                 timeout_secs: 30,
                 network: "mainnet".to_string(),
             },
@@ -3904,6 +3904,24 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             }
             Err(e) => {
                 warn!("₿ Bitcoin RPC client unavailable: {} (balance/address features disabled)", e);
+            }
+        }
+
+        // v10.3.16: Initialize Bitcoin deposit bridge (BTC → wBTC one-way)
+        if let Some(bridge_config) = q_bitcoin_bridge::deposit_bridge::DepositBridgeConfig::from_env() {
+            let (dep_event_tx, mut dep_event_rx) = tokio::sync::mpsc::unbounded_channel::<q_bitcoin_bridge::deposit_bridge::DepositEvent>();
+            // Drain events in a background task (SSE integration can be wired later)
+            tokio::spawn(async move {
+                while dep_event_rx.recv().await.is_some() {}
+            });
+            match q_bitcoin_bridge::deposit_bridge::DepositBridge::new(bridge_config, dep_event_tx).await {
+                Ok(bridge) => {
+                    state.deposit_bridge = Some(Arc::new(bridge));
+                    info!("₿ Bitcoin deposit bridge initialized (Delta RPC: {})", btc_rpc_url);
+                }
+                Err(e) => {
+                    warn!("₿ Bitcoin deposit bridge init failed: {} (deposit address generation disabled)", e);
+                }
             }
         }
     }

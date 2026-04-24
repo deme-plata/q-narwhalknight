@@ -386,74 +386,94 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend, liveBalance }: Das
     });
   }, []);
 
-  // Generate AI Report
+  // Generate AI Report — uses Ollama/gemma4 via /api/v1/ai/chat
   const generateAIReport = async () => {
     setAiReportLoading(true);
     setIsAIReportModalOpen(true);
     setAiReport('');
 
+    const networkStats = nodeStatus ? {
+      tpsCurrent: nodeStatus.tps_current || 0,
+      tpsAverage: nodeStatus.tps_average || 0,
+      connectedPeers: nodeStatus.connected_peers || 0,
+      isValidator: nodeStatus.is_validator,
+      currentHeight: nodeStatus.current_height || 0,
+    } : null;
+
+    const walletBalance = nodeStatus?.balance || 0;
+
+    const context = `Wallet: ${walletAddress}
+Balance: ${walletBalance.toFixed(4)} QUG
+${networkStats
+  ? `TPS: ${networkStats.tpsCurrent} current / ${networkStats.tpsAverage} avg
+Peers: ${networkStats.connectedPeers}
+Height: ${networkStats.currentHeight}
+Validator: ${networkStats.isValidator ? 'Active' : 'No'}`
+  : 'Network: offline'}
+Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
+
+    const query = 'Analyze this wallet and give a short report: balance health, network status, and top 2 recommendations to earn more rewards. Be concise.';
+
     try {
-      // Prepare context for AI
-      const networkStats = nodeStatus ? {
-        tpsCurrent: nodeStatus.tps_current || 0,
-        tpsAverage: nodeStatus.tps_average || 0,
-        connectedPeers: nodeStatus.connected_peers || 0,
-        isValidator: nodeStatus.is_validator,
-        currentHeight: nodeStatus.current_height || 0
-      } : null;
+      const res = await fetch('/api/v1/ai/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query, context, stream: true }),
+      });
 
-      const walletContext = {
-        balance: nodeStatus?.balance || 0,
-        walletAddress: walletAddress,
-        recentTransactions: recentTransactions.slice(0, 10),
-        networkStats
-      };
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+        setAiReport(`Error: ${err.error || `Server returned ${res.status}`}`);
+        setAiReportLoading(false);
+        return;
+      }
 
-      const prompt = `Analyze this Q-NarwhalKnight wallet and network performance:
+      const reader = res.body?.getReader();
+      if (!reader) {
+        setAiReport('Error: no response stream.');
+        setAiReportLoading(false);
+        return;
+      }
 
-Wallet Balance: ${walletContext.balance.toFixed(4)} QUG
-${networkStats ? `Network TPS: ${networkStats.tpsCurrent} current, ${networkStats.tpsAverage} average
-Connected Peers: ${networkStats.connectedPeers}
-Block Height: ${networkStats.currentHeight}
-Validator Status: ${networkStats.isValidator ? 'Active' : 'Not active'}` : 'Network: Offline'}
+      const decoder = new TextDecoder();
+      let buf = '';
+      let full = '';
+      let currentEvent = '';
 
-Recent Transactions: ${walletContext.recentTransactions.length} transactions
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop() || '';
 
-Provide a brief analysis (under 250 tokens) covering:
-1. Balance health & recommendations
-2. Network participation insights
-3. Key optimizations for earning rewards`;
-
-      // Stream AI response with reduced token limit for faster generation
-      const eventSource = new EventSource(`/api/chat/stream?content=${encodeURIComponent(prompt)}&max_tokens=250`);
-      let fullReport = '';
-
-      eventSource.addEventListener('token', (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          fullReport = data.cumulative || '';
-          setAiReport(fullReport);
-        } catch (e) {
-          console.error('Failed to parse AI token:', e);
+        for (const line of lines) {
+          const t = line.trim();
+          if (!t || t.startsWith(':')) continue;
+          if (t.startsWith('event: ')) { currentEvent = t.slice(7); continue; }
+          if (t.startsWith('data: ')) {
+            const evType = currentEvent || 'token';
+            currentEvent = '';
+            try {
+              const parsed = JSON.parse(t.slice(6));
+              if (evType === 'token' && parsed.content) {
+                full += parsed.content;
+                setAiReport(full);
+              } else if (evType === 'done') {
+                setAiReportLoading(false);
+              } else if (evType === 'error') {
+                setAiReport(`Error: ${parsed.message || 'AI error'}`);
+                setAiReportLoading(false);
+              }
+            } catch { /* skip unparseable */ }
+          }
         }
-      });
-
-      eventSource.addEventListener('complete', () => {
-        setAiReportLoading(false);
-        eventSource.close();
-      });
-
-      eventSource.addEventListener('error', (error) => {
-        console.error('AI Report generation error:', error);
-        setAiReportLoading(false);
-        setAiReport('Failed to generate AI report. Please try again.');
-        eventSource.close();
-      });
-
-    } catch (error) {
-      console.error('Failed to generate AI report:', error);
+      }
       setAiReportLoading(false);
+    } catch (error) {
+      console.error('AI report error:', error);
       setAiReport('Failed to generate AI report. Please try again.');
+      setAiReportLoading(false);
     }
   };
 

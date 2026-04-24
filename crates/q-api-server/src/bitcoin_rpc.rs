@@ -49,7 +49,7 @@ impl Default for BitcoinRpcConfig {
             rpc_user: std::env::var("BTC_RPC_USER")
                 .unwrap_or_else(|_| "qnk".to_string()),
             rpc_password: std::env::var("BTC_RPC_PASS")
-                .unwrap_or_else(|_| "QnkBtcBridge2026".to_string()),
+                .unwrap_or_default(),
             timeout_secs: 30,
             network: "mainnet".to_string(),
         }

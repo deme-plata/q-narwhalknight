@@ -12,6 +12,12 @@ import { OAuthConsentScreen, OAuthScope } from "oauth_consent.slint";
 import { PosScreen } from "pos.slint";
 import { DexScreen, DexToken, ChartBar, TokenTx } from "dex.slint";
 
+// ─── Excluded features (not ready) ───────────────────────────
+// email.slint, calendar.slint, chat.slint are intentionally NOT
+// imported here. Add them only when features are complete.
+// Icons reserved: icons/mail.svg, icons/calendar.svg, icons/bot.svg
+// ─────────────────────────────────────────────────────────────
+
 export { TokenInfo, TxRecord, OAuthScope, AddressEntry, DexToken, ChartBar, TokenTx }
 
 export component AppWindow inherits Window {
