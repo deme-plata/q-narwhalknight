@@ -67,6 +67,7 @@ pub use clsag::{
     CLSAGSignature, CLSAGSigner,
     batch_verify_clsag, batch_verify_clsag_detailed,
     create_pedersen_commitment, generate_commitment_mask,
+    scalar_from_bytes_wide, derive_stealth_address,
 };
 pub use uc_traceable_ring_sig::{
     UCTraceableRingSigner, UCTraceableRingSignature, UCTRSConfig,

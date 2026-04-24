@@ -20,6 +20,7 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+use base64::Engine as _;
 use crate::paas_auth::AuthContext;
 use crate::AppState;
 use q_types::{ApiResponse, PrivacyLevel};
@@ -550,22 +551,89 @@ pub async fn ring_signature_service(
         signature_fee as f64 / 1e24
     );
 
-    // TODO: Implement actual Dilithium5 ring signature generation
-    // For now, return simulated response
+    // Wire to real CLSAG (Compact Linkable Spontaneous Anonymous Group Signatures)
+    // CLSAGSigner uses curve25519-dalek Ristretto255 with quantum-seeded entropy
+    let entropy_pool = match q_quantum_mixing::quantum_entropy::QuantumEntropyPool::new().await {
+        Ok(pool) => std::sync::Arc::new(pool),
+        Err(e) => {
+            error!("Failed to initialize entropy pool for ring signature: {}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    let mut signer = match q_quantum_mixing::clsag::CLSAGSigner::new(entropy_pool.clone()).await {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to create CLSAG signer: {}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    // Build ring — place service's ephemeral public key at signing_key_index
+    let signer_pubkey = signer.get_public_key();
+    let mut ring: Vec<[u8; 32]> = request.ring_members.iter()
+        .map(|m| {
+            let bytes = hex::decode(&m.public_key).unwrap_or_default();
+            let mut arr = [0u8; 32];
+            if bytes.len() >= 32 { arr.copy_from_slice(&bytes[..32]); }
+            arr
+        })
+        .collect();
+    ring[request.signing_key_index] = signer_pubkey;
+
+    // Generate Pedersen commitment for confidential amount
+    let commitment_mask = match q_quantum_mixing::clsag::generate_commitment_mask(&entropy_pool).await {
+        Ok(m) => m,
+        Err(e) => {
+            error!("Commitment mask generation failed: {}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+    let (commitment_bytes, _) = q_quantum_mixing::clsag::create_pedersen_commitment(0, &commitment_mask);
+    let message = hex::decode(&request.message_hash).unwrap_or_default();
+
+    let signature = match signer.sign(&message, &ring, &commitment_bytes, &commitment_mask).await {
+        Ok(sig) => sig,
+        Err(e) => {
+            error!("CLSAG signing failed: {}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    // Server-side verify before returning (catches any encoding/logic bugs)
+    match signature.verify(&message) {
+        Ok(true) => {},
+        Ok(false) => {
+            error!("CLSAG self-verification failed immediately after signing");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+        Err(e) => {
+            error!("CLSAG verification error: {}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    info!("🔑 CLSAG ring sig produced — key_image=0x{} ring_size={}",
+        hex::encode(signature.get_key_image()), ring.len());
+
+    let sig_bytes = match postcard::to_allocvec(&signature) {
+        Ok(b) => b,
+        Err(e) => {
+            error!("CLSAG serialization failed: {}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+    let sig_b64 = base64::engine::general_purpose::STANDARD.encode(&sig_bytes);
 
     let ring_signature = RingSignatureData {
-        signature_data: "base64_dilithium5_signature_placeholder".to_string(),
-        key_image: format!("0x{}", hex::encode(&rand::random::<[u8; 32]>())),
-        ring_size: request.ring_members.len(),
-        scheme: request.signature_scheme.clone(),
+        signature_data: sig_b64,
+        key_image: format!("0x{}", hex::encode(signature.get_key_image())),
+        ring_size: ring.len(),
+        scheme: "clsag-ristretto255".to_string(),
     };
 
     let verification_data = VerificationData {
-        ring_public_keys: request
-            .ring_members
-            .iter()
-            .map(|m| m.public_key.clone())
-            .collect(),
+        ring_public_keys: ring.iter().map(|k| hex::encode(k)).collect(),
         message_hash: request.message_hash.clone(),
     };
 
@@ -638,22 +706,65 @@ pub async fn stealth_address_service(
         generation_fee as f64 / 1e24
     );
 
-    // TODO: Implement actual stealth address generation
-    // For now, return simulated response
+    // Wire to real Dual-Key Stealth Address Protocol using curve25519-dalek Ristretto255.
+    // Implements standard Monero-style one-time stealth addresses:
+    //   ephemeral r   = quantum random scalar
+    //   ephemeral_pub = r * G
+    //   shared_secret = r * recipient_pubkey  (ECDH)
+    //   one_time_addr = H("stealth" || shared_secret) * G + recipient_pubkey
+    let recipient_bytes = match hex::decode(
+        request.recipient_public_key.trim_start_matches("0x")
+    ) {
+        Ok(b) if b.len() == 32 => {
+            let mut arr = [0u8; 32]; arr.copy_from_slice(&b); arr
+        }
+        _ => {
+            return Ok(Json(ApiResponse::error(
+                "recipient_public_key must be 32-byte hex (Ristretto255 compressed point)".to_string(),
+            )));
+        }
+    };
 
-    let stealth_addresses: Vec<StealthAddressInfo> = (0..request.count)
-        .map(|_| StealthAddressInfo {
-            address: format!("qnk:stealth:0x{}", hex::encode(&rand::random::<[u8; 20]>())),
-            view_key: "encrypted_view_key_base64".to_string(),
-            spend_key: "encrypted_spend_key_base64".to_string(),
-        })
-        .collect();
+    let entropy_pool = match q_quantum_mixing::quantum_entropy::QuantumEntropyPool::new().await {
+        Ok(pool) => std::sync::Arc::new(pool),
+        Err(e) => {
+            error!("Failed to initialize entropy pool for stealth addresses: {}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
 
+    let mut stealth_addresses = Vec::with_capacity(request.count as usize);
+    for _ in 0..request.count {
+        // Generate quantum random ephemeral scalar r
+        let mut r_bytes = [0u8; 64];
+        if let Err(e) = entropy_pool.fill_bytes(&mut r_bytes[..32]).await
+            .and(entropy_pool.fill_bytes(&mut r_bytes[32..]).await) {
+            error!("Entropy fill failed for stealth address: {}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+        let r = q_quantum_mixing::clsag::scalar_from_bytes_wide(r_bytes);
+
+        // Compute ephemeral public key R = r*G and ECDH shared secret S = r*P_recipient
+        let (ephemeral_pub, one_time_addr) =
+            q_quantum_mixing::clsag::derive_stealth_address(&r, &recipient_bytes)
+                .map_err(|e| {
+                    error!("Stealth address derivation failed: {}", e);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+
+        stealth_addresses.push(StealthAddressInfo {
+            address: format!("qnk:stealth:0x{}", hex::encode(&one_time_addr)),
+            view_key: hex::encode(&ephemeral_pub),
+            spend_key: hex::encode(&recipient_bytes),
+        });
+    }
+
+    let master_view_key = hex::encode(&recipient_bytes);
     let response = StealthAddressResponse {
         success: true,
         stealth_addresses,
-        view_key: "master_view_key_encrypted".to_string(),
-        spend_key: "master_spend_key_encrypted".to_string(),
+        view_key: master_view_key.clone(),
+        spend_key: master_view_key,
         generation_fee_qug: format!("{:.8}", generation_fee as f64 / 1e24),
         billing_transaction_id: billing_tx_id,
     };
@@ -715,18 +826,76 @@ pub async fn zk_stark_proof_service(
         proof_fee as f64 / 1e24
     );
 
-    // TODO: Implement actual ZK-STARK proof generation using q-zk-stark
-    // For now, return simulated response
+    // Wire to real FRI-based ZK-STARK prover (q-zk-stark crate, CPU mode)
+    let t0 = std::time::Instant::now();
 
-    let proof_id = format!("zk-proof-{}", Uuid::new_v4().to_string()[..8].to_string());
+    // Build execution trace from public_inputs and statement
+    let trace: Vec<Vec<u64>> = {
+        let mut rows = Vec::new();
+        if let Some(arr) = request.public_inputs.as_array() {
+            for v in arr {
+                if let Some(n) = v.as_u64() {
+                    rows.push(vec![n]);
+                }
+            }
+        }
+        if rows.is_empty() {
+            // Default: single-row trace from statement hash
+            use sha3::Digest;
+            let h = sha3::Sha3_256::new().chain_update(request.statement.as_bytes()).finalize();
+            rows.push(h.iter().take(8).map(|&b| b as u64).collect());
+        }
+        rows
+    };
+
+    // Constraints encoding: SHA3-256 of (statement || witness JSON)
+    let constraints: Vec<u8> = {
+        use sha3::Digest;
+        let mut hasher = sha3::Sha3_256::new();
+        hasher.update(request.statement.as_bytes());
+        hasher.update(request.witness.to_string().as_bytes());
+        hasher.finalize().to_vec()
+    };
+
+    let mut stark = match q_zk_stark::StarkSystem::new(false).await {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to initialize STARK system: {}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    let stark_proof = match stark.prove(&trace, &constraints).await {
+        Ok(p) => p,
+        Err(e) => {
+            error!("STARK proof generation failed: {}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    let generation_time_ms = t0.elapsed().as_millis() as u64;
+
+    let proof_bytes = match postcard::to_allocvec(&stark_proof) {
+        Ok(b) => b,
+        Err(e) => {
+            error!("STARK proof serialization failed: {}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+    let proof_b64 = base64::engine::general_purpose::STANDARD.encode(&proof_bytes);
+    let proof_size_bytes = proof_bytes.len();
+    let proof_id = format!("stark-{}", &Uuid::new_v4().to_string()[..8]);
+
+    info!("🔬 STARK proof generated: id={} size={}B time={}ms",
+        proof_id, proof_size_bytes, generation_time_ms);
 
     let response = ZkStarkProofResponse {
         success: true,
         proof_id,
-        proof_data: "base64_encoded_stark_proof_placeholder".to_string(),
-        verification_key: "base64_encoded_vk_placeholder".to_string(),
-        proof_size_bytes: 45000, // Typical STARK proof size
-        generation_time_ms: 250, // Simulated
+        proof_data: proof_b64,
+        verification_key: hex::encode(&constraints),
+        proof_size_bytes,
+        generation_time_ms,
         proof_fee_qug: format!("{:.8}", proof_fee as f64 / 1e24),
         verifiable_on_chain: true,
         billing_transaction_id: billing_tx_id,

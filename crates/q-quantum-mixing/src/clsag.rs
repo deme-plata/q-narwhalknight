@@ -707,6 +707,48 @@ pub async fn generate_commitment_mask(entropy: &QuantumEntropyPool) -> Result<Sc
     Ok(Scalar::from_bytes_mod_order_wide(&mask_bytes))
 }
 
+/// Reduce 64 wide bytes to a Scalar (avoids exposing curve25519_dalek in api crates)
+pub fn scalar_from_bytes_wide(bytes: [u8; 64]) -> Scalar {
+    Scalar::from_bytes_mod_order_wide(&bytes)
+}
+
+/// Derive a Monero-style stealth address from an ephemeral scalar and recipient public key.
+///
+/// Returns `(ephemeral_pub_bytes [u8;32], one_time_addr_bytes [u8;32])` where:
+///   ephemeral_pub  = r * G   (sent alongside tx so recipient can find the payment)
+///   one_time_addr  = H("qnk:stealth" || r*P)*G + P   (only spendable by recipient)
+pub fn derive_stealth_address(
+    r: &Scalar,
+    recipient_pubkey_bytes: &[u8; 32],
+) -> Result<([u8; 32], [u8; 32])> {
+    // Parse recipient as a compressed Ristretto point
+    let recipient_point = decompress_point(recipient_pubkey_bytes)?;
+
+    // R = r * G  (ephemeral public key sent with transaction)
+    let ephemeral_pub = (r * RISTRETTO_BASEPOINT_TABLE.basepoint()).compress().to_bytes();
+
+    // shared_secret S = r * P_recipient  (ECDH)
+    let shared_secret = (r * recipient_point).compress().to_bytes();
+
+    // Derivation scalar d = H("qnk:stealth" || S)
+    let d = {
+        let mut hasher = Sha3_512::new();
+        hasher.update(b"qnk:stealth:v1");
+        hasher.update(&shared_secret);
+        let hash = hasher.finalize();
+        let mut hash_bytes = [0u8; 64];
+        hash_bytes.copy_from_slice(&hash);
+        Scalar::from_bytes_mod_order_wide(&hash_bytes)
+    };
+
+    // One-time address P_ot = d*G + P_recipient  (Monero-style)
+    let one_time_addr = (&d * RISTRETTO_BASEPOINT_TABLE.basepoint() + recipient_point)
+        .compress()
+        .to_bytes();
+
+    Ok((ephemeral_pub, one_time_addr))
+}
+
 // ============================================================================
 // Tests
 // ============================================================================

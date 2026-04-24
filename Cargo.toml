@@ -75,7 +75,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.3.15"  # v10.3.15: DAG→height re-index — 545K early-history blocks made visible to get_qblocks_range()
+version = "10.4.2"  # v10.4.2: privacy wiring — real CLSAG ring sigs + DKSAP stealth + ZK-STARK prover wired into API
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"
