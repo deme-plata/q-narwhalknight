@@ -53,15 +53,35 @@ This guide explains how to set up distributed development with multiple Claude C
 - **Working Directory**: `/opt/orobit/shared/q-narwhalknight`
 - **Reverse Proxy**: q-flux (NOT nginx, NOT Caddy — nginx is DISABLED on Epsilon)
 - **Static Files Root**: `/home/orobit/q-narwhalknight/dist-final/` (DIFFERENT from Beta!)
-- **Peer ID**: `12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM`
+- **Peer ID**: `12D3KooWAbrVw892T8RSenWy1j89NBrd7p4aXKsSMKAYpH47YbgD`
 - **⚠️ CRITICAL: ALWAYS use /home paths on Epsilon, NEVER /tmp or /root!**
   - `/tmp` is on a tiny 40GB root partition (always near full)
-  - `/home` is on a 1.8TB NVMe partition with 1.4TB free
+  - `/home` is on a 1.8TB NVMe partition with ~800GB free
   - **Git clone destination**: `/home/orobit/q-narwhalknight/` (NOT /tmp/q-source)
   - **Build/temp files**: `/home/orobit/tmp/` (git tmpdir configured here)
   - **Frontend deploy**: `/home/orobit/q-narwhalknight/dist-final/`
   - **Binary deploy**: `/opt/orobit/shared/q-narwhalknight/q-api-server-v889`
 - **NEVER**: `git clone ... /tmp/...` or write large files to `/tmp` or `/root`
+
+- **🗄️ EPSILON DATABASE — CRITICAL FACTS (learned 2026-04-24 incident):**
+  - **Authoritative DB path**: `/home/orobit/data-mainnet-genesis/` (219 GB, full chain history)
+  - **`/.env` must use ABSOLUTE path**: `Q_DB_PATH=/home/orobit/data-mainnet-genesis`
+  - **NEVER use relative `Q_DB_PATH`** — `WorkingDirectory=/` + `Q_DB_PATH=./data-mainnet-genesis` resolves to `/data-mainnet-genesis` on the 40 GB root partition, which fills up and kills block production
+  - **Setup wizard regenerates `/.env` with a relative path** — always audit `/.env` after any wizard run and fix `Q_DB_PATH` to the absolute path
+  - **After ANY restart of Epsilon**, verify the DB in use: `ls /proc/$(pgrep -f q-api-server)/fd | grep home/orobit/data-mainnet-genesis | wc -l` — must be >1000. If 0, the node opened the wrong DB.
+  - **Root partition (40 GB) breakdown** (approximate, leaves ~800MB–1.3GB free at best):
+    - `/usr`: 13 GB (OS — fixed)
+    - `/var/lib`: 8.3 GB (docker, postgresql — fixed)
+    - `/opt`: 6.2 GB (node binary, shared data — fixed)
+    - `/home/orobit/data-mainnet-genesis/` on home: correct (219 GB, /home partition)
+    - `/var/log/syslog`: grows unboundedly at DEBUG log level — keep logrotate cap at 200 MB
+    - **Journal**: must stay volatile (`/etc/systemd/journald.conf.d/size.conf` → `Storage=volatile`) or it fills root in minutes at DEBUG log level
+  - **RUST_LOG on Epsilon must be `warn` or higher** — DEBUG/INFO level generates hundreds of MB of logs per minute during sync, instantly filling root via syslog
+
+- **⚠️ EMISSION CONTROLLER STATE — DO NOT TRUST P2P RE-SYNCED DB:**
+  - If Epsilon is ever forced to rebuild its DB by re-syncing from peers (turbo sync from genesis), the **emission controller state will be incorrect** — balance watermarks, minted supply totals, and economic parameters come out wrong because the emission state is computed locally and not fully replicated via P2P gossip
+  - The authoritative state lives only in the **original database** (`/home/orobit/data-mainnet-genesis/`) which has been running since genesis
+  - If you ever see emission/balance data that looks wrong on Epsilon: stop the node, check which DB it opened (FD check above), and if it's not the home DB, fix `/.env` and restart onto the correct DB
 
 ### **🔄 HA Rolling Deployment Pipeline (v5.5.4+ / 3-Server)**
 
@@ -207,12 +227,12 @@ journalctl -u q-api-server --since "5 minutes ago" | grep -E "Gossipsub BLOCK fr
 - If mining to a non-bootstrap node, check for "DAG-KNIGHT" and "DAG→SSE" log messages on bootstrap
 
 ### **P2P Network Bootstrap (mainnet-genesis — ACTIVE):**
-- **Bootstrap Peer ID (Epsilon)**: `12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM` (10Gbit SUPERNODE — primary sync target)
+- **Bootstrap Peer ID (Epsilon)**: `12D3KooWAbrVw892T8RSenWy1j89NBrd7p4aXKsSMKAYpH47YbgD` (10Gbit SUPERNODE — primary sync target)
 - **Bootstrap Peer ID (Delta)**: `12D3KooWLJJRvqo6mBoHLpgxVbGKfW3Jv39ziU4kz1adKFv93JbK` (1Gbit — second fastest)
 - **Bootstrap Peer ID (Gamma)**: `12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH` (1Gbit)
 - **Bootstrap Peer ID (Beta)**: `12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH` (100Mbit — DHT coordinator)
 - **Bootstrap Peer ID (Alpha)**: `12D3KooWPwin4nJcU9PzsxNgUVXj5e6zDnACr84H7RZ1XzmnARsY` (canary)
-- **Bootstrap Address**: `/ip4/89.149.241.126/tcp/9001/p2p/12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM`
+- **Bootstrap Address**: `/ip4/89.149.241.126/tcp/9001/p2p/12D3KooWAbrVw892T8RSenWy1j89NBrd7p4aXKsSMKAYpH47YbgD`
 - **Network ID**: `mainnet2026.1`
 - **Gossipsub Topics**:
   - `/qnk/mainnet2026.1/blocks` - Block propagation
