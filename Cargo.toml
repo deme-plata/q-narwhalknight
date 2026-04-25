@@ -75,7 +75,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.4.6"  # v10.4.6: Epsilon peer ID fix + turbo sync historical gap skip
+version = "10.4.8"  # v10.4.8: Fix balance inflation on restart (streaming.rs RocksDB init, remove BalanceUpdated(pending)); add emission state-snapshot endpoint
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"

@@ -553,6 +553,12 @@ function App() {
         // The PendingMiningReward SSE event handles UI notification separately.
         if (changeReason === 'p2p_mining_reward_pending' || confirmationStatus === 'pending') return;
 
+        // Skip zero-balance initial events — wallet_balances cache is empty at node startup
+        // and previously sent balance=0 on SSE connect, overriding the valid cached balance.
+        // Now handled at server (reads RocksDB instead), but keep this as frontend safety net.
+        const newBalanceValue = balanceData.new_balance ?? 0;
+        if (newBalanceValue === 0 && changeReason === 'SSE connection established') return;
+
         const isP2PMiningReward = changeReason === 'p2p_mining_reward' || changeReason === 'pending_mining_reward';
 
         const sseGlobalCooldownUntil = parseInt(localStorage.getItem('dexCooldownUntil') || '0');

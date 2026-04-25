@@ -870,35 +870,36 @@ pub async fn sse_events(
             {
                 debug!("📡 SSE: Sending initial balance");
 
-                // v2.4.5-beta FIX: Use in-memory wallet_balances HashMap instead of RocksDB
-                // The HashMap is kept up-to-date with mining rewards in real-time,
-                // while RocksDB may have stale data if persistence is delayed.
-                // This fixes the bug where SSE initial balance was 0 or outdated.
+                // Use RocksDB as authoritative source for the initial SSE balance event.
+                // The in-memory wallet_balances HashMap starts EMPTY on node restart and takes
+                // 15+ seconds to populate. Using it caused initial SSE events to send balance=0,
+                // which overwrote the user's correct locally-cached balance with 0, then jumped
+                // to the real balance once the 15s sync ran — confusing users with balance spikes.
+                // RocksDB is always authoritative and available immediately on startup.
                 let wallet_hex = wallet_filter_value
                     .strip_prefix("qnk")
                     .unwrap_or(wallet_filter_value);
 
-                // Convert hex string to [u8; 32] for HashMap lookup
-                let balance = if let Ok(addr_bytes) = hex::decode(wallet_hex) {
-                    if addr_bytes.len() == 32 {
-                        let mut addr_array = [0u8; 32];
-                        addr_array.copy_from_slice(&addr_bytes);
-                        // Read from in-memory HashMap (most up-to-date source)
-                        let balances = state.wallet_balances.read().await;
-                        balances.get(&addr_array).copied().unwrap_or(0)
-                    } else {
-                        // Fallback to storage engine if address format is wrong
-                        state.storage_engine.get_balance(wallet_hex).await.unwrap_or(0)
-                    }
-                } else {
-                    // Fallback to storage engine if hex decode fails
-                    state.storage_engine.get_balance(wallet_hex).await.unwrap_or(0)
+                // Always read from RocksDB for initial event (authoritative, available at startup)
+                // Fall back to in-memory cache only if RocksDB read fails
+                let balance = {
+                    let rocksdb_balance = state.storage_engine.get_balance(wallet_hex).await.unwrap_or(0);
+                    if rocksdb_balance > 0 {
+                        rocksdb_balance
+                    } else if let Ok(addr_bytes) = hex::decode(wallet_hex) {
+                        if addr_bytes.len() == 32 {
+                            let mut addr_array = [0u8; 32];
+                            addr_array.copy_from_slice(&addr_bytes);
+                            let balances = state.wallet_balances.read().await;
+                            balances.get(&addr_array).copied().unwrap_or(0)
+                        } else { 0 }
+                    } else { 0 }
                 };
 
                 // v3.0.6-beta FIX: Use 1e24 divisor for u128 migration (was 100_000_000.0)
                 let balance_qnk = balance as f64 / 1e24;
                 // 🔒 PRIVACY: No logging of balances or addresses
-                debug!("💰 SSE: Initial balance fetched successfully (from in-memory HashMap)");
+                debug!("💰 SSE: Initial balance fetched from RocksDB");
 
                 // Create initial balance event
                 let initial_balance_event = serde_json::json!({

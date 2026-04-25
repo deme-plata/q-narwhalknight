@@ -22787,6 +22787,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/totalsupply", get(handlers::total_supply_plain)) // v9.9.2: Plain-text total supply for CMC/CoinGecko
         .route("/api/v1/circulatingsupply", get(handlers::circulating_supply_plain)) // v9.9.2: Plain-text circulating supply for CMC/CoinGecko
         .route("/api/v1/emission/stats", get(handlers::get_emission_stats)) // v6.2.4: Emission analytics (daily history, target vs actual)
+        .route("/api/v1/emission/state-snapshot", get(handlers::get_emission_state_snapshot)) // v10.4.8: P2P recovery — serialized emission state for bootstrap peers
         .route("/api/v1/emission/attophysics", get(handlers::get_emission_attophysics)) // v10.3.15: Opto-physics diagnostics
         .route("/api/v1/dune/status", {
             let dp = dune_progress.clone();

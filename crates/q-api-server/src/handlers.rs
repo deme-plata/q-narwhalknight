@@ -1188,21 +1188,27 @@ pub fn active_genesis_timestamp() -> u64 {
 pub async fn bootstrap_peers(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    // Bootstrap node network information (Server Beta - 185.182.185.227)
-    const BOOTSTRAP_IP: &str = "185.182.185.227";
     const BOOTSTRAP_P2P_PORT: u16 = 9001;
 
-    // Try to get dynamic peer ID from libp2p with timeout
     // Use try_read to avoid blocking if lock is contested
-    let peer_id = match state.libp2p_peer_info.try_read() {
-        Ok(peer_info) if !peer_info.0.is_empty() => peer_info.0.clone(),
+    let (peer_id, mut multiaddrs) = match state.libp2p_peer_info.try_read() {
+        Ok(peer_info) if !peer_info.0.is_empty() => {
+            (peer_info.0.clone(), peer_info.1.clone())
+        }
         _ => {
-            // Fallback: peer info not available yet or lock contested
-            // Return empty peer_id - clients will retry or use fallback discovery
             warn!("Bootstrap endpoint: libp2p peer info not available, returning minimal info");
-            String::from("discovering...")
+            (String::from("discovering..."), vec![])
         }
     };
+
+    // Always include DNS multiaddr so clients (especially Windows, which can't reach firewalled
+    // port 8080) get a working entry without HTTP verification timeout
+    if peer_id != "discovering..." {
+        let dns_addr = format!("/dns4/quillon.xyz/tcp/{}/p2p/{}", BOOTSTRAP_P2P_PORT, peer_id);
+        if !multiaddrs.contains(&dns_addr) {
+            multiaddrs.push(dns_addr);
+        }
+    }
 
     // ✨ v1.4.2-beta: Get upgrade status for mainnet-safe evolution
     let current_height = state.upgrade_manager.height();
@@ -1210,14 +1216,7 @@ pub async fn bootstrap_peers(
 
     let bootstrap_info = serde_json::json!({
         "peer_id": peer_id,
-        "multiaddrs": if peer_id != "discovering..." {
-            vec![
-                format!("/ip4/{}/tcp/{}/p2p/{}", BOOTSTRAP_IP, BOOTSTRAP_P2P_PORT, peer_id),
-                format!("/dns4/quillon.xyz/tcp/{}/p2p/{}", BOOTSTRAP_P2P_PORT, peer_id),
-            ]
-        } else {
-            vec![]
-        },
+        "multiaddrs": if peer_id != "discovering..." { multiaddrs } else { vec![] },
         "network_id": std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "mainnet-genesis".to_string()),
         "version": env!("CARGO_PKG_VERSION"),
         "bootstrap_node": true,
@@ -1566,6 +1565,34 @@ pub async fn get_emission_stats(
     });
 
     Ok(Json(ApiResponse::success(response)))
+}
+
+/// GET /api/v1/emission/state-snapshot
+/// Returns serialized emission controller state for bootstrap peer recovery.
+/// A fresh node with no persisted emission state can pull this from 2-of-3 bootstrap
+/// peers and apply it as a warm-start baseline (Option A of the P2P recovery plan).
+pub async fn get_emission_state_snapshot(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let bytes = state.balance_consensus_engine
+        .serialize_emission_state()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let summary = state.balance_consensus_engine
+        .get_emission_summary()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let height = state.current_height.load(std::sync::atomic::Ordering::Relaxed);
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "serialized_state": general_purpose::STANDARD.encode(&bytes),
+        "height": height,
+        "total_cumulative_emission": summary.total_supply.to_string(),
+        "total_cumulative_emission_qug": summary.total_supply as f64 / 1e24,
+        "era": summary.current_era,
+    }))))
 }
 
 /// v10.3.15: Attosecond opto-physics emission diagnostics
