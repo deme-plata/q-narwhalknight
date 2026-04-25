@@ -1,0 +1,242 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{fontenc}
+\usepackage{parskip}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{mdframed}
+
+\definecolor{qugblue}{RGB}{30, 80, 160}
+\definecolor{lightgray}{RGB}{245, 245, 245}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=qugblue,
+  urlcolor=qugblue,
+}
+
+\titleformat{\section}{\large\bfseries\color{qugblue}}{}{0em}{}[\titlerule]
+\titleformat{\subsection}{\normalsize\bfseries}{}{0em}{}
+
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{\small\color{gray} Quillon Network — Confidential}
+\lhead{\small\color{gray} QUGUSD Allocation Structure}
+\rfoot{\small\thepage}
+
+\begin{document}
+
+% Title block
+\begin{center}
+  {\LARGE\bfseries QUGUSD Partnership Allocation}\\[0.4em]
+  {\large\color{qugblue} Collateral Mechanics \& Conversion Path}\\[0.6em]
+  {\small Dragon Ball Enterprise $\times$ Quillon Network \quad|\quad April 2026 \quad|\quad Confidential}
+\end{center}
+
+\vspace{0.5em}
+\begin{mdframed}[backgroundcolor=lightgray, linecolor=qugblue, linewidth=1pt]
+\small
+\textbf{Summary.} Quillon commits 20,000,000 QUGUSD to the Dragon Ball FPGA/ASIC partnership.
+QUGUSD is a collateralised debt position (CDP) stablecoin pegged 1:1 to USD,
+backed by locked QUG at a 150\% minimum collateralisation ratio.
+At the current QUG price of \$2,971, the allocation is overcollateralised.
+Conversion to USDT runs through the HiBT exchange listing targeted for Q4 2026.
+The liquidation mechanism protects the peg if QUG price falls.
+All mechanics are on-chain and independently verifiable.
+\end{mdframed}
+
+\vspace{1em}
+
+\section{What is QUGUSD}
+
+QUGUSD is Quillon's native stablecoin. It is not issued by a central entity.
+It is minted by locking QUG into an on-chain \texttt{CollateralVault} contract,
+subject to a minimum collateralisation ratio of 150\%.
+The peg is maintained algorithmically: the protocol monitors the QUG/USD oracle
+price and triggers liquidations automatically when a vault falls below the
+safety threshold.
+
+QUGUSD is a first-class token type in Quillon's transaction format
+(\texttt{TokenType::QUGUSD}), meaning the consensus layer — not a separate
+smart contract — validates all stablecoin operations.
+There is no issuer who can freeze or blacklist tokens.
+
+\section{The 20M QUGUSD Allocation}
+
+\begin{center}
+\begin{tabular}{lrl}
+\toprule
+\textbf{Use} & \textbf{Amount (QUGUSD)} & \textbf{Purpose} \\
+\midrule
+ASIC NRE funding          & 10,000,000  & Mask set, design, prototyping \\
+FPGA development fund     &    500,000  & Hardware, boards, engineering time \\
+Marketing \& launch       &    500,000  & Product launch, mining outreach \\
+Market making (HiBT)      &    100,000  & QUG/USDT liquidity on listing \\
+Exchange listing fee      &     15,000  & HiBT listing (CMC \#38) \\
+Treasury reserve          &  8,885,000  & Operations \& future 7nm tape-out \\
+\midrule
+\textbf{Total}            & \textbf{20,000,000} & \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Tranches are released on delivery milestones. The first tranche (2,000,000 QUGUSD)
+transfers upon contract signing. Subsequent tranches release at BLAKE3 pipeline
+validation, full SoC verification, and ASIC feasibility sign-off.
+
+\section{Collateral Mechanics}
+
+\subsection{Minting}
+
+To back 20,000,000 QUGUSD at a 150\% collateralisation ratio, the vault
+must hold at least:
+
+\[
+  \text{QUG required} = \frac{20{,}000{,}000 \times 1.50}{\$2{,}971}
+  = \frac{30{,}000{,}000}{2{,}971} \approx 10{,}097 \text{ QUG}
+\]
+
+At the current circulating supply of 487,668 QUG, this represents 2.07\%
+of all mined supply — a meaningful but non-destabilising commitment.
+
+\subsection{Overcollateralisation Buffer}
+
+The vault is initialised at a 200\% ratio, providing a 50 percentage point
+buffer above the liquidation threshold:
+
+\[
+  \text{Initial QUG locked} = \frac{20{,}000{,}000 \times 2.00}{2{,}971}
+  \approx 13{,}463 \text{ QUG}
+\]
+
+At \$2,971/QUG this locks approximately \$40,000,000 in collateral to back
+\$20,000,000 in QUGUSD — a 2:1 overcollateralisation at issuance.
+
+\subsection{Liquidation Protection}
+
+If the QUG price falls, the vault's collateralisation ratio falls with it.
+The protocol enforces the following thresholds:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Event} & \textbf{Ratio} & \textbf{Action} \\
+\midrule
+Healthy          & $>$ 150\% & No action \\
+Margin call      & 150\%     & Vault owner alerted \\
+Partial liquidation & 140\% & Protocol sells QUG to restore ratio \\
+Full liquidation    & 120\% & Entire vault liquidated, QUGUSD redeemed \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+At the 120\% full liquidation threshold, QUG would need to fall to:
+
+\[
+  P_{\text{liquidation}} = \frac{20{,}000{,}000 \times 1.20}{13{,}463}
+  \approx \$1{,}782 \text{ per QUG}
+\]
+
+This represents a 40\% decline from current price before any principal loss
+occurs. Partial liquidations begin at 150\%, giving the vault owner time to
+add collateral before losses materialise.
+
+\section{Conversion Path to USDT}
+
+QUGUSD is convertible to USDT via two routes:
+
+\textbf{Route 1 — Quillon DEX (available now).}
+QUGUSD trades on the native AMM at \texttt{quillon.xyz} with a live
+QUG/QUGUSD pool. Conversion requires first swapping QUGUSD to QUG,
+then QUG to USDT once QUG is listed externally.
+
+\textbf{Route 2 — HiBT Exchange (Q4 2026).}
+Quillon has a signed listing agreement with HiBT (CoinMarketCap rank \#38,
+3.5M users). Once QUG/USDT is live on HiBT, QUGUSD is redeemable
+directly via the DEX at the 1:1 peg and the resulting QUG is immediately
+sellable for USDT. The first deposit of 5,000 USDT toward the listing fee
+is scheduled for October 2026.
+
+Route 2 is the primary liquidation path for large tranches. Dragon Ball
+should plan USDT conversion timelines around the Q4 2026 listing date.
+For smaller amounts, Route 1 is available now for operational expenses
+denominated in QUGUSD.
+
+\section{Price Sensitivity Analysis}
+
+\begin{center}
+\begin{tabular}{rrrr}
+\toprule
+\textbf{QUG Price} & \textbf{Collateral Value} & \textbf{Ratio} & \textbf{Status} \\
+\midrule
+\$2,971 (today)  & \$40,000,000 & 200\% & Healthy \\
+\$2,230          & \$30,000,000 & 150\% & Margin call \\
+\$1,975          & \$26,580,000 & 133\% & Partial liquidation \\
+\$1,782          & \$24,000,000 & 120\% & Full liquidation \\
+\$1,000          & \$13,463,000 & ---  & Post-liquidation \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+At full liquidation (\$1,782/QUG), Dragon Ball's QUGUSD holdings are redeemed
+at par (1:1 USD) from the liquidation proceeds. The 20M face value of the
+allocation is preserved through the liquidation mechanism; only a QUG price
+below the liquidation floor combined with a DEX liquidity failure would
+result in a shortfall.
+
+\section{Verification}
+
+All vault mechanics are on-chain and auditable:
+
+\begin{itemize}
+  \item \textbf{Vault state:} \texttt{/api/v1/vaults/\{address\}} — returns
+    collateralisation ratio, locked QUG, minted QUGUSD, liquidation price
+  \item \textbf{Oracle price:} \texttt{/api/v1/oracle/qugusd} — live
+    QUG/USD feed with multi-exchange consensus and outlier rejection
+  \item \textbf{Supply audit:} \texttt{/api/v1/tokens/qugusd/supply} —
+    total minted vs total collateral, always public
+  \item \textbf{DEX pool:} \texttt{/api/v1/dex/pools} — live reserve
+    depth for QUG/QUGUSD pair
+\end{itemize}
+
+Dragon Ball's technical team can verify any of these endpoints at any time
+without relying on Quillon's representations.
+
+\section{Summary}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\
+\midrule
+Total allocation          & 20,000,000 QUGUSD \\
+Peg                       & 1 QUGUSD = 1 USD \\
+Collateral asset          & QUG \\
+Current QUG price         & \$2,971 \\
+Collateralisation at issuance & 200\% \\
+QUG locked                & $\approx$13,463 QUG \\
+Liquidation price         & \$1,782/QUG ($-$40\% from today) \\
+Primary conversion path   & HiBT listing Q4 2026 \\
+First tranche             & 2,000,000 QUGUSD on contract signing \\
+On-chain verification     & Yes — all endpoints public \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\vspace{2em}
+\hrule
+\vspace{0.5em}
+{\small\color{gray}
+Quillon Network \quad|\quad \texttt{quillon.xyz} \quad|\quad April 2026 \quad|\quad
+This document is provided for informational purposes to Dragon Ball Enterprise as part of the FPGA/ASIC partnership discussion.
+It does not constitute a securities offering.
+QUGUSD mechanics are subject to on-chain governance and may be updated by protocol upgrade.
+}
+
+\end{document}

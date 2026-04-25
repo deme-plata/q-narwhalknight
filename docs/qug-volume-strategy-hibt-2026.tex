@@ -1,0 +1,750 @@
+% QUG × HiBT — Volume & Investor Attraction Strategy
+% Prepared for Dragon Ball Enterprise collaboration discussion
+% 2026-04-23
+
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{colortbl}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{mdframed}
+\usepackage{microtype}
+\usepackage{parskip}
+\usepackage{amsmath}
+\usepackage{multirow}
+\usepackage{float}
+
+% ── Colour palette ──────────────────────────────────────────────────
+\definecolor{quggreen}{RGB}{0,160,90}
+\definecolor{quggreenlight}{RGB}{220,245,232}
+\definecolor{hibtgreen}{RGB}{180,230,50}
+\definecolor{hibtblack}{RGB}{20,20,20}
+\definecolor{accent}{RGB}{0,120,200}
+\definecolor{warning}{RGB}{200,60,40}
+\definecolor{warninglight}{RGB}{255,235,230}
+\definecolor{darkgray}{RGB}{60,60,60}
+\definecolor{lightgray}{RGB}{240,240,240}
+\definecolor{midgray}{RGB}{150,150,150}
+\definecolor{gold}{RGB}{180,140,0}
+\definecolor{goldlight}{RGB}{255,248,220}
+
+% ── Section formatting ───────────────────────────────────────────────
+\titleformat{\section}
+  {\Large\bfseries\color{quggreen}}
+  {\thesection.}{0.6em}{}[\color{quggreen}\rule{\linewidth}{0.6pt}]
+
+\titleformat{\subsection}
+  {\large\bfseries\color{darkgray}}
+  {\thesubsection.}{0.5em}{}
+
+\titleformat{\subsubsection}
+  {\normalsize\bfseries\color{accent}}
+  {\thesubsubsection.}{0.4em}{}
+
+% ── Header / Footer ──────────────────────────────────────────────────
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\color{midgray}\textbf{QUG $\times$ HiBT} — Volume \& Investor Attraction Strategy}
+\fancyhead[R]{\small\color{midgray}CONFIDENTIAL — April 2026}
+\fancyfoot[C]{\small\color{midgray}\thepage}
+\renewcommand{\headrulewidth}{0.3pt}
+\renewcommand{\footrulewidth}{0pt}
+
+% ── Hyperref setup ───────────────────────────────────────────────────
+\hypersetup{
+  colorlinks=true,
+  linkcolor=quggreen,
+  urlcolor=accent,
+  pdfauthor={Quillon Graph / Dragon Ball Enterprise},
+  pdftitle={QUG x HiBT: Volume and Investor Attraction Strategy},
+}
+
+% ── Custom boxes ─────────────────────────────────────────────────────
+\newmdenv[
+  backgroundcolor=quggreenlight,
+  linecolor=quggreen,
+  linewidth=1.5pt,
+  leftmargin=0pt, rightmargin=0pt,
+  innerleftmargin=10pt, innerrightmargin=10pt,
+  innertopmargin=8pt, innerbottommargin=8pt,
+  skipabove=8pt, skipbelow=8pt
+]{greenbox}
+
+\newmdenv[
+  backgroundcolor=warninglight,
+  linecolor=warning,
+  linewidth=1.5pt,
+  leftmargin=0pt, rightmargin=0pt,
+  innerleftmargin=10pt, innerrightmargin=10pt,
+  innertopmargin=8pt, innerbottommargin=8pt,
+  skipabove=8pt, skipbelow=8pt
+]{redbox}
+
+\newmdenv[
+  backgroundcolor=goldlight,
+  linecolor=gold,
+  linewidth=1.5pt,
+  leftmargin=0pt, rightmargin=0pt,
+  innerleftmargin=10pt, innerrightmargin=10pt,
+  innertopmargin=8pt, innerbottommargin=8pt,
+  skipabove=8pt, skipbelow=8pt
+]{goldbox}
+
+\newmdenv[
+  backgroundcolor=lightgray,
+  linecolor=midgray,
+  linewidth=1pt,
+  leftmargin=0pt, rightmargin=0pt,
+  innerleftmargin=10pt, innerrightmargin=10pt,
+  innertopmargin=8pt, innerbottommargin=8pt,
+  skipabove=8pt, skipbelow=8pt
+]{graybox}
+
+% ── Table column types ───────────────────────────────────────────────
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
+\newcolumntype{R}[1]{>{\raggedleft\arraybackslash}p{#1}}
+
+% ────────────────────────────────────────────────────────────────────
+\begin{document}
+
+% ── Title page ───────────────────────────────────────────────────────
+\begin{titlepage}
+  \pagecolor{hibtblack}
+  \color{white}
+  \vspace*{2cm}
+  \begin{center}
+    {\fontsize{36}{42}\selectfont\bfseries\color{hibtgreen} QUG $\times$ HiBT}\\[0.4cm]
+    {\fontsize{18}{24}\selectfont\color{white}
+      Volume Generation \& Investor Attraction Strategy}\\[0.3cm]
+    {\large\color{midgray} After CEX Listing — Concrete Execution Plan}\\[2.5cm]
+
+    \begin{tabular}{ll}
+      \color{hibtgreen}\textbf{Token:}    & \color{white} QUG (Quillon Graph) \\[4pt]
+      \color{hibtgreen}\textbf{Exchange:} & \color{white} HiBT (CMC \#38, 3.5M users) \\[4pt]
+      \color{hibtgreen}\textbf{Pair:}     & \color{white} QUG/USDT \\[4pt]
+      \color{hibtgreen}\textbf{Partners:} & \color{white} Quillon Team $\times$ Dragon Ball Enterprise \\[4pt]
+      \color{hibtgreen}\textbf{Date:}     & \color{white} April 2026 \\[4pt]
+      \color{hibtgreen}\textbf{Status:}   & \color{white} Confidential — Internal Strategy \\
+    \end{tabular}
+
+    \vfill
+    {\small\color{midgray}
+      Prepared for: Dragon Ball Enterprise $\times$ Quillon Graph partnership discussion.\\
+      Based on analysis of HiBT listing materials, FWOG case study, and QUG network fundamentals.
+    }
+  \end{center}
+\end{titlepage}
+\pagecolor{white}
+\color{black}
+
+% ── Table of Contents ────────────────────────────────────────────────
+\newpage
+\tableofcontents
+\newpage
+
+% ════════════════════════════════════════════════════════════════════
+\section{Executive Summary}
+% ════════════════════════════════════════════════════════════════════
+
+\begin{greenbox}
+\textbf{The single biggest mistake new CEX listings make:} they treat the listing day as the finish line. In reality, it is the starting gun. Without an active volume strategy, even genuine projects trade at near-zero volume within 30 days of listing and risk delisting.
+
+This document gives Quillon Graph and Dragon Ball Enterprise a concrete, week-by-week plan to \textbf{build real, sustainable trading volume} on HiBT and grow from there toward larger exchanges.
+\end{greenbox}
+
+\medskip
+
+\textbf{Key conclusions of this document:}
+
+\begin{itemize}[leftmargin=1.5em]
+  \item HiBT has a proven toolkit (X Spaces, community airdrops, trading competitions) — the FWOG case study shows what they \emph{can} do, but FWOG was ultimately delisted because it lacked real utility. QUG must use the same tools \emph{plus} its genuine technical moat.
+  \item The Dragon Ball ASIC partnership is QUG's most powerful volume catalyst: every miner sold creates a new holder who earns QUG daily and has an economic incentive to check the price.
+  \item Sustainable volume comes from three simultaneous pillars: \textbf{mining demand} (miners sell rewards, traders buy), \textbf{community depth} (Asia-Pacific focus via Dragon Ball's network), and \textbf{narrative momentum} (quantum-resistance story is unique and timely).
+  \item The plan is structured in three phases: \textbf{Launch Burst} (Days 1--14), \textbf{Consolidation} (Days 15--60), and \textbf{Sustained Growth} (Month 3+).
+\end{itemize}
+
+% ════════════════════════════════════════════════════════════════════
+\section{The Volume Problem: Why Most CEX Listings Fail}
+% ════════════════════════════════════════════════════════════════════
+
+Most projects that list on a tier-2 exchange follow the same pattern and make the same mistakes.
+
+\subsection{The Typical Failure Curve}
+
+\begin{center}
+\begin{tabular}{C{2.5cm} L{5cm} L{5.5cm}}
+  \toprule
+  \rowcolor{lightgray}
+  \textbf{Phase} & \textbf{What Happens} & \textbf{Why It Fails} \\
+  \midrule
+  Day 1--3 & Listing announcement hype; high volume & No plan to sustain; early buyers dump \\
+  \midrule
+  Day 4--14 & Volume drops 80--95\% & No activities scheduled; no reason to return \\
+  \midrule
+  Day 15--30 & Price stable or declining & Miners/team selling rewards; no buying pressure \\
+  \midrule
+  Day 30--90 & Near-zero volume & Exchange puts project on watch list \\
+  \midrule
+  Day 90+ & Delisting risk & Project fails activity/volume thresholds \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{The FWOG Warning: HiBT's Own Case Study}
+
+\begin{redbox}
+\textbf{Critical insight from the HiBT-provided FWOG case study:} HiBT titled the document \textbf{``Closure of FWOG''} — meaning FWOG was eventually \emph{delisted} from HiBT after all the marketing activities were run. This is the scenario QUG must actively avoid.
+
+FWOG was a Solana-based memecoin with no real utility. Despite homepage banners, 100+ community promotions, X Spaces with 2,500+ live listeners, lucky draws, and triple-airdrop events, the project had no organic reason for holders to stay. When marketing spend ended, volume collapsed.
+
+\textbf{QUG is structurally different from FWOG in every way that matters} — but we must still execute the marketing correctly.
+\end{redbox}
+
+\subsection{What FWOG Got Right (Tactics to Replicate)}
+
+Despite the eventual outcome, HiBT's marketing execution for FWOG demonstrated real reach:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{X (Twitter) Spaces:} Themed spaces drawing 2,400--2,600 live listeners, branded as ``market trend'' discussions — drove massive awareness in a short window.
+  \item \textbf{Triple Events structure:} Running three simultaneous campaigns (airdrop + lucky draw + trading competition) creates compound engagement — users participate in all three.
+  \item \textbf{Telegram community blast:} 100+ communities, 7 languages, reaching 50K+ users in Chinese crypto communities specifically.
+  \item \textbf{Homepage placement:} Banner on website and app with 9M+ exposure for 3--5 days.
+  \item \textbf{App notifications:} Push to 9M+ registered users.
+\end{itemize}
+
+The lesson: \textbf{replicate the tactics, but attach them to genuine value that keeps people after the event ends.}
+
+% ════════════════════════════════════════════════════════════════════
+\section{What HiBT Has Already Planned for QUG}
+% ════════════════════════════════════════════════════════════════════
+
+The Standard listing package (\$15,000 USDT) includes the following pre-planned activities that QUG receives automatically upon listing. Understanding these precisely is essential for building our own strategy around them.
+
+\subsection{Automatic Deliverables (No Extra Token Cost)}
+
+\begin{center}
+\begin{tabular}{L{6.5cm} C{2.5cm} L{4cm}}
+  \toprule
+  \rowcolor{lightgray}
+  \textbf{Deliverable} & \textbf{Exposure} & \textbf{Our Action} \\
+  \midrule
+  Listing announcements on website \& app & 9M+ & Coordinate launch timing \\
+  Homepage banners (3--5 days) & 9M+ & Provide branded creatives \\
+  Multilingual Telegram promos — 11 communities, 7 languages & 50K+ & Prepare multi-language content \\
+  Twitter: Weekly Top Gainer poster & 60K+ & Prepare price narrative \\
+  Twitter: Quarterly News poster & 60K+ & Prepare milestone news \\
+  Weekly report via email \& announcements & 9M+ & Submit weekly update to HiBT \\
+  Social media blast (Twitter, Facebook, LinkedIn, Discord, Instagram) & 200K+ & Prepare all assets \\
+  PR articles written by HiBT & --- & Provide QUG factsheet \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Activatable Campaigns (Require QUG Token Allocation)}
+
+These are opt-in. Each one increases volume but requires allocating QUG from our community fund. All were used for FWOG and proved effective at generating short-term spikes.
+
+\begin{center}
+\begin{tabular}{L{3.5cm} C{2cm} L{7cm}}
+  \toprule
+  \rowcolor{lightgray}
+  \textbf{Activity} & \textbf{Exposure} & \textbf{Strategy} \\
+  \midrule
+  AMA & 100K+ & Run within first week — builds credibility \\
+  Lucky Draw & 100K+ & Pairs well with FWOG-style X Spaces \\
+  Trading Competition & 200K+ & Best volume driver — run in weeks 2--3 \\
+  Buy \& Win & 50K+ & Launch week; drives initial buying pressure \\
+  Buy \& Earn & 200K+ & Month 2; rewards sustained holding \\
+  Social Media Airdrop & 50K+ & Drives social follower growth \\
+  Deposit Bonus & 200K+ & Best for onboarding new exchange users \\
+  Net Buying Competition & 100K+ & Week 3--4; rewards sustained accumulation \\
+  Hold Earn & 100K+ & Month 2+; reduces sell pressure \\
+  Lending & 200K+ & Month 3+; advanced liquidity mechanism \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Recommended token allocation for activities:} 150,000--200,000 QUG total (0.7--1.0\% of max supply), distributed over 90 days. This is within the industry standard range of 1--3\% for initial exchange marketing.
+
+% ════════════════════════════════════════════════════════════════════
+\section{QUG's Unique Volume Advantages}
+% ════════════════════════════════════════════════════════════════════
+
+QUG has structural advantages that no memecoin like FWOG can replicate. These must be the foundation of every conversation with potential investors.
+
+\subsection{The Mining Economy: Built-in Volume Machine}
+
+\begin{greenbox}
+\textbf{Every miner is a daily seller AND a daily buyer of QUG.} Miners earn QUG rewards continuously. They sell a portion to cover electricity costs (creating sell-side volume). They also buy more QUG when price dips because it extends their mining profitability. This is the same mechanics that drives Bitcoin and Kaspa's daily trading volume — a self-sustaining economic loop.
+\end{greenbox}
+
+\begin{center}
+\begin{tabular}{L{4cm} L{4cm} L{5cm}}
+  \toprule
+  \rowcolor{lightgray}
+  \textbf{Miner Count} & \textbf{Est. Daily QUG Earned} & \textbf{Est. Daily Volume Contribution} \\
+  \midrule
+  50 miners & $\sim$360 QUG/day & Low (\$X at current price) \\
+  500 miners & $\sim$3,600 QUG/day & Moderate — noticeable on HiBT \\
+  5,000 miners & $\sim$36,000 QUG/day & Significant — sustains top-gainer status \\
+  ASIC miners (Dragon Ball) & 6--10$\times$ efficiency & Multiplies all figures above \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Conclusion:} Growing the miner count is the single most sustainable volume strategy. Every miner Dragon Ball sells onto the market creates permanent, recurring daily trading volume on HiBT.
+
+\subsection{The Dragon Ball Partnership as a Marketing Weapon}
+
+The FPGA/ASIC cooperation with Dragon Ball Enterprise is not just a hardware deal — it is a marketing event of the first order.
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{``The first quantum-resistant ASIC miner''} is a globally unique news hook. No other project can claim this.
+  \item Dragon Ball's manufacturing and distribution network in Asia-Pacific reaches mining communities that HiBT's Korean, Chinese, and Japanese communities also reach — a natural overlap.
+  \item FPGA validation milestones (Blake3 pipeline pass, full SoC verification) are \emph{datable press release events} that give us fresh news hooks every 4--6 weeks.
+  \item The existence of a physical hardware product gives QUG legitimacy that no token-only project can match.
+\end{itemize}
+
+\subsection{The Quantum-Resistance Narrative}
+
+The global regulatory and institutional conversation about quantum computing is accelerating in 2026. NIST completed its PQC standardisation in 2024--2025. Major banks and governments are discussing ``Q-Day'' timelines. QUG is the \emph{only mineable cryptocurrency built on post-quantum cryptography from genesis}.
+
+\begin{graybox}
+\textbf{Key talking point for all KOL and media briefings:}\\
+``Every major blockchain — Bitcoin, Ethereum, Solana — is vulnerable to a sufficiently powerful quantum computer. QUG was built from the ground up with NIST-standardised Dilithium5 and Kyber1024. It is the only PoW blockchain that a quantum computer cannot break. And now it has the first quantum-resistant ASIC miner — built in partnership with Dragon Ball Enterprise.''
+\end{graybox}
+
+% ════════════════════════════════════════════════════════════════════
+\section{Market Making and Liquidity Foundation}
+% ════════════════════════════════════════════════════════════════════
+
+Before any marketing activity can succeed, there must be a functioning order book. Volume without liquidity produces violent price swings that scare away exactly the investors you are trying to attract.
+
+\subsection{Minimum Viable Order Book at Launch}
+
+HiBT's market making package (\$3,000 USDT + \$3,000 USDT equivalent in QUG) is the minimum. Based on standard CEX mechanics, the order book should be seeded as follows:
+
+\begin{center}
+\begin{tabular}{C{2.5cm} C{2.5cm} C{2.5cm} C{2.5cm}}
+  \toprule
+  \rowcolor{lightgray}
+  \textbf{Side} & \textbf{Depth} & \textbf{Spread} & \textbf{Goal} \\
+  \midrule
+  Buy (bid) & \$1,500 USDT & 0.5--1\% below mid & Absorb sell pressure \\
+  Sell (ask) & 3,000 QUG & 0.5--1\% above mid & Absorb buy pressure \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Key principle:} The initial price on HiBT must be \textbf{at or slightly above} the current DEX price on quillon.xyz. If HiBT price launches significantly above DEX price, arbitrageurs immediately sell and crater the price. If it launches below, it looks like a troubled project.
+
+\subsection{Price Discovery Coordination}
+
+Since QUG has not traded on any CEX before, the initial listing price must be carefully considered:
+
+\begin{enumerate}[leftmargin=1.5em]
+  \item Agree on an initial price with HiBT's market making team \textbf{before} the listing goes live.
+  \item Ensure the DEX price on quillon.xyz reflects this anchor before listing day.
+  \item Coordinate with miners to avoid a large dump during the first 24 hours — this is the most critical window.
+  \item Consider a voluntary 7-day lock on team/founding wallet selling during launch week.
+\end{enumerate}
+
+% ════════════════════════════════════════════════════════════════════
+\section{Phase-by-Phase Execution Plan}
+% ════════════════════════════════════════════════════════════════════
+
+\subsection{Phase 1: Launch Burst (Days 1--14)}
+
+\textbf{Goal:} Maximum visibility, establish QUG as a legitimate project in the HiBT ecosystem, get QUG into the Top Gainer list.
+
+\begin{center}
+\begin{longtable}{C{1.5cm} L{3.5cm} L{7cm}}
+  \toprule
+  \rowcolor{lightgray}
+  \textbf{Day} & \textbf{Activity} & \textbf{Detail} \\
+  \midrule
+  \endhead
+  \bottomrule
+  \endfoot
+
+  D-7 & Pre-listing media blast & Release announcement on quillon.xyz, Discord, Telegram, Twitter/X. ``QUG lists on HiBT in 7 days.'' KOL pre-briefings. \\
+
+  D-3 & AMA (HiBT community) & Live AMA in HiBT's 100K+ community. Demetri + Dragon Ball representative on the call. Mention the ASIC partnership specifically. \\
+
+  D-1 & Deposit bonus live & HiBT activates Deposit Bonus — users who deposit QUG before listing receive bonus. Incentivises holders to bring QUG to the exchange. \\
+
+  \rowcolor{quggreenlight}
+  \textbf{D0} & \textbf{LISTING DAY} & \textbf{All HiBT homepage banners live. App push notification to 9M+ users. Social media blast across all channels. Lucky Draw opens (50 USDT prize pool, 72-hour window — replicating FWOG model). Buy \& Win activates.} \\
+
+  D1--3 & X (Twitter) Spaces & Themed space: ``Is Quantum Computing a Threat to Bitcoin? Meet the Solution.'' Target: 1,000+ live listeners. Dragon Ball representative as guest speaker — talk about ASIC. \\
+
+  D3--7 & Trading Competition & Buy competition: top 20 buyers by QUG volume share a QUG prize pool. This is the single most reliable short-term volume driver in HiBT's toolkit. \\
+
+  D7 & Weekly update to HiBT & Submit content for HiBT's weekly report blast (9M+ email). Milestone: ``1 week live — X trades executed, FPGA validation progress.'' \\
+
+  D10 & Net Buying Competition & Rewards sustained accumulation, not just one-time buys. Reduces early sell pressure in week 2. \\
+
+  D14 & Phase 1 Review & Measure: 24h volume, active wallets on HiBT, social follower growth, price relative to D0 launch. Decide Phase 2 allocation. \\
+\end{longtable}
+\end{center}
+
+\textbf{QUG token budget for Phase 1:} 60,000--80,000 QUG (Lucky Draw: 20K, Trading Comp: 30K, Buy\&Win: 10K, Deposit Bonus: 10K+).
+
+\subsection{Phase 2: Consolidation and Depth (Days 15--60)}
+
+\textbf{Goal:} Prevent the ``post-listing cliff'' that killed FWOG. Build holders who stay because of the mining opportunity, not just the trading activity.
+
+\subsubsection{Mining Community Onboarding Campaign}
+
+The key insight for Phase 2 is that \textbf{miners are QUG's most loyal long-term holders}. Unlike speculators, miners have sunk cost (hardware investment) that keeps them engaged for months. Phase 2 should focus heavily on converting HiBT users into miners.
+
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{Mining Tutorial Series:} Weekly posts on HiBT's social channels: ``How to mine QUG and earn daily income.'' Show earnings calculator (X QUG/day at Y difficulty = Z USDT/month).
+  \item \textbf{``Mine and Trade'' campaign:} Users who prove they are mining QUG (by showing their miner address) get reduced trading fees or a HiBT bonus. Coordinate with HiBT to implement.
+  \item \textbf{Dragon Ball FPGA milestone press release:} When Blake3 pipeline validation passes, issue a joint press release — Dragon Ball Enterprise + Quillon. Submit to CoinDesk, Cointelegraph, CoinGecko news, Decrypt. This is organic media with no cost.
+  \item \textbf{ASIC pre-announcement:} Even a vague announcement — ``Dragon Ball Enterprise is conducting ASIC feasibility evaluation for QUG'' — is enough to generate news.
+\end{enumerate}
+
+\subsubsection{Hold Earn and Staking (Month 2)}
+
+\begin{center}
+\begin{tabular}{L{4cm} L{4cm} L{5cm}}
+  \toprule
+  \rowcolor{lightgray}
+  \textbf{Activity} & \textbf{HiBT Exposure} & \textbf{Effect} \\
+  \midrule
+  Hold Earn & 100K+ users & QUG locked in HiBT = reduced circulating supply = price support \\
+  Staking & 50K+ users & Same effect; also signals long-term confidence in the project \\
+  Buy \& Earn & 200K+ users & Largest exposure of any single activity; strong month-2 catalyst \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\subsubsection{KOL Outreach Strategy}
+
+HiBT's Premium package includes 15+ global KOLs. Even on the Standard package, independent KOL outreach is the highest ROI marketing spend in crypto.
+
+\begin{center}
+\begin{tabular}{L{3cm} L{4cm} L{3.5cm} L{2.5cm}}
+  \toprule
+  \rowcolor{lightgray}
+  \textbf{KOL Type} & \textbf{Platform} & \textbf{Target Audience} & \textbf{Budget Est.} \\
+  \midrule
+  Crypto tech YouTuber & YouTube (50K--500K subs) & Developers, builders & \$500--\$2,000 \\
+  Mining YouTuber & YouTube (10K--200K subs) & Miners, hardware enthusiasts & \$200--\$1,000 \\
+  Chinese KOL & WeChat / Weibo / Bilibili & Chinese retail investors & \$300--\$1,500 \\
+  Korean crypto influencer & Twitter/KakaoTalk & Korean retail (HiBT core) & \$300--\$1,200 \\
+  Quantum computing blogger & Twitter / Substack & Tech-curious investors & Often free (story is genuine) \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Recommended approach:} Give all KOLs the same three talking points: (1) quantum threat to Bitcoin is real, (2) QUG is the solution, (3) Dragon Ball is making the ASIC hardware. These are verifiable, provable claims — which is rare in crypto influencer marketing and will stand out.
+
+\subsection{Phase 3: Sustained Growth and Tier-1 Bridge (Month 3+)}
+
+\textbf{Goal:} Use the HiBT listing as a launchpad toward tier-1.5 exchanges (Gate.io, MEXC, KuCoin) and grow to a market cap where those conversations become productive.
+
+\subsubsection{Listing Leverage: Use HiBT to Get MEXC/Gate.io}
+
+Every major exchange considers three data points when evaluating new listings:
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{Volume:} 30-day average daily volume on existing exchanges.
+  \item \textbf{Community size:} Twitter followers, Telegram members, Discord users.
+  \item \textbf{Narrative:} Is this project unique? Will our users care?
+\end{enumerate}
+
+HiBT gives us the volume proof point. Our job in months 2--3 is to also grow the community metrics so that when we approach MEXC or Gate.io, we can say: ``QUG has been live on HiBT for 90 days, averaging \$X daily volume, with 5,000 Twitter followers and 3,000 Telegram members. Here is why your users will want this.''
+
+\begin{goldbox}
+\textbf{Target metrics before approaching MEXC/Gate.io:}
+\begin{itemize}[leftmargin=1em, itemsep=0pt]
+  \item Daily volume on HiBT: $\geq$ \$50,000 USDT average (30-day)
+  \item Twitter/X followers: $\geq$ 5,000
+  \item Telegram community: $\geq$ 3,000 members
+  \item Confirmed ASIC partner: Dragon Ball (already have this)
+  \item Mining network: $\geq$ 200 active miners globally
+  \item FPGA validation: completed (provides third-party technical validation)
+\end{itemize}
+\end{goldbox}
+
+\subsubsection{The Asia-Pacific Mining Network Advantage}
+
+Dragon Ball Enterprise's presence in the Asia-Pacific hardware manufacturing ecosystem is a direct route to Chinese and Korean mining communities — which are the primary retail investor base on HiBT and MEXC. This is QUG's competitive advantage over any project without a hardware partner.
+
+\textbf{Concrete actions:}
+\begin{itemize}[leftmargin=1.5em]
+  \item Dragon Ball to demo the FPGA mining rig at one mining conference or trade show in China or Taiwan. Even a table at a smaller event with a live demo generates organic media.
+  \item Cross-post mining results from Dragon Ball's FPGA board on Bilibili and Weibo — the Chinese mining community watches these platforms daily.
+  \item Launch a ``QUG Mining Community'' WeChat group targeting Chinese retail miners — Dragon Ball's existing network can seed this organically.
+\end{itemize}
+
+% ════════════════════════════════════════════════════════════════════
+\section{Community Infrastructure: What Must Be Built Before Listing}
+% ════════════════════════════════════════════════════════════════════
+
+\begin{redbox}
+\textbf{One of the most common listing mistakes:} projects announce a CEX listing but have no Telegram group, no Discord, no Twitter presence, and no content ready. When the HiBT banner sends 9M users to check QUG, they find nothing and leave. This must be fixed before the listing goes live.
+\end{redbox}
+
+\subsection{Minimum Community Infrastructure Checklist}
+
+\begin{center}
+\begin{tabular}{L{5cm} C{2cm} L{6cm}}
+  \toprule
+  \rowcolor{lightgray}
+  \textbf{Platform} & \textbf{Priority} & \textbf{Target at Launch} \\
+  \midrule
+  Twitter/X (@QuillonGraph or similar) & Critical & 1,000+ followers, daily posting schedule \\
+  Telegram (Announcement channel) & Critical & Active, moderated, 500+ members \\
+  Telegram (Community chat) & Critical & 24/7 moderated, English + Chinese \\
+  Discord (Main server) & High & Structured channels, active mods \\
+  Website (quillon.xyz) & Critical & Updated with HiBT listing info, mining guide \\
+  CoinGecko / CMC listing & Critical & Verified project page with all metadata \\
+  GitHub (code.quillon.xyz) & Medium & Public-facing summary of repo activity \\
+  YouTube & Medium & At least one technical explainer video \\
+  WeChat Group (Chinese) & High & Dragon Ball network seed this \\
+  BitcoinTalk ANN thread & Medium & Already exists — keep updated weekly \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Content Calendar: 30 Days Before Listing}
+
+\begin{center}
+\begin{tabular}{C{1.5cm} L{5cm} L{6.5cm}}
+  \toprule
+  \rowcolor{lightgray}
+  \textbf{Week} & \textbf{Content Theme} & \textbf{Posts / Actions} \\
+  \midrule
+  Week -4 & Quantum threat awareness & 3 posts on why existing blockchains are vulnerable to quantum computers \\
+  Week -3 & QUG technical intro & 3 posts: consensus, post-quantum crypto, mining \\
+  Week -2 & Dragon Ball partnership reveal & 1 major announcement: ``Our ASIC partner is Dragon Ball Enterprise.'' \\
+  Week -1 & Listing countdown & Daily countdown posts. Collect email signups for airdrop whitelist. \\
+  Week 0 & Launch week & Daily posts, AMA, X Space, Lucky Draw announcement \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+% ════════════════════════════════════════════════════════════════════
+\section{Avoiding Delisting: The Sustainability Framework}
+% ════════════════════════════════════════════════════════════════════
+
+The FWOG lesson is the most important in this document. HiBT will monitor QUG's listing health using several metrics. Understanding these and proactively managing them is critical.
+
+\subsection{HiBT Delisting Triggers to Monitor}
+
+Based on the listing agreement analysis:
+
+\begin{center}
+\begin{tabular}{L{4.5cm} L{3cm} L{5.5cm}}
+  \toprule
+  \rowcolor{lightgray}
+  \textbf{Trigger} & \textbf{Risk for QUG} & \textbf{Mitigation} \\
+  \midrule
+  Social media inactive $>$ 1 month & Medium & Never go more than 48 hours without a post \\
+  Price stays ``low'' due to project concealment & Low (if transparent) & Publish weekly mining stats publicly \\
+  Hash rate / 51\% attack risk & Low-Medium & Grow miner count; ASIC launch increases hash rate dramatically \\
+  Team member lawsuits & Low & Ensure contract names specific individuals narrowly \\
+  Website/app inactive & Low & quillon.xyz is live and actively developed \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{The 90-Day Volume Floor}
+
+Based on HiBT's portfolio behavior with new listings, projects need approximately \$10,000--\$30,000 in daily trading volume to stay off the watch list. Our strategy targets:
+
+\begin{center}
+\begin{tabular}{C{2.5cm} C{3cm} C{3cm} C{3.5cm}}
+  \toprule
+  \rowcolor{lightgray}
+  \textbf{Month} & \textbf{Target Daily Volume} & \textbf{Primary Driver} & \textbf{Secondary Driver} \\
+  \midrule
+  Month 1 & \$20,000 USDT & Trading competition & Launch hype \\
+  Month 2 & \$15,000 USDT & Miner sell/buy activity & Hold Earn \\
+  Month 3 & \$25,000 USDT & ASIC news + Buy\&Earn & Organic miner growth \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+% ════════════════════════════════════════════════════════════════════
+\section{Budget Summary}
+% ════════════════════════════════════════════════════════════════════
+
+\begin{center}
+\begin{tabular}{L{5.5cm} R{2.5cm} R{2.5cm} L{3cm}}
+  \toprule
+  \rowcolor{lightgray}
+  \textbf{Item} & \textbf{USDT Cost} & \textbf{QUG Cost} & \textbf{Phase} \\
+  \midrule
+  HiBT listing fee & 15,000 & --- & Pre-launch \\
+  HiBT market making deposit & 3,000 & 3,000 QUG equiv. & At listing \\
+  Phase 1 activities (Lucky Draw, Trading Comp, Buy\&Win, Deposit Bonus) & --- & 70,000 QUG & Month 1 \\
+  Phase 2 activities (Hold Earn, Buy\&Earn, Net Buy Comp) & --- & 80,000 QUG & Month 2--3 \\
+  KOL outreach (5 KOLs: mining + quantum + Chinese) & 3,000--5,000 & --- & Month 1--2 \\
+  Community management (moderation, translations) & 500--1,000/mo & --- & Ongoing \\
+  Content creation (graphics, videos) & 500--1,000 & --- & Pre-launch \\
+  \midrule
+  \rowcolor{quggreenlight}
+  \textbf{Total USDT} & \textbf{$\sim$\$22,000--26,000} & \textbf{153,000 QUG} & \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Note:} 153,000 QUG represents approximately 0.73\% of the 21M max supply. This is within the conservative range of 0.5--1\% that successful PoW projects allocate for initial exchange marketing.
+
+% ════════════════════════════════════════════════════════════════════
+\section{The Dragon Ball Partnership: Strategic Amplification Points}
+% ════════════════════════════════════════════════════════════════════
+
+Chong has asked specifically how the Dragon Ball partnership creates investor interest. Here is the concrete answer.
+
+\subsection{Milestones as Press Events}
+
+Each validation milestone in the Dragon Ball FPGA roadmap is a dateable, verifiable press event:
+
+\begin{center}
+\begin{tabular}{L{3cm} L{5.5cm} L{4.5cm}}
+  \toprule
+  \rowcolor{lightgray}
+  \textbf{Milestone} & \textbf{What It Proves} & \textbf{Marketing Angle} \\
+  \midrule
+  Blake3 pipeline pass (XC7K355T) & The core mining algorithm works in hardware & ``QUG mining is now FPGA-verified — institutional grade'' \\
+  Full SoC synthesis ($\sim$13K LUTs) & Complete chip design is viable & ``Dragon Ball confirms QUG ASIC is technically feasible'' \\
+  Genus-2 VDF validation & The VDF-based ASIC resistance is real & ``First post-quantum mining VDF validated in silicon'' \\
+  ASIC feasibility report & Cost/performance numbers from Dragon Ball & ``Dragon Ball targets \$149 retail miner — ROI positive at X QUG price'' \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Why This Drives Volume}
+
+When a mining hardware company announces a miner for a specific coin, it signals to the entire crypto market that:
+\begin{enumerate}[leftmargin=1.5em]
+  \item The coin will exist long-term (hardware companies do due diligence).
+  \item The coin will have growing hash rate (harder to 51\% attack = safer to hold).
+  \item There will be increasing demand from miners buying the coin to participate.
+  \item There is a specific date-based catalyst (miner ship date) for price discovery.
+\end{enumerate}
+
+These are the same dynamics that drove Kaspa (KAS) from obscurity to \$500M+ market cap when GPU miner manufacturers started building Kaspa-specific cards. Dragon Ball's partnership announcement, at the right time, can be QUG's equivalent moment.
+
+% ════════════════════════════════════════════════════════════════════
+\section{90-Day Execution Timeline}
+% ════════════════════════════════════════════════════════════════════
+
+\begin{center}
+\begin{longtable}{C{2cm} L{4cm} L{7cm}}
+  \toprule
+  \rowcolor{lightgray}
+  \textbf{Week} & \textbf{Theme} & \textbf{Key Actions} \\
+  \midrule
+  \endhead
+  \bottomrule
+  \endfoot
+
+  \rowcolor{lightgray}
+  \multicolumn{3}{c}{\textbf{PRE-LAUNCH}} \\
+
+  W-4 & Infrastructure & Build Telegram, Discord, Twitter. Post first content. \\
+  W-3 & Content \& KOL prep & Brief 5 KOLs. Record AMA outline. Prepare graphics for all campaigns. \\
+  W-2 & Dragon Ball reveal & Joint announcement: ``Dragon Ball is our exclusive ASIC manufacturer.'' \\
+  W-1 & Countdown & Daily countdown posts. Deposit Bonus opens. Email list collection. \\
+
+  \rowcolor{lightgray}
+  \multicolumn{3}{c}{\textbf{PHASE 1: LAUNCH BURST}} \\
+
+  W0 (D0) & \textbf{Listing Day} & All HiBT banners live. App notifications. Lucky Draw opens. Buy\&Win live. \\
+  W0 (D1--3) & X Spaces & ``Quantum computing vs. Bitcoin'' space. Dragon Ball rep as guest. \\
+  W0 (D3--7) & Trading Comp & Top buyers share QUG prize pool. KOL posts during competition. \\
+  W2 & Net Buying Comp & Transition from one-time buy to sustained accumulation. \\
+  W2 & HiBT Weekly update & Submit milestone content. Mining tutorial released. \\
+
+  \rowcolor{lightgray}
+  \multicolumn{3}{c}{\textbf{PHASE 2: CONSOLIDATION}} \\
+
+  W3--4 & Mining onboarding & Mining guide published. ``Mine and Trade'' campaign. WeChat mining group launched by Dragon Ball. \\
+  W5 & FPGA milestone PR & Blake3 validation press release. Submit to CoinDesk, Cointelegraph. \\
+  W6--8 & Hold Earn \& Buy\&Earn & Reduce circulating supply on HiBT. Reward long-term holders. \\
+  W7 & 2nd AMA & Progress update AMA. Include Dragon Ball engineer for technical credibility. \\
+  W8 & Social media airdrop & Twitter/Telegram follower growth campaign. Build towards 5,000 followers. \\
+
+  \rowcolor{lightgray}
+  \multicolumn{3}{c}{\textbf{PHASE 3: GROWTH}} \\
+
+  W9--10 & Staking launch & HiBT staking for QUG. Reduces sell pressure. \\
+  W10--12 & ASIC feasibility reveal & Dragon Ball completes ASIC evaluation. Announce cost targets (\$149 miner). \\
+  W12 & MEXC/Gate.io approach & Use 90-day volume data + Dragon Ball validation + community metrics to open next exchange discussions. \\
+\end{longtable}
+\end{center}
+
+% ════════════════════════════════════════════════════════════════════
+\section{Key Risks and Mitigations}
+% ════════════════════════════════════════════════════════════════════
+
+\begin{center}
+\begin{tabular}{L{3.5cm} C{1.5cm} L{7cm}}
+  \toprule
+  \rowcolor{lightgray}
+  \textbf{Risk} & \textbf{Severity} & \textbf{Mitigation} \\
+  \midrule
+  Launch day miner dump & High & Voluntary 7-day lock communicated to mining community pre-launch. Offset with Buy\&Win campaign running simultaneously. \\
+  Volume cliff after week 2 & High & Pre-schedule Phase 2 activities before launch. Never have a ``gap week'' with no active campaign. \\
+  HiBT low real volume (wash trading) & Medium & Use HiBT listing as credibility signal; do not rely on it for actual investor discovery. Pursue MEXC/Gate.io in parallel. \\
+  FWOG-style closure & Medium & Unlike FWOG, QUG has real utility (mining) and real development (Dragon Ball ASIC). Maintain weekly social activity. \\
+  ASIC timeline slippage & Low & Each validation phase still generates news even if delayed. Manage expectations proactively. \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+% ════════════════════════════════════════════════════════════════════
+\section{Conclusions and Recommendations}
+% ════════════════════════════════════════════════════════════════════
+
+\begin{greenbox}
+\textbf{Summary of the three things that will determine success or failure:}
+
+\begin{enumerate}[leftmargin=1em, itemsep=3pt]
+  \item \textbf{Miner growth is everything.} Every new miner is a recurring daily volume contributor. Dragon Ball's ASIC work accelerates this by orders of magnitude. Prioritise miner community building above all other marketing.
+
+  \item \textbf{Never have a quiet week.} The FWOG failure was not that HiBT's marketing was bad — it was that after the marketing events ended, there was nothing real underneath. QUG must run a rolling calendar of activities so there is always a reason to watch the price.
+
+  \item \textbf{The Dragon Ball press moments are your biggest free marketing events.} Each FPGA milestone, each validation pass, the ASIC announcement — these are news stories that cost nothing and reach audiences no paid KOL can reach. Plan the press release timing to align with quiet trading periods to maximise their impact.
+\end{enumerate}
+\end{greenbox}
+
+\medskip
+
+\textbf{Immediate next steps:}
+
+\begin{enumerate}[leftmargin=1.5em]
+  \item Sign the HiBT contract (with market manipulation language removed per legal review).
+  \item Begin building Telegram and Twitter infrastructure now — do not wait for the listing date.
+  \item Agree with Dragon Ball on a joint announcement date for the ASIC partnership reveal.
+  \item Allocate 153,000 QUG from the community reserve for 90-day HiBT marketing activities.
+  \item Brief 5 KOLs (2 mining, 2 Chinese market, 1 quantum computing) with materials before listing week.
+\end{enumerate}
+
+\vfill
+\begin{center}
+\small\color{midgray}
+\textit{This document is confidential and prepared for internal strategic planning.\\
+Quillon Graph $\times$ Dragon Ball Enterprise — April 2026}\\[4pt]
+\textbf{quillon.xyz}
+\end{center}
+
+\end{document}

@@ -747,11 +747,21 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
         ];
       }
 
+      // Fetch QUG/USD price from AMM oracle for usdValue display
+      let qugPriceUsd: number | undefined;
+      try {
+        const priceResp = await qnkAPI.getAMMPrice('QUG');
+        if (priceResp.success && priceResp.data && priceResp.data.price_usd > 0) {
+          qugPriceUsd = priceResp.data.price_usd;
+        }
+      } catch { /* silent — usdValue just stays undefined */ }
+
       const balances: WalletBalance[] = [
         {
           symbol: 'QUG',
           name: 'Quillon Graph',
           balance: qugBalance,
+          usdValue: qugPriceUsd !== undefined ? qugBalance * qugPriceUsd : undefined,
           icon: 'qug',
           color: 'from-amber-400 to-yellow-500',
           history: qugHistory
@@ -3166,148 +3176,161 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
       {/* ── RIGHT COLUMN: Sticky live transaction history ── */}
       <div className="flex flex-col">
         <motion.div
-          className="backdrop-blur-xl rounded-3xl p-5 flex flex-col"
+          className="rounded-2xl flex flex-col overflow-hidden"
           style={{
-            background: 'linear-gradient(135deg, rgba(15, 15, 25, 0.92) 0%, rgba(25, 25, 40, 0.92) 100%)',
-            border: '2px solid rgba(212, 175, 55, 0.2)',
-            boxShadow: '0 0 30px rgba(212, 175, 55, 0.1)',
+            background: 'rgba(10, 12, 20, 0.85)',
+            backdropFilter: 'blur(24px)',
+            border: '1px solid rgba(212, 175, 55, 0.15)',
+            boxShadow: '0 8px 32px rgba(0,0,0,0.4), 0 0 0 0.5px rgba(212,175,55,0.08) inset',
             position: 'sticky',
             top: '1rem',
             maxHeight: 'calc(100vh - 2rem)',
-            overflowY: 'auto'
           }}
           initial={{ opacity: 0, x: 20 }}
           animate={{ opacity: 1, x: 0 }}
-          transition={{ delay: 0.3 }}
+          transition={{ delay: 0.25, type: 'spring', stiffness: 260, damping: 22 }}
         >
-          {/* Header row with live indicator */}
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
-              <Zap className="w-4 h-4 text-amber-400" />
-              <h3 className="text-sm font-semibold text-amber-100">Recent Activity</h3>
-              <span className="text-xs text-amber-300/50">{filteredAndSortedTransactions.length}</span>
+          {/* Header */}
+          <div className="px-4 pt-4 pb-3" style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <div className="w-6 h-6 rounded-md flex items-center justify-center"
+                  style={{ background: 'linear-gradient(135deg, rgba(212,175,55,0.25), rgba(255,215,0,0.15))' }}>
+                  <Zap className="w-3.5 h-3.5 text-amber-400" />
+                </div>
+                <span className="text-sm font-semibold text-white/90 tracking-tight">Activity</span>
+                <span className="text-[11px] text-white/30 font-medium tabular-nums">
+                  {filteredAndSortedTransactions.length}
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <motion.div className="w-1.5 h-1.5 rounded-full"
+                  style={{ background: sseConnected ? '#10B981' : '#4B5563' }}
+                  animate={sseConnected ? { scale: [1, 1.5, 1], opacity: [0.5, 1, 0.5] } : {}}
+                  transition={{ duration: 1.8, repeat: Infinity }}
+                />
+                <span className="text-[10px] font-medium" style={{ color: sseConnected ? '#34D399' : '#6B7280' }}>
+                  {sseConnected ? 'LIVE' : 'OFFLINE'}
+                </span>
+              </div>
             </div>
-            <div className="flex items-center gap-1.5">
-              <motion.div
-                className="w-1.5 h-1.5 rounded-full"
-                style={{ background: sseConnected ? '#10B981' : '#6B7280' }}
-                animate={sseConnected ? { scale: [1, 1.4, 1], opacity: [0.6, 1, 0.6] } : {}}
-                transition={{ duration: 2, repeat: Infinity }}
-              />
-              <span className="text-xs text-amber-300/40">{sseConnected ? 'Live' : 'Polling'}</span>
-            </div>
-          </div>
-
-          {/* Compact filter chips */}
-          <div className="flex items-center gap-1.5 mb-3 flex-wrap">
-            {(['all', 'receive', 'send', 'mining', 'swap'] as const).map((type) => (
-              <motion.button
-                key={type}
-                onClick={() => setFilterType(type)}
-                className={`px-2 py-0.5 rounded text-xs font-medium transition-all ${
-                  filterType === type ? 'text-slate-900' : 'text-amber-300/60 hover:text-amber-200'
-                }`}
-                style={filterType === type ? {
-                  background: 'linear-gradient(135deg, #D4AF37, #FFD700)',
-                } : { background: 'rgba(212,175,55,0.07)', border: '1px solid rgba(212,175,55,0.12)' }}
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
+            {/* Filter pills */}
+            <div className="flex items-center gap-1">
+              {([
+                { id: 'all', label: 'All' },
+                { id: 'receive', label: '↓ In' },
+                { id: 'send', label: '↑ Out' },
+                { id: 'mining', label: '⛏ Mine' },
+                { id: 'swap', label: '⇄ Swap' },
+              ] as const).map(({ id, label }) => (
+                <motion.button key={id} onClick={() => setFilterType(id as typeof filterType)}
+                  className="px-2 py-1 rounded-md text-[10px] font-semibold tracking-wide transition-all"
+                  style={filterType === id ? {
+                    background: 'linear-gradient(135deg, #D4AF37, #F59E0B)',
+                    color: '#0a0c14',
+                  } : { background: 'rgba(255,255,255,0.04)', color: 'rgba(255,255,255,0.35)', border: '1px solid rgba(255,255,255,0.06)' }}
+                  whileTap={{ scale: 0.93 }}
+                >
+                  {label}
+                </motion.button>
+              ))}
+              <motion.button onClick={() => setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')}
+                className="ml-auto p-1 rounded-md text-[10px]"
+                style={{ background: 'rgba(255,255,255,0.04)', color: 'rgba(255,255,255,0.3)', border: '1px solid rgba(255,255,255,0.06)' }}
+                whileTap={{ scale: 0.93 }}
+                title={sortOrder === 'desc' ? 'Showing newest first' : 'Showing oldest first'}
               >
-                {type === 'all' ? 'All' : type === 'receive' ? '↓ In' : type === 'send' ? '↑ Out' : type === 'mining' ? '⛏' : '⇄'}
+                {sortOrder === 'desc' ? '↓' : '↑'}
               </motion.button>
-            ))}
-            <motion.button
-              onClick={() => setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')}
-              className="ml-auto px-2 py-0.5 rounded text-amber-300/50 text-xs"
-              style={{ background: 'rgba(212,175,55,0.07)', border: '1px solid rgba(212,175,55,0.12)' }}
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
-            >
-              {sortOrder === 'desc' ? '↓ Newest' : '↑ Oldest'}
-            </motion.button>
+            </div>
           </div>
 
-          {/* Transaction List */}
-          <div className="space-y-3">
+          {/* Transaction List — scrollable */}
+          <div className="flex-1 overflow-y-auto px-3 py-2 space-y-1" style={{ scrollbarWidth: 'none' }}>
             <AnimatePresence initial={false}>
-              {paginatedTransactions.length > 0 ? paginatedTransactions.map((tx) => (
-                <motion.div
-                  key={tx.id}
-                  initial={{ opacity: 0, x: -10 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  exit={{ opacity: 0, scale: 0.95 }}
-                  transition={{ duration: 0.15 }}
-                  className="flex items-center justify-between p-4 rounded-xl cursor-pointer group"
-                  style={{
-                    background: 'rgba(15, 23, 42, 0.5)',
-                    border: '1px solid rgba(212, 175, 55, 0.1)'
-                  }}
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.background = 'rgba(212, 175, 55, 0.1)';
-                    e.currentTarget.style.borderColor = 'rgba(212, 175, 55, 0.3)';
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.background = 'rgba(15, 23, 42, 0.5)';
-                    e.currentTarget.style.borderColor = 'rgba(212, 175, 55, 0.1)';
-                  }}
-                  onClick={() => {
-                    setSelectedTransaction(tx);
-                    setIsModalOpen(true);
-                  }}
-                >
-                  <div className="flex items-center gap-4">
-                    <div
-                      className={`w-10 h-10 rounded-lg flex items-center justify-center`}
-                      style={{
-                        background: tx.type === 'receive'
-                          ? 'linear-gradient(135deg, rgba(34, 197, 94, 0.2), rgba(22, 163, 74, 0.15))'
-                          : tx.type === 'mining'
-                          ? 'linear-gradient(135deg, rgba(251, 191, 36, 0.2), rgba(245, 158, 11, 0.15))'
-                          : tx.type === 'swap'
-                          ? 'linear-gradient(135deg, rgba(139, 92, 246, 0.2), rgba(124, 58, 237, 0.15))'
-                          : 'linear-gradient(135deg, rgba(244, 63, 94, 0.2), rgba(225, 29, 72, 0.15))',
-                        border: `1px solid ${tx.type === 'receive' ? 'rgba(34, 197, 94, 0.3)' : tx.type === 'mining' ? 'rgba(251, 191, 36, 0.3)' : tx.type === 'swap' ? 'rgba(139, 92, 246, 0.3)' : 'rgba(244, 63, 94, 0.3)'}`
-                      }}
-                    >
-                      {tx.type === 'receive' ? '↓' : tx.type === 'mining' ? '⛏️' : tx.type === 'swap' ? '⇄' : '↑'}
-                    </div>
-                    <div>
-                      <div className="font-semibold text-amber-100">
-                        {tx.type === 'receive' ? 'Received from' : tx.type === 'mining' ? 'Mining Reward' : tx.type === 'swap' ? 'Swapped' : 'Sent to'} {' '}
-                        <span className="text-amber-300/70">
-                          {tx.type === 'receive' ? (tx.from || 'Unknown') : tx.type === 'mining' ? '' : tx.type === 'swap' ? `${tx.tokenIn || 'Token'} → ${tx.tokenOut || 'Token'}` : (tx.to || 'Unknown')}
-                        </span>
-                      </div>
-                      <div className="text-sm text-amber-300/50 flex items-center gap-2">
-                        {new Date(tx.timestamp).toLocaleString()} •
-                        <span className="font-mono">{tx.txHash?.slice(0, 8) || 'N/A'}...</span>
-                      </div>
-                      {tx.memo && (
-                        <div className="text-xs text-amber-200/60 mt-0.5 italic truncate max-w-[180px]">
-                          "{tx.memo}"
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                  <div
-                    className={`font-bold text-lg ${
-                      tx.type === 'receive' ? 'text-green-400' : tx.type === 'mining' ? 'text-amber-400' : tx.type === 'swap' ? 'text-violet-400' : 'text-rose-400'
-                    }`}
+              {paginatedTransactions.length > 0 ? paginatedTransactions.map((tx) => {
+                const isIn = tx.type === 'receive' || tx.type === 'mining';
+                const accentColor = tx.type === 'receive' ? '#22C55E'
+                  : tx.type === 'mining' ? '#F59E0B'
+                  : tx.type === 'swap' ? '#A78BFA'
+                  : '#F43F5E';
+                const iconBg = tx.type === 'receive' ? 'rgba(34,197,94,0.12)'
+                  : tx.type === 'mining' ? 'rgba(245,158,11,0.12)'
+                  : tx.type === 'swap' ? 'rgba(167,139,250,0.12)'
+                  : 'rgba(244,63,94,0.12)';
+                const icon = tx.type === 'receive' ? '↓' : tx.type === 'mining' ? '⛏' : tx.type === 'swap' ? '⇄' : '↑';
+                const label = tx.type === 'receive' ? 'From' : tx.type === 'mining' ? 'Block reward' : tx.type === 'swap' ? `${tx.tokenIn||'?'} → ${tx.tokenOut||'?'}` : 'To';
+                const addr = tx.type === 'receive' ? tx.from : tx.type === 'send' ? tx.to : undefined;
+                const shortAddr = addr ? `${addr.slice(0,6)}…${addr.slice(-4)}` : '';
+                const relTime = (() => {
+                  const diffMs = Date.now() - new Date(tx.timestamp).getTime();
+                  const s = Math.floor(diffMs / 1000);
+                  if (s < 60) return `${s}s ago`;
+                  if (s < 3600) return `${Math.floor(s/60)}m ago`;
+                  if (s < 86400) return `${Math.floor(s/3600)}h ago`;
+                  return `${Math.floor(s/86400)}d ago`;
+                })();
+
+                return (
+                  <motion.div
+                    key={tx.id}
+                    initial={{ opacity: 0, y: -6 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, scale: 0.96 }}
+                    transition={{ duration: 0.18 }}
+                    className="flex items-center gap-3 p-2.5 rounded-xl cursor-pointer group"
+                    style={{ transition: 'background 0.15s' }}
+                    onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255,255,255,0.04)'; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
+                    onClick={() => { setSelectedTransaction(tx); setIsModalOpen(true); }}
                   >
-                    {tx.type === 'receive' ? '+' : tx.type === 'mining' ? '+' : tx.type === 'swap' ? '' : '-'}{formatBalance(tx.amount)} {tx.tokenSymbol || TICKER_SYMBOL}
+                    {/* Icon */}
+                    <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 text-sm"
+                      style={{ background: iconBg, color: accentColor }}>
+                      {icon}
+                    </div>
+                    {/* Middle */}
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[11px] font-semibold text-white/80 uppercase tracking-wide">
+                          {tx.type === 'mining' ? 'Mining' : tx.type === 'swap' ? 'Swap' : tx.type === 'receive' ? 'Received' : 'Sent'}
+                        </span>
+                        {addr && (
+                          <span className="text-[10px] font-mono text-white/30 truncate">{label} {shortAddr}</span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1.5 mt-0.5">
+                        <span className="text-[10px] text-white/25">{relTime}</span>
+                        <span className="text-[10px] text-white/15">·</span>
+                        <span className="text-[10px] font-mono text-white/20">{tx.txHash?.slice(0,6)}</span>
+                        {tx.memo && (
+                          <>
+                            <span className="text-[10px] text-white/15">·</span>
+                            <span className="text-[10px] italic text-amber-300/50 truncate max-w-[90px]">"{tx.memo}"</span>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                    {/* Amount */}
+                    <div className="text-right flex-shrink-0">
+                      <div className="text-sm font-bold tabular-nums" style={{ color: accentColor }}>
+                        {isIn ? '+' : tx.type === 'swap' ? '' : '−'}{formatBalance(tx.amount)}
+                      </div>
+                      <div className="text-[10px] text-white/30">{tx.tokenSymbol || TICKER_SYMBOL}</div>
+                    </div>
+                  </motion.div>
+                );
+              }) : (
+                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+                  className="flex flex-col items-center justify-center py-16 gap-3">
+                  <div className="w-12 h-12 rounded-2xl flex items-center justify-center"
+                    style={{ background: 'rgba(212,175,55,0.06)', border: '1px solid rgba(212,175,55,0.1)' }}>
+                    <Activity className="w-5 h-5 text-amber-400/40" />
                   </div>
-                </motion.div>
-              )) : (
-                <motion.div
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  className="text-center py-12 text-amber-300/60"
-                >
-                  <Activity className="w-12 h-12 mx-auto mb-3 opacity-50" />
-                  <p className="font-medium">No transactions found</p>
-                  <p className="text-sm mt-1">
-                    Activity will appear here once the node processes transactions
-                  </p>
+                  <div className="text-center">
+                    <p className="text-sm font-medium text-white/30">No activity yet</p>
+                    <p className="text-[11px] text-white/15 mt-1">Transactions will appear instantly</p>
+                  </div>
                 </motion.div>
               )}
             </AnimatePresence>
@@ -3315,74 +3338,37 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
 
           {/* Pagination */}
           {totalPages > 1 && (
-            <div className="flex items-center justify-between mt-6 pt-6"
-              style={{ borderTop: '1px solid rgba(212, 175, 55, 0.2)' }}
+            <div className="px-4 py-3 flex items-center justify-between"
+              style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}
             >
-              <div className="text-sm text-amber-300/60">
-                Page {currentPage} of {totalPages} • Showing {paginatedTransactions.length} of {filteredAndSortedTransactions.length}
-              </div>
-
-              <div className="flex items-center gap-2">
-                <motion.button
-                  onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+              <span className="text-[10px] text-white/25 tabular-nums">
+                {currentPage}/{totalPages}
+              </span>
+              <div className="flex items-center gap-1">
+                <motion.button onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
                   disabled={currentPage === 1}
-                  className="p-2 rounded-lg disabled:opacity-30 disabled:cursor-not-allowed"
-                  style={{
-                    background: 'rgba(212, 175, 55, 0.15)',
-                    border: '1px solid rgba(212, 175, 55, 0.3)'
-                  }}
-                  whileHover={{ scale: currentPage === 1 ? 1 : 1.1 }}
-                  whileTap={{ scale: currentPage === 1 ? 1 : 0.9 }}
-                >
-                  <ChevronLeft className="w-4 h-4 text-amber-300" />
+                  className="w-6 h-6 rounded-md flex items-center justify-center disabled:opacity-20"
+                  style={{ background: 'rgba(255,255,255,0.06)' }}
+                  whileTap={{ scale: 0.9 }}>
+                  <ChevronLeft className="w-3 h-3 text-white/50" />
                 </motion.button>
-
                 {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
-                  let pageNum;
-                  if (totalPages <= 5) {
-                    pageNum = i + 1;
-                  } else if (currentPage <= 3) {
-                    pageNum = i + 1;
-                  } else if (currentPage >= totalPages - 2) {
-                    pageNum = totalPages - 4 + i;
-                  } else {
-                    pageNum = currentPage - 2 + i;
-                  }
-
+                  let p = totalPages <= 5 ? i + 1 : currentPage <= 3 ? i + 1 : currentPage >= totalPages - 2 ? totalPages - 4 + i : currentPage - 2 + i;
                   return (
-                    <motion.button
-                      key={pageNum}
-                      onClick={() => setCurrentPage(pageNum)}
-                      className={`w-8 h-8 rounded-lg text-sm font-medium ${
-                        currentPage === pageNum ? 'text-slate-900' : 'text-amber-300'
-                      }`}
-                      style={currentPage === pageNum ? {
-                        background: 'linear-gradient(135deg, #D4AF37, #FFD700)',
-                        boxShadow: '0 0 15px rgba(212, 175, 55, 0.3)'
-                      } : {
-                        background: 'rgba(212, 175, 55, 0.1)',
-                        border: '1px solid rgba(212, 175, 55, 0.2)'
-                      }}
-                      whileHover={{ scale: 1.1 }}
-                      whileTap={{ scale: 0.9 }}
-                    >
-                      {pageNum}
+                    <motion.button key={p} onClick={() => setCurrentPage(p)}
+                      className="w-6 h-6 rounded-md text-[10px] font-bold"
+                      style={currentPage === p ? { background: 'linear-gradient(135deg,#D4AF37,#F59E0B)', color: '#0a0c14' } : { background: 'rgba(255,255,255,0.04)', color: 'rgba(255,255,255,0.3)' }}
+                      whileTap={{ scale: 0.9 }}>
+                      {p}
                     </motion.button>
                   );
                 })}
-
-                <motion.button
-                  onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                <motion.button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
                   disabled={currentPage === totalPages}
-                  className="p-2 rounded-lg disabled:opacity-30 disabled:cursor-not-allowed"
-                  style={{
-                    background: 'rgba(212, 175, 55, 0.15)',
-                    border: '1px solid rgba(212, 175, 55, 0.3)'
-                  }}
-                  whileHover={{ scale: currentPage === totalPages ? 1 : 1.1 }}
-                  whileTap={{ scale: currentPage === totalPages ? 1 : 0.9 }}
-                >
-                  <ChevronRight className="w-4 h-4 text-amber-300" />
+                  className="w-6 h-6 rounded-md flex items-center justify-center disabled:opacity-20"
+                  style={{ background: 'rgba(255,255,255,0.06)' }}
+                  whileTap={{ scale: 0.9 }}>
+                  <ChevronRight className="w-3 h-3 text-white/50" />
                 </motion.button>
               </div>
             </div>

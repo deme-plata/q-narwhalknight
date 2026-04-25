@@ -75,7 +75,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.4.3"  # v10.4.3: fix AI chat ad-blocker block — rename frontend endpoint to /api/v1/ai/chat
+version = "10.4.5"  # v10.4.5: DEX limit order book via DCA timer infrastructure
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"

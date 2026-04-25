@@ -1,0 +1,374 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{longtable}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{enumitem}
+
+\definecolor{quillon}{RGB}{0,128,128}
+\definecolor{darkblue}{RGB}{0,51,102}
+\definecolor{lightgray}{RGB}{245,245,245}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=darkblue,
+    urlcolor=quillon,
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textcolor{gray}{ASIC 12nm Cost Model --- QUG-V1 Mining SoC}}
+\fancyhead[R]{\small\textcolor{gray}{Dragon Ball $\times$ Quillon}}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\titleformat{\section}{\large\bfseries\color{darkblue}}{\thesection}{1em}{}
+\titleformat{\subsection}{\normalsize\bfseries\color{quillon}}{\thesubsection}{1em}{}
+
+\title{
+    \vspace{-1cm}
+    {\Large\textbf{ASIC 12nm Cost Model}}\\[0.3cm]
+    {\large QUG-V1 Mining SoC --- Economic Analysis}\\[0.3cm]
+    {\normalsize Dragon Ball $\times$ Quillon Partnership}\\[0.5cm]
+    {\small\textcolor{gray}{Revised with DeepSeek Stress Test Corrections}}
+}
+\author{Quillon Foundation}
+\date{April 2026}
+
+\begin{document}
+\maketitle
+\thispagestyle{fancy}
+
+\begin{abstract}
+This document presents a comprehensive cost analysis for the QUG-V1 Mining SoC targeting TSMC 12FFC (12nm FinFET Compact). We evaluate die economics, bill of materials, break-even projections, and the 12nm vs 7nm trade-off. The analysis incorporates code-verified VDF performance numbers and corrections from an independent stress test. Our conclusion: a standalone box miner at \$149 retail breaks even at 8,300 units with a 6--10$\times$ mining advantage over desktop CPUs.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%% ============================================================
+\section{Die \& Wafer Economics}
+%% ============================================================
+
+\subsection{TSMC 12FFC Process Parameters}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrl}
+\toprule
+\textbf{Parameter} & \textbf{Value} & \textbf{Notes} \\
+\midrule
+Process & TSMC 12FFC & Mature node, proven for crypto ASICs \\
+Wafer diameter & 300\,mm & Standard \\
+Wafer cost & \$3,500 & Volume pricing at 100+ wafers \\
+Defect density (first lot) & 0.45/cm$^2$ & Conservative for initial lots \\
+Defect density (production) & 0.25/cm$^2$ & Mature production \\
+Reticle limit & 858\,mm$^2$ & Max single-exposure die \\
+\bottomrule
+\end{tabular}
+\caption{TSMC 12FFC process parameters}
+\end{table}
+
+\subsection{Die Size Estimates}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcccl}
+\toprule
+\textbf{Configuration} & \textbf{Tiles} & \textbf{LUTs (FPGA)} & \textbf{Die Area} & \textbf{Notes} \\
+\midrule
+Minimal (Phase 1A) & 4 & $\sim$52K & 12--16\,mm$^2$ & BLAKE3 only \\
+Standard (Phase 1B) & 16 & $\sim$210K & 25--35\,mm$^2$ & Full SoC \\
+Performance (Phase 2) & 64 & $\sim$840K & 80--120\,mm$^2$ & Multi-cluster \\
+\bottomrule
+\end{tabular}
+\caption{Die size estimates by configuration}
+\end{table}
+
+\subsection{Yield Model (Standard 16-tile, 30\,mm$^2$)}
+
+\begin{align}
+\text{Gross dies per wafer} &= \frac{63{,}000\,\text{mm}^2}{30\,\text{mm}^2} \approx 2{,}100 \\[6pt]
+\text{After edge loss (15\%)} &= 2{,}100 \times 0.85 = 1{,}785 \\[6pt]
+\text{Yield} &= e^{-D_0 \times A} = e^{-0.45 \times 0.30} = 86.6\% \\[6pt]
+\text{Good dies per wafer} &= 1{,}785 \times 0.866 = \mathbf{1{,}545}
+\end{align}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcccl}
+\toprule
+\textbf{Lot} & $D_0$ (cm$^{-2}$) & \textbf{Yield} & \textbf{Good dies/wafer} & \textbf{Die cost} \\
+\midrule
+First lot (25 wafers) & 0.45 & 86.6\% & 1,545 & \$2.27 \\
+Production (100+ wafers) & 0.25 & 92.7\% & 1,654 & \$2.12 \\
+\bottomrule
+\end{tabular}
+\caption{Yield and die cost by production phase}
+\end{table}
+
+%% ============================================================
+\section{NRE (Non-Recurring Engineering)}
+%% ============================================================
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Item} & \textbf{12nm Cost} & \textbf{7nm Cost} & \textbf{Savings} \\
+\midrule
+Mask set & \$400K--600K & \$800K--1.2M & 50\% \\
+Design services & \$150K--250K & \$200K--350K & 25\% \\
+IP licensing (RISC-V, PLL, IO) & \$50K--100K & \$75K--150K & 30\% \\
+Packaging engineering & \$30K--50K & \$30K--50K & Same \\
+Testing/characterization & \$50K--100K & \$75K--125K & 30\% \\
+Prototype wafers (3 lots) & \$75K--105K & \$150K--210K & 50\% \\
+\midrule
+\textbf{Total NRE} & \textbf{\$755K--1.2M} & \textbf{\$1.33M--2.08M} & \textbf{40--45\%} \\
+\bottomrule
+\end{tabular}
+\caption{NRE comparison: 12nm vs 7nm}
+\end{table}
+
+\subsection{NRE Amortization Per Unit}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{rrl}
+\toprule
+\textbf{Production Volume} & \textbf{NRE/Unit} & \textbf{Impact} \\
+\midrule
+5,000 units & \$160--240 & Significant \\
+10,000 units & \$80--120 & Manageable \\
+25,000 units & \$32--48 & Minimal \\
+50,000 units & \$16--24 & Negligible \\
+\bottomrule
+\end{tabular}
+\caption{NRE amortization by volume}
+\end{table}
+
+%% ============================================================
+\section{Bill of Materials --- Box Miner (\$149 retail)}
+%% ============================================================
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrl}
+\toprule
+\textbf{Component} & \textbf{Cost} & \textbf{Notes} \\
+\midrule
+ASIC die (12nm, 16-tile) & \$2.27 & First lot pricing \\
+BGA-256 package & \$1.50 & Larger package for IO \\
+PCB (4-layer, 60$\times$60\,mm) & \$2.50 & Ethernet + power \\
+DDR3 RAM (256\,MB) & \$2.00 & Optional, for full node \\
+Ethernet PHY + magnetics & \$2.50 & RJ45 connection \\
+Power supply (5V/3A, 15W) & \$3.00 & External brick \\
+Voltage regulators (multi-rail) & \$2.50 & Buck converters \\
+Oscillator + clock tree & \$0.80 & \\
+Flash (SPI, 16\,MB) & \$0.50 & Firmware storage \\
+Enclosure (aluminum) & \$5.00 & Heat sink integrated \\
+Assembly + test & \$3.00 & \\
+\midrule
+\textbf{Total BOM} & \textbf{\$25.57} & \\
+Packaging + shipping & \$3.00 & \\
+\midrule
+\textbf{Landed cost} & \textbf{\$28.57} & \\
+\bottomrule
+\end{tabular}
+\caption{Box miner bill of materials}
+\end{table}
+
+\subsection{Margin Analysis}
+
+At \textbf{\$149 retail, 25K units}:
+\begin{itemize}[noitemsep]
+    \item Revenue: \$3.73M
+    \item COGS: \$714K
+    \item NRE amortization: \$1M
+    \item \textbf{Net profit: \$2.02M (54\% margin)}
+\end{itemize}
+
+%% ============================================================
+\section{Mining Performance (Code-Verified)}
+%% ============================================================
+
+Quillon uses a \textbf{dual-lane mining algorithm}:
+\begin{enumerate}
+    \item \textbf{BLAKE3 Lane}: 100 sequential BLAKE3 hashes per nonce candidate
+    \item \textbf{VDF Lane}: Genus-2 hyperelliptic curve Jacobian doublings ($\sim$154,930 iterations)
+\end{enumerate}
+
+Both lanes must produce valid proofs for a block solution. The VDF lane is the bottleneck.
+
+\subsection{VDF Doubling Performance (Verified from \texttt{genus2\_vdf.rs:334})}
+
+Each Jacobian doubling requires $\sim$8 BigInt operations on 256-bit numbers (3$\times$ multiply + mod\_floor, 3$\times$ add + mod\_floor, comparison, reduction).
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Platform} & \textbf{Per Doubling} & \textbf{Doublings/sec} & \textbf{VDF Proofs/sec} \\
+\midrule
+CPU (Rust \texttt{num-bigint}) & 3--5\,$\mu$s & 200K--330K & $\sim$1.5 \\
+CPU (AVX-512 Montgomery) & 0.5--1\,$\mu$s & 1M--2M & $\sim$10 \\
+ASIC Xlattice (firmware) & $\sim$840\,ns & $\sim$1.19M & $\sim$5 \\
+ASIC hardened FSM (Phase 2) & $\sim$50\,ns & $\sim$20M & $\sim$130 \\
+\bottomrule
+\end{tabular}
+\caption{VDF performance by platform (at 154,930 iterations per proof)}
+\end{table}
+
+\subsection{Combined Mining Advantage}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lccc}
+\toprule
+\textbf{Lane} & \textbf{ASIC} & \textbf{Desktop CPU} & \textbf{Advantage} \\
+\midrule
+BLAKE3 (100-hash chain) & 500\,MH/s & 240\,MH/s & $\sim$2$\times$ \\
+VDF (Jacobian doublings) & 5 proofs/s & 1.5 proofs/s & $\sim$3--5$\times$ \\
+\midrule
+\textbf{Combined mining} & & & \textbf{6--10$\times$} \\
+\bottomrule
+\end{tabular}
+\caption{Phase 1 ASIC vs desktop CPU mining performance}
+\end{table}
+
+\textbf{Phase 2 ASIC} with hardened Jacobian doubling FSM (bypasses RISC-V pipeline entirely): \textbf{50--100$\times$ advantage} over desktop CPU. This is the long-term competitive moat.
+
+%% ============================================================
+\section{Break-Even Analysis}
+%% ============================================================
+
+\subsection{Box Miner at \$149, 12nm}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{rrrrr}
+\toprule
+\textbf{Units} & \textbf{Revenue} & \textbf{COGS} & \textbf{NRE} & \textbf{Net Profit} \\
+\midrule
+5,000 & \$745K & \$143K & \$1M & $-$\$397K \\
+\textbf{8,300} & \textbf{\$1.24M} & \textbf{\$237K} & \textbf{\$1M} & \textbf{\$0 (break-even)} \\
+10,000 & \$1.49M & \$286K & \$1M & \$206K \\
+25,000 & \$3.73M & \$714K & \$1M & \$2.02M \\
+50,000 & \$7.45M & \$1.43M & \$1M & \$5.03M \\
+\bottomrule
+\end{tabular}
+\caption{Break-even analysis --- 12nm box miner at \$149}
+\end{table}
+
+\subsection{Comparison: 12nm vs 7nm}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Metric} & \textbf{Box \$149 (12nm)} & \textbf{Box \$149 (7nm)} & \textbf{Winner} \\
+\midrule
+Break-even units & \textbf{8,300} & 17,200 & 12nm \\
+Profit at 25K units & \$2.02M & \$905K & 12nm \\
+Profit at 50K units & \$5.03M & \$3.80M & 12nm \\
+Time to market & 14--16 weeks & 18--22 weeks & 12nm \\
+Initial capital & $\sim$\$1.3M & $\sim$\$2.5M & 12nm \\
+\bottomrule
+\end{tabular}
+\caption{12nm vs 7nm economic comparison}
+\end{table}
+
+%% ============================================================
+\section{Customer ROI --- Mining Revenue Projections}
+%% ============================================================
+
+Quillon emission: 2,625,000 QUG/year (Era 0). Revenue per miner depends on network size and QUG price.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{rrrr}
+\toprule
+\textbf{ASICs on Network} & \textbf{Daily (\$3/QUG)} & \textbf{Daily (\$0.10/QUG)} & \textbf{Payback (\$0.10)} \\
+\midrule
+1 (first mover) & \$19,600 & \$653 & $<$1 day \\
+10 & \$1,960 & \$65 & 2 days \\
+100 & \$196 & \$6.53 & 23 days \\
+500 & \$39.20 & \$1.31 & 114 days \\
+1,000 & \$19.60 & \$0.65 & 229 days \\
+5,000 & \$3.92 & \$0.13 & 3.1 years \\
+\bottomrule
+\end{tabular}
+\caption{Mining revenue per miner at various network sizes}
+\end{table}
+
+\textbf{Realistic scenario}: 500--1,000 ASICs within 12 months. At \$0.10/QUG, payback is 4--8 months. Competitive with Bitcoin ASIC miners (12--18 month payback).
+
+%% ============================================================
+\section{Strategic Timeline}
+%% ============================================================
+
+\begin{table}[h]
+\centering
+\begin{tabular}{cl}
+\toprule
+\textbf{Month} & \textbf{Milestone} \\
+\midrule
+0--1 & Sign collaboration agreement; deliver production RTL \\
+1--3 & FPGA validation on XC7K355T; timing closure at 500\,MHz \\
+3--4 & Tape-out submission to TSMC 12FFC; package finalization \\
+4--7 & Wafer fabrication (14--16 weeks); board design in parallel \\
+7--8 & First silicon; bring-up + characterization \\
+8--9 & Production qualification; begin wafer orders \\
+9--10 & First customer shipments; mining revenue begins \\
+12+ & 7nm shrink design begins (funded by 12nm revenue) \\
+\bottomrule
+\end{tabular}
+\caption{Development and production timeline}
+\end{table}
+
+%% ============================================================
+\section{DeepSeek Stress Test Corrections}
+%% ============================================================
+
+An independent review identified and corrected the following issues:
+
+\begin{enumerate}
+    \item \textbf{USB miner removed} --- 8W die + 1W losses = 9W exceeds USB 2.0 power limit (2.5W)
+    \item \textbf{Defect density corrected} --- D$_0$ = 0.45/cm$^2$ for first lots (was 0.3)
+    \item \textbf{VDF advantage corrected} --- Code-verified at 3--5$\times$ (was 600$\times$). Phase 2 hardened FSM delivers 50--100$\times$
+    \item \textbf{CPU hashrate validated} --- BLAKE3 100-chain: $\sim$30\,MH/s per core (not raw GH/s)
+    \item \textbf{16FFC option identified} --- Same lithography as 12FFC, 15--20\% lower wafer cost at 500\,MHz
+\end{enumerate}
+
+%% ============================================================
+\section{Conclusion}
+%% ============================================================
+
+The 12nm box miner at \$149 is economically viable:
+
+\begin{itemize}
+    \item \textbf{Break-even at 8,300 units} --- achievable with Dragon Ball's existing distribution
+    \item \textbf{6--10$\times$ mining advantage} over desktop CPUs (Phase 1, Xlattice firmware VDF)
+    \item \textbf{50--100$\times$ advantage planned} for Phase 2 (hardened Jacobian doubling FSM)
+    \item \textbf{Lowest capital risk} --- \$1.3M initial vs \$2.5M for 7nm
+    \item \textbf{Fastest time to market} --- 14--16 weeks fab vs 18--22 for 7nm
+    \item \textbf{Self-funding path to 7nm} --- 12nm profits finance the shrink
+\end{itemize}
+
+Dragon Ball's existing TSMC relationships, XC7K355T FPGA boards, VCS simulation infrastructure, and manufacturing expertise de-risk execution. This is a proven team adding a new product to an existing pipeline.
+
+\vspace{1cm}
+\noindent\rule{\textwidth}{0.4pt}
+\begin{center}
+\small\textcolor{gray}{Quillon Foundation $\mid$ April 2026}\\
+\small\textcolor{gray}{All cost estimates based on publicly available TSMC pricing and industry benchmarks}\\
+\small\textcolor{gray}{Actual costs may vary based on Dragon Ball's existing TSMC agreements}
+\end{center}
+
+\end{document}
