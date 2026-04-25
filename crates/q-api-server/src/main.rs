@@ -13977,36 +13977,16 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                         }
                                     ).await;
 
-                                    // v7.0.0 CRITICAL FIX: DO NOT persist P2P pending rewards to wallet balances!
-                                    //
-                                    // ROOT CAUSE of 300x+ emission overshoot:
-                                    // Previously, this code added pending_reward to wallet balance AND persisted to RocksDB.
-                                    // But BalanceConsensusEngine.process_block_mining_rewards() ALSO credits the same
-                                    // reward via coinbase transactions when the block is processed. This caused:
-                                    //   1. P2P stats received → add_balance(pending_reward) ← FIRST CREDIT
-                                    //   2. Block produced → coinbase TX → add_balance(reward) ← SECOND CREDIT
-                                    // With 100+ mining submissions per block, each triggering a P2P stats broadcast,
-                                    // the P2P path alone inflated balances by 100x+ before the block even credited.
-                                    //
-                                    // FIX: Only emit SSE event for UI "pending" display. Actual balance credits come
-                                    // EXCLUSIVELY through BalanceConsensusEngine coinbase transaction processing.
-                                    let new_balance_with_pending = current_balance + pending_reward_qnk;
-
-                                    // Emit SSE event for UI pending display ONLY (no storage persistence!)
-                                    let _ = app_state_gossip.event_broadcaster.broadcast(
-                                        q_api_server::streaming::StreamEvent::BalanceUpdated {
-                                            wallet_address: stats_update.miner_address.clone(),
-                                            old_balance: current_balance,
-                                            new_balance: new_balance_with_pending,
-                                            change_reason: "p2p_mining_reward_pending".to_string(),
-                                            timestamp: chrono::Utc::now(),
-                                            block_hash: None,
-                                            block_height: Some(source_height),
-                                            confirmation_status: "pending".to_string(),
-                                        }
-                                    ).await;
-
-                                    trace!("💰 [P2P→SSE] Broadcast PENDING mining reward {:.8} QNK for {} (display only, not persisted)",
+                                    // NOTE: Do NOT emit a BalanceUpdated(pending) event here.
+                                    // The PendingMiningReward event above is sufficient for UI display.
+                                    // Emitting BalanceUpdated(pending) caused balance inflation during
+                                    // restarts: each P2P stats batch pushed stored_balance + pending_reward,
+                                    // which updated nodeDataBalanceRef in the frontend. Combined with the
+                                    // pending_mining_reward handler also adding rewardQnk to nodeDataBalanceRef,
+                                    // TopBar's Math.max ratcheted the displayed balance upward permanently.
+                                    // Actual balance credits come EXCLUSIVELY from BalanceConsensusEngine
+                                    // coinbase transaction processing.
+                                    trace!("💰 [P2P→SSE] Broadcast PENDING mining reward {:.8} QNK for {} (PendingMiningReward only)",
                                           pending_reward_qnk,
                                           &stats_update.miner_address[..16.min(stats_update.miner_address.len())]);
                                 }

@@ -383,8 +383,11 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
 
     const handleWalletBalanceUpdated = (event: Event) => {
       const customEvent = event as CustomEvent;
-      const { symbol, balance, reason } = customEvent.detail || {};
+      const { symbol, balance, reason, infoOnly } = customEvent.detail || {};
       if (symbol !== 'QUG') return;
+
+      // infoOnly events (pending_mining_reward) are display hints only — not confirmed balance
+      if (infoOnly) return;
 
       // v3.6.1-beta: CRITICAL - Validate balance before using
       if (!isValidBalance(balance)) {

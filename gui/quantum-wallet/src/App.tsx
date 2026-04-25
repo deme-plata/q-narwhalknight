@@ -546,6 +546,13 @@ function App() {
 
       if (myHex && eventHex === myHex) {
         const changeReason = balanceData.change_reason || '';
+        const confirmationStatus = balanceData.confirmation_status || '';
+
+        // Skip pending-only balance events — they inflate nodeDataBalanceRef temporarily
+        // during restart bursts. Confirmed balance updates come from block processing.
+        // The PendingMiningReward SSE event handles UI notification separately.
+        if (changeReason === 'p2p_mining_reward_pending' || confirmationStatus === 'pending') return;
+
         const isP2PMiningReward = changeReason === 'p2p_mining_reward' || changeReason === 'pending_mining_reward';
 
         const sseGlobalCooldownUntil = parseInt(localStorage.getItem('dexCooldownUntil') || '0');
