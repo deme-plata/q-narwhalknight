@@ -75,7 +75,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.4.8"  # v10.4.8: Fix balance inflation on restart (streaming.rs RocksDB init, remove BalanceUpdated(pending)); add emission state-snapshot endpoint
+version = "10.4.8"  # v10.4.8: Fix balance inflation on restart; Windows P2P fix — DNS bootstrap fallback, reduce HTTP verification timeout 10s→3s, fix bootstrap handler
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"

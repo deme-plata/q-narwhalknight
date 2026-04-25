@@ -1584,7 +1584,7 @@ pub async fn get_emission_state_snapshot(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let height = state.current_height.load(std::sync::atomic::Ordering::Relaxed);
+    let height = state.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
 
     Ok(Json(ApiResponse::success(serde_json::json!({
         "serialized_state": general_purpose::STANDARD.encode(&bytes),

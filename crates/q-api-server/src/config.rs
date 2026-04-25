@@ -389,8 +389,10 @@ impl Config {
         let peers = vec![
             // Epsilon (10Gbit SUPERNODE — primary sync target)
             "/ip4/89.149.241.126/tcp/9001/p2p/12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM".to_string(),
-            // Beta (production bootstrap)
-            "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH".to_string(),
+            // DNS fallback — bypasses per-IP HTTP verification (no timeout on firewalled port 8080)
+            "/dns4/quillon.xyz/tcp/9001/p2p/12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM".to_string(),
+            // Beta (production bootstrap) — updated peer ID
+            "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWKyjQUYXJQ8y8WdHbtMVxsNt4a412Ccqdr1oKjSY8fy93".to_string(),
             // Gamma (backup bootstrap)
             "/ip4/109.205.176.60/tcp/9001/p2p/12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH".to_string(),
         ];

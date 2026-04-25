@@ -903,7 +903,7 @@ async fn fetch_peer_id_from_http(ip: &str, http_port: u16) -> anyhow::Result<Pee
 
         // Use reqwest with timeout
         let client = match reqwest::Client::builder()
-            .timeout(Duration::from_secs(10)) // Increased from 5s
+            .timeout(Duration::from_secs(3)) // Reduced from 10s: firewalled port 8080 (DROP policy) holds full timeout, blocking Windows startup for 70+ seconds
             .build() {
             Ok(c) => c,
             Err(e) => {
