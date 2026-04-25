@@ -75,7 +75,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.4.5"  # v10.4.5: DEX limit order book via DCA timer infrastructure
+version = "10.4.6"  # v10.4.6: Epsilon peer ID fix + turbo sync historical gap skip
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"

@@ -499,11 +499,11 @@ const HTTP_BOOTSTRAP_PEERS: &[&str] = &[
 /// When gossipsub mesh is broken, HTTP fallback discovers peer heights but needs
 /// peer IDs to register them in turbo sync. This mapping enables that.
 fn bootstrap_peer_id_for_url(url: &str) -> Option<&'static str> {
-    if url.contains("89.149.241.126") { Some("12D3KooWAbrVw892T8RSenWy1j89NBrd7p4aXKsSMKAYpH47YbgD") }      // Epsilon
+    if url.contains("89.149.241.126") { Some("12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM") }      // Epsilon (verified 2026-04-25)
     else if url.contains("5.79.79.158") { Some("12D3KooWLJJRvqo6mBoHLpgxVbGKfW3Jv39ziU4kz1adKFv93JbK") }     // Delta
     else if url.contains("109.205.176.60") { Some("12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH") }  // Gamma
-    else if url.contains("185.182.185.227") { Some("12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH") } // Beta
-    else if url.contains("quillon.xyz") { Some("12D3KooWAbrVw892T8RSenWy1j89NBrd7p4aXKsSMKAYpH47YbgD") }    // quillon.xyz = Epsilon
+    else if url.contains("185.182.185.227") { Some("12D3KooWKyjQUYXJQ8y8WdHbtMVxsNt4a412Ccqdr1oKjSY8fy93") } // Beta (verified 2026-04-25)
+    else if url.contains("quillon.xyz") { Some("12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM") }    // quillon.xyz = Epsilon
     else { None }
 }
 
@@ -512,7 +512,9 @@ fn bootstrap_peer_id_for_url(url: &str) -> Option<&'static str> {
 fn is_allowed_balance_update_origin(origin_node_id: &str) -> bool {
     // Known bootstrap nodes always get automatic approval
     let bootstrap_nodes = [
-        "12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH", // Server Beta (Mainnet 2026.1.3)
+        "12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM", // Server Epsilon (10Gbit supernode, verified 2026-04-25)
+        "12D3KooWKyjQUYXJQ8y8WdHbtMVxsNt4a412Ccqdr1oKjSY8fy93", // Server Beta (verified 2026-04-25)
+        "12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH", // Server Beta (legacy, for compat)
         "12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH", // Server Gamma (Mainnet 2026.1.3)
         "12D3KooWLJJRvqo6mBoHLpgxVbGKfW3Jv39ziU4kz1adKFv93JbK", // Server Delta (Mainnet 2026.1.3)
         "12D3KooWBHTC9FhwwXmvH7YA17YHTLdcxbtLWg2U5xEtxSeqX7jc", // Server Beta (legacy, for compat)

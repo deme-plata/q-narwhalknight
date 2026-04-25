@@ -606,18 +606,19 @@ async fn worker_loop(
                                 Ok(backend_stream) => {
                                     tracing::info!(client = %client_addr,
                                         "LibP2P WS proxy established (no timeout)");
-                                    // Use 64KB buffers for better throughput on
-                                    // gossipsub messages (~70KB blocks)
-                                    let (client_read, client_write) = tokio::io::split(tls_stream);
-                                    let (backend_read, backend_write) = tokio::io::split(backend_stream);
+                                    // BufReader on read side (reduces syscalls for large gossipsub msgs).
+                                    // NO BufWriter on write side — BufWriter would hold the initial HTTP
+                                    // WebSocket upgrade request (~500 bytes) in its 64KB buffer without
+                                    // flushing, deadlocking the WS handshake (backend never gets request,
+                                    // client never gets HTTP 101 response). Use raw split halves instead.
+                                    let (client_read, mut client_write) = tokio::io::split(tls_stream);
+                                    let (backend_read, mut backend_write) = tokio::io::split(backend_stream);
                                     let mut cr = tokio::io::BufReader::with_capacity(65536, client_read);
-                                    let mut bw = tokio::io::BufWriter::with_capacity(65536, backend_write);
                                     let mut br = tokio::io::BufReader::with_capacity(65536, backend_read);
-                                    let mut cw = tokio::io::BufWriter::with_capacity(65536, client_write);
                                     // No timeout — libp2p connections are long-lived
                                     let _ = tokio::select! {
-                                        r = tokio::io::copy(&mut cr, &mut bw) => r,
-                                        r = tokio::io::copy(&mut br, &mut cw) => r,
+                                        r = tokio::io::copy(&mut cr, &mut backend_write) => r,
+                                        r = tokio::io::copy(&mut br, &mut client_write) => r,
                                     };
                                 }
                                 Err(e) => {
@@ -680,12 +681,11 @@ async fn worker_loop(
                                             match tokio::net::TcpStream::connect(backend_addr.as_str()).await {
                                                 Ok(mut backend_stream) => {
                                                     let _ = backend_stream.write_all(&peek[..n]).await;
-                                                    let (cr, cw) = tokio::io::split(tls_stream);
-                                                    let (br, bw) = tokio::io::split(backend_stream);
+                                                    // Same fix as port 9443 path: no BufWriter on write side.
+                                                    let (cr, mut cw) = tokio::io::split(tls_stream);
+                                                    let (br, mut bw) = tokio::io::split(backend_stream);
                                                     let mut cr = tokio::io::BufReader::with_capacity(65536, cr);
-                                                    let mut bw = tokio::io::BufWriter::with_capacity(65536, bw);
                                                     let mut br = tokio::io::BufReader::with_capacity(65536, br);
-                                                    let mut cw = tokio::io::BufWriter::with_capacity(65536, cw);
                                                     let _ = tokio::select! {
                                                         r = tokio::io::copy(&mut cr, &mut bw) => r,
                                                         r = tokio::io::copy(&mut br, &mut cw) => r,

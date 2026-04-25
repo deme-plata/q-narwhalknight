@@ -5631,6 +5631,18 @@ impl TurboSyncManager {
                             }
 
                             if retry_count >= max_retries {
+                                // v10.4.6: If ALL peers explicitly say "No blocks found" the
+                                // data is pruned network-wide and will never be retrievable.
+                                // Skip the chunk so sync continues rather than stalling forever.
+                                // Transport failures (timeout, connection) are NOT skipped — they
+                                // hit the is_transport_failure path above and get proper retries.
+                                if err_msg.contains("No blocks found in range") {
+                                    warn!("⚠️  [HISTORICAL GAP v10.4.6] Skipping unavailable \
+                                           chunk {}-{}: no peer has these blocks \
+                                           (data pruned network-wide). Sync continues.",
+                                          start, end);
+                                    return Ok((start, end));
+                                }
                                 error!("❌ Failed chunk {}-{} after {} retries with {} different peers: {}",
                                        start, end, max_retries, max_retries.min(peer_count as u32), e);
                                 return Err(e);

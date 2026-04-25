@@ -420,9 +420,11 @@ const EventCreateModal: React.FC<{
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [eventType, setEventType] = useState(isScheduledTx ? 'scheduled_tx' : 'personal');
-  const [startDate, setStartDate] = useState(
-    initialDate ? initialDate.toISOString().slice(0, 16) : new Date().toISOString().slice(0, 16)
-  );
+  const [startDate, setStartDate] = useState(() => {
+    const base = initialDate ?? new Date();
+    base.setMinutes(base.getMinutes() - base.getTimezoneOffset());
+    return base.toISOString().slice(0, 16);
+  });
   const [endDate, setEndDate] = useState('');
   const [allDay, setAllDay] = useState(false);
   const [color, setColor] = useState('');
@@ -434,9 +436,11 @@ const EventCreateModal: React.FC<{
   const [txAmount, setTxAmount] = useState('');
 
   const [submitting, setSubmitting] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
 
   const handleSubmit = async () => {
     if (!title.trim()) return;
+    setErrorMessage('');
     setSubmitting(true);
     try {
       const startTime = Math.floor(new Date(startDate).getTime() / 1000);
@@ -464,14 +468,15 @@ const EventCreateModal: React.FC<{
           reminder_minutes: reminderMinutes ? [parseInt(reminderMinutes)] : undefined,
         });
       }
-      if (response?.error) {
-        console.error('Calendar event creation failed:', response.error);
+      if (!response?.success || response?.error) {
+        setErrorMessage(response?.error || 'Failed to create event. Please try again.');
         return;
       }
       onCreated();
       onClose();
     } catch (e) {
       console.error('Failed to create event:', e);
+      setErrorMessage('Network error. Please check your connection.');
     } finally {
       setSubmitting(false);
     }
@@ -610,6 +615,19 @@ const EventCreateModal: React.FC<{
                   }} title={EVENT_TYPE_LABELS[type]} />
                 ))}
               </div>
+            </div>
+          )}
+
+          {errorMessage && (
+            <div style={{
+              color: '#f87171',
+              background: 'rgba(248,113,113,0.1)',
+              border: '1px solid rgba(248,113,113,0.3)',
+              borderRadius: 6,
+              padding: '8px 12px',
+              fontSize: 12,
+            }}>
+              ⚠️ {errorMessage}
             </div>
           )}
 

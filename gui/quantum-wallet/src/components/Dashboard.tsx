@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, memo, useRef, lazy, Suspense } from '
 import { motion, AnimatePresence, Reorder } from 'framer-motion';
 import { Activity, Zap, AlertCircle, Copy, Check, Wallet, ChevronLeft, ChevronRight, Calendar, DollarSign, TrendingUp, TrendingDown, QrCode, Info, Plus, Send, BarChart3, Radio, Mail, MessageCircle, Settings2, GripVertical, ArrowUp, ArrowDown, Globe } from 'lucide-react';
 import { qnkAPI, type NodeStatus } from '../services/api'; // debounce not needed - SSE in App.tsx
+import { sseManager } from '../services/sseManager';
 import TransactionDetailsModal from './TransactionDetailsModal';
 // 🌐 v3.4.3-browser: P2P real-time block streaming
 import { useRealtimeBlocks } from '../hooks/useRealtimeBlocks';
@@ -1246,10 +1247,43 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
       setSseConnected(true);
     }
 
-    // v3.4.15: Cleanup for the initial delay timeout
+    // Subscribe to sseManager for instant Recent Activity updates.
+    // sseManager is App.tsx's shared singleton — subscribing here does NOT
+    // create a second SSE connection; it just fans out to another listener.
+    const currentWalletAddr = localStorage.getItem('walletAddress') || '';
+    let txRefreshDebounce: ReturnType<typeof setTimeout> | null = null;
+    const triggerTxRefresh = () => {
+      if (!mounted) return;
+      if (txRefreshDebounce) clearTimeout(txRefreshDebounce);
+      txRefreshDebounce = setTimeout(() => {
+        if (mounted) fetchRecentTransactionsCore();
+      }, 200); // 200ms debounce — collapse rapid-fire events into one fetch
+    };
+
+    // balance-updated: fires when a QUG transfer is sent/received or mining reward credited
+    const unsubBalance = sseManager.on('balance-updated', (data: any) => {
+      const payload = data?.data ?? data;
+      const addr = payload?.wallet_address ?? '';
+      if (!addr || addr.includes(currentWalletAddr.replace(/^qnk/, '')) ||
+          currentWalletAddr.includes(addr.replace(/^qnk/, ''))) {
+        triggerTxRefresh();
+      }
+    });
+
+    // pending_mining_reward: fires immediately when a block reward is pending
+    const unsubMining = sseManager.on('pending_mining_reward', () => triggerTxRefresh());
+
+    // transaction-submitted: fires when our node processes a new transaction
+    const unsubTxSubmitted = sseManager.on('transaction-submitted', () => triggerTxRefresh());
+
+    // v3.4.15: Cleanup for the initial delay timeout + SSE subscriptions
     return () => {
       mounted = false;
       clearTimeout(initialDelay);
+      if (txRefreshDebounce) clearTimeout(txRefreshDebounce);
+      unsubBalance();
+      unsubMining();
+      unsubTxSubmitted();
     };
 
     // Early return - skip all SSE setup since App.tsx handles it
