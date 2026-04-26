@@ -2563,12 +2563,12 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
 
   if (!nodeStatus) {
     return (
-      <div className="space-y-8">
-        <div className="bg-quantum-yellow/20 border border-quantum-yellow/50 rounded-3xl p-8 text-center">
-          <AlertCircle className="w-12 h-12 text-quantum-yellow mx-auto mb-4" />
-          <h2 className="text-xl font-bold text-quantum-yellow mb-2">No Node Data</h2>
-          <p className="text-gray-400">Unable to retrieve node status</p>
-        </div>
+      <div className="relative w-full rounded-3xl overflow-hidden" style={{ height: 'calc(100vh - 200px)', minHeight: 480 }}>
+        <QuantumLoader
+          message="Initializing Quantum Dashboard"
+          subMessage="Fetching node telemetry and wallet state..."
+          inline
+        />
       </div>
     );
   }

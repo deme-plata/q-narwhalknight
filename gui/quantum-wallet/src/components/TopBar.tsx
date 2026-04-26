@@ -1599,41 +1599,38 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
 
         {/* Right: Network Health Gauge — canvas clock animation matching admin panel */}
         <div className="flex items-center gap-2">
-          {/* NHG with wicked hover tooltip */}
+          {/* NHG with hover tooltip — tooltip is DOM child so onMouseLeave doesn't fire when cursor moves into it */}
           <div
             ref={nhgRef}
             className="relative"
-            onMouseEnter={showNHGTooltip}
-            onMouseLeave={hideNHGTooltip}
+            onMouseEnter={() => setShowKTooltip(true)}
+            onMouseLeave={() => setShowKTooltip(false)}
+            style={{ zIndex: 200 }}
           >
             <NHGClock kValue={kValue} kPhase={kPhase} />
+
+            {/* Tooltip: absolute inside nhgRef, appears below-right, no portal needed */}
             <AnimatePresence>
-              {showKTooltip && createPortal(
+              {showKTooltip && (
                 <motion.div
-                  initial={{ opacity: 0, y: -8, scale: 0.95 }}
+                  initial={{ opacity: 0, y: -6, scale: 0.96 }}
                   animate={{ opacity: 1, y: 0, scale: 1 }}
-                  exit={{ opacity: 0, y: -8, scale: 0.95 }}
-                  transition={{ duration: 0.18, ease: 'easeOut' }}
-                  onMouseEnter={showNHGTooltip}
-                  onMouseLeave={hideNHGTooltip}
-                  className="rounded-2xl overflow-hidden"
+                  exit={{ opacity: 0, y: -6, scale: 0.96 }}
+                  transition={{ duration: 0.15, ease: 'easeOut' }}
+                  className="absolute top-full right-0 mt-2 w-[300px] rounded-2xl overflow-hidden pointer-events-none"
                   style={{
-                    position: 'fixed',
-                    top: (nhgRef.current?.getBoundingClientRect().bottom ?? 0) + 8,
-                    right: window.innerWidth - (nhgRef.current?.getBoundingClientRect().right ?? 0),
                     zIndex: 9999,
-                    width: 300,
-                    background: 'linear-gradient(135deg, rgba(15,23,42,0.97) 0%, rgba(10,15,30,0.99) 100%)',
+                    background: 'linear-gradient(135deg, rgba(15,23,42,0.98) 0%, rgba(10,15,30,0.99) 100%)',
                     backdropFilter: 'blur(24px)',
                     border: '1px solid rgba(255,255,255,0.08)',
                     boxShadow: kPhase === 'critical'
-                      ? '0 0 40px rgba(239,68,68,0.2), 0 20px 60px rgba(0,0,0,0.8)'
+                      ? '0 0 40px rgba(239,68,68,0.2), 0 20px 60px rgba(0,0,0,0.85)'
                       : kPhase === 'approaching'
-                        ? '0 0 40px rgba(245,158,11,0.2), 0 20px 60px rgba(0,0,0,0.8)'
-                        : '0 0 40px rgba(16,185,129,0.15), 0 20px 60px rgba(0,0,0,0.8)',
+                        ? '0 0 40px rgba(245,158,11,0.2), 0 20px 60px rgba(0,0,0,0.85)'
+                        : '0 0 40px rgba(16,185,129,0.15), 0 20px 60px rgba(0,0,0,0.85)',
                   }}
                 >
-                  {/* Header strip */}
+                  {/* Header */}
                   <div className={`px-4 py-3 border-b border-white/5 flex items-center justify-between ${
                     kPhase === 'critical' ? 'bg-red-500/10' : kPhase === 'approaching' ? 'bg-amber-500/10' : 'bg-emerald-500/10'
                   }`}>
@@ -1641,7 +1638,7 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
                       <div className="text-[11px] font-semibold uppercase tracking-[0.15em] text-white/40 mb-0.5">Network Health Gauge</div>
                       <div className="text-white/60 text-[10px] font-mono">K = 2π √(ΔH · Δs · ℏ) / τ</div>
                     </div>
-                    <div className={`flex flex-col items-end gap-1`}>
+                    <div className="flex flex-col items-end gap-1">
                       <div className={`text-xl font-black font-mono ${
                         kPhase === 'critical' ? 'text-red-400' : kPhase === 'approaching' ? 'text-amber-400' : 'text-emerald-400'
                       }`}>
@@ -1660,9 +1657,9 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
                   </div>
 
                   {/* Phase thresholds */}
-                  <div className="px-4 py-2 border-b border-white/5 flex gap-2 text-[9px] font-mono">
+                  <div className="px-4 py-2 border-b border-white/5 flex gap-3 text-[9px] font-mono">
                     <span className="flex items-center gap-1 text-emerald-400/70"><span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" />K&lt;5 Stable</span>
-                    <span className="flex items-center gap-1 text-amber-400/70"><span className="w-1.5 h-1.5 rounded-full bg-amber-500 inline-block" />5≤K&lt;10 Warning</span>
+                    <span className="flex items-center gap-1 text-amber-400/70"><span className="w-1.5 h-1.5 rounded-full bg-amber-500 inline-block" />5≤K&lt;10 Warn</span>
                     <span className="flex items-center gap-1 text-red-400/70"><span className="w-1.5 h-1.5 rounded-full bg-red-500 inline-block" />K≥10 Critical</span>
                   </div>
 
@@ -1670,9 +1667,9 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
                   <div className="px-4 py-3 grid grid-cols-2 gap-2 border-b border-white/5">
                     {[
                       { letter: 'G', label: 'ΔH (Entropy)', color: '#10b981', val: kData?.delta_h },
-                      { letter: 'Q', label: 'Δs (State Diverge)', color: '#06b6d4', val: kData?.delta_s },
+                      { letter: 'Q', label: 'Δs (State Div.)', color: '#06b6d4', val: kData?.delta_s },
                       { letter: 'T', label: 'Rejection Ratio', color: '#f97316', val: kData?.rejection_ratio },
-                      { letter: 'I', label: 'Observer Coverage', color: '#3b82f6', val: kData?.observer_coverage },
+                      { letter: 'I', label: 'Observer Cover.', color: '#3b82f6', val: kData?.observer_coverage },
                       { letter: 'R', label: 'λ Commitment', color: '#a855f7', val: kData?.lambda_commit },
                       { letter: 'F', label: 'f_irrev', color: '#ec4899', val: kData?.f_irrev },
                     ].map(({ letter, label, color, val }) => (
@@ -1693,7 +1690,7 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
                     ))}
                   </div>
 
-                  {/* Network stats */}
+                  {/* Stats row */}
                   <div className="px-4 py-3 grid grid-cols-2 gap-x-4 gap-y-1">
                     {[
                       { label: 'Rounds', val: kData?.rounds_computed },
@@ -1711,19 +1708,16 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
                   {/* Health bar */}
                   <div className="px-4 pb-3">
                     <div className="h-1 rounded-full bg-white/5 overflow-hidden">
-                      <motion.div
-                        className="h-full rounded-full"
+                      <div
+                        className="h-full rounded-full transition-all duration-700"
                         style={{
-                          width: `${Math.max(0, 100 - Math.min(kValue / 15 * 100, 100))}%`,
+                          width: `${Math.max(2, 100 - Math.min(kValue / 15 * 100, 100))}%`,
                           background: kPhase === 'critical'
                             ? 'linear-gradient(90deg, #ef4444, #dc2626)'
                             : kPhase === 'approaching'
                               ? 'linear-gradient(90deg, #f59e0b, #d97706)'
                               : 'linear-gradient(90deg, #10b981, #059669)',
                         }}
-                        initial={{ width: 0 }}
-                        animate={{ width: `${Math.max(0, 100 - Math.min(kValue / 15 * 100, 100))}%` }}
-                        transition={{ duration: 0.6, ease: 'easeOut' }}
                       />
                     </div>
                     <div className="flex justify-between mt-1">
@@ -1731,8 +1725,7 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
                       <span className="text-[8px] text-white/25">Healthy</span>
                     </div>
                   </div>
-                </motion.div>,
-                document.body
+                </motion.div>
               )}
             </AnimatePresence>
           </div>
