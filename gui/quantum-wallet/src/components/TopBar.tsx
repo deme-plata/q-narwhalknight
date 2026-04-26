@@ -260,17 +260,17 @@ function NHGClock({ kValue, kPhase }: { kValue: number; kPhase: string }) {
       ctx.arc(cx, cy, 10, 0, Math.PI * 2);
       ctx.fill();
 
-      // Center K value + label
+      // Center K value + label (show "---" when no data yet)
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillStyle = pColor;
-      ctx.font = 'bold 10px monospace';
-      ctx.shadowColor = pColor;
-      ctx.shadowBlur = 4;
-      ctx.fillText(k.toFixed(2), cx, cy - 3);
+      ctx.fillStyle = k === 0 ? 'rgba(255,255,255,0.3)' : pColor;
+      ctx.font = k === 0 ? '8px monospace' : 'bold 10px monospace';
+      ctx.shadowColor = k === 0 ? 'transparent' : pColor;
+      ctx.shadowBlur = k === 0 ? 0 : 4;
+      ctx.fillText(k === 0 ? '---' : k.toFixed(2), cx, cy - 3);
       ctx.shadowBlur = 0;
       ctx.font = '6px monospace';
-      ctx.fillStyle = `${glowRgba}0.8)`;
+      ctx.fillStyle = k === 0 ? 'rgba(255,255,255,0.2)' : `${glowRgba}0.8)`;
       ctx.fillText('K', cx, cy + 8);
 
       animRef.current = requestAnimationFrame(draw);
@@ -346,6 +346,9 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
   // Network Health Gauge — k-parameter from /api/v1/k-parameter
   const [kValue, setKValue] = useState<number>(0);
   const [kPhase, setKPhase] = useState<string>('stable');
+  const [kData, setKData] = useState<Record<string, any> | null>(null);
+  const [showKTooltip, setShowKTooltip] = useState(false);
+  const nhgRef = useRef<HTMLDivElement>(null);
   const [isTorConnected, setIsTorConnected] = useState(false);
   const [torOnionUrl, setTorOnionUrl] = useState("http://ca3jpub2haxboxjw4ws6run36ekdh3pv7pneqg2tbac5rxzvxhd2i5id.onion");
   const [minerLinkCount, setMinerLinkCount] = useState(0);
@@ -828,6 +831,7 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
         const d = json.data ?? json;
         if (typeof d.k_value === 'number') setKValue(d.k_value);
         if (typeof d.phase === 'string') setKPhase(d.phase);
+        setKData(d);
       } catch { /* ignore */ }
     };
     fetchK();
@@ -1587,7 +1591,141 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
 
         {/* Right: Network Health Gauge — canvas clock animation matching admin panel */}
         <div className="flex items-center gap-2">
-          <NHGClock kValue={kValue} kPhase={kPhase} />
+          {/* NHG with wicked hover tooltip */}
+          <div
+            ref={nhgRef}
+            className="relative"
+            onMouseEnter={() => setShowKTooltip(true)}
+            onMouseLeave={() => setShowKTooltip(false)}
+          >
+            <NHGClock kValue={kValue} kPhase={kPhase} />
+            <AnimatePresence>
+              {showKTooltip && createPortal(
+                <motion.div
+                  initial={{ opacity: 0, y: -8, scale: 0.95 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: -8, scale: 0.95 }}
+                  transition={{ duration: 0.18, ease: 'easeOut' }}
+                  className="rounded-2xl overflow-hidden"
+                  style={{
+                    position: 'fixed',
+                    top: (nhgRef.current?.getBoundingClientRect().bottom ?? 0) + 8,
+                    right: window.innerWidth - (nhgRef.current?.getBoundingClientRect().right ?? 0),
+                    zIndex: 9999,
+                    width: 300,
+                    background: 'linear-gradient(135deg, rgba(15,23,42,0.97) 0%, rgba(10,15,30,0.99) 100%)',
+                    backdropFilter: 'blur(24px)',
+                    border: '1px solid rgba(255,255,255,0.08)',
+                    boxShadow: kPhase === 'critical'
+                      ? '0 0 40px rgba(239,68,68,0.2), 0 20px 60px rgba(0,0,0,0.8)'
+                      : kPhase === 'approaching'
+                        ? '0 0 40px rgba(245,158,11,0.2), 0 20px 60px rgba(0,0,0,0.8)'
+                        : '0 0 40px rgba(16,185,129,0.15), 0 20px 60px rgba(0,0,0,0.8)',
+                  }}
+                >
+                  {/* Header strip */}
+                  <div className={`px-4 py-3 border-b border-white/5 flex items-center justify-between ${
+                    kPhase === 'critical' ? 'bg-red-500/10' : kPhase === 'approaching' ? 'bg-amber-500/10' : 'bg-emerald-500/10'
+                  }`}>
+                    <div>
+                      <div className="text-[11px] font-semibold uppercase tracking-[0.15em] text-white/40 mb-0.5">Network Health Gauge</div>
+                      <div className="text-white/60 text-[10px] font-mono">K = 2π √(ΔH · Δs · ℏ) / τ</div>
+                    </div>
+                    <div className={`flex flex-col items-end gap-1`}>
+                      <div className={`text-xl font-black font-mono ${
+                        kPhase === 'critical' ? 'text-red-400' : kPhase === 'approaching' ? 'text-amber-400' : 'text-emerald-400'
+                      }`}>
+                        {kValue === 0 ? '—' : kValue.toFixed(4)}
+                      </div>
+                      <span className={`text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full ${
+                        kPhase === 'critical'
+                          ? 'bg-red-500/20 text-red-300 border border-red-500/30'
+                          : kPhase === 'approaching'
+                            ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                            : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                      }`}>
+                        {kPhase === 'critical' ? '⚠ Critical' : kPhase === 'approaching' ? '◎ Warning' : '✓ Stable'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Phase thresholds */}
+                  <div className="px-4 py-2 border-b border-white/5 flex gap-2 text-[9px] font-mono">
+                    <span className="flex items-center gap-1 text-emerald-400/70"><span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" />K&lt;5 Stable</span>
+                    <span className="flex items-center gap-1 text-amber-400/70"><span className="w-1.5 h-1.5 rounded-full bg-amber-500 inline-block" />5≤K&lt;10 Warning</span>
+                    <span className="flex items-center gap-1 text-red-400/70"><span className="w-1.5 h-1.5 rounded-full bg-red-500 inline-block" />K≥10 Critical</span>
+                  </div>
+
+                  {/* Factor grid */}
+                  <div className="px-4 py-3 grid grid-cols-2 gap-2 border-b border-white/5">
+                    {[
+                      { letter: 'G', label: 'ΔH (Entropy)', color: '#10b981', val: kData?.delta_h },
+                      { letter: 'Q', label: 'Δs (State Diverge)', color: '#06b6d4', val: kData?.delta_s },
+                      { letter: 'T', label: 'Rejection Ratio', color: '#f97316', val: kData?.rejection_ratio },
+                      { letter: 'I', label: 'Observer Coverage', color: '#3b82f6', val: kData?.observer_coverage },
+                      { letter: 'R', label: 'λ Commitment', color: '#a855f7', val: kData?.lambda_commit },
+                      { letter: 'F', label: 'f_irrev', color: '#ec4899', val: kData?.f_irrev },
+                    ].map(({ letter, label, color, val }) => (
+                      <div key={letter} className="flex items-center gap-2 min-w-0">
+                        <div
+                          className="flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center text-[9px] font-black"
+                          style={{ background: `${color}22`, border: `1px solid ${color}66`, color }}
+                        >
+                          {letter}
+                        </div>
+                        <div className="min-w-0">
+                          <div className="text-[9px] text-white/40 truncate">{label}</div>
+                          <div className="text-[10px] font-mono font-semibold text-white/80">
+                            {val !== undefined && val !== null ? (typeof val === 'number' ? val.toFixed(4) : String(val)) : '—'}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Network stats */}
+                  <div className="px-4 py-3 grid grid-cols-2 gap-x-4 gap-y-1">
+                    {[
+                      { label: 'Rounds', val: kData?.rounds_computed },
+                      { label: 'K-Enhanced', val: typeof kData?.k_enhanced === 'number' ? kData.k_enhanced.toFixed(4) : null },
+                      { label: 'ZK Commit', val: kData?.lambda_commit !== undefined ? `${(kData.lambda_commit * 100).toFixed(1)}%` : null },
+                      { label: 'Phase', val: kData?.phase ?? kPhase },
+                    ].map(({ label, val }) => (
+                      <div key={label} className="flex items-baseline justify-between gap-1">
+                        <span className="text-[9px] text-white/35 uppercase tracking-wider">{label}</span>
+                        <span className="text-[10px] font-mono text-white/70">{val ?? '—'}</span>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Health bar */}
+                  <div className="px-4 pb-3">
+                    <div className="h-1 rounded-full bg-white/5 overflow-hidden">
+                      <motion.div
+                        className="h-full rounded-full"
+                        style={{
+                          width: `${Math.max(0, 100 - Math.min(kValue / 15 * 100, 100))}%`,
+                          background: kPhase === 'critical'
+                            ? 'linear-gradient(90deg, #ef4444, #dc2626)'
+                            : kPhase === 'approaching'
+                              ? 'linear-gradient(90deg, #f59e0b, #d97706)'
+                              : 'linear-gradient(90deg, #10b981, #059669)',
+                        }}
+                        initial={{ width: 0 }}
+                        animate={{ width: `${Math.max(0, 100 - Math.min(kValue / 15 * 100, 100))}%` }}
+                        transition={{ duration: 0.6, ease: 'easeOut' }}
+                      />
+                    </div>
+                    <div className="flex justify-between mt-1">
+                      <span className="text-[8px] text-white/25">Critical</span>
+                      <span className="text-[8px] text-white/25">Healthy</span>
+                    </div>
+                  </div>
+                </motion.div>,
+                document.body
+              )}
+            </AnimatePresence>
+          </div>
 
           {/* v5.1.1: Deploy Panel - Visible for all logged-in users (read-only status) */}
           {(() => {
