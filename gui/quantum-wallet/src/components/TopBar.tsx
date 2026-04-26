@@ -141,12 +141,17 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
 
   // v3.4.16-beta: SSE-updated live metrics
   const [liveBlockHeight, setLiveBlockHeight] = useState(blockHeight);
+  const [blockFlash, setBlockFlash] = useState(false);
   const [livePeers, setLivePeers] = useState(peers);
   const [personalHashrate, setPersonalHashrate] = useState<number>(0);
 
   // Network power + miners (polled from /api/v1/network/supply)
   const [networkHashrate, setNetworkHashrate] = useState<number>(0);
   const [networkMiners, setNetworkMiners] = useState<number>(0);
+
+  // Network Health Gauge — k-parameter from /api/v1/k-parameter
+  const [kValue, setKValue] = useState<number>(0);
+  const [kPhase, setKPhase] = useState<string>('stable');
   const [isTorConnected, setIsTorConnected] = useState(false);
   const [torOnionUrl, setTorOnionUrl] = useState("http://ca3jpub2haxboxjw4ws6run36ekdh3pv7pneqg2tbac5rxzvxhd2i5id.onion");
   const [minerLinkCount, setMinerLinkCount] = useState(0);
@@ -511,41 +516,55 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
     const unsubs: (() => void)[] = [];
 
     // Listen for node status updates (block height, peers)
+    // SSE format: {type: "NodeStatusUpdate", data: {status: {current_height, connected_peers, ...}, timestamp}}
     unsubs.push(sseManager.on('node-status', (data: any) => {
-      if (data.current_height) {
-        setLiveBlockHeight(data.current_height);
+      const s = data.data?.status ?? data.data ?? data;
+      if (s.current_height) {
+        setLiveBlockHeight(s.current_height);
       }
-      if (data.connected_peers !== undefined) {
-        setLivePeers(data.connected_peers);
+      if (s.connected_peers !== undefined) {
+        setLivePeers(s.connected_peers);
       }
     }));
 
     // Listen for mining stats updates (personal hashrate)
-    unsubs.push(sseManager.on('miner-stats', (data: any) => {
+    // Server sends event type "mining_stats" with format {type: "MiningStats", data: {miner_address, avg_hash_rate, ...}}
+    unsubs.push(sseManager.on('mining_stats', (data: any) => {
+      const d = data.data ?? data;
       const normalizedWallet = walletAddress.replace(/^qnk/, '').toLowerCase();
-      const normalizedMiner = (data.miner_address || '').replace(/^qnk/, '').toLowerCase();
-      if (normalizedMiner === normalizedWallet && data.avg_hash_rate) {
-        setPersonalHashrate(data.avg_hash_rate);
+      const normalizedMiner = (d.miner_address || '').replace(/^qnk/, '').toLowerCase();
+      if (normalizedMiner === normalizedWallet && d.avg_hash_rate) {
+        setPersonalHashrate(d.avg_hash_rate);
       }
-      // Capture network-level fields if present
-      if (typeof data?.network_hashrate_hs === 'number' && data.network_hashrate_hs > 0) {
-        setNetworkHashrate(data.network_hashrate_hs);
+      if (typeof d?.network_hashrate_hs === 'number' && d.network_hashrate_hs > 0) {
+        setNetworkHashrate(d.network_hashrate_hs);
       }
-      if (typeof data?.total_miners === 'number' && data.total_miners > 0) {
-        setNetworkMiners(data.total_miners);
+      if (typeof d?.total_miners === 'number' && d.total_miners > 0) {
+        setNetworkMiners(d.total_miners);
+      }
+    }));
+
+    // v10.4.11: Subscribe to new-block SSE for instant block height updates
+    // SSE format: {type: "NewBlock", data: {height, hash, dag_round, ...}}
+    unsubs.push(sseManager.on('new-block', (data: any) => {
+      const h = data.data?.height ?? data.height;
+      if (typeof h === 'number' && h > liveBlockHeightRef.current) {
+        setLiveBlockHeight(h);
       }
     }));
 
     // Also listen for block height from mining rewards
+    // SSE format: {type: "MiningReward", data: {block_height, hash_rate, miner_address, ...}}
     unsubs.push(sseManager.on('mining_reward', (data: any) => {
-      if (data.block_height) {
-        setLiveBlockHeight(data.block_height);
+      const d = data.data ?? data;
+      if (d.block_height) {
+        setLiveBlockHeight(d.block_height);
       }
-      if (data.hash_rate) {
+      if (d.hash_rate) {
         const normalizedWallet = walletAddress.replace(/^qnk/, '').toLowerCase();
-        const normalizedMiner = (data.miner_address || '').replace(/^qnk/, '').toLowerCase();
+        const normalizedMiner = (d.miner_address || '').replace(/^qnk/, '').toLowerCase();
         if (normalizedMiner === normalizedWallet) {
-          setPersonalHashrate(data.hash_rate);
+          setPersonalHashrate(d.hash_rate);
         }
       }
     }));
@@ -581,7 +600,15 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
     }
   }, [blockHeight, peers]);
 
-  // v8.5.10: Poll /api/v1/status every 5s for fresh block height (fallback when SSE is slow)
+  // v10.4.11: Flash the block counter whenever a new block arrives
+  useEffect(() => {
+    if (liveBlockHeight === blockHeight) return; // skip initial render
+    setBlockFlash(true);
+    const t = setTimeout(() => setBlockFlash(false), 400);
+    return () => clearTimeout(t);
+  }, [liveBlockHeight]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // v10.4.11: Poll /api/v1/status every 1s for fresh block height (fast fallback when SSE is slow)
   const liveBlockHeightRef = useRef(liveBlockHeight);
   liveBlockHeightRef.current = liveBlockHeight;
   useEffect(() => {
@@ -601,7 +628,24 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
       } catch {}
     };
     fetchStatus();
-    const interval = setInterval(fetchStatus, 5000);
+    const interval = setInterval(fetchStatus, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Network Health Gauge: fetch k-parameter every 60s
+  useEffect(() => {
+    const fetchK = async () => {
+      try {
+        const res = await fetch('/api/v1/k-parameter');
+        if (!res.ok) return;
+        const json = await res.json();
+        const d = json.data ?? json;
+        if (typeof d.k_value === 'number') setKValue(d.k_value);
+        if (typeof d.phase === 'string') setKPhase(d.phase);
+      } catch { /* ignore */ }
+    };
+    fetchK();
+    const interval = setInterval(fetchK, 60000);
     return () => clearInterval(interval);
   }, []);
 
@@ -1283,9 +1327,9 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
               transition={{ duration: 2, repeat: Infinity }}
             />
 
-            {/* Block height */}
-            <div className="flex flex-col items-center px-3 py-1 rounded-xl bg-amber-500/8 border border-amber-500/20 min-w-[72px]">
-              <span className="text-amber-100 text-sm font-bold font-mono leading-tight">#{liveBlockHeight.toLocaleString()}</span>
+            {/* Block height — flashes amber on each new block */}
+            <div className={`flex flex-col items-center px-3 py-1 rounded-xl border min-w-[72px] transition-colors duration-300 ${blockFlash ? 'bg-amber-500/25 border-amber-400/60' : 'bg-amber-500/8 border-amber-500/20'}`}>
+              <span className={`text-sm font-bold font-mono leading-tight transition-colors duration-300 ${blockFlash ? 'text-amber-300' : 'text-amber-100'}`}>#{liveBlockHeight.toLocaleString()}</span>
               <span className="text-amber-400/50 text-[9px] font-semibold uppercase tracking-wider">Block</span>
             </div>
 
@@ -1355,98 +1399,57 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
           </div>
         </div>
 
-        {/* Right: Coherence Index */}
-        <div className="flex items-center gap-3">
-          <motion.div
-            animate={{
-              scale: qci >= 0.9 ? [1, 1.1, 1] : [1, 1.05, 1],
-              rotate: [0, 360],
-            }}
-            transition={{
-              scale: { duration: 2, repeat: Infinity },
-              rotate: { duration: qci >= 0.9 ? 20 : 40, repeat: Infinity, ease: "linear" }
-            }}
-          >
-            <Shield className="w-5 h-5 text-amber-400" />
-          </motion.div>
-          <div className="text-right">
-            <div className="flex items-center gap-2">
-              <motion.span
-                className="text-amber-100 text-sm font-bold"
-                key={qci}
-                initial={{ scale: 1.2, opacity: 0.5 }}
-                animate={{ scale: 1, opacity: 1 }}
-                transition={{ duration: 0.3 }}
-              >
-                {(qci * 100).toFixed(0)}%
-              </motion.span>
-              <motion.span
-                className="text-xs font-semibold bg-gradient-to-r from-amber-400 to-yellow-500 bg-clip-text text-transparent"
-                key={getQCIStatus(qci)}
-                initial={{ opacity: 0, x: -10 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ duration: 0.4 }}
-              >
-                {getQCIStatus(qci)}
-              </motion.span>
-            </div>
-            <div className="text-amber-300/60 text-xs font-medium">Quantum Coherence</div>
-          </div>
-          <div
-            className="relative w-12 h-2 rounded-full overflow-hidden"
-            style={{
-              background: 'rgba(15, 23, 42, 0.7)',
-              border: '1px solid rgba(212, 175, 55, 0.3)',
-              boxShadow: qci >= 0.9
-                ? '0 0 15px rgba(212, 175, 55, 0.6), 0 0 30px rgba(255, 215, 0, 0.4)'
-                : qci >= 0.8
-                ? '0 0 10px rgba(212, 175, 55, 0.4)'
-                : '0 0 5px rgba(212, 175, 55, 0.2)'
-            }}
-          >
-            <motion.div
-              className="h-full relative"
-              style={{
-                background: qci >= 0.9
-                  ? 'linear-gradient(90deg, #FFD700, #FFA500, #FF8C00, #FFD700)'
-                  : qci >= 0.8
-                  ? 'linear-gradient(90deg, #D4AF37, #FFD700, #FFA500)'
-                  : 'linear-gradient(90deg, #8B7355, #D4AF37, #FFD700)',
-                backgroundSize: '200% 100%'
-              }}
-              initial={{ width: 0 }}
-              animate={{
-                width: `${qci * 100}%`,
-                backgroundPosition: qci >= 0.8 ? ['0% 0%', '200% 0%'] : '0% 0%'
-              }}
-              transition={{
-                width: { duration: 1, ease: "easeOut" },
-                backgroundPosition: {
-                  duration: 2,
-                  repeat: Infinity,
-                  ease: "linear"
-                }
-              }}
-            >
-              {/* Shimmer effect for high coherence */}
-              {qci >= 0.8 && (
+        {/* Right: Network Health Gauge — k-parameter orbital circle */}
+        <div className="flex items-center gap-2">
+          {/* K-value orbital ring — green=stable, amber=approaching, red=critical */}
+          {(() => {
+            const radius = 17;
+            const stroke = 3;
+            const circ = 2 * Math.PI * radius;
+            // Arc fill = inverse health: low k (stable) = full arc, high k (critical) = empty arc
+            const kNorm = Math.min(kValue / 15, 1);
+            const healthFill = 1 - kNorm;
+            const dashOffset = circ * (1 - healthFill);
+            const arcColor = kPhase === 'critical' ? '#ef4444' : kPhase === 'approaching' ? '#f59e0b' : '#10b981';
+            const glowColor = kPhase === 'critical' ? '0 0 8px rgba(239,68,68,0.6)' : kPhase === 'approaching' ? '0 0 6px rgba(245,158,11,0.4)' : '0 0 8px rgba(16,185,129,0.5)';
+            const orbitDuration = kPhase === 'stable' ? 4 : kPhase === 'approaching' ? 6 : 2;
+            const phaseLabel = kPhase === 'critical' ? 'Critical' : kPhase === 'approaching' ? 'Warning' : 'Healthy';
+            return (
+              <div className="relative flex items-center justify-center" title={`Network Health Gauge — K=${kValue.toFixed(2)} (${phaseLabel})`}>
+                <svg
+                  width={(radius + stroke) * 2 + 2}
+                  height={(radius + stroke) * 2 + 2}
+                  className="-rotate-90"
+                  style={{ filter: `drop-shadow(${glowColor})` }}
+                >
+                  <circle cx={radius + stroke + 1} cy={radius + stroke + 1} r={radius}
+                    fill="none" stroke="rgba(255,255,255,0.07)" strokeWidth={stroke} />
+                  <circle cx={radius + stroke + 1} cy={radius + stroke + 1} r={radius}
+                    fill="none" stroke={arcColor} strokeWidth={stroke} strokeLinecap="round"
+                    strokeDasharray={circ} strokeDashoffset={dashOffset}
+                    style={{ transition: 'stroke-dashoffset 1.5s ease, stroke 0.5s ease' }} />
+                </svg>
                 <motion.div
-                  className="absolute inset-0"
-                  style={{
-                    background: 'linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent)',
-                  }}
-                  animate={{
-                    x: ['-100%', '200%']
-                  }}
-                  transition={{
-                    duration: 1.5,
-                    repeat: Infinity,
-                    ease: "linear"
-                  }}
-                />
-              )}
-            </motion.div>
-          </div>
+                  className="absolute"
+                  style={{ width: radius * 2, height: radius * 2 }}
+                  animate={{ rotate: 360 }}
+                  transition={{ duration: orbitDuration, repeat: Infinity, ease: 'linear' }}
+                >
+                  <div className="absolute rounded-full" style={{
+                    width: 5, height: 5, background: arcColor,
+                    top: -2.5, left: '50%', transform: 'translateX(-50%)',
+                    boxShadow: `0 0 5px ${arcColor}`,
+                  }} />
+                </motion.div>
+                <div className="absolute flex flex-col items-center leading-none">
+                  <span className="text-[9px] font-bold font-mono" style={{ color: arcColor }}>
+                    {kValue.toFixed(1)}
+                  </span>
+                  <span className="text-[7px] font-semibold uppercase tracking-widest -mt-0.5" style={{ color: arcColor, opacity: 0.7 }}>NHG</span>
+                </div>
+              </div>
+            );
+          })()}
 
           {/* v5.1.1: Deploy Panel - Visible for all logged-in users (read-only status) */}
           {(() => {
@@ -1838,7 +1841,7 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
               {/* Social Links */}
               <div className="border-t border-slate-700/50 mt-1 pt-1 flex items-center gap-1 px-3 py-2">
                 <a
-                  href="https://x.com/QuilloNetwork"
+                  href="https://x.com/quillongraph"
                   target="_blank"
                   rel="noopener noreferrer"
                   className="p-2 rounded-lg hover:bg-slate-700/50 text-slate-500 hover:text-white transition-colors"
@@ -1860,7 +1863,7 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
                   </svg>
                 </a>
                 <a
-                  href="https://discord.gg/quillon"
+                  href="https://discord.gg/jEhaYtAhfx"
                   target="_blank"
                   rel="noopener noreferrer"
                   className="p-2 rounded-lg hover:bg-slate-700/50 text-slate-500 hover:text-[#5865F2] transition-colors"

@@ -2596,31 +2596,6 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
         }}
       />
 
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl lg:text-4xl font-bold text-white">Dashboard</h1>
-          <p className="text-gray-400 mt-1 flex items-center gap-2">
-            Quantum Consensus Wallet
-            {sseConnected && (
-              <span className="inline-flex items-center gap-1 text-xs text-quantum-green">
-                <span className="w-2 h-2 rounded-full bg-quantum-green animate-pulse"></span>
-                Live Updates
-              </span>
-            )}
-            {/* 🌐 v3.4.3-browser: P2P gossipsub status indicator */}
-            {p2pSubscribed && (
-              <span className="inline-flex items-center gap-1 text-xs text-cyan-400 ml-2">
-                <Radio className="w-3 h-3 animate-pulse" />
-                P2P {p2pBlockHistory.length > 0 ? `(${p2pBlockHistory.length} blocks)` : 'Subscribed'}
-              </span>
-            )}
-          </p>
-        </div>
-        <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-quantum-purple to-quantum-cyan flex items-center justify-center">
-          <Activity className={`w-6 h-6 text-white ${nodeStatus.network_health === 'healthy' ? 'animate-pulse' : 'opacity-50'}`} />
-        </div>
-      </div>
 
       {/* ═══════════════════════════════════════════════════════════════ */}
       {/* CYBERPUNK TAB NAVIGATION                                       */}

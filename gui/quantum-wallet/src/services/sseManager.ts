@@ -46,6 +46,7 @@ const SSE_EVENT_TYPES = [
   'balance-updated',
   'node-status',
   'miner-stats',
+  'mining_stats',
   'new-block',
   'transaction-submitted',
   'transaction-confirmed',
