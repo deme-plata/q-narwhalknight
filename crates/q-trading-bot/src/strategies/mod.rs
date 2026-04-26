@@ -14,6 +14,8 @@ pub mod grid;
 pub mod market_maker;
 pub mod dca;
 pub mod dex_activity;
+pub mod water_bot;
+pub mod dark_knight;
 
 // Re-export DEX activity components for easy access
 pub use dex_activity::{
@@ -22,3 +24,6 @@ pub use dex_activity::{
     DexActivityWallet,
     calculate_dex_activity_split,
 };
+
+pub use water_bot::{TunnelingOctopusBot, WaterBotConfig};
+pub use dark_knight::{DarkKnightBot, DarkKnightConfig};

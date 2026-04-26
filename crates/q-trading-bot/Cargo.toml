@@ -41,6 +41,18 @@ chrono = "0.4"
 rust_decimal = "1.33"
 rust_decimal_macros = "1.33"
 
+# RNG for DCA strategies
+rand = "0.8"
+
+# SIMD-accelerated indicators (Dagknight)
+wide = "0.7"
+
+# DashMap for concurrent indicator registry
+dashmap = "6"
+
+# P2P / Bracha integration
+q-narwhal-core = { path = "../q-narwhal-core" }
+
 # Database for trade history
 sled = "0.34"
 

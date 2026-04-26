@@ -10,14 +10,24 @@ use tracing::{error, info, warn};
 
 mod api_client;
 mod config;
+mod dna;
 mod engine;
+mod indicators;
+mod kelly;
+mod p2p_bridge;
+mod resonance;
 mod strategies;
+mod swarm;
 mod types;
 mod wallet_manager;
 
 use crate::config::BotConfig;
 use crate::engine::TradingEngine;
-use crate::strategies::{DexActivityStrategy, DexActivityConfig, DexActivityWallet};
+use crate::strategies::{
+    DexActivityStrategy, DexActivityConfig, DexActivityWallet,
+    TunnelingOctopusBot, WaterBotConfig,
+    DarkKnightBot, DarkKnightConfig,
+};
 
 #[derive(Parser)]
 #[command(name = "q-trading-bot")]
@@ -111,6 +121,73 @@ enum Commands {
         #[arg(long)]
         burst_probability: Option<f64>,
     },
+    /// Run the Water Robot DCA bot (Tunneling Octopus species)
+    WaterBot {
+        /// Your qnk wallet address (must hold token_in balance)
+        #[arg(long, env = "WATER_BOT_WALLET")]
+        wallet: String,
+
+        /// Token to sell (e.g. QUG)
+        #[arg(long, default_value = "QUG")]
+        token_in: String,
+
+        /// Token to buy (e.g. QUGUSD)
+        #[arg(long, default_value = "QUGUSD")]
+        token_out: String,
+
+        /// Amount of token_in per DCA execution (display units)
+        #[arg(long, default_value = "10.0")]
+        amount: f64,
+
+        /// Interval between executions in seconds
+        #[arg(long, default_value = "3600")]
+        interval: u64,
+
+        /// Maximum slippage (e.g. 0.01 = 1%)
+        #[arg(long, default_value = "0.01")]
+        max_slippage: f64,
+
+        /// Override resonance threshold (0.0–1.0). Auto-selected if omitted.
+        #[arg(long)]
+        resonance: Option<f64>,
+
+        /// Dry run — print decisions but do NOT execute swaps
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Combined Dark Knight + Water Robot (Dagknight indicators + resonance + swarm + Kelly)
+    DarkKnight {
+        #[arg(long, env = "DARK_KNIGHT_WALLET")]
+        wallet: String,
+        #[arg(long, default_value = "QUG")]
+        token_in: String,
+        #[arg(long, default_value = "QUGUSD")]
+        token_out: String,
+        #[arg(long, default_value = "10.0")]
+        amount: f64,
+        #[arg(long, default_value = "0.0")]
+        capital: f64,
+        #[arg(long, default_value = "3600")]
+        interval: u64,
+        #[arg(long, default_value = "0.01")]
+        max_slippage: f64,
+        /// Require Ichimoku multi-confluence before swapping
+        #[arg(long, default_value = "true")]
+        require_ichimoku: bool,
+        /// Minimum ADX for trend confirmation
+        #[arg(long, default_value = "20.0")]
+        min_adx: f64,
+        #[arg(long)]
+        resonance: Option<f64>,
+        #[arg(long)]
+        no_kelly: bool,
+        /// Enable P2P Bracha multi-node consensus (requires live node)
+        #[arg(long)]
+        p2p_bracha: bool,
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Trade QBANK token specifically
     TradeQbank {
         /// Buy or sell
@@ -162,6 +239,46 @@ async fn main() -> Result<()> {
         }
         Some(Commands::DexConfig { wallet, min_interval, max_interval, target_trades, burst_mode, burst_probability }) => {
             configure_dex_bot(&wallet, min_interval, max_interval, target_trades, burst_mode, burst_probability)?;
+        }
+        Some(Commands::WaterBot { wallet, token_in, token_out, amount, interval, max_slippage, resonance, dry_run }) => {
+            let cfg = WaterBotConfig {
+                api_url: cli.api_endpoint.clone(),
+                wallet,
+                token_in,
+                token_out,
+                amount_per_execution: amount,
+                total_capital: 0.0, // auto-computed as 100× amount_per_execution
+                interval_secs: interval,
+                max_slippage,
+                resonance_threshold: resonance,
+                kelly_sizing: true,
+                dry_run,
+            };
+            let mut bot = TunnelingOctopusBot::new(cfg);
+            bot.run().await?;
+        }
+        Some(Commands::DarkKnight {
+            wallet, token_in, token_out, amount, capital, interval,
+            max_slippage, require_ichimoku, min_adx, resonance, no_kelly, p2p_bracha, dry_run,
+        }) => {
+            let cfg = DarkKnightConfig {
+                api_url: cli.api_endpoint.clone(),
+                wallet,
+                token_in,
+                token_out,
+                base_amount: amount,
+                total_capital: capital,
+                interval_secs: interval,
+                max_slippage,
+                resonance_threshold: resonance,
+                require_ichimoku,
+                min_adx,
+                kelly_sizing: !no_kelly,
+                p2p_bracha,
+                dry_run,
+            };
+            let mut bot = DarkKnightBot::new(cfg);
+            bot.run().await?;
         }
         Some(Commands::TradeQbank { action, amount, price, wallet }) => {
             trade_qbank(&cli.api_endpoint, &action, amount, price, &wallet).await?;
@@ -269,11 +386,11 @@ async fn show_stats(config_path: &str, limit: usize) -> Result<()> {
     println!("╠════════════════════════════════════════════════════════════╣");
 
     for trade in recent_trades {
-        println!("║ {} | {} | {} → {} | {:8.2} @ {:8.2} ║",
+        println!("║ {} | {} | {}/{} | {:8.2} @ {:8.2} ║",
             trade.timestamp.format("%Y-%m-%d %H:%M:%S"),
             trade.side,
-            trade.from_token,
-            trade.to_token,
+            trade.pair.base,
+            trade.pair.quote,
             trade.amount,
             trade.price
         );

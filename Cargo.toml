@@ -72,6 +72,7 @@ members = [
     "crates/crown-ash-api",     # Crown & Ash — REST API handlers
     "crates/crown-ash-narrative", # Crown & Ash — narrative text generation (templates + optional LLM)
     # "crates/crown-ash-client",  # Crown & Ash — Bevy game client (build separately: cargo check --manifest-path crates/crown-ash-client/Cargo.toml)
+    "crates/q-trading-bot",      # Water Robot DCA + Dagknight SIMD trading bot
 ]
 
 [workspace.package]

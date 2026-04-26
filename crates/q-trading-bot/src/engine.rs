@@ -26,7 +26,7 @@ pub struct TradingEngine {
 }
 
 impl TradingEngine {
-    pub async fn new(config: BotConfig, api_endpoint: String, dry_run: bool) -> Result<()> {
+    pub async fn new(config: BotConfig, api_endpoint: String, dry_run: bool) -> Result<TradingEngine> {
         config.validate()?;
 
         let api_client = ApiClient::new(api_endpoint);
@@ -119,18 +119,18 @@ impl TradingEngine {
         // Get balances
         let balances = self.wallet_manager.get_all_balances().await?;
 
-        // Update each strategy
-        for strategy in &mut self.strategies {
-            if let Err(e) = self.process_strategy(strategy.as_mut(), &balances).await {
-                error!("Error processing strategy {}: {}", strategy.name(), e);
+        // Update each strategy (avoid double &mut self via index-based iteration)
+        for i in 0..self.strategies.len() {
+            let name = self.strategies[i].name().to_string();
+            if let Err(e) = Self::process_strategy_static(self.strategies[i].as_mut(), &balances).await {
+                error!("Error processing strategy {}: {}", name, e);
             }
         }
 
         Ok(())
     }
 
-    async fn process_strategy(
-        &mut self,
+    async fn process_strategy_static(
         strategy: &mut dyn Strategy,
         balances: &HashMap<String, WalletBalance>,
     ) -> Result<()> {

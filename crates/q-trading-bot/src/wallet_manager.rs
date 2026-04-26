@@ -1,5 +1,6 @@
 /// Wallet management for trading bot
 use anyhow::Result;
+use rust_decimal::Decimal;
 use std::collections::HashMap;
 use crate::api_client::ApiClient;
 use crate::config::WalletConfig;
@@ -23,7 +24,13 @@ impl WalletManager {
     }
 
     pub async fn get_balance(&self, wallet_id: &str) -> Result<WalletBalance> {
-        self.api_client.get_balance(wallet_id).await
+        // QuillonClient.get_all_balances is a stub returning [] (auth required on-chain).
+        // Return empty balance for this wallet — the water bot uses DEX pool state directly.
+        Ok(WalletBalance {
+            wallet_id: wallet_id.to_string(),
+            qnk_balance: Decimal::ZERO,
+            custom_tokens: HashMap::new(),
+        })
     }
 
     pub async fn get_all_balances(&self) -> Result<HashMap<String, WalletBalance>> {
