@@ -3104,8 +3104,31 @@ export default function ExplorerScreen() {
 
     try {
       // Determine search type based on query format
+      // Handle mining-{height}-{nonce} IDs from the activity feed — redirect to block
+      const miningHeightMatch = query.match(/^mining-(\d+)/i);
+      if (miningHeightMatch) {
+        const blockHeight = parseInt(miningHeightMatch[1]);
+        console.log(`🔍 [EXPLORER] Mining reward ID detected, looking up block #${blockHeight}`);
+        const blockResponse = await qnkAPI.getBlock(blockHeight);
+        if (blockResponse.success && blockResponse.data) {
+          setDataSource('via HTTP API');
+          setSelectedDetail({
+            type: 'block',
+            data: {
+              height: blockHeight,
+              tx_count: Array.isArray(blockResponse.data) ? blockResponse.data.length : 0,
+              hash: blockResponse.data[0]?.hash || 'N/A',
+              transactions: blockResponse.data
+            }
+          });
+        } else {
+          setSelectedDetail({ type: 'error', data: { message: `Block #${blockHeight} not found`, hint: 'The block for this mining reward could not be loaded' } });
+        }
+        return;
+      }
+
       let searchType = '';
-      if (query.match(/^tx_[a-f0-9]+/i) || query.match(/^[a-f0-9]{64}$/i)) searchType = 'transaction';
+      if (query.match(/^tx_[a-f0-9]+/i) || query.match(/^[a-f0-9]{32,128}$/i)) searchType = 'transaction';
       else if (query.match(/^vtx_[a-f0-9]+/i)) searchType = 'vertex';
       else if (query.match(/^0x[a-f0-9]{40}$/i)) searchType = 'contract'; // EVM contract address
       else if (query.match(/^qnk[a-z0-9]{39}$/i)) searchType = 'address'; // Q-NarwhalKnight wallet address

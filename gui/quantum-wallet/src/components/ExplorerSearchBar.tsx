@@ -39,8 +39,34 @@ export default function ExplorerSearchBar() {
 
     try {
       // Determine search type based on query format
+      // Handle mining-{height}-{nonce} IDs from the activity feed — redirect to block
+      const miningHeightMatch = query.match(/^mining-(\d+)/i);
+      if (miningHeightMatch) {
+        const blockHeight = parseInt(miningHeightMatch[1]);
+        const blockResponse = await qnkAPI.getBlock(blockHeight);
+        if (blockResponse.success && blockResponse.data) {
+          results.push({
+            type: 'block',
+            id: blockHeight.toString(),
+            title: `Block #${blockHeight} (Mining Reward)`,
+            subtitle: `${Array.isArray(blockResponse.data) ? blockResponse.data.length : 0} transactions`,
+            data: {
+              height: blockHeight,
+              tx_count: Array.isArray(blockResponse.data) ? blockResponse.data.length : 0,
+              hash: blockResponse.data[0]?.hash || 'N/A',
+              transactions: blockResponse.data
+            }
+          });
+        } else {
+          results.push({ type: 'error', id: 'not-found', title: 'Block Not Found', subtitle: `Block #${blockHeight} could not be loaded` });
+        }
+        setSearchResults(results);
+        setIsSearching(false);
+        return;
+      }
+
       let searchType = '';
-      if (query.match(/^tx_[a-f0-9]+/i) || query.match(/^[a-f0-9]{64}$/i)) searchType = 'transaction';
+      if (query.match(/^tx_[a-f0-9]+/i) || query.match(/^[a-f0-9]{32,128}$/i)) searchType = 'transaction';
       else if (query.match(/^qnk[a-z0-9]{39}$/i)) searchType = 'address';
       else if (query.match(/^\d+$/)) searchType = 'block';
 

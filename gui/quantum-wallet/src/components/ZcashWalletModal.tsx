@@ -17,10 +17,11 @@ interface SwapEntry {
   created_at: string;
 }
 
-type Tab = 'balance' | 'send' | 'receive' | 'history';
+type Tab = 'balance' | 'send' | 'swap' | 'history';
 
 const ZcashWalletModal: React.FC<ZcashWalletModalProps> = ({ isOpen, onClose, walletAddress }) => {
   const [activeTab, setActiveTab] = useState<Tab>('balance');
+  const [copied, setCopied] = useState(false);
   const [zAddress, setZAddress] = useState('');
   const [balanceZec, setBalanceZec] = useState(0);
   const [balanceZat, setBalanceZat] = useState(0);
@@ -116,8 +117,9 @@ const ZcashWalletModal: React.FC<ZcashWalletModalProps> = ({ isOpen, onClose, wa
   }, [isOpen, fetchData]);
 
   const handleSend = async () => {
-    if (!sendAddress.startsWith('zs1') && !sendAddress.startsWith('zs')) {
-      setError('Only shielded z-addresses (zs1...) are supported.');
+    const isShielded = sendAddress.startsWith('zs') || sendAddress.startsWith('u1');
+    if (!isShielded) {
+      setError('Only shielded addresses are supported (zs1... for Sapling, u1... for Unified/Orchard).');
       return;
     }
     const amountZat = Math.round(parseFloat(sendAmount) * 100_000_000);
@@ -189,8 +191,14 @@ const ZcashWalletModal: React.FC<ZcashWalletModalProps> = ({ isOpen, onClose, wa
 
   const copyAddress = (addr: string) => {
     navigator.clipboard.writeText(addr);
-    setSuccess('Address copied to clipboard');
-    setTimeout(() => setSuccess(''), 2000);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handleMaxSend = () => {
+    const fee = 0.0001;
+    const max = Math.max(0, balanceZec - fee);
+    setSendAmount(max > 0 ? max.toFixed(8) : '');
   };
 
   if (!isOpen) return null;
@@ -217,6 +225,9 @@ const ZcashWalletModal: React.FC<ZcashWalletModalProps> = ({ isOpen, onClose, wa
                   {bridgeStatus.zebra_syncing ? `Syncing (${bridgeStatus.zebra_height?.toLocaleString()})` : `Synced (${bridgeStatus.zebra_height?.toLocaleString()})`}
                 </span>
               )}
+              <button onClick={fetchData} title="Refresh" className="text-gray-400 hover:text-purple-300 p-1 transition-colors">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+              </button>
               <button onClick={onClose} className="text-gray-400 hover:text-white p-1">
                 <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
               </button>
@@ -226,7 +237,7 @@ const ZcashWalletModal: React.FC<ZcashWalletModalProps> = ({ isOpen, onClose, wa
 
         {/* Tabs */}
         <div className="flex border-b border-gray-700/50">
-          {(['balance', 'send', 'receive', 'history'] as Tab[]).map((tab) => (
+          {(['balance', 'send', 'swap', 'history'] as Tab[]).map((tab) => (
             <button
               key={tab}
               onClick={() => { setActiveTab(tab); setError(''); setSuccess(''); }}
@@ -238,7 +249,7 @@ const ZcashWalletModal: React.FC<ZcashWalletModalProps> = ({ isOpen, onClose, wa
             >
               {tab === 'balance' && 'Balance'}
               {tab === 'send' && 'Send ZEC'}
-              {tab === 'receive' && 'Swap QNK/ZEC'}
+              {tab === 'swap' && 'Swap'}
               {tab === 'history' && 'History'}
             </button>
           ))}
@@ -268,8 +279,8 @@ const ZcashWalletModal: React.FC<ZcashWalletModalProps> = ({ isOpen, onClose, wa
                 {zAddress ? (
                   <div className="flex items-center gap-2">
                     <code className="text-purple-300 text-xs flex-1 break-all font-mono">{zAddress}</code>
-                    <button onClick={() => copyAddress(zAddress)} className="px-3 py-1 bg-purple-500/20 hover:bg-purple-500/30 text-purple-300 rounded text-xs whitespace-nowrap">
-                      Copy
+                    <button onClick={() => copyAddress(zAddress)} className="px-3 py-1 bg-purple-500/20 hover:bg-purple-500/30 text-purple-300 rounded text-xs whitespace-nowrap transition-colors">
+                      {copied ? '✓ Copied' : 'Copy'}
                     </button>
                   </div>
                 ) : (
@@ -307,14 +318,19 @@ const ZcashWalletModal: React.FC<ZcashWalletModalProps> = ({ isOpen, onClose, wa
                   type="text"
                   value={sendAddress}
                   onChange={(e) => setSendAddress(e.target.value)}
-                  placeholder="zs1..."
+                  placeholder="zs1... or u1..."
                   className="w-full bg-gray-800/50 border border-gray-700/50 rounded-lg px-4 py-3 text-white placeholder-gray-500 text-sm font-mono focus:border-purple-500/50 focus:outline-none"
                 />
-                <p className="text-gray-500 text-xs mt-1">Only shielded z-addresses accepted (privacy enforced)</p>
+                <p className="text-gray-500 text-xs mt-1">Sapling (zs1...) or Unified/Orchard (u1...) addresses accepted</p>
               </div>
 
               <div>
-                <label className="text-gray-400 text-sm mb-1 block">Amount (ZEC)</label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-gray-400 text-sm">Amount (ZEC)</label>
+                  <button onClick={handleMaxSend} className="text-purple-400 hover:text-purple-300 text-xs font-medium">
+                    MAX
+                  </button>
+                </div>
                 <input
                   type="number"
                   step="0.00000001"
@@ -323,7 +339,10 @@ const ZcashWalletModal: React.FC<ZcashWalletModalProps> = ({ isOpen, onClose, wa
                   placeholder="0.00000000"
                   className="w-full bg-gray-800/50 border border-gray-700/50 rounded-lg px-4 py-3 text-white placeholder-gray-500 text-sm focus:border-purple-500/50 focus:outline-none"
                 />
-                <p className="text-gray-500 text-xs mt-1">Available: {balanceZec.toFixed(8)} ZEC</p>
+                <div className="flex justify-between mt-1">
+                  <p className="text-gray-500 text-xs">Available: {balanceZec.toFixed(8)} ZEC</p>
+                  <p className="text-gray-500 text-xs">Fee: 0.0001 ZEC</p>
+                </div>
               </div>
 
               <div>
@@ -354,8 +373,8 @@ const ZcashWalletModal: React.FC<ZcashWalletModalProps> = ({ isOpen, onClose, wa
             </div>
           )}
 
-          {/* Receive / Swap Tab */}
-          {activeTab === 'receive' && (
+          {/* Swap Tab */}
+          {activeTab === 'swap' && (
             <div className="space-y-4">
               <div className="flex gap-2 bg-gray-800/30 rounded-lg p-1">
                 <button
@@ -481,7 +500,7 @@ const ZcashWalletModal: React.FC<ZcashWalletModalProps> = ({ isOpen, onClose, wa
                           {swap.status}
                         </span>
                       </div>
-                      <span className="text-gray-500 text-xs">{new Date(swap.created_at).toLocaleDateString()}</span>
+                      <span className="text-gray-500 text-xs">{new Date(swap.created_at).toLocaleString()}</span>
                     </div>
                     <div className="grid grid-cols-2 gap-2 text-xs">
                       <div>
