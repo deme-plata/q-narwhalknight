@@ -16,6 +16,7 @@ pub mod dca;
 pub mod dex_activity;
 pub mod water_bot;
 pub mod dark_knight;
+pub mod btc_advantage;
 
 // Re-export DEX activity components for easy access
 pub use dex_activity::{
@@ -27,3 +28,4 @@ pub use dex_activity::{
 
 pub use water_bot::{TunnelingOctopusBot, WaterBotConfig};
 pub use dark_knight::{DarkKnightBot, DarkKnightConfig};
+pub use btc_advantage::{BtcAdvantageBot, BtcAdvantageConfig};

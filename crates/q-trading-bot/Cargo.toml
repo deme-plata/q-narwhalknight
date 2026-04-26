@@ -56,9 +56,12 @@ q-narwhal-core = { path = "../q-narwhal-core" }
 # Database for trade history
 sled = "0.34"
 
-# Crypto for wallet operations
+# Crypto for wallet operations and Binance HMAC-SHA256 auth
 blake3 = "1.5"
 hex = "0.4"
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
 
 # Q-NarwhalKnight types
 q-types = { path = "../q-types" }

@@ -9,12 +9,14 @@ use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
 
 mod api_client;
+mod binance;
 mod config;
 mod dna;
 mod engine;
 mod indicators;
 mod kelly;
 mod p2p_bridge;
+mod polymarket;
 mod resonance;
 mod strategies;
 mod swarm;
@@ -27,7 +29,9 @@ use crate::strategies::{
     DexActivityStrategy, DexActivityConfig, DexActivityWallet,
     TunnelingOctopusBot, WaterBotConfig,
     DarkKnightBot, DarkKnightConfig,
+    BtcAdvantageBot, BtcAdvantageConfig,
 };
+use crate::binance::BinanceConfig;
 
 #[derive(Parser)]
 #[command(name = "q-trading-bot")]
@@ -188,6 +192,57 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Trade Binance BTC futures using Polymarket vs Black-Scholes probability edge
+    BtcAdvantage {
+        /// Binance API key (testnet or mainnet)
+        #[arg(long, env = "BINANCE_API_KEY", default_value = "")]
+        api_key: String,
+
+        /// Binance secret key
+        #[arg(long, env = "BINANCE_SECRET_KEY", default_value = "")]
+        secret_key: String,
+
+        /// Use Binance testnet (paper trading). ALWAYS start here!
+        #[arg(long, default_value = "true")]
+        testnet: bool,
+
+        /// Leverage (1–125). Recommend ≤5.
+        #[arg(long, default_value = "3")]
+        leverage: u32,
+
+        /// Fraction of margin to use per trade (0.01–0.25)
+        #[arg(long, default_value = "0.05")]
+        position_size: f64,
+
+        /// Minimum |P_poly - P_bs| to enter a trade (0.05–0.20)
+        #[arg(long, default_value = "0.08")]
+        entry_threshold: f64,
+
+        /// Stop-loss fraction from entry price
+        #[arg(long, default_value = "0.02")]
+        stop_loss: f64,
+
+        /// Take-profit fraction from entry price
+        #[arg(long, default_value = "0.05")]
+        take_profit: f64,
+
+        /// Minimum Polymarket USDC volume to consider a market liquid
+        #[arg(long, default_value = "10000")]
+        min_volume: f64,
+
+        /// Maximum days to expiry to consider
+        #[arg(long, default_value = "90")]
+        max_dte: f64,
+
+        /// Minimum days to expiry to consider
+        #[arg(long, default_value = "3")]
+        min_dte: f64,
+
+        /// Analyse opportunities but do NOT place real orders
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Trade QBANK token specifically
     TradeQbank {
         /// Buy or sell
@@ -278,6 +333,31 @@ async fn main() -> Result<()> {
                 dry_run,
             };
             let mut bot = DarkKnightBot::new(cfg);
+            bot.run().await?;
+        }
+        Some(Commands::BtcAdvantage {
+            api_key, secret_key, testnet, leverage, position_size,
+            entry_threshold, stop_loss, take_profit, min_volume, max_dte, min_dte, dry_run,
+        }) => {
+            let binance_cfg = BinanceConfig {
+                api_key,
+                secret_key,
+                testnet,
+                leverage,
+                position_size_fraction: position_size,
+                min_notional_usdt: 10.0,
+            };
+            let cfg = BtcAdvantageConfig {
+                binance: binance_cfg,
+                min_poly_volume: min_volume,
+                max_dte,
+                min_dte,
+                entry_threshold,
+                stop_loss_pct: stop_loss,
+                take_profit_pct: take_profit,
+                dry_run,
+            };
+            let mut bot = BtcAdvantageBot::new(cfg);
             bot.run().await?;
         }
         Some(Commands::TradeQbank { action, amount, price, wallet }) => {
