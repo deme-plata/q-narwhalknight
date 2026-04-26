@@ -247,6 +247,13 @@ impl MemoryLimiter {
         // If the host's swap is full (e.g. from other production processes) but
         // this container process itself has VmSwap=0, host swap exhaustion cannot
         // cause THIS process to crash — so don't throttle based on it.
+        //
+        // v10.4.8: Cap swap pressure at Medium when process has little of its own
+        // footprint on disk (< 25% of RSS+swap). If a container process has 3 GB
+        // RSS and only 200 MB swapped, it is NOT swap-thrashing — other processes
+        // filled the host swap. Declaring Critical here stalls turbo sync forever
+        // because the condition never self-heals. Only escalate beyond Medium when
+        // the process itself is heavily swap-dependent.
         let process_vm_swap_kb = Self::read_process_vm_swap_kb();
         let swap_total = system.total_swap();
         let swap_used = system.used_swap();
@@ -257,7 +264,7 @@ impl MemoryLimiter {
             MemoryPressure::Low
         } else {
             let swap_ratio = swap_used as f64 / swap_total as f64;
-            if swap_ratio < 0.60 {
+            let raw_pressure = if swap_ratio < 0.60 {
                 MemoryPressure::Low
             } else if swap_ratio < 0.80 {
                 MemoryPressure::Medium
@@ -265,6 +272,21 @@ impl MemoryLimiter {
                 MemoryPressure::High
             } else {
                 MemoryPressure::Critical
+            };
+            // v10.4.8: If process's own swap is < 25% of its total memory footprint
+            // (RSS + swap), its active pages are mostly in RAM — host swap exhaustion
+            // from other processes won't cause THIS process to crash. Cap at Medium.
+            let process_rss_kb = self.process_rss_bytes.load(Ordering::Relaxed) / 1024;
+            let process_total_kb = process_rss_kb + process_vm_swap_kb;
+            let process_swap_pct = if process_total_kb > 0 {
+                process_vm_swap_kb as f64 / process_total_kb as f64
+            } else {
+                0.0
+            };
+            if process_swap_pct < 0.25 {
+                std::cmp::min(raw_pressure, MemoryPressure::Medium)
+            } else {
+                raw_pressure
             }
         };
 

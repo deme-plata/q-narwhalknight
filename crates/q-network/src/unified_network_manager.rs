@@ -209,7 +209,7 @@ pub const HARDCODED_BOOTSTRAP_PEERS: &[&str] = &[
     // Server Gamma - 1Gbit
     "/ip4/109.205.176.60/tcp/9001/p2p/12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH",
     // Server Beta - 100Mbit (DHT coordinator, gossipsub anchor)
-    "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH",
+    "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWKyjQUYXJQ8y8WdHbtMVxsNt4a412Ccqdr1oKjSY8fy93",
 ];
 
 /// v4.2.0-beta: Bootstrap HTTP API endpoints for dynamic peer ID discovery
@@ -2536,10 +2536,24 @@ impl UnifiedNetworkManager {
                         if consecutive_no_peers >= 3 {
                             warn!("🚨 [AUTO-RECONNECT] Been disconnected for {} checks - clearing stale bootstrap peers and refreshing",
                                   consecutive_no_peers);
-                            // Clear potentially stale bootstrap peer IDs (they may have regenerated keys)
-                            let mut bp = self.bootstrap_peers.write().await;
-                            bp.clear();
-                            drop(bp);
+                            // v10.4.9: Re-seed from hardcoded peers before clearing stale entries.
+                            // Previously this cleared the map and if HTTP discovery also failed, the
+                            // node was permanently stuck with zero reconnect candidates.
+                            {
+                                let mut bp = self.bootstrap_peers.write().await;
+                                bp.clear();
+                                // Re-add hardcoded peers so reconnect always has fallback addresses
+                                for peer_str in HARDCODED_BOOTSTRAP_PEERS {
+                                    if let Ok(addr) = peer_str.parse::<Multiaddr>() {
+                                        use libp2p::multiaddr::Protocol;
+                                        if let Some(Protocol::P2p(peer_id)) = addr.iter().last() {
+                                            if peer_id != self.local_peer_id {
+                                                bp.insert(peer_id, addr);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             consecutive_no_peers = 0; // Reset counter to allow fresh discovery
                         }
 

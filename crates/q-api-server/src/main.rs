@@ -8467,6 +8467,34 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     }
 
     // ========================================
+    // 🎯 v10.4.9: LIMIT ORDER BACKGROUND TASKS
+    // Load orders from storage, recover crash-interrupted fills, start price-check loop
+    // ========================================
+    {
+        if let Some(ref lo_storage) = app_state.limit_order_storage {
+            match lo_storage.load_from_storage(&app_state.storage_engine).await {
+                Ok(_) => {
+                    let orders = lo_storage.orders.read().await;
+                    let open_count = orders.values().filter(|o| o.status == q_api_server::limit_order_api::LimitOrderStatus::Open).count();
+                    info!("🎯 [LIMIT] Loaded {} limit orders ({} open) from storage", orders.len(), open_count);
+                    drop(orders);
+                }
+                Err(e) => {
+                    warn!("⚠️ [LIMIT] Failed to load limit orders: {}", e);
+                }
+            }
+            // Reset any orders stuck in Processing state from a previous crash
+            lo_storage.recover_stuck_processing(&app_state.storage_engine).await;
+        }
+
+        let lo_app_state = app_state.clone();
+        tokio::spawn(async move {
+            q_api_server::limit_order_api::limit_order_check_loop(lo_app_state).await;
+        });
+        info!("🎯 Limit order price-check background task started");
+    }
+
+    // ========================================
     // 📈 v2.5.0-beta: PERPETUAL FUTURES BACKGROUND TASKS
     // Liquidation engine, funding rate, and mark price oracle
     // ========================================
@@ -8887,6 +8915,19 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     // 🔐 v1.1.9-beta: SECURITY-HARDENED P2P Balance Update Handler
                     // Implements: mandatory signatures, dedup cache, rate limiting, validator allowlist
                     info!("💰 [P2P BALANCE] Processing gossipsub balance update (v3.9.5)");
+                    // v10.4.10: Startup grace period — skip P2P gossip balance updates for the first
+                    // 60 seconds after node start. During this window, dedup flags from the previous
+                    // session are being loaded from RocksDB and block processing is catching up.
+                    // Accepting gossip updates before dedup is stable causes double-counting
+                    // (both gossip path and block-consensus path apply the same reward), which shows
+                    // as ~30-second balance inflation in the frontend.
+                    {
+                        let uptime_secs = app_state_gossip.start_time.elapsed().as_secs();
+                        if uptime_secs < 60 {
+                            debug!("⏳ [P2P BALANCE] Skipping gossip balance update during startup grace period (uptime={}s < 60s)", uptime_secs);
+                            continue;
+                        }
+                    }
                     match q_types::P2PBalanceUpdate::from_cbor(&data) {
                         Ok(update) => {
                             // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -23239,6 +23280,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .nest("/api/v1/liquidity", create_liquidity_router())
         // 💰 v2.4.8-beta: Dollar Cost Averaging API - Automated recurring token purchases
         .nest("/api/v1/dca", q_api_server::dca_api::create_dca_router())
+        // 🎯 v10.4.9: Limit Orders API - Price-triggered one-shot swaps
+        .nest("/api/v1/dex/limit-orders", q_api_server::limit_order_api::create_limit_order_router())
         // 📈 v2.5.0-beta: Perpetual Futures API - Leveraged long/short trading
         .nest("/api/v1/perp", q_api_server::perpetual_api::create_perp_router())
         // ⛏️ v2.2.1-beta: Stratum Mining Pool API - PPLNS rewards

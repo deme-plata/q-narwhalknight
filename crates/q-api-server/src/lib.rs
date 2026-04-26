@@ -276,6 +276,7 @@ pub mod dex_handlers; // ✅ ENABLED - DEX HTTP API handlers
 pub mod dex_initialization; // ✅ ENABLED - DEX component initialization
 pub mod governance_api; // ✅ v1.0.1 - Proof-of-Contribution governance with mining-weighted voting
 pub mod dca_api; // ✅ v2.4.8-beta - Dollar Cost Averaging for automated recurring token purchases
+pub mod limit_order_api; // ✅ v10.4.9 - Price-triggered one-shot swaps (limit orders)
 pub mod perpetual_api; // ✅ v2.5.0-beta - Perpetual futures with 10x leverage (long/short)
 pub mod handlers;
 pub mod startup_progress; // ✅ v1.4.15-beta - Startup progress tracker for frontend UI
@@ -1597,6 +1598,9 @@ pub struct AppState {
     // 💰 v2.4.8-beta: Dollar Cost Averaging (DCA) Storage
     // Enables users to automate recurring token purchases at configured intervals
     pub dca_storage: Option<Arc<dca_api::DcaStorage>>,
+
+    // 🎯 v10.4.9: Limit Order Storage — price-triggered one-shot swaps
+    pub limit_order_storage: Option<Arc<limit_order_api::LimitOrderStorage>>,
 
     // 📈 v2.5.0-beta: Perpetual Futures Storage
     // Enables leveraged long/short trading with up to 10x leverage
@@ -3146,6 +3150,9 @@ impl AppState {
             // 💰 v2.4.8-beta: Dollar Cost Averaging (DCA) Storage
             dca_storage: Some(Arc::new(dca_api::DcaStorage::new())),
 
+            // 🎯 v10.4.9: Limit Order Storage
+            limit_order_storage: Some(Arc::new(limit_order_api::LimitOrderStorage::new())),
+
             // 📈 v2.5.0-beta: Perpetual Futures Storage
             perp_storage: Some(Arc::new(perpetual_api::PerpStorage::new())),
 
@@ -4623,6 +4630,9 @@ impl AppState {
 
             // 💰 v2.4.8-beta: Dollar Cost Averaging (DCA) Storage
             dca_storage: Some(Arc::new(dca_api::DcaStorage::new())),
+
+            // 🎯 v10.4.9: Limit Order Storage
+            limit_order_storage: Some(Arc::new(limit_order_api::LimitOrderStorage::new())),
 
             // 📈 v2.5.0-beta: Perpetual Futures Storage
             perp_storage: Some(Arc::new(perpetual_api::PerpStorage::new())),
