@@ -349,6 +349,14 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
   const [kData, setKData] = useState<Record<string, any> | null>(null);
   const [showKTooltip, setShowKTooltip] = useState(false);
   const nhgRef = useRef<HTMLDivElement>(null);
+  const nhgHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showNHGTooltip = () => {
+    if (nhgHideTimerRef.current) clearTimeout(nhgHideTimerRef.current);
+    setShowKTooltip(true);
+  };
+  const hideNHGTooltip = () => {
+    nhgHideTimerRef.current = setTimeout(() => setShowKTooltip(false), 150);
+  };
   const [isTorConnected, setIsTorConnected] = useState(false);
   const [torOnionUrl, setTorOnionUrl] = useState("http://ca3jpub2haxboxjw4ws6run36ekdh3pv7pneqg2tbac5rxzvxhd2i5id.onion");
   const [minerLinkCount, setMinerLinkCount] = useState(0);
@@ -1595,8 +1603,8 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
           <div
             ref={nhgRef}
             className="relative"
-            onMouseEnter={() => setShowKTooltip(true)}
-            onMouseLeave={() => setShowKTooltip(false)}
+            onMouseEnter={showNHGTooltip}
+            onMouseLeave={hideNHGTooltip}
           >
             <NHGClock kValue={kValue} kPhase={kPhase} />
             <AnimatePresence>
@@ -1606,6 +1614,8 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
                   animate={{ opacity: 1, y: 0, scale: 1 }}
                   exit={{ opacity: 0, y: -8, scale: 0.95 }}
                   transition={{ duration: 0.18, ease: 'easeOut' }}
+                  onMouseEnter={showNHGTooltip}
+                  onMouseLeave={hideNHGTooltip}
                   className="rounded-2xl overflow-hidden"
                   style={{
                     position: 'fixed',
