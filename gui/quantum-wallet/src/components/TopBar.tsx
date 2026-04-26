@@ -95,6 +95,201 @@ interface TopBarProps {
   onNavigate?: (screen: 'dashboard' | 'transactions' | 'explorer' | 'dex' | 'mining' | 'vm' | 'download' | 'aichat' | 'settings') => void;
 }
 
+/**
+ * Network Health Gauge — compact canvas animation that mirrors the KOrbitalViz
+ * from DeployControlPanel. Orbiting factor particles (G Q T I R), phase-boundary
+ * dashed arcs at K=5 and K=10, background radial glow, center K value.
+ */
+function NHGClock({ kValue, kPhase }: { kValue: number; kPhase: string }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const animRef = useRef<number>(0);
+  const kRef = useRef(kValue);
+  const phaseRef = useRef(kPhase);
+  kRef.current = kValue;
+  phaseRef.current = kPhase;
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const maybeCtx = canvas.getContext('2d');
+    if (!maybeCtx) return;
+    const ctx = maybeCtx;
+
+    const SIZE = 72; // larger so particles + letters are legible
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = SIZE * dpr;
+    canvas.height = SIZE * dpr;
+    canvas.style.width = `${SIZE}px`;
+    canvas.style.height = `${SIZE}px`;
+    ctx.scale(dpr, dpr);
+
+    const cx = SIZE / 2;
+    const cy = SIZE / 2;
+    const R = 28; // orbit radius (matches KOrbitalViz feel)
+    const stroke = 2;
+
+    // Factor particles — same labels as KOrbitalViz
+    const factors = [
+      { letter: 'G', color: '#10b981', speed: 0.8,  offset: 0 },
+      { letter: 'Q', color: '#06b6d4', speed: 1.1,  offset: Math.PI * 0.4 },
+      { letter: 'T', color: '#f97316', speed: 0.6,  offset: Math.PI * 0.8 },
+      { letter: 'I', color: '#3b82f6', speed: 0.9,  offset: Math.PI * 1.2 },
+      { letter: 'R', color: '#a855f7', speed: 0.7,  offset: Math.PI * 1.6 },
+    ];
+
+    const phaseColor = (p: string) =>
+      p === 'critical' ? '#ef4444' : p === 'approaching' ? '#f59e0b' : '#10b981';
+    const phaseGlowRgba = (p: string) =>
+      p === 'critical' ? 'rgba(239,68,68,' : p === 'approaching' ? 'rgba(245,158,11,' : 'rgba(16,185,129,';
+
+    // Trail sparks
+    const trails: Array<{ x: number; y: number; vx: number; vy: number; life: number; color: string }> = [];
+
+    let t = 0;
+    function draw() {
+      t += 0.016;
+      const k = kRef.current;
+      const p = phaseRef.current || (k < 5 ? 'stable' : k < 10 ? 'approaching' : 'critical');
+      const pColor = phaseColor(p);
+      const glowRgba = phaseGlowRgba(p);
+      const kNorm = Math.min(k / 15, 1);
+
+      ctx.clearRect(0, 0, SIZE, SIZE);
+
+      // Background radial glow (phase-colored)
+      const bg = ctx.createRadialGradient(cx, cy, 0, cx, cy, R + 6);
+      bg.addColorStop(0, `${glowRgba}0.15)`);
+      bg.addColorStop(1, `${glowRgba}0)`);
+      ctx.fillStyle = bg;
+      ctx.beginPath();
+      ctx.arc(cx, cy, R + 8, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Outer track (faint ring)
+      ctx.beginPath();
+      ctx.arc(cx, cy, R, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(255,255,255,0.07)';
+      ctx.lineWidth = stroke;
+      ctx.stroke();
+
+      // Phase boundary dashed arcs at K=5 (33%) and K=10 (67%)
+      [0.333, 0.667].forEach(frac => {
+        const angle = frac * 2 * Math.PI - Math.PI / 2;
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(angle);
+        ctx.beginPath();
+        ctx.moveTo(R - 4, 0);
+        ctx.lineTo(R + 4, 0);
+        ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([2, 2]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+      });
+
+      // Health arc: low k = full arc (healthy). starts at top (-π/2), sweeps CW.
+      const arcSweep = (1 - kNorm) * 2 * Math.PI;
+      if (arcSweep > 0.02) {
+        ctx.beginPath();
+        ctx.arc(cx, cy, R, -Math.PI / 2, -Math.PI / 2 + arcSweep);
+        ctx.strokeStyle = pColor;
+        ctx.lineWidth = 2.5;
+        ctx.lineCap = 'round';
+        ctx.shadowColor = pColor;
+        ctx.shadowBlur = 8;
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+        ctx.lineCap = 'butt';
+      }
+
+      // Update + draw trail sparks
+      for (let i = trails.length - 1; i >= 0; i--) {
+        const s = trails[i];
+        s.x += s.vx; s.y += s.vy; s.life -= 0.03;
+        if (s.life <= 0) { trails.splice(i, 1); continue; }
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, 1.5 * s.life, 0, Math.PI * 2);
+        ctx.fillStyle = s.color.replace(')', `,${s.life})`).replace('rgb', 'rgba');
+        ctx.fill();
+      }
+
+      // Orbiting factor particles (letters)
+      factors.forEach(f => {
+        const angle = t * f.speed + f.offset;
+        const px = cx + Math.cos(angle) * R;
+        const py = cy + Math.sin(angle) * R;
+
+        // Emit trail sparks occasionally
+        if (Math.random() < 0.12) {
+          trails.push({
+            x: px, y: py,
+            vx: (Math.random() - 0.5) * 1.2,
+            vy: (Math.random() - 0.5) * 1.2,
+            life: 0.8 + Math.random() * 0.4,
+            color: f.color,
+          });
+        }
+
+        // Glow behind particle
+        ctx.shadowColor = f.color;
+        ctx.shadowBlur = 6;
+
+        // Draw particle dot
+        ctx.beginPath();
+        ctx.arc(px, py, 3.5, 0, Math.PI * 2);
+        ctx.fillStyle = f.color;
+        ctx.fill();
+
+        // Letter label
+        ctx.shadowBlur = 0;
+        ctx.font = 'bold 6px monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(f.letter, px, py);
+      });
+
+      // Center orb glow
+      const centerGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, 10);
+      centerGrad.addColorStop(0, `${glowRgba}0.4)`);
+      centerGrad.addColorStop(1, `${glowRgba}0)`);
+      ctx.fillStyle = centerGrad;
+      ctx.beginPath();
+      ctx.arc(cx, cy, 10, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Center K value + label
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = pColor;
+      ctx.font = 'bold 10px monospace';
+      ctx.shadowColor = pColor;
+      ctx.shadowBlur = 4;
+      ctx.fillText(k.toFixed(2), cx, cy - 3);
+      ctx.shadowBlur = 0;
+      ctx.font = '6px monospace';
+      ctx.fillStyle = `${glowRgba}0.8)`;
+      ctx.fillText('K', cx, cy + 8);
+
+      animRef.current = requestAnimationFrame(draw);
+    }
+
+    animRef.current = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(animRef.current);
+  }, []);
+
+  const phaseLabel = kPhase === 'critical' ? 'Critical' : kPhase === 'approaching' ? 'Warning' : 'Healthy';
+  return (
+    <canvas
+      ref={canvasRef}
+      title={`Network Health Gauge — K=${kValue.toFixed(4)} (${phaseLabel})`}
+      style={{ cursor: 'default' }}
+    />
+  );
+}
+
 // v2.4.0: Memoized for performance
 const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers, isOnline, qci, onNavigate }: TopBarProps) {
   const [searchQuery, setSearchQuery] = useState('');
@@ -141,7 +336,6 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
 
   // v3.4.16-beta: SSE-updated live metrics
   const [liveBlockHeight, setLiveBlockHeight] = useState(blockHeight);
-  const [blockFlash, setBlockFlash] = useState(false);
   const [livePeers, setLivePeers] = useState(peers);
   const [personalHashrate, setPersonalHashrate] = useState<number>(0);
 
@@ -600,15 +794,7 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
     }
   }, [blockHeight, peers]);
 
-  // v10.4.11: Flash the block counter whenever a new block arrives
-  useEffect(() => {
-    if (liveBlockHeight === blockHeight) return; // skip initial render
-    setBlockFlash(true);
-    const t = setTimeout(() => setBlockFlash(false), 400);
-    return () => clearTimeout(t);
-  }, [liveBlockHeight]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // v10.4.11: Poll /api/v1/status every 1s for fresh block height (fast fallback when SSE is slow)
+// v10.4.11: Poll /api/v1/status every 1s for fresh block height (fast fallback when SSE is slow)
   const liveBlockHeightRef = useRef(liveBlockHeight);
   liveBlockHeightRef.current = liveBlockHeight;
   useEffect(() => {
@@ -1328,8 +1514,8 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
             />
 
             {/* Block height — flashes amber on each new block */}
-            <div className={`flex flex-col items-center px-3 py-1 rounded-xl border min-w-[72px] transition-colors duration-300 ${blockFlash ? 'bg-amber-500/25 border-amber-400/60' : 'bg-amber-500/8 border-amber-500/20'}`}>
-              <span className={`text-sm font-bold font-mono leading-tight transition-colors duration-300 ${blockFlash ? 'text-amber-300' : 'text-amber-100'}`}>#{liveBlockHeight.toLocaleString()}</span>
+            <div className="flex flex-col items-center px-3 py-1 rounded-xl border min-w-[72px] bg-amber-500/8 border-amber-500/20">
+              <span className="text-sm font-bold font-mono leading-tight text-amber-100">#{liveBlockHeight.toLocaleString()}</span>
               <span className="text-amber-400/50 text-[9px] font-semibold uppercase tracking-wider">Block</span>
             </div>
 
@@ -1399,57 +1585,9 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
           </div>
         </div>
 
-        {/* Right: Network Health Gauge — k-parameter orbital circle */}
+        {/* Right: Network Health Gauge — canvas clock animation matching admin panel */}
         <div className="flex items-center gap-2">
-          {/* K-value orbital ring — green=stable, amber=approaching, red=critical */}
-          {(() => {
-            const radius = 17;
-            const stroke = 3;
-            const circ = 2 * Math.PI * radius;
-            // Arc fill = inverse health: low k (stable) = full arc, high k (critical) = empty arc
-            const kNorm = Math.min(kValue / 15, 1);
-            const healthFill = 1 - kNorm;
-            const dashOffset = circ * (1 - healthFill);
-            const arcColor = kPhase === 'critical' ? '#ef4444' : kPhase === 'approaching' ? '#f59e0b' : '#10b981';
-            const glowColor = kPhase === 'critical' ? '0 0 8px rgba(239,68,68,0.6)' : kPhase === 'approaching' ? '0 0 6px rgba(245,158,11,0.4)' : '0 0 8px rgba(16,185,129,0.5)';
-            const orbitDuration = kPhase === 'stable' ? 4 : kPhase === 'approaching' ? 6 : 2;
-            const phaseLabel = kPhase === 'critical' ? 'Critical' : kPhase === 'approaching' ? 'Warning' : 'Healthy';
-            return (
-              <div className="relative flex items-center justify-center" title={`Network Health Gauge — K=${kValue.toFixed(2)} (${phaseLabel})`}>
-                <svg
-                  width={(radius + stroke) * 2 + 2}
-                  height={(radius + stroke) * 2 + 2}
-                  className="-rotate-90"
-                  style={{ filter: `drop-shadow(${glowColor})` }}
-                >
-                  <circle cx={radius + stroke + 1} cy={radius + stroke + 1} r={radius}
-                    fill="none" stroke="rgba(255,255,255,0.07)" strokeWidth={stroke} />
-                  <circle cx={radius + stroke + 1} cy={radius + stroke + 1} r={radius}
-                    fill="none" stroke={arcColor} strokeWidth={stroke} strokeLinecap="round"
-                    strokeDasharray={circ} strokeDashoffset={dashOffset}
-                    style={{ transition: 'stroke-dashoffset 1.5s ease, stroke 0.5s ease' }} />
-                </svg>
-                <motion.div
-                  className="absolute"
-                  style={{ width: radius * 2, height: radius * 2 }}
-                  animate={{ rotate: 360 }}
-                  transition={{ duration: orbitDuration, repeat: Infinity, ease: 'linear' }}
-                >
-                  <div className="absolute rounded-full" style={{
-                    width: 5, height: 5, background: arcColor,
-                    top: -2.5, left: '50%', transform: 'translateX(-50%)',
-                    boxShadow: `0 0 5px ${arcColor}`,
-                  }} />
-                </motion.div>
-                <div className="absolute flex flex-col items-center leading-none">
-                  <span className="text-[9px] font-bold font-mono" style={{ color: arcColor }}>
-                    {kValue.toFixed(1)}
-                  </span>
-                  <span className="text-[7px] font-semibold uppercase tracking-widest -mt-0.5" style={{ color: arcColor, opacity: 0.7 }}>NHG</span>
-                </div>
-              </div>
-            );
-          })()}
+          <NHGClock kValue={kValue} kPhase={kPhase} />
 
           {/* v5.1.1: Deploy Panel - Visible for all logged-in users (read-only status) */}
           {(() => {

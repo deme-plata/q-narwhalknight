@@ -109,7 +109,12 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend, liveBalance }: Das
 
   const [nodeStatus, setNodeStatus] = useState<NodeStatus | null>(null);
   const [recentTransactions, setRecentTransactions] = useState<Transaction[]>([]);
-  const [loading, setLoading] = useState(true);
+  // Skip loading screen if we have cached balance — dashboard renders immediately with cached data
+  const [loading, setLoading] = useState(() => {
+    const cached = localStorage.getItem('cachedBalance');
+    const v = cached ? parseFloat(cached) : 0;
+    return isNaN(v) || v <= 0; // show spinner only when no cache exists
+  });
   const [error, setError] = useState<string | null>(null);
   const [walletAddress, setWalletAddress] = useState('');
   const [copiedAddress, setCopiedAddress] = useState(false);
@@ -670,47 +675,42 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
         refValue: highestKnownBalancesRef.current['QUG']
       });
 
-      try {
-        const balanceResponse = await qnkAPI.getWalletBalance(currentWalletAddress);
-        if (balanceResponse.success && balanceResponse.data) {
+      // Fetch QUG balance + USD price in parallel for faster display
+      const [balanceResponse, priceResp] = await Promise.all([
+        qnkAPI.getWalletBalance(currentWalletAddress),
+        qnkAPI.getAMMPrice('QUG').catch(() => null),
+      ]);
+
+      let qugPriceUsd: number | undefined;
+      if (priceResp && priceResp.success && priceResp.data && priceResp.data.price_usd > 0) {
+        qugPriceUsd = priceResp.data.price_usd;
+      }
+
+      if (balanceResponse.success && balanceResponse.data) {
           const fetchedBalance = balanceResponse.data.balance_qnk || 0;
           console.log('💰 Fresh QUG balance fetched:', fetchedBalance, '(previous highest:', previousHighest, ', cached:', validCachedBalance, ')');
 
-          // CRITICAL FIX: Only accept new balance if it's higher than or close to previous
-          // Allow small decreases (up to 10% or 1 QUG) for legitimate transactions
           // v1.0.2: Accept API balance as authoritative — only reject near-zero from large values
           const referenceBalance = Math.max(previousHighest, validCachedBalance);
           if (fetchedBalance > 0 || referenceBalance === 0 || fetchedBalance >= referenceBalance * 0.01) {
             qugBalance = fetchedBalance;
-            // Update tracking with latest value
             highestKnownBalancesRef.current['QUG'] = fetchedBalance;
-            // v2.3.31-beta: Check global cooldown for localStorage write
             const wbGlobalCooldownUntil = parseInt(localStorage.getItem('dexCooldownUntil') || '0');
             const wbGlobalCooldownActive = Date.now() < wbGlobalCooldownUntil;
             if (!dexSwapCooldownRef.current && !wbGlobalCooldownActive) {
               safeCacheBalance(fetchedBalance);
-            } else {
-              console.log('🚫 [fetchWalletBalances] SKIPPING localStorage write during DEX cooldown (global:', wbGlobalCooldownActive, ')');
             }
           } else {
-            // Near-zero from large balance — likely stale/corrupt data
             console.warn(`⚠️ Rejecting near-zero balance: ${fetchedBalance} (reference: ${referenceBalance})`);
             qugBalance = referenceBalance;
           }
         } else {
-          // Fall back to highest known balance if API fails
           qugBalance = Math.max(previousHighest, validCachedBalance, nodeStatus?.balance || 0);
           console.warn('⚠️ Balance query failed, using best known:', qugBalance);
         }
-      } catch (error) {
-        // Fall back to highest known balance on error
-        qugBalance = Math.max(previousHighest, validCachedBalance, nodeStatus?.balance || 0);
-        console.error('❌ Failed to fetch QUG balance, using best known:', qugBalance, error);
-      }
 
       // 🚨 NEVER allow 0 balance if we have cached value
       if (qugBalance === 0 && validCachedBalance > 0) {
-        console.warn('⚠️ [fetchWalletBalances] qugBalance was 0 but cache has value, using cache:', validCachedBalance);
         qugBalance = validCachedBalance;
       }
 
@@ -729,7 +729,6 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
       const qugSavedHistory = savedHistory['QUG'] || [];
       const qugLastPoint = qugSavedHistory[qugSavedHistory.length - 1];
       let qugHistory: BalanceHistoryPoint[];
-      // Only add a new point if balance changed by >0.5% or >10s since last point
       const qugShouldAdd = !qugLastPoint
         || (qugLastPoint.balance > 0 && Math.abs(qugBalance - qugLastPoint.balance) / qugLastPoint.balance > 0.005)
         || (qugLastPoint.balance === 0 && qugBalance > 0)
@@ -740,22 +739,12 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
         qugHistory = qugSavedHistory.length >= 2 ? qugSavedHistory : [...qugSavedHistory, { timestamp: now, balance: qugBalance }].slice(-10080);
       }
 
-      // Ensure at least 2 points for graph rendering
       if (qugHistory.length < 2) {
         qugHistory = [
           { timestamp: now - 60000, balance: qugBalance },
           { timestamp: now, balance: qugBalance }
         ];
       }
-
-      // Fetch QUG/USD price from AMM oracle for usdValue display
-      let qugPriceUsd: number | undefined;
-      try {
-        const priceResp = await qnkAPI.getAMMPrice('QUG');
-        if (priceResp.success && priceResp.data && priceResp.data.price_usd > 0) {
-          qugPriceUsd = priceResp.data.price_usd;
-        }
-      } catch { /* silent — usdValue just stays undefined */ }
 
       const balances: WalletBalance[] = [
         {
@@ -1198,7 +1187,12 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
     // ============================================
 
     const loadData = async (retryCount = 0) => {
-      setLoading(true);
+      // Only show spinner if we have no cached data yet
+      const hasCachedBalance = (() => {
+        const v = parseFloat(localStorage.getItem('cachedBalance') || '0');
+        return !isNaN(v) && v > 0;
+      })();
+      if (!hasCachedBalance) setLoading(true);
       try {
         await generateWalletAddress();
         // v8.9.9: Add 15s timeout to prevent infinite hang when API doesn't respond
@@ -1219,14 +1213,29 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
       }
     };
 
-    // v3.4.15: Small delay to allow node discovery to complete on first load
-    console.log('🎬 [Dashboard useEffect] Scheduling loadData() with 100ms delay...');
-    const initialDelay = setTimeout(() => {
-      if (mounted) {
-        console.log('🎬 [Dashboard useEffect] Calling loadData()...');
-        loadData();
-      }
-    }, 100);
+    // Fast-path: load native QUG balance immediately before full data load
+    const addr = localStorage.getItem('walletAddress');
+    if (addr) {
+      qnkAPI.getWalletBalance(addr).then(r => {
+        if (!mounted || !r.success || !r.data) return;
+        const bal = r.data.balance_qnk || 0;
+        if (bal > 0) {
+          highestKnownBalancesRef.current['QUG'] = bal;
+          safeCacheBalance(bal);
+          setWalletBalances(prev => {
+            const existing = prev.find(w => w.symbol === 'QUG');
+            if (existing) {
+              return prev.map(w => w.symbol === 'QUG' ? { ...w, balance: bal } : w);
+            }
+            return [{ symbol: 'QUG', name: 'Quillon Graph', balance: bal, icon: 'qug', color: 'from-amber-400 to-yellow-500', history: [] }, ...prev];
+          });
+          setLoading(false); // show dashboard immediately once we have the balance
+        }
+      }).catch(() => {/* silent — full loadData handles fallback */});
+    }
+
+    // Full data load (runs concurrently with fast-path above)
+    loadData();
 
     // Set up SSE for real-time balance updates
     // CRITICAL: Pass wallet_address parameter for privacy-filtered SSE
@@ -1279,7 +1288,7 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
     // v3.4.15: Cleanup for the initial delay timeout + SSE subscriptions
     return () => {
       mounted = false;
-      clearTimeout(initialDelay);
+      // (initialDelay removed — loadData fires immediately)
       if (txRefreshDebounce) clearTimeout(txRefreshDebounce);
       unsubBalance();
       unsubMining();
