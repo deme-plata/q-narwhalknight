@@ -101,6 +101,8 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [showResults, setShowResults] = useState(false);
   const [isSearching, setIsSearching] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [selectedDetail, setSelectedDetail] = useState<SearchResult | null>(null); // v3.4.2: Detail modal
   const [selectedContract, setSelectedContract] = useState<any | null>(null); // v3.4.20: Enhanced contract modal
@@ -988,6 +990,36 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
     return () => clearTimeout(timeoutId);
   }, [searchQuery]);
 
+  // Cmd/Ctrl+K opens search; Escape closes it
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault();
+        setSearchOpen(true);
+        setTimeout(() => searchInputRef.current?.focus(), 50);
+      }
+      if (e.key === 'Escape') {
+        setSearchOpen(false);
+        setSearchQuery('');
+        setSearchResults([]);
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
+
+  const openSearch = () => {
+    setSearchOpen(true);
+    setTimeout(() => searchInputRef.current?.focus(), 50);
+  };
+
+  const closeSearch = () => {
+    setSearchOpen(false);
+    setSearchQuery('');
+    setSearchResults([]);
+    setShowResults(false);
+  };
+
   const copyToClipboard = (text: string, id: string) => {
     navigator.clipboard.writeText(text);
     setCopiedId(id);
@@ -1021,48 +1053,93 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
         paddingTop: '20px'
       }}
     >
-      <div className="flex items-center justify-between">
-        {/* Left: Search */}
-        <div className="flex-1 max-w-xs relative ml-4">
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-amber-400" />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => {
-                setSearchQuery(e.target.value);
-                setShowResults(true);
-              }}
-              onBlur={() => setTimeout(() => setShowResults(false), 200)}
-              onFocus={() => setShowResults(true)}
-              placeholder="Search transactions, blocks, addresses..."
-              className="w-full pl-10 pr-4 py-2 bg-slate-900/70 border-2 border-amber-500/30 rounded-lg text-amber-50 placeholder-amber-300/40 focus:outline-none focus:border-amber-400 focus:shadow-[0_0_15px_rgba(251,191,36,0.3)] transition-all"
-            />
-            {isSearching && (
-              <motion.div
-                animate={{ rotate: 360 }}
-                transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
-                className="absolute right-3 top-1/2 transform -translate-y-1/2"
-              >
-                <Search className="w-4 h-4 text-amber-400" />
-              </motion.div>
-            )}
-          </div>
+      <div className="flex items-center justify-between relative">
+        {/* Left: Search trigger button */}
+        <div className="ml-4">
+          <motion.button
+            whileHover={{ scale: 1.08 }}
+            whileTap={{ scale: 0.93 }}
+            onClick={openSearch}
+            className="flex items-center gap-2 px-3 py-2 rounded-xl text-amber-400/70 hover:text-amber-300 transition-all group"
+            style={{
+              background: 'rgba(212,175,55,0.07)',
+              border: '1.5px solid rgba(212,175,55,0.2)',
+            }}
+            title="Search (⌘K)"
+          >
+            <Search className="w-4 h-4" />
+            <span className="text-xs text-amber-400/50 font-mono hidden sm:block">⌘K</span>
+          </motion.button>
+        </div>
 
-          {/* Search Results Dropdown */}
-          <AnimatePresence>
-            {showResults && searchResults.length > 0 && (
-              <motion.div
-                initial={{ opacity: 0, y: -10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -10 }}
-                className="absolute top-full mt-2 w-full backdrop-blur-xl rounded-lg shadow-2xl max-h-96 overflow-y-auto z-50"
+        {/* Full-width search overlay — slides in and hides other topbar elements */}
+        <AnimatePresence>
+          {searchOpen && (
+            <motion.div
+              initial={{ opacity: 0, scaleX: 0.7, y: -8 }}
+              animate={{ opacity: 1, scaleX: 1, y: 0 }}
+              exit={{ opacity: 0, scaleX: 0.7, y: -8 }}
+              transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+              className="absolute inset-x-0 top-1/2 -translate-y-1/2 z-[60] px-4"
+              style={{ transformOrigin: 'left center' }}
+            >
+              <div
+                className="relative w-full rounded-2xl overflow-visible"
                 style={{
-                  background: 'linear-gradient(135deg, rgba(15, 15, 25, 0.98) 0%, rgba(25, 25, 40, 0.98) 100%)',
-                  border: '2px solid rgba(212, 175, 55, 0.3)',
-                  boxShadow: '0 10px 40px rgba(212, 175, 55, 0.2)'
+                  background: 'linear-gradient(135deg, rgba(10,10,20,0.98) 0%, rgba(20,20,35,0.98) 100%)',
+                  border: '2px solid rgba(212,175,55,0.5)',
+                  boxShadow: '0 0 60px rgba(212,175,55,0.25), 0 20px 60px rgba(0,0,0,0.6)',
                 }}
               >
+                {/* Search icon */}
+                <div className="absolute left-5 top-1/2 -translate-y-1/2 pointer-events-none">
+                  {isSearching ? (
+                    <motion.div animate={{ rotate: 360 }} transition={{ duration: 0.8, repeat: Infinity, ease: 'linear' }}>
+                      <Search className="w-5 h-5 text-amber-400" />
+                    </motion.div>
+                  ) : (
+                    <Search className="w-5 h-5 text-amber-400/70" />
+                  )}
+                </div>
+
+                {/* The big input */}
+                <input
+                  ref={searchInputRef}
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => { setSearchQuery(e.target.value); setShowResults(true); }}
+                  onBlur={() => setTimeout(() => { if (!searchQuery) closeSearch(); }, 200)}
+                  placeholder="Search blocks, transactions, addresses, contracts…"
+                  className="w-full pl-14 pr-20 py-4 bg-transparent text-amber-50 text-lg placeholder-amber-300/30 focus:outline-none font-light tracking-wide"
+                />
+
+                {/* Hint + close */}
+                <div className="absolute right-4 top-1/2 -translate-y-1/2 flex items-center gap-3">
+                  <span className="text-xs text-amber-400/30 font-mono hidden md:block">ESC to close</span>
+                  <motion.button
+                    whileHover={{ scale: 1.15, rotate: 90 }}
+                    whileTap={{ scale: 0.9 }}
+                    onClick={closeSearch}
+                    className="p-1.5 rounded-lg text-amber-400/50 hover:text-amber-300 hover:bg-amber-500/10 transition-all"
+                  >
+                    <X className="w-4 h-4" />
+                  </motion.button>
+                </div>
+
+                {/* Results dropdown */}
+                <AnimatePresence>
+                  {showResults && searchResults.length > 0 && (
+                    <motion.div
+                      initial={{ opacity: 0, y: -6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -6 }}
+                      className="absolute top-full left-0 right-0 mt-2 rounded-2xl overflow-hidden max-h-[60vh] overflow-y-auto"
+                      style={{
+                        background: 'linear-gradient(135deg, rgba(12,12,22,0.99) 0%, rgba(22,22,38,0.99) 100%)',
+                        border: '2px solid rgba(212,175,55,0.3)',
+                        boxShadow: '0 20px 60px rgba(0,0,0,0.7), 0 0 40px rgba(212,175,55,0.15)',
+                      }}
+                    >
                 {searchResults.map((result, index) => (
                   <motion.div
                     key={`${result.type}-${result.id}-${index}`}
@@ -1089,8 +1166,7 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
                           setSelectedDetail(result);
                         }
                       }
-                      setShowResults(false);
-                      setSearchQuery('');
+                      closeSearch();
                     }}
                   >
                     <div className="flex items-center gap-3">
@@ -1131,11 +1207,14 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
                       <ExternalLink className="w-4 h-4 text-amber-400/60" />
                     </div>
                   </motion.div>
-                ))}
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </div>
+                    ))}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Center: Network Status */}
         <div className="flex items-center gap-4 shrink-0 px-6">

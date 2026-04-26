@@ -1025,13 +1025,80 @@ async fn execute_dca_order(state: &Arc<AppState>, order_id: &str) -> anyhow::Res
     }
 }
 
+/// Public wrapper called by limit_order_api.
+/// `max_slippage` (e.g. 0.03 = 3%) is applied to the pre-swap pool estimate to derive
+/// `min_amount_out`. If the actual output after AMM pricing is below that floor, the swap
+/// is rejected so the order retries on the next tick.
+pub async fn execute_limit_swap(
+    state: &Arc<AppState>,
+    from_token: &str,
+    to_token: &str,
+    amount: u128,
+    max_slippage: f64,
+    wallet_address: &str,
+) -> anyhow::Result<(u128, String)> {
+    // Estimate expected output from current pool state and apply slippage tolerance.
+    // This read happens BEFORE the swap write; the TOCTOU window is negligible (same tick).
+    let min_amount_out = estimate_swap_output(state, from_token, to_token, amount)
+        .await
+        .map(|expected| {
+            let floor = expected as f64 * (1.0 - max_slippage.clamp(0.0, 1.0));
+            floor as u128
+        })
+        .unwrap_or(0); // If estimation fails, enforce no floor (better to fill than not)
+    execute_dca_swap(state, from_token, to_token, amount, min_amount_out, wallet_address).await
+}
+
+/// Read-only AMM output estimate — same formula as execute_dca_swap but without side effects.
+async fn estimate_swap_output(
+    state: &Arc<AppState>,
+    from_token: &str,
+    to_token: &str,
+    amount: u128,
+) -> Option<u128> {
+    let pools = state.liquidity_pools.read().await;
+    let pool_id = format!("{}_{}", from_token.to_uppercase(), to_token.to_uppercase());
+    let pool_id_reverse = format!("{}_{}", to_token.to_uppercase(), from_token.to_uppercase());
+    let (pool, is_reversed) = if let Some(p) = pools.get(&pool_id) {
+        (p.clone(), false)
+    } else if let Some(p) = pools.get(&pool_id_reverse) {
+        (p.clone(), true)
+    } else {
+        return None;
+    };
+    drop(pools);
+
+    let (reserve_in, reserve_out, dec_in, dec_out) = if is_reversed {
+        (pool.reserve1, pool.reserve0, pool.token1_decimals, pool.token0_decimals)
+    } else {
+        (pool.reserve0, pool.reserve1, pool.token0_decimals, pool.token1_decimals)
+    };
+
+    let amount_with_fee = amount.checked_mul(997)?.checked_div(1000)?;
+    let numerator = amount_with_fee.checked_mul(reserve_out as u128);
+    let denominator = reserve_in.checked_add(amount_with_fee)?;
+    if denominator == 0 { return None; }
+    let mut out = numerator.map(|n| n / denominator)
+        .unwrap_or_else(|| ((amount_with_fee as f64) * (reserve_out as f64 / reserve_in as f64)) as u128);
+
+    if dec_in != dec_out {
+        if dec_in > dec_out {
+            out = out / 10u128.pow((dec_in - dec_out) as u32);
+        } else {
+            out = out.saturating_mul(10u128.pow((dec_out - dec_in) as u32));
+        }
+    }
+    if out == 0 { return None; }
+    Some(out)
+}
+
 /// Execute the actual swap for DCA (internal function)
 async fn execute_dca_swap(
     state: &Arc<AppState>,
     from_token: &str,
     to_token: &str,
     amount: u128,
-    _min_amount_out: u128,
+    min_amount_out: u128,
     wallet_address: &str,
 ) -> anyhow::Result<(u128, String)> {
     // This function mirrors the logic in handlers::execute_swap
@@ -1093,6 +1160,16 @@ async fn execute_dca_swap(
 
     if amount_out == 0 {
         return Err(anyhow::anyhow!("Swap would result in zero output. Try a larger amount."));
+    }
+
+    // Slippage guard: reject if output is below the caller's minimum.
+    // For DCA callers min_amount_out is always 0 (no guard). For limit orders it is set
+    // by execute_limit_swap from the pool estimate × (1 - max_slippage).
+    if min_amount_out > 0 && amount_out < min_amount_out {
+        return Err(anyhow::anyhow!(
+            "Slippage too high: expected ≥{} base units out, AMM gives {} — rejecting (will retry next tick)",
+            min_amount_out, amount_out
+        ));
     }
 
     // Update wallet balances

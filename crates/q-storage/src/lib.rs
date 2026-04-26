@@ -9444,6 +9444,33 @@ impl QStorage {
         Ok(orders)
     }
 
+    /// Save a limit order using CF_DCA_ORDERS with "limitorder:" key prefix.
+    /// Uses put_sync (fsync) so a Processing status written before swap execution survives a crash.
+    pub async fn save_limit_order(&self, order_id: &str, bytes: &[u8]) -> Result<()> {
+        let key = format!("limitorder:{}", order_id);
+        self.hot_db.put_sync(CF_DCA_ORDERS, key.as_bytes(), bytes).await?;
+        debug!("📋 Saved limit order: {}", order_id);
+        Ok(())
+    }
+
+    /// Delete a limit order from RocksDB
+    pub async fn delete_limit_order(&self, order_id: &str) -> Result<()> {
+        let key = format!("limitorder:{}", order_id);
+        self.hot_db.delete(CF_DCA_ORDERS, key.as_bytes()).await?;
+        debug!("🗑️ Deleted limit order: {}", order_id);
+        Ok(())
+    }
+
+    /// Load all limit orders by scanning CF_DCA_ORDERS with "limitorder:" prefix
+    pub async fn load_all_limit_orders(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let pairs = self.hot_db.scan_prefix(CF_DCA_ORDERS, b"limitorder:").await?;
+        let orders = pairs
+            .into_iter()
+            .filter_map(|(k, v)| String::from_utf8(k).ok().map(|s| (s, v)))
+            .collect();
+        Ok(orders)
+    }
+
     /// Load DCA orders for a specific wallet address
     /// Scans all orders and filters by wallet (orders should include wallet_address field)
     pub async fn load_dca_orders_by_wallet(&self, wallet_address: &str) -> Result<Vec<(String, Vec<u8>)>> {

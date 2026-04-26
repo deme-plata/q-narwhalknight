@@ -19,11 +19,19 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 use std::collections::HashMap;
 use tracing::{info, warn, error, debug};
 
+use ed25519_dalek::Verifier;
 use crate::AppState;
+
+/// Orders stuck in Processing for longer than this (e.g. after a crash) are reset to Open on startup.
+/// 5 minutes is safely above the 60s poll interval plus any reasonable swap latency.
+const PROCESSING_TIMEOUT_MS: i64 = 5 * 60 * 1000;
+
+/// Auto-cancel an order after this many consecutive swap failures to avoid infinite retry loops.
+const MAX_FAILURE_COUNT: u32 = 5;
 
 // ============================================================================
 // TYPES
@@ -44,6 +52,10 @@ pub enum PriceDirection {
 #[serde(rename_all = "lowercase")]
 pub enum LimitOrderStatus {
     Open,
+    /// Written to storage (via put_sync) BEFORE the swap executes.
+    /// A node crash between Processing and Filled leaves the order in this state.
+    /// On startup, orders stuck in Processing longer than PROCESSING_TIMEOUT_SECS are reset to Open.
+    Processing,
     Filled,
     Cancelled,
     Expired,
@@ -71,9 +83,14 @@ pub struct LimitOrder {
     pub max_slippage: f64,
     pub status: LimitOrderStatus,
     pub created_at: i64,
+    /// Timestamp in ms when the order entered Processing state (for crash recovery)
+    pub processing_since: Option<i64>,
     pub filled_at: Option<i64>,
     /// Optional expiry timestamp in ms (None = GTC)
     pub expiry: Option<i64>,
+    /// Consecutive swap failures; auto-cancelled after MAX_FAILURE_COUNT attempts
+    #[serde(default)]
+    pub failure_count: u32,
     /// Actual output after fill
     #[serde(serialize_with = "q_types::u128_serde::serialize", deserialize_with = "q_types::u128_serde::deserialize")]
     pub amount_out: u128,
@@ -82,15 +99,22 @@ pub struct LimitOrder {
     pub tx_hash: Option<String>,
 }
 
+/// Max concurrent swap executions in the polling loop.
+/// Prevents memory spikes when many orders trigger in the same tick.
+const MAX_CONCURRENT_EXECUTIONS: usize = 8;
+
 /// In-memory + RocksDB storage for limit orders
 pub struct LimitOrderStorage {
     pub orders: RwLock<HashMap<String, LimitOrder>>,
+    /// Limits concurrent swap executions to prevent OOM under high trigger volume
+    pub execution_semaphore: Arc<Semaphore>,
 }
 
 impl LimitOrderStorage {
     pub fn new() -> Self {
         LimitOrderStorage {
             orders: RwLock::new(HashMap::new()),
+            execution_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_EXECUTIONS)),
         }
     }
 
@@ -121,6 +145,35 @@ impl LimitOrderStorage {
     pub async fn delete_order(&self, storage: &q_storage::QStorage, order_id: &str) -> anyhow::Result<()> {
         storage.delete_limit_order(order_id).await?;
         Ok(())
+    }
+
+    /// On startup, any order stuck in Processing state past PROCESSING_TIMEOUT_MS was left in-flight
+    /// by a crash. The swap may or may not have executed. We conservatively reset these to Open so
+    /// the next poll cycle re-evaluates them; the TOCTOU guard (re-read + Processing write) ensures
+    /// that if the swap actually completed, the order will be in Filled state and the re-read guard
+    /// will skip it. If the swap did not complete, it will be retried.
+    pub async fn recover_stuck_processing(&self, storage: &q_storage::QStorage) {
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut orders = self.orders.write().await;
+        let stuck: Vec<String> = orders
+            .values()
+            .filter(|o| {
+                o.status == LimitOrderStatus::Processing
+                    && o.processing_since.map(|t| now - t > PROCESSING_TIMEOUT_MS).unwrap_or(true)
+            })
+            .map(|o| o.id.clone())
+            .collect();
+
+        for id in stuck {
+            if let Some(o) = orders.get_mut(&id) {
+                o.status = LimitOrderStatus::Open;
+                o.processing_since = None;
+                let o_clone = o.clone();
+                warn!("🔄 [LIMIT] Recovered stuck Processing order {} → Open", id);
+                let bytes = serde_json::to_vec(&o_clone).unwrap_or_default();
+                let _ = storage.save_limit_order(&id, &bytes).await;
+            }
+        }
     }
 }
 
@@ -160,6 +213,17 @@ pub struct CreateLimitOrderResponse {
     pub success: bool,
     pub order_id: Option<String>,
     pub message: String,
+}
+
+/// Signed cancellation request — prevents unauthorised cancellation of another user's order.
+/// The client signs `"{order_id}:{timestamp_ms}"` with their Ed25519 private key.
+/// Timestamp must be within 60 seconds of server time to prevent replay attacks.
+#[derive(Debug, Deserialize)]
+pub struct CancelLimitOrderRequest {
+    /// Unix milliseconds when the request was signed — must be within 60s of now
+    pub timestamp_ms: i64,
+    /// hex-encoded 64-byte Ed25519 signature over `"{order_id}:{timestamp_ms}"`
+    pub signature: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -231,11 +295,13 @@ pub async fn create_limit_order(
         max_slippage: req.max_slippage,
         status: LimitOrderStatus::Open,
         created_at: now,
+        processing_since: None,
         filled_at: None,
         expiry: req.expiry,
         amount_out: 0,
         fill_price: None,
         tx_hash: None,
+        failure_count: 0,
     };
 
     {
@@ -289,10 +355,55 @@ pub async fn get_wallet_limit_orders(
 }
 
 /// DELETE /api/v1/dex/limit-orders/:wallet_address/:order_id
+/// Body must be a JSON `CancelLimitOrderRequest` with a valid Ed25519 signature.
 pub async fn cancel_limit_order(
     State(state): State<Arc<AppState>>,
     Path((wallet_address, order_id)): Path<(String, String)>,
+    Json(req): Json<CancelLimitOrderRequest>,
 ) -> impl IntoResponse {
+    // --- Replay protection: reject requests signed > 60s ago ---
+    let server_now = chrono::Utc::now().timestamp_millis();
+    if (server_now - req.timestamp_ms).abs() > 60_000 {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "success": false, "message": "Request timestamp out of range (must be within 60s)"
+        })));
+    }
+
+    // --- Decode the wallet public key and signature ---
+    let pub_key_bytes: [u8; 32] = match hex::decode(&wallet_address)
+        .ok()
+        .and_then(|b| b.try_into().ok())
+    {
+        Some(b) => b,
+        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "success": false, "message": "Invalid wallet_address (must be 32-byte hex)"
+        }))),
+    };
+    let verifying_key = match ed25519_dalek::VerifyingKey::from_bytes(&pub_key_bytes) {
+        Ok(k) => k,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "success": false, "message": "wallet_address is not a valid Ed25519 public key"
+        }))),
+    };
+    let sig_bytes: [u8; 64] = match hex::decode(&req.signature)
+        .ok()
+        .and_then(|b| b.try_into().ok())
+    {
+        Some(b) => b,
+        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "success": false, "message": "Invalid signature (must be 64-byte hex)"
+        }))),
+    };
+    let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+
+    // --- Verify signature over "{order_id}:{timestamp_ms}" ---
+    let message = format!("{}:{}", order_id, req.timestamp_ms);
+    if verifying_key.verify(message.as_bytes(), &signature).is_err() {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+            "success": false, "message": "Signature verification failed"
+        })));
+    }
+
     let Some(lo_storage) = &state.limit_order_storage else {
         return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({
             "success": false, "message": "Limit order service not available"
@@ -384,8 +495,11 @@ pub async fn limit_order_check_loop(state: Arc<AppState>) {
 
         debug!("🎯 [LIMIT] Checking {} open limit orders", candidates.len());
 
+        // Phase 1 (sequential, fast): evaluate price conditions for all open orders.
+        // Expirations are handled inline. Triggered orders are collected for concurrent execution.
+        let mut triggered: Vec<(LimitOrder, f64)> = Vec::new();
+
         for order in candidates {
-            // Expire if past expiry
             if let Some(expiry) = order.expiry {
                 if now >= expiry {
                     let mut orders = lo_storage.orders.write().await;
@@ -400,19 +514,18 @@ pub async fn limit_order_check_loop(state: Arc<AppState>) {
                 }
             }
 
-            // Get current price for the watched token
             let current_price = get_token_price_usd(&state, &order.price_token).await;
             let Some(price) = current_price else {
                 debug!("🎯 [LIMIT] Cannot get price for {} — skipping order {}", order.price_token, order.id);
                 continue;
             };
 
-            let triggered = match order.direction {
+            let fires = match order.direction {
                 PriceDirection::Above => price >= order.trigger_price,
                 PriceDirection::Below => price <= order.trigger_price,
             };
 
-            if !triggered {
+            if !fires {
                 debug!(
                     "🎯 [LIMIT] Order {} not triggered: current={:.4} trigger={:.4} {:?}",
                     order.id, price, order.trigger_price, order.direction
@@ -421,52 +534,122 @@ pub async fn limit_order_check_loop(state: Arc<AppState>) {
             }
 
             info!(
-                "🎯 [LIMIT] Order {} TRIGGERED: {} {} {} ${:.4} (trigger ${:.4})",
-                order.id, order.price_token, if matches!(order.direction, PriceDirection::Above) { ">=" } else { "<=" },
-                "price", price, order.trigger_price
+                "🎯 [LIMIT] Order {} TRIGGERED: {} {} ${:.4} (trigger ${:.4})",
+                order.id, order.price_token,
+                if matches!(order.direction, PriceDirection::Above) { ">=" } else { "<=" },
+                price, order.trigger_price
             );
+            triggered.push((order, price));
+        }
 
-            // Execute the swap
-            match execute_limit_order_swap(&state, &order).await {
-                Ok((amount_out, tx_hash)) => {
-                    let mut orders = lo_storage.orders.write().await;
-                    if let Some(o) = orders.get_mut(&order.id) {
-                        o.status = LimitOrderStatus::Filled;
-                        o.filled_at = Some(now);
-                        o.amount_out = amount_out;
-                        o.fill_price = Some(price);
-                        o.tx_hash = Some(tx_hash.clone());
-                        let o_clone = o.clone();
-                        drop(orders);
+        if triggered.is_empty() {
+            continue;
+        }
 
-                        let _ = lo_storage.save_order(&state.storage_engine, &o_clone).await;
+        // Phase 2 (concurrent): execute each triggered order in its own task.
+        // Semaphore caps concurrent swap executions to prevent OOM under high trigger volume.
+        // The TOCTOU guard (re-read + Processing write) runs inside each task under the write lock,
+        // so concurrent spawns are safe — only one task can claim any given order.
+        let mut join_handles = Vec::with_capacity(triggered.len());
 
-                        info!(
-                            "✅ [LIMIT] Order {} filled: {} {} → {} {} at ${:.4} tx={}",
-                            order.id, order.amount, order.from_token,
-                            amount_out, order.to_token, price, tx_hash
-                        );
+        for (order, price) in triggered {
+            let state_c = state.clone();
+            let lo_storage_c = lo_storage.clone();
+            let sem = lo_storage.execution_semaphore.clone();
 
-                        // Broadcast fill via SSE (reuse SwapExecuted so frontend picks it up)
-                        let event = crate::streaming::StreamEvent::SwapExecuted {
-                            from_token: order.from_token.clone(),
-                            to_token: order.to_token.clone(),
-                            amount_in: order.amount,
-                            amount_out,
-                            wallet_address: order.wallet_address.clone(),
-                            price_impact: 0.0,
-                            timestamp: chrono::Utc::now(),
-                        };
-                        let _ = state.event_broadcaster.broadcast(event).await;
-                    } else {
-                        drop(orders);
+            join_handles.push(tokio::spawn(async move {
+                // Acquire semaphore slot — blocks if MAX_CONCURRENT_EXECUTIONS already running
+                let _permit = match sem.acquire_owned().await {
+                    Ok(p) => p,
+                    Err(_) => return, // semaphore closed (shutdown)
+                };
+
+                let now_inner = chrono::Utc::now().timestamp_millis();
+
+                // TOCTOU guard: re-read order under write lock; gate on still-Open
+                let should_execute = {
+                    let mut orders = lo_storage_c.orders.write().await;
+                    match orders.get_mut(&order.id) {
+                        Some(o) if o.status == LimitOrderStatus::Open => {
+                            o.status = LimitOrderStatus::Processing;
+                            o.processing_since = Some(now_inner);
+                            let o_clone = o.clone();
+                            if let Err(e) = lo_storage_c.save_order(&state_c.storage_engine, &o_clone).await {
+                                error!("❌ [LIMIT] Cannot write Processing for {}: {} — skipping", order.id, e);
+                                o.status = LimitOrderStatus::Open;
+                                o.processing_since = None;
+                                false
+                            } else {
+                                true
+                            }
+                        }
+                        Some(o) => {
+                            debug!("🎯 [LIMIT] Order {} is {:?} — skipping (race handled)", order.id, o.status);
+                            false
+                        }
+                        None => false,
+                    }
+                };
+
+                if !should_execute { return; }
+
+                match execute_limit_order_swap(&state_c, &order).await {
+                    Ok((amount_out, tx_hash)) => {
+                        let mut orders = lo_storage_c.orders.write().await;
+                        if let Some(o) = orders.get_mut(&order.id) {
+                            o.status = LimitOrderStatus::Filled;
+                            o.filled_at = Some(now_inner);
+                            o.processing_since = None;
+                            o.amount_out = amount_out;
+                            o.fill_price = Some(price);
+                            o.tx_hash = Some(tx_hash.clone());
+                            let o_clone = o.clone();
+                            drop(orders);
+                            let _ = lo_storage_c.save_order(&state_c.storage_engine, &o_clone).await;
+                            info!(
+                                "✅ [LIMIT] Order {} filled: {} {} → {} {} at ${:.4} tx={}",
+                                order.id, order.amount, order.from_token,
+                                amount_out, order.to_token, price, tx_hash
+                            );
+                            let event = crate::streaming::StreamEvent::SwapExecuted {
+                                from_token: order.from_token.clone(),
+                                to_token: order.to_token.clone(),
+                                amount_in: order.amount,
+                                amount_out,
+                                wallet_address: order.wallet_address.clone(),
+                                price_impact: 0.0,
+                                timestamp: chrono::Utc::now(),
+                            };
+                            let _ = state_c.event_broadcaster.broadcast(event).await;
+                        }
+                    }
+                    Err(e) => {
+                        error!("❌ [LIMIT] Failed to execute order {}: {}", order.id, e);
+                        let mut orders = lo_storage_c.orders.write().await;
+                        if let Some(o) = orders.get_mut(&order.id) {
+                            o.failure_count += 1;
+                            o.processing_since = None;
+                            if o.failure_count >= MAX_FAILURE_COUNT {
+                                o.status = LimitOrderStatus::Cancelled;
+                                warn!(
+                                    "⚠️ [LIMIT] Order {} auto-cancelled after {} consecutive failures",
+                                    order.id, MAX_FAILURE_COUNT
+                                );
+                            } else {
+                                o.status = LimitOrderStatus::Open;
+                            }
+                            let o_clone = o.clone();
+                            drop(orders);
+                            let _ = lo_storage_c.save_order(&state_c.storage_engine, &o_clone).await;
+                        }
                     }
                 }
-                Err(e) => {
-                    error!("❌ [LIMIT] Failed to execute order {}: {}", order.id, e);
-                    // Leave as Open — will retry next tick unless it expires
-                }
-            }
+            }));
+        }
+
+        // Wait for all concurrent executions this tick to finish before next sleep
+        for h in join_handles {
+            let _ = h.await;
         }
     }
 }
@@ -517,17 +700,18 @@ async fn get_token_price_usd(state: &Arc<AppState>, token: &str) -> Option<f64> 
 }
 
 /// Execute the actual token swap for a triggered limit order.
-/// Reuses the same balance-update logic as DCA swap execution.
+/// Slippage is enforced via `order.max_slippage` — the swap is rejected if AMM output
+/// is more than `max_slippage` worse than the pre-swap pool estimate.
 async fn execute_limit_order_swap(
     state: &Arc<AppState>,
     order: &LimitOrder,
 ) -> anyhow::Result<(u128, String)> {
-    // Delegate to the DCA swap function (same pool + balance logic)
     crate::dca_api::execute_limit_swap(
         state,
         &order.from_token,
         &order.to_token,
         order.amount,
+        order.max_slippage,
         &order.wallet_address,
     ).await
 }

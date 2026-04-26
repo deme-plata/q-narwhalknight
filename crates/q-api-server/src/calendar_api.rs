@@ -65,6 +65,8 @@ pub struct CreateEventRequest {
     pub color: Option<String>,
     #[serde(default)]
     pub reminder_minutes: Option<Vec<u32>>,
+    #[serde(default)]
+    pub shared: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -194,7 +196,7 @@ async fn create_event(
         color: req.color,
         reminder_minutes: req.reminder_minutes,
         scheduled_tx: None,
-        shared: false,
+        shared: req.shared,
         created_at: now,
         updated_at: None,
         source_peer: None,
@@ -215,6 +217,10 @@ async fn create_event(
         has_scheduled_tx: false,
         timestamp: chrono::Utc::now(),
     });
+
+    if event.shared {
+        publish_calendar_event_p2p(&state, &event).await;
+    }
 
     info!("📅 Created calendar event {} for wallet {}", event_id, hex::encode(&auth.address[..4]));
     Ok(Json(ApiResponse::success(EventResponse::from(event))))
