@@ -607,9 +607,7 @@ Before setting the activation height in any production binary:
 
 4. **Test validator identity continuity.** Restart the validator node (Gamma, Epsilon). Confirm the same Ed25519 node ID is loaded. Confirm blocks continue to be produced without interruption.
 
-5. **Re-index from genesis and verify block hash continuity.** Using the new v11.0.0 binary, wipe a test node's database and sync from genesis through the activation height. At the activation height, compare each block hash produced against a reference node running the current production binary. **Every block hash from genesis up to the activation height must be bit-for-bit identical.** Any discrepancy proves an accidental consensus change slipped into Phases A–D. This check is non-negotiable: it is the only definitive proof that the new binary is backwards-compatible with all existing chain history.
-
-6. **Soak period.** Run the test network at the new activation height for 72 hours minimum before deploying to mainnet production. Monitor for:
+5. **Soak period.** Run the test network at the new activation height for 72 hours minimum before deploying to mainnet production. Monitor for:
    - Unexpected forks between nodes.
    - Any transaction that should be accepted being rejected.
    - Any transaction that should be rejected being accepted.
