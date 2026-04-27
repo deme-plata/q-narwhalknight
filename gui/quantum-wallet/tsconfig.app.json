@@ -6,7 +6,7 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "skipLibCheck": true,
-    "types": ["@webgpu/types"],
+    "types": ["@webgpu/types", "node"],
 
     /* Bundler mode */
     "moduleResolution": "bundler",
