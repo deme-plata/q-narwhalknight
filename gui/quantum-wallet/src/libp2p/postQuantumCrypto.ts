@@ -216,11 +216,20 @@ export async function loadPQCrypto(): Promise<boolean> {
         // Fall through to simulated
       }
 
-      // Final fallback: Use simulated PQ crypto for development
-      // This provides the API but with simulated security
-      // In production, the WASM module MUST be available
-      console.warn('⚠️ [PQ-CRYPTO] Using SIMULATED post-quantum crypto (development only!)')
-      console.warn('   ⚠️ NO REAL SECURITY - For testing API only!')
+      // Final fallback: simulated backend for development API testing only.
+      // In production this path means the WASM failed to load — operations that
+      // require real cryptography will throw or return false (see createSimulatedPQCrypto).
+      if (process.env.NODE_ENV !== 'development') {
+        console.error('🚨 [PQ-CRYPTO] WASM backend failed to load in production — PQ crypto unavailable')
+        console.error('   Dilithium5 keygen will throw. Verification will always return false.')
+        // Dispatch event so the UI can show a visible warning banner
+        window.dispatchEvent(new CustomEvent('pq-backend-failed', {
+          detail: { reason: 'WASM module unavailable' }
+        }))
+      } else {
+        console.warn('⚠️ [PQ-CRYPTO] Using SIMULATED post-quantum crypto (development only!)')
+        console.warn('   ⚠️ NO REAL SECURITY — for API testing only. Verify always returns false.')
+      }
       pqcrypto = createSimulatedPQCrypto()
       wasmLoaded = true
       return true
@@ -239,6 +248,15 @@ export async function loadPQCrypto(): Promise<boolean> {
  */
 export function isPQCryptoAvailable(): boolean {
   return wasmLoaded && pqcrypto !== null
+}
+
+/**
+ * Check if the real (WASM) Dilithium5 backend is loaded.
+ * Returns false when running on the simulated fallback.
+ * Phase A keygen must gate on this before deriving any keys.
+ */
+export function isRealBackendLoaded(): boolean {
+  return wasmLoaded && pqcrypto !== null && pqcrypto.type !== 'simulated'
 }
 
 /**
@@ -755,20 +773,35 @@ function createSimulatedPQCrypto() {
   return {
     type: 'simulated',
     dilithium5: {
-      keyGen: () => ({
-        publicKey: crypto.getRandomValues(new Uint8Array(DILITHIUM5_PUBLIC_KEY_BYTES)),
-        secretKey: crypto.getRandomValues(new Uint8Array(DILITHIUM5_SECRET_KEY_BYTES))
-      }),
+      keyGen: (): { publicKey: Uint8Array; secretKey: Uint8Array } => {
+        // Throw in production — random keys cannot be used for real signing.
+        // In development, returning random bytes allows API shape testing only.
+        if (process.env.NODE_ENV !== 'development') {
+          throw new Error(
+            '[PQC] Real Dilithium5 WASM not loaded — cannot generate quantum-safe keys in production. ' +
+            'Ensure the dilithium-crystals WASM module is available.'
+          )
+        }
+        return {
+          publicKey: crypto.getRandomValues(new Uint8Array(DILITHIUM5_PUBLIC_KEY_BYTES)),
+          secretKey: crypto.getRandomValues(new Uint8Array(DILITHIUM5_SECRET_KEY_BYTES))
+        }
+      },
       sign: (message: Uint8Array, secretKey: Uint8Array) => {
-        // Simulated signature: SHA3-256(message || secretKey) padded to signature size
+        // Simulated signature: SHA3-256(message || secretKey) padded to signature size.
+        // Only reachable in development — production throws at keyGen before reaching sign.
         const hash = sha3_256(new Uint8Array([...message, ...secretKey.slice(0, 32)]))
         const sig = new Uint8Array(DILITHIUM5_SIGNATURE_BYTES)
         sig.set(hash, 0)
         return sig
       },
-      verify: (message: Uint8Array, signature: Uint8Array, publicKey: Uint8Array) => {
-        // Simulated verification: always true for valid-looking signatures
-        return signature.length === DILITHIUM5_SIGNATURE_BYTES
+      verify: (_message: Uint8Array, _signature: Uint8Array, _publicKey: Uint8Array) => {
+        // ALWAYS return false — a simulated backend cannot verify real signatures.
+        // Accepting any correctly-sized buffer (old behaviour) was a security hole.
+        if (process.env.NODE_ENV !== 'development') {
+          console.error('[PQC] Real Dilithium5 backend not loaded — verification rejected')
+        }
+        return false
       }
     },
     kyber1024: {
