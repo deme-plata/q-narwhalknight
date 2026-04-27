@@ -224,10 +224,19 @@ async fn local_chart_data(chart: &str, state: &AppState) -> Option<serde_json::V
                     (stats.active_miner_count() as u32, stats.calculate_network_hashrate())
                 } else { (0, 0.0) }
             } else { (0, 0.0) };
-            let peer_hr: f64 = q_storage::PEER_COMPUTE_POWER.iter().map(|e| e.value().0).sum();
+            // v10.4.12: Only count fresh entries (TTL 120s) — stale entries from disconnected
+            // peers inflate the miner count and hashrate, masking actual network state.
+            let now_for_peer_stats = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+            let peer_hr: f64 = q_storage::PEER_COMPUTE_POWER.iter()
+                .filter(|e| now_for_peer_stats.saturating_sub(e.value().2) <= 120)
+                .map(|e| e.value().0).sum();
+            let live_peer_miners = q_storage::PEER_COMPUTE_POWER.iter()
+                .filter(|e| now_for_peer_stats.saturating_sub(e.value().2) <= 120)
+                .count() as u32;
             let total_hr = local_hr + peer_hr;
             let total_hr_khs = total_hr / 1000.0;
-            let total_miners = miners + q_storage::PEER_COMPUTE_POWER.len() as u32;
+            let total_miners = miners + live_peer_miners;
             let difficulty = if total_hr > 0.0 { total_hr.log2() } else { 0.0 };
             let security_bits = if total_hr > 0.0 { total_hr.log2() } else { 0.0 };
             let security_tier = if total_hr > 1e15 { "QUANTUM-SAFE" }
@@ -1202,10 +1211,15 @@ async fn update_tui_metrics(
 
         // v9.1.0: Compute Power Layer metrics for TUI
         {
+            let now_tui = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
             let total_peer_hashrate: f64 = q_storage::PEER_COMPUTE_POWER.iter()
+                .filter(|e| now_tui.saturating_sub(e.value().2) <= 120)
                 .map(|e| e.value().0)
                 .sum::<f64>() + total_hashrate;
-            let connected_compute_peers = q_storage::PEER_COMPUTE_POWER.len() as u32;
+            let connected_compute_peers = q_storage::PEER_COMPUTE_POWER.iter()
+                .filter(|e| now_tui.saturating_sub(e.value().2) <= 120)
+                .count() as u32;
             let live_bits = q_mining::hashpower_security::HashpowerSecurityManager::live_security_bits(
                 0.0, total_peer_hashrate
             );
@@ -4639,6 +4653,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 // Calculate network hashrate (local miners + P2P peers)
                 // Use try_read() (not try_write()) to avoid lock contention with mining submissions.
                 // On busy nodes with 100+ miners, try_write() almost never succeeds, producing 0 readings.
+                // v10.4.12: Filter to fresh entries only (TTL 120s) — stale entries from
+                // disconnected peers inflate hashrate and miner count telemetry.
+                let now_sample = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
                 let (hashrate, miners) = if let Some(ref ms) = sampler_mining_stats {
                     if let Ok(stats) = ms.try_read() {
                         let now_inst = std::time::Instant::now();
@@ -4649,17 +4667,26 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         let local_miners = stats.active_miners.values()
                             .filter(|s| now_inst.duration_since(s.last_update).as_secs() < 300)
                             .count();
-                        let peer_hr: f64 = q_storage::PEER_COMPUTE_POWER.iter().map(|e| e.value().0).sum();
-                        let peer_count = q_storage::PEER_COMPUTE_POWER.len();
+                        let peer_hr: f64 = q_storage::PEER_COMPUTE_POWER.iter()
+                            .filter(|e| now_sample.saturating_sub(e.value().2) <= 120)
+                            .map(|e| e.value().0).sum();
+                        let peer_count = q_storage::PEER_COMPUTE_POWER.iter()
+                            .filter(|e| now_sample.saturating_sub(e.value().2) <= 120).count();
                         (local_hr + peer_hr, local_miners + peer_count)
                     } else {
-                        let peer_hr: f64 = q_storage::PEER_COMPUTE_POWER.iter().map(|e| e.value().0).sum();
-                        let peer_count = q_storage::PEER_COMPUTE_POWER.len();
+                        let peer_hr: f64 = q_storage::PEER_COMPUTE_POWER.iter()
+                            .filter(|e| now_sample.saturating_sub(e.value().2) <= 120)
+                            .map(|e| e.value().0).sum();
+                        let peer_count = q_storage::PEER_COMPUTE_POWER.iter()
+                            .filter(|e| now_sample.saturating_sub(e.value().2) <= 120).count();
                         (peer_hr, peer_count)
                     }
                 } else {
-                    let peer_hr: f64 = q_storage::PEER_COMPUTE_POWER.iter().map(|e| e.value().0).sum();
-                    let peer_count = q_storage::PEER_COMPUTE_POWER.len();
+                    let peer_hr: f64 = q_storage::PEER_COMPUTE_POWER.iter()
+                        .filter(|e| now_sample.saturating_sub(e.value().2) <= 120)
+                        .map(|e| e.value().0).sum();
+                    let peer_count = q_storage::PEER_COMPUTE_POWER.iter()
+                        .filter(|e| now_sample.saturating_sub(e.value().2) <= 120).count();
                     (peer_hr, peer_count)
                 };
 
@@ -14897,8 +14924,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     active_miners,
                     simd_tier: simd_tier.to_string(),
                     security_bits: {
-                        // v9.1.0: Aggregate live security bits from all peers
+                        // v9.1.0: Aggregate live security bits from all peers (TTL-filtered)
+                        let now_sec_bits = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
                         let total_peer_hashrate: f64 = q_storage::PEER_COMPUTE_POWER.iter()
+                            .filter(|e| now_sec_bits.saturating_sub(e.value().2) <= 120)
                             .map(|e| e.value().0)
                             .sum::<f64>() + total_hashrate; // Include our own
                         q_mining::hashpower_security::HashpowerSecurityManager::live_security_bits(
@@ -22562,14 +22592,19 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         } else {
                             (0, 0.0)
                         };
-                        // Add P2P peer hashrate from PEER_COMPUTE_POWER
+                        // Add P2P peer hashrate from PEER_COMPUTE_POWER (TTL-filtered)
+                        let now_dune = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
                         let peer_hashrate_hs: f64 = q_storage::PEER_COMPUTE_POWER
                             .iter()
+                            .filter(|e| now_dune.saturating_sub(e.value().2) <= 120)
                             .map(|e| e.value().0)
                             .sum();
                         let total_hashrate_hs = local_hashrate_hs + peer_hashrate_hs;
                         let total_hashrate_khs = total_hashrate_hs / 1000.0;
-                        let total_miners = miners + q_storage::PEER_COMPUTE_POWER.len() as u32;
+                        let live_dune_peers = q_storage::PEER_COMPUTE_POWER.iter()
+                            .filter(|e| now_dune.saturating_sub(e.value().2) <= 120).count() as u32;
+                        let total_miners = miners + live_dune_peers;
                         // Compute difficulty from hashrate (log2 approximation)
                         let difficulty = if total_hashrate_hs > 0.0 {
                             total_hashrate_hs.log2()

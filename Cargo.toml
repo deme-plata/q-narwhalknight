@@ -76,7 +76,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.4.11"  # v10.4.11: 60s startup grace period on P2P gossip balance updates to eliminate post-restart balance inflation
+version = "10.4.12"  # v10.4.12: Fix unbounded PEER_COMPUTE_POWER/PEER_BANDWIDTH_TIERS growth causing 10h sync degradation
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"

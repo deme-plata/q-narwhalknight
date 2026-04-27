@@ -2740,6 +2740,22 @@ impl UnifiedNetworkManager {
                         info!("✅ [P2P HEALTH] {} peer(s), {} established, {} bootstrap connected",
                               peer_count, established, bootstrap_connected);
                     }
+
+                    // v10.4.12: TTL-based eviction of stale compute-power entries.
+                    // The disconnect handler cleans entries for known disconnections, but
+                    // entries can also become stale without a clean disconnect (e.g., NAT
+                    // timeout, routing failure). Evict anything older than 120s here as a
+                    // catch-all to keep both maps bounded during long uptimes.
+                    {
+                        let now_secs = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        PEER_COMPUTE_POWER.retain(|_, (_, _, ts)| now_secs.saturating_sub(*ts) <= 120);
+                        // q_storage::PEER_COMPUTE_POWER is the same logical map used by turbo_sync;
+                        // evict stale entries there too.
+                        q_storage::PEER_COMPUTE_POWER.retain(|_, (_, _, ts)| now_secs.saturating_sub(*ts) <= 120);
+                    }
                 }
                 // v10.1.5: QKD session refresh (every 240s)
                 _ = qkd_refresh_interval.tick() => {
@@ -2888,6 +2904,19 @@ impl UnifiedNetworkManager {
                         if self.websocket_peers.remove(&peer_id) {
                             self.swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
                             info!("🌐 [BROWSER CLIENT] Removed explicit gossipsub peer: {}", peer_id);
+                        }
+
+                        // v10.4.12: Evict stale-peer data from global DashMaps on disconnect.
+                        // These maps are written on connect/announce but were never cleaned on
+                        // disconnect, causing unbounded growth over long uptimes (6000+ entries
+                        // after 10h of peer churn). Large maps slow PEER_COMPUTE_POWER.len()
+                        // and .iter() calls that run on every gossipsub event, eventually causing
+                        // the processing loop to fall behind and drop blocks → sync degradation.
+                        {
+                            let pid_str = peer_id.to_string();
+                            PEER_BANDWIDTH_TIERS.remove(&pid_str);
+                            PEER_COMPUTE_POWER.remove(&pid_str);
+                            self.slow_peer_strikes.remove(&peer_id);
                         }
 
                         // 🔧 v0.6.8-beta: Automatic reconnection for bootstrap peers
