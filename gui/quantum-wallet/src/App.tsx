@@ -870,7 +870,7 @@ function App() {
               </div>
               {/* v2.3.12-beta: Keep DexScreen mounted to preserve swap state */}
               <div style={{ display: currentScreen === 'dex' ? 'block' : 'none' }}>
-                <DexScreen />
+                <DexScreen isActive={currentScreen === 'dex'} />
               </div>
               {/* Keep AIChatScreen mounted to preserve state (messages, currentChatId, isGenerating) */}
               <div style={{ display: currentScreen === 'aichat' ? 'block' : 'none' }}>

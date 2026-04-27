@@ -266,14 +266,15 @@ export default function IndexFundModal({ token, onClose }: IndexFundModalProps) 
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+        className="fixed inset-0 z-50 overflow-y-auto bg-black/60 backdrop-blur-sm"
         onClick={onClose}
       >
+        <div className="flex min-h-full items-center justify-center p-4">
         <motion.div
           initial={{ scale: 0.9, opacity: 0 }}
           animate={{ scale: 1, opacity: 1 }}
           exit={{ scale: 0.9, opacity: 0 }}
-          className="relative w-full max-w-4xl max-h-[90vh] overflow-hidden rounded-2xl"
+          className="relative w-full max-w-4xl flex flex-col max-h-[90vh] rounded-2xl"
           style={{
             background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.98) 0%, rgba(30, 41, 59, 0.98) 100%)',
             border: '2px solid rgba(139, 92, 246, 0.3)',
@@ -359,7 +360,7 @@ export default function IndexFundModal({ token, onClose }: IndexFundModalProps) 
           </div>
 
           {/* Content */}
-          <div className="p-6 overflow-y-auto max-h-[calc(90vh-200px)]">
+          <div className="p-6 overflow-y-auto flex-1">
             {activeTab === 'overview' && (
               <div className="space-y-6">
                 {/* Key Metrics */}
@@ -750,6 +751,7 @@ export default function IndexFundModal({ token, onClose }: IndexFundModalProps) 
             )}
           </div>
         </motion.div>
+        </div>
       </motion.div>
     </AnimatePresence>
   );

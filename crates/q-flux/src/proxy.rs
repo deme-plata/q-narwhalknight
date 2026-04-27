@@ -1067,6 +1067,8 @@ pub(crate) fn is_sse_path(path: &str) -> bool {
         || path.starts_with("/api/v1/sse?")
         || path == "/sse"
         || path.starts_with("/sse?")
+        || path == "/api/v1/ai/chat"  // AI wallet analysis — streams SSE tokens
+        || path == "/api/v1/admin/deploy/progress"  // deploy progress SSE
 }
 
 /// Handle SSE/streaming request via direct TCP connection.
@@ -1394,6 +1396,8 @@ mod tests {
     fn test_sse_path_exact() {
         assert!(is_sse_path("/api/v1/sse"));
         assert!(is_sse_path("/sse"));
+        assert!(is_sse_path("/api/v1/ai/chat"));
+        assert!(is_sse_path("/api/v1/admin/deploy/progress"));
     }
 
     #[test]

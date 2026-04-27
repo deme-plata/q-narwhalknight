@@ -2051,7 +2051,7 @@ Response: "I'll send a mail to **Bob** through the node's P2P messaging.\n\n[ACT
           <div className="flex items-center gap-3 mb-4">
             <div className="w-12 h-12 rounded-xl flex items-center justify-center p-1">
               <img
-                src="/quantum-ai-logo.png"
+                src="/quantum-ai-logo.svg"
                 alt="Quantum AI"
                 className="w-full h-full object-contain"
                 style={{

@@ -296,7 +296,7 @@ interface Token {
   };
 }
 
-export default function DexScreen() {
+export default function DexScreen({ isActive }: { isActive?: boolean }) {
   const [swapFrom, setSwapFrom] = useState('QUG');
   const [swapTo, setSwapTo] = useState('QUGUSD');
   const [swapAmount, setSwapAmount] = useState('');
@@ -1237,7 +1237,7 @@ export default function DexScreen() {
         if (walletAddress) {
           console.log('🔍 [DEX] Fetching multi-token balance for wallet:', walletAddress);
           try {
-            const multiTokenResponse = await qnkAPI.getMultiTokenBalance();
+            const multiTokenResponse = await qnkAPI.getMultiTokenBalance(true);
             console.log('📊 [DEX] Multi-token balance API response:', multiTokenResponse);
             if (multiTokenResponse.success && multiTokenResponse.data) {
               // v4.3.0: Save all token balances for index fund lookup
@@ -1267,7 +1267,7 @@ export default function DexScreen() {
             if (nativeQugBalance === 0) {
               console.log('🔄 [DEX] QUG balance still 0, trying getWalletBalance fallback');
               try {
-                const fallbackResponse = await qnkAPI.getWalletBalance(walletAddress);
+                const fallbackResponse = await qnkAPI.getWalletBalance(walletAddress, true);
                 if (fallbackResponse.success && fallbackResponse.data) {
                   nativeQugBalance = fallbackResponse.data.balance_qnk || fallbackResponse.data.balance || 0;
                   // Handle raw base units (> 1e15 means base units with 24 decimals)
@@ -1479,11 +1479,15 @@ export default function DexScreen() {
         // Fetch USD balance from payment API
         if (walletAddress) {
           try {
+            const usdAbortController = new AbortController();
+            const usdFetchTimeout = setTimeout(() => usdAbortController.abort(), 8000);
             const usdResponse = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/v1/payment/balance`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ wallet_address: walletAddress }),
+              signal: usdAbortController.signal,
             });
+            clearTimeout(usdFetchTimeout);
 
             if (usdResponse.ok) {
               const usdData = await usdResponse.json();
@@ -2120,8 +2124,14 @@ export default function DexScreen() {
       }
     };
 
-    // Initial fetch
-    fetchTokens();
+    // Initial fetch — safety timeout clears spinner if fetchTokens ever hangs
+    const loadingTimeoutId = setTimeout(() => {
+      if (mounted) {
+        console.warn('[DEX] fetchTokens timed out after 30s — clearing spinner');
+        setLoading(false);
+      }
+    }, 30000);
+    fetchTokens().finally(() => clearTimeout(loadingTimeoutId));
 
     // Set up SSE for real-time balance updates (same pattern as Dashboard)
     const currentWalletForSSE = localStorage.getItem('walletAddress') || '';
@@ -2287,6 +2297,15 @@ export default function DexScreen() {
       }
     };
   }, []); // Only run once on mount - fetchTokens is called via SSE events
+
+  // Re-fetch when user navigates to DEX screen (isActive becomes true)
+  const prevIsActive = useRef<boolean | undefined>(undefined);
+  useEffect(() => {
+    if (isActive && prevIsActive.current === false) {
+      window.dispatchEvent(new CustomEvent('manual-token-refresh'));
+    }
+    prevIsActive.current = isActive;
+  }, [isActive]);
 
   // Separate effect to handle manual refresh triggers from swaps
   useEffect(() => {

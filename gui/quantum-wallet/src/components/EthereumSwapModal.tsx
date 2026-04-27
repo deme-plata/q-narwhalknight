@@ -412,12 +412,13 @@ const EthereumSwapModal = ({ isOpen, onClose, walletAddress }: EthereumSwapModal
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        className="fixed inset-0 z-50 flex items-center justify-center"
+        className="fixed inset-0 z-50 overflow-y-auto"
         onClick={onClose}
       >
         {/* Backdrop */}
-        <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm pointer-events-none" />
 
+        <div className="flex min-h-full items-center justify-center p-4">
         {/* Modal */}
         <motion.div
           initial={{ scale: 0.9, opacity: 0 }}
@@ -425,7 +426,7 @@ const EthereumSwapModal = ({ isOpen, onClose, walletAddress }: EthereumSwapModal
           exit={{ scale: 0.9, opacity: 0 }}
           transition={{ type: 'spring', damping: 25 }}
           onClick={(e) => e.stopPropagation()}
-          className="relative w-full max-w-lg mx-4 rounded-2xl overflow-hidden"
+          className="relative w-full max-w-lg rounded-2xl overflow-y-auto max-h-[90vh]"
           style={{
             background: 'linear-gradient(135deg, rgba(15, 15, 25, 0.98), rgba(10, 15, 30, 0.95))',
             border: '1px solid rgba(99, 102, 241, 0.3)',
@@ -921,6 +922,7 @@ const EthereumSwapModal = ({ isOpen, onClose, walletAddress }: EthereumSwapModal
             )}
           </div>
         </motion.div>
+        </div>
       </motion.div>
     </AnimatePresence>
   );

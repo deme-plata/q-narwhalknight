@@ -299,14 +299,15 @@ export default function StakingModal({
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+        className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 overflow-y-auto"
         onClick={onClose}
       >
+        <div className="flex min-h-full items-center justify-center p-4">
         <motion.div
           initial={{ scale: 0.9, opacity: 0 }}
           animate={{ scale: 1, opacity: 1 }}
           exit={{ scale: 0.9, opacity: 0 }}
-          className="bg-gradient-to-br from-slate-900 via-purple-950/50 to-slate-900 rounded-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden border border-purple-500/20 shadow-2xl"
+          className="bg-gradient-to-br from-slate-900 via-purple-950/50 to-slate-900 rounded-2xl w-full max-w-2xl flex flex-col max-h-[90vh] border border-purple-500/20 shadow-2xl"
           onClick={(e) => e.stopPropagation()}
         >
           {/* Header */}
@@ -366,7 +367,7 @@ export default function StakingModal({
           </div>
 
           {/* Content */}
-          <div className="p-4 overflow-y-auto max-h-[60vh]">
+          <div className="p-4 overflow-y-auto flex-1">
             {activeTab === 'stake' ? (
               <div className="space-y-4">
                 {/* Domain Selection */}
@@ -828,6 +829,7 @@ export default function StakingModal({
             </div>
           </div>
         </motion.div>
+        </div>
       </motion.div>
     </AnimatePresence>
   );

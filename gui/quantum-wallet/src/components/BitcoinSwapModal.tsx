@@ -84,6 +84,7 @@ const BitcoinSwapModal = ({ isOpen, onClose, walletAddress }: BitcoinSwapModalPr
   // Receive state
   const [depositAddr, setDepositAddr] = useState<DepositAddress | null>(null);
   const [creatingAddr, setCreatingAddr] = useState(false);
+  const [addrError, setAddrError] = useState<string | null>(null);
   const [deposits, setDeposits] = useState<DepositItem[]>([]);
 
   // Send state
@@ -159,6 +160,7 @@ const BitcoinSwapModal = ({ isOpen, onClose, walletAddress }: BitcoinSwapModalPr
   // ── Receive ──────────────────────────────────────────────────
   const handleCreateAddress = async () => {
     setCreatingAddr(true);
+    setAddrError(null);
     try {
       const res = await qnkAPI.createDepositAddress();
       if (res.success && res.data) {
@@ -167,8 +169,12 @@ const BitcoinSwapModal = ({ isOpen, onClose, walletAddress }: BitcoinSwapModalPr
           deposit_id: res.data.deposit_id,
           expires_at: res.data.expires_in_secs ? `${res.data.expires_in_secs}s` : undefined,
         });
+      } else {
+        setAddrError(res.error || 'Bridge unavailable — deposit address could not be generated.');
       }
-    } catch {/* silent */} finally {
+    } catch (e: any) {
+      setAddrError(e.message || 'Network error — could not reach the bridge.');
+    } finally {
       setCreatingAddr(false);
     }
   };
@@ -234,18 +240,19 @@ const BitcoinSwapModal = ({ isOpen, onClose, walletAddress }: BitcoinSwapModalPr
     <AnimatePresence>
       <motion.div
         initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-        className="fixed inset-0 z-50 flex items-center justify-center"
+        className="fixed inset-0 z-50 overflow-y-auto"
         onClick={onClose}
       >
-        <div className="absolute inset-0 bg-black/75 backdrop-blur-sm" />
+        <div className="fixed inset-0 bg-black/75 backdrop-blur-sm pointer-events-none" />
 
+        <div className="flex min-h-full items-center justify-center p-4">
         <motion.div
           initial={{ scale: 0.92, opacity: 0, y: 20 }}
           animate={{ scale: 1, opacity: 1, y: 0 }}
           exit={{ scale: 0.92, opacity: 0 }}
           transition={{ type: 'spring', damping: 26, stiffness: 300 }}
           onClick={(e) => e.stopPropagation()}
-          className="relative w-full max-w-lg mx-4 rounded-2xl overflow-hidden flex flex-col"
+          className="relative w-full max-w-lg rounded-2xl overflow-hidden flex flex-col"
           style={{
             background: 'linear-gradient(145deg, rgba(12,10,20,0.99), rgba(22,14,8,0.98))',
             border: '1px solid rgba(251,146,60,0.25)',
@@ -380,14 +387,22 @@ const BitcoinSwapModal = ({ isOpen, onClose, walletAddress }: BitcoinSwapModalPr
                   </div>
 
                   {!depositAddr ? (
-                    <button
-                      onClick={handleCreateAddress}
-                      disabled={creatingAddr}
-                      className="w-full py-3 rounded-xl font-semibold text-white flex items-center justify-center gap-2 transition-all"
-                      style={{ background: 'linear-gradient(135deg, rgba(34,197,94,0.8), rgba(22,163,74,0.8))' }}
-                    >
-                      {creatingAddr ? <><Loader2 size={15} className="animate-spin" />Generating…</> : <><Download size={15} />Generate Deposit Address</>}
-                    </button>
+                    <div className="space-y-2">
+                      <button
+                        onClick={handleCreateAddress}
+                        disabled={creatingAddr || !bridgeOnline}
+                        className="w-full py-3 rounded-xl font-semibold text-white flex items-center justify-center gap-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                        style={{ background: 'linear-gradient(135deg, rgba(34,197,94,0.8), rgba(22,163,74,0.8))' }}
+                      >
+                        {creatingAddr ? <><Loader2 size={15} className="animate-spin" />Generating…</> : <><Download size={15} />Generate Deposit Address</>}
+                      </button>
+                      {!bridgeOnline && !addrError && (
+                        <p className="text-center text-xs text-red-400/80">Bridge is offline — deposit address generation is currently unavailable.</p>
+                      )}
+                      {addrError && (
+                        <p className="text-center text-xs text-red-400/80">{addrError}</p>
+                      )}
+                    </div>
                   ) : (
                     <div className="space-y-3">
                       {/* Address display */}
@@ -680,6 +695,7 @@ const BitcoinSwapModal = ({ isOpen, onClose, walletAddress }: BitcoinSwapModalPr
             </AnimatePresence>
           </div>
         </motion.div>
+        </div>
       </motion.div>
     </AnimatePresence>
   );

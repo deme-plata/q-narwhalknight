@@ -220,28 +220,29 @@ export default function LiquidityModal({ token, availableTokens, onClose, onAddL
 
   return (
     <AnimatePresence>
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="fixed inset-0 z-50 overflow-y-auto">
         {/* Backdrop */}
         <motion.div
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           onClick={onClose}
-          className="absolute inset-0 bg-black/80 backdrop-blur-sm"
+          className="fixed inset-0 bg-black/80 backdrop-blur-sm"
         />
 
-        {/* Modal - v2.4.7: Fixed height constraint */}
+        <div className="flex min-h-full items-center justify-center p-4">
+        {/* Modal */}
         <motion.div
           initial={{ opacity: 0, scale: 0.95, y: 20 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
           exit={{ opacity: 0, scale: 0.95, y: 20 }}
-          className="relative w-full max-w-lg max-h-[85vh] overflow-hidden"
+          className="relative w-full max-w-lg"
         >
-          <div className="relative group h-full">
+          <div className="relative group">
             {/* Glow effect */}
             <div className="absolute -inset-0.5 bg-gradient-to-r from-quantum-cyan via-quantum-purple to-quantum-pink rounded-2xl blur-xl opacity-50" />
 
-            <div className="relative bg-black border border-quantum-cyan/30 rounded-2xl p-4 max-h-[85vh] overflow-y-auto">
+            <div className="relative bg-black border border-quantum-cyan/30 rounded-2xl p-4 max-h-[90vh] overflow-y-auto">
               {/* Header - v2.4.7: Compact */}
               <div className="flex items-center justify-between mb-3">
                 <div>
@@ -595,6 +596,7 @@ export default function LiquidityModal({ token, availableTokens, onClose, onAddL
             </div>
           </div>
         </motion.div>
+        </div>
       </div>
     </AnimatePresence>
   );

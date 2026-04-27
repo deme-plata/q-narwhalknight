@@ -659,10 +659,18 @@ class QNarwhalKnightAPI {
             ...options?.headers as Record<string, string>,
           };
 
-          const response = await fetch(url, {
-            ...options,
-            headers,
-          });
+          const fetchController = new AbortController();
+          const fetchTimeout = setTimeout(() => fetchController.abort(), 15000);
+          let response: Response;
+          try {
+            response = await fetch(url, {
+              ...options,
+              headers,
+              signal: fetchController.signal,
+            });
+          } finally {
+            clearTimeout(fetchTimeout);
+          }
 
           // Handle rate limiting with exponential backoff (DISABLED - no rate limiting)
           if (response.status === 429) {
@@ -719,6 +727,13 @@ class QNarwhalKnightAPI {
           console.log(`✅ [API SUCCESS] ${options?.method || 'GET'} ${endpoint}`);
           return result;
         } catch (error) {
+          // Don't retry on fetch timeout (AbortError) — endpoint is slow/down; retry won't help
+          const isTimeout = error instanceof DOMException && error.name === 'AbortError';
+          if (isTimeout) {
+            console.warn(`⏱️ [TIMEOUT] ${endpoint} timed out — failing fast`);
+            throw error;
+          }
+
           // Check for browser resource exhaustion
           const isResourceError = error instanceof TypeError &&
             (error.message.includes('Failed to fetch') || error.message.includes('NetworkError'));
@@ -743,13 +758,21 @@ class QNarwhalKnightAPI {
                 try {
                   const failoverUrl = `${newBaseUrl}${endpoint}`;
                   console.log(`🔄 [FAILOVER] Retrying on backup: ${failoverUrl}`);
-                  const failoverResponse = await fetch(failoverUrl, {
-                    ...options,
-                    headers: {
-                      'Content-Type': 'application/json',
-                      ...options?.headers,
-                    },
-                  });
+                  const failoverController = new AbortController();
+                  const failoverTimeout = setTimeout(() => failoverController.abort(), 12000);
+                  let failoverResponse: Response;
+                  try {
+                    failoverResponse = await fetch(failoverUrl, {
+                      ...options,
+                      headers: {
+                        'Content-Type': 'application/json',
+                        ...options?.headers,
+                      },
+                      signal: failoverController.signal,
+                    });
+                  } finally {
+                    clearTimeout(failoverTimeout);
+                  }
                   if (failoverResponse.ok) {
                     const result = await failoverResponse.json();
                     console.log(`✅ [FAILOVER] Request succeeded on backup server`);
@@ -793,7 +816,8 @@ class QNarwhalKnightAPI {
   private async authenticatedRequest<T>(
     endpoint: string,
     options?: RequestInit,
-    passwordPrompt?: () => Promise<string>
+    passwordPrompt?: () => Promise<string>,
+    skipPromptIfNoSession?: boolean
   ): Promise<ApiResponse<T>> {
     try {
       // Check if wallet session is active
@@ -806,6 +830,11 @@ class QNarwhalKnightAPI {
 
       // If no active session, try to restore or decrypt wallet
       if (!session) {
+        // Fail fast for background calls that must not open a password modal
+        if (skipPromptIfNoSession) {
+          return { success: false, data: null, error: 'No active session', timestamp: new Date().toISOString() };
+        }
+
         const encryptedKey = localStorage.getItem('walletEncryptedKey');
         const sessionTimeout = localStorage.getItem('walletSessionTimeout') || 'never';
 
@@ -1213,18 +1242,18 @@ class QNarwhalKnightAPI {
   }
 
   // Get wallet balance by address (AUTHENTICATED - requires signature)
-  async getWalletBalance(walletAddress?: string): Promise<ApiResponse<any>> {
+  async getWalletBalance(walletAddress?: string, skipPrompt?: boolean): Promise<ApiResponse<any>> {
     // Use stored wallet address if none provided
     const address = walletAddress || localStorage.getItem('walletAddress') || '';
     console.log('🔍 Fetching balance for wallet address:', address);
-    return this.authenticatedRequest<any>(`/v1/wallets/${address}/balance`);
+    return this.authenticatedRequest<any>(`/v1/wallets/${address}/balance`, undefined, undefined, skipPrompt);
   }
 
   // Get multi-token balances (QUG + QUGUSD) (AUTHENTICATED - requires signature)
-  async getMultiTokenBalance(): Promise<ApiResponse<any>> {
+  async getMultiTokenBalance(skipPrompt?: boolean): Promise<ApiResponse<any>> {
     console.log('🔍 [AUTHENTICATED] Fetching multi-token balance for wallet (address not in URL)');
     // Address is extracted from X-Wallet-Auth header on backend for privacy
-    return this.authenticatedRequest<any>('/v1/wallet/tokens');
+    return this.authenticatedRequest<any>('/v1/wallet/tokens', undefined, undefined, skipPrompt);
   }
 
   // Send a transaction

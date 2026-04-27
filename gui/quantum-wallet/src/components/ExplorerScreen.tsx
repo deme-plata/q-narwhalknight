@@ -34,6 +34,7 @@ import {
   Loader2
 } from 'lucide-react';
 import { qnkAPI } from '../services/api';
+import { sseManager } from '../services/sseManager';
 import { InfiniteBlockList } from './InfiniteBlockList';
 import DAGKnight3DPopup from './DAGKnight3DPopup';
 import { useP2PData } from '../hooks/useP2PData';
@@ -2728,9 +2729,14 @@ export default function ExplorerScreen() {
     // Fetch ONLY real production data - NO MOCK DATA per CLAUDE.md requirements
     let isMounted = true;
     let hasLoadedOnce = false;
-    const fetchAllData = async () => {
+    // Concurrency guard: skip if a fetch is already in-flight.
+    // Without this, the 15s interval can launch a new fetchAllData while the previous
+    // one is still awaiting the optional-metrics block (up to 15s), causing 3+ overlapping
+    // invocations that exhaust the 10-slot rate limiter and leave stats showing zeros.
+    let isFetching = false;
+
+    const fetchCoreStats = async () => {
       try {
-        // Use allSettled so one failing request doesn't blank the entire screen
         const [nodeStatusResult, supplyResult] = await Promise.allSettled([
           qnkAPI.getNodeStatus(),
           qnkAPI.getNetworkSupply(),
@@ -2740,10 +2746,8 @@ export default function ExplorerScreen() {
         const nodeStatus = nodeStatusResult.status === 'fulfilled' ? nodeStatusResult.value : null;
         const supplyResponse = supplyResult.status === 'fulfilled' ? supplyResult.value : null;
 
-        if (nodeStatus || supplyResponse) hasLoadedOnce = true;
+        if (nodeStatus?.success || supplyResponse?.success) hasLoadedOnce = true;
 
-        // Debug logging (console only)
-        console.debug('[Explorer] nodeStatus:', nodeStatus?.success, 'supply:', supplyResponse?.success);
         if (supplyResponse?.success && supplyResponse.data) {
           const newTotalMined = supplyResponse.data.total_mined;
 
@@ -2769,8 +2773,7 @@ export default function ExplorerScreen() {
             });
           } else {
             console.warn(`⚠️ Ignoring stale supply data: ${newTotalMined} < ${highestMinedRef.current} (keeping higher value)`);
-            // Still update non-mined fields that can change
-            const data = supplyResponse.data; // TypeScript narrowing
+            const data = supplyResponse.data;
             setNetworkSupply(prev => ({
               ...prev,
               networkHashrate: data.network_hashrate,
@@ -2780,8 +2783,6 @@ export default function ExplorerScreen() {
           }
         }
 
-        // v1.0.3: Set core network stats IMMEDIATELY after nodeStatus resolves
-        // Guard the nodeStatus block but DON'T return — activity data should still load
         if (nodeStatus?.success && nodeStatus.data) {
           const newHeight = nodeStatus.data.current_height || 0;
           const effectiveHeight = Math.max(newHeight, highestKnownHeightRef.current);
@@ -2807,60 +2808,18 @@ export default function ExplorerScreen() {
 
           const currentTps = nodeStatus.data.tps_current || 0;
           setTpsHistory(prev => [...prev.slice(-59), currentTps]);
+
+          const peers = nodeStatus.data.connected_peers || 0;
+          setLiveMetrics({
+            vdfComputations: Math.max(1, Math.floor((nodeStatus.data.current_round || 0) / 10)),
+            memoryUsage: nodeStatus.data.system_metrics?.memory_usage_percent ?? 0,
+            dataStorage: nodeStatus.data.system_metrics?.data_storage_gb ?? 0,
+            realTimeTps: nodeStatus.data.tps_current || 0,
+            realTimeLatency: peers >= 4 ? 12 : 45
+          });
         }
 
-        // Fetch optional metrics in parallel (non-blocking, failures don't affect core stats)
-        try {
-          const [hashpowerResponse, priceResponse, emissionResponse, progressResponse, resonanceResponse, physicsResponse, cryptoResponse] = await Promise.allSettled([
-            qnkAPI.getHashpowerSecurity(),
-            qnkAPI.getAMMPrice('QUG'),
-            qnkAPI.getEmissionStats(30),
-            qnkAPI.getStartupProgress(),
-            qnkAPI.getResonanceMetrics(),
-            qnkAPI.getPhysicsMetrics(),
-            qnkAPI.getCryptoMetrics(),
-          ]);
-          if (!isMounted) return;
-
-          if (hashpowerResponse.status === 'fulfilled' && hashpowerResponse.value.success && hashpowerResponse.value.data) {
-            setHashpowerSecurity(hashpowerResponse.value.data);
-          }
-          if (priceResponse.status === 'fulfilled' && priceResponse.value.success && priceResponse.value.data && priceResponse.value.data.price_usd != null && priceResponse.value.data.price_usd > 0) {
-            setQugPriceUsd(priceResponse.value.data!.price_usd!);
-          }
-          if (emissionResponse.status === 'fulfilled' && emissionResponse.value.success && emissionResponse.value.data) {
-            setEmissionStats(emissionResponse.value.data);
-          }
-          if (progressResponse.status === 'fulfilled' && progressResponse.value.success && progressResponse.value.data) {
-            setStartupProgress(progressResponse.value.data);
-          }
-          if (resonanceResponse.status === 'fulfilled' && resonanceResponse.value.success && resonanceResponse.value.data?.metrics) {
-            const rd = resonanceResponse.value.data!;
-            const m = rd.metrics!;
-            setResonanceMetrics({
-              mode: rd.mode,
-              agreement_rate: m!.agreement_rate,
-              resonance_weight: m!.resonance_weight,
-              primary_latency_ms: m!.primary_latency_ms,
-              shadow_latency_ms: m!.shadow_latency_ms,
-              harmony_score: rd.visualization?.harmony_score || 0,
-              energy_state: rd.visualization?.energy_state || 'initializing',
-              spectral_health: rd.visualization?.spectral_health || 'unknown',
-              byzantine_detected: m!.shadow_byzantine_detected,
-              total_rounds: m!.total_rounds,
-            });
-          }
-          if (physicsResponse.status === 'fulfilled' && physicsResponse.value.success && physicsResponse.value.data) {
-            setPhysicsMetrics(physicsResponse.value.data);
-          }
-          if (cryptoResponse.status === 'fulfilled' && cryptoResponse.value.success && cryptoResponse.value.data) {
-            setCryptoMetrics(cryptoResponse.value.data);
-          }
-        } catch (optionalErr) {
-          console.warn('[Explorer] Optional metrics failed (core stats unaffected):', optionalErr);
-        }
-
-        // Fetch activity data in parallel
+        // Fetch activity data (4 calls, fast endpoints)
         const [transactionsResponse, blocksResponse, verticesResponse, contractsResponse] = await Promise.allSettled([
           qnkAPI.getExplorerTransactions(10),
           qnkAPI.getRecentBlocks(5),
@@ -2927,22 +2886,73 @@ export default function ExplorerScreen() {
           contracts: recentContracts.length > 0 ? recentContracts : prev.contracts,
         }));
 
-        // Update live metrics from real data - v3.4.15: Fixed realistic calculations
-        if (nodeStatus?.success && nodeStatus.data) {
-          const peers = nodeStatus.data.connected_peers || 0;
-          setLiveMetrics({
-            vdfComputations: Math.max(1, Math.floor((nodeStatus.data.current_round || 0) / 10)),
-            // v6.2.3: Use REAL system metrics from backend instead of fake formulas
-            memoryUsage: nodeStatus.data.system_metrics?.memory_usage_percent ?? 0,
-            dataStorage: nodeStatus.data.system_metrics?.data_storage_gb ?? 0,
-            realTimeTps: nodeStatus.data.tps_current || 0,
-            realTimeLatency: peers >= 4 ? 12 : 45
+      } catch (error) {
+        console.error('[Explorer] fetchCoreStats failed:', error);
+      }
+    };
+
+    const fetchAllData = async () => {
+      if (isFetching) return; // Skip if previous run is still in-flight
+      isFetching = true;
+      try {
+        await fetchCoreStats();
+      } finally {
+        isFetching = false;
+      }
+    };
+
+    // Separate slower poll for optional metrics (7 calls that can each take up to 15s).
+    // Keeping these out of the 15s main loop prevents rate-limiter exhaustion.
+    const fetchOptionalMetrics = async () => {
+      if (!isMounted) return;
+      try {
+        const [hashpowerResponse, priceResponse, emissionResponse, progressResponse, resonanceResponse, physicsResponse, cryptoResponse] = await Promise.allSettled([
+          qnkAPI.getHashpowerSecurity(),
+          qnkAPI.getAMMPrice('QUG'),
+          qnkAPI.getEmissionStats(30),
+          qnkAPI.getStartupProgress(),
+          qnkAPI.getResonanceMetrics(),
+          qnkAPI.getPhysicsMetrics(),
+          qnkAPI.getCryptoMetrics(),
+        ]);
+        if (!isMounted) return;
+
+        if (hashpowerResponse.status === 'fulfilled' && hashpowerResponse.value.success && hashpowerResponse.value.data) {
+          setHashpowerSecurity(hashpowerResponse.value.data);
+        }
+        if (priceResponse.status === 'fulfilled' && priceResponse.value.success && priceResponse.value.data && priceResponse.value.data.price_usd != null && priceResponse.value.data.price_usd > 0) {
+          setQugPriceUsd(priceResponse.value.data!.price_usd!);
+        }
+        if (emissionResponse.status === 'fulfilled' && emissionResponse.value.success && emissionResponse.value.data) {
+          setEmissionStats(emissionResponse.value.data);
+        }
+        if (progressResponse.status === 'fulfilled' && progressResponse.value.success && progressResponse.value.data) {
+          setStartupProgress(progressResponse.value.data);
+        }
+        if (resonanceResponse.status === 'fulfilled' && resonanceResponse.value.success && resonanceResponse.value.data?.metrics) {
+          const rd = resonanceResponse.value.data!;
+          const m = rd.metrics!;
+          setResonanceMetrics({
+            mode: rd.mode,
+            agreement_rate: m!.agreement_rate,
+            resonance_weight: m!.resonance_weight,
+            primary_latency_ms: m!.primary_latency_ms,
+            shadow_latency_ms: m!.shadow_latency_ms,
+            harmony_score: rd.visualization?.harmony_score || 0,
+            energy_state: rd.visualization?.energy_state || 'initializing',
+            spectral_health: rd.visualization?.spectral_health || 'unknown',
+            byzantine_detected: m!.shadow_byzantine_detected,
+            total_rounds: m!.total_rounds,
           });
         }
-
-      } catch (error) {
-        console.error('Failed to fetch real data:', error);
-        // On error, keep current state (all zeros initially) - NO FALLBACK TO MOCK DATA
+        if (physicsResponse.status === 'fulfilled' && physicsResponse.value.success && physicsResponse.value.data) {
+          setPhysicsMetrics(physicsResponse.value.data);
+        }
+        if (cryptoResponse.status === 'fulfilled' && cryptoResponse.value.success && cryptoResponse.value.data) {
+          setCryptoMetrics(cryptoResponse.value.data);
+        }
+      } catch (optionalErr) {
+        console.warn('[Explorer] Optional metrics failed (core stats unaffected):', optionalErr);
       }
     };
 
@@ -2953,7 +2963,11 @@ export default function ExplorerScreen() {
       if (isMounted && !hasLoadedOnce) fetchAllData();
     }, 3000);
 
-    const interval = setInterval(fetchAllData, 15000); // Update every 15 seconds
+    // Core stats + activity: every 15s (protected by isFetching guard)
+    const interval = setInterval(fetchAllData, 15000);
+    // Optional metrics: every 60s (slow endpoints, not needed for core stats display)
+    fetchOptionalMetrics(); // run once on mount
+    const optionalInterval = setInterval(fetchOptionalMetrics, 60000);
 
     // Refetch immediately when the tab becomes visible again (user switching back)
     const handleVisibility = () => {
@@ -2965,71 +2979,47 @@ export default function ExplorerScreen() {
       isMounted = false;
       clearTimeout(retryTimer);
       clearInterval(interval);
+      clearInterval(optionalInterval);
       document.removeEventListener('visibilitychange', handleVisibility);
     };
   }, []);
 
-  // v7.3.1: SSE-based real-time height updates (fixes "Current Height: 162" stale display)
-  // The 15s REST polling above provides full data refresh, but height needs instant updates
-  // to match what TopBar shows. Without this, ExplorerScreen can lag behind by up to 15s
-  // or show a stale startup value if the first REST poll returns a cached/contiguous height.
+  // v7.3.1 (revised): SSE-based real-time height updates via shared sseManager.
+  // Previously used a second EventSource which created a duplicate SSE connection.
+  // Two concurrent connections to the same SSE endpoint can cause server-side confusion
+  // and trigger sseManager reconnect loops that starve the REST rate limiter.
   useEffect(() => {
-    const walletAddress = localStorage.getItem('walletAddress') || '';
-    if (!walletAddress) return;
-
-    const baseUrl = window.location.hostname.endsWith('.onion')
-      ? ''
-      : (localStorage.getItem('nodeUrl') || '');
-    const sseUrl = `${baseUrl}/api/v1/events?wallet_address=${encodeURIComponent(walletAddress)}`;
-
-    const eventSource = new EventSource(sseUrl);
-
-    // Listen for node-status events (same as TopBar)
-    eventSource.addEventListener('node-status', (e: MessageEvent) => {
-      try {
-        const data = JSON.parse(e.data);
-        const newHeight = data.current_height || data.status?.current_height;
-        if (newHeight && newHeight > highestKnownHeightRef.current) {
-          highestKnownHeightRef.current = newHeight;
-          setNetworkStats(prev => ({ ...prev, currentHeight: newHeight }));
-        }
-        // Also update peers count from SSE
-        const peers = data.connected_peers ?? data.status?.connected_peers;
-        if (peers !== undefined) {
-          setNetworkStats(prev => ({ ...prev, activePeers: peers }));
-        }
-      } catch { /* ignore parse errors */ }
+    const unsubNodeStatus = sseManager.on('node-status', (data: any) => {
+      const newHeight = data.current_height || data.status?.current_height;
+      if (newHeight && newHeight > highestKnownHeightRef.current) {
+        highestKnownHeightRef.current = newHeight;
+        setNetworkStats(prev => ({ ...prev, currentHeight: newHeight }));
+      }
+      const peers = data.connected_peers ?? data.status?.connected_peers;
+      if (peers !== undefined) {
+        setNetworkStats(prev => ({ ...prev, activePeers: peers }));
+      }
     });
 
-    // Listen for mining_reward events (carries block_height)
-    eventSource.addEventListener('mining_reward', (e: MessageEvent) => {
-      try {
-        const data = JSON.parse(e.data);
-        if (data.block_height && data.block_height > highestKnownHeightRef.current) {
-          highestKnownHeightRef.current = data.block_height;
-          setNetworkStats(prev => ({ ...prev, currentHeight: data.block_height }));
-        }
-      } catch { /* ignore parse errors */ }
+    const unsubMiningReward = sseManager.on('mining_reward', (data: any) => {
+      if (data.block_height && data.block_height > highestKnownHeightRef.current) {
+        highestKnownHeightRef.current = data.block_height;
+        setNetworkStats(prev => ({ ...prev, currentHeight: data.block_height }));
+      }
     });
 
-    // Listen for new-block events
-    eventSource.addEventListener('new-block', (e: MessageEvent) => {
-      try {
-        const data = JSON.parse(e.data);
-        const height = data.height || data.block?.height || data.header?.height;
-        if (height && height > highestKnownHeightRef.current) {
-          highestKnownHeightRef.current = height;
-          setNetworkStats(prev => ({ ...prev, currentHeight: height }));
-        }
-      } catch { /* ignore parse errors */ }
+    const unsubNewBlock = sseManager.on('new-block', (data: any) => {
+      const height = data.height || data.block?.height || data.header?.height;
+      if (height && height > highestKnownHeightRef.current) {
+        highestKnownHeightRef.current = height;
+        setNetworkStats(prev => ({ ...prev, currentHeight: height }));
+      }
     });
-
-    eventSource.onerror = () => {
-      // SSE will auto-reconnect; no action needed
-    };
 
     return () => {
-      eventSource.close();
+      unsubNodeStatus();
+      unsubMiningReward();
+      unsubNewBlock();
     };
   }, []);
 
