@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, memo, useRef, lazy, Suspense } from 'react';
 import { motion, AnimatePresence, Reorder } from 'framer-motion';
-import { Activity, Zap, AlertCircle, Copy, Check, Wallet, ChevronLeft, ChevronRight, Calendar, DollarSign, TrendingUp, TrendingDown, QrCode, Info, Plus, Send, BarChart3, Radio, Mail, MessageCircle, Settings2, GripVertical, ArrowUp, ArrowDown, Globe } from 'lucide-react';
+import { Activity, Zap, AlertCircle, Copy, Check, Wallet, ChevronLeft, ChevronRight, Calendar, DollarSign, TrendingUp, TrendingDown, QrCode, Info, Plus, Send, BarChart3, Radio, Mail, MessageCircle, Settings2, GripVertical, ArrowUp, ArrowDown, Globe, Newspaper, ExternalLink, Cpu, Shield, Layers } from 'lucide-react';
 import { qnkAPI, type NodeStatus } from '../services/api'; // debounce not needed - SSE in App.tsx
 import { sseManager } from '../services/sseManager';
 import TransactionDetailsModal from './TransactionDetailsModal';
@@ -324,6 +324,12 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend, liveBalance }: Das
   const [showPhaseModal, setShowPhaseModal] = useState(false); // Disabled - phase transition modal no longer needed
   const [showStakingModal, setShowStakingModal] = useState(false);
   const [showMobileSetup, setShowMobileSetup] = useState(false);
+  const [newsCollapsed, setNewsCollapsed] = useState(true);
+  const [selectedArticle, setSelectedArticle] = useState<null | {
+    tag: string; tagColor: string; tagBg: string; tagBorder: string;
+    icon: React.ReactNode; title: string; excerpt: string; date: string;
+    accent: string; border: string; fullContent: string;
+  }>(null);
 
   // v10.3.0: Show mobile setup QR modal once (2s after load)
   useEffect(() => {
@@ -684,6 +690,7 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
       let qugPriceUsd: number | undefined;
       if (priceResp && priceResp.success && priceResp.data && priceResp.data.price_usd > 0) {
         qugPriceUsd = priceResp.data.price_usd;
+        qugPriceUsdRef.current = qugPriceUsd;
       }
 
       if (balanceResponse.success && balanceResponse.data) {
@@ -1101,10 +1108,7 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
         });
       } catch (err) {
         console.error('❌ Error fetching wallet history:', err);
-        // On error, preserve mining transactions
-        setRecentTransactions(prev => prev.filter(tx =>
-          tx.id.startsWith('mining-')
-        ));
+        // On error, keep existing list intact — don't clear visible activity
       }
     };
 
@@ -1724,6 +1728,7 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
   // v2.3.26-beta: Track DEX swap cooldown AND lock the balance value
   const dexSwapCooldownRef = useRef(false);
   const lockedQugBalanceRef = useRef<number | null>(null);
+  const qugPriceUsdRef = useRef<number | undefined>(undefined);
 
   // v2.3.26-beta: Listen for qug-balance-changed event (from DEX swap) - highest priority
   useEffect(() => {
@@ -1762,6 +1767,7 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
               return {
                 ...wallet,
                 balance: newBalance,
+                usdValue: qugPriceUsdRef.current !== undefined ? newBalance * qugPriceUsdRef.current : wallet.usdValue,
                 history: newHistory
               };
             }
@@ -1973,7 +1979,11 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
           if (pctDiff < 0.005 && Date.now() - last.timestamp < 5000) {
             // Still update the displayed balance, just don't add a history point
             setWalletBalances(wallets => wallets.map(wallet =>
-              wallet.symbol === symbol ? { ...wallet, balance: validatedBalance } : wallet
+              wallet.symbol === symbol ? {
+                ...wallet,
+                balance: validatedBalance,
+                usdValue: symbol === 'QUG' && qugPriceUsdRef.current !== undefined ? validatedBalance * qugPriceUsdRef.current : wallet.usdValue
+              } : wallet
             ));
             return prev;
           }
@@ -2002,6 +2012,7 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
               return {
                 ...wallet,
                 balance: validatedBalance,
+                usdValue: symbol === 'QUG' && qugPriceUsdRef.current !== undefined ? validatedBalance * qugPriceUsdRef.current : wallet.usdValue,
                 history: updatedHistory
               };
             }
@@ -2037,7 +2048,11 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
       // Only update if balance actually changed
       if (Math.abs(qugWallet.balance - liveBalance) < 1e-12) return wallets;
       return wallets.map(wallet =>
-        wallet.symbol === 'QUG' ? { ...wallet, balance: liveBalance } : wallet
+        wallet.symbol === 'QUG' ? {
+          ...wallet,
+          balance: liveBalance,
+          usdValue: qugPriceUsdRef.current !== undefined ? liveBalance * qugPriceUsdRef.current : wallet.usdValue
+        } : wallet
       );
     });
   }, [liveBalance]);
@@ -2847,6 +2862,270 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
       </AnimatePresence>
 
       {activeDashboardTab === 'wallet' && <>
+
+      {/* ── News & Blog Row ─────────────────────────────────────────── */}
+      <motion.div
+        initial={{ opacity: 0, y: 16 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.1 }}
+        className="mb-6"
+      >
+        <div
+          className="flex items-center justify-between mb-4 cursor-pointer select-none"
+          onClick={() => setNewsCollapsed(v => !v)}
+        >
+          <div className="flex items-center gap-2">
+            <Newspaper className="w-4 h-4 text-yellow-400/70" />
+            <span className="text-sm font-semibold text-gray-300 uppercase tracking-widest">News & Updates</span>
+            <motion.span
+              animate={{ rotate: newsCollapsed ? -90 : 0 }}
+              transition={{ type: 'spring', stiffness: 380, damping: 28 }}
+              className="text-gray-600 ml-0.5"
+            >
+              <ChevronRight className="w-3.5 h-3.5" />
+            </motion.span>
+          </div>
+          <a
+            href="https://quillon.xyz"
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={e => e.stopPropagation()}
+            className="flex items-center gap-1 text-xs text-gray-500 hover:text-yellow-400 transition-colors"
+          >
+            All posts <ExternalLink className="w-3 h-3" />
+          </a>
+        </div>
+        <AnimatePresence initial={false}>
+        {!newsCollapsed && (
+        <motion.div
+          key="news-cards"
+          initial={{ opacity: 0, height: 0, marginTop: 0 }}
+          animate={{ opacity: 1, height: 'auto', marginTop: 0 }}
+          exit={{ opacity: 0, height: 0 }}
+          transition={{ duration: 0.32, ease: [0.4, 0, 0.2, 1] }}
+          style={{ overflow: 'hidden' }}
+        >
+          {(() => {
+            const posts = [
+              {
+                tag: 'Research', tagColor: 'text-purple-400', tagBg: 'rgba(139,92,246,0.12)', tagBorder: 'rgba(139,92,246,0.25)',
+                icon: <Shield className="w-3.5 h-3.5 text-purple-400" />,
+                title: 'David and Goliath: QNK Built in 30 Days What Took Monero a Decade',
+                excerpt: 'A full technical comparison of cryptographic stacks, mining fairness, and privacy primitives — and why starting from first principles in 2026 changes every assumption.',
+                date: 'March 2026', accent: 'rgba(139,92,246,0.1)', border: 'rgba(139,92,246,0.2)',
+                fullContent: `## Executive Summary
+
+Monero has spent over a decade hardening its privacy stack. Quillon Network shipped an equivalent — and in several respects superior — cryptographic foundation in 30 days of intensive development. This post examines why that is possible in 2026 and what it means for the ecosystem.
+
+## Cryptographic Stack Comparison
+
+### Ring Signatures
+Monero uses CLSAG (Concise Linkable Spontaneous Anonymous Group) signatures with a fixed ring size of 16. Quillon ships CLSAG with configurable ring sizes from 8 to 128, and lays the groundwork for Groth16-based membership proofs that collapse the ring into a single O(1) ZK proof.
+
+### Stealth Addresses
+Both protocols implement dual-key stealth addresses (DKSAP). Quillon adds a view-tag byte for O(1) scanning — a technique Monero adopted only in 2022 after years of community pressure. Our implementation ships this on day one.
+
+### Bulletproofs
+Monero v0.15 introduced Bulletproofs for range proofs; v0.18 upgraded to Bulletproofs+. Quillon implements Bulletproofs+ natively, skipping three years of migration cost.
+
+### Post-Quantum Layer
+Monero has no post-quantum roadmap. Quillon has a four-phase migration plan:
+- Phase 0 (live): Ed25519 + BLAKE3
+- Phase 1 (in progress): Dilithium5 hybrid signatures
+- Phase 2: Kyber1024 key encapsulation
+- Phase 3: Fully post-quantum consensus
+
+## Mining Fairness
+
+Monero's RandomX is excellent CPU-friendly PoW, but GPU mining still commands a marginal edge on some configurations. Quillon's Genus 2 upgrade enforces a hard 50/50 split: half the block reward goes to BLAKE3 GPU miners, half to VDF CPU miners. These are separate consensus lanes — GPU farms literally cannot crowd out home hardware.
+
+## DAG Consensus vs Linear Chain
+
+Monero processes transactions in strict linear order, limiting throughput to ~1,700 TPS under ideal conditions. Quillon uses DAG-Knight, a directed acyclic graph BFT protocol with Narwhal mempool. Concurrent vertices are validated in parallel, targeting 48,000+ TPS with sub-3-second finality.
+
+## Conclusion
+
+Starting from first principles in 2026 means inheriting a decade of lessons without inheriting a decade of technical debt. Quillon is not a Monero fork — it is what Monero would build if it started today.`,
+              },
+              {
+                tag: 'Announcement', tagColor: 'text-green-400', tagBg: 'rgba(34,197,94,0.1)', tagBorder: 'rgba(34,197,94,0.25)',
+                icon: <Cpu className="w-3.5 h-3.5 text-green-400" />,
+                title: 'CPU Mining Returns: VDF Dual-Lane Now Live',
+                excerpt: 'The Genus 2 upgrade splits every block reward 50/50 between BLAKE3 GPU miners and VDF CPU miners. Home hardware has a guaranteed lane that GPU farms cannot crowd out.',
+                date: 'April 2026', accent: 'rgba(34,197,94,0.08)', border: 'rgba(34,197,94,0.18)',
+                fullContent: `## The Problem with Single-Algorithm Mining
+
+Every major proof-of-work coin faces the same trajectory: hobbyist CPU miners → GPU farms → ASIC monopolies. Even RandomX, designed to be CPU-friendly, attracts GPU optimisations that incrementally price out home miners.
+
+## The Genus 2 Solution: Two Lanes, One Block
+
+Starting with block 500,000, every QNK block reward is split into two equal halves:
+
+**Lane A — BLAKE3 GPU Mining (50%)**
+Standard high-throughput GPU mining. Fast, competitive, and profitable for professional operations. This keeps QNK attractive to large miners who provide network security.
+
+**Lane B — VDF CPU Mining (50%)**
+Verifiable Delay Functions cannot be parallelised. A VDF requires sequential computation — more GPUs do not help. A single modern CPU core competes on equal footing with a rack of GPUs in this lane.
+
+## How VDF Mining Works
+
+1. Each block contains a VDF challenge derived from the previous block hash.
+2. CPU miners compute the VDF output sequentially — this takes approximately 10 seconds on a modern core.
+3. The first miner to submit a valid VDF proof claims the CPU lane reward.
+4. The GPU lane operates in parallel and settles independently.
+
+Both lanes must be satisfied for a block to be considered fully valid. This creates a cooperative dynamic between GPU and CPU miners rather than a competitive one.
+
+## Hardware Requirements
+
+**GPU Lane:** Any GPU with ≥4GB VRAM. RTX 3060 achieves ~420 MH/s.
+
+**CPU Lane:** Any x86-64 CPU released after 2018. A Raspberry Pi 4 is too slow; a laptop i5 is competitive. The key insight: you don't need more cores, you need a fast single-core clock speed.
+
+## Download the CPU Miner
+
+\`\`\`bash
+wget https://quillon.xyz/downloads/q-miner-v10.3.12
+chmod +x q-miner-v10.3.12
+./q-miner-v10.3.12 --mode vdf --wallet YOUR_ADDRESS
+\`\`\`
+
+The miner auto-detects your hardware and selects the optimal lane. Run both simultaneously on the same machine for maximum rewards.`,
+              },
+              {
+                tag: 'Update', tagColor: 'text-blue-400', tagBg: 'rgba(59,130,246,0.1)', tagBorder: 'rgba(59,130,246,0.25)',
+                icon: <Layers className="w-3.5 h-3.5 text-blue-400" />,
+                title: 'Community Roadmap: Sync Speed, Emission Resilience & P2P Hardening',
+                excerpt: 'Full post-mortem and three-phase hardening plan covering emission state recovery, turbo-sync reliability, and bootstrap redundancy.',
+                date: 'Apr 10, 2026', accent: 'rgba(59,130,246,0.08)', border: 'rgba(59,130,246,0.18)',
+                fullContent: `## Post-Mortem: April 4–9 Incident
+
+On April 4 a cascade of issues exposed three independent weaknesses in the network stack. No funds were lost and chain continuity was maintained, but sync reliability and emission accuracy degraded for approximately 48 hours on secondary nodes.
+
+This post documents exactly what happened and our three-phase response.
+
+## What Happened
+
+**Issue 1: Emission Controller Drift**
+The emission controller on Epsilon (primary bootstrap) was computing rewards using a stale genesis timestamp after an unclean restart. Blocks produced during this window had slightly incorrect coinbase values — still valid under consensus rules, but inconsistent with the long-term emission schedule.
+
+**Issue 2: Turbo-Sync Gap Detection**
+A kill -9 on Epsilon left 180 corrupt block entries in RocksDB. The gap-detection algorithm in turbo-sync counted these corrupt entries as "present", so the sync engine never requested the missing blocks from peers. Nodes syncing from Epsilon accumulated silent gaps.
+
+**Issue 3: Bootstrap Redundancy**
+With Epsilon degraded, new nodes had no reliable bootstrap path. The fallback to Beta and Gamma worked, but at 100× lower throughput — new node sync time went from ~6 hours to ~3 days.
+
+## Three-Phase Hardening Plan
+
+### Phase 1 — Emission Resilience (Complete)
+- Emission genesis timestamp now persisted to a separate sled column family and cross-checked on every restart.
+- Coinbase validation added to block acceptance: any block with a coinbase outside ±0.1% of the expected emission rate is rejected.
+- Automated emission audit runs every 1,000 blocks and emits a structured log entry.
+
+### Phase 2 — Sync Hardening (In Progress)
+- Corrupt block detection during gap scan: entries that deserialise to an error are treated as absent, not present.
+- Post-sync verification pass: after turbo-sync completes, a random 1% sample of blocks is re-verified against stored hashes.
+- Sync-down protection at the database layer: any attempt to replace a block at height H with data from a shorter chain is rejected with an explicit error.
+
+### Phase 3 — Bootstrap Redundancy (Planned Q2 2026)
+- Four independent bootstrap nodes with automatic health scoring.
+- New nodes receive a ranked peer list sorted by sync speed, not just peer availability.
+- Introducing Delta (5.79.79.158) as a permanently funded 1Gbit bootstrap node.
+
+## Timeline
+
+| Date | Milestone |
+|------|-----------|
+| Apr 10 | Phase 1 emission fixes deployed to all nodes |
+| Apr 15 | Phase 2 sync hardening in testing |
+| Apr 22 | Phase 2 deployed to mainnet |
+| May 15 | Phase 3 bootstrap redundancy complete |
+
+We thank the community members who reported degraded sync speeds and helped us reproduce the corrupt block scenario.`,
+              },
+            ];
+            const [featured, ...rest] = posts;
+            return (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {/* Featured card — spans 2 cols */}
+                <motion.div
+                  key="featured"
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: 0.1 }}
+                  whileHover={{ y: -3 }}
+                  className="md:col-span-2 rounded-2xl overflow-hidden cursor-pointer flex flex-col"
+                  style={{ background: 'linear-gradient(135deg, rgba(12,8,28,0.97) 0%, rgba(20,10,40,0.97) 100%)', border: `1.5px solid ${featured.border}`, boxShadow: `0 4px 32px ${featured.accent}` }}
+                  onClick={() => setSelectedArticle(featured)}
+                >
+                  {/* Gradient header strip */}
+                  <div className="h-1.5 w-full" style={{ background: `linear-gradient(90deg, rgba(139,92,246,0.7) 0%, rgba(167,139,250,0.3) 100%)` }} />
+                  <div className="p-5 flex flex-col gap-3 flex-1">
+                    <div className="flex items-center justify-between">
+                      <span className={`flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-widest px-2 py-0.5 rounded-full ${featured.tagColor}`} style={{ background: featured.tagBg, border: `1px solid ${featured.tagBorder}` }}>
+                        {featured.icon}{featured.tag}
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[9px] font-semibold uppercase tracking-widest px-1.5 py-0.5 rounded-full text-amber-400 bg-amber-400/10 border border-amber-400/25">Featured</span>
+                        <span className="text-[10px] text-gray-600">{featured.date}</span>
+                      </div>
+                    </div>
+                    <h3 className="text-sm font-bold text-gray-100 leading-snug">{featured.title}</h3>
+                    <p className="text-[11px] text-gray-400 leading-relaxed flex-1">{featured.excerpt}</p>
+                    <div className="flex items-center gap-2 pt-2" style={{ borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+                      <span className="text-[10px] text-gray-600 uppercase tracking-widest">Quillon Network</span>
+                      <div className="flex-1" />
+                      <motion.span whileHover={{ x: 2 }} className={`text-[10px] font-semibold ${featured.tagColor} flex items-center gap-1`}>
+                        Read full article <ChevronRight className="w-3 h-3" />
+                      </motion.span>
+                    </div>
+                  </div>
+                </motion.div>
+
+                {/* Side cards — stacked */}
+                <div className="flex flex-col gap-4">
+                  {rest.map((post, i) => (
+                    <motion.div
+                      key={i}
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ delay: 0.15 + i * 0.07 }}
+                      whileHover={{ y: -2 }}
+                      className="rounded-2xl overflow-hidden cursor-pointer flex flex-col flex-1"
+                      style={{ background: 'linear-gradient(135deg, rgba(12,10,22,0.97) 0%, rgba(18,14,32,0.97) 100%)', border: `1.5px solid ${post.border}`, boxShadow: `0 2px 16px ${post.accent}` }}
+                      onClick={() => setSelectedArticle(post)}
+                    >
+                      <div className="h-1" style={{ background: `linear-gradient(90deg, ${post.tagBorder} 0%, transparent 100%)` }} />
+                      <div className="p-4 flex flex-col gap-2 flex-1">
+                        <div className="flex items-center justify-between">
+                          <span className={`flex items-center gap-1 text-[9px] font-semibold uppercase tracking-widest px-1.5 py-0.5 rounded-full ${post.tagColor}`} style={{ background: post.tagBg, border: `1px solid ${post.tagBorder}` }}>
+                            {post.icon}{post.tag}
+                          </span>
+                          {i === 0 && (
+                            <span className="text-[9px] font-semibold uppercase tracking-widest px-1.5 py-0.5 rounded-full text-emerald-400 bg-emerald-400/10 border border-emerald-400/25">New</span>
+                          )}
+                        </div>
+                        <h3 className="text-[11px] font-bold text-gray-200 leading-snug">{post.title}</h3>
+                        <p className="text-[10px] text-gray-500 leading-relaxed flex-1 line-clamp-2">{post.excerpt}</p>
+                        <div className="flex items-center justify-between pt-1.5" style={{ borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+                          <span className="text-[9px] text-gray-700 uppercase tracking-widest">{post.date}</span>
+                          <motion.span whileHover={{ x: 2 }} className={`text-[9px] font-medium ${post.tagColor} flex items-center gap-0.5`}>
+                            Read <ChevronRight className="w-2.5 h-2.5" />
+                          </motion.span>
+                        </div>
+                      </div>
+                    </motion.div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+        </motion.div>
+        )}
+        </AnimatePresence>
+      </motion.div>
+      {/* ── /News & Blog Row ─────────────────────────────────────────── */}
+
       <div className="grid grid-cols-1 xl:grid-cols-[1fr_380px] gap-6 items-start">
       <div className="flex flex-col gap-6">
       {/* Multi-Wallet Card */}
@@ -2926,7 +3205,7 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
                 title="AI Wallet Analysis"
               >
                 <img
-                  src="/quantum-ai-logo.png"
+                  src="/quantum-ai-logo.svg"
                   alt="AI Report"
                   className="w-5 h-5 object-contain"
                   style={{
@@ -3420,15 +3699,16 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+            className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 overflow-y-auto"
             onClick={() => setIsAIReportModalOpen(false)}
           >
+            <div className="flex min-h-full items-center justify-center p-4">
             <motion.div
               initial={{ scale: 0.9, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.9, opacity: 0 }}
               onClick={(e) => e.stopPropagation()}
-              className="rounded-2xl p-6 max-w-3xl w-full max-h-[80vh] overflow-y-auto shadow-2xl"
+              className="rounded-2xl p-6 max-w-3xl w-full max-h-[90vh] overflow-y-auto shadow-2xl"
               style={{
                 background: 'linear-gradient(135deg, rgba(20, 20, 30, 0.98), rgba(30, 30, 45, 0.98))',
                 border: '2px solid rgba(168, 85, 247, 0.3)',
@@ -3440,7 +3720,7 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
                 <div className="flex items-center gap-3">
                   <div className="p-3 rounded-xl">
                     <img
-                      src="/quantum-ai-logo.png"
+                      src="/quantum-ai-logo.svg"
                       alt="Quantum AI"
                       className="w-8 h-8 object-contain"
                       style={{
@@ -3474,7 +3754,7 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
                       className="w-16 h-16"
                     >
                       <img
-                        src="/quantum-ai-logo.png"
+                        src="/quantum-ai-logo.svg"
                         alt="Loading"
                         className="w-full h-full object-contain"
                         style={{
@@ -3543,6 +3823,7 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
                 </motion.button>
               </div>
             </motion.div>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -3554,15 +3835,16 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+            className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 overflow-y-auto"
             onClick={() => setIsNodeInfoModalOpen(false)}
           >
+            <div className="flex min-h-full items-center justify-center p-4">
             <motion.div
               initial={{ scale: 0.9, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.9, opacity: 0 }}
               onClick={(e) => e.stopPropagation()}
-              className="rounded-2xl p-6 max-w-2xl w-full shadow-2xl"
+              className="rounded-2xl p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto shadow-2xl"
               style={{
                 background: 'linear-gradient(135deg, rgba(20, 20, 30, 0.98), rgba(30, 30, 45, 0.98))',
                 border: '2px solid rgba(59, 130, 246, 0.3)',
@@ -3720,6 +4002,7 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
                 </motion.button>
               </div>
             </motion.div>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -3731,7 +4014,7 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+            className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 overflow-y-auto"
             onClick={() => {
               setIsAddUSDModalOpen(false);
               setShowStripeCheckout(false);
@@ -3739,12 +4022,13 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
               setUsdAmount('');
             }}
           >
+            <div className="flex min-h-full items-center justify-center p-4">
             <motion.div
               initial={{ scale: 0.9, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.9, opacity: 0 }}
               onClick={(e) => e.stopPropagation()}
-              className="rounded-2xl p-6 max-w-md w-full shadow-2xl"
+              className="rounded-2xl p-6 max-w-md w-full max-h-[90vh] overflow-y-auto shadow-2xl"
               style={{
                 background: 'linear-gradient(135deg, rgba(20, 30, 20, 0.98), rgba(30, 45, 30, 0.98))',
                 border: '2px solid rgba(34, 197, 94, 0.3)',
@@ -3865,6 +4149,7 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
                 </Suspense>
               )}
             </motion.div>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -3876,7 +4161,7 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+            className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 overflow-y-auto"
             onClick={() => {
               setIsSendUSDModalOpen(false);
               setStripeError(null);
@@ -3884,6 +4169,7 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
               setUsdRecipient('');
             }}
           >
+            <div className="flex min-h-full items-center justify-center p-4">
             <motion.div
               initial={{ scale: 0.9, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
@@ -4002,6 +4288,7 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
                 </div>
               </div>
             </motion.div>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -4087,6 +4374,162 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
           walletAddress={walletAddress}
         />
       )}
+
+      {/* ── Article Reader Modal ──────────────────────────────────────── */}
+      <AnimatePresence>
+        {selectedArticle && (
+          <>
+            {/* Backdrop */}
+            <motion.div
+              key="article-backdrop"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.25 }}
+              className="fixed inset-0 z-[90]"
+              style={{ background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(12px)' }}
+              onClick={() => setSelectedArticle(null)}
+            />
+
+            {/* Modal panel — slides up from bottom */}
+            <motion.div
+              key="article-modal"
+              initial={{ opacity: 0, y: '100%', scale: 0.96 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: '80%', scale: 0.96 }}
+              transition={{ type: 'spring', stiffness: 340, damping: 32, mass: 0.9 }}
+              className="fixed inset-x-4 bottom-4 top-16 z-[91] flex flex-col rounded-3xl overflow-hidden md:inset-x-auto md:left-1/2 md:-translate-x-1/2 md:w-[720px] md:max-w-[calc(100vw-2rem)]"
+              style={{
+                background: 'linear-gradient(160deg, rgba(10,10,20,0.98) 0%, rgba(16,16,32,0.98) 100%)',
+                border: `1.5px solid ${selectedArticle.border}`,
+                boxShadow: `0 0 80px ${selectedArticle.accent}, 0 32px 80px rgba(0,0,0,0.7)`,
+              }}
+            >
+              {/* Animated glow bar at top */}
+              <motion.div
+                initial={{ scaleX: 0 }}
+                animate={{ scaleX: 1 }}
+                transition={{ delay: 0.18, duration: 0.6, ease: 'easeOut' }}
+                className="h-[2px] w-full origin-left"
+                style={{
+                  filter: 'blur(1px)',
+                  background: selectedArticle.tagColor.includes('purple')
+                    ? 'linear-gradient(90deg, transparent, #a78bfa, transparent)'
+                    : selectedArticle.tagColor.includes('green')
+                    ? 'linear-gradient(90deg, transparent, #4ade80, transparent)'
+                    : 'linear-gradient(90deg, transparent, #60a5fa, transparent)',
+                }}
+              />
+
+              {/* Header */}
+              <div className="flex items-start gap-3 px-6 pt-5 pb-4" style={{ borderBottom: `1px solid ${selectedArticle.border}` }}>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span
+                      className={`flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-widest px-2.5 py-1 rounded-full ${selectedArticle.tagColor}`}
+                      style={{ background: selectedArticle.tagBg, border: `1px solid ${selectedArticle.tagBorder}` }}
+                    >
+                      {selectedArticle.icon} {selectedArticle.tag}
+                    </span>
+                    <span className="text-[10px] text-gray-500">{selectedArticle.date}</span>
+                  </div>
+                  <h2 className="text-base font-bold text-gray-100 leading-snug">{selectedArticle.title}</h2>
+                  <p className="text-xs text-gray-500 mt-1">Quillon Network</p>
+                </div>
+                <motion.button
+                  whileHover={{ scale: 1.12, rotate: 90 }}
+                  whileTap={{ scale: 0.9 }}
+                  transition={{ type: 'spring', stiffness: 400, damping: 20 }}
+                  onClick={() => setSelectedArticle(null)}
+                  className="shrink-0 w-8 h-8 flex items-center justify-center rounded-full text-gray-400 hover:text-gray-100 mt-0.5"
+                  style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)' }}
+                >
+                  <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+                    <path d="M1 1l10 10M11 1L1 11" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
+                  </svg>
+                </motion.button>
+              </div>
+
+              {/* Scrollable content */}
+              <div className="flex-1 overflow-y-auto px-6 py-5" style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(255,255,255,0.1) transparent' }}>
+                <motion.div
+                  initial={{ opacity: 0, y: 12 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: 0.15, duration: 0.35 }}
+                  className="prose prose-invert prose-sm max-w-none"
+                  style={{ color: '#c1c1d0' }}
+                >
+                  {selectedArticle.fullContent.split('\n').map((line, li) => {
+                    if (line.startsWith('## ')) return (
+                      <h2 key={li} style={{ color: '#f0f0ff', fontSize: '1rem', fontWeight: 700, marginTop: '1.5rem', marginBottom: '0.6rem', borderBottom: `1px solid ${selectedArticle.border}`, paddingBottom: '0.4rem' }}>
+                        {line.slice(3)}
+                      </h2>
+                    );
+                    if (line.startsWith('### ')) return (
+                      <h3 key={li} style={{ color: '#d0d0ef', fontSize: '0.8rem', fontWeight: 700, marginTop: '1.1rem', marginBottom: '0.3rem', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                        {line.slice(4)}
+                      </h3>
+                    );
+                    if (line.startsWith('**') && line.endsWith('**')) return (
+                      <p key={li} style={{ color: '#e8e8f8', fontWeight: 600, fontSize: '0.75rem', marginTop: '0.8rem', marginBottom: '0.2rem' }}>
+                        {line.slice(2, -2)}
+                      </p>
+                    );
+                    if (line.startsWith('- ')) return (
+                      <div key={li} style={{ display: 'flex', gap: '0.6rem', marginBottom: '0.35rem' }}>
+                        <span style={{ color: selectedArticle.tagColor.includes('purple') ? '#a78bfa' : selectedArticle.tagColor.includes('green') ? '#4ade80' : '#60a5fa', flexShrink: 0, marginTop: '0.15rem' }}>▸</span>
+                        <span style={{ fontSize: '0.75rem', lineHeight: '1.6' }}>{line.slice(2)}</span>
+                      </div>
+                    );
+                    if (line.startsWith('```')) return (
+                      <div key={li} style={{ background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 8, padding: '0.1rem 0', margin: '0.6rem 0' }} />
+                    );
+                    if (line.startsWith('| ') && line.includes('|')) {
+                      const cells = line.split('|').filter(c => c.trim());
+                      const isHeader = li > 0 && selectedArticle.fullContent.split('\n')[li + 1]?.startsWith('|---');
+                      if (line.startsWith('|---')) return null;
+                      return (
+                        <div key={li} style={{ display: 'grid', gridTemplateColumns: `repeat(${cells.length}, 1fr)`, gap: 1, marginBottom: 1 }}>
+                          {cells.map((cell, ci) => (
+                            <div key={ci} style={{ fontSize: '0.7rem', padding: '0.3rem 0.5rem', background: isHeader ? 'rgba(255,255,255,0.07)' : 'rgba(255,255,255,0.03)', borderRadius: 4, fontWeight: isHeader ? 600 : 400, color: isHeader ? '#e0e0f0' : '#a0a0b8' }}>
+                              {cell.trim()}
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    }
+                    if (line.startsWith('`') && line.endsWith('`') && !line.startsWith('```')) return (
+                      <code key={li} style={{ display: 'block', fontFamily: 'monospace', fontSize: '0.7rem', background: 'rgba(0,0,0,0.35)', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 6, padding: '0.5rem 0.75rem', margin: '0.2rem 0', color: '#a0e0ff' }}>
+                        {line.slice(1, -1)}
+                      </code>
+                    );
+                    if (!line.trim()) return <div key={li} style={{ height: '0.5rem' }} />;
+                    return (
+                      <p key={li} style={{ fontSize: '0.75rem', lineHeight: '1.75', marginBottom: '0.5rem' }}>
+                        {line}
+                      </p>
+                    );
+                  })}
+                </motion.div>
+              </div>
+
+              {/* Footer */}
+              <div className="px-6 py-3 flex items-center justify-between" style={{ borderTop: `1px solid ${selectedArticle.border}`, background: 'rgba(0,0,0,0.3)' }}>
+                <span className="text-[10px] text-gray-600">quillon.xyz · {selectedArticle.date}</span>
+                <motion.button
+                  whileHover={{ scale: 1.04 }}
+                  whileTap={{ scale: 0.97 }}
+                  onClick={() => setSelectedArticle(null)}
+                  className={`text-[11px] font-semibold px-4 py-1.5 rounded-full ${selectedArticle.tagColor}`}
+                  style={{ background: selectedArticle.tagBg, border: `1px solid ${selectedArticle.tagBorder}` }}
+                >
+                  Close
+                </motion.button>
+              </div>
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
 
     </div>
   );

@@ -206,13 +206,15 @@ function scheduleReconnect() {
   }, delay);
 }
 
-// Health check: if no events for 60s while "connected", force reconnect
+// Health check: if no events for 3 minutes while "connected", force reconnect
+// 60s was too aggressive — server sends SSE comments as heartbeats (not counted as events),
+// so in low-activity periods this would reconnect unnecessarily and disrupt state.
 function startHealthCheck() {
   if (state.healthCheckInterval) return;
   state.healthCheckInterval = setInterval(() => {
     if (state.status === 'connected' && state.lastEventTime > 0) {
       const staleMs = Date.now() - state.lastEventTime;
-      if (staleMs > 60000) {
+      if (staleMs > 180000) {
         console.warn(`[SSE Manager] No events for ${(staleMs/1000).toFixed(0)}s, forcing reconnect`);
         cleanup(false);
         state.reconnectAttempts = 0; // Reset — this is a health issue, not a connection failure

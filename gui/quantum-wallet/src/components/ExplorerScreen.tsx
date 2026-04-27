@@ -2727,17 +2727,24 @@ export default function ExplorerScreen() {
   useEffect(() => {
     // Fetch ONLY real production data - NO MOCK DATA per CLAUDE.md requirements
     let isMounted = true;
+    let hasLoadedOnce = false;
     const fetchAllData = async () => {
       try {
-        // Fetch node status and supply in parallel for faster load
-        const [nodeStatus, supplyResponse] = await Promise.all([
+        // Use allSettled so one failing request doesn't blank the entire screen
+        const [nodeStatusResult, supplyResult] = await Promise.allSettled([
           qnkAPI.getNodeStatus(),
           qnkAPI.getNetworkSupply(),
         ]);
         if (!isMounted) return;
+
+        const nodeStatus = nodeStatusResult.status === 'fulfilled' ? nodeStatusResult.value : null;
+        const supplyResponse = supplyResult.status === 'fulfilled' ? supplyResult.value : null;
+
+        if (nodeStatus || supplyResponse) hasLoadedOnce = true;
+
         // Debug logging (console only)
         console.debug('[Explorer] nodeStatus:', nodeStatus?.success, 'supply:', supplyResponse?.success);
-        if (supplyResponse.success && supplyResponse.data) {
+        if (supplyResponse?.success && supplyResponse.data) {
           const newTotalMined = supplyResponse.data.total_mined;
 
           // CRITICAL FIX: Prevent backwards jumps in mined coins display
@@ -2774,32 +2781,33 @@ export default function ExplorerScreen() {
         }
 
         // v1.0.3: Set core network stats IMMEDIATELY after nodeStatus resolves
-        // Previously this was after 6 optional Promise.allSettled calls — if any handler
-        // threw an exception, setNetworkStats was never reached and UI showed all zeros.
-        const newHeight = nodeStatus.data?.current_height || 0;
-        const effectiveHeight = Math.max(newHeight, highestKnownHeightRef.current);
-        if (newHeight >= highestKnownHeightRef.current) {
-          highestKnownHeightRef.current = newHeight;
+        // Guard the nodeStatus block but DON'T return — activity data should still load
+        if (nodeStatus?.success && nodeStatus.data) {
+          const newHeight = nodeStatus.data.current_height || 0;
+          const effectiveHeight = Math.max(newHeight, highestKnownHeightRef.current);
+          if (newHeight >= highestKnownHeightRef.current) {
+            highestKnownHeightRef.current = newHeight;
+          }
+
+          setNetworkStats({
+            currentHeight: effectiveHeight,
+            currentRound: nodeStatus.data.current_round || Math.floor((nodeStatus.data.current_height || 0) / 100),
+            currentTps: nodeStatus.data.tps_current || 0,
+            totalTransactions: 0,
+            activePeers: nodeStatus.data.connected_peers || 0,
+            networkHealth: nodeStatus.data.is_validator ? 0.95 : 0.8,
+            consensusParticipation: nodeStatus.data.is_validator ? 1.0 : 0.0,
+            mempoolSize: nodeStatus.data.tx_pool_size || 0,
+            quantumEntropy: 0.92,
+            avgBlockTime: nodeStatus.data.system_metrics?.avg_block_time_seconds || 2.3,
+            networkHashRate: (nodeStatus.data.tps_current || 0) * 1000,
+            byzantineTolerance: (nodeStatus.data.connected_peers || 0) >= 4 ? 0.95 : 0.75,
+            postQuantumReady: 0.88
+          });
+
+          const currentTps = nodeStatus.data.tps_current || 0;
+          setTpsHistory(prev => [...prev.slice(-59), currentTps]);
         }
-
-        setNetworkStats({
-          currentHeight: effectiveHeight,
-          currentRound: nodeStatus.data?.current_round || Math.floor((nodeStatus.data?.current_height || 0) / 100),
-          currentTps: nodeStatus.data?.tps_current || 0,
-          totalTransactions: 0,
-          activePeers: nodeStatus.data?.connected_peers || 0,
-          networkHealth: nodeStatus.data?.is_validator ? 0.95 : 0.8,
-          consensusParticipation: nodeStatus.data?.is_validator ? 1.0 : 0.0,
-          mempoolSize: nodeStatus.data?.tx_pool_size || 0,
-          quantumEntropy: 0.92,
-          avgBlockTime: nodeStatus.data?.system_metrics?.avg_block_time_seconds || 2.3,
-          networkHashRate: (nodeStatus.data?.tps_current || 0) * 1000,
-          byzantineTolerance: (nodeStatus.data?.connected_peers || 0) >= 4 ? 0.95 : 0.75,
-          postQuantumReady: 0.88
-        });
-
-        const currentTps = nodeStatus.data?.tps_current || 0;
-        setTpsHistory(prev => [...prev.slice(-59), currentTps]);
 
         // Fetch optional metrics in parallel (non-blocking, failures don't affect core stats)
         try {
@@ -2912,26 +2920,25 @@ export default function ExplorerScreen() {
               }))
           : [];
 
-        setRecentActivity({
-          transactions: recentTxs,
-          blocks: recentBlocks,
-          vertices: recentVertices,
-          contracts: recentContracts
-        });
+        setRecentActivity(prev => ({
+          transactions: recentTxs.length > 0 ? recentTxs : prev.transactions,
+          blocks: recentBlocks.length > 0 ? recentBlocks : prev.blocks,
+          vertices: recentVertices.length > 0 ? recentVertices : prev.vertices,
+          contracts: recentContracts.length > 0 ? recentContracts : prev.contracts,
+        }));
 
         // Update live metrics from real data - v3.4.15: Fixed realistic calculations
-        const height = nodeStatus.data?.current_height || 0;
-        const peers = nodeStatus.data?.connected_peers || 0;
-        const txPoolSize = nodeStatus.data?.tx_pool_size || 0;
-
-        setLiveMetrics({
-          vdfComputations: Math.max(1, Math.floor((nodeStatus.data?.current_round || 0) / 10)),
-          // v6.2.3: Use REAL system metrics from backend instead of fake formulas
-          memoryUsage: nodeStatus.data?.system_metrics?.memory_usage_percent ?? 0,
-          dataStorage: nodeStatus.data?.system_metrics?.data_storage_gb ?? 0,
-          realTimeTps: nodeStatus.data?.tps_current || 0,
-          realTimeLatency: peers >= 4 ? 12 : 45
-        });
+        if (nodeStatus?.success && nodeStatus.data) {
+          const peers = nodeStatus.data.connected_peers || 0;
+          setLiveMetrics({
+            vdfComputations: Math.max(1, Math.floor((nodeStatus.data.current_round || 0) / 10)),
+            // v6.2.3: Use REAL system metrics from backend instead of fake formulas
+            memoryUsage: nodeStatus.data.system_metrics?.memory_usage_percent ?? 0,
+            dataStorage: nodeStatus.data.system_metrics?.data_storage_gb ?? 0,
+            realTimeTps: nodeStatus.data.tps_current || 0,
+            realTimeLatency: peers >= 4 ? 12 : 45
+          });
+        }
 
       } catch (error) {
         console.error('Failed to fetch real data:', error);
@@ -2940,11 +2947,25 @@ export default function ExplorerScreen() {
     };
 
     fetchAllData();
+
+    // Retry once after 3s if the first load produced nothing (catches startup races)
+    const retryTimer = setTimeout(() => {
+      if (isMounted && !hasLoadedOnce) fetchAllData();
+    }, 3000);
+
     const interval = setInterval(fetchAllData, 15000); // Update every 15 seconds
+
+    // Refetch immediately when the tab becomes visible again (user switching back)
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible' && isMounted) fetchAllData();
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
 
     return () => {
       isMounted = false;
+      clearTimeout(retryTimer);
       clearInterval(interval);
+      document.removeEventListener('visibilitychange', handleVisibility);
     };
   }, []);
 
@@ -3017,7 +3038,10 @@ export default function ExplorerScreen() {
     const fetchPeers = async () => {
       try {
         // 🔧 v2.2.3: Fixed - use relative URL (like qnkAPI) instead of localhost
-        const response = await fetch('/api/mesh/peers');
+        const peersController = new AbortController();
+        const peersTimeout = setTimeout(() => peersController.abort(), 8000);
+        const response = await fetch('/api/mesh/peers', { signal: peersController.signal });
+        clearTimeout(peersTimeout);
         const data = await response.json();
 
         if (data.success && data.data) {
