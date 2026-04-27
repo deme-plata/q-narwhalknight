@@ -1270,6 +1270,12 @@ impl UnifiedNetworkManager {
         let mut bootstrap_count = 0;
         // 🔧 v0.6.8-beta: Track bootstrap peers for automatic reconnection
         let mut bootstrap_peer_map: HashMap<PeerId, Multiaddr> = HashMap::new();
+        // v10.4.13: All addresses per peer for multi-transport fallback (Windows fix)
+        // Windows nodes can't use TCP/9001 (often firewalled), need WSS/443 as fallback.
+        // bootstrap_peer_map only stores ONE address per peer (last wins), causing Windows
+        // nodes to only try the last registered address. We store ALL addresses here so
+        // the swarm address book gets all transport options and libp2p can auto-fallback.
+        let mut all_peer_addresses: HashMap<PeerId, Vec<Multiaddr>> = HashMap::new();
 
         for addr_str in bootstrap_peers {
             if let Ok(mut addr) = addr_str.trim().parse::<Multiaddr>() {
@@ -1336,6 +1342,7 @@ impl UnifiedNetworkManager {
                                         fresh_addr.push(Protocol::P2p(current_peer_id));
 
                                         bootstrap_peer_map.insert(current_peer_id, fresh_addr.clone());
+                                        all_peer_addresses.entry(current_peer_id).or_default().push(fresh_addr.clone());
                                         info!("📍 Added {} bootstrap peer (HTTP-verified): {} at {}",
                                               network_config.network_id.as_str(), current_peer_id, fresh_addr);
                                         bootstrap_count += 1;
@@ -1346,6 +1353,7 @@ impl UnifiedNetworkManager {
                                         if let Some(Protocol::P2p(peer_id)) = addr.iter().last() {
                                             if peer_id != local_peer_id {
                                                 bootstrap_peer_map.insert(peer_id, addr.clone());
+                                                all_peer_addresses.entry(peer_id).or_default().push(addr.clone());
                                                 info!("📍 Added {} bootstrap peer (hardcoded fallback): {} at {}",
                                                       network_config.network_id.as_str(), peer_id, addr);
                                                 bootstrap_count += 1;
@@ -1361,6 +1369,7 @@ impl UnifiedNetworkManager {
                                 if let Some(Protocol::P2p(peer_id)) = addr.iter().last() {
                                     if peer_id != local_peer_id {
                                         bootstrap_peer_map.insert(peer_id, addr.clone());
+                                        all_peer_addresses.entry(peer_id).or_default().push(addr.clone());
                                         info!("📍 Added {} bootstrap peer (hardcoded fallback): {} at {}",
                                               network_config.network_id.as_str(), peer_id, addr);
                                         bootstrap_count += 1;
@@ -1369,13 +1378,19 @@ impl UnifiedNetworkManager {
                             }
                         }
                     } else {
-                        // No IP to fetch from - use hardcoded directly
+                        // No IP to fetch from (e.g. /dns4/... WSS addresses) - use hardcoded directly
+                        // v10.4.13: Always add to all_peer_addresses so swarm gets all transport options
                         if let Some(Protocol::P2p(peer_id)) = addr.iter().last() {
                             if peer_id != local_peer_id {
-                                bootstrap_peer_map.insert(peer_id, addr.clone());
-                                info!("📍 Added {} bootstrap peer: {} at {}",
-                                      network_config.network_id.as_str(), peer_id, addr);
-                                bootstrap_count += 1;
+                                // Don't overwrite TCP address in bootstrap_peer_map with WSS —
+                                // use entry() so the first address (HTTP-verified TCP) wins.
+                                bootstrap_peer_map.entry(peer_id).or_insert_with(|| {
+                                    bootstrap_count += 1;
+                                    addr.clone()
+                                });
+                                all_peer_addresses.entry(peer_id).or_default().push(addr.clone());
+                                info!("📍 Added {} bootstrap peer address (WSS/DNS): {}",
+                                      network_config.network_id.as_str(), addr);
                             }
                         }
                     }
@@ -1426,6 +1441,7 @@ impl UnifiedNetworkManager {
 
                                         final_addr.push(Protocol::P2p(peer_id));
                                         bootstrap_peer_map.insert(peer_id, final_addr.clone());
+                                        all_peer_addresses.entry(peer_id).or_default().push(final_addr.clone());
                                         info!("✅ Added {} bootstrap peer with dynamic discovery: {} at {}",
                                               network_config.network_id.as_str(), peer_id, final_addr);
                                         bootstrap_count += 1;
@@ -1512,6 +1528,7 @@ impl UnifiedNetworkManager {
         // Clone data for use inside closure
         let network_config_clone = network_config.clone();
         let bootstrap_peer_map_clone = bootstrap_peer_map.clone();
+        let all_peer_addresses_clone = all_peer_addresses.clone();
 
         // 🌐 v2.0.0: SwarmBuilder with full transport stack (libp2p 0.56)
         // 🔥 CRITICAL PATTERN: .with_websocket() is ASYNC (needs .await?), others are sync (just ?)
@@ -1558,12 +1575,19 @@ impl UnifiedNetworkManager {
                 let mut kademlia = Kademlia::with_config(local_peer_id_inner, kad_store, kad_config);
 
                 // Add bootstrap peers to Kademlia (skip self)
-                // 🔧 v1.0.88-beta: Skip adding ourselves to our own Kademlia routing table
-                for (peer_id, addr) in &bootstrap_peer_map_clone {
+                // v10.4.13: Add ALL known addresses per peer so Kademlia has full transport options
+                // This is critical for Windows nodes where TCP/9001 may be firewalled — Kademlia
+                // needs the WSS/443 address too so it can route through the firewall.
+                for (peer_id, addrs) in &all_peer_addresses_clone {
                     if *peer_id == local_peer_id_inner {
                         continue; // Skip self
                     }
-                    kademlia.add_address(peer_id, addr.clone());
+                    for addr in addrs {
+                        let addr_without_p2p: libp2p::Multiaddr = addr.iter()
+                            .filter(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
+                            .collect();
+                        kademlia.add_address(peer_id, addr_without_p2p);
+                    }
                 }
 
                 // Identify
@@ -2058,6 +2082,24 @@ impl UnifiedNetworkManager {
                 }
             }
 
+            // v10.4.13: Register ALL transport addresses with swarm address book BEFORE dialing.
+            // Windows fix: TCP/9001 is often firewalled on home PCs. By registering WSS/443 and
+            // WSS/9443 in the swarm's address book, libp2p will automatically try them as fallback
+            // when the primary dial fails, without any application-level retry logic.
+            for (peer_id, addrs) in &all_peer_addresses {
+                if *peer_id == local_peer_id {
+                    continue;
+                }
+                for addr in addrs {
+                    let addr_without_p2p: Multiaddr = addr.iter()
+                        .filter(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
+                        .collect();
+                    swarm.add_peer_address(*peer_id, addr_without_p2p.clone());
+                }
+                info!("📋 [BOOTSTRAP] Registered {} transport addresses for peer {} in swarm address book",
+                      addrs.len(), peer_id);
+            }
+
             // 🔧 v1.0.17-beta: DIAGNOSTIC - Also manually dial bootstrap peers
             // This helps us see connection errors immediately instead of waiting for Kademlia
             info!("🔧 [BOOTSTRAP-DIAG] Manually dialing {} bootstrap peers for immediate error visibility", bootstrap_count);
@@ -2072,34 +2114,9 @@ impl UnifiedNetworkManager {
 
                 info!("📡 [BOOTSTRAP-DIAG] Manually dialing: {} at {}", peer_id, addr);
 
-                // 🚨 v1.0.20-beta: CRITICAL - Log connection state BEFORE dial
-                let conn_info = swarm.network_info();
-                info!("🔍 [DIAL PRE] Connection state before dial:");
-                info!("   Total connections: {:?}", conn_info.connection_counters());
-                info!("   Pending outgoing: {}", conn_info.connection_counters().num_pending_outgoing());
-                info!("   Established: {}", conn_info.connection_counters().num_established());
-
-                // 🔧 v1.0.87-beta: FIX DialFailure - Add peer address to swarm's address book
-                // CRITICAL: Without this, request-response can't dial the peer for block sync
-                // Kademlia.add_address() only updates Kademlia's routing table, NOT the swarm's address book
-                // 🔧 v1.0.88-beta: FIX - Strip /p2p/ from address before adding to address book
-                // add_peer_address expects transport address ONLY, not the full multiaddr with peer ID
-                let addr_without_p2p: Multiaddr = addr.iter()
-                    .filter(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
-                    .collect();
-                swarm.add_peer_address(*peer_id, addr_without_p2p.clone());
-                info!("📋 [BOOTSTRAP] Added peer {} address to swarm address book: {}", peer_id, addr_without_p2p);
-
                 match swarm.dial(addr.clone()) {
                     Ok(_) => {
-                        info!("✅ [BOOTSTRAP-DIAG] Dial initiated for {}", peer_id);
-
-                        // 🚨 v1.0.20-beta: CRITICAL - Log connection state AFTER dial
-                        let conn_info_after = swarm.network_info();
-                        info!("🔍 [DIAL POST] Connection state after dial:");
-                        info!("   Total connections: {:?}", conn_info_after.connection_counters());
-                        info!("   Pending outgoing: {}", conn_info_after.connection_counters().num_pending_outgoing());
-                        info!("   Established: {}", conn_info_after.connection_counters().num_established());
+                        info!("✅ [BOOTSTRAP-DIAG] Dial initiated for {} (swarm will try all registered addresses on failure)", peer_id);
                     }
                     Err(e) => {
                         error!("❌ [BOOTSTRAP-DIAG] Failed to dial {}: {:?}", peer_id, e);
