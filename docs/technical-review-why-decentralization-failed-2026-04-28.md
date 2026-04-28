@@ -311,3 +311,338 @@ All the infrastructure is already there. The one missing piece is committing the
 ---
 
 *This document is a companion to `docs/technical-review-balance-divergence-root-cause-2026-04-28.md`. It addresses the architectural question of why the existing consensus infrastructure did not prevent the balance divergence, and what architectural change (the `balance_root` in block headers) is needed to make it structurally impossible going forward.*
+
+---
+
+## 10. External Consultation Responses (2026-04-28)
+
+Two external technical advisors reviewed this document. Their feedback refines the `balance_root` proposal and corrects several claims. Incorporated below in full, then summarized.
+
+---
+
+### 10.1 Advisor A — Refinements to `balance_root` Sufficiency
+
+#### 10.1.1 The Core Correction: `balance_root` Is Necessary, Not Sufficient
+
+The original claim:
+
+> "State divergence becomes structurally impossible for blocks produced after the activation height."
+
+Is too strong. The precise version is:
+
+> **State divergence becomes structurally impossible among nodes that share the same pre-state at the activation height, execute the same deterministic transition function, with all non-consensus balance writes disabled.**
+
+If two nodes have different pre-states when `balance_root` enforcement begins, they will compute different post-state roots for the same block and permanently fork. Example:
+
+```text
+Activation height H. Node A: Alice = 100. Node B: Alice = 200.
+Block H+1: Alice sends 10 to Bob.
+Node A post-state: Alice=90, Bob=10
+Node B post-state: Alice=190, Bob=10
+Both applied the same block. They still disagree.
+```
+
+Therefore the `balance_root` rollout **must** be paired with the v10.4.14/v10.4.15 checkpoint. The two phases are:
+
+```text
+At height H = 16,538,868:
+  canonical_balance_state := Epsilon snapshot (SHA-256: eabbeadf...)
+  
+For every block after activation height A ≥ H:
+  validate post-block balance_root
+```
+
+#### 10.1.2 Activation Design — Two-Stage Hard Fork
+
+**Stage 1 (checkpoint state fork at H=16,538,868):**
+Every node must verify:
+- SHA-256 of canonical snapshot == `eabbeadf85d03fb3a3b3fbafb1f6928513abafaf49ffba758f42f889a3fd8009`
+- Wallet count == 1,332
+- Total supply == 497,391,964,203,542,355,791,983,084,160 raw units
+- All previous local wallet balances discarded
+
+**Stage 2 (balance-root-enforced blocks at activation height A ≥ H + N):**
+Every block at height ≥ A must include `balance_root: [u8; 32]`. Validation:
+
+```rust
+let pre_state = current_wallet_state;
+let post_state = apply_block_transactions(pre_state, block.transactions)?;
+let recomputed_root = compute_balance_root(post_state);
+
+if block.balance_root != recomputed_root {
+    reject_block();
+}
+```
+
+The block **hash/signature** must commit to `balance_root`. If it's not covered by the block hash, it's metadata only and does not protect consensus.
+
+#### 10.1.3 Root Timing: Post-State Root
+
+`balance_root` must be the **post-state root** (after applying all transactions):
+
+```text
+block.balance_root = root(state_after_applying_this_block)
+```
+
+NOT the pre-state. Post-state roots are easier to validate: node applies block, recomputes root, compares. Optional enhancement for clarity:
+
+```rust
+pub parent_balance_root: [u8; 32],   // optional, for explicit chaining
+pub balance_root: [u8; 32],          // required post-state root
+```
+
+#### 10.1.4 `Option<[u8; 32]>` Is Fine, But Activation Must Be Strict
+
+```rust
+pub balance_root: Option<[u8; 32]>
+```
+
+But validation must be height-gated:
+
+- **Before activation height**: `None` allowed, `Some` ignored or rejected
+- **At and after activation height**: `None` → block invalid. Mismatch → block invalid.
+
+Do not accept `None` after activation for backward compatibility. That would weaken the fork.
+
+#### 10.1.5 Do Not Compute `balance_root` From In-Memory HashMap
+
+The in-memory `wallet_balances: HashMap<[u8;32], u128>` has already been shown to be a secondary, unreliable source of truth. The root must be computed from the canonical RocksDB store:
+
+```text
+RocksDB / state database = canonical
+HashMap = cache only
+```
+
+Preferred model:
+
+```rust
+apply_block_tx_batch_to_state_db(block);
+balance_root = compute_balance_root_from_state_db();
+update_cache_from_committed_state();
+```
+
+This ensures the root reflects committed, durable state — not potentially-stale in-memory state.
+
+#### 10.1.6 Canonical Commitment Scheme (Short-Term vs Long-Term)
+
+**Short-term (acceptable for 1,332 wallets):**
+
+```text
+balance_root = Blake3(sorted(address || balance))
+```
+
+**Long-term (when wallet count grows):**
+A sorted Merkle tree with leaves `Blake3(address || balance_be)` supports:
+- Light-client balance proofs (single wallet proof without full state download)
+- Efficient state sync (download only changed branches)
+- Partial state validation
+
+Define canonical serialization exactly:
+
+```text
+address:  32 raw bytes (NOT hex string)
+balance:  u128 big-endian 16 bytes
+leaf:     Blake3(address_32 || balance_be_16)
+root:     Blake3(concat(sorted leaf hashes by address))
+```
+
+Never use JSON, decimal strings, debug formatting, locale-dependent formatting, or unordered map iteration.
+
+#### 10.1.7 Invalid Block Handling (Critical Missing Section)
+
+Once `balance_root` is active, what happens when a node receives a block with a mismatched root?
+
+```text
+If balance_root mismatch:
+  1. reject block — do NOT mutate local state
+  2. log: local pre-root, recomputed post-root, advertised root
+  3. penalize or disconnect peer if repeated
+  4. if THIS NODE rejects blocks that a quorum accepts:
+     → local state is probably corrupt
+     → enter state recovery mode
+     → reload last trusted checkpoint snapshot
+     → replay from there
+```
+
+Without recovery logic, `balance_root` turns silent divergence into loud liveness failure. That is better than silent corruption, but still operationally painful.
+
+#### 10.1.8 Correction on Bitcoin/Ethereum Comparison
+
+The original document implied Bitcoin commits a UTXO root in every block header. This is incorrect.
+
+**Bitcoin**: Does NOT put a UTXO set root in every block. It prevents UTXO divergence through strict deterministic transaction/block validation rules. Nodes independently compute the UTXO set; it is deterministic from the chain. (Some proposals like Utreexo add UTXO commitments, but Bitcoin's base protocol does not.)
+
+**Ethereum**: DOES commit a state root (Merkle Patricia trie root of the full world state) in every block header. This is the model Q-NarwhalKnight should follow.
+
+**Bracha nuance**: Bracha's reliable broadcast has specific validity, agreement, and termination properties under Byzantine thresholds and timing assumptions. The simplified statement "if an honest node broadcasts, everyone eventually receives it" is directionally correct but elides the threshold assumptions.
+
+#### 10.1.9 Balance Correction Transactions After Root Activation
+
+Once `balance_root` is enforced, any balance correction must be encoded as a transaction in a block:
+
+```rust
+BalanceCorrection {
+    correction_id: [u8; 32],
+    activation_height: u64,
+    entries: Vec<(Address, OldBalance, NewBalance)>,
+    reason_hash: [u8; 32],
+    validator_signatures: Vec<Signature>,
+}
+```
+
+Including `OldBalance` prevents applying a correction to the wrong pre-state:
+
+```rust
+for entry in entries {
+    assert_eq!(current_balance(entry.address), entry.old_balance);
+    set_balance(entry.address, entry.new_balance);
+}
+```
+
+---
+
+### 10.2 Advisor B — Full External Review
+
+#### Key Verdict
+
+> The diagnosis is correct. The `balance_root` strategy is the definitive resolution. The consensus layer is already built; adding the state commitment is the missing lock.
+
+#### Endorsements
+
+1. **The layered analysis is correct**: DAG-Knight + Bracha + libp2p answered *"which blocks, in what order?"* — fully solved. None of them answered *"what do those blocks mean for wallet balances?"* — completely unguarded.
+2. **The `balance_root` fix is correct in principle**: embedding a state commitment in every block header is the standard solution.
+3. **The checkpoint is the necessary paired step**: without a canonical pre-state, two nodes with different histories will still disagree even with `balance_root` enforced.
+
+#### Structural Enhancement: Merkle Mountain Range
+
+For the commitment scheme, consider a **Merkle mountain range (MMR)** or simple binary Merkle tree:
+
+- Leaves: `H(address || balance)` sorted by address
+- Root: balance_root
+
+This allows individual wallet balance proofs without downloading full state — useful for light clients and efficient snapshot distribution.
+
+#### Psychological Factor (Root Cause Note)
+
+> When a system is small, it feels safe to correct state manually. The tipping point where that became unsustainable was passed months ago, and the checkpoint is the forced correction. The `balance_root` is the permanent prevention.
+
+This explains the history. The 22 off-chain write paths each appeared reasonable in isolation. In aggregate they destroyed determinism.
+
+#### Kill the 15-Second Backward Sync Immediately
+
+Even before `balance_root`, remove the HashMap backward-sync (which reads from RocksDB and overwrites in-memory state on a timer). It actively masks divergence that `balance_root` validation would otherwise catch, by overwriting the correct in-memory state with a corrupted DB value.
+
+#### Shadow State Validator (Post-Fork)
+
+For 2-3 weeks after `balance_root` activation, run a separate process that continuously replays all blocks from checkpoint forward *without* any off-chain logic, comparing its computed root against the committed block root. Any mismatch means the block production code is still non-deterministic in some subtle way.
+
+---
+
+### 10.3 Revised Roadmap (Incorporating Both Reviews)
+
+The original roadmap (Sections 7-8) is correct in direction. The revised ordering below incorporates both advisors' sequencing recommendations:
+
+#### Phase 0 — Make the Checkpoint Truly Fork-Safe (v10.4.15 — in progress)
+
+Before `balance_root`:
+1. ✅ Verify checkpoint hash (SHA-256) after import
+2. ✅ Verify wallet count (1,332) and total supply after import  
+3. ✅ Write structured 32-byte marker (height + count + total)
+4. ⬜ Replay blocks H+1..local_tip after import (critical for nodes already past checkpoint height)
+5. ✅ All pre-checkpoint chain-scan migrations gated behind `!checkpoint_applied`
+6. ⬜ Disable authority sync (`Q_BALANCE_AUTHORITY_PEER`) after checkpoint applied
+7. ⬜ Kill the 15-second RocksDB→HashMap backward sync
+
+#### Phase 1 — Deterministic Replay CI
+
+Before implementing `balance_root`, prove the transition function is deterministic:
+
+```text
+Test variants:
+  same blocks, two fresh DBs → assert identical balance_root
+  same blocks, different batch sizes → assert identical balance_root  
+  same blocks, restart halfway → assert identical balance_root
+  same blocks, cache disabled/enabled → assert identical balance_root
+  same blocks, post-checkpoint replay → assert identical balance_root
+```
+
+The cache/restart cases catch lifecycle bugs, which are the predominant failure mode.
+
+#### Phase 2 — Add `balance_root` Field and Activation Rule
+
+```rust
+pub balance_root: Option<[u8; 32]>
+```
+
+With:
+- Strict activation height (hardcoded, 2+ weeks out)
+- Post-state root (after applying block transactions to RocksDB canonical store)
+- `balance_root` covered by block hash/signature
+- Validation: apply block → recompute root from DB → compare → reject if mismatch
+- Recovery mode: if this node rejects blocks quorum accepts → reload checkpoint → replay
+
+#### Phase 3 — Remove All Off-Chain Balance Mutations
+
+Once root validation exists, any off-chain write becomes a consensus hazard:
+
+- ❌ Balance gossip application (P2P balance propagation bypassing blocks)
+- ❌ Authority peer overwrite (`Q_BALANCE_AUTHORITY_PEER`)
+- ❌ Startup DEX adjustment (`apply_dex_qug_adjustments`)
+- ❌ Convergence migration (`safe_batched_convergence_v103`)
+- ❌ v8.x rebuild migrations
+- ❌ 15-second RocksDB→HashMap backward sync
+- ❌ Admin balance rebuild unless explicitly offline and non-consensus
+
+The DEX must encode all fee/credit events as on-chain transactions before this phase.
+
+#### Phase 4 — Authenticated Snapshots / Fast Sync
+
+Only after roots are live:
+
+```text
+New node:
+  1. Download snapshot at height S
+  2. Verify: hash(snapshot) == block[S].balance_root
+  3. Replay blocks S+1 through current tip, verifying each balance_root
+  4. No trust beyond snapshot hash is required — all subsequent state cryptographically verified
+```
+
+Note: verify snapshot against `block[S].balance_root`, NOT the current tip root (unless S == tip).
+
+---
+
+### 10.4 Corrected Key Claim
+
+**Original:**
+
+> "Adding a `balance_root` to block headers is the single most impactful architectural change possible. It closes the gap between Layer 1 and Layer 2 permanently."
+
+**Revised (per Advisor A):**
+
+> "Adding a consensus-enforced `balance_root` to block headers, activated after a canonical checkpoint and paired with removal of all off-chain balance mutations, is the single most impactful architectural change possible. It makes balance divergence consensus-visible and prevents honest nodes with the same pre-state and deterministic transition rules from silently diverging."
+
+**The complete fix requires:**
+
+```text
+canonical checkpoint (v10.4.14/v10.4.15)
++ deterministic state transition function (Phase 1 CI)
++ balance_root in block hash (Phase 2)
++ strict activation-height validation (Phase 2)
++ no off-chain balance writes (Phase 3)
++ snapshot/replay recovery path (Phase 4)
+```
+
+If implemented that way, Q-NarwhalKnight moves from:
+
+```text
+state = f(blocks) + local_history + migrations + gossip + ...
+```
+
+to:
+
+```text
+state_n = apply(block_n, state_{n-1})
+block_n.balance_root = hash(state_n)
+```
+
+That is the correct architecture.

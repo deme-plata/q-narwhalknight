@@ -4,6 +4,21 @@
 pub const CHECKPOINT_HEIGHT: u64 = 16538868;
 pub const CHECKPOINT_WALLET_COUNT: usize = 1332;
 
+/// Total raw balance units across all 1,332 wallets (u128 sum).
+/// Computed from CHECKPOINT_DATA; verify after import.
+pub const CHECKPOINT_TOTAL_SUPPLY: u128 = 497_391_964_203_542_355_791_983_084_160;
+
+/// SHA-256 of canonical representation: sorted `address_hex:raw_balance\n`-per-line (no trailing newline).
+/// Canonical sort: lexicographic on 64-char lowercase hex address.
+/// Canonical line format: `{64_hex}:{u128_decimal}` — one line per wallet, NO trailing newline on last line.
+pub const CHECKPOINT_SHA256: &str = "eabbeadf85d03fb3a3b3fbafb1f6928513abafaf49ffba758f42f889a3fd8009";
+
+/// `prev_block_hash` field of the block AT checkpoint height, as hex.
+/// Used to anchor the snapshot to the chain: block at CHECKPOINT_HEIGHT must have this prev hash.
+/// Raw bytes: [103,184,89,192,66,81,250,103,63,7,86,151,210,222,213,85,172,43,67,135,102,102,209,96,149,27,186,188,245,184,230,10]
+pub const CHECKPOINT_PREV_BLOCK_HASH_HEX: &str =
+    "67b859c04251fa673f075697d2ded555ac2b43876666d160951bbabcf5b8e60a";
+
 /// Canonical sorted (wallet_id_hex, raw_balance_str) pairs from Epsilon at checkpoint height.
 pub static CHECKPOINT_DATA: &[(&str, &str)] = &[
     ("0000000000000000000000000000000000000000000000000000000000000000", "135257191214039760600471302"),

@@ -76,7 +76,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.4.14"  # v10.4.14: Balance checkpoint — hardcoded Epsilon snapshot, idempotent one-time import, all chain-scan migrations gated
+version = "10.4.15"  # v10.4.15: Checkpoint hardening — count+total verification, structured 32-byte marker, post-checkpoint gap warning
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"

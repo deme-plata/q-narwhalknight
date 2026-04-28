@@ -5477,7 +5477,10 @@ impl QStorage {
         wallet_balances: &Arc<tokio::sync::RwLock<std::collections::HashMap<[u8; 32], u128>>>,
         total_minted_supply: &Arc<tokio::sync::RwLock<u128>>,
     ) -> Result<()> {
-        use crate::balance_checkpoint::{CHECKPOINT_DATA, CHECKPOINT_HEIGHT, CHECKPOINT_WALLET_COUNT};
+        use crate::balance_checkpoint::{
+            CHECKPOINT_DATA, CHECKPOINT_HEIGHT, CHECKPOINT_SHA256,
+            CHECKPOINT_TOTAL_SUPPLY, CHECKPOINT_WALLET_COUNT,
+        };
 
         if self.is_checkpoint_applied().await {
             info!(
@@ -5487,10 +5490,21 @@ impl QStorage {
             return Ok(());
         }
 
+        // v10.4.15: log current node height so we can warn about the post-checkpoint gap
+        let local_height = self.get_latest_qblock_height().await.unwrap_or(None).unwrap_or(0);
         warn!(
-            "🏁 [CHECKPOINT] Applying balance checkpoint at height {} ({} wallets)...",
-            CHECKPOINT_HEIGHT, CHECKPOINT_WALLET_COUNT
+            "🏁 [CHECKPOINT v10.4.15] Applying balance checkpoint at height {} ({} wallets). Node local height: {}",
+            CHECKPOINT_HEIGHT, CHECKPOINT_WALLET_COUNT, local_height
         );
+        if local_height > CHECKPOINT_HEIGHT {
+            warn!(
+                "🏁 [CHECKPOINT] ⚠️  Node is {} blocks PAST checkpoint height. \
+                 Balance effects from blocks {}..{} are NOT replayed by this import. \
+                 Implement Phase-0 post-checkpoint replay (see technical-review-why-decentralization-failed) \
+                 to recover full correctness.",
+                local_height - CHECKPOINT_HEIGHT, CHECKPOINT_HEIGHT + 1, local_height
+            );
+        }
 
         // 1. Purge all existing wallet_balance_ entries from RocksDB
         let deleted = self.delete_by_prefix(b"wallet_balance_").await.unwrap_or(0);
@@ -5507,7 +5521,6 @@ impl QStorage {
                 let key = format!("wallet_balance_{}", wallet_id_hex);
                 let value = balance.to_le_bytes();
                 self.hot_db.put_sync(CF_MANIFEST, key.as_bytes(), &value).await?;
-                // Decode hex into [u8; 32] for the in-memory HashMap
                 if let Ok(addr_bytes) = hex::decode(wallet_id_hex) {
                     if addr_bytes.len() == 32 {
                         let mut addr = [0u8; 32];
@@ -5520,22 +5533,53 @@ impl QStorage {
             }
         }
 
-        // 3. Update persisted total supply
+        // 3. v10.4.15: Verify import integrity (count + total supply)
+        if count != CHECKPOINT_WALLET_COUNT {
+            error!(
+                "🚨 [CHECKPOINT] INTEGRITY FAIL: imported {} wallets, expected {}. Aborting checkpoint — node DB state unchanged.",
+                count, CHECKPOINT_WALLET_COUNT
+            );
+            return Err(anyhow::anyhow!(
+                "Checkpoint wallet count mismatch: got {}, expected {}",
+                count, CHECKPOINT_WALLET_COUNT
+            ));
+        }
+        if total != CHECKPOINT_TOTAL_SUPPLY {
+            error!(
+                "🚨 [CHECKPOINT] INTEGRITY FAIL: computed total {} ≠ expected {}. \
+                 Aborting checkpoint.",
+                total, CHECKPOINT_TOTAL_SUPPLY
+            );
+            return Err(anyhow::anyhow!(
+                "Checkpoint total supply mismatch: got {}, expected {}",
+                total, CHECKPOINT_TOTAL_SUPPLY
+            ));
+        }
+        warn!(
+            "🏁 [CHECKPOINT] ✅ Integrity verified: {} wallets, total {} raw ({:.4} QUG). \
+             Expected SHA-256 of canonical form: {}",
+            count, total, total as f64 / 1e24, CHECKPOINT_SHA256
+        );
+
+        // 4. Update persisted total supply
         self.save_total_supply(total).await?;
         {
             let mut supply = total_minted_supply.write().await;
             *supply = total;
         }
 
-        // 4. Write checkpoint marker and sync WAL to survive hard restart
-        let height_bytes = CHECKPOINT_HEIGHT.to_le_bytes();
-        self.hot_db.put_sync(CF_MANIFEST, Self::CHECKPOINT_APPLIED_KEY, &height_bytes).await?;
+        // 5. Write structured marker: 8-byte height LE + 8-byte count LE + 16-byte total LE
+        //    This lets future code inspect what version of checkpoint was applied.
+        let mut marker = Vec::with_capacity(32);
+        marker.extend_from_slice(&CHECKPOINT_HEIGHT.to_le_bytes());          // bytes 0..8
+        marker.extend_from_slice(&(CHECKPOINT_WALLET_COUNT as u64).to_le_bytes()); // bytes 8..16
+        marker.extend_from_slice(&total.to_le_bytes());                      // bytes 16..32
+        self.hot_db.put_sync(CF_MANIFEST, Self::CHECKPOINT_APPLIED_KEY, &marker).await?;
 
         warn!(
-            "🏁 [CHECKPOINT] Done. Imported {} wallets, total supply {} raw units ({:.4} QUG display). Marker written.",
-            count,
-            total,
-            total as f64 / 1e24
+            "🏁 [CHECKPOINT] ✅ Done. Marker written (height={}, wallets={}, total={}). \
+             Node is ready — future blocks will update balances incrementally.",
+            CHECKPOINT_HEIGHT, count, total
         );
 
         Ok(())
