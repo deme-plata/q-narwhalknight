@@ -5494,11 +5494,10 @@ impl QStorage {
             return Ok(());
         }
 
-        // v10.4.15: log current node height so we can warn about the post-checkpoint gap
         let local_height = self.get_latest_qblock_height().await.unwrap_or(None).unwrap_or(0);
         warn!(
-            "🏁 [CHECKPOINT v10.4.15] Applying balance checkpoint at height {} ({} wallets). Node local height: {}",
-            CHECKPOINT_HEIGHT, CHECKPOINT_WALLET_COUNT, local_height
+            "🏁 [CHECKPOINT v{}] Applying balance checkpoint at height {} ({} wallets). Node local height: {}",
+            env!("CARGO_PKG_VERSION"), CHECKPOINT_HEIGHT, CHECKPOINT_WALLET_COUNT, local_height
         );
         if local_height > CHECKPOINT_HEIGHT {
             warn!(
@@ -5657,6 +5656,25 @@ impl QStorage {
                 txs_applied, local_height - CHECKPOINT_HEIGHT, blocks_missing,
                 wallet_count_after, replayed_total
             );
+
+            let total_replay_blocks = local_height - CHECKPOINT_HEIGHT;
+            if blocks_missing > 0 {
+                let pct = blocks_missing * 100 / total_replay_blocks.max(1);
+                if pct >= 5 {
+                    error!(
+                        "🚨 [CHECKPOINT] BALANCE ACCURACY WARNING: {} of {} replay blocks missing ({}%). \
+                         Post-checkpoint balances are INCOMPLETE. This node has chain gaps. \
+                         Run turbo-sync to fill gaps before trusting balance state.",
+                        blocks_missing, total_replay_blocks, pct
+                    );
+                } else {
+                    warn!(
+                        "⚠️ [CHECKPOINT] {} of {} replay blocks missing ({}%) — minor gaps, \
+                         balance state is nearly complete.",
+                        blocks_missing, total_replay_blocks, pct
+                    );
+                }
+            }
 
             local_height
         } else {
