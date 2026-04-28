@@ -3339,10 +3339,11 @@ impl TurboSyncManager {
                 {
                     Ok(resp) => {
                         if let Ok(text) = resp.into_string() {
-                            // Parse the blocks array from JSON sync response
-                            // Response format: {"blocks":[...], "count":N, ...}
+                            // Response format: {"success":true,"data":{"blocks":[...], "count":N}}
                             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
-                                if let Some(arr) = parsed["blocks"].as_array() {
+                                let blocks_arr = parsed["data"]["blocks"].as_array()
+                                    .or_else(|| parsed["blocks"].as_array());
+                                if let Some(arr) = blocks_arr {
                                     return arr.iter()
                                         .filter_map(|v| serde_json::from_value(v.clone()).ok())
                                         .collect();
