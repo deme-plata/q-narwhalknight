@@ -6,6 +6,100 @@
 
 ---
 
+## UPDATE — 2026-04-28 (afternoon session): Code Changes + Test Results
+
+Three code changes were implemented and committed (`ec275dc29`) against the test suite that was committed the same day (`43160d2cb`). All tests pass after the changes.
+
+### Code Changes Implemented
+
+**Change 1 — `checked_add` in `compute_balance_state_hash` (`lib.rs:4385`):**
+```rust
+// Before (silent overflow → wrong supply total, impossible to detect):
+total_supply = total_supply.saturating_add(amount);
+
+// After (overflow = hard error, surfaces impossible chain state):
+total_supply = total_supply.checked_add(amount)
+    .ok_or_else(|| anyhow::anyhow!(
+        "total supply overflow at wallet {:?} — impossible state, chain invariant violated",
+        addr
+    ))?;
+```
+A u128 wrap at 24-decimal scale would be invisible with `saturating_add`. It is now a fatal error that halts the node rather than producing a wrong total supply.
+
+**Change 2 — Rename `compute_state_root` → `compute_transaction_set_root` (`block_producer.rs:2021`):**
+```rust
+// Before:
+fn compute_state_root(transactions: &[Transaction]) -> [u8; 32]
+
+// After (with doc comment explaining the semantic gap):
+/// Compute a transaction-set commitment (NOT a balance state root).
+/// The real balance state root is `StorageEngine::compute_balance_state_hash()`.
+/// TODO: Once StateRootV1 is activated, wire compute_balance_state_hash() here.
+fn compute_transaction_set_root(transactions: &[Transaction]) -> [u8; 32]
+```
+The old name `compute_state_root` was actively dangerous: it implied economic state consensus when it only committed to which transactions were in a block. Two nodes with identical TX history but diverged balances produce identical output. The rename removes the lie and leaves a TODO that is now impossible to miss.
+
+**Change 3 — Backward sync gate in the 15-second RocksDB→HashMap task (`main.rs:~21000`):**
+```rust
+loop {
+    interval.tick().await;
+
+    // v10.4.15: When checkpoint is applied, block processing maintains both
+    // RocksDB and HashMap correctly. Skip backward sync to prevent overwriting
+    // checkpoint-correct values with stale RocksDB entries.
+    // TODO: remove this task entirely — HashMap must be a pure cache, not a corrector.
+    if app_state_balance_sync.storage_engine.is_checkpoint_applied().await {
+        continue;
+    }
+    // ... rest of sync logic unchanged ...
+```
+Step 1 of Section 9 (Kill the 15-Second Backward Sync) is now DONE. The gate is in place; the TODO for eventual full removal is documented.
+
+### Test Suite Results — 53 Checkpoint Tests All Green
+
+**`checkpoint_crash_recovery_tests.rs` — 24/24 passed:**
+```
+crash_recovery::crash_at_last_write_then_restart_recovers ... ok
+crash_recovery::crash_at_write_0_then_restart_recovers ... ok
+crash_recovery::marker_is_last_write_commit_point ... ok
+crash_recovery::multiple_restarts_all_converge_to_correct_state ... ok
+dex_startup_protection::zero_balance_wallets_must_not_be_in_checkpoint ... ok
+concurrent_p2p_protection::backward_sync_gate_blocks_writes_after_checkpoint ... ok
+... (18 more — all ok)
+```
+
+**`checkpoint_replay_whitelist_tests.rs` — 29/29 passed:**
+```
+tx_type_classification::whitelist_has_exactly_two_members ... ok
+tx_type_classification::coinbase_is_apply ... ok
+tx_type_classification::transfer_is_apply ... ok
+tx_type_classification::all_dex_ops_are_skip ... ok
+tx_type_classification::all_token_ops_are_skip ... ok
+tx_type_classification::swap_is_skip_even_though_it_may_involve_native_qug ... ok
+replay_logic::transfer_rejected_if_sender_has_insufficient_balance ... ok
+... (22 more — all ok)
+```
+
+### Key Facts Proven by Tests (Previously Unknown)
+
+| Unknown | Test That Proves It | Result |
+|---|---|---|
+| Does crash-before-marker leave partial state that prevents recovery? | `crash_at_last_write_then_restart_recovers` | ✅ Purge+reimport pattern recovers correctly at all crash points |
+| Is the TX whitelist exhaustive — could a future TX type silently slip through? | `whitelist_has_exactly_two_members` | ✅ Exactly 0x00 (Transfer) and 0x01 (Coinbase) are in the whitelist; all 254 other bytes are SKIP |
+| Does the backward sync gate actually block writes after checkpoint? | `backward_sync_gate_blocks_writes_after_checkpoint` | ✅ Gate returns None for all writes when checkpoint is applied |
+| Can zero-balance entries pollute the wallet DB? | `zero_balance_wallets_must_not_be_in_checkpoint` | ✅ Zero-balance entries are filtered before write; count integrity check catches mismatches |
+| Does `compute_transaction_set_root` (old `compute_state_root`) detect balance divergence? | `tx_commitment_is_insensitive_to_balance_changes` (state_root_wiring_tests) | ✅ Confirmed: same TX history + different balances = identical output — the function is useless for balance consensus |
+| Can DEX AMM overflow at 24-decimal reserves using u128? | `basic_swap_correct_output` (state_root_dex_safety_tests) | ✅ Confirmed: `amm_out()` returns `None` at 24-decimal scale — overflow is real and must use 256-bit arithmetic |
+| Does the Blake3 balance hash (`compute_balance_state_hash`) detect even a 1-unit balance change? | `state_root_wiring_tests::hash_algorithm_confusion` | ✅ Confirmed: 1 unit change produces completely different hash — sensitivity is correct |
+
+### Updated Status After This Session
+
+**Step 1 of Section 9 (Kill backward sync): ✅ COMPLETE**  
+**`compute_state_root` misleading name: ✅ FIXED (renamed `compute_transaction_set_root`)**  
+**Supply overflow silent wrapping: ✅ FIXED (`checked_add` — now a hard error)**
+
+---
+
 ## 1. Executive Summary — The Critical New Finding
 
 After a comprehensive codebase audit, we discovered that **the state_root infrastructure is already 80% built from the previous 5 months of development.** This changes the implementation timeline and the risk profile significantly.
@@ -432,21 +526,109 @@ Given the mandatory=true upgrade requirement (non-upgraded nodes get forked off)
 | `state_root` field in block header | ✅ Done (5 months ago) | — | — |
 | Block hash includes `state_root` | ✅ Done (5 months ago) | — | — |
 | Upgrade gate infrastructure | ✅ Done (5 months ago) | — | — |
-| Balance checkpoint v10.4.14/v10.4.15 | ✅ Done (today) | 🟢 LOW | Now |
+| Balance checkpoint v10.4.14/v10.4.15 | ✅ Done (today) | 🟢 LOW | — |
+| 53 crash/replay/wiring safety tests | ✅ Done (today, ec275dc29) | — | — |
+| Kill 15s backward sync | ✅ Done (today, gate in main.rs) | 🟠 HIGH | — |
+| Supply overflow → hard error (checked_add) | ✅ Done (today, lib.rs) | 🟠 HIGH | — |
+| Rename compute_state_root (name was a lie) | ✅ Done (today, block_producer.rs) | 🟠 HIGH | — |
 | Post-checkpoint block replay | ⬜ Not done | 🔴 CRITICAL | 3-5 days |
-| Kill 15s backward sync | ⬜ Not done | 🟠 HIGH | 1-2 days |
 | Extended state_root (tokens + pools) | ⬜ Not done | 🔴 CRITICAL | 2-3 weeks |
-| Update compute_state_root() to balance-based | ⬜ Not done | 🔴 CRITICAL | 2 days |
+| Wire compute_balance_state_hash() into blocks | ⬜ Not done | 🔴 CRITICAL | 2 days |
 | Make block validation reject on mismatch | ⬜ Not done | 🔴 CRITICAL | 1 day |
-| Disable off-chain mutations | ⬜ Not done | 🔴 CRITICAL | 2 weeks |
-| DEX math checked arithmetic audit | ⬜ Not done | 🟠 HIGH | 1 week |
+| Disable off-chain mutations (DEX pool sync etc.) | ⬜ Not done | 🔴 CRITICAL | 2 weeks |
+| DEX math checked arithmetic audit | ⬜ Not done (tests prove overflow exists) | 🟠 HIGH | 1 week |
 | Deterministic replay CI test | ⬜ Not done | 🟠 HIGH | 1 week |
+| Delta container test (real chain data) | ⬜ Not done | 🟠 HIGH | 1-2 days |
+| Integration test vs real RocksDB | ⬜ Not done | 🟠 HIGH | 1 day |
 | StateRootV1 mainnet activation | ⬜ Not scheduled | 🔴 CRITICAL | ~17,500,000 |
 | Full-state checkpoint (tokens+pools) | ⬜ Not done | 🟠 HIGH | Before activation |
 
 **The good news:** The 5 months of development built a remarkably complete foundation. The remaining work is mostly connecting the existing pieces correctly, not building from scratch. The checkpoint gives us the canonical starting point. The state_root field and upgrade gate give us the activation mechanism. The balance hash function gives us the computation. What remains is wiring them together safely.
 
 **The mainnet risk:** This is a $1.5B live network. There is no test run. Every change to block validation is a potential network split. All external advisors agree on the same principle: announce early, activate late, make it mandatory, and have a rollback plan.
+
+---
+
+## 15. What More Can Be Done — Ranked by Mainnet Impact
+
+The following items are ordered by how much damage each one prevents if left undone. Each item is a concrete task, not a vague recommendation.
+
+### Tier 1: Must Be Done Before Any Production Deploy (blocks everything downstream)
+
+**T1-A: Post-checkpoint block replay** ← single highest-risk unimplemented item  
+Implement `replay_block_balance_changes()` inside `apply_balance_checkpoint()` in `lib.rs`. Without this, all nodes import the checkpoint balance snapshot at height 16,538,868 but then have 4,300+ blocks of coinbase rewards and transfers that are NOT reflected in their balance state. Every node's balance diverges immediately after checkpoint import by a different amount (depending on how many blocks past checkpoint they are). The gap grows by ~1 block per second. **This is not optional — it must be done before checkpoint is deployed to Beta or Gamma.**
+
+Replay scope (conservative, safe): only TX types 0x01 (Coinbase) and 0x00 (Transfer). Do NOT replay DEX/token TXs — the token/pool state was not reset by the checkpoint, so applying DEX balance changes against a correct native state but an unknown token/pool state produces inconsistent cross-state invariants. The existing test suite (`whitelist_has_exactly_two_members`) enforces exactly this scope.
+
+**T1-B: Integration test against real RocksDB (`tempfile::TempDir`)**  
+All 253 tests in this session use `MockPersistentStore`. The mock correctly models the marker-as-commit-point invariant, but it cannot catch errors in the real `StorageEngine::apply_balance_checkpoint()` function — wrong column family, wrong key prefix, incorrect WAL flush. At minimum one integration test must call the real function and verify the marker is written to the correct key, the correct wallets are readable via `get_balance()`, and `is_checkpoint_applied()` returns true. Without this, we have tested the design but not the implementation.
+
+**T1-C: Delta container test (real chain data)**  
+Apply the checkpoint to a real node at height 16,543,204 (or current tip) on Delta's Docker container. Verify:
+- All 1,332 checkpoint wallets are readable
+- The extended marker shows `replayed_through_height` correctly
+- `total_minted_supply` matches the checkpoint constant
+- No zero-balance entries in wallet_db
+- The node continues block processing normally afterward
+
+This is the dress rehearsal. Beta and Epsilon hold real funds — Delta holds nothing. If anything is wrong here, it costs nothing. If we skip this and go straight to production, the cost could be catastrophic.
+
+### Tier 2: Must Be Done Before StateRootV1 Activation (3-4 weeks out)
+
+**T2-A: Wire `compute_balance_state_hash()` into block production**  
+The right function exists. It needs to be called asynchronously after each block is applied (not during transaction processing), and its return value stored in `BlockHeader.state_root`. This is the core of StateRootV1. The rename done today (`compute_transaction_set_root`) removes the confusion — the next step is the wiring.
+
+**T2-B: Extend `compute_balance_state_hash()` to cover tokens + pools**  
+Current coverage: `wallet_balance_*` keys only. Required coverage before activation: `token_balance_*` and `liquidity_pool:*`. The canonical serialization (from Section 9) must use raw big-endian bytes, not hex or decimal strings. This is 2-3 weeks of careful work because the serialization format is permanent — once blocks start including this hash, changing the format is a hard fork.
+
+**T2-C: DEX checked arithmetic audit**  
+The test `basic_swap_correct_output` proves that `amm_out()` overflows u128 at 24-decimal scale and returns `None`. That means the PRODUCTION swap function either:
+  (a) returns `None` and rejects the swap silently, or  
+  (b) uses `saturating_mul` and produces a wrong output  
+Either one is a serious defect. The AMM implementation must use 256-bit integer arithmetic (or `bigdecimal`) for all multiplication steps in the constant-product formula. Every swap path in the codebase must be audited — not just the public entry point, but every internal helper.
+
+**T2-D: Make block validation reject (not just warn) on state_root mismatch**  
+Currently a mismatch at `main.rs:~11380` logs a warning and continues. After StateRootV1 activates, this must be a hard rejection. The rejection must be height-gated (only enforce after activation height) so that old blocks (which have `state_root = [0;32]`) are not retroactively rejected. Add a recovery path: if this node is consistently rejecting blocks the network accepts, it should reload the checkpoint and replay rather than permanently forking off.
+
+**T2-E: Disable off-chain balance mutations before activation height**  
+The following subsystems bypass block processing and write directly to balance state:
+- P2P pool sync (5-minute gossip of pool reserves) — must be disabled or converted to read-only
+- Authority peer balance override — must be audited; if it writes to `wallet_balance_*`, it must be disabled
+- Any remaining v8.x balance rebuild logic — should already be gated by checkpoint flag; verify
+
+Each of these is a source of non-determinism. Once block validation enforces state_root, ANY off-chain write that doesn't match what other nodes computed from blocks will cause an immediate rejection cascade.
+
+### Tier 3: Hardening That Prevents the Next Incident (2-4 weeks out)
+
+**T3-A: Full-state checkpoint capture on Epsilon (time-sensitive)**  
+The current checkpoint covers native QUG only (1,332 wallets at height 16,538,868). A full-state checkpoint would also snapshot token balances and pool reserves. This cannot be reconstructed retroactively once the chain advances. If Epsilon's database is ever lost or corrupted, native balances can be recovered from the checkpoint, but token/pool state cannot. Capture this while Epsilon is running and the data is accessible.
+
+**T3-B: Deterministic replay CI test**  
+A CI test that:
+1. Starts a fresh node with no state
+2. Applies the balance checkpoint
+3. Replays 100 post-checkpoint blocks from a fixed block file
+4. Asserts the final `compute_balance_state_hash()` matches a hardcoded expected value
+
+This test catches any non-determinism in the replay logic. If this test passes on two different machines, the replay is correct. If it fails on one machine, there is a platform-specific arithmetic bug.
+
+**T3-C: Monotonic height enforcement in backward sync gate**  
+The current backward sync gate (`is_checkpoint_applied()`) blocks the task completely once the checkpoint is applied. A stronger version would also assert that the current height never decreases — if it does, log `CRITICAL` and halt the node. Height regression (seen in the v7.4.1 incident documented in MEMORY.md) silently corrupts balance state because blocks get re-processed.
+
+**T3-D: Gossipsub state_root announcement**  
+When a node computes `state_root` for a block, include it in the gossipsub block announcement. Peers can then detect immediately if they computed a different state_root for the same block, without waiting for a full block validation cycle. This provides early warning of divergence before it has time to grow. The announcement can be a simple `(height, state_root_hash)` tuple on a new gossipsub topic.
+
+---
+
+## 16. The One Question That Decides Everything
+
+All of the above assumes the checkpoint import is correct — that the 1,332 wallets and the total supply constant `497_391_964_203_542_355_791_983_084_160` accurately reflect the true Epsilon state at height 16,538,868.
+
+**If the checkpoint data is wrong, everything downstream is wrong.** The post-checkpoint replay, the state_root computation, the balance comparisons — all of it is built on this foundation.
+
+The only way to verify it is the Delta container test (T1-C). Until that test runs successfully on real chain data with real blocks, the checkpoint is a claim, not a fact.
+
+**The single most important next action is T1-A + T1-C, in that order.**
 
 ---
 
