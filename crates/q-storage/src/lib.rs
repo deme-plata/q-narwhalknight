@@ -5502,11 +5502,9 @@ impl QStorage {
         );
         if local_height > CHECKPOINT_HEIGHT {
             warn!(
-                "🏁 [CHECKPOINT] ⚠️  Node is {} blocks PAST checkpoint height. \
-                 Balance effects from blocks {}..{} are NOT replayed by this import. \
-                 Implement Phase-0 post-checkpoint replay (see technical-review-why-decentralization-failed) \
-                 to recover full correctness.",
-                local_height - CHECKPOINT_HEIGHT, CHECKPOINT_HEIGHT + 1, local_height
+                "🏁 [CHECKPOINT] Node is {} blocks past checkpoint height ({} → {}). \
+                 Phase-0 post-checkpoint replay (Coinbase + Transfer only) will run after import.",
+                local_height - CHECKPOINT_HEIGHT, CHECKPOINT_HEIGHT, local_height
             );
         }
 
@@ -5565,25 +5563,130 @@ impl QStorage {
             count, total, total as f64 / 1e24, CHECKPOINT_SHA256
         );
 
-        // 4. Update persisted total supply
-        self.save_total_supply(total).await?;
-        {
-            let mut supply = total_minted_supply.write().await;
-            *supply = total;
-        }
+        // 4. POST-CHECKPOINT REPLAY — Phase 0: Coinbase (0x01) + Transfer (0x00) only.
+        //    Replays balance effects of blocks CHECKPOINT_HEIGHT+1..local_height so that
+        //    nodes which are past the checkpoint height end up with correct current balances,
+        //    not the snapshot-at-checkpoint-height balances.
+        //
+        //    DEX swaps, token ops, contract calls are intentionally SKIPPED:
+        //    token/pool state was NOT reset by the checkpoint, so applying DEX deltas
+        //    against an unknown token state would create cross-state inconsistency.
+        //    Whitelist enforcement mirrors checkpoint_replay_whitelist_tests (0x00 + 0x01 only).
+        //
+        //    `local_height` was measured before the purge + import above, so replay covers
+        //    exactly the blocks that existed on disk when this function was called.
+        //    Any blocks arriving DURING the import are handled by normal block processing.
+        let replayed_through = if local_height > CHECKPOINT_HEIGHT {
+            warn!(
+                "🏁 [CHECKPOINT] Starting post-checkpoint replay: {} → {} ({} blocks)...",
+                CHECKPOINT_HEIGHT + 1, local_height, local_height - CHECKPOINT_HEIGHT
+            );
 
-        // 5. Write structured marker: 8-byte height LE + 8-byte count LE + 16-byte total LE
-        //    This lets future code inspect what version of checkpoint was applied.
-        let mut marker = Vec::with_capacity(32);
-        marker.extend_from_slice(&CHECKPOINT_HEIGHT.to_le_bytes());          // bytes 0..8
-        marker.extend_from_slice(&(CHECKPOINT_WALLET_COUNT as u64).to_le_bytes()); // bytes 8..16
-        marker.extend_from_slice(&total.to_le_bytes());                      // bytes 16..32
+            // Clone the just-imported checkpoint balances as the starting point
+            let mut replay_map: std::collections::HashMap<[u8; 32], u128> = {
+                let wb = wallet_balances.read().await;
+                wb.clone()
+            };
+
+            let mut txs_applied = 0u64;
+            let mut blocks_missing = 0u64;
+
+            for height in (CHECKPOINT_HEIGHT + 1)..=local_height {
+                match self.get_qblock_by_height(height).await {
+                    Ok(Some(block)) => {
+                        for tx in &block.transactions {
+                            match tx.tx_type as u8 {
+                                0x01 => {
+                                    // Coinbase: credit mining reward to block receiver
+                                    if tx.to != [0u8; 32] && tx.amount > 0 {
+                                        let bal = replay_map.entry(tx.to).or_insert(0);
+                                        *bal = bal.saturating_add(tx.amount);
+                                        txs_applied += 1;
+                                    }
+                                }
+                                0x00 => {
+                                    // Transfer: debit sender, credit receiver
+                                    if tx.amount > 0 && tx.from != [0u8; 32] {
+                                        if let Some(sender) = replay_map.get_mut(&tx.from) {
+                                            *sender = sender.saturating_sub(tx.amount);
+                                        }
+                                        let bal = replay_map.entry(tx.to).or_insert(0);
+                                        *bal = bal.saturating_add(tx.amount);
+                                        txs_applied += 1;
+                                    }
+                                }
+                                _ => {} // DEX, token, contract, vault, etc. — skip
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        debug!("🏁 [CHECKPOINT REPLAY] Block {} not in local DB, skipping.", height);
+                        blocks_missing += 1;
+                    }
+                    Err(e) => {
+                        warn!("⚠️ [CHECKPOINT REPLAY] Error fetching block {}: {}", height, e);
+                        blocks_missing += 1;
+                    }
+                }
+            }
+
+            // Drop zero-balance wallets — they don't exist on-chain
+            replay_map.retain(|_, v| *v > 0);
+
+            // Batch-write all updated balances to RocksDB (fsync — crash-safe)
+            self.save_wallet_balances(&replay_map).await?;
+
+            // Update in-memory HashMap to match replayed state
+            let wallet_count_after = replay_map.len();
+            {
+                let mut wb = wallet_balances.write().await;
+                *wb = replay_map.clone();
+            }
+
+            // Recompute + persist total supply from replayed balances
+            let replayed_total: u128 = replay_map.values().sum();
+            self.save_total_supply(replayed_total).await?;
+            {
+                let mut supply = total_minted_supply.write().await;
+                *supply = replayed_total;
+            }
+
+            warn!(
+                "🏁 [CHECKPOINT] ✅ Replay complete: {} txs applied, {} blocks ({} missing). \
+                 Wallets: {}. Total supply after replay: {} raw.",
+                txs_applied, local_height - CHECKPOINT_HEIGHT, blocks_missing,
+                wallet_count_after, replayed_total
+            );
+
+            local_height
+        } else {
+            // Node is at or before checkpoint height — no replay needed
+            self.save_total_supply(total).await?;
+            {
+                let mut supply = total_minted_supply.write().await;
+                *supply = total;
+            }
+            CHECKPOINT_HEIGHT
+        };
+
+        // 5. Write extended marker (40 bytes):
+        //    bytes 0..8:   checkpoint_height (u64 LE)
+        //    bytes 8..16:  checkpoint_wallet_count (u64 LE)
+        //    bytes 16..32: checkpoint_total_supply (u128 LE)  — snapshot value, not replayed
+        //    bytes 32..40: replayed_through_height (u64 LE)   — u64::MAX when no replay needed
+        //
+        //    is_checkpoint_applied() checks only for key presence — marker length can grow safely.
+        let mut marker = Vec::with_capacity(40);
+        marker.extend_from_slice(&CHECKPOINT_HEIGHT.to_le_bytes());
+        marker.extend_from_slice(&(CHECKPOINT_WALLET_COUNT as u64).to_le_bytes());
+        marker.extend_from_slice(&total.to_le_bytes());
+        marker.extend_from_slice(&replayed_through.to_le_bytes());
         self.hot_db.put_sync(CF_MANIFEST, Self::CHECKPOINT_APPLIED_KEY, &marker).await?;
 
         warn!(
-            "🏁 [CHECKPOINT] ✅ Done. Marker written (height={}, wallets={}, total={}). \
-             Node is ready — future blocks will update balances incrementally.",
-            CHECKPOINT_HEIGHT, count, total
+            "🏁 [CHECKPOINT] ✅ Done. Marker written (checkpoint_height={}, wallets={}, \
+             checkpoint_total={}, replayed_through={}).",
+            CHECKPOINT_HEIGHT, count, total, replayed_through
         );
 
         Ok(())
