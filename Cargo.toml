@@ -76,7 +76,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.4.15"  # v10.4.15: Checkpoint hardening — count+total verification, structured 32-byte marker, post-checkpoint gap warning
+version = "10.4.16"  # v10.4.16: Post-checkpoint block replay (Phase 0) + real RocksDB integration tests
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"
