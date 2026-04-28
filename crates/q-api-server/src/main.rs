@@ -3380,10 +3380,31 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         info!("   To re-enable: set Q_ENABLE_CHAIN_REBUILD=1 (only for debugging on Docker test nodes)");
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // v10.4.12: BALANCE CHECKPOINT — one-time idempotent import of Epsilon snapshot
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Applies the hardcoded Epsilon balance state on the first boot with this binary.
+    // Once the marker key is written to RocksDB, all old chain-scanning migrations
+    // are permanently skipped — their outputs are non-deterministic and cannot
+    // reproduce Epsilon's correct state. See docs/technical-review-balance-divergence-root-cause-2026-04-28.md
+    {
+        match state.storage_engine.apply_balance_checkpoint(
+            &state.wallet_balances,
+            &state.total_minted_supply,
+        ).await {
+            Ok(()) => {}
+            Err(e) => warn!("⚠️ [CHECKPOINT] Failed to apply balance checkpoint: {} — continuing with existing state", e),
+        }
+    }
+    let checkpoint_applied = state.storage_engine.is_checkpoint_applied().await;
+    if checkpoint_applied {
+        info!("🏁 [CHECKPOINT] Balance checkpoint applied — all chain-scanning migrations will be skipped.");
+    }
+
     // v8.5.0: One-time testnet wallet purge + rebuild from mainnet blocks.
     // Pass emission controller total so balances are scaled to match reality.
     // Also load the balance watermark to prevent re-inflation on restart.
-    if chain_rebuild_enabled {
+    if chain_rebuild_enabled && !checkpoint_applied {
         let emission_total = match balance_engine.get_emission_summary().await {
             Ok(summary) => summary.total_supply,
             Err(_) => 0, // No emission state → skip scaling
@@ -3442,7 +3463,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     // v8.5.4: MONEY GLITCH FIX — Reconcile wallet balances with DEX swap history.
     // State sync was importing stale balances from peers, overwriting DEX swap debits.
     // This one-time migration rebuilds balances from chain + applies swap debits/credits.
-    if chain_rebuild_enabled {
+    if chain_rebuild_enabled && !checkpoint_applied {
         match state.storage_engine.reconcile_balances_with_dex_swaps().await {
             Ok(true) => {
                 // Reconciliation happened — refresh in-memory wallet_balances from RocksDB
@@ -3609,7 +3630,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     // v8.8.1: Full chain balance rebuild with proportional scaling.
     // Replays chain for correct relative proportions (coinbase + transfers), then
     // scales total to match emission controller (~69K QUG). Preserves proportional shares.
-    if chain_rebuild_enabled {
+    if chain_rebuild_enabled && !checkpoint_applied {
         let emission_total_for_rebuild = match balance_engine.get_emission_summary().await {
             Ok(summary) => summary.total_supply,
             Err(_) => 0,
@@ -3638,7 +3659,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     // v8.8.5: Deterministic full-chain transaction replay + proportional scaling.
     // Replays every block from genesis, computes expected emission from FIRST PRINCIPLES
     // (genesis + halving schedule), scales proportionally. Does NOT trust controller state.
-    if chain_rebuild_enabled {
+    if chain_rebuild_enabled && !checkpoint_applied {
         match state.storage_engine.deterministic_tx_replay_v885().await {
             Ok(true) => {
                 // Refresh in-memory balances from RocksDB
@@ -3695,7 +3716,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     // Fixes servers where v8.8.5 already ran but emission controller wasn't synced.
     // The emission controller still has the old inflated total (49M on Beta, 2.2M on Epsilon)
     // while wallet balances are correctly scaled to ~64K QUG.
-    {
+    if !checkpoint_applied {
         match state.storage_engine.post_migration_emission_sync_v886().await {
             Ok(Some((_old, wallet_total))) => {
                 let qug = 1_000_000_000_000_000_000_000_000u128;
@@ -3750,10 +3771,37 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         }
     }
 
+    // Q_RESET_CONVERGENCE_MIGRATION=1 — delete the v103 flag so the migration re-runs this boot.
+    // Use this to force a balance rebuild when the node's balance state has diverged from peers.
+    if std::env::var("Q_RESET_CONVERGENCE_MIGRATION").map(|v| v == "1").unwrap_or(false) {
+        warn!("⚠️  [Q_RESET_CONVERGENCE_MIGRATION] Deleting convergence migration flag — will re-run this boot");
+        let _ = state.storage_engine.delete_migration_flag(b"migration_safe_convergence_v103_done").await;
+    }
+
+    // Q_PURGE_WALLET_BALANCES=1 — wipe ALL wallet_balance_ keys from RocksDB and clear in-memory
+    // state BEFORE any authority sync or chain-rebuild migration runs. Use with Q_BALANCE_AUTHORITY_PEER
+    // to cleanly import a trusted peer's balance state without leaving stale/extra wallet entries.
+    // WARNING: balances will be zero until Q_BALANCE_AUTHORITY_PEER imports them.
+    if std::env::var("Q_PURGE_WALLET_BALANCES").map(|v| v == "1").unwrap_or(false) {
+        warn!("🚨 [Q_PURGE_WALLET_BALANCES] Purging ALL wallet_balance_ entries from RocksDB...");
+        let deleted = state.storage_engine.delete_by_prefix(b"wallet_balance_").await.unwrap_or(0);
+        let _ = state.storage_engine.save_balance_watermark(0).await;
+        let _ = state.storage_engine.save_total_supply(0).await;
+        {
+            let mut wb = state.wallet_balances.write().await;
+            wb.clear();
+        }
+        {
+            let mut supply = state.total_minted_supply.write().await;
+            *supply = 0;
+        }
+        warn!("🚨 [Q_PURGE_WALLET_BALANCES] Purged {} wallet entries. Balances will import from Q_BALANCE_AUTHORITY_PEER.", deleted);
+    }
+
     // v1.0.3: Full state convergence migration — deterministic replay of QUG + vault state.
     // Replays entire chain to rebuild wallet balances AND CollateralVault from block data.
     // Runs ONCE per node (flag: migration_safe_convergence_v103_done).
-    if chain_rebuild_enabled {
+    if chain_rebuild_enabled && !checkpoint_applied {
         match state.storage_engine.safe_batched_convergence_v103().await {
             Ok(true) => {
                 let qug = 1_000_000_000_000_000_000_000_000u128;

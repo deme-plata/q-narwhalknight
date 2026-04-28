@@ -166,6 +166,7 @@ impl StakingTier {
 pub mod aegis_sync; // v0.9.14-beta: AEGIS-QL signed P2P sync
 #[cfg(not(target_os = "windows"))]
 pub mod async_engine; // ✅ v1.0.2-beta: AsyncStorageEngine with micro-batching to eliminate mining stalls
+pub mod balance_checkpoint; // v10.4.12: Hardcoded Epsilon balance snapshot — idempotent one-time import
 pub mod balance_consensus;
 pub mod batch_sync;
 pub mod sharded_balance;  // 🚀 v3.4.6-beta: 16-shard balance cache for 2-3x lookup speedup // ✅ v1.0.12-beta: Phase 1 batch sync with 512-block batches + parallel validation
@@ -5449,6 +5450,95 @@ impl QStorage {
             self.hot_db.delete(CF_MANIFEST, key).await?;
         }
         Ok(count)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // v10.4.12 BALANCE CHECKPOINT — idempotent one-time import of Epsilon snapshot
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    const CHECKPOINT_APPLIED_KEY: &'static [u8] = b"__balance_checkpoint_v1__";
+
+    /// Returns true if the balance checkpoint has already been applied to this node's DB.
+    pub async fn is_checkpoint_applied(&self) -> bool {
+        self.hot_db
+            .get(CF_MANIFEST, Self::CHECKPOINT_APPLIED_KEY)
+            .await
+            .map(|v| v.is_some())
+            .unwrap_or(false)
+    }
+
+    /// Apply the hardcoded Epsilon balance snapshot exactly once.
+    /// - If already applied (marker key present): returns immediately.
+    /// - If not yet applied: purges all wallet_balance_ keys, imports CHECKPOINT_DATA,
+    ///   updates total supply, writes marker + syncs WAL.
+    /// wallet_balances and total_minted_supply are updated in-memory to match.
+    pub async fn apply_balance_checkpoint(
+        &self,
+        wallet_balances: &Arc<tokio::sync::RwLock<std::collections::HashMap<[u8; 32], u128>>>,
+        total_minted_supply: &Arc<tokio::sync::RwLock<u128>>,
+    ) -> Result<()> {
+        use crate::balance_checkpoint::{CHECKPOINT_DATA, CHECKPOINT_HEIGHT, CHECKPOINT_WALLET_COUNT};
+
+        if self.is_checkpoint_applied().await {
+            info!(
+                "🏁 [CHECKPOINT] Already applied (height {}), skipping.",
+                CHECKPOINT_HEIGHT
+            );
+            return Ok(());
+        }
+
+        warn!(
+            "🏁 [CHECKPOINT] Applying balance checkpoint at height {} ({} wallets)...",
+            CHECKPOINT_HEIGHT, CHECKPOINT_WALLET_COUNT
+        );
+
+        // 1. Purge all existing wallet_balance_ entries from RocksDB
+        let deleted = self.delete_by_prefix(b"wallet_balance_").await.unwrap_or(0);
+        warn!("🏁 [CHECKPOINT] Purged {} existing wallet entries from RocksDB.", deleted);
+
+        // 2. Import checkpoint data — write each wallet to CF_MANIFEST + in-memory HashMap
+        let mut total: u128 = 0;
+        let mut count = 0usize;
+        {
+            let mut wb = wallet_balances.write().await;
+            wb.clear();
+            for (wallet_id_hex, balance_str) in CHECKPOINT_DATA {
+                let balance: u128 = balance_str.parse().unwrap_or(0);
+                let key = format!("wallet_balance_{}", wallet_id_hex);
+                let value = balance.to_le_bytes();
+                self.hot_db.put_sync(CF_MANIFEST, key.as_bytes(), &value).await?;
+                // Decode hex into [u8; 32] for the in-memory HashMap
+                if let Ok(addr_bytes) = hex::decode(wallet_id_hex) {
+                    if addr_bytes.len() == 32 {
+                        let mut addr = [0u8; 32];
+                        addr.copy_from_slice(&addr_bytes);
+                        wb.insert(addr, balance);
+                    }
+                }
+                total = total.saturating_add(balance);
+                count += 1;
+            }
+        }
+
+        // 3. Update persisted total supply
+        self.save_total_supply(total).await?;
+        {
+            let mut supply = total_minted_supply.write().await;
+            *supply = total;
+        }
+
+        // 4. Write checkpoint marker and sync WAL to survive hard restart
+        let height_bytes = CHECKPOINT_HEIGHT.to_le_bytes();
+        self.hot_db.put_sync(CF_MANIFEST, Self::CHECKPOINT_APPLIED_KEY, &height_bytes).await?;
+
+        warn!(
+            "🏁 [CHECKPOINT] Done. Imported {} wallets, total supply {} raw units ({:.4} QUG display). Marker written.",
+            count,
+            total,
+            total as f64 / 1e24
+        );
+
+        Ok(())
     }
 
     /// Purge all DEX pools, contracts, token balances, and related state

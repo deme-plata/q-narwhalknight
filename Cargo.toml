@@ -76,7 +76,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.4.13"  # v10.4.13: Windows peer discovery fix — register all bootstrap transport addresses (WSS/443 fallback when TCP/9001 firewalled)
+version = "10.4.14"  # v10.4.14: Balance checkpoint — hardcoded Epsilon snapshot, idempotent one-time import, all chain-scan migrations gated
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"
