@@ -4382,7 +4382,11 @@ impl QStorage {
             hasher.update(addr.as_slice());
             hasher.update(&amount.to_le_bytes());
             wallet_count += 1;
-            total_supply = total_supply.saturating_add(amount);
+            total_supply = total_supply.checked_add(amount)
+                .ok_or_else(|| anyhow::anyhow!(
+                    "total supply overflow at wallet {:?} — impossible state, chain invariant violated",
+                    addr
+                ))?;
         }
 
         let hash: [u8; 32] = *hasher.finalize().as_bytes();

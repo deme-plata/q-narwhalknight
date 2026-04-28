@@ -20998,6 +20998,16 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             loop {
                 interval.tick().await;
 
+                // v10.4.15: When a balance checkpoint has been applied, RocksDB already holds
+                // the authoritative 1,332-wallet snapshot and block processing keeps both RocksDB
+                // and HashMap in sync correctly. Backward sync from RocksDB into HashMap is not
+                // needed and could overwrite checkpoint-correct HashMap values with stale RocksDB
+                // entries during the brief window before the first post-checkpoint block arrives.
+                // TODO: medium-term: remove this task entirely — HashMap must be a pure cache, not a corrector.
+                if app_state_balance_sync.storage_engine.is_checkpoint_applied().await {
+                    continue;
+                }
+
                 // v8.3.0: REVERSED DIRECTION — Read FROM RocksDB INTO HashMap (never other way).
                 // Previous: HashMap → RocksDB (CORRUPTED RocksDB with stale in-memory values).
                 // balance_consensus is the sole authoritative writer to RocksDB via add_balance_tx.

@@ -955,7 +955,7 @@ impl BlockProducer {
             q_consensus_guard::Upgrade::StateRootV1,
             next_height,
         ) {
-            Self::compute_state_root(&all_transactions)
+            Self::compute_transaction_set_root(&all_transactions)
         } else {
             [0u8; 32]
         };
@@ -2015,10 +2015,20 @@ impl BlockProducer {
         hasher.finalize().into()
     }
 
-    /// 🔐 v5.1.0: Compute state root from block transactions
-    /// SHA3-256 over sorted transaction hashes to create a deterministic commitment.
-    /// This ensures all nodes computing state from the same transactions get the same root.
-    fn compute_state_root(transactions: &[Transaction]) -> [u8; 32] {
+    /// Compute a transaction-set commitment (NOT a balance state root).
+    ///
+    /// SHA3-256 over sorted transaction IDs — a deterministic commitment to which
+    /// transactions are in this block. This is a TX dedup/receipt anchor, NOT an
+    /// economic state root. Two nodes with identical TX history but different balances
+    /// (due to a bug) would produce the same output from this function.
+    ///
+    /// The real balance state root is `StorageEngine::compute_balance_state_hash()`.
+    /// This function is wired into BlockHeader.state_root during the StateRootV1
+    /// shadow period; it will be replaced by compute_balance_state_hash() when
+    /// StateRootV1 activates (currently activation_height = u64::MAX on mainnet).
+    ///
+    /// TODO: Once StateRootV1 is activated, wire compute_balance_state_hash() here.
+    fn compute_transaction_set_root(transactions: &[Transaction]) -> [u8; 32] {
         use sha3::{Digest, Sha3_256};
 
         if transactions.is_empty() {
