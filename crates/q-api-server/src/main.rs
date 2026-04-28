@@ -5615,6 +5615,13 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         )
     );
 
+    // v10.5.0: Wire gap-fill channel so auto-repair actually fetches missing blocks.
+    // The sender lives in the integrity monitor; the receiver is consumed below after
+    // turbo_sync is constructed (it needs turbo_sync to dispatch the fetch).
+    let (gap_fill_tx, gap_fill_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(u64, u64)>();
+    safety_manager.integrity_monitor.set_gap_fill_channel(gap_fill_tx);
+
     info!("✅ MainnetSafetyManager initialized successfully");
     info!("   📍 Data directory: {}", db_path);
 
@@ -7660,6 +7667,23 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
     let turbo_sync = Arc::new(turbo_sync_manager);
     state.turbo_sync = Some(turbo_sync.clone());
+
+    // v10.5.0: Spawn gap-fill consumer — receives (first_gap, last_gap) from auto-repair.
+    // Fetches the missing block range directly from HTTP bootstrap peers and stores each
+    // block in RocksDB without touching the contiguous pointer (pointer advances on next
+    // integrity check once the gaps are filled).
+    {
+        let turbo_sync_gap = turbo_sync.clone();
+        let mut gap_fill_rx = gap_fill_rx;
+        tokio::spawn(async move {
+            while let Some((first_gap, last_gap)) = gap_fill_rx.recv().await {
+                info!("🔧 [GAP-FILL] Dispatching fetch for missing blocks {}-{}", first_gap, last_gap);
+                if let Err(e) = turbo_sync_gap.fill_gap_from_bootstrap(first_gap, last_gap).await {
+                    warn!("⚠️ [GAP-FILL] fetch for {}-{} failed: {}", first_gap, last_gap, e);
+                }
+            }
+        });
+    }
 
     // v1.0.2: Starship Flight Computer — central sync state machine
     let flight_computer = Arc::new(tokio::sync::RwLock::new(

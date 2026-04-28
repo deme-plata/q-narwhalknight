@@ -310,6 +310,11 @@ pub struct BackgroundIntegrityMonitor {
     last_check: AtomicU64,
     /// Issues found count
     issues_found: AtomicU64,
+    /// v10.5.0: Gap-fill trigger channel.
+    /// When BlockGaps are detected, sends (first_gap_height, last_gap_height) to this sender.
+    /// The TurboSyncManager or main loop owns the receiver and dispatches a targeted fetch.
+    /// Uses OnceLock so it can be set after Arc<BackgroundIntegrityMonitor> is created.
+    pub gap_fill_tx: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<(u64, u64)>>,
 }
 
 /// Trait for integrity checking operations
@@ -355,7 +360,14 @@ impl BackgroundIntegrityMonitor {
             running: AtomicBool::new(false),
             last_check: AtomicU64::new(0),
             issues_found: AtomicU64::new(0),
+            gap_fill_tx: std::sync::OnceLock::new(),
         }
+    }
+
+    /// v10.5.0: Wire a gap-fill channel so auto-repair can actually trigger fetches.
+    /// Safe to call after Arc<BackgroundIntegrityMonitor> is created — uses OnceLock.
+    pub fn set_gap_fill_channel(&self, tx: tokio::sync::mpsc::UnboundedSender<(u64, u64)>) {
+        let _ = self.gap_fill_tx.set(tx);
     }
 
     /// Start background monitoring
@@ -487,11 +499,23 @@ impl BackgroundIntegrityMonitor {
                     }
                 }
                 IntegrityIssue::BlockGaps { count, first_gap } => {
+                    // v10.5.0: Actually trigger the gap fill instead of just logging.
+                    // Scan for the last gap height so we pass a meaningful range.
+                    let last_gap = report.gaps.last().copied().unwrap_or(*first_gap);
                     warn!(
-                        "⚠️ [AUTO-REPAIR] {} gaps detected (first at {}), triggering P2P sync",
-                        count, first_gap
+                        "⚠️ [AUTO-REPAIR] {} gaps detected ({}-{}), dispatching gap-fill fetch",
+                        count, first_gap, last_gap
                     );
-                    // Gap fill would be triggered via P2P sync
+                    if let Some(tx) = self.gap_fill_tx.get() {
+                        if let Err(e) = tx.send((*first_gap, last_gap)) {
+                            error!("❌ [AUTO-REPAIR] Gap-fill channel send failed: {}", e);
+                        } else {
+                            info!("📨 [AUTO-REPAIR] Gap-fill request sent for {}-{}", first_gap, last_gap);
+                        }
+                    } else {
+                        warn!("⚠️ [AUTO-REPAIR] No gap-fill channel wired — gaps will persist until restart. \
+                               Call set_gap_fill_channel() during setup.");
+                    }
                 }
                 IntegrityIssue::BrokenParentChain { .. } => {
                     error!("🚨 [AUTO-REPAIR] Broken parent chain detected - manual intervention required");

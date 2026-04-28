@@ -1989,6 +1989,16 @@ pub struct TurboSyncManager {
     /// When true, a sync is in progress and new emergency syncs should be skipped
     emergency_sync_in_progress: Arc<AtomicBool>,
 
+    /// 🔒 v10.5.0: Fresh-start single-flight gate.
+    /// Gossipsub delivers peer-height events concurrently; each fires sync_to_height().
+    /// On a fresh node (height < 100) two invocations race over the height pointer.
+    /// Only one invocation should run the probe + initial sync at a time.
+    fresh_sync_gate: Arc<Mutex<()>>,
+    /// Highest target height latched by any concurrent caller while gate is held.
+    /// Gate winner reads this after acquiring the lock so it syncs to the maximum
+    /// announced height, not just the height that triggered its own invocation.
+    fresh_sync_target: Arc<AtomicU64>,
+
     // ═══════════════════════════════════════════════════════════════════════════════
     // 🚀 v1.0.2: Lock-Free Sync State (Miner-Optimized Atomics)
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -2465,6 +2475,9 @@ impl TurboSyncManager {
             session_sync_mode: Arc::new(AtomicU8::new(0)),
             // 🎚️ v8.5.4: Runtime throttle mode (default: Turbo=2 for max sync speed)
             network_throttle_mode: Arc::new(AtomicU8::new(2)),
+            // 🔒 v10.5.0: Fresh-start single-flight gate
+            fresh_sync_gate: Arc::new(Mutex::new(())),
+            fresh_sync_target: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -3294,6 +3307,72 @@ impl TurboSyncManager {
 
         info!("🔗 [CHECKPOINT SYNC] Network checkpoint at height {} (searched {}..{})", hi, last_empty, first_found);
         hi
+    }
+
+    /// v10.5.0: Fetch a specific block range from HTTP bootstrap peers and store directly.
+    /// Used by the auto-repair gap-fill consumer to recover holes left by GAP SKIP.
+    /// Does NOT touch the contiguous height pointer; the integrity monitor advances it
+    /// on its next scan once the gaps are confirmed filled.
+    pub async fn fill_gap_from_bootstrap(&self, first_gap: u64, last_gap: u64) -> Result<()> {
+        const BOOTSTRAP_URLS: &[&str] = &[
+            "http://185.182.185.227:8080",  // Beta
+            "http://89.149.241.126:8080",   // Epsilon
+        ];
+        const WINDOW: u64 = 500;
+
+        let mut cursor = first_gap;
+        while cursor <= last_gap {
+            let window_end = (cursor + WINDOW).min(last_gap + 1);
+            let limit = (window_end - cursor) as usize;
+            let url_base = BOOTSTRAP_URLS[((cursor / WINDOW) as usize) % BOOTSTRAP_URLS.len()];
+            let fetch_url = format!(
+                "{}/api/v1/sync/blocks?from_height={}&limit={}",
+                url_base, cursor, limit
+            );
+            info!("🔧 [GAP-FILL] GET {}", fetch_url);
+
+            let storage_clone = self.storage.clone();
+            let blocks = tokio::task::spawn_blocking(move || -> Vec<q_types::block::QBlock> {
+                match ureq::get(&fetch_url)
+                    .timeout(std::time::Duration::from_secs(20))
+                    .call()
+                {
+                    Ok(resp) => {
+                        if let Ok(text) = resp.into_string() {
+                            // Parse the blocks array from JSON sync response
+                            // Response format: {"blocks":[...], "count":N, ...}
+                            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
+                                if let Some(arr) = parsed["blocks"].as_array() {
+                                    return arr.iter()
+                                        .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                                        .collect();
+                                }
+                            }
+                        }
+                        vec![]
+                    }
+                    Err(e) => {
+                        warn!("🔧 [GAP-FILL] HTTP fetch failed: {}", e);
+                        vec![]
+                    }
+                }
+            }).await.unwrap_or_default();
+
+            if blocks.is_empty() {
+                warn!("🔧 [GAP-FILL] No blocks returned for range {}-{} — skipping window", cursor, window_end);
+            } else {
+                info!("🔧 [GAP-FILL] Storing {} blocks for range {}-{}", blocks.len(), cursor, window_end - 1);
+                for block in &blocks {
+                    if let Err(e) = storage_clone.save_qblock(block).await {
+                        warn!("🔧 [GAP-FILL] Failed to store block {}: {}", block.header.height, e);
+                    }
+                }
+            }
+            cursor = window_end;
+        }
+
+        info!("🔧 [GAP-FILL] Completed gap-fill for {}-{}", first_gap, last_gap);
+        Ok(())
     }
 
     /// Register a peer with their highest block height (v5.2.0: with monotonicity enforcement)
@@ -4861,9 +4940,43 @@ impl TurboSyncManager {
             } else if block.header.height > highest_contiguous + 1 {
                 let gap_size = block.header.height - (highest_contiguous + 1);
                 if blocks_forward == 0 && gap_size > 0 {
+                    // v10.5.0 TIP GUARD: never skip gaps when near the live chain tip.
+                    // At the tip, missed gossipsub blocks will be re-delivered within seconds.
+                    // Skipping them permanently orphans them and accumulates gaps that
+                    // auto-repair cannot fill (auto-repair is a no-op for BlockGaps).
+                    // GAP SKIP is only safe in the sparse historical range (genesis→100K)
+                    // where gossipsub will never re-deliver old blocks.
+                    let network_height = self.cached_max_peer_height.load(Ordering::Relaxed);
+                    let near_tip = network_height > 0
+                        && highest_contiguous + 5_000 >= network_height;
+                    if near_tip {
+                        warn!(
+                            "⏸️ [TIP GAP STOP] Gap of {} blocks ({}-{}) at live tip \
+                             (contiguous={}, network={}). Stopping — gossipsub will fill gap.",
+                            gap_size, highest_contiguous + 1, block.header.height - 1,
+                            highest_contiguous, network_height
+                        );
+                        break;
+                    }
+
+                    // v10.5.0: Bound the maximum gap skip for historical range.
+                    // The original code was unconditional — a peer returning blocks from
+                    // any height (e.g. their local tip, height 16M) when we requested
+                    // heights 1–1000 would silently advance our pointer 16M forward.
+                    // Limit to 10,000 heights; larger jumps require a registered chain void.
+                    const MAX_UNREGISTERED_GAP_SKIP: u64 = 10_000;
+                    if gap_size > MAX_UNREGISTERED_GAP_SKIP {
+                        error!(
+                            "🚫 [GAP SKIP REFUSED] Gap at start of batch is {} heights \
+                             (missing {}-{}), exceeds safety cap {}. Discarding out-of-range batch.",
+                            gap_size, highest_contiguous + 1, block.header.height - 1,
+                            MAX_UNREGISTERED_GAP_SKIP
+                        );
+                        break;
+                    }
                     warn!(
-                        "🚨 [v6.1.0 GAP SKIP] Gap at START! Missing blocks {}-{}",
-                        highest_contiguous + 1, block.header.height - 1
+                        "🔍 [v6.1.0 GAP SKIP] Historical gap at start of batch: {} heights ({}-{}), advancing pointer",
+                        gap_size, highest_contiguous + 1, block.header.height - 1
                     );
                     highest_contiguous = block.header.height;
                     blocks_forward += 1;
@@ -5905,6 +6018,9 @@ impl TurboSyncManager {
             orphan_limiter: Arc::clone(&self.orphan_limiter),
             // 🚀 v2.3.4-beta: Emergency sync guard
             emergency_sync_in_progress: Arc::clone(&self.emergency_sync_in_progress),
+            // 🔒 v10.5.0: Fresh-start single-flight gate (shared Arc — same gate across clones)
+            fresh_sync_gate: Arc::clone(&self.fresh_sync_gate),
+            fresh_sync_target: Arc::clone(&self.fresh_sync_target),
             // 🚀 v1.5.0-beta: CHIRON parallel state applicator
             parallel_state_applicator: Arc::clone(&self.parallel_state_applicator),
             // 🚀 v1.5.0-beta: NEMO high-contention executor
@@ -5980,6 +6096,39 @@ impl TurboSyncManager {
                 local_height, target_height, local_height - target_height
             ));
         }
+
+        // 🔒 v10.5.0: Fresh-start single-flight gate.
+        // On a fresh node (height < 100) multiple gossipsub height announcements arrive
+        // within milliseconds of each other, each triggering sync_to_height() concurrently.
+        // Two invocations racing over the shared height pointer corrupt it — one advances
+        // to 75,000 while the other writes 7,200 and the last writer wins.
+        //
+        // Pattern: latch the highest target, then try_lock().
+        //   - Gate winner: acquires lock, re-reads latched target, runs full probe + sync.
+        //   - Losers: latch their target and return immediately.
+        // The _guard is held for the rest of this invocation via RAII drop.
+        let _fresh_sync_guard;
+        let target_height = if local_height < 100 {
+            self.fresh_sync_target.fetch_max(target_height, Ordering::AcqRel);
+            match self.fresh_sync_gate.try_lock() {
+                Ok(guard) => {
+                    _fresh_sync_guard = Some(guard);
+                    // Use the highest target latched by any concurrent caller.
+                    self.fresh_sync_target.load(Ordering::Acquire)
+                }
+                Err(_) => {
+                    info!(
+                        "🔒 [FRESH-SYNC GATE] Invocation deferred — another caller holds \
+                         the gate (our target={}). Latched and exiting.",
+                        target_height
+                    );
+                    return Ok(());
+                }
+            }
+        } else {
+            _fresh_sync_guard = None;
+            target_height
+        };
 
         // 🔧 v3.1.4-beta: FRESH START PROTECTION
         // If local_height is 0 or very low (< 100), SKIP endgame detection entirely!
