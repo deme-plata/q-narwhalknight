@@ -3310,69 +3310,79 @@ impl TurboSyncManager {
     }
 
     /// v10.5.0: Fetch a specific block range from HTTP bootstrap peers and store directly.
-    /// Used by the auto-repair gap-fill consumer to recover holes left by GAP SKIP.
-    /// Does NOT touch the contiguous height pointer; the integrity monitor advances it
-    /// on its next scan once the gaps are confirmed filled.
-    pub async fn fill_gap_from_bootstrap(&self, first_gap: u64, last_gap: u64) -> Result<()> {
-        const BOOTSTRAP_URLS: &[&str] = &[
-            "http://185.182.185.227:8080",  // Beta
-            "http://89.149.241.126:8080",   // Epsilon
-        ];
-        const WINDOW: u64 = 500;
+    /// RC-3 [GAP-FILL]: Fill a missing block range using P2P (libp2p block-pack protocol).
+    /// Uses NetworkRequest::RequestBlockRangeDirect — the same turbo-sync mechanism —
+    /// instead of HTTP bootstrap. Does NOT touch the contiguous height pointer; the
+    /// integrity monitor advances it on its next scan once gaps are confirmed filled.
+    pub async fn fill_gap_p2p(&self, first_gap: u64, last_gap: u64) -> Result<()> {
+        const CHUNK: u64 = 200; // Match block-pack server cap per response
+        const TIMEOUT_SECS: u64 = 30;
+
+        let network_tx = match &self.network_tx {
+            Some(tx) => tx.clone(),
+            None => {
+                warn!("🔧 [RC-3 GAP-FILL P2P] No network channel — cannot fill gap {}-{} via P2P", first_gap, last_gap);
+                return Ok(());
+            }
+        };
 
         let mut cursor = first_gap;
         while cursor <= last_gap {
-            let window_end = (cursor + WINDOW).min(last_gap + 1);
-            let limit = (window_end - cursor) as usize;
-            let url_base = BOOTSTRAP_URLS[((cursor / WINDOW) as usize) % BOOTSTRAP_URLS.len()];
-            let fetch_url = format!(
-                "{}/api/v1/sync/blocks?from_height={}&limit={}",
-                url_base, cursor, limit
-            );
-            info!("🔧 [GAP-FILL] GET {}", fetch_url);
+            let end = (cursor + CHUNK - 1).min(last_gap);
 
-            let storage_clone = self.storage.clone();
-            let blocks = tokio::task::spawn_blocking(move || -> Vec<q_types::block::QBlock> {
-                match ureq::get(&fetch_url)
-                    .timeout(std::time::Duration::from_secs(20))
-                    .call()
-                {
-                    Ok(resp) => {
-                        if let Ok(text) = resp.into_string() {
-                            // Response format: {"success":true,"data":{"blocks":[...], "count":N}}
-                            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
-                                let blocks_arr = parsed["data"]["blocks"].as_array()
-                                    .or_else(|| parsed["blocks"].as_array());
-                                if let Some(arr) = blocks_arr {
-                                    return arr.iter()
-                                        .filter_map(|v| serde_json::from_value(v.clone()).ok())
-                                        .collect();
-                                }
-                            }
+            // Pick the best peer at or above the required height
+            let best_peer = {
+                let registry = self.peer_registry.read().await;
+                registry.active_peers_by_height()
+                    .into_iter()
+                    .find(|p| p.height >= end)
+                    .map(|p| p.peer_id.to_string())
+            };
+
+            if best_peer.is_none() {
+                warn!("🔧 [RC-3 GAP-FILL P2P] No peer at height {} — aborting gap fill for now", end);
+                break;
+            }
+
+            let (response_tx, response_rx) = oneshot::channel();
+            if let Err(e) = network_tx.send(NetworkRequest::RequestBlockRangeDirect {
+                peer_id: best_peer,
+                start_height: cursor,
+                end_height: end,
+                response_tx,
+            }) {
+                warn!("🔧 [RC-3 GAP-FILL P2P] Failed to send request {}-{}: {}", cursor, end, e);
+                cursor = end + 1;
+                continue;
+            }
+
+            match tokio::time::timeout(Duration::from_secs(TIMEOUT_SECS), response_rx).await {
+                Ok(Ok(Ok(blocks))) if !blocks.is_empty() => {
+                    warn!("🔧 [RC-3 GAP-FILL P2P] Storing {} blocks for {}-{}", blocks.len(), cursor, end);
+                    for block in &blocks {
+                        if let Err(e) = self.storage.save_qblock(block).await {
+                            warn!("🔧 [RC-3 GAP-FILL P2P] Failed to store block {}: {}", block.header.height, e);
                         }
-                        vec![]
-                    }
-                    Err(e) => {
-                        warn!("🔧 [GAP-FILL] HTTP fetch failed: {}", e);
-                        vec![]
                     }
                 }
-            }).await.unwrap_or_default();
-
-            if blocks.is_empty() {
-                warn!("🔧 [GAP-FILL] No blocks returned for range {}-{} — skipping window", cursor, window_end);
-            } else {
-                info!("🔧 [GAP-FILL] Storing {} blocks for range {}-{}", blocks.len(), cursor, window_end - 1);
-                for block in &blocks {
-                    if let Err(e) = storage_clone.save_qblock(block).await {
-                        warn!("🔧 [GAP-FILL] Failed to store block {}: {}", block.header.height, e);
-                    }
+                Ok(Ok(Ok(_))) => {
+                    warn!("🔧 [RC-3 GAP-FILL P2P] No blocks returned for {}-{}", cursor, end);
+                }
+                Ok(Ok(Err(e))) => {
+                    warn!("🔧 [RC-3 GAP-FILL P2P] Peer error for {}-{}: {}", cursor, end, e);
+                }
+                Ok(Err(_)) => {
+                    warn!("🔧 [RC-3 GAP-FILL P2P] Response channel closed for {}-{}", cursor, end);
+                }
+                Err(_) => {
+                    warn!("🔧 [RC-3 GAP-FILL P2P] Timeout ({}s) fetching {}-{}", TIMEOUT_SECS, cursor, end);
                 }
             }
-            cursor = window_end;
+
+            cursor = end + 1;
         }
 
-        info!("🔧 [GAP-FILL] Completed gap-fill for {}-{}", first_gap, last_gap);
+        info!("🔧 [RC-3 GAP-FILL P2P] Completed gap-fill for {}-{}", first_gap, last_gap);
         Ok(())
     }
 

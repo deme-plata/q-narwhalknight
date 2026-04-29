@@ -3387,13 +3387,23 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     // Once the marker key is written to RocksDB, all old chain-scanning migrations
     // are permanently skipped — their outputs are non-deterministic and cannot
     // reproduce Epsilon's correct state. See docs/technical-review-balance-divergence-root-cause-2026-04-28.md
+    //
+    // Set Q_SKIP_CHECKPOINT=1 to bypass checkpoint (fresh-sync test / dev mode).
+    // The node will start at height 0 and sync all blocks from genesis via P2P.
     {
-        match state.storage_engine.apply_balance_checkpoint(
-            &state.wallet_balances,
-            &state.total_minted_supply,
-        ).await {
-            Ok(()) => {}
-            Err(e) => warn!("⚠️ [CHECKPOINT] Failed to apply balance checkpoint: {} — continuing with existing state", e),
+        let skip_checkpoint = std::env::var("Q_SKIP_CHECKPOINT")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if skip_checkpoint {
+            warn!("🚫 [CHECKPOINT] Q_SKIP_CHECKPOINT=1 — skipping balance checkpoint (fresh-sync / test mode). Node will sync all blocks from genesis via P2P.");
+        } else {
+            match state.storage_engine.apply_balance_checkpoint(
+                &state.wallet_balances,
+                &state.total_minted_supply,
+            ).await {
+                Ok(()) => {}
+                Err(e) => warn!("⚠️ [CHECKPOINT] Failed to apply balance checkpoint: {} — continuing with existing state", e),
+            }
         }
     }
     let checkpoint_applied = state.storage_engine.is_checkpoint_applied().await;
@@ -7668,18 +7678,17 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     let turbo_sync = Arc::new(turbo_sync_manager);
     state.turbo_sync = Some(turbo_sync.clone());
 
-    // v10.5.0: Spawn gap-fill consumer — receives (first_gap, last_gap) from auto-repair.
-    // Fetches the missing block range directly from HTTP bootstrap peers and stores each
-    // block in RocksDB without touching the contiguous pointer (pointer advances on next
-    // integrity check once the gaps are filled).
+    // v10.5.0 RC-3: Spawn gap-fill consumer — receives (first_gap, last_gap) from auto-repair.
+    // Fetches the missing block range via P2P (libp2p block-pack) and stores each block in
+    // RocksDB without touching the contiguous pointer (pointer advances on next integrity check).
     {
         let turbo_sync_gap = turbo_sync.clone();
         let mut gap_fill_rx = gap_fill_rx;
         tokio::spawn(async move {
             while let Some((first_gap, last_gap)) = gap_fill_rx.recv().await {
-                info!("🔧 [GAP-FILL] Dispatching fetch for missing blocks {}-{}", first_gap, last_gap);
-                if let Err(e) = turbo_sync_gap.fill_gap_from_bootstrap(first_gap, last_gap).await {
-                    warn!("⚠️ [GAP-FILL] fetch for {}-{} failed: {}", first_gap, last_gap, e);
+                warn!("🔧 [RC-3 GAP-FILL P2P] Dispatching P2P fetch for missing blocks {}-{}", first_gap, last_gap);
+                if let Err(e) = turbo_sync_gap.fill_gap_p2p(first_gap, last_gap).await {
+                    warn!("⚠️ [RC-3 GAP-FILL P2P] fetch for {}-{} failed: {}", first_gap, last_gap, e);
                 }
             }
         });
