@@ -7694,6 +7694,32 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         >,
     > = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
 
+    // Auto-promote Epsilon (quillon.xyz primary bootstrap) to supernode for 10x sync priority.
+    // Dynamically fetches current peer ID — no hardcoded peer ID required.
+    // Q_SUPERNODE_PEERS env var overrides if set explicitly.
+    if turbo_sync_config.supernode_peers.is_empty() {
+        match reqwest::Client::new()
+            .get("https://quillon.xyz/api/v1/status")
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                if let Ok(body) = resp.text().await {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+                        if let Some(pid) = v.pointer("/data/peer_id").and_then(|x| x.as_str()) {
+                            turbo_sync_config.supernode_peers.push(pid.to_string());
+                            info!("🚀 [TURBO SYNC] Auto-promoted Epsilon to supernode: {} (10x priority)", pid);
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                info!("⚠️ [TURBO SYNC] Could not reach quillon.xyz for Epsilon peer ID — using default peer selection");
+            }
+        }
+    }
+
     let mut turbo_sync_manager =
         q_storage::TurboSyncManager::new(state.storage_engine.clone(), turbo_sync_config);
 
@@ -24106,8 +24132,17 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     {
         let app_state_for_sync = app_state.clone();
         let our_port = config.port;
-        q_api_server::state_sync_api::spawn_state_sync_task(app_state_for_sync, our_port);
-        info!("🔄 [STATE SYNC] Background state sync task spawned");
+        // Q_SKIP_CHECKPOINT=1 → full block sync from genesis: skip HTTP state snapshot
+        // so the turbo sync pointer stays at 0 and all blocks are downloaded in order.
+        let skip_state_snapshot = std::env::var("Q_SKIP_CHECKPOINT")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if skip_state_snapshot {
+            info!("🚫 [STATE SYNC] Q_SKIP_CHECKPOINT=1 — skipping HTTP state snapshot. Full block sync from genesis via P2P.");
+        } else {
+            q_api_server::state_sync_api::spawn_state_sync_task(app_state_for_sync, our_port);
+            info!("🔄 [STATE SYNC] Background state sync task spawned");
+        }
     }
 
     // ========================================
