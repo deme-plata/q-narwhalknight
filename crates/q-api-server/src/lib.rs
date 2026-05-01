@@ -1251,6 +1251,10 @@ pub struct AppState {
     // Balance API returns null/syncing when false to avoid showing stale 4200 QUG.
     pub startup_sync_complete: Arc<std::sync::atomic::AtomicBool>,
 
+    // BFT-safe balance finalization engine (Bracha RB + DAG-Knight anchoring).
+    // `None` on observer-only nodes; `Some` on validators.
+    pub balance_finality_engine: Option<Arc<q_storage::balance_finality_engine::BalanceFinalityEngine>>,
+
     // 🔄 v8.5.1: Admin notification email for update alerts
     // Set via POST /api/v1/admin/update/notification-email or Q_ADMIN_NOTIFICATION_EMAIL env
     pub admin_notification_email: Arc<tokio::sync::RwLock<Option<String>>>,
@@ -2795,6 +2799,7 @@ impl AppState {
             ai_active: Arc::new(std::sync::atomic::AtomicBool::new(false)), // 🤖 v9.3.3: AI inference throttle
             dex_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)), // 🛡️ v10.3.1: DEX gate (test mode: always ready)
             startup_sync_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)), // v10.3.2: test mode: always synced
+            balance_finality_engine: None, // initialized in main.rs for validator nodes
             admin_notification_email: Arc::new(tokio::sync::RwLock::new(
                 std::env::var("Q_ADMIN_NOTIFICATION_EMAIL").ok()
             )), // 🔄 v8.5.1: Admin notification email
@@ -4178,6 +4183,7 @@ impl AppState {
             ai_active: Arc::new(std::sync::atomic::AtomicBool::new(false)), // 🤖 v9.3.3: AI inference throttle
             dex_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)), // 🛡️ v10.3.1: DEX gate (starts DISABLED — enabled after reconciliation in main.rs)
             startup_sync_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)), // v10.3.2: starts false, set true after authority sync
+            balance_finality_engine: None, // wired after AppState construction in main.rs
             admin_notification_email: Arc::new(tokio::sync::RwLock::new(
                 std::env::var("Q_ADMIN_NOTIFICATION_EMAIL").ok()
             )), // 🔄 v8.5.1: Admin notification email

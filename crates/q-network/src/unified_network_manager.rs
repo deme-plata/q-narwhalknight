@@ -1865,6 +1865,8 @@ impl UnifiedNetworkManager {
             IdentTopic::new(network_config.network_id.bridge_attestations_topic()),
             // v9.1.0: Compute power announcements — aggregate hashrate from peers
             IdentTopic::new(network_config.network_id.compute_power_topic()),
+            // BFT balance finality: Bracha SEND/ECHO/READY messages for consensus
+            IdentTopic::new(network_config.network_id.balance_rb_topic()),
         ];
 
         // UN-DEPRECATED v3.9.5-beta: Balance gossipsub is now enabled by default

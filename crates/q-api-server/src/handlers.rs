@@ -11819,15 +11819,51 @@ pub async fn execute_swap(
 
         // Credit output token to user
         if to_is_qug {
-            // v10.3.2: REMOVED direct QUG credit — same double-deduction fix as debit side.
-            // balance_consensus will credit QUG when the Swap tx is processed from the block.
-            // Only record the DEX credit counter here (for tracking, does NOT modify balance).
+            // v10.5.1 FIX: The v10.3.2 assumption was wrong for the QUGUSD→QUG direction.
+            //
+            // HOW QUG→QUGUSD works (debit side — correct):
+            //   Swap tx has token_type=QUG → balance_consensus routes to native-transfer branch
+            //   → calls subtract_balance(user, amount) → writes to CF_MANIFEST wallet_balance_
+            //   → 15s sync task reads CF_MANIFEST → in-memory stays consistent.
+            //
+            // WHY QUGUSD→QUG was broken (credit side):
+            //   Swap tx has token_type=QUGUSD → balance_consensus routes to TOKEN TRANSFER branch
+            //   → calls subtract_token_balance(user, QUGUSD) — fails (handler already deducted)
+            //   → `continue` is hit → add_balance for QUG NEVER called by balance_consensus.
+            //   StateApplicator credits QUG to CF_TOKEN_BALANCES (wrong CF — get_balance reads
+            //   CF_MANIFEST wallet_balance_). The 15s sync task then "corrects" any optimistic
+            //   in-memory increase back to the stale CF_MANIFEST value → user sees revert.
+            //
+            // FIX: directly persist the QUG credit to CF_MANIFEST (same as debit side does via
+            // balance_consensus), and update in-memory immediately.
+            // No double-apply risk at restart: record_dex_qug_credit sets dex_applied_net =
+            // credits − debits, so apply_dex_qug_adjustments() computes delta = 0 on next boot.
             drop(token_balances);
             let wallet_hex = hex::encode(wallet_addr);
+
+            // 1. Record credit counter (for startup idempotency via apply_dex_qug_adjustments)
             if let Err(e) = state.storage_engine.record_dex_qug_credit(&wallet_hex, final_amount_out as u128).await {
-                warn!("⚠️ [SWAP v10.3.2] Failed to record DEX credit counter: {} — continuing", e);
+                warn!("⚠️ [SWAP v10.5.1] Failed to record DEX credit counter: {} — continuing", e);
             }
-            info!("💰 [SWAP v10.3.2] QUG credit will be applied by balance_consensus when Swap tx is included in block");
+
+            // 2. Persist QUG credit directly to CF_MANIFEST wallet_balance_ (the authoritative
+            //    location for native QUG). balance_consensus never does this for QUGUSD-input swaps.
+            match state.storage_engine.add_balance(&wallet_hex, final_amount_out as u128).await {
+                Ok(_) => {
+                    // 3. Sync in-memory cache from the freshly-updated RocksDB value
+                    let new_qug = state.storage_engine.get_balance(&wallet_hex).await.unwrap_or(0);
+                    let mut wallet_balances = state.wallet_balances.write().await;
+                    wallet_balances.insert(wallet_addr, new_qug);
+                    info!("💰 [SWAP v10.5.1] QUG credit {} persisted to CF_MANIFEST + in-memory synced (new balance: {})",
+                        final_amount_out, new_qug);
+                }
+                Err(e) => {
+                    warn!("⚠️ [SWAP v10.5.1] Failed to persist QUG credit to RocksDB: {} — updating in-memory only", e);
+                    let cur = state.wallet_balances.read().await.get(&wallet_addr).copied().unwrap_or(0);
+                    let mut wallet_balances = state.wallet_balances.write().await;
+                    wallet_balances.insert(wallet_addr, cur.saturating_add(final_amount_out as u128));
+                }
+            }
         } else if to_is_qugusd {
             // v4.0.3: Credit QUGUSD to token_balances using standard QUGUSD_TOKEN_ADDRESS
             let qugusd_addr = q_types::QUGUSD_TOKEN_ADDRESS;
@@ -16918,4 +16954,66 @@ pub async fn get_network_miners(
         "total_hashrate": total_hashrate,
         "miners": miners_list,
     }))
+}
+
+/// GET /api/v1/sync/dag-balance-anchor
+///
+/// Returns the full set of BFT-finalized balance records so fresh-syncing nodes
+/// can apply them without running their own Bracha RB instance from scratch.
+///
+/// Response includes:
+/// - `anchored`: records that have been embedded in a DAG vertex (have a `dag_vertex_hash`)
+/// - `pending_anchor`: records delivered (2f+1 READYs) but not yet in any vertex
+///
+/// Fresh nodes MUST apply both sets. The split exists because the DAG vertex for
+/// pending records may not have been produced yet, but the balance is already final.
+pub async fn get_dag_balance_anchor(
+    State(state): State<Arc<AppState>>,
+) -> impl axum::response::IntoResponse {
+    use q_types::DagBalanceAnchorResponse;
+
+    let engine = match &state.balance_finality_engine {
+        Some(e) => e.clone(),
+        None => {
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                axum::Json(serde_json::json!({
+                    "error": "balance_finality_engine not initialized on this node"
+                })),
+            );
+        }
+    };
+
+    let anchored = match engine.load_anchored_records().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("dag-balance-anchor: load_anchored_records failed: {e}");
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({ "error": e.to_string() })),
+            );
+        }
+    };
+
+    let pending_anchor = engine.pending_anchor_snapshot().await;
+    let latest_dag_round = state.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
+    let block_height = latest_dag_round;
+    let validator_count = {
+        // Use the network peer count as a proxy for active validators.
+        state
+            .libp2p_peer_count
+            .as_ref()
+            .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(0)
+    };
+
+    let response = DagBalanceAnchorResponse {
+        anchored,
+        pending_anchor,
+        latest_dag_round,
+        block_height,
+        validator_count,
+    };
+
+    (axum::http::StatusCode::OK, axum::Json(serde_json::to_value(response).unwrap_or_default()))
 }

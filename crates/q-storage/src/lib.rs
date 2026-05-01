@@ -264,6 +264,8 @@ pub mod nemo_executor;  // NEMO-style executor for high contention (+42% over Bl
 #[cfg(not(target_os = "windows"))]
 pub mod async_pipeline;  // Async storage pipeline (70% overhead reduction)
 
+pub mod balance_finality_engine;  // BFT-safe balance finalization via Bracha RB over DAG-Knight
+
 // ========== v10.0.0: 3-Stage Sync Pipeline (Phase 4 Optimization) ==========
 #[cfg(not(target_os = "windows"))]
 pub mod sync_pipeline;  // Receive → Validate → Store pipeline (~50% sync throughput increase)
@@ -4241,6 +4243,18 @@ impl QStorage {
         self.hot_db.delete(cf, key).await
     }
 
+    /// Scan the manifest CF for all entries with the given key prefix.
+    /// Used by BalanceFinalityEngine to enumerate finality proof records.
+    pub async fn scan_manifest_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        self.hot_db.scan_prefix(CF_MANIFEST, prefix).await
+    }
+
+    /// Fsync-write a single key into the manifest CF.
+    /// Used by BalanceFinalityEngine to persist finality proof records.
+    pub async fn put_manifest_sync(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.hot_db.put_sync(CF_MANIFEST, key, value).await
+    }
+
     /// Load all wallet balances from persistent storage
     /// v2.5.0: Returns u128 with backward compatibility for u64 storage
     pub async fn load_wallet_balances(&self) -> Result<HashMap<[u8; 32], u128>> {
@@ -5495,6 +5509,30 @@ impl QStorage {
         }
 
         let local_height = self.get_latest_qblock_height().await.unwrap_or(None).unwrap_or(0);
+
+        // v10.5.2 SAFETY: Never wipe an existing authoritative database.
+        // If this node already has MORE wallets than the checkpoint AND is past the checkpoint
+        // height, it is the data source — not the destination. Applying the checkpoint would
+        // overwrite live balances with an older snapshot, destroying accumulated state.
+        // This makes restarts safe on any node (including Epsilon/genesis) without needing
+        // any environment variable or manual rule to remember.
+        {
+            let existing_wallets = self.hot_db
+                .scan_prefix(CF_MANIFEST, b"wallet_balance_").await
+                .map(|v| v.len())
+                .unwrap_or(0);
+            if existing_wallets >= CHECKPOINT_WALLET_COUNT && local_height > CHECKPOINT_HEIGHT {
+                warn!(
+                    "🏁 [CHECKPOINT] Skipping wipe: node has {} wallets at height {} \
+                     (checkpoint has {} wallets at height {}). This node is authoritative — \
+                     writing marker and continuing.",
+                    existing_wallets, local_height, CHECKPOINT_WALLET_COUNT, CHECKPOINT_HEIGHT
+                );
+                self.hot_db.put_sync(CF_MANIFEST, Self::CHECKPOINT_APPLIED_KEY, b"skipped-authoritative").await?;
+                return Ok(());
+            }
+        }
+
         warn!(
             "🏁 [CHECKPOINT v{}] Applying balance checkpoint at height {} ({} wallets). Node local height: {}",
             env!("CARGO_PKG_VERSION"), CHECKPOINT_HEIGHT, CHECKPOINT_WALLET_COUNT, local_height
@@ -5510,6 +5548,14 @@ impl QStorage {
         // 1. Purge all existing wallet_balance_ entries from RocksDB
         let deleted = self.delete_by_prefix(b"wallet_balance_").await.unwrap_or(0);
         warn!("🏁 [CHECKPOINT] Purged {} existing wallet entries from RocksDB.", deleted);
+        // Also reset dex_applied_net trackers so apply_dex_qug_adjustments() re-applies the full
+        // credits-debits delta to the freshly-restored checkpoint balances on this boot.
+        // Without this, previously_applied == desired_net → delta == 0 → balances stay at
+        // checkpoint values, silently dropping all post-checkpoint DEX swap credits.
+        let dex_net_purged = self.delete_by_prefix(b"dex_applied_net:").await.unwrap_or(0);
+        if dex_net_purged > 0 {
+            warn!("🏁 [CHECKPOINT] Reset {} dex_applied_net entries — adjustments will be re-applied this boot.", dex_net_purged);
+        }
 
         // 2. Import checkpoint data — write each wallet to CF_MANIFEST + in-memory HashMap
         let mut total: u128 = 0;
@@ -9425,16 +9471,12 @@ impl QStorage {
             _ => 0u128,
         };
 
-        // Update applied-net tracker: credited - debited (keeps idempotent reconciliation in sync)
-        let new_applied_net: i128 = new_credit_total as i128 - current_debit as i128;
-        let applied_key = format!("dex_applied_net:{}", wallet_hex);
-
-        // Atomic write: credit counter + applied-net tracker
-        let batch: Vec<(&str, Vec<u8>, Vec<u8>)> = vec![
-            (CF_MANIFEST, credit_key.as_bytes().to_vec(), new_credit_total.to_le_bytes().to_vec()),
-            (CF_MANIFEST, applied_key.as_bytes().to_vec(), new_applied_net.to_le_bytes().to_vec()),
-        ];
-        self.hot_db.write_batch(batch).await?;
+        // v10.5.2 FIX: Do NOT update dex_applied_net here. Only apply_dex_qug_adjustments()
+        // should write dex_applied_net, after the checkpoint restore. If we set it here,
+        // the checkpoint purge resets wallet_balance_ but dex_applied_net survives, causing
+        // apply_dex_qug_adjustments() to compute delta=0 and silently drop post-checkpoint credits.
+        // Write credit counter only:
+        self.hot_db.put_sync(CF_MANIFEST, credit_key.as_bytes(), &new_credit_total.to_le_bytes()).await?;
 
         debug!("📈 [DEX ADJUST v10.3.1] Recorded QUG credit: {} += {} (total: {})",
             &wallet_hex[..8.min(wallet_hex.len())], amount as f64 / 1e24, new_credit_total as f64 / 1e24);

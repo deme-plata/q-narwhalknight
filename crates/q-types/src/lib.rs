@@ -288,6 +288,9 @@ pub mod legacy;
 // ✨ v1.1.8-beta: P2P balance update messages for decentralized mining
 pub mod balance_update;
 
+// BFT-safe balance finalization types (Bracha RB + DAG-Knight anchoring)
+pub mod balance_finality;
+
 // ✨ v1.0.58-beta: Advanced cryptographic primitives (FROST, AEGIS, SQIsign, Bulletproofs, etc.)
 #[cfg(feature = "advanced-crypto")]
 pub mod advanced_crypto;
@@ -410,6 +413,13 @@ pub use token_announcement::{
 // Re-export P2P balance update types (v1.1.9-beta: security hardened decentralized mining)
 pub use balance_update::{
     P2PBalanceUpdate, P2PMinerStats, BalanceUpdateType, BalanceUpdateError,
+};
+
+// Re-export Bracha RB balance finality types (BFT-safe finalization)
+pub use balance_finality::{
+    BrachaPhase, BrachaBalanceMsg, BrachaInstance, ValidatorBitmask,
+    BalanceFinalityRecord, DagBalanceAnchorResponse,
+    BRACHA_ROUND_WINDOW, BRACHA_PROPOSAL_TIMEOUT_ROUNDS, MAX_ANCHOR_BATCH, ANCHOR_FLUSH_SECS,
 };
 
 // Re-export CHIRON execution hints types (v1.5.0-beta: parallel sync)
@@ -4019,6 +4029,12 @@ impl NetworkId {
     /// This enables mining to localhost while syncing balances across all nodes
     pub fn balance_updates_topic(&self) -> String {
         format!("{}/balance-updates", self.gossipsub_topic_prefix())
+    }
+
+    /// Bracha Reliable Broadcast topic for BFT-safe balance finalization.
+    /// All validators subscribe and relay SEND/ECHO/READY messages on this topic.
+    pub fn balance_rb_topic(&self) -> String {
+        format!("{}/consensus/balance-rb", self.gossipsub_topic_prefix())
     }
 
     /// Get the miner stats gossipsub topic for this network

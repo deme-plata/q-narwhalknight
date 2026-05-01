@@ -3615,6 +3615,40 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         });
     }
 
+    // ── Balance Finality Engine (Bracha RB + DAG-Knight) ─────────────────────
+    // Wire BalanceFinalityEngine into AppState now that we have the node signing key
+    // and gossip channel. f=0 (shadow mode) for Phase 1; bump to f=1 when 4+ validators.
+    {
+        use q_storage::balance_finality_engine::BalanceFinalityEngine;
+        let rb_topic = state.config.network_id.balance_rb_topic();
+        let gossip_tx = state.libp2p_command_tx.as_ref().map(|tx| {
+            // Create an unbounded channel; the task below forwards to the network command.
+            let (fwd_tx, mut fwd_rx) =
+                tokio::sync::mpsc::unbounded_channel::<(String, Vec<u8>)>();
+            let cmd_tx = tx.clone();
+            tokio::spawn(async move {
+                while let Some((topic, data)) = fwd_rx.recv().await {
+                    let _ = cmd_tx.send(q_network::NetworkCommand::PublishMessage { topic, data });
+                }
+            });
+            fwd_tx
+        });
+
+        let engine = Arc::new(BalanceFinalityEngine::new(
+            0, // f=0 shadow mode (Phase 1, all-honest)
+            state.storage_engine.clone(),
+            Some(node_signing_key.clone()),
+            gossip_tx,
+            rb_topic,
+        ));
+
+        // Spawn background anchor-flush + timeout-cleanup tasks.
+        engine.clone().spawn_background_tasks();
+
+        state.balance_finality_engine = Some(engine);
+        info!("✅ BalanceFinalityEngine initialized (f=0 shadow mode)");
+    }
+
     // v8.8.1: Log founder wallet balance for diagnostics (no modification).
     // Balance restoration deferred — need to determine correct QUG amount from chain data.
     {
@@ -14519,6 +14553,22 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             debug!("🔄 [AUTO-UPDATE] Forwarded announcement ({} bytes)", data.len());
                         }
                     }
+                } else if topic.ends_with("/consensus/balance-rb") {
+                    // Bracha RB balance finality message: SEND / ECHO / READY
+                    if let Some(ref engine) = app_state_gossip.balance_finality_engine {
+                        match q_types::BrachaBalanceMsg::from_cbor(&data) {
+                            Ok(msg) => {
+                                let current_round = app_state_gossip
+                                    .current_height_atomic
+                                    .load(std::sync::atomic::Ordering::Relaxed);
+                                let result = engine.handle_bracha_msg(msg, current_round).await;
+                                debug!("🔐 [BALANCE-RB] {:?}", result);
+                            }
+                            Err(e) => {
+                                debug!("⚠️ [BALANCE-RB] CBOR decode failed: {}", e);
+                            }
+                        }
+                    }
                 } else {
                     warn!("Unknown gossipsub topic: {}, dropping", topic);
                 }
@@ -23254,6 +23304,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/sync/health", get(handlers::sync_health))
         // v1.0.2: Detailed sync status for admin panel chunk-level visibility
         .route("/api/v1/sync/detailed", get(handlers::sync_detailed))
+        // BFT-finalized balance anchor records (Bracha RB + DAG-Knight anchoring)
+        .route("/api/v1/sync/dag-balance-anchor", get(handlers::get_dag_balance_anchor))
         // Quantum Cryptography
         .route(
             "/api/v1/quantum/crypto/status",
