@@ -1553,16 +1553,19 @@ async fn run_benchmark(threads: usize, intensity: u8, duration: u64) -> Result<(
         .map(|thread_id| {
             let hash_counter = hash_counter.clone();
             let is_running = is_running.clone();
-            
-            tokio::spawn(async move {
-                benchmark_mining_thread(thread_id, hash_counter, is_running, intensity, benchmark_duration).await
-            })
+
+            std::thread::Builder::new()
+                .name(format!("bench-{}", thread_id))
+                .spawn(move || {
+                    benchmark_mining_thread(thread_id, hash_counter, is_running, intensity, benchmark_duration)
+                })
+                .expect("Failed to spawn benchmark thread")
         })
         .collect();
-    
-    // Wait for benchmark completion
+
+    // Wait for benchmark completion (blocking join — correct for CPU-bound threads)
     for handle in handles {
-        let _ = handle.await;
+        let _ = handle.join();
     }
     
     let elapsed = start_time.elapsed();
@@ -1818,6 +1821,7 @@ async fn run_mining(
 
             let bw_limit = bandwidth_limit;
             let thread_proxy_url = proxy_url.clone();
+            let thread_target_intensity = target_intensity.clone();
             std::thread::Builder::new()
                 .name(format!("miner-{}", thread_id))
                 .spawn(move || {
@@ -1833,7 +1837,7 @@ async fn run_mining(
                         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
                     }
                     mining_thread(
-                        thread_id, hash_counter, is_running, intensity, wallet, server_url,
+                        thread_id, hash_counter, is_running, thread_target_intensity, wallet, server_url,
                         new_block_signal, hashrate_khs, miner_id, miner_name, handle,
                         thread_state, event_tx, throttle_mode, challenge_latency, using_fallback,
                         bw_limit, shared_state_solutions, shared_state_blocks,
@@ -2772,26 +2776,68 @@ fn compute_dag_knight_hash_for_pool(header: &[u8]) -> [u8; 32] {
     current
 }
 
-async fn benchmark_mining_thread(
+// Sync function — runs on a dedicated OS thread via std::thread::spawn, NOT tokio.
+// CPU-bound mining must not run on tokio's async executor (causes scheduler stalls).
+fn benchmark_mining_thread(
     thread_id: usize,
     hash_counter: Arc<AtomicU64>,
     is_running: Arc<AtomicBool>,
     intensity: u8,
     duration: std::time::Duration,
 ) {
+    // Pin to core for accurate single-thread measurement
+    let core_ids = core_affinity::get_core_ids().unwrap_or_default();
+    if thread_id < core_ids.len() {
+        core_affinity::set_for_current(core_ids[thread_id]);
+    }
+
     let start_time = std::time::Instant::now();
-    let mut nonce = thread_id as u64 * 10_000;
-    let batch_size = (intensity as u64) * 1000;
-    
-    while start_time.elapsed() < duration && is_running.load(Ordering::SeqCst) {
-        // Mine a batch of nonces using DAG-Knight VDF algorithm
-        for _ in 0..batch_size {
-            let _hash = compute_dag_knight_hash(&[0u8; 32], nonce);
-            hash_counter.fetch_add(1, Ordering::Relaxed);
-            nonce += 1;
+    let mut nonce = thread_id as u64 * 1_000_000;
+    // Match the real mining thread's batch size (was 1000, corrected to 100_000)
+    let batch_size = (intensity as u64) * 100_000;
+
+    #[cfg(unix)]
+    let simd_batch = q_miner::cpu::optimal_mining_batch_size();
+    #[cfg(not(unix))]
+    let simd_batch: usize = 4;
+    let mut batch_results: [(u64, [u8; 32]); 16] = [(0u64, [0u8; 32]); 16];
+    let challenge = [0u8; 32];
+    let mut local_count: u64 = 0;
+
+    while start_time.elapsed() < duration && is_running.load(Ordering::Relaxed) {
+        let mut i: u64 = 0;
+        while i < batch_size {
+            #[cfg(unix)]
+            let count = q_miner::cpu::compute_dag_knight_hash_batch(
+                &challenge, nonce, simd_batch, &mut batch_results,
+            );
+            #[cfg(not(unix))]
+            let count = {
+                let bs = simd_batch.min(16).min(batch_results.len());
+                for bi in 0..bs {
+                    let n = nonce.wrapping_add(bi as u64);
+                    let mut input = [0u8; 40];
+                    input[32..].copy_from_slice(&n.to_le_bytes());
+                    let mut h = *blake3::hash(&input).as_bytes();
+                    for _ in 0..100 { h = *blake3::hash(&h).as_bytes(); }
+                    batch_results[bi] = (n, h);
+                }
+                bs
+            };
+            nonce = nonce.wrapping_add(count as u64);
+            local_count += count as u64;
+            // Flush to shared atomic every 8192 hashes (reduces contention vs per-hash)
+            if local_count >= 8192 {
+                hash_counter.fetch_add(local_count, Ordering::Relaxed);
+                local_count = 0;
+            }
+            i += count as u64;
         }
     }
-    
+
+    if local_count > 0 {
+        hash_counter.fetch_add(local_count, Ordering::Relaxed);
+    }
     info!("🛑 Benchmark thread {} completed", thread_id);
 }
 
@@ -2806,7 +2852,7 @@ fn mining_thread(
     thread_id: usize,
     hash_counter: Arc<AtomicU64>,
     is_running: Arc<AtomicBool>,
-    intensity: u8,
+    target_intensity: Arc<AtomicU8>,
     wallet: String,
     server_url: String,
     new_block_signal: Arc<AtomicU64>,
@@ -2844,7 +2890,6 @@ fn mining_thread(
     }
 
     let mut nonce = thread_id as u64 * 1_000_000;
-    let batch_size = (intensity as u64) * 100_000; // Base batch size
     let api_url = &server_url;
 
     // v1.0.2: Single shared client with connection pooling + TCP keepalive.
@@ -3210,6 +3255,10 @@ fn mining_thread(
             }
         }
 
+        // Dynamic batch_size — re-read intensity each outer iteration so wallet UI
+        // adjustments (via target_intensity) take effect without restarting threads.
+        let batch_size = (target_intensity.load(Ordering::Relaxed).max(1) as u64) * 100_000;
+
         // Mine a batch of nonces with SIMD-interleaved VDF batching
         // v9.1.0: Process `simd_batch` nonces per inner iteration, interleaving
         // VDF rounds across the batch to keep SIMD pipelines saturated (2-4x faster)
@@ -3251,7 +3300,8 @@ fn mining_thread(
 
             local_hash_count += count as u64;
             // Flush hash counter periodically
-            if local_hash_count >= 1024 {
+            // Flush to shared atomic every 8192 hashes (8× less contention than 1024)
+            if local_hash_count >= 8192 {
                 hash_counter.fetch_add(local_hash_count, Ordering::Relaxed);
                 local_hash_count = 0;
             }
@@ -3323,8 +3373,8 @@ fn mining_thread(
             nonce = nonce.wrapping_add(count as u64);
             i += count as u64;
 
-            // v7.4.3: Check for new block every 4096 hashes to abandon stale work
-            if i & 4095 < simd_batch as u64 && i > 0 {
+            // Check for new block every 512 nonces (~1ms at 500 KH/s) to abandon stale work
+            if i & 511 < simd_batch as u64 && i > 0 {
                 let sig = new_block_signal.load(Ordering::Relaxed);
                 if sig != last_known_block_signal {
                     break; // New block arrived — refresh challenge immediately
@@ -3407,6 +3457,7 @@ async fn start_sse_listener(
     let fallback_url = format!("{}/api/v1/events?wallet_address={}&miner_mode=true", FALLBACK_BOOTSTRAP_URL, wallet);
     let mut use_fallback = false;
     let mut primary_fail_count = 0u32;
+    let mut ever_connected = false;
 
     loop {
         if !is_running.load(Ordering::SeqCst) {
@@ -3447,6 +3498,13 @@ async fn start_sse_listener(
 
         let mut stream = client.stream();
 
+        if ever_connected {
+            // Server came back after disconnection — immediately signal mining threads
+            // to refresh their challenge rather than waiting up to 50s for periodic timer.
+            new_block_signal.fetch_add(1, Ordering::SeqCst);
+            info!("🔄 SERVER BACK ONLINE — challenge refresh triggered for all threads");
+        }
+        ever_connected = true;
         info!("🎧 Connected to SSE stream at {}", url);
         sse_connected.store(true, Ordering::Relaxed);
         let _ = sse_event_tx.send(DiagnosticEvent::SseConnected { url: url.to_string() });
@@ -3670,6 +3728,7 @@ async fn decentralized_sse_listener(
     let fallback_url = format!("{}/api/v1/events?wallet_address={}&miner_mode=true", FALLBACK_BOOTSTRAP_URL, wallet);
     let mut use_fallback = false;
     let mut primary_fail_count = 0u32;
+    let mut ever_connected = false;
 
     loop {
         if !is_running.load(Ordering::SeqCst) {
@@ -3703,6 +3762,11 @@ async fn decentralized_sse_listener(
             }
         };
 
+        if ever_connected {
+            new_block_signal.fetch_add(1, Ordering::SeqCst);
+            info!("🔄 [decentralized-SSE] SERVER BACK ONLINE — challenge refresh triggered");
+        }
+        ever_connected = true;
         let mut stream = client.stream();
         info!("[decentralized-SSE] Connected to {} for new-block signals", url);
 

@@ -231,8 +231,6 @@ pub fn vdf_mining_thread(
             }
         }
 
-        // Brief pause
-        std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
     info!("🧮 VDF mining thread stopped");
