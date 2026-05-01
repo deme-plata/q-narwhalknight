@@ -47,6 +47,11 @@ pub struct FullStateSnapshot {
     /// v7.3.0: Network ID for cross-network contamination prevention
     #[serde(default)]
     pub network_id: Option<String>,
+    /// BFT-finalized balance records (Bracha RB + DAG-Knight).
+    /// Includes both anchored and pending-anchor records that have reached 2f+1 READY.
+    /// Fresh nodes apply these AFTER block-derived balances to get the authoritative value.
+    #[serde(default)]
+    pub finality_records: Vec<q_types::BalanceFinalityRecord>,
 }
 
 // ============================================================================
@@ -114,6 +119,16 @@ pub async fn get_full_state(
     let our_network_id = std::env::var("Q_NETWORK_ID")
         .unwrap_or_else(|_| "mainnet-genesis".to_string());
 
+    // Gather BFT-finalized balance records for fresh-node seeding.
+    // Includes both anchored records (in DB) and pending-anchor records (delivered but not yet in vertex).
+    let finality_records = if let Some(ref engine) = app_state.balance_finality_engine {
+        let mut recs = engine.load_anchored_records().await.unwrap_or_default();
+        recs.extend(engine.pending_anchor_snapshot().await);
+        recs
+    } else {
+        Vec::new()
+    };
+
     let snapshot = FullStateSnapshot {
         contracts,
         liquidity_pools,
@@ -124,6 +139,7 @@ pub async fn get_full_state(
         version: crate::VERSION.to_string(),
         timestamp: chrono::Utc::now().timestamp() as u64,
         network_id: Some(our_network_id),
+        finality_records,
     };
 
     let elapsed = start.elapsed();
@@ -1440,6 +1456,33 @@ async fn merge_http_snapshot(app_state: &Arc<AppState>, snapshot: &FullStateSnap
     if !snapshot.wallet_balances.is_empty() {
         debug!("🔒 [STATE SYNC HTTP v8.5.4] Skipping {} wallet balances (disabled — prevents DEX swap debit erasure)",
                snapshot.wallet_balances.len());
+    }
+
+    // ---- BFT finality records: AUTHORITATIVE overwrite ----
+    // Finality records have 2f+1 Bracha READY signatures — they override block-derived balances.
+    // Applied AFTER the disabled wallet_balances section so they always take precedence.
+    if !snapshot.finality_records.is_empty() {
+        info!("🔐 [STATE SYNC HTTP] Applying {} BFT-finalized balance records from peer",
+              snapshot.finality_records.len());
+        let mut wb = app_state.wallet_balances.write().await;
+        for record in &snapshot.finality_records {
+            // Write to in-memory cache
+            wb.insert(record.wallet_address, record.new_balance);
+            // Persist to RocksDB
+            if let Err(e) = app_state.storage_engine.save_wallet_balance(&record.wallet_address, record.new_balance).await {
+                warn!("🔐 [STATE SYNC HTTP] Failed to persist finality record for {}: {e}",
+                      hex::encode(&record.wallet_address[..8]));
+            }
+            // Persist the finality proof itself
+            if let Err(e) = app_state.storage_engine.put_manifest_sync(
+                q_types::BalanceFinalityRecord::db_key(&record.wallet_address).as_bytes(),
+                &record.to_cbor().unwrap_or_default(),
+            ).await {
+                warn!("🔐 [STATE SYNC HTTP] Failed to persist finality proof: {e}");
+            }
+            result.wallets_added += 1;
+        }
+        info!("✅ [STATE SYNC HTTP] Applied {} BFT-finalized balances", snapshot.finality_records.len());
     }
 
     // ---- Merge token balances (add-only for NEW tokens, never overwrite existing) ----

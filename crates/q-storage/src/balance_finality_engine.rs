@@ -482,21 +482,45 @@ impl BalanceFinalityEngine {
 
     /// Every ANCHOR_FLUSH_SECS, if pending_anchor is non-empty, produce an
     /// anchor-only DAG vertex (stub — DAG-Knight integration fills this in).
+    /// Bounded anchor flush: after ANCHOR_FLUSH_SECS, any delivered-but-not-anchored records
+    /// that the DAG-Knight producer hasn't drained get a synthetic anchor hash stamped and
+    /// persisted. This prevents unbounded memory growth during low-mining-activity periods.
     async fn anchor_flush_loop(&self) {
         let interval = Duration::from_secs(ANCHOR_FLUSH_SECS);
         loop {
             tokio::time::sleep(interval).await;
-            // Snapshot count under lock, release lock, then log.
-            let count = {
-                let pa = self.pending_anchor.lock().await;
-                pa.len()
-            };
-            if count > 0 {
-                info!(
-                    "BalanceFinalityEngine: {} records in pending_anchor (DAG-Knight will drain next vertex)",
-                    count
-                );
+
+            let batch = self.drain_pending_anchor().await;
+            if batch.is_empty() {
+                continue;
             }
+
+            info!(
+                "BalanceFinalityEngine: anchor flush — {} records not drained by DAG-Knight, stamping synthetic anchor",
+                batch.len()
+            );
+
+            // Synthetic anchor hash = BLAKE3(timestamp || broadcast_ids)
+            let synthetic_hash: [u8; 32] = {
+                use blake3::Hasher;
+                let mut h = Hasher::new();
+                let ts = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                h.update(&ts.to_le_bytes());
+                for rec in &batch {
+                    h.update(&rec.broadcast_id);
+                }
+                *h.finalize().as_bytes()
+            };
+
+            self.stamp_anchor_hash(&batch, synthetic_hash).await;
+            info!(
+                "BalanceFinalityEngine: stamped {} records with synthetic anchor {}",
+                batch.len(),
+                hex::encode(&synthetic_hash[..8])
+            );
         }
     }
 

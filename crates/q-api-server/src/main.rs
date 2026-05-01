@@ -3620,7 +3620,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     // and gossip channel. f=0 (shadow mode) for Phase 1; bump to f=1 when 4+ validators.
     {
         use q_storage::balance_finality_engine::BalanceFinalityEngine;
-        let rb_topic = state.config.network_id.balance_rb_topic();
+        let rb_topic = network_config.network_id.balance_rb_topic();
         let gossip_tx = state.libp2p_command_tx.as_ref().map(|tx| {
             // Create an unbounded channel; the task below forwards to the network command.
             let (fwd_tx, mut fwd_rx) =
