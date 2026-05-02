@@ -6246,8 +6246,15 @@ impl TurboSyncManager {
         }
 
         // v10.3.5: CHECKPOINT SYNC — now that we have peers, probe for the gap
+        // Q_SKIP_CHECKPOINT=1 bypasses the probe so the node syncs ALL blocks from genesis.
+        let skip_checkpoint = std::env::var("Q_SKIP_CHECKPOINT")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
         let mut effective_start_height = effective_start_height; // make mutable for checkpoint update
-        if local_height < 100 && effective_start_height == 0 {
+        if skip_checkpoint && local_height < 100 {
+            warn!("🚫 [CHECKPOINT SYNC] Q_SKIP_CHECKPOINT=1 — skipping network gap probe. Syncing ALL blocks from genesis via P2P.");
+        }
+        if !skip_checkpoint && local_height < 100 && effective_start_height == 0 {
             let gap_floor = self.probe_network_gap(target_height, &qualified_peers).await;
             if gap_floor > 0 {
                 let blocks_to_sync = target_height.saturating_sub(gap_floor);

@@ -1052,12 +1052,17 @@ async fn merge_p2p_response(
 
 async fn do_http_state_sync(app_state: &Arc<AppState>, our_port: u16) {
     let bootstrap_peers: &[&str] = &[
-        "http://185.182.185.227:8080",
-        "http://109.205.176.60:8080",
-        "http://161.35.219.10:8080",
+        "http://89.149.241.126:8080",   // Epsilon — authoritative 10Gbit supernode, most complete balance state
+        "http://185.182.185.227:8080",  // Beta
+        "http://109.205.176.60:8080",   // Gamma
+        "http://161.35.219.10:8080",    // Alpha
     ];
 
     let our_ips = get_local_ips();
+
+    // Collect snapshots from all reachable peers, then use the most complete one.
+    // "Most complete" = highest wallet_balances count (most state coverage).
+    let mut best_snapshot: Option<(String, FullStateSnapshot)> = None;
 
     for peer_url in bootstrap_peers {
         if is_self(peer_url, our_port, &our_ips) {
@@ -1080,37 +1085,46 @@ async fn do_http_state_sync(app_state: &Arc<AppState>, our_port: u16) {
                     snapshot.block_height,
                     snapshot.network_id.as_deref().unwrap_or("unknown"),
                 );
-                let result = merge_http_snapshot(app_state, &snapshot).await;
-                if result.anything_changed() {
-                    info!(
-                        "🔄 [STATE SYNC HTTP] Merged from {}: contracts +{}/{}, pools +{}/{}, wallets +{}, tokens +{}",
-                        peer_url,
-                        result.contracts_added, result.contracts_skipped,
-                        result.pools_added, result.pools_updated,
-                        result.wallets_added,
-                        result.tokens_added,
-                    );
-                    let _ = app_state.event_broadcaster.broadcast(
-                        crate::streaming::StreamEvent::StateSyncComplete {
-                            contracts_added: result.contracts_added,
-                            pools_added: result.pools_added,
-                            balances_added: result.wallets_added + result.tokens_added,
-                            timestamp: chrono::Utc::now(),
-                        },
-                    ).await;
-                } else {
-                    debug!("🔄 [STATE SYNC HTTP] No new state from {}", peer_url);
+                let is_better = match &best_snapshot {
+                    None => true,
+                    Some((_, prev)) => snapshot.wallet_balances.len() > prev.wallet_balances.len(),
+                };
+                if is_better {
+                    best_snapshot = Some((peer_url.to_string(), snapshot));
                 }
-                return;
             }
             Err(e) => {
                 warn!("🔄 [STATE SYNC HTTP] Failed to fetch from {}: {}", peer_url, e);
-                continue;
             }
         }
     }
 
-    warn!("🔄 [STATE SYNC] Could not reach any peer (P2P or HTTP) for state sync");
+    if let Some((peer_url, snapshot)) = best_snapshot {
+        info!("🔄 [STATE SYNC HTTP] Using best snapshot from {} ({} wallets)", peer_url, snapshot.wallet_balances.len());
+        let result = merge_http_snapshot(app_state, &snapshot).await;
+        if result.anything_changed() {
+            info!(
+                "🔄 [STATE SYNC HTTP] Merged from {}: contracts +{}/{}, pools +{}/{}, wallets +{}, tokens +{}",
+                peer_url,
+                result.contracts_added, result.contracts_skipped,
+                result.pools_added, result.pools_updated,
+                result.wallets_added,
+                result.tokens_added,
+            );
+            let _ = app_state.event_broadcaster.broadcast(
+                crate::streaming::StreamEvent::StateSyncComplete {
+                    contracts_added: result.contracts_added,
+                    pools_added: result.pools_added,
+                    balances_added: result.wallets_added + result.tokens_added,
+                    timestamp: chrono::Utc::now(),
+                },
+            ).await;
+        } else {
+            debug!("🔄 [STATE SYNC HTTP] No new state from {}", peer_url);
+        }
+    } else {
+        warn!("🔄 [STATE SYNC] Could not reach any peer (P2P or HTTP) for state sync");
+    }
 }
 
 /// v9.0.0: One-time authoritative balance sync from a trusted peer.
