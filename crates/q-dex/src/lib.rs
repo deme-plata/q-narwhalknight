@@ -401,7 +401,28 @@ impl QuantumDexManager {
         &self,
         trade_request: QuantumTradeRequest,
     ) -> Result<QuantumTradeResult> {
-        self.trading.execute_quantum_trade(&trade_request).await
+        // Physics-layer pricing (display/UX purpose)
+        let mut result = self.trading.execute_quantum_trade(&trade_request).await?;
+
+        // DEX-001/002: atomically update pool reserves using constant-product AMM.
+        // Physics price above is for display; settled amount comes from the AMM formula.
+        // DEX-003: derive slippage floor from request.max_slippage_bps + physics price.
+        let min_out = if trade_request.max_slippage_bps > 0 {
+            let expected_out = &trade_request.amount * &result.price;
+            let scale_num = BigDecimal::from(10_000i64 - trade_request.max_slippage_bps as i64);
+            expected_out * scale_num / BigDecimal::from(10_000i64)
+        } else {
+            BigDecimal::from(0i64)
+        };
+
+        let (actual_out, _, _) = self.liquidity
+            .execute_atomic_swap(&trade_request.pair_id, &trade_request.amount, &min_out)
+            .await?;
+
+        // Use AMM-settled output as the authoritative filled amount
+        result.amount_filled = actual_out;
+
+        Ok(result)
     }
 
     /// Add quantum-entangled liquidity to a pair

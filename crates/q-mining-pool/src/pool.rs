@@ -153,6 +153,7 @@ impl MiningPool {
         ));
         let stratum_server = Arc::new(StratumServer::new(
             config.stratum.clone(),
+            config.vardiff.min_difficulty,
             Arc::clone(&worker_manager),
         ));
         let job_manager = Arc::new(JobManager::new(config.pool_wallet.clone()));
@@ -391,10 +392,13 @@ impl MiningPool {
         // Start new round
         self.pplns.new_round();
 
-        // Create new job (clean jobs = true to invalidate old work)
-        // This would typically fetch a new block template from the node
-        // For now, just invalidate existing jobs
+        // Invalidate stale jobs and immediately notify workers to abandon their work (POOL-004)
+        tracing::debug!("[POOL] block_found invalidating_all_jobs height={}", height);
         self.job_manager.invalidate_all();
+        // broadcast_clean_jobs closes the race window: without this, workers keep submitting
+        // against the now-invalid job until the next block template arrives
+        self.stratum_server.broadcast_clean_jobs();
+        tracing::debug!("[POOL] block_found clean_jobs broadcast sent height={}", height);
 
         // Notify callback
         if let Some(callback) = &self.on_block_found {

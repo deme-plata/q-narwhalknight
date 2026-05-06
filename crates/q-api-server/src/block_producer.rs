@@ -981,7 +981,9 @@ impl BlockProducer {
                             root
                         }
                         Err(e) => {
-                            warn!("⚠️ [BALANCE ROOT v1] Failed to compute balance root: {}. Using [0;32]", e);
+                            // BAL-001: Escalated to error — zero root causes peer rejection at height >= 18,600,000
+                            error!("🚨 [BALANCE ROOT v1] CRITICAL: Failed to compute balance root for block {}: {}. \
+                                    Peers will REJECT this block. Check storage health immediately.", next_height, e);
                             [0u8; 32]
                         }
                     }

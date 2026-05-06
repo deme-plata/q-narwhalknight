@@ -222,6 +222,6 @@ mod tests {
 
         // v2.3.5-beta: Now 11 topics (8 original + 3 share ledger topics)
         assert_eq!(all.len(), 11);
-        assert!(all.iter().all(|t| t.contains("/qnk/mainnet2026/pool/")));
+        assert!(all.iter().all(|t| t.contains("/qnk/mainnet-genesis/pool/")));
     }
 }

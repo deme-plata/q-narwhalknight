@@ -10,9 +10,21 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::types::*;
+
+/// Minimum reserve floor — prevents dust-pool near-zero division and drain attacks (DEX-004).
+/// 1000 display-unit tokens keeps pools functional while guarding against total drainage.
+const MIN_POOL_RESERVE: &str = "1000";
+
+/// Log amount tier without exposing exact values (privacy-safe debug helper).
+fn log_amount_tier(v: &BigDecimal) -> &'static str {
+    if v < &BigDecimal::from(1i64)              { "dust(<1)" }
+    else if v < &BigDecimal::from(1_000i64)     { "small(<1K)" }
+    else if v < &BigDecimal::from(1_000_000i64) { "medium(<1M)" }
+    else                                         { "large(>=1M)" }
+}
 
 /// Quantum Liquidity Manager with entangled pool states
 #[derive(Clone)]
@@ -385,7 +397,7 @@ impl QuantumLiquidityManager {
         }
     }
 
-    /// Update pool reserves with quantum effects
+    /// Update pool reserves with quantum effects (add/remove liquidity — not swap path)
     async fn update_pool_reserves(
         &self,
         pair_id: &str,
@@ -404,8 +416,19 @@ impl QuantumLiquidityManager {
                 // Transition to superposition state for new liquidity
                 pool.wave_function_state = QuantumState::Superposition;
             } else {
-                pool.token_a_reserve = &pool.token_a_reserve - amount_a;
-                pool.token_b_reserve = &pool.token_b_reserve - amount_b;
+                // DEX-004: enforce minimum reserve floor before removal
+                let min_reserve = BigDecimal::from_str(MIN_POOL_RESERVE)
+                    .unwrap_or_else(|_| BigDecimal::from(0i64));
+                let new_a = &pool.token_a_reserve - amount_a;
+                let new_b = &pool.token_b_reserve - amount_b;
+                if new_a < min_reserve || new_b < min_reserve {
+                    return Err(anyhow::anyhow!(
+                        "Cannot remove liquidity: reserves would fall below minimum floor for pair {}",
+                        pair_id
+                    ));
+                }
+                pool.token_a_reserve = new_a;
+                pool.token_b_reserve = new_b;
                 if pool.providers_count > 0 {
                     pool.providers_count -= 1;
                 }
@@ -421,6 +444,88 @@ impl QuantumLiquidityManager {
         }
 
         Ok(())
+    }
+
+    /// Atomically execute a constant-product swap, update reserves, verify k-invariant,
+    /// enforce slippage floor (DEX-003), and minimum reserve floor (DEX-004).
+    ///
+    /// Holds the pool write lock for the entire read→compute→write cycle (DEX-001/002).
+    /// Returns (amount_out, new_reserve_in, new_reserve_out).
+    pub async fn execute_atomic_swap(
+        &self,
+        pair_id: &str,
+        amount_in: &BigDecimal,
+        min_amount_out: &BigDecimal,  // slippage floor; zero or negative means no check
+    ) -> Result<(BigDecimal, BigDecimal, BigDecimal)> {
+        trace!("[DEX] swap enter pair={}", pair_id);
+
+        let min_reserve = BigDecimal::from_str(MIN_POOL_RESERVE)
+            .map_err(|_| anyhow::anyhow!("Invalid MIN_POOL_RESERVE constant"))?;
+
+        let mut pools = self.quantum_pools.write().await;
+        let pool = pools.get_mut(pair_id)
+            .ok_or_else(|| anyhow::anyhow!("Quantum pool not found: {}", pair_id))?;
+
+        let reserve_in  = pool.token_a_reserve.clone();
+        let reserve_out = pool.token_b_reserve.clone();
+
+        // Constant-product formula with fee: out = (amount_in * (1 - fee) * reserve_out)
+        //                                              / (reserve_in + amount_in * (1 - fee))
+        let one = BigDecimal::from(1i64);
+        let fee_factor = &one - &pool.fee_rate;
+        let amount_in_with_fee = amount_in * &fee_factor;
+        let amount_out = &amount_in_with_fee * &reserve_out
+            / (&reserve_in + &amount_in_with_fee);
+
+        debug!("[DEX] swap pair={} fee_rate={} amount_out_tier={} min_out_tier={}",
+            pair_id, pool.fee_rate,
+            log_amount_tier(&amount_out), log_amount_tier(min_amount_out));
+
+        // DEX-003: enforce slippage floor
+        if min_amount_out > &BigDecimal::from(0i64) && amount_out < *min_amount_out {
+            debug!("[DEX] swap REJECTED slippage pair={} reason=amount_out_below_floor", pair_id);
+            return Err(anyhow::anyhow!(
+                "Slippage exceeded: expected at least {} out, got {} for pair {}",
+                min_amount_out, amount_out, pair_id
+            ));
+        }
+
+        let new_reserve_in  = &reserve_in  + amount_in;
+        let new_reserve_out = &reserve_out - &amount_out;
+
+        // DEX-004: enforce minimum reserve floor
+        if new_reserve_out < min_reserve {
+            debug!("[DEX] swap REJECTED reserve_floor pair={} reason=post_swap_reserve_below_min", pair_id);
+            return Err(anyhow::anyhow!(
+                "Reserve too low after swap: {} for pair {}",
+                new_reserve_out, pair_id
+            ));
+        }
+
+        // DEX-002: verify k-invariant (fee guarantees new_k >= old_k; this is a safety guard)
+        let old_k = &reserve_in * &reserve_out;
+        let new_k = &new_reserve_in * &new_reserve_out;
+        if new_k < old_k {
+            error!("[DEX] INVARIANT VIOLATION pair={} k_decreased=true", pair_id);
+            return Err(anyhow::anyhow!(
+                "K-invariant violation for pair {}: new_k < old_k",
+                pair_id
+            ));
+        }
+
+        // DEX-001: atomically write updated reserves under the write lock
+        pool.token_a_reserve = new_reserve_in.clone();
+        pool.token_b_reserve = new_reserve_out.clone();
+        pool.quantum_k_invariant = new_k;
+        pool.last_interaction = Utc::now();
+
+        debug!("[DEX] swap OK pair={} reserve_in_tier={} reserve_out_tier={}",
+            pair_id,
+            log_amount_tier(&new_reserve_in),
+            log_amount_tier(&new_reserve_out));
+        trace!("[DEX] swap exit pair={}", pair_id);
+
+        Ok((amount_out, new_reserve_in, new_reserve_out))
     }
 
     /// Update liquidity statistics

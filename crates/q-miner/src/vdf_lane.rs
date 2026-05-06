@@ -110,7 +110,18 @@ pub fn vdf_mining_thread(
         };
         let difficulty_target = data["difficulty_target"].as_str().unwrap_or("ff").to_string();
         let block_height = data["block_height"].as_u64().unwrap_or(0);
-        let vdf_iters = get_vdf_iterations(&resp_json);
+        let vdf_iters_full = get_vdf_iterations(&resp_json);
+
+        // VDF-001: operator cap to prevent runaway iteration counts from malicious challenges
+        let vdf_iters_cap: u64 = std::env::var("Q_VDF_ITERATIONS_CAP")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(u64::MAX);
+        let vdf_iters = vdf_iters_full.min(vdf_iters_cap);
+        if vdf_iters < vdf_iters_full {
+            debug!("[VDF] iterations capped: requested={} effective={} cap={}",
+                vdf_iters_full, vdf_iters, vdf_iters_cap);
+        }
 
         // Snapshot the new-block signal before starting computation.
         // If it changes by the time we finish, a new block arrived mid-compute.

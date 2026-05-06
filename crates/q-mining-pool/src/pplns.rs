@@ -404,7 +404,8 @@ mod tests {
     #[test]
     fn test_calculate_rewards() {
         let calculator = PPLNSCalculator::new(test_config(), 150);
-        calculator.update_network_difficulty(1.0);
+        // n_factor=2.0 so window = network_diff * 2.0; set 6.0 → window=12 covers all 10 shares
+        calculator.update_network_difficulty(6.0);
 
         // Add shares from two workers
         for i in 0..10 {
@@ -428,10 +429,10 @@ mod tests {
             |id| id.wallet().to_string(),
         );
 
-        // Check fee calculations
-        assert_eq!(round.dev_fee, 20_000_000); // 1%
+        // Check fee calculations (v8.6.0: DEV_FEE_BPS=175 = 1.75%, pool_fee_bps=150 = 1.5%)
+        assert_eq!(round.dev_fee, 35_000_000); // 1.75%
         assert_eq!(round.pool_fee, 30_000_000); // 1.5%
-        assert_eq!(round.miner_rewards, 1_950_000_000); // 97.5%
+        assert_eq!(round.miner_rewards, 1_935_000_000); // 96.75%
 
         // Worker1 has 70% of shares
         assert_eq!(round.payouts.len(), 2);

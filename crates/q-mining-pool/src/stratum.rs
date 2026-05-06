@@ -150,6 +150,9 @@ pub enum PoolEvent {
     /// Difficulty update
     DifficultyUpdate(f64),
 
+    /// Block found — tell all workers to abandon current work (POOL-004)
+    CleanJobs,
+
     /// Pool shutdown
     Shutdown,
 }
@@ -158,6 +161,9 @@ pub enum PoolEvent {
 pub struct StratumServer {
     /// Configuration
     config: StratumConfig,
+
+    /// Minimum share difficulty (from VardiffConfig) — used for POOL-002 synchronous floor check
+    min_difficulty: f64,
 
     /// Worker manager
     worker_manager: Arc<WorkerManager>,
@@ -174,11 +180,12 @@ pub struct StratumServer {
 
 impl StratumServer {
     /// Create new stratum server
-    pub fn new(config: StratumConfig, worker_manager: Arc<WorkerManager>) -> Self {
+    pub fn new(config: StratumConfig, min_difficulty: f64, worker_manager: Arc<WorkerManager>) -> Self {
         let (event_tx, _) = broadcast::channel(1024);
 
         Self {
             config,
+            min_difficulty,
             worker_manager,
             event_tx,
             connection_count: Arc::new(RwLock::new(0)),
@@ -194,6 +201,12 @@ impl StratumServer {
     /// Broadcast new job to all workers
     pub fn broadcast_job(&self, job: Arc<MiningJob>) {
         let _ = self.event_tx.send(PoolEvent::NewJob(job));
+    }
+
+    /// Broadcast clean-jobs notification to all workers (call after block found + invalidate_all)
+    pub fn broadcast_clean_jobs(&self) {
+        tracing::debug!("[POOL] broadcast_clean_jobs: signaling all workers to abandon stale work");
+        let _ = self.event_tx.send(PoolEvent::CleanJobs);
     }
 
     /// Start the stratum server
@@ -322,6 +335,34 @@ impl StratumServer {
                         Ok(PoolEvent::DifficultyUpdate(diff)) => {
                             if conn.subscribed {
                                 let notification = StratumNotification::mining_set_difficulty(diff);
+                                writer.write_all(notification.to_json_line().as_bytes()).await?;
+                            }
+                        }
+                        Ok(PoolEvent::CleanJobs) => {
+                            // POOL-004: Tell workers to abandon stale work after a block is found.
+                            // Send mining.notify with clean_jobs=true so they stop submitting against
+                            // the now-invalid job. Workers will wait for the next real notify.
+                            if conn.subscribed && conn.authorized {
+                                tracing::debug!("[STRATUM] sending clean_jobs=true to worker");
+                                let notification = StratumNotification {
+                                    id: None,
+                                    method: "mining.notify".to_string(),
+                                    params: vec![
+                                        serde_json::json!("clean"),  // job_id placeholder
+                                        serde_json::json!("0000000000000000000000000000000000000000000000000000000000000000"),
+                                        serde_json::json!(""),
+                                        serde_json::json!(""),
+                                        serde_json::json!([]),
+                                        serde_json::json!("00000001"),
+                                        serde_json::json!("1d00ffff"),
+                                        serde_json::json!(format!("{:08x}",
+                                            std::time::SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .unwrap_or_default()
+                                                .as_secs() as u32)),
+                                        serde_json::json!(true),  // clean_jobs = true
+                                    ],
+                                };
                                 writer.write_all(notification.to_json_line().as_bytes()).await?;
                             }
                         }
@@ -502,14 +543,23 @@ impl StratumServer {
             worker_name: worker.worker_name.clone(),
         };
 
+        // POOL-002: Synchronous difficulty floor — reject shares before they enter the queue
+        let worker_diff = worker.current_difficulty();
+        let min_diff = self.min_difficulty;
+        tracing::trace!("[STRATUM] submit pre-validate job={} worker_diff={:.4}", submission.job_id, worker_diff);
+        if worker_diff < min_diff {
+            tracing::debug!("[STRATUM] submit DIFF_LOW job={} worker_diff={:.4} min_diff={:.4}",
+                submission.job_id, worker_diff, min_diff);
+            return Ok(Some(StratumResponse::error(msg.id, 23, "Difficulty below pool minimum")));
+        }
+
         // Send to share processor
         let worker_id = worker.id.clone();
+        tracing::trace!("[STRATUM] submit queued job={}", submission.job_id);
         if share_tx.send((worker_id, submission)).await.is_err() {
             return Ok(Some(StratumResponse::error(msg.id, 20, "Share processing failed")));
         }
 
-        // For now, always accept (actual validation happens asynchronously)
-        // In production, you'd want to validate synchronously and return the result
         Ok(Some(StratumResponse::success(msg.id, json!(true))))
     }
 

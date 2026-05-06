@@ -3,12 +3,46 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use parking_lot::RwLock;
 
 use crate::error::{PoolResult, ShareError};
 use crate::job::MiningJob;
 use crate::worker::WorkerId;
+
+/// LRU-evicting dedup cache — prevents both total-flush bypass and unbounded growth.
+struct DedupCache {
+    set:   HashSet<String>,
+    queue: VecDeque<String>,
+    cap:   usize,
+}
+
+impl DedupCache {
+    fn new(cap: usize) -> Self {
+        Self { set: HashSet::new(), queue: VecDeque::new(), cap }
+    }
+
+    fn contains(&self, id: &str) -> bool {
+        self.set.contains(id)
+    }
+
+    /// Insert id, evicting the oldest entry if at capacity.
+    fn insert(&mut self, id: String) {
+        if self.set.len() >= self.cap {
+            if let Some(old) = self.queue.pop_front() {
+                self.set.remove(&old);
+                tracing::trace!("[POOL] dedup_evict oldest_prefix={}", &old[..old.len().min(12)]);
+            }
+        }
+        self.queue.push_back(id.clone());
+        self.set.insert(id);
+    }
+
+    fn clear(&mut self) {
+        self.set.clear();
+        self.queue.clear();
+    }
+}
 
 /// Mining share
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,11 +164,8 @@ pub struct ShareValidator {
     /// Network target (for block detection)
     network_target: [u8; 32],
 
-    /// Duplicate share cache
-    duplicate_cache: RwLock<HashSet<String>>,
-
-    /// Maximum cache size
-    max_cache_size: usize,
+    /// Duplicate share cache — LRU-evicting, never clears all entries at once (POOL-001/003)
+    duplicate_cache: RwLock<DedupCache>,
 }
 
 impl ShareValidator {
@@ -142,8 +173,7 @@ impl ShareValidator {
     pub fn new(network_difficulty: f64) -> Self {
         Self {
             network_target: Self::difficulty_to_target(network_difficulty),
-            duplicate_cache: RwLock::new(HashSet::new()),
-            max_cache_size: 100_000,
+            duplicate_cache: RwLock::new(DedupCache::new(100_000)),
         }
     }
 
@@ -230,11 +260,14 @@ impl ShareValidator {
             return Ok(ShareValidationResult::Stale);
         }
 
-        // 2. Check for duplicate
-        let unique_id = format!("{}:{}:{}", submission.job_id, submission.nonce, &submission.extranonce2);
+        // 2. Check for duplicate — key excludes extranonce2 (miner-controlled, must not vary to bypass)
+        let nonce_prefix = submission.nonce.to_string();
+        let unique_id = format!("{}:{}", submission.job_id, nonce_prefix);
+        tracing::trace!("[POOL] share validate job={} nonce_prefix={}", submission.job_id, &nonce_prefix[..nonce_prefix.len().min(8)]);
         {
             let cache = self.duplicate_cache.read();
             if cache.contains(&unique_id) {
+                tracing::debug!("[POOL] share DUPLICATE job={} nonce_prefix={}", submission.job_id, &nonce_prefix[..nonce_prefix.len().min(8)]);
                 return Ok(ShareValidationResult::Duplicate);
             }
         }
@@ -255,12 +288,10 @@ impl ShareValidator {
             });
         }
 
-        // 6. Record share to prevent duplicates
+        // 6. Record share to prevent duplicates — LRU eviction, never total-flush
         {
             let mut cache = self.duplicate_cache.write();
-            if cache.len() >= self.max_cache_size {
-                cache.clear(); // Simple eviction strategy
-            }
+            tracing::trace!("[POOL] share dedup_insert cache_len={}", cache.set.len());
             cache.insert(unique_id);
         }
 
@@ -346,6 +377,11 @@ impl ShareValidator {
     /// Clear duplicate cache
     pub fn clear_cache(&self) {
         self.duplicate_cache.write().clear();
+    }
+
+    /// Current dedup cache size (for monitoring)
+    pub fn cache_size(&self) -> usize {
+        self.duplicate_cache.read().set.len()
     }
 }
 

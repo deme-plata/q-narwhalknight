@@ -4278,11 +4278,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     // ========================================
     // ⛏️ v2.2.1-beta: STRATUM MINING POOL - PPLNS Rewards
     // Full-featured mining pool with Stratum V1 protocol
-    // v7.3.0: ENABLED by default for mainnet2026.2 decentralized pool mining
-    // Disable with Q_ENABLE_MINING_POOL=0 if not running a pool
+    // DISABLED by default — set Q_ENABLE_MINING_POOL=1 to opt in and bind port 3333
     // ========================================
     let enable_mining_pool = std::env::var("Q_ENABLE_MINING_POOL")
-        .unwrap_or_else(|_| "1".to_string()) != "0";  // ENABLED by default for mainnet2026.2
+        .unwrap_or_else(|_| "0".to_string()) == "1";  // DISABLED by default; set =1 to enable
 
     if enable_mining_pool {
         info!("⛏️  Initializing Stratum Mining Pool...");
@@ -23792,6 +23791,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/bitcoin/deposit/bridge-status", get(q_api_server::bitcoin_deposit_api::get_deposit_bridge_status))
         .route("/api/v1/bitcoin/deposit/:id", get(q_api_server::bitcoin_deposit_api::get_deposit_status))
         .route("/api/v1/bitcoin/deposits", get(q_api_server::bitcoin_deposit_api::list_deposits))
+        // v10.5.4: HiBT listing donation campaign — public, no auth
+        .route("/api/v1/donation/hibt-status", get(hibt_donation_status))
         // ═══ Zcash Shielded Bridge (v7.2.2) ═══
         .route("/api/v1/zcash/swap", post(q_api_server::zcash_bridge_api::create_zcash_swap))
         .route("/api/v1/zcash/swap/:id", get(q_api_server::zcash_bridge_api::get_zec_swap_status))
@@ -24606,4 +24607,49 @@ async fn admin_purge_phase_data(
             }
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// v10.5.4: HiBT listing donation campaign status (public, no auth)
+// GET /api/v1/donation/hibt-status
+// ─────────────────────────────────────────────────────────────────────────────
+const HIBT_DONATION_ADDRESS: &str = "bc1qxm6q3f700y072ghxk3mj0rndk5yhxw5l79c2lw";
+const HIBT_GOAL_USD: f64 = 15_000.0;
+
+async fn hibt_donation_status(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<AppState>>,
+) -> axum::Json<serde_json::Value> {
+    // Fetch BTC price from the Quillon bank oracle
+    let btc_price_usd = {
+        use q_quillon_bank::AssetType;
+        let bank = state.quillon_bank.read().await;
+        bank.oracle_integration.get_price_f64(&AssetType::BTC).await
+    };
+
+    // Try to read how much BTC has been received at the donation address
+    let received_btc = if let Some(rpc) = &state.bitcoin_rpc_client {
+        rpc.get_received_by_address(HIBT_DONATION_ADDRESS, 1).await.unwrap_or(0.0)
+    } else {
+        0.0
+    };
+
+    let received_usd = received_btc * btc_price_usd;
+    let goal_btc = HIBT_GOAL_USD / btc_price_usd;
+    let percent = if HIBT_GOAL_USD > 0.0 { (received_usd / HIBT_GOAL_USD * 100.0).min(100.0) } else { 0.0 };
+
+    axum::Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "address": HIBT_DONATION_ADDRESS,
+            "goal_usd": HIBT_GOAL_USD,
+            "goal_btc": goal_btc,
+            "received_btc": received_btc,
+            "received_usd": received_usd,
+            "btc_price_usd": btc_price_usd,
+            "percent_complete": percent,
+            "campaign": "HiBT Exchange Listing — $QUG/USDT",
+            "exchange_url": "https://hibt.com",
+        },
+        "error": null
+    }))
 }

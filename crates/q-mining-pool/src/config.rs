@@ -307,8 +307,8 @@ mod tests {
     fn test_default_config() {
         let config = PoolConfig::default();
         assert_eq!(config.stratum.port, 3333);
-        assert_eq!(config.fees.pool_fee_bps, 150);
-        assert_eq!(config.vardiff.target_time_secs, 20.0);
+        assert_eq!(config.fees.pool_fee_bps, 250); // v8.6.0: raised to 2.5%
+        assert_eq!(config.vardiff.target_time_seconds, 20.0);
     }
 
     #[test]
@@ -316,7 +316,7 @@ mod tests {
         let mut config = FeeConfig::default();
 
         // Normal fee
-        assert_eq!(config.effective_fee_bps(), 150);
+        assert_eq!(config.effective_fee_bps(), 250); // v8.6.0: raised to 2.5%
 
         // Promotional with no end date = 0%
         config.promotional_period = true;
@@ -334,6 +334,6 @@ mod tests {
 
         // Promotional with past end date = normal fee
         config.promotional_end = Some(0);
-        assert_eq!(config.effective_fee_bps(), 150);
+        assert_eq!(config.effective_fee_bps(), 250); // v8.6.0: raised to 2.5%
     }
 }
