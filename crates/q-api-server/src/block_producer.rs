@@ -178,6 +178,11 @@ pub struct BlockProducer {
     /// When present and non-empty, used INSTEAD of local mining_pool PPLNS.
     /// Contains raw proportions (wallet_hex, proportion) summing to 1.0.
     distributed_pplns: Option<Arc<tokio::sync::RwLock<Option<Vec<(String, f64)>>>>>,
+
+    /// 🔐 BalanceRootV1: Storage handle for computing balance state root
+    /// Used to compute and include the canonical balance root in every block header
+    /// when the BalanceRootV1 upgrade is active.
+    storage: Option<Arc<q_storage::QStorage>>,
 }
 
 /// 💰 v8.7.0: Entry for distributed operator fee splitting
@@ -298,6 +303,7 @@ impl BlockProducer {
             distributed_operators: Arc::new(std::sync::RwLock::new(Vec::new())), // v8.7.0: distributed fee
             mining_pool: None, // v9.1.2: PPLNS pool (use set_mining_pool to enable)
             distributed_pplns: None, // v10.0.0: distributed PPLNS (use set_distributed_pplns to enable)
+            storage: None, // BalanceRootV1: no storage by default (use set_storage to enable)
         }
     }
 
@@ -335,6 +341,7 @@ impl BlockProducer {
             distributed_operators: Arc::new(std::sync::RwLock::new(Vec::new())), // v8.7.0: distributed fee
             mining_pool: None, // v9.1.2: PPLNS pool (use set_mining_pool to enable)
             distributed_pplns: None, // v10.0.0: distributed PPLNS (use set_distributed_pplns to enable)
+            storage: None, // BalanceRootV1: no storage by default (use set_storage to enable)
         }
     }
 
@@ -383,6 +390,7 @@ impl BlockProducer {
             distributed_operators: Arc::new(std::sync::RwLock::new(Vec::new())), // v8.7.0: distributed fee
             mining_pool: None, // v9.1.2: PPLNS pool (use set_mining_pool to enable)
             distributed_pplns: None, // v10.0.0: distributed PPLNS (use set_distributed_pplns to enable)
+            storage: None, // BalanceRootV1: no storage by default (use set_storage to enable)
         })
     }
 
@@ -407,6 +415,13 @@ impl BlockProducer {
     /// 🌐 v10.0.0: Set distributed PPLNS proportions source
     pub fn set_distributed_pplns(&mut self, proportions: Arc<tokio::sync::RwLock<Option<Vec<(String, f64)>>>>) {
         self.distributed_pplns = Some(proportions);
+    }
+
+    /// 🔐 BalanceRootV1: Set storage for balance root computation
+    /// Required for BalanceRootV1 enforcement in block headers.
+    /// Call this during block producer initialization when storage is available.
+    pub fn set_storage(&mut self, storage: Arc<q_storage::QStorage>) {
+        self.storage = Some(storage);
     }
 
     /// 💰 v8.7.0: Set distributed operators for fee splitting
@@ -949,9 +964,35 @@ impl BlockProducer {
         // 🚀 v1.0.72-beta: Compute proper tx_root from all transactions
         let tx_root = self.compute_tx_merkle_root(&all_transactions);
 
-        // 🔐 v5.1.0: Compute real state root (height-gated via StateRootV1 upgrade)
+        // 🔐 v5.1.0 / BalanceRootV1: Compute state root (height-gated)
+        // Priority order: BalanceRootV1 > StateRootV1 > zero
         let next_height = self.current_height + 1;
         let state_root = if q_consensus_guard::is_upgrade_active(
+            q_consensus_guard::Upgrade::BalanceRootV1,
+            next_height,
+        ) {
+            // 🔐 BalanceRootV1: Full balance state root enforcement
+            match self.storage.as_ref() {
+                Some(storage) => {
+                    match storage.compute_balance_root_for_block().await {
+                        Ok(root) => {
+                            info!("🔐 [BALANCE ROOT v1] Computed balance root for block {}: {}",
+                                next_height, hex::encode(&root[..8]));
+                            root
+                        }
+                        Err(e) => {
+                            warn!("⚠️ [BALANCE ROOT v1] Failed to compute balance root: {}. Using [0;32]", e);
+                            [0u8; 32]
+                        }
+                    }
+                }
+                None => {
+                    warn!("⚠️ [BALANCE ROOT v1] BalanceRootV1 active at height {} but no storage set on BlockProducer — using [0;32]",
+                        next_height);
+                    [0u8; 32]
+                }
+            }
+        } else if q_consensus_guard::is_upgrade_active(
             q_consensus_guard::Upgrade::StateRootV1,
             next_height,
         ) {

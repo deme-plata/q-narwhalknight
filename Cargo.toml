@@ -76,7 +76,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.5.3"  # v10.5.3: Miner CPU optimizations — dynamic intensity, 8× flush, faster new-block reaction, VDF lane, bench accuracy
+version = "10.6.0"  # v10.6.0: BalanceRootV1 — balance state root enforced in block headers (mainnet activation: 18,600,000)
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"

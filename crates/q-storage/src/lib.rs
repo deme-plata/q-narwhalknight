@@ -4412,6 +4412,45 @@ impl QStorage {
         Ok((hash, wallet_count, total_supply))
     }
 
+    /// Compute the canonical balance root for inclusion in block headers.
+    ///
+    /// Uses Blake3 with a domain separator and big-endian balance encoding per the
+    /// canonical BalanceRootV1 spec. Called by the block producer (before producing a
+    /// block) and by validators (before applying a received block) to verify agreement.
+    ///
+    /// Returns `[0u8; 32]` when no non-zero balances exist (fresh/empty chain).
+    ///
+    /// This is intentionally SEPARATE from `compute_balance_state_hash()`:
+    /// - `compute_balance_state_hash()` uses little-endian and no domain separator (legacy)
+    /// - `compute_balance_root_for_block()` uses big-endian + domain separator (canonical spec)
+    pub async fn compute_balance_root_for_block(&self) -> Result<[u8; 32]> {
+        let balances = self.load_wallet_balances().await?;
+
+        let mut sorted: Vec<([u8; 32], u128)> = balances
+            .into_iter()
+            .filter(|(_, amount)| *amount > 0)
+            .collect();
+
+        if sorted.is_empty() {
+            return Ok([0u8; 32]);
+        }
+
+        sorted.sort_by_key(|(addr, _)| *addr);
+
+        let mut root_hasher = blake3::Hasher::new();
+        root_hasher.update(b"balance_root_v1"); // domain separator
+
+        for (addr, amount) in &sorted {
+            let mut leaf_hasher = blake3::Hasher::new();
+            leaf_hasher.update(addr.as_slice());
+            leaf_hasher.update(&amount.to_be_bytes()); // big-endian per spec
+            let leaf = leaf_hasher.finalize();
+            root_hasher.update(leaf.as_bytes());
+        }
+
+        Ok(*root_hasher.finalize().as_bytes())
+    }
+
     /// Save total minted supply to persistent storage (enforces 21M QUG hard cap)
     /// CRITICAL: Must be called atomically with balance updates to prevent supply violations
     pub async fn save_total_supply(&self, total_supply: u128) -> Result<()> {

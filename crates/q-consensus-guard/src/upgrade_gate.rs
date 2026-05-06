@@ -57,6 +57,9 @@ pub enum Upgrade {
     /// Phase 8: Block evidence required for P2P balance updates
     BlockEvidenceRequired = 8,
 
+    /// Phase 9: Balance state root enforced in block headers
+    BalanceRootV1 = 9,
+
     // Add more as needed - NEVER REMOVE OR REORDER
 }
 
@@ -73,6 +76,7 @@ impl Upgrade {
             Upgrade::SmartContractsV2 => "SmartContractsV2",
             Upgrade::StateRootV1 => "StateRootV1",
             Upgrade::BlockEvidenceRequired => "BlockEvidenceRequired",
+            Upgrade::BalanceRootV1 => "BalanceRootV1",
         }
     }
 }
@@ -131,6 +135,14 @@ pub static MAINNET_UPGRADES: Lazy<HashMap<Upgrade, UpgradeConfig>> = Lazy::new(|
         min_version: "5.1.0".to_string(),
     });
 
+    // Balance state root enforcement - scheduled ~2 weeks from current tip (~17.4M at 1 block/sec)
+    upgrades.insert(Upgrade::BalanceRootV1, UpgradeConfig {
+        activation_height: 18_600_000, // ~2 weeks from current tip (~17.4M at 1 block/sec)
+        description: "Enforce balance state root in block headers".to_string(),
+        mandatory: true,
+        min_version: "10.6.0".to_string(),
+    });
+
     // Add more upgrades here as they are scheduled
 
     upgrades
@@ -169,6 +181,14 @@ pub static TESTNET_UPGRADES: Lazy<HashMap<Upgrade, UpgradeConfig>> = Lazy::new(|
         description: "Require block hash evidence for P2P balance updates".to_string(),
         mandatory: false,
         min_version: "5.1.0".to_string(),
+    });
+
+    // Balance state root enforcement - immediate on testnet for testing
+    upgrades.insert(Upgrade::BalanceRootV1, UpgradeConfig {
+        activation_height: 0, // Immediate for testnet
+        description: "Enforce balance state root in block headers".to_string(),
+        mandatory: true,
+        min_version: "10.6.0".to_string(),
     });
 
     upgrades

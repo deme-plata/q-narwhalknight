@@ -11217,6 +11217,47 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                     }
                                 }
 
+                                // ============================================
+                                // 🔐 BalanceRootV1: ENFORCE balance state root (reject block on mismatch)
+                                // ============================================
+                                // Check BEFORE applying this block's transactions so our local state
+                                // matches what the producer computed when creating the block.
+                                // ============================================
+                                if q_consensus_guard::is_upgrade_active(
+                                    q_consensus_guard::Upgrade::BalanceRootV1,
+                                    block_height,
+                                ) {
+                                    if block.header.state_root == [0u8; 32] {
+                                        error!("💥 [BALANCE ROOT v1] REJECT block {} — missing balance root (state_root is [0;32]). \
+                                               This node may be connecting to an unupgraded peer.", block_height);
+                                        return; // Skip this block
+                                    } else {
+                                        // Compute local balance root BEFORE applying this block's transactions
+                                        let local_root = match storage.compute_balance_root_for_block().await {
+                                            Ok(r) => r,
+                                            Err(e) => {
+                                                error!("💥 [BALANCE ROOT v1] Failed to compute local balance root: {}", e);
+                                                [0u8; 32]
+                                            }
+                                        };
+                                        if local_root != block.header.state_root {
+                                            error!(
+                                                "💥 [BALANCE ROOT v1] REJECT block {} — balance root mismatch!\n  \
+                                                 Block claims: {}\n  \
+                                                 Local state:  {}\n  \
+                                                 Action: block rejected. If this node keeps rejecting: check checkpoint integrity.",
+                                                block_height,
+                                                hex::encode(block.header.state_root),
+                                                hex::encode(local_root)
+                                            );
+                                            return; // Skip this block
+                                        } else {
+                                            debug!("✅ [BALANCE ROOT v1] Block {} balance root verified: {}",
+                                                block_height, hex::encode(&local_root[..8]));
+                                        }
+                                    }
+                                }
+
                                 // ========================================
                                 // v0.8.1-beta: ATOMIC TRANSACTION - Balance consensus + block storage
                                 // ========================================

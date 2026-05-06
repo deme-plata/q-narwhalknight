@@ -586,6 +586,11 @@ impl LockFreeProducer {
             return;
         }
 
+        // 🔐 BalanceRootV1: Wire storage into producer for balance root computation.
+        // Required so produce_block() can call compute_balance_root_for_block() when
+        // the BalanceRootV1 upgrade is active (mainnet activation: 18,600,000).
+        producer.set_storage(storage.clone());
+
         info!(
             "✅ Producer #{} initialized with storage (ZERO LOCKS, BOUNDED CHANNEL)",
             producer_id
