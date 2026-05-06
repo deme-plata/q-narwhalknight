@@ -12,12 +12,7 @@
 //! These tests MUST pass before activating BalanceRootV1 on mainnet (height 18,600,000).
 //! If any test here fails, DO NOT DEPLOY.
 //!
-//! Run: cargo test --package q-storage --test balance_determinism_tests -- --include-ignored
-//!
-//! NOTE: All tests are marked #[ignore] because QStorage::open() triggers a
-//! winter-prover ZK trace assertion that fires in test environments (trace too small).
-//! Run with `-- --include-ignored` or `-- --ignored` to execute them.
-//! In CI, use a real node environment or the `Q_SKIP_ZK_TRACE=1` env var if available.
+//! Run: cargo test --package q-storage --test balance_determinism_tests
 
 use q_storage::{BalanceStorage, QStorage};
 use std::sync::Arc;
@@ -55,7 +50,6 @@ fn wallet_addr(seed: u8) -> String {
 // This is the fundamental network consensus property.
 
 #[tokio::test]
-#[ignore = "requires real blockchain environment (winter-prover ZK trace too small in tests)"]
 async fn test_two_nodes_same_blocks_same_hash() {
     let (engine_a, _dir_a) = open_test_storage().await;
     let (engine_b, _dir_b) = open_test_storage().await;
@@ -111,9 +105,10 @@ async fn test_two_nodes_same_blocks_same_hash() {
 // This validates RocksDB persistence and the scan-then-sort-then-hash pattern.
 
 #[tokio::test]
-#[ignore = "requires real blockchain environment (winter-prover ZK trace too small in tests)"]
 async fn test_restart_preserves_balance_hash() {
     let dir = TempDir::new().expect("failed to create tempdir");
+    // Save the path before drop — TempDir lives for the full test.
+    let dir_path = dir.path().to_path_buf();
     let node_id = [1u8; 32];
 
     let wallets: Vec<(String, u128)> = vec![
@@ -121,10 +116,12 @@ async fn test_restart_preserves_balance_hash() {
         (wallet_addr(0xBB), 3_333_333_333_333_333_333_333_333u128),
     ];
 
-    // Phase 1: open, add balances, capture hashes, drop storage
+    // Phase 1: open, add balances, capture hashes.
+    // Do NOT wrap in Arc — we need the RocksDB lock to release synchronously when
+    // `engine` drops. An Arc could delay destruction if the runtime holds a ref.
     let (hash_before, root_before) = {
-        let engine = Arc::new(QStorage::open(dir.path(), node_id).await
-            .expect("open pre-restart failed"));
+        let engine = QStorage::open(&dir_path, node_id).await
+            .expect("open pre-restart failed");
         for (addr, balance) in &wallets {
             engine.add_balance(addr, *balance).await.expect("add_balance pre-restart failed");
         }
@@ -133,11 +130,15 @@ async fn test_restart_preserves_balance_hash() {
         let r = engine.compute_balance_root_for_block().await
             .expect("compute_balance_root_for_block pre-restart failed");
         (h, r)
-        // engine dropped here (simulates graceful shutdown)
+        // engine drops here — RocksDB LOCK released synchronously
     };
 
-    // Phase 2: reopen same path, verify identical hashes
-    let engine2 = Arc::new(QStorage::open(dir.path(), node_id).await
+    // Yield to the async runtime so RocksDB's destructor fully completes and
+    // the OS file lock is released before we attempt to re-open the same path.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // Phase 2: reopen same path, verify identical hashes (simulates node restart)
+    let engine2 = Arc::new(QStorage::open(&dir_path, node_id).await
         .expect("open post-restart failed"));
     let (hash_after, _, _) = engine2.compute_balance_state_hash().await
         .expect("compute_balance_state_hash post-restart failed");
@@ -168,7 +169,6 @@ async fn test_restart_preserves_balance_hash() {
 // This guards against HashMap non-determinism leaking into consensus.
 
 #[tokio::test]
-#[ignore = "requires real blockchain environment (winter-prover ZK trace too small in tests)"]
 async fn test_order_independence() {
     let (engine_fwd, _dir_fwd) = open_test_storage().await;
     let (engine_rev, _dir_rev) = open_test_storage().await;
@@ -223,7 +223,6 @@ async fn test_order_independence() {
 // that never saw that wallet at all (as long as non-zero balances agree).
 
 #[tokio::test]
-#[ignore = "requires real blockchain environment (winter-prover ZK trace too small in tests)"]
 async fn test_zero_balance_excluded() {
     let (engine_with_zero, _dir_a) = open_test_storage().await;
     let (engine_without, _dir_b) = open_test_storage().await;
@@ -276,7 +275,6 @@ async fn test_zero_balance_excluded() {
 // balance discrepancy.
 
 #[tokio::test]
-#[ignore = "requires real blockchain environment (winter-prover ZK trace too small in tests)"]
 async fn test_balance_change_changes_hash() {
     let (engine, _dir) = open_test_storage().await;
 
@@ -327,7 +325,6 @@ async fn test_balance_change_changes_hash() {
 //   - [0;32] is the sentinel used by validators to detect "missing root" post-BalanceRootV1.
 
 #[tokio::test]
-#[ignore = "requires real blockchain environment (winter-prover ZK trace too small in tests)"]
 async fn test_empty_state_returns_zero_hash() {
     let (engine, _dir) = open_test_storage().await;
 
