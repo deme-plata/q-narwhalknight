@@ -168,4 +168,5 @@ cc = "1.0"
 tempfile = "3.8"
 tokio-test = "0.4"
 proptest = { workspace = true }
+q-consensus-guard = { path = "../q-consensus-guard" }
 # criterion temporarily disabled due to font-kit issues - benchmarks moved to separate crate
