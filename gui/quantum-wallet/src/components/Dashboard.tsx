@@ -21,6 +21,7 @@ import StakingModal from './StakingModal';
 import CustomTokensCard from './CustomTokensCard';
 import FinanceModal from './FinanceModal';
 import BitcoinSwapModal from './BitcoinSwapModal';
+import HiBTDonationModal from './HiBTDonationModal';
 import ZcashWalletModal from './ZcashWalletModal';
 import IronFishWalletModal from './IronFishWalletModal';
 import EthereumSwapModal from './EthereumSwapModal';
@@ -101,6 +102,47 @@ interface WalletBalance {
 interface DashboardProps {
   onNavigateToSend?: (coinSymbol: string) => void;
   liveBalance?: number; // v8.6.5: Live QUG balance from App.tsx SSE (same source as TopBar)
+}
+
+// ── HiBT Listing Donation Banner (v10.5.4) ────────────────────────────────
+function HiBTDonationBanner() {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <motion.div
+        initial={{ opacity: 0, y: -8 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.05 }}
+        className="mb-6 cursor-pointer group"
+        onClick={() => setOpen(true)}
+      >
+        <div
+          className="relative w-full rounded-2xl overflow-hidden"
+          style={{ border: '1.5px solid rgba(132,204,22,0.35)', boxShadow: '0 0 24px rgba(132,204,22,0.1)' }}
+        >
+          <img
+            src="/hibt-banner.png"
+            alt="$QUG listing on HiBT — donate BTC"
+            className="w-full h-auto block transition-transform duration-300 group-hover:scale-[1.01]"
+            style={{ maxHeight: 90, objectFit: 'cover', objectPosition: 'center' }}
+          />
+          {/* Hover overlay */}
+          <div
+            className="absolute inset-0 flex items-center justify-end pr-6 opacity-0 group-hover:opacity-100 transition-opacity duration-200"
+            style={{ background: 'linear-gradient(90deg, transparent 40%, rgba(0,0,0,0.6) 100%)' }}
+          >
+            <span
+              className="text-xs font-bold px-3 py-1.5 rounded-lg"
+              style={{ background: 'rgba(132,204,22,0.9)', color: '#000' }}
+            >
+              Donate BTC →
+            </span>
+          </div>
+        </div>
+      </motion.div>
+      <HiBTDonationModal isOpen={open} onClose={() => setOpen(false)} />
+    </>
+  );
 }
 
 const Dashboard = memo(function Dashboard({ onNavigateToSend, liveBalance }: DashboardProps) {
@@ -2863,6 +2905,9 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
 
       {activeDashboardTab === 'wallet' && <>
 
+      {/* ── HiBT Listing Donation Banner — hidden until address verified */}
+      {/* <HiBTDonationBanner /> */}
+
       {/* ── News & Blog Row ─────────────────────────────────────────── */}
       <motion.div
         initial={{ opacity: 0, y: 16 }}
@@ -2985,9 +3030,9 @@ Both lanes must be satisfied for a block to be considered fully valid. This crea
 ## Download the CPU Miner
 
 \`\`\`bash
-wget https://quillon.xyz/downloads/q-miner-v10.3.12
-chmod +x q-miner-v10.3.12
-./q-miner-v10.3.12 --mode vdf --wallet YOUR_ADDRESS
+wget https://quillon.xyz/downloads/q-miner-v10.5.3
+chmod +x q-miner-v10.5.3
+./q-miner-v10.5.3 --mode vdf --wallet YOUR_ADDRESS
 \`\`\`
 
 The miner auto-detects your hardware and selects the optimal lane. Run both simultaneously on the same machine for maximum rewards.`,

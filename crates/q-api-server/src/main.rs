@@ -24613,7 +24613,7 @@ async fn admin_purge_phase_data(
 // v10.5.4: HiBT listing donation campaign status (public, no auth)
 // GET /api/v1/donation/hibt-status
 // ─────────────────────────────────────────────────────────────────────────────
-const HIBT_DONATION_ADDRESS: &str = "bc1qxm6q3f700y072ghxk3mj0rndk5yhxw5l79c2lw";
+const HIBT_DONATION_ADDRESS: &str = "bc1qnqdj5kuka522kctk4v99l22jpjut3lums2kepl";
 const HIBT_GOAL_USD: f64 = 15_000.0;
 
 async fn hibt_donation_status(
@@ -24626,11 +24626,23 @@ async fn hibt_donation_status(
         bank.oracle_integration.get_price_f64(&AssetType::BTC).await
     };
 
-    // Try to read how much BTC has been received at the donation address
+    // Try to read how much BTC has been received at the donation address.
+    // Primary: local Bitcoin RPC (if bridge enabled).
+    // Fallback: mempool.space public API — works without a Bitcoin node.
     let received_btc = if let Some(rpc) = &state.bitcoin_rpc_client {
         rpc.get_received_by_address(HIBT_DONATION_ADDRESS, 1).await.unwrap_or(0.0)
     } else {
-        0.0
+        let url = format!("https://mempool.space/api/address/{}", HIBT_DONATION_ADDRESS);
+        match reqwest::Client::new().get(&url).timeout(std::time::Duration::from_secs(8)).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                resp.json::<serde_json::Value>().await
+                    .ok()
+                    .and_then(|v| v["chain_stats"]["funded_txo_sum"].as_u64())
+                    .map(|sats| sats as f64 / 100_000_000.0)
+                    .unwrap_or(0.0)
+            }
+            _ => 0.0,
+        }
     };
 
     let received_usd = received_btc * btc_price_usd;
