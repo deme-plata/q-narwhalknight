@@ -19947,6 +19947,29 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 // ✅ RELAXED ACTIVATION: Activate for gaps > NEAR_TIP_THRESHOLD (not ANY gap)
                 // For small gaps, gossipsub delivers blocks faster than triggering full sync
                 let gap = network_height.saturating_sub(current_height);
+
+                // v10.5.4: Q_GENESIS_SYNC_ONLY=1 — suppress the catch-up loop when doing full genesis sync.
+                // Without this, the catch-up loop triggers when P2P gossip sets current_height_atomic to 16.674M,
+                // causing the catch-up to download only the top 693K blocks while warp sync handles genesis.
+                // The catch-up's Transaction commits advance qblock:latest non-sequentially (see transaction.rs).
+                // Use Q_GENESIS_SYNC_ONLY=1 alongside Q_SKIP_CHECKPOINT=1 for fully controlled genesis sync.
+                let genesis_sync_only = std::env::var("Q_GENESIS_SYNC_ONLY")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+
+                if genesis_sync_only {
+                    // In genesis-sync-only mode, the catch-up loop is suppressed.
+                    // Warp sync Phase 2 handles all block downloads from genesis to tip sequentially.
+                    // The sync loop only wakes on the sync_trigger (gossipsub) to check for live new blocks.
+                    let warp_progress = current_height; // height_cache reflects warp sync progress
+                    debug!("🌱 [GENESIS SYNC ONLY] Warp sync progress: height={}/{} ({:.1}%). Catch-up suppressed.",
+                           warp_progress, network_height,
+                           if network_height > 0 { warp_progress as f64 / network_height as f64 * 100.0 } else { 0.0 });
+                    // Still check for true network tip updates but don't trigger catch-up
+                    adaptive_interval_ms = 5000; // Check less frequently in genesis mode
+                    continue;
+                }
+
                 if (current_height == 0 && network_height > 0) || (gap > NEAR_TIP_THRESHOLD)
                 {
                     let blocks_behind = gap;
@@ -24132,16 +24155,32 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     {
         let app_state_for_sync = app_state.clone();
         let our_port = config.port;
-        // Q_SKIP_CHECKPOINT=1 → full block sync from genesis: skip HTTP state snapshot
-        // so the turbo sync pointer stays at 0 and all blocks are downloaded in order.
-        let skip_state_snapshot = std::env::var("Q_SKIP_CHECKPOINT")
+        // v10.5.4: ALWAYS run HTTP state sync to get wallet balances from the best peer (Epsilon).
+        // Q_SKIP_CHECKPOINT=1 only skips the HEIGHT PROBE in turbo_sync (preventing jump to 16.8M).
+        // The balance snapshot must always run — otherwise fresh nodes have 0 wallet balances
+        // even after downloading all 16M+ blocks (chain-scanning migrations are disabled by default).
+        //
+        // Previous bug (pre-v10.5.4): Q_SKIP_CHECKPOINT=1 skipped BOTH the probe AND the balance sync.
+        // This left nodes with correct block height but empty wallet_balances in RAM.
+        // Fix: Decouple probe skip (in turbo_sync.rs) from balance sync (here — always runs).
+        let skip_checkpoint = std::env::var("Q_SKIP_CHECKPOINT")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-        if skip_state_snapshot {
-            info!("🚫 [STATE SYNC] Q_SKIP_CHECKPOINT=1 — skipping HTTP state snapshot. Full block sync from genesis via P2P.");
+        if skip_checkpoint {
+            warn!("⚠️  [GENESIS SYNC] Q_SKIP_CHECKPOINT=1 — height probe skipped in turbo_sync.");
+            warn!("    Balance state sync will still run to populate wallet_balances from Epsilon.");
+            warn!("    To also skip balance sync: set Q_SKIP_BALANCE_SYNC=1 (rarely needed).");
+        }
+        // Balance sync always runs unless explicitly suppressed with Q_SKIP_BALANCE_SYNC=1
+        let skip_balance_sync = std::env::var("Q_SKIP_BALANCE_SYNC")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if skip_balance_sync {
+            warn!("🚫 [STATE SYNC] Q_SKIP_BALANCE_SYNC=1 — skipping HTTP balance snapshot entirely.");
+            warn!("    Node will have 0 wallet balances until P2P gossip populates them (may take hours).");
         } else {
             q_api_server::state_sync_api::spawn_state_sync_task(app_state_for_sync, our_port);
-            info!("🔄 [STATE SYNC] Background state sync task spawned");
+            info!("🔄 [STATE SYNC] Background balance state sync task spawned (queries Epsilon first)");
         }
     }
 

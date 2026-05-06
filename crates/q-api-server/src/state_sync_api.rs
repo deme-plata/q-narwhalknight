@@ -1101,7 +1101,26 @@ async fn do_http_state_sync(app_state: &Arc<AppState>, our_port: u16) {
 
     if let Some((peer_url, snapshot)) = best_snapshot {
         info!("🔄 [STATE SYNC HTTP] Using best snapshot from {} ({} wallets)", peer_url, snapshot.wallet_balances.len());
+
+        // v10.5.4: Log wallet count BEFORE applying so we can see the delta clearly.
+        // This is critical for diagnosing Q_SKIP_CHECKPOINT balance bugs.
+        let before_count = {
+            let balances = app_state.wallet_balances.read().await;
+            balances.len()
+        };
+        info!("📊 [BALANCE SYNC] Before: {} wallets in RAM. Applying {} wallets from {}.",
+              before_count, snapshot.wallet_balances.len(), peer_url);
+
         let result = merge_http_snapshot(app_state, &snapshot).await;
+
+        // v10.5.4: Log wallet count AFTER merge to confirm balances were populated.
+        let after_count = {
+            let balances = app_state.wallet_balances.read().await;
+            balances.len()
+        };
+        info!("📊 [BALANCE SYNC] After: {} wallets in RAM (+{} new wallets applied).",
+              after_count, after_count.saturating_sub(before_count));
+
         if result.anything_changed() {
             info!(
                 "🔄 [STATE SYNC HTTP] Merged from {}: contracts +{}/{}, pools +{}/{}, wallets +{}, tokens +{}",

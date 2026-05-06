@@ -1356,6 +1356,11 @@ impl QStorage {
         } else if !heights.is_empty() {
             info!("🔍 [TURBO CONTIGUITY] Batch did NOT advance pointer (cache={}, first_height={}, last_height={})",
                   contiguous_height, heights.first().unwrap(), heights.last().unwrap());
+            warn!("⚠️  [GENESIS INTEGRITY] Batch {} blocks ({}-{}) did NOT extend contiguous chain \
+                   (current contiguous: {}, first_height: {}, expected_next: {}). \
+                   This creates a gap — sequential warp sync will fill it later.",
+                  heights.len(), heights.first().unwrap(), heights.last().unwrap(),
+                  contiguous_height, heights.first().unwrap(), contiguous_height + 1);
         }
 
         // v10.2.7: Forward probe — check if blocks from PREVIOUS batches bridge beyond this batch.

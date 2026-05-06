@@ -389,6 +389,23 @@ impl QTransaction {
                 _ => 0,
             };
 
+            // v10.5.4: DEBUG — show when Transaction advances pointer non-sequentially.
+            // The Transaction path does NOT verify sequential continuity (unlike write_batch_qblocks).
+            // This is intentional for catch-up sync (get to tip fast) but can create a pointer ahead of
+            // actual contiguous chain. The height_cache reflects this pointer, not true sequential height.
+            if max_height > current_pointer {
+                let gap = max_height - current_pointer;
+                if gap > 1000 {
+                    warn!("🔍 [TX POINTER DEBUG] Non-sequential advance: {} → {} (gap: {} blocks). \
+                           This is the catch-up sync jumping pointer ahead of sequential warp sync. \
+                           height_cache will reflect {} but blocks between {} and {} may have gaps.",
+                          current_pointer, max_height, gap, max_height, current_pointer, max_height);
+                } else {
+                    debug!("🔍 [TX POINTER DEBUG] Sequential advance: {} → {} (+{} blocks)",
+                           current_pointer, max_height, gap);
+                }
+            }
+
             // Only update pointer if we're advancing it (never go backwards!)
             if max_height > current_pointer {
                 let cf_handle = self.hot_db.get_cf("blocks")?;
