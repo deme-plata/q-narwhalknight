@@ -1254,12 +1254,105 @@ pub async fn get_user_contracts(
 
 /// Get all contracts with optional filtering
 pub async fn get_contracts(
-    Query(_query): Query<ContractQuery>,
-    State(_state): State<Arc<AppState>>,
+    Query(query): Query<ContractQuery>,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<Vec<ContractInfo>>>, StatusCode> {
-    // Implementation would filter based on query parameters
-    // For now, return empty list
-    Ok(Json(ApiResponse::success(Vec::new())))
+    let ecosystem = &state.orobit_ecosystem;
+    let deployed = ecosystem.deployed_contracts.read().await;
+
+    let rwa_bool_keys = [
+        "kyc_required", "accredited_only", "dividend_enabled", "transfer_restrictions",
+        "voting_rights", "callable", "convertible", "delivery_option",
+        "insurance_enabled", "retirement_enabled", "offset_tracking",
+        "provenance_verified", "redemption_enabled", "sublicensing_allowed",
+        "serial_number_tracking", "supply_chain_verified", "shipping_included",
+    ];
+
+    let mut contract_infos: Vec<ContractInfo> = deployed
+        .values()
+        .filter(|contract| {
+            // Filter by owner (hex or qnk-prefixed address)
+            if let Some(ref owner) = query.owner {
+                let owner_hex = if owner.starts_with("qnk") {
+                    owner[3..].to_string()
+                } else if owner.starts_with("0x") {
+                    owner[2..].to_string()
+                } else {
+                    owner.clone()
+                };
+                if hex::encode(contract.deployer) != owner_hex.to_lowercase() {
+                    return false;
+                }
+            }
+            // Filter by contract type (case-insensitive substring)
+            if let Some(ref ct) = query.contract_type {
+                let type_str = format!("{:?}", contract.contract_type).to_lowercase();
+                if !type_str.contains(&ct.to_lowercase()) {
+                    return false;
+                }
+            }
+            // Filter by verified
+            if query.verified_only.unwrap_or(false) && !contract.verified {
+                return false;
+            }
+            true
+        })
+        .map(|contract| {
+            let total_supply = contract
+                .deployment_params
+                .get("initialSupply")
+                .or_else(|| contract.deployment_params.get("initial_supply"))
+                .and_then(|v| {
+                    v.as_u64().map(|n| n as u128)
+                        .or_else(|| v.as_str().and_then(|s| s.parse::<u128>().ok()))
+                });
+
+            let decimals = contract
+                .deployment_params
+                .get("decimals")
+                .and_then(|v| v.as_u64())
+                .map(|d| d as u32)
+                .or(Some(8));
+
+            let mut features = contract.metadata.features.clone();
+            for key in &rwa_bool_keys {
+                if let Some(val) = contract.deployment_params.get(*key) {
+                    if let Some(b) = val.as_bool() {
+                        if b {
+                            features.insert(key.to_string(), true);
+                        }
+                    }
+                }
+            }
+
+            ContractInfo {
+                address: format!("qnk{}", hex::encode(contract.address.0)),
+                contract_type: format!("{:?}", contract.contract_type),
+                name: contract.metadata.name.clone(),
+                symbol: contract.metadata.symbol.clone(),
+                owner: format!("qnk{}", hex::encode(contract.deployer)),
+                deployed_at: contract.deployed_at,
+                verified: contract.verified,
+                has_security_features: true,
+                features,
+                deployment_tx: contract.deployment_tx.clone(),
+                total_supply,
+                decimals,
+                deployment_params: serde_json::to_value(&contract.deployment_params).ok(),
+            }
+        })
+        .collect();
+
+    // Apply offset and limit
+    let offset = query.offset.unwrap_or(0) as usize;
+    let limit = query.limit.unwrap_or(u32::MAX) as usize;
+    if offset < contract_infos.len() {
+        contract_infos = contract_infos.into_iter().skip(offset).take(limit).collect();
+    } else {
+        contract_infos = Vec::new();
+    }
+
+    Ok(Json(ApiResponse::success(contract_infos)))
 }
 
 /// Get specific contract details
@@ -1601,12 +1694,36 @@ pub async fn interact_with_contract(
 
 /// Get user's deployment history
 pub async fn get_user_deployments(
-    Path(_address): Path<String>,
-    State(_state): State<Arc<AppState>>,
+    Path(address): Path<String>,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<Vec<DeploymentStatusResponse>>>, StatusCode> {
-    // Implementation would return deployment history
-    // For now, return empty list
-    Ok(Json(ApiResponse::success(Vec::new())))
+    let deployer = match parse_address(&address) {
+        Ok(addr) => addr,
+        Err(e) => return Ok(Json(ApiResponse::error(e))),
+    };
+
+    let ecosystem = &state.orobit_ecosystem;
+    let contracts = ecosystem.get_user_contracts(deployer).await;
+
+    let responses: Vec<DeploymentStatusResponse> = contracts
+        .into_iter()
+        .map(|contract| DeploymentStatusResponse {
+            request_id: contract.deployment_tx.clone(),
+            status: "deployed".to_string(),
+            contract_address: Some(format!("qnk{}", hex::encode(contract.address.0))),
+            deployment_tx: Some(contract.deployment_tx.clone()),
+            gas_used: None,
+            error_message: None,
+            progress: DeploymentProgress {
+                current_step: 4,
+                total_steps: 4,
+                step_name: "Completed".to_string(),
+                estimated_time_remaining: 0,
+            },
+        })
+        .collect();
+
+    Ok(Json(ApiResponse::success(responses)))
 }
 
 /// Estimate deployment cost
