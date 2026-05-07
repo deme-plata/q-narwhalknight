@@ -10,8 +10,9 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
+use crate::liquidity::QuantumLiquidityManager;
 use crate::types::*;
 
 /// Quantum Trading Engine with physics-inspired algorithms
@@ -25,6 +26,8 @@ pub struct QuantumTradingEngine {
     pub quantum_params: Arc<RwLock<QuantumTradingParameters>>,
     /// Trade execution statistics
     pub execution_stats: Arc<RwLock<QuantumExecutionStats>>,
+    /// Liquidity manager — holds pool reserves; used for atomic swap (DEX-001/002)
+    pub liquidity_manager: Arc<QuantumLiquidityManager>,
 }
 
 /// Quantum trade position with physics properties
@@ -144,8 +147,8 @@ impl QuantumExecutionStats {
 }
 
 impl QuantumTradingEngine {
-    /// Create a new quantum trading engine
-    pub fn new() -> Self {
+    /// Create a new quantum trading engine with a shared liquidity manager (DEX-001/002).
+    pub fn new(liquidity_manager: Arc<QuantumLiquidityManager>) -> Self {
         Self {
             active_positions: Arc::new(RwLock::new(HashMap::new())),
             quantum_order_book: Arc::new(RwLock::new(QuantumOrderBook {
@@ -159,6 +162,7 @@ impl QuantumTradingEngine {
             })),
             quantum_params: Arc::new(RwLock::new(QuantumTradingParameters::default())),
             execution_stats: Arc::new(RwLock::new(QuantumExecutionStats::default())),
+            liquidity_manager,
         }
     }
 
@@ -239,7 +243,11 @@ impl QuantumTradingEngine {
         Ok(())
     }
 
-    /// Execute quantum-enhanced trade with physics-based algorithms
+    /// Execute quantum-enhanced trade with physics-based algorithms.
+    ///
+    /// Physics price discovery drives display; the AMM constant-product formula in
+    /// `execute_atomic_swap()` drives the actual settled amount and reserve mutation
+    /// (DEX-001/002).  Slippage is enforced inside `execute_atomic_swap` (DEX-003).
     pub async fn execute_quantum_trade(
         &self,
         request: &QuantumTradeRequest,
@@ -252,10 +260,28 @@ impl QuantumTradingEngine {
         // Check for quantum entanglement effects
         let entangled_effect = self.calculate_entanglement_effect(&request.pair_id).await?;
 
-        // Execute trade with quantum enhancements
-        let execution_result = self
+        // Execute trade with quantum enhancements (physics estimation)
+        let mut execution_result = self
             .execute_with_quantum_algorithms(request, quantum_price, entangled_effect)
             .await?;
+
+        // DEX-001/002/003: Atomic reserve update under pool write lock.
+        // slippage floor = physics output * (1 - max_slippage); zero means no check.
+        let physics_out = &execution_result.filled_amount;
+        let min_out = if request.max_slippage_bps > 0 {
+            physics_out
+                * (BigDecimal::from(10_000i64) - BigDecimal::from(request.max_slippage_bps as i64))
+                / BigDecimal::from(10_000i64)
+        } else {
+            BigDecimal::from(0i64)
+        };
+        debug!("[DEX] trade executing atomic swap pair={} slippage_floor_bps={}",
+            request.pair_id, request.max_slippage_bps);
+        let (actual_out, _, _) = self.liquidity_manager
+            .execute_atomic_swap(&request.pair_id, &request.amount, &min_out)
+            .await?;
+        // Settle against the AMM output, not the physics estimate
+        execution_result.filled_amount = actual_out;
 
         // Update quantum statistics
         self.update_quantum_stats(&execution_result).await?;
@@ -556,15 +582,20 @@ pub struct QuantumOrderRequest {
 mod tests {
     use super::*;
 
+    fn test_engine() -> QuantumTradingEngine {
+        use crate::liquidity::QuantumLiquidityManager;
+        QuantumTradingEngine::new(Arc::new(QuantumLiquidityManager::new()))
+    }
+
     #[tokio::test]
     async fn test_quantum_trading_engine_creation() {
-        let engine = QuantumTradingEngine::new();
+        let engine = test_engine();
         assert!(engine.initialize_quantum_engine().await.is_ok());
     }
 
     #[tokio::test]
     async fn test_uncertainty_principle_application() {
-        let engine = QuantumTradingEngine::new();
+        let engine = test_engine();
         engine.initialize_quantum_engine().await.unwrap();
 
         let request = QuantumTradeRequest {
@@ -589,7 +620,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_quantum_entanglement_calculation() {
-        let engine = QuantumTradingEngine::new();
+        let engine = test_engine();
         engine.initialize_quantum_engine().await.unwrap();
 
         let entanglement = engine
@@ -607,7 +638,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_quantum_order_placement() {
-        let engine = QuantumTradingEngine::new();
+        let engine = test_engine();
         engine.initialize_quantum_engine().await.unwrap();
 
         let order = QuantumOrderRequest {

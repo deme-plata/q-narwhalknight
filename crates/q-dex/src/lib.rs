@@ -71,11 +71,14 @@ pub struct QuantumDexManager {
 impl QuantumDexManager {
     /// Create a new quantum-enhanced DEX manager
     pub fn new(token_registry: Arc<TokenRegistry>, price_history: Arc<PriceHistoryManager>) -> Result<Self> {
+        // Liquidity manager is constructed first and shared with the trading engine
+        // so that execute_atomic_swap() can update pool reserves (DEX-001/002).
+        let liquidity = Arc::new(QuantumLiquidityManager::new());
         Ok(Self {
             api_server: Arc::new(QuantumDexApiServer::new(8080)),
             screener: Arc::new(QuantumDexScreenerIntegration::new()),
-            liquidity: Arc::new(QuantumLiquidityManager::new()),
-            trading: Arc::new(QuantumTradingEngine::new()),
+            trading: Arc::new(QuantumTradingEngine::new(Arc::clone(&liquidity))),
+            liquidity,
             analytics: Arc::new(QuantumTradingAnalytics::new()),
             token_registry,
             price_history,
