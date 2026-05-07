@@ -32,6 +32,10 @@ Environment="Q_AI_MAX_CONCURRENT=2"
 # Optional: Set custom keys file location (otherwise auto-generated in data dir):
 # Environment="Q_ENCRYPTION_KEYS_FILE=/path/to/encryption.keys"
 
+# v1.4.0-beta: Recursive Proofs Service — trustless light client bootstrap (~10ms verification)
+# Activates 8 endpoints under /api/v1/recursive-proofs/. Q_ENABLE_PROVER intentionally left off (CPU-heavy, optional).
+Environment="Q_ENABLE_RECURSIVE_PROOFS=1"
+
 ExecStart=/opt/orobit/shared/q-narwhalknight/target/release/q-api-server --port 8080
 Restart=on-failure
 RestartSec=10
