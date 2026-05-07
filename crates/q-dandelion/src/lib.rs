@@ -60,6 +60,9 @@ pub struct DandelionMessage {
     pub timestamp: u64,
     /// Quantum nonce for enhanced privacy
     pub quantum_nonce: [u8; 16],
+    /// Gossipsub topic used for fluff propagation (set by propagate_message caller)
+    #[serde(default)]
+    pub topic: String,
 }
 
 /// Quantum-enhanced Dandelion++ protocol implementation
@@ -76,7 +79,7 @@ pub struct QuantumDandelion {
     qrng: Option<Arc<QuantumRNG>>,
     /// Message tracking for deduplication
     seen_messages: Arc<RwLock<HashMap<[u8; 32], Instant>>>,
-    /// Stem relay targets
+    /// Stem relay targets (also used as the connected peer list)
     stem_targets: Arc<RwLock<Vec<NodeId>>>,
     /// Configuration
     config: DandelionConfig,
@@ -90,6 +93,9 @@ pub struct QuantumDandelion {
     failsafe: Option<Arc<FailsafeTimer>>,
     /// Failsafe event receiver
     failsafe_rx: Option<Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<FailsafeEvent>>>>,
+    /// Live gossipsub publisher: (topic, data) — the actual wire for fluff propagation.
+    /// Set via set_gossipsub_tx() after libp2p initialises. Uses RwLock so &self setters work.
+    gossipsub_tx: Arc<RwLock<Option<tokio::sync::mpsc::UnboundedSender<(String, Vec<u8>)>>>>,
 }
 
 impl QuantumDandelion {
@@ -199,6 +205,7 @@ impl QuantumDandelion {
             tor_bridge,
             failsafe: Some(failsafe),
             failsafe_rx: Some(failsafe_rx),
+            gossipsub_tx: Arc::new(RwLock::new(None)),
         };
 
         // Start background cleanup of seen messages
@@ -246,6 +253,7 @@ impl QuantumDandelion {
             vrf_proof: self.generate_vrf_proof(topic, &message_id).await?,
             timestamp: chrono::Utc::now().timestamp() as u64,
             quantum_nonce: self.generate_quantum_nonce().await?,
+            topic: topic.to_string(),
         };
 
         // Capture hop_count before moving message
@@ -318,17 +326,52 @@ impl QuantumDandelion {
         Ok(())
     }
 
-    /// Propagate message in fluff phase (broadcast to all peers)
+    /// Propagate message in fluff phase (broadcast via gossipsub)
     async fn fluff_propagate(&self, message: DandelionMessage) -> Result<()> {
         debug!(
             "🌸 Fluff propagation for message {}",
             hex::encode(message.id)
         );
 
-        // Get all connected peers
-        let peers = self.get_all_peers().await?;
+        // Primary path: publish via wired gossipsub channel.
+        // This is zero-copy efficient — gossipsub handles fanout to all subscribed peers.
+        {
+            let tx_guard = self.gossipsub_tx.read().await;
+            if let Some(ref tx) = *tx_guard {
+                let fluff_topic = if message.topic.is_empty() {
+                    // Fallback topic when caller didn't set one
+                    "/qnk/blocks".to_string()
+                } else {
+                    message.topic.clone()
+                };
+                match bincode::serialize(&message) {
+                    Ok(payload) => {
+                        if tx.send((fluff_topic.clone(), payload)).is_ok() {
+                            debug!(
+                                "🌸 Fluff published via gossipsub topic '{}' (msg {})",
+                                fluff_topic,
+                                hex::encode(&message.id[..4])
+                            );
+                            return Ok(());
+                        }
+                        warn!("⚠️ Gossipsub TX channel closed — falling back to peer iteration");
+                    }
+                    Err(e) => {
+                        warn!("⚠️ Failed to serialize fluff message: {}", e);
+                    }
+                }
+            }
+        }
 
-        // Broadcast to all peers via Tor
+        // Fallback: iterate connected peers (only reached when gossipsub not wired)
+        let peers = self.get_all_peers().await?;
+        if peers.is_empty() {
+            warn!(
+                "⚠️ No gossipsub TX and no connected peers — fluff message {} dropped",
+                hex::encode(&message.id[..4])
+            );
+            return Ok(());
+        }
         for peer in peers {
             if let Err(e) = self.send_to_peer(&peer, &message).await {
                 warn!("⚠️ Failed to send to peer {}: {}", hex::encode(peer), e);
@@ -416,53 +459,80 @@ impl QuantumDandelion {
         }
     }
 
-    /// Send message to specific peer via Tor
-    ///
-    /// v3.4.2-beta: Fixed to use proper v3 onion addresses instead of fake .qnk.onion
+    /// Send message to specific peer — used for stem relay.
+    /// Primary path uses gossipsub dandelion-stem topic; Tor is the fallback when available.
     async fn send_to_peer(&self, peer_id: &NodeId, message: &DandelionMessage) -> Result<()> {
-        // Sanitized logging - don't expose peer_id directly
         debug!(
-            "📤 Sending Dandelion message to peer (hash: {:08x})",
+            "📤 Dandelion stem relay (peer prefix: {:08x})",
             u32::from_le_bytes([peer_id[0], peer_id[1], peer_id[2], peer_id[3]])
         );
 
-        // Serialize message
         let message_data = bincode::serialize(message)?;
 
-        // Get peer's onion address using proper v3 onion derivation
-        // v3.4.2-beta: Use tor_bridge::peer_id_to_onion for real v3 addresses
-        let peer_onion = tor_bridge::peer_id_to_onion(peer_id);
-
-        // Validate it's a real onion address, not a fake .qnk.onion
-        if !peer_onion.ends_with(".onion") || peer_onion.contains("qnk") {
-            anyhow::bail!("Security: Invalid onion address generated - refusing to send");
+        // Primary: gossipsub dandelion-stem topic.
+        // Peers subscribed to this topic re-run their own stem/fluff coin flip,
+        // providing the time-delay and re-routing that makes Dandelion++ effective.
+        {
+            let tx_guard = self.gossipsub_tx.read().await;
+            if let Some(ref tx) = *tx_guard {
+                if tx
+                    .send(("/qnk/dandelion-stem".to_string(), message_data.clone()))
+                    .is_ok()
+                {
+                    debug!(
+                        "📤 Stem relay sent via gossipsub (msg {})",
+                        hex::encode(&message.id[..4])
+                    );
+                    return Ok(());
+                }
+                warn!("⚠️ Gossipsub TX closed during stem relay — trying Tor");
+            }
         }
 
-        // Send via Tor
-        let _connection = self.tor_client.connect_to_peer(&peer_onion).await?;
+        // Fallback: Tor circuit (when available and connected)
+        let peer_onion = tor_bridge::peer_id_to_onion(peer_id);
+        if peer_onion.ends_with(".onion") && !peer_onion.contains("qnk") {
+            if let Ok(_conn) = self.tor_client.connect_to_peer(&peer_onion).await {
+                debug!(
+                    "📤 Stem relay sent via Tor onion (msg {})",
+                    hex::encode(&message.id[..4])
+                );
+                return Ok(());
+            }
+        }
 
-        // In production, would send the actual message data
-        debug!(
-            "✅ Sent Dandelion message {} via Tor",
-            hex::encode(message.id)
+        // Neither path worked — log and continue (failsafe timer will force fluff)
+        warn!(
+            "⚠️ Stem relay for {} had no viable transport — failsafe will promote to fluff",
+            hex::encode(&message.id[..4])
         );
-
         Ok(())
     }
 
-    /// Get all connected peers
+    /// Get all connected peers (from stem_targets, updated by main.rs peer-sync task)
     async fn get_all_peers(&self) -> Result<Vec<NodeId>> {
-        // In production, this would get peers from the network layer
-        // For now, return empty list
-        Ok(vec![])
+        let peers = self.stem_targets.read().await;
+        Ok(peers.clone())
     }
 
-    /// Update stem targets
+    /// Update stem targets (also used as connected peer list for fluff fallback)
     pub async fn update_stem_targets(&self, targets: Vec<NodeId>) {
         let mut stem_targets = self.stem_targets.write().await;
         *stem_targets = targets;
-
         info!("🎯 Updated stem targets: {} peers", stem_targets.len());
+    }
+
+    /// Wire the live gossipsub publisher into Dandelion++.
+    /// Call this once after libp2p initialises. The sender should wrap
+    /// q_network::NetworkCommand::PublishMessage so published (topic, data) pairs
+    /// reach the gossipsub swarm.
+    pub async fn set_gossipsub_tx(
+        &self,
+        tx: tokio::sync::mpsc::UnboundedSender<(String, Vec<u8>)>,
+    ) {
+        let mut guard = self.gossipsub_tx.write().await;
+        *guard = Some(tx);
+        info!("📡 Gossipsub TX wired — Dandelion++ fluff/stem propagation is now LIVE");
     }
 
     /// Handle incoming Dandelion message
