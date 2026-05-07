@@ -24714,7 +24714,7 @@ async fn hibt_donation_status(
     // Primary: local Bitcoin RPC (if bridge enabled).
     // Fallback: mempool.space public API — works without a Bitcoin node.
     let received_btc = if let Some(rpc) = &state.bitcoin_rpc_client {
-        rpc.get_received_by_address(HIBT_DONATION_ADDRESS, 1).await.unwrap_or(0.0)
+        rpc.as_ref().get_received_by_address(HIBT_DONATION_ADDRESS, 1).await.unwrap_or(0.0)
     } else {
         let url = format!("https://mempool.space/api/address/{}", HIBT_DONATION_ADDRESS);
         match reqwest::Client::new().get(&url).timeout(std::time::Duration::from_secs(8)).send().await {
