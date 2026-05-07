@@ -83,17 +83,20 @@ add_files -norecurse [list \
     ${rtl_root}/rtl/core/qug_core.sv \
 ]
 
-# Xcrypto (BLAKE3)
+# Xcrypto (BLAKE3 + SHA-3)
 add_files -norecurse [list \
     ${rtl_root}/rtl/xcrypto/blake3_round.sv \
     ${rtl_root}/rtl/xcrypto/blake3_state.sv \
     ${rtl_root}/rtl/xcrypto/blake3_pipeline.sv \
+    ${rtl_root}/rtl/xcrypto/sha3_state.sv \
+    ${rtl_root}/rtl/xcrypto/sha3_keccak.sv \
     ${rtl_root}/rtl/xcrypto/xcrypto_unit.sv \
 ]
 
 # Xlattice (256-bit field arithmetic)
 add_files -norecurse [list \
     ${rtl_root}/rtl/xlattice/mod_add_256.sv \
+    ${rtl_root}/rtl/xlattice/mod_sub_256.sv \
     ${rtl_root}/rtl/xlattice/mod_mul_256.sv \
     ${rtl_root}/rtl/xlattice/mod_inv_256.sv \
     ${rtl_root}/rtl/xlattice/xlattice_unit.sv \
@@ -103,7 +106,14 @@ add_files -norecurse [list \
 add_files -norecurse [list \
     ${rtl_root}/rtl/memory/bram_sp.sv \
     ${rtl_root}/rtl/memory/bram_dp.sv \
+    ${rtl_root}/rtl/memory/xcrypto_scratchpad.sv \
     ${rtl_root}/rtl/memory/mem_subsystem.sv \
+]
+
+# Mining controller
+add_files -norecurse [list \
+    ${rtl_root}/rtl/mining/difficulty_regs.sv \
+    ${rtl_root}/rtl/mining/mining_controller.sv \
 ]
 
 # SoC top-level
@@ -154,8 +164,11 @@ set_property -name {STEPS.SYNTH_DESIGN.ARGS.MORE OPTIONS} -value {} -objects [ge
 # Enable retiming for better Fmax
 set_property STEPS.SYNTH_DESIGN.ARGS.RETIMING true [get_runs synth_1]
 
-# Flatten hierarchy for better optimization
-set_property STEPS.SYNTH_DESIGN.ARGS.FLATTEN_HIERARCHY rebuilt [get_runs synth_1]
+# Keep hierarchy to prevent constant propagation through crypto modules.
+# 'rebuilt' flattens the design and allows Vivado to prove xcrypto_valid/xlattice_valid
+# are always 0 (BRAM inits to 0 = NOP instructions), removing Xcrypto/Xlattice entirely
+# despite dont_touch on module instances. 'none' preserves hierarchy boundaries.
+set_property STEPS.SYNTH_DESIGN.ARGS.FLATTEN_HIERARCHY none [get_runs synth_1]
 
 # ==============================================================================
 # Run Synthesis
