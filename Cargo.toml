@@ -2,8 +2,9 @@
 resolver = "2"
 exclude = ["test_tx_propagation", "crates/crown-ash-client"]
 members = [
+    "crates/q-chat-types",
     "crates/q-types",
-    "crates/q-wallet", 
+    "crates/q-wallet",
     "crates/q-api-server",
     "crates/q-visualizer",
     "crates/q-narwhal-core",
@@ -73,10 +74,11 @@ members = [
     "crates/crown-ash-narrative", # Crown & Ash — narrative text generation (templates + optional LLM)
     # "crates/crown-ash-client",  # Crown & Ash — Bevy game client (build separately: cargo check --manifest-path crates/crown-ash-client/Cargo.toml)
     "crates/q-trading-bot",      # Water Robot DCA + Dagknight SIMD trading bot
+    "crates/q-turn",             # Custom STUN/TURN relay server — zero IP leak WebRTC
 ]
 
 [workspace.package]
-version = "10.6.0"  # v10.6.0: BalanceRootV1 — balance state root enforced in block headers (mainnet activation: 18,600,000)
+version = "10.6.2"  # v10.6.2: HEIGHT CLAMP 10K→5M + remove per-batch caps for 1000+ bps sync
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"

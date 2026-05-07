@@ -1,0 +1,24 @@
+[server]
+bind      = "0.0.0.0:3478"
+realm     = "quillon.xyz"
+software  = "q-turn/1.0 (quillon.xyz)"
+
+[auth]
+# Must match Q_TURN_SECRET in q-api-server's environment
+secret          = "CHANGE_ME_BEFORE_DEPLOY"
+credential_ttl  = 600   # 10 minutes
+
+[relay]
+# External IP of this server — included in ICE candidates sent to clients
+public_ip = "89.149.241.126"   # Epsilon (10Gbit supernode)
+min_port  = 49152
+max_port  = 65535
+
+[limits]
+max_allocations  = 2000
+allocation_lifetime = 600   # seconds
+max_channels     = 16
+max_permissions  = 32
+
+[logging]
+level = "info"

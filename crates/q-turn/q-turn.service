@@ -1,0 +1,24 @@
+[Unit]
+Description=q-turn STUN/TURN relay server
+Documentation=https://quillon.xyz
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/orobit/shared/q-narwhalknight/crates/q-turn
+ExecStart=/opt/orobit/shared/q-narwhalknight/target/release/q-turn --config /opt/orobit/shared/q-narwhalknight/crates/q-turn/q-turn.toml
+
+# Secret must match Q_TURN_SECRET in q-api-server's environment
+EnvironmentFile=/opt/orobit/shared/q-narwhalknight/crates/q-turn/.env
+
+Restart=always
+RestartSec=3
+
+# Raised limits for relay sockets
+LimitNOFILE=65536
+LimitNPROC=4096
+
+[Install]
+WantedBy=multi-user.target

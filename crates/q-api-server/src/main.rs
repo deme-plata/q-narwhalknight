@@ -15423,10 +15423,15 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 // Windows at height 1500 with real network at 3M) were getting clamped to
                 // 1500+10K=11.5K, destroying their sync target and making progress show ~12K
                 // instead of the real 3M. Poisoning defense not needed during initial sync.
-                let hard_cap = local_height + 10_000;
+                // v10.6.2: Raised from 10K to 5M — the old 10K cap prevented TURBO SYNC DIRECT
+                // from ever running during catch-up: local+10K ≈ network_height after each batch,
+                // so turbo sync thought it was done and only RC-3 GAP-FILL ran at ~34 bps.
+                // Turbo sync's own peer registry already validates heights (100× cap in turbo_sync.rs).
+                // Only clamp truly absurd heights (>5M blocks ahead = ~58 days at 1 bps).
+                let hard_cap = local_height + 5_000_000;
                 if network_height > hard_cap && local_height > 100_000 {
                     warn!(
-                        "🚫 [HEIGHT CLAMP v8.1.7] CLAMPING poisoned network_height {} → {} (local: {}, cap: local+10K)",
+                        "🚫 [HEIGHT CLAMP] CLAMPING absurd network_height {} → {} (local: {}, cap: local+5M)",
                         network_height, hard_cap, local_height
                     );
                     app_state_decay.highest_network_height.store(
@@ -19810,7 +19815,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                               missing_height);
 
                                         // ✅ v1.4.8-beta: Actually trigger TurboSync to fill the gap!
-                                        let target_height = network_height.min(missing_height + 10000);
+                                        // v10.6.2: Removed +10K cap — target full network height
+                                        let target_height = network_height;
                                         warn!("🚀 [GAP FILL] Triggering TurboSync to {} (network height: {})",
                                               target_height, network_height);
 
@@ -19963,8 +19969,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     // Previous bug: (current_height + 100).min(network_height) = max 100 blocks
                     // Correct: network_height.min(current_height + 10000) = sync to network (capped for safety)
                     let target_height = if network_height_snapshot > current_height {
-                        // Sync to network height (cap at +10000 per batch for safety)
-                        network_height_snapshot.min(current_height + 10000)
+                        // v10.6.2: Removed +10K cap — target full network height for fast sync
+                        network_height_snapshot
                     } else {
                         // If network_height is unknown (0), try conservative +1000
                         // This will fail gracefully if peers don't have blocks
@@ -20592,10 +20598,12 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                     // 🚀 v1.4.13-beta: Actually call TurboSync to fetch blocks!
                                     // This is the critical missing piece - we must actively request blocks
                                     if let Some(ref turbo_sync) = app_state_sync.turbo_sync {
-                                        // Sync to network height (capped at +10000 per batch for safety)
-                                        let sync_target = network_height.min(current_height + 10000);
+                                        // v10.6.2: Removed +10K per-batch cap — let turbo sync target
+                                        // the full network height so parallel streams run at 1000+ bps.
+                                        // Turbo sync's own peer registry caps heights internally.
+                                        let sync_target = network_height;
                                         warn!("🚀 [TURBO SYNC DIRECT] Triggering sync {} → {} ({} blocks)",
-                                              current_height, sync_target, sync_target - current_height);
+                                              current_height, sync_target, sync_target.saturating_sub(current_height));
 
                                         match turbo_sync.sync_to_height(sync_target).await {
                                             Ok(()) => {
@@ -23579,6 +23587,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .nest("/api/chat", chat_api::chat_router())
         // Also expose at /api/v1/chat for OpenAI-compatible endpoints
         .nest("/api/v1/chat", chat_api::chat_router())
+        // TURN relay credentials — zero IP leak WebRTC
+        .route("/api/v1/turn/credentials", get(q_api_server::turn_credentials::get_turn_credentials))
         // P2P chat persistence routes (nova-chat integration Phase 3)
         .route("/api/v1/peer-chat/messages", get(q_api_server::chat_persistence::get_chat_history).post(q_api_server::chat_persistence::store_message_handler))
         .route("/api/v1/peer-chat/conversations", get(q_api_server::chat_persistence::list_conversations))
@@ -24035,10 +24045,12 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     info!("🔐 [VALIDATOR-BACKUP] Validator key backup API enabled (5-of-9 threshold)");
 
     // Chat/Voice/Video signaling WebSocket
+    // CorsLayer applied directly so it is not bypassed by the post-layer merge (CRIT-3 fix).
     let signaling_state = SignalingState::new();
     let signaling_router = Router::new()
         .route("/ws/chat/signal", get(ws_signal_handler))
-        .with_state(signaling_state);
+        .with_state(signaling_state)
+        .layer(tower_http::cors::CorsLayer::permissive());
 
     // Merge the routers
     let app = app.merge(storage_router).merge(zcash_router).merge(temporal_router).merge(validator_backup_router).merge(signaling_router);

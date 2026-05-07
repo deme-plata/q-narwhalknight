@@ -714,6 +714,53 @@ async fn try_aioc_service_auth(
     }))
 }
 
+/// Validate an `X-Wallet-Auth`-style JSON auth header passed as a WebSocket query parameter.
+///
+/// Used by the signaling server to authenticate WebSocket connections without custom HTTP headers
+/// (browser WebSocket API cannot send custom headers).
+///
+/// The frontend signs the fixed path `/ws/chat/signal` — same SHA3-256(address || ts || path)
+/// challenge as the standard `X-Wallet-Auth` flow.
+///
+/// Returns the validated wallet address string on success.
+pub fn validate_signaling_auth_query(auth_json: &str, expected_peer_id: &str) -> Result<String, &'static str> {
+    let auth: AuthHeader = serde_json::from_str(auth_json).map_err(|_| "invalid_auth_json")?;
+
+    // Replay-attack prevention: reject headers older than 5 minutes
+    let now = chrono::Utc::now().timestamp();
+    if (now - auth.timestamp).abs() > 300 {
+        return Err("expired_auth");
+    }
+
+    // Parse address — strip qnk prefix to get raw 32-byte public key
+    let hex_part = if auth.address.starts_with("qnk") { &auth.address[3..] } else { &auth.address };
+    let addr_bytes = hex::decode(hex_part).map_err(|_| "invalid_address")?;
+    if addr_bytes.len() != 32 { return Err("invalid_address_length"); }
+    let mut address = [0u8; 32];
+    address.copy_from_slice(&addr_bytes);
+
+    // peer_id must match the address in the auth header
+    let strip_prefix = |s: &str| s.strip_prefix("qnk").unwrap_or(s).to_lowercase();
+    if strip_prefix(&auth.address) != strip_prefix(expected_peer_id) {
+        return Err("peer_id_mismatch");
+    }
+
+    // Reconstruct the challenge: identical to generate_auth_challenge() for /ws/chat/signal
+    let challenge = generate_auth_challenge(&address, "/ws/chat/signal", auth.timestamp);
+
+    // Verify Ed25519 signature (only Ed25519 supported for WebSocket auth)
+    let sig_hex = auth.signature.as_deref().ok_or("missing_signature")?;
+    let sig_bytes = hex::decode(sig_hex).map_err(|_| "invalid_signature_hex")?;
+    if sig_bytes.len() != 64 { return Err("invalid_signature_length"); }
+
+    let sig_arr: [u8; 64] = sig_bytes.try_into().map_err(|_| "signature_conversion_failed")?;
+    let sig = DalekSignature::from_bytes(&sig_arr);
+    let vk = VerifyingKey::from_bytes(&address).map_err(|_| "invalid_public_key")?;
+    vk.verify(&challenge, &sig).map_err(|_| "signature_verification_failed")?;
+
+    Ok(auth.address.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

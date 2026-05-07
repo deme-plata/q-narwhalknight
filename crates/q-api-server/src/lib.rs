@@ -259,6 +259,7 @@ pub mod aegis_auth_middleware; // ✅ ENABLED - AEGIS-QL post-quantum authentica
 pub mod binary_protocol; // High-performance binary ingestion for 1M+ TPS
 pub mod cdp_simple; // Simple CDP system for QUGUSD minting (fallback, can be removed)
 pub mod chat_api; // ✅ ENABLED - AI chat API with privacy-first distributed inference
+pub mod chat_persistence; // P2P peer-to-peer chat message persistence
 pub mod email_api; // ✅ v7.3.2 - Quillon Mail: decentralized email with crypto transfers
 pub mod email_smtp; // ✅ v7.3.2 - Quillon Mail: SMTP server for inbound/outbound
 pub mod calendar_api; // ✅ v7.3.3 - Blockchain Calendar: events, scheduled TXs, P2P sync
@@ -304,6 +305,9 @@ pub mod streaming;
 pub mod sync_activation; // ✅ v1.0.15-beta - Timeout-based sync activation
 pub mod wallet_auth; // Signature-based wallet authentication for privacy
 pub mod websocket_stream; // WebSocket streaming for 1M+ TPS (zero HTTP overhead)
+pub mod call_manager; // Call lifecycle state machine (capacity + timeout enforcement)
+pub mod signaling_server; // Chat/Voice/Video WebRTC signaling (SDP + ICE routing)
+pub mod turn_credentials; // TURN credential endpoint (/api/v1/turn/credentials)
 pub mod consensus_service; // ✅ v1.3.11-beta: TRUE DECENTRALIZED CONSENSUS with multi-validator signatures
 pub mod oracle_integration; // ✅ v1.4.3-beta: Oracle feeds for QNO prediction resolution
 pub mod zcash_api;
