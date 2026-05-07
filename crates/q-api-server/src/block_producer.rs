@@ -1270,6 +1270,15 @@ impl BlockProducer {
         // Previously tracking only local blocks here caused N× emission overshoot
         // when N nodes independently produced blocks.
 
+        // 🏊 v9.1.2 PPLNS FIX: Notify the mining pool that a block was produced so the
+        // PPLNS round advances and the blocks_found stat is incremented.
+        // record_http_share() is called at submission time (main.rs batch processor) — this
+        // call closes the round after the block is finalised, mirroring what handle_block_found()
+        // does for the Stratum path.
+        if let Some(ref pool) = self.mining_pool {
+            pool.notify_block_produced(block.header.height, block.calculate_hash());
+        }
+
         Some(block)
     }
 

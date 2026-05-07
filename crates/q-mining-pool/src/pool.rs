@@ -686,6 +686,30 @@ impl MiningPool {
         stats.total_shares += 1;
     }
 
+    /// Notify the pool that a block has been produced by the local block producer.
+    ///
+    /// Must be called every time the block producer successfully creates a block so that:
+    /// - The PPLNS round advances (sliding window is preserved, but round counter increments)
+    /// - The blocks_found stat is incremented
+    ///
+    /// This is the HTTP-path equivalent of `handle_block_found` (which is only reached via
+    /// the Stratum submit path). Without this call the pool's round never advances and the
+    /// `blocks_found` counter stays at zero even though blocks are being produced.
+    pub fn notify_block_produced(&self, block_height: u64, block_hash: [u8; 32]) {
+        tracing::info!(
+            height = block_height,
+            hash = %hex::encode(&block_hash[..8]),
+            shares = self.pplns.share_count(),
+            "🏊 [POOL] Block produced — advancing PPLNS round",
+        );
+        // Advance the PPLNS round (rolls the sliding window; shares are kept per PPLNS rules)
+        self.pplns.new_round();
+        // Increment blocks_found stat
+        let mut stats = self.stats.write();
+        stats.blocks_found += 1;
+        stats.block_height = block_height;
+    }
+
     /// Get PPLNS share proportions for coinbase distribution.
     /// Returns Vec<(wallet_hex, proportion)> or None if no shares in window.
     /// Proportions are fee-free — block producer handles dev fee separately.
