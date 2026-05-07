@@ -23902,6 +23902,16 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/bridge/admin/freeze", post(q_api_server::bridge_safety::admin_freeze_bridge))
         .route("/api/v1/bridge/admin/unfreeze", post(q_api_server::bridge_safety::admin_unfreeze_bridge))
         .route("/api/v1/bridge/admin/safety-status", get(q_api_server::bridge_safety::admin_safety_status))
+
+        // ── Integrity & Decentralization Diagnostics (v10.7.0) ──────────────
+        .route("/api/v1/integrity/balance-root",  get(q_api_server::integrity_api::get_balance_root))
+        .route("/api/v1/integrity/chain-tip",     get(q_api_server::integrity_api::get_chain_tip))
+        .route("/api/v1/integrity/emission",      get(q_api_server::integrity_api::get_emission))
+        .route("/api/v1/integrity/storage",       get(q_api_server::integrity_api::get_storage_health))
+        .route("/api/v1/integrity/validators",    get(q_api_server::integrity_api::get_validators))
+        .route("/api/v1/integrity/upgrades",      get(q_api_server::integrity_api::get_upgrades))
+        .route("/api/v1/integrity/compare",       get(q_api_server::integrity_api::get_compare_snapshot))
+        .route("/api/v1/integrity/full",          get(q_api_server::integrity_api::get_full_integrity))
         // v9.6.1: QR code payment requests for brick-and-mortar POS
         .route("/api/v1/payment-requests", post(q_api_server::payment_request_api::create_payment_request))
         .route("/api/v1/payment-requests/:id", get(q_api_server::payment_request_api::get_payment_request))

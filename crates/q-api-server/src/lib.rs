@@ -338,6 +338,7 @@ pub mod ethereum_bridge_api; // ✅ v7.3.0: Ethereum atomic swap bridge (QNK ↔
 pub mod bridge_committee; // ✅ v7.3.1: Multi-sig bridge validation with rotating 11-node committee
 pub mod bridge_tokens; // ✅ v7.2.5: Wrapped bridge tokens (wBTC, wZEC, wIRON) mint/burn system
 pub mod bridge_safety; // ✅ v9.4.0: Bridge safety layer — deposit verification, kill-switch, amount limits
+pub mod integrity_api;  // ✅ v10.7.0: Data integrity & decentralization diagnostics API
 pub mod sharkgod; // 🦈 SharkGod: Maximum power transaction beam (bypass all bottlenecks)
 pub mod swap_indexer; // ✅ v2.4.0-beta: Consensus-verified swap history indexer
 pub mod price_history_indexer; // ✅ v3.7.1-beta: Consensus-verified price history indexer

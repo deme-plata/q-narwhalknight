@@ -78,7 +78,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.6.2"  # v10.6.2: HEIGHT CLAMP 10K→5M + remove per-batch caps for 1000+ bps sync
+version = "10.7.0"  # v10.7.0: DEX atomic fixes + integrity/decentralization API endpoints
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"
