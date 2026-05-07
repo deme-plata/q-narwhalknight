@@ -10650,7 +10650,8 @@ impl QStorage {
         Ok(())
     }
 
-    /// Mark a scheduled transaction as failed
+    /// Mark a scheduled transaction as failed and remove it from the pending index.
+    /// Without the index removal the executor picks it up again every 60 s, retrying forever.
     pub async fn mark_scheduled_tx_failed(&self, event_id: &str, error: &str) -> Result<()> {
         if let Some(mut event) = self.get_calendar_event(event_id).await? {
             if let Some(ref mut tx) = event.scheduled_tx {
@@ -10664,7 +10665,13 @@ impl QStorage {
             );
             let event_bytes = serde_json::to_vec(&event)?;
             self.hot_db.put(CF_CALENDAR_EVENTS, event_id.as_bytes(), &event_bytes).await?;
-            debug!("📅 Scheduled TX for event {} failed: {}", event_id, error);
+
+            // Remove from pending index so the executor does not retry this TX.
+            let wallet_hex = hex::encode(event.wallet);
+            let sched_key = format!("{}:{:020}:{}", wallet_hex, event.start_time, event.id);
+            let _ = self.hot_db.delete(CF_CALENDAR_SCHEDULED_TX, sched_key.as_bytes()).await;
+
+            debug!("📅 Scheduled TX for event {} failed (removed from pending index): {}", event_id, error);
         }
         Ok(())
     }

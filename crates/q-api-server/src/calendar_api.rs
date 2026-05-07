@@ -763,18 +763,45 @@ pub async fn execute_pending_scheduled_txs(state: &Arc<AppState>) {
         // Execute the transfer based on token type
         let is_qug = scheduled_tx.token.to_uppercase() == "QUG";
 
-        let tx_result = if is_qug {
-            // QUG transfer via wallet_balances (Amount = u128, stored in 24-decimal)
-            let mut balances = state.wallet_balances.write().await;
-            let sender_balance = balances.get(&event.wallet).copied().unwrap_or(0u128);
-            let amount_base = (amount * 1e24) as u128;
+        // Deterministic tx hash: sha3-256 of "scheduled_tx:" || event_id || ":" || start_time
+        let tx_hash = {
+            use sha3::{Digest, Sha3_256};
+            let mut h = Sha3_256::new();
+            h.update(b"scheduled_tx:");
+            h.update(event.id.as_bytes());
+            h.update(b":");
+            h.update(event.start_time.to_le_bytes());
+            hex::encode(h.finalize())
+        };
 
-            if sender_balance < amount_base {
-                Err("Insufficient QUG balance".to_string())
-            } else {
-                *balances.entry(event.wallet).or_insert(0u128) -= amount_base;
-                *balances.entry(to_wallet_bytes).or_insert(0u128) += amount_base;
-                Ok(hex::encode(&event.wallet[..8]))
+        let tx_result: Result<String, String> = if is_qug {
+            // QUG transfer: update in-memory map then persist both sides to RocksDB.
+            let amount_base = (amount * 1e24) as u128;
+            let check = {
+                let mut balances = state.wallet_balances.write().await;
+                let sender_balance = balances.get(&event.wallet).copied().unwrap_or(0u128);
+                if sender_balance < amount_base {
+                    Err("Insufficient QUG balance".to_string())
+                } else {
+                    let new_sender = sender_balance - amount_base;
+                    let new_recipient = balances.get(&to_wallet_bytes).copied().unwrap_or(0u128) + amount_base;
+                    *balances.entry(event.wallet).or_insert(0u128) = new_sender;
+                    *balances.entry(to_wallet_bytes).or_insert(0u128) = new_recipient;
+                    Ok((new_sender, new_recipient))
+                }
+            };
+            match check {
+                Err(e) => Err(e),
+                Ok((new_sender_bal, new_recipient_bal)) => {
+                    // Persist so the balance survives node restarts.
+                    if let Err(e) = state.storage_engine.save_wallet_balance(&event.wallet, new_sender_bal).await {
+                        warn!("📅 Failed to persist sender balance after scheduled TX {}: {}", event.id, e);
+                    }
+                    if let Err(e) = state.storage_engine.save_wallet_balance(&to_wallet_bytes, new_recipient_bal).await {
+                        warn!("📅 Failed to persist recipient balance after scheduled TX {}: {}", event.id, e);
+                    }
+                    Ok(tx_hash)
+                }
             }
         } else {
             // Token transfer via token_balances: key = ([u8;32], [u8;32]), value = u128
@@ -805,7 +832,7 @@ pub async fn execute_pending_scheduled_txs(state: &Arc<AppState>) {
                 *token_balances.entry(sender_key).or_insert(0u128) -= amount_base;
                 let recipient_key = (to_wallet_bytes, token_addr);
                 *token_balances.entry(recipient_key).or_insert(0u128) += amount_base;
-                Ok(hex::encode(&event.wallet[..8]))
+                Ok(tx_hash)
             }
         };
 
