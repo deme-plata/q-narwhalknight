@@ -183,8 +183,10 @@ pub async fn get_emission(
     let divergence_signed: i128 = (total_minted as i128) - (expected as i128);
     let divergence_display_qug = divergence_signed / (DECIMALS as i128);
 
-    let tolerance = expected / 20; // 5% tolerance
-    let supply_healthy = (total_minted as i128 - expected as i128).unsigned_abs() <= tolerance;
+    // Healthy = supply does not EXCEED the theoretical max by more than 5%.
+    // Being under expected is fine — not every block is mined.
+    let tolerance = expected / 20;
+    let supply_healthy = total_minted <= expected + tolerance;
 
     let fmt_qug = |base: u128| -> String {
         format!("{}.{:06}", base / DECIMALS, (base % DECIMALS) / 10u128.pow(18))
@@ -416,8 +418,10 @@ pub async fn get_full_integrity(
     const ERA0_ANNUAL_QUG: u128 = 2_625_000;
     let per_block_reward = ERA0_ANNUAL_QUG * DECIMALS / BLOCKS_PER_YEAR;
     let expected = per_block_reward * (height as u128);
+    // Healthy = supply does not EXCEED the theoretical max by more than 5%.
+    // Being under expected is fine — not every block is mined.
     let tolerance = expected / 20;
-    let supply_healthy = (total_supply as i128 - expected as i128).unsigned_abs() <= tolerance;
+    let supply_healthy = total_supply <= expected + tolerance;
     let total_supply_display = format!("{}.{:06} QUG",
         total_supply / DECIMALS,
         (total_supply % DECIMALS) / 10u128.pow(18));
