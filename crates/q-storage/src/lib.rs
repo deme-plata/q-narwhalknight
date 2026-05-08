@@ -5791,6 +5791,17 @@ impl QStorage {
         marker.extend_from_slice(&replayed_through.to_le_bytes());
         self.hot_db.put_sync(CF_MANIFEST, Self::CHECKPOINT_APPLIED_KEY, &marker).await?;
 
+        // v10.7.2: Also set the P2P bootstrap-sync flag so that the state_sync_api bootstrap
+        // path sees it as "already done" and never overwrites checkpoint balances with a live
+        // P2P snapshot. This is a belt-and-suspenders guard alongside the is_checkpoint_applied()
+        // check added to state_sync_api.rs — protects against any race where the API check
+        // runs before this marker is written.
+        let _ = self.hot_db.put_sync(
+            CF_MANIFEST,
+            b"migration_bootstrap_wallet_sync_v882_done",
+            b"set_by_checkpoint",
+        ).await;
+
         warn!(
             "🏁 [CHECKPOINT] ✅ Done. Marker written (checkpoint_height={}, wallets={}, \
              checkpoint_total={}, replayed_through={}).",

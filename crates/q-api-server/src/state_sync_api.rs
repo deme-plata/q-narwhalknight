@@ -802,15 +802,30 @@ async fn merge_p2p_response(
     // v8.5.4: Ongoing wallet balance import disabled (DEX swap debit erasure).
     // v8.8.1: ONE-TIME bootstrap import for nodes that have never imported before.
     // Safe because during initial state sync there are no local DEX swaps to protect.
+    // v10.7.2: CHECKPOINT GATE — if the node applied the balance checkpoint, P2P bootstrap
+    //   must be skipped entirely. Block replay from the checkpoint is the sole balance source.
+    //   Without this gate the P2P snapshot (at live-network height) overwrites checkpoint
+    //   balances, and subsequent block replay double-counts every coinbase since the checkpoint
+    //   warp-floor (~7,000 QUG phantom inflation observed in sync tests).
     // Capture BEFORE wallet bootstrap runs — used for QUGUSD gating below.
     let bootstrap_was_done_before_this_sync = app_state.bootstrap_wallet_sync_done
         .load(std::sync::atomic::Ordering::SeqCst);
     if !response.wallet_balances.is_empty() {
         let already_done = bootstrap_was_done_before_this_sync;
+        // v10.7.2: also treat checkpoint-applied nodes as "already done"
+        let checkpoint_applied = app_state.storage_engine.is_checkpoint_applied().await;
 
-        if already_done {
+        if already_done || checkpoint_applied {
+            if checkpoint_applied && !already_done {
+                debug!("🔒 [STATE SYNC v10.7.2] Skipping {} wallet balances — balance checkpoint applied; block replay is sole source",
+                       response.wallet_balances.len());
+                // Mark as done so future checks skip the is_checkpoint_applied() DB read
+                app_state.bootstrap_wallet_sync_done
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            } else {
             debug!("🔒 [STATE SYNC v8.5.4] Skipping {} wallet balances (bootstrap already done)",
                    response.wallet_balances.len());
+            }
         } else {
             let our_height = app_state.current_height_atomic
                 .load(std::sync::atomic::Ordering::SeqCst);
