@@ -4386,6 +4386,24 @@ impl TurboSyncManager {
                     }
                 };
 
+                // v10.7.1 debug: count coinbase vs transfer txs in this batch
+                let (mut coinbase_tx_count, mut transfer_tx_count) = (0u64, 0u64);
+                for block in &blocks {
+                    for tx_item in &block.transactions {
+                        if tx_item.is_coinbase() {
+                            coinbase_tx_count += 1;
+                        } else {
+                            transfer_tx_count += 1;
+                        }
+                    }
+                }
+                debug!(
+                    "📊 [BATCH MODE] Tx breakdown: {} coinbase, {} transfer across {} blocks (heights {}-{})",
+                    coinbase_tx_count, transfer_tx_count, blocks.len(),
+                    blocks.first().map(|b| b.header.height).unwrap_or(0),
+                    blocks.last().map(|b| b.header.height).unwrap_or(0)
+                );
+
                 for block in &blocks {
                     let result = engine.process_block_mining_rewards_tx(&tx, block).await;
                     match result {
@@ -4413,16 +4431,28 @@ impl TurboSyncManager {
                 // survives restarts with the correct value (not recomputed from a stale map).
                 if let Ok(balances) = self.storage.load_wallet_balances().await {
                     let total: u128 = balances.values().copied().sum();
+                    let wallet_count = balances.len();
                     if let Err(e) = self.storage.save_total_supply(total).await {
                         warn!("⚠️ [BATCH MODE] Failed to persist total_minted_supply: {:?}", e);
+                    } else {
+                        debug!(
+                            "💾 [BATCH MODE] Persisted supply={} QUG-units, wallet_count={} (heights {}-{})",
+                            total,
+                            wallet_count,
+                            blocks.first().map(|b| b.header.height).unwrap_or(0),
+                            blocks.last().map(|b| b.header.height).unwrap_or(0)
+                        );
                     }
+                } else {
+                    warn!("⚠️ [BATCH MODE] load_wallet_balances() failed — supply not persisted");
                 }
 
                 let balance_elapsed = balance_start.elapsed();
                 if balance_updates_total > 0 {
                     info!(
-                        "💰 [BATCH MODE] Processed {} balance updates for {} blocks in {:?} (single commit!)",
-                        balance_updates_total, blocks_committed, balance_elapsed
+                        "💰 [BATCH MODE] Processed {} balance updates for {} blocks in {:?} (single commit!) coinbase={} transfer={}",
+                        balance_updates_total, blocks_committed, balance_elapsed,
+                        coinbase_tx_count, transfer_tx_count
                     );
                 }
             }
@@ -4990,11 +5020,30 @@ impl TurboSyncManager {
             }
 
             if let Some(engine) = balance_engine {
+                // v10.7.1 debug: count coinbase vs transfer txs in this batch
+                let (mut coinbase_tx_count_d, mut transfer_tx_count_d) = (0u64, 0u64);
+                for block in &blocks {
+                    for tx_item in &block.transactions {
+                        if tx_item.is_coinbase() {
+                            coinbase_tx_count_d += 1;
+                        } else {
+                            transfer_tx_count_d += 1;
+                        }
+                    }
+                }
+                debug!(
+                    "📊 [DIRECT] Tx breakdown: {} coinbase, {} transfer across {} blocks (heights {}-{})",
+                    coinbase_tx_count_d, transfer_tx_count_d, blocks.len(),
+                    blocks.first().map(|b| b.header.height).unwrap_or(0),
+                    blocks.last().map(|b| b.header.height).unwrap_or(0)
+                );
+
                 let tx = self.storage.begin_transaction().await?;
+                let mut direct_updates = 0usize;
                 for block in &blocks {
                     let result = engine.process_block_mining_rewards_tx(&tx, block).await;
                     match result {
-                        Ok(_) => {}
+                        Ok(updates) => { direct_updates += updates.len(); }
                         Err(BalanceConsensusError::AlreadyProcessed(_)) => {}
                         Err(e) => {
                             error!("❌ [DIRECT] Balance processing failed for block {}: {:?}",
@@ -5007,9 +5056,20 @@ impl TurboSyncManager {
                 // v10.7.1: Persist total_minted_supply after each batch.
                 if let Ok(balances) = self.storage.load_wallet_balances().await {
                     let total: u128 = balances.values().copied().sum();
+                    let wallet_count = balances.len();
                     if let Err(e) = self.storage.save_total_supply(total).await {
                         warn!("⚠️ [DIRECT] Failed to persist total_minted_supply: {:?}", e);
+                    } else {
+                        debug!(
+                            "💾 [DIRECT] Persisted supply={} QUG-units, wallet_count={} updates={} coinbase={} transfer={} (heights {}-{})",
+                            total, wallet_count, direct_updates,
+                            coinbase_tx_count_d, transfer_tx_count_d,
+                            blocks.first().map(|b| b.header.height).unwrap_or(0),
+                            blocks.last().map(|b| b.header.height).unwrap_or(0)
+                        );
                     }
+                } else {
+                    warn!("⚠️ [DIRECT] load_wallet_balances() failed — supply not persisted");
                 }
             }
 
