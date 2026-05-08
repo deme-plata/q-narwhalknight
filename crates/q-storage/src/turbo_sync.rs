@@ -4364,42 +4364,12 @@ impl TurboSyncManager {
             // BEFORE: 500 blocks × 50-400ms fsync = 25-200 SECONDS
             // AFTER:  1 transaction × 50-400ms fsync = 50-400ms TOTAL
             //
-            // 🚀 v3.4.12-beta: EXTREME_SKIP_BALANCES - Skip balance processing for 10x speed
-            // When Q_EXTREME_SKIP_BALANCES=1 or auto-detected (>100k behind), skip balance
-            // processing to achieve 2000+ BPS. Balances can be rebuilt after sync completes.
-            // v8.0.9: Lowered from 100k to 5k — users syncing 10-50k blocks were
-            // getting slow balance processing needlessly. Balances rebuild from coinbase
-            // after sync completes, so skipping during initial catch-up is safe.
-            let extreme_skip_balances_threshold: u64 = std::env::var("Q_EXTREME_SKIP_BALANCES_THRESHOLD")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(5_000);  // 5k blocks = auto-skip balances (was 100k)
-
-            let estimated_network_height_for_balance = {
-                let registry = self.peer_registry.read().await;
-                registry.max_height().unwrap_or(pack.end_height)
-            };
-            let blocks_behind_for_balance = estimated_network_height_for_balance
-                .saturating_sub(self.storage.height_cache.cached());
-
-            let skip_balances_env = std::env::var("Q_EXTREME_SKIP_BALANCES")
-                .map(|v| v == "1" || v.to_lowercase() == "true")
-                .unwrap_or(false);
-
-            // v3.4.12: Skip balances when explicitly set OR auto-detected far behind
-            let skip_balances = skip_balances_env || blocks_behind_for_balance > extreme_skip_balances_threshold;
-
-            if skip_balances {
-                // Log every 50 chunks to avoid spam
-                let chunk_count = self.chunks_since_wal_sync.load(Ordering::Relaxed);
-                if chunk_count % 50 == 0 {
-                    warn!(
-                        "🔥 [EXTREME v3.4.12] SKIPPING BALANCE PROCESSING ({} blocks behind > {}k threshold) - 10x SPEED BOOST!",
-                        blocks_behind_for_balance, extreme_skip_balances_threshold / 1000
-                    );
-                }
-            }
-
+            // v10.7.1: ALWAYS process full balance state (coinbase + transfers).
+            // The previous "extreme skip" optimization (skip transfers when >5k blocks behind)
+            // created a different state machine from archive replay: transfer-only wallets were
+            // never created and transfer debits were never applied, causing supply inflation.
+            // Wallet balances are consensus-critical (BAL-001 activates at block 18,600,000)
+            // so "fast but approximate" is no longer a valid mode.
             if let Some(engine) = balance_engine {
                 let balance_start = std::time::Instant::now();
 
@@ -4417,13 +4387,7 @@ impl TurboSyncManager {
                 };
 
                 for block in &blocks {
-                    // v7.1.2: In skip_balances mode, still process coinbase (mining rewards)
-                    let result = if skip_balances {
-                        engine.process_block_coinbase_only_tx(&tx, block).await
-                    } else {
-                        engine.process_block_mining_rewards_tx(&tx, block).await
-                    };
-
+                    let result = engine.process_block_mining_rewards_tx(&tx, block).await;
                     match result {
                         Ok(updates) => {
                             balance_updates_total += updates.len();
@@ -4444,6 +4408,15 @@ impl TurboSyncManager {
                 // SINGLE commit for all blocks - only ONE fsync!
                 tx.commit().await
                     .context(format!("Failed to commit batched balance updates for {} blocks", blocks.len()))?;
+
+                // v10.7.1: Persist total_minted_supply to RocksDB after each batch so it
+                // survives restarts with the correct value (not recomputed from a stale map).
+                if let Ok(balances) = self.storage.load_wallet_balances().await {
+                    let total: u128 = balances.values().copied().sum();
+                    if let Err(e) = self.storage.save_total_supply(total).await {
+                        warn!("⚠️ [BATCH MODE] Failed to persist total_minted_supply: {:?}", e);
+                    }
+                }
 
                 let balance_elapsed = balance_start.elapsed();
                 if balance_updates_total > 0 {
@@ -5007,18 +4980,7 @@ impl TurboSyncManager {
 
         // Save blocks using batched writes (same as apply_block_pack line 2900)
         if self.config.enable_batched_writes {
-            // Skip balance processing for extreme sync (same logic as apply_block_pack)
-            let estimated_network_height = {
-                let registry = self.peer_registry.read().await;
-                registry.max_height().unwrap_or(range_end)
-            };
-            let blocks_behind = estimated_network_height.saturating_sub(self.storage.height_cache.cached());
-            let extreme_skip_balances_threshold: u64 = std::env::var("Q_EXTREME_SKIP_BALANCES_THRESHOLD")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(5_000);  // v8.0.9: 5k (was 100k)
-            let skip_balances = std::env::var("Q_EXTREME_SKIP_BALANCES")
-                .map(|v| v == "1" || v.to_lowercase() == "true").unwrap_or(false)
-                || blocks_behind > extreme_skip_balances_threshold;
-
+            // v10.7.1: ALWAYS process full balance state. See apply_block_pack fix above.
             // Process state changes
             #[cfg(not(target_os = "windows"))]
             if let Some(ref state_proc) = self.state_processor {
@@ -5027,15 +4989,10 @@ impl TurboSyncManager {
                 }
             }
 
-            // v7.1.2: Process balance consensus - coinbase-only when skip_balances, full otherwise
             if let Some(engine) = balance_engine {
                 let tx = self.storage.begin_transaction().await?;
                 for block in &blocks {
-                    let result = if skip_balances {
-                        engine.process_block_coinbase_only_tx(&tx, block).await
-                    } else {
-                        engine.process_block_mining_rewards_tx(&tx, block).await
-                    };
+                    let result = engine.process_block_mining_rewards_tx(&tx, block).await;
                     match result {
                         Ok(_) => {}
                         Err(BalanceConsensusError::AlreadyProcessed(_)) => {}
@@ -5046,6 +5003,14 @@ impl TurboSyncManager {
                     }
                 }
                 tx.commit().await?;
+
+                // v10.7.1: Persist total_minted_supply after each batch.
+                if let Ok(balances) = self.storage.load_wallet_balances().await {
+                    let total: u128 = balances.values().copied().sum();
+                    if let Err(e) = self.storage.save_total_supply(total).await {
+                        warn!("⚠️ [DIRECT] Failed to persist total_minted_supply: {:?}", e);
+                    }
+                }
             }
 
             // Batch save blocks
@@ -5072,6 +5037,11 @@ impl TurboSyncManager {
             }
 
             // WAL sync (same logic as apply_block_pack)
+            let blocks_behind = {
+                let registry = self.peer_registry.read().await;
+                let net_height = registry.max_height().unwrap_or(range_end);
+                net_height.saturating_sub(self.storage.height_cache.cached())
+            };
             let use_extreme = std::env::var("Q_EXTREME_SYNC")
                 .map(|v| v == "1" || v.to_lowercase() == "true").unwrap_or(false)
                 || blocks_behind > std::env::var("Q_AUTO_EXTREME_THRESHOLD")
