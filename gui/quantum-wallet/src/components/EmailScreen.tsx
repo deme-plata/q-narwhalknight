@@ -1,4 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+
+// Module-level cache so emails survive tab switches and show instantly on return.
+// Each folder has its own entry: { emails, timestamp }.
+// Cache is considered fresh for 60s — after that a background revalidation fires
+// but the stale data is shown immediately so the UI never blanks.
+const _emailCache: Map<string, { emails: any[]; ts: number }> = new Map();
+const EMAIL_CACHE_TTL_MS = 60_000;
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Mail, Send, Inbox, Archive, Trash2, Search, Plus, ArrowLeft,
@@ -191,8 +198,26 @@ export default function EmailScreen() {
   // Data Fetching
   // ============================================================================
 
-  const fetchEmails = useCallback(async () => {
-    setLoading(true);
+  const fetchEmails = useCallback(async (opts?: { forceRefresh?: boolean }) => {
+    const cacheKey = searchQuery.trim() ? `search:${searchQuery}` : activeFolder;
+    const cached = _emailCache.get(cacheKey);
+    const now = Date.now();
+    const isFresh = cached && (now - cached.ts) < EMAIL_CACHE_TTL_MS;
+
+    // Show cached data immediately — no spinner if we have something to show
+    if (cached && !opts?.forceRefresh) {
+      setEmails(cached.emails);
+      if (activeFolder === 'inbox') {
+        const localUnread = cached.emails.filter((e: any) => !e.read).length;
+        setUnreadCount(localUnread);
+        window.dispatchEvent(new CustomEvent('email-unread-count', { detail: { count: localUnread } }));
+      }
+      if (isFresh) return; // cache still fresh — skip the network call entirely
+    }
+
+    // Only show spinner when there's nothing to display yet
+    if (!cached) setLoading(true);
+
     try {
       let response;
       if (searchQuery.trim()) {
@@ -205,9 +230,8 @@ export default function EmailScreen() {
         response = await qnkAPI.getEmailFolder(activeFolder);
       }
       if (response?.data) {
+        _emailCache.set(cacheKey, { emails: response.data, ts: Date.now() });
         setEmails(response.data);
-        // v8.5.5: When viewing inbox, compute unread from actual loaded emails
-        // and sync to Dashboard — prevents stale badge when API count disagrees
         if (activeFolder === 'inbox') {
           const localUnread = response.data.filter((e: any) => !e.read).length;
           setUnreadCount(localUnread);
@@ -221,12 +245,21 @@ export default function EmailScreen() {
     }
   }, [activeFolder, searchQuery]);
 
+  // Kept for external callers (SSE events, send confirmation) but skipped when
+  // the inbox fetch already computed the count locally above.
   const fetchUnreadCount = useCallback(async () => {
+    // If inbox is cached and fresh, compute locally — skip the extra round-trip
+    const cached = _emailCache.get('inbox');
+    if (cached && (Date.now() - cached.ts) < EMAIL_CACHE_TTL_MS) {
+      const localUnread = cached.emails.filter((e: any) => !e.read).length;
+      setUnreadCount(localUnread);
+      window.dispatchEvent(new CustomEvent('email-unread-count', { detail: { count: localUnread } }));
+      return;
+    }
     try {
       const response = await qnkAPI.getEmailUnreadCount();
       if (response?.data?.count !== undefined) {
         setUnreadCount(response.data.count);
-        // v8.5.5: Always sync authoritative count to Dashboard badge
         window.dispatchEvent(new CustomEvent('email-unread-count', { detail: { count: response.data.count } }));
       }
     } catch (e) {
@@ -239,7 +272,9 @@ export default function EmailScreen() {
     fetchUnreadCount();
   }, [fetchEmails, fetchUnreadCount]);
 
-  // Load email settings + send welcome email on first visit
+  // Load email settings + send welcome email on first visit.
+  // Settings load runs independently — only triggers a re-fetch if the welcome
+  // email was just sent (new account), which invalidates the inbox cache.
   useEffect(() => {
     if (settingsLoaded) return;
     const loadSettings = async () => {
@@ -251,8 +286,9 @@ export default function EmailScreen() {
           setEmailSignature(res.data.signature || '');
           if (!res.data.welcome_sent) {
             await qnkAPI.sendWelcomeEmail();
-            fetchEmails();
-            fetchUnreadCount();
+            // Invalidate cache so the welcome email appears
+            _emailCache.delete('inbox');
+            fetchEmails({ forceRefresh: true });
           }
         }
         setSettingsLoaded(true);
@@ -262,7 +298,7 @@ export default function EmailScreen() {
       }
     };
     loadSettings();
-  }, [settingsLoaded, fetchEmails, fetchUnreadCount]);
+  }, [settingsLoaded, fetchEmails]);
 
   // Save settings handler
   const handleSaveSettings = async () => {
@@ -286,10 +322,12 @@ export default function EmailScreen() {
     }
   };
 
-  // SSE listeners
+  // SSE listeners — invalidate cache so new emails appear immediately
   useEffect(() => {
     const handleEmailReceived = () => {
-      fetchEmails();
+      _emailCache.delete('inbox');
+      _emailCache.delete('sent');
+      fetchEmails({ forceRefresh: true });
       fetchUnreadCount();
     };
     window.addEventListener('email-received', handleEmailReceived);
@@ -328,6 +366,9 @@ export default function EmailScreen() {
       }
       if (response?.data?.email_id) {
         setSendSuccess(true);
+        // Invalidate both inbox and sent cache so fresh data loads after send
+        _emailCache.delete('inbox');
+        _emailCache.delete('sent');
         setTimeout(() => {
           setSendSuccess(false);
           setComposing(false);
@@ -337,7 +378,7 @@ export default function EmailScreen() {
           setCryptoEnabled(false);
           setCryptoAmount('');
           setReplyTo(undefined);
-          fetchEmails();
+          fetchEmails({ forceRefresh: true });
         }, 1200);
       } else {
         setSendError('Failed to send — no email ID returned');
@@ -591,7 +632,7 @@ export default function EmailScreen() {
               placeholder="Search emails..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && fetchEmails()}
+              onKeyDown={(e) => e.key === 'Enter' && fetchEmails({ forceRefresh: true })}
               className="w-full pl-9 pr-3 py-2 rounded-lg text-sm text-white placeholder-gray-700 focus:outline-none transition-all"
               style={{
                 background: 'rgba(0,229,255,0.04)',
@@ -641,7 +682,7 @@ export default function EmailScreen() {
             <motion.button
               whileHover={{ rotate: 180 }}
               transition={{ duration: 0.4 }}
-              onClick={fetchEmails}
+              onClick={() => { _emailCache.delete(activeFolder); fetchEmails({ forceRefresh: true }); }}
               className="p-1.5 rounded-lg transition-colors"
               style={{ color: 'rgba(0,229,255,0.4)' }}
             >
