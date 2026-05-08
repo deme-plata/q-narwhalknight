@@ -78,7 +78,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.7.2"  # v10.7.2: fix P2P bootstrap overwriting checkpoint balances (SYNC-003/BAL-001)
+version = "10.7.3"  # v10.7.3: post-sync balance replay for checkpoint nodes (SYNC-004/BAL-001)
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"

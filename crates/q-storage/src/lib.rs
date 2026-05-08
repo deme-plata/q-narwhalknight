@@ -5811,6 +5811,184 @@ impl QStorage {
         Ok(())
     }
 
+    /// Post-sync balance replay for checkpoint-bootstrapped nodes (SYNC-004 / v10.7.3).
+    ///
+    /// Turbo sync downloads blocks with `balance_engine=None` — no balance updates during
+    /// the historical bulk-download phase. A node that applies the balance checkpoint at
+    /// startup gets 1,326 wallets at height 16,538,868, but the ~1M blocks between the
+    /// checkpoint and chain tip are never credited (coinbase + transfers skipped).
+    ///
+    /// This function is called once, when `now_synced && !was_synced`, to replay every
+    /// block from CHECKPOINT_HEIGHT+1 to chain-tip and compute the correct balance state.
+    /// Uses two passes to close the race window between the replay and concurrent gossipsub.
+    pub async fn replay_post_checkpoint_balances(
+        &self,
+        wallet_balances: &Arc<tokio::sync::RwLock<std::collections::HashMap<[u8; 32], u128>>>,
+        total_minted_supply: &Arc<tokio::sync::RwLock<u128>>,
+    ) -> Result<()> {
+        use crate::balance_checkpoint::{CHECKPOINT_HEIGHT, CHECKPOINT_DATA};
+
+        let height_pass1_end = self
+            .get_latest_qblock_height()
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+
+        if height_pass1_end <= CHECKPOINT_HEIGHT {
+            warn!(
+                "🏁 [POST-SYNC REPLAY v10.7.3] height {} ≤ checkpoint {}, nothing to replay.",
+                height_pass1_end, CHECKPOINT_HEIGHT
+            );
+            return Ok(());
+        }
+
+        warn!(
+            "🏁 [POST-SYNC REPLAY v10.7.3] Starting: replaying {} blocks ({} → {})...",
+            height_pass1_end - CHECKPOINT_HEIGHT,
+            CHECKPOINT_HEIGHT + 1,
+            height_pass1_end
+        );
+
+        // ---- Build starting map from embedded checkpoint data ----
+        let mut replay_map: std::collections::HashMap<[u8; 32], u128> = {
+            let mut m = std::collections::HashMap::new();
+            for (wallet_id_hex, balance_str) in CHECKPOINT_DATA.iter() {
+                let balance: u128 = balance_str.parse().unwrap_or(0);
+                if let Ok(addr_bytes) = hex::decode(wallet_id_hex) {
+                    if addr_bytes.len() == 32 {
+                        let mut addr = [0u8; 32];
+                        addr.copy_from_slice(&addr_bytes);
+                        m.insert(addr, balance);
+                    }
+                }
+            }
+            m
+        };
+
+        // ---- Pass 1: Replay CHECKPOINT_HEIGHT+1 to height_pass1_end ----
+        let mut txs_applied = 0u64;
+        let mut blocks_missing = 0u64;
+
+        for height in (CHECKPOINT_HEIGHT + 1)..=height_pass1_end {
+            match self.get_qblock_by_height(height).await {
+                Ok(Some(block)) => {
+                    for tx in &block.transactions {
+                        match tx.tx_type as u8 {
+                            0x01 => {
+                                if tx.to != [0u8; 32] && tx.amount > 0 {
+                                    *replay_map.entry(tx.to).or_insert(0) =
+                                        replay_map.get(&tx.to).copied().unwrap_or(0)
+                                            .saturating_add(tx.amount);
+                                    txs_applied += 1;
+                                }
+                            }
+                            0x00 => {
+                                if tx.amount > 0 && tx.from != [0u8; 32] {
+                                    if let Some(s) = replay_map.get_mut(&tx.from) {
+                                        *s = s.saturating_sub(tx.amount);
+                                    }
+                                    *replay_map.entry(tx.to).or_insert(0) =
+                                        replay_map.get(&tx.to).copied().unwrap_or(0)
+                                            .saturating_add(tx.amount);
+                                    txs_applied += 1;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Ok(None) => {
+                    blocks_missing += 1;
+                }
+                Err(_) => {
+                    blocks_missing += 1;
+                }
+            }
+        }
+
+        warn!(
+            "🏁 [POST-SYNC REPLAY] Pass 1 done: {} txs applied, {} blocks missing (of {})",
+            txs_applied,
+            blocks_missing,
+            height_pass1_end - CHECKPOINT_HEIGHT
+        );
+
+        // ---- Pass 2: Close the race window — replay any blocks that arrived during Pass 1 ----
+        let height_pass2_end = self
+            .get_latest_qblock_height()
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(height_pass1_end);
+
+        if height_pass2_end > height_pass1_end {
+            warn!(
+                "🏁 [POST-SYNC REPLAY] Pass 2: {} new blocks arrived during Pass 1 ({}→{})",
+                height_pass2_end - height_pass1_end,
+                height_pass1_end + 1,
+                height_pass2_end
+            );
+            for height in (height_pass1_end + 1)..=height_pass2_end {
+                if let Ok(Some(block)) = self.get_qblock_by_height(height).await {
+                    for tx in &block.transactions {
+                        match tx.tx_type as u8 {
+                            0x01 => {
+                                if tx.to != [0u8; 32] && tx.amount > 0 {
+                                    *replay_map.entry(tx.to).or_insert(0) =
+                                        replay_map.get(&tx.to).copied().unwrap_or(0)
+                                            .saturating_add(tx.amount);
+                                }
+                            }
+                            0x00 => {
+                                if tx.amount > 0 && tx.from != [0u8; 32] {
+                                    if let Some(s) = replay_map.get_mut(&tx.from) {
+                                        *s = s.saturating_sub(tx.amount);
+                                    }
+                                    *replay_map.entry(tx.to).or_insert(0) =
+                                        replay_map.get(&tx.to).copied().unwrap_or(0)
+                                            .saturating_add(tx.amount);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        // Drop zero-balance wallets
+        replay_map.retain(|_, v| *v > 0);
+
+        let total: u128 = replay_map.values().copied().sum();
+        let count = replay_map.len();
+
+        // Persist to RocksDB
+        self.save_wallet_balances(&replay_map).await?;
+        if let Err(e) = self.save_total_supply(total).await {
+            warn!("⚠️ [POST-SYNC REPLAY] Failed to persist total_minted_supply: {}", e);
+        }
+
+        // Replace in-memory wallet map atomically
+        {
+            let mut wb = wallet_balances.write().await;
+            *wb = replay_map;
+        }
+        {
+            let mut supply = total_minted_supply.write().await;
+            *supply = total;
+        }
+
+        warn!(
+            "✅ [POST-SYNC REPLAY v10.7.3] Complete: {} wallets, {:.6} QUG total (replayed through {})",
+            count,
+            total as f64 / 1_000_000_000_000_000_000_000_000f64,
+            height_pass2_end
+        );
+
+        Ok(())
+    }
+
     /// Purge all DEX pools, contracts, token balances, and related state
     /// Used for phase transitions to clear stale data
     pub async fn purge_dex_and_contracts(&self) -> Result<(usize, usize, usize, usize, usize)> {

@@ -20900,6 +20900,27 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         // have correct balances immediately after turbo sync completes.
                         if now_synced && !was_synced {
                             info!("🎉 [SYNC COMPLETE v8.6.7] Node fully synced at height {} — reloading balances from RocksDB...", current_height);
+
+                            // v10.7.3 SYNC-004: Post-checkpoint balance replay.
+                            // Turbo sync uses balance_engine=None (no balance updates during bulk
+                            // download). For checkpoint-bootstrapped nodes, this means all ~1M
+                            // post-checkpoint blocks are stored but never credited. Run the replay
+                            // now that all blocks are on disk.
+                            if app_state_sync.storage_engine.is_checkpoint_applied().await {
+                                info!("🏁 [SYNC COMPLETE v10.7.3] Checkpoint detected — starting post-sync balance replay...");
+                                match app_state_sync.storage_engine.replay_post_checkpoint_balances(
+                                    &app_state_sync.wallet_balances,
+                                    &app_state_sync.total_minted_supply,
+                                ).await {
+                                    Ok(()) => {
+                                        info!("✅ [SYNC COMPLETE v10.7.3] Post-checkpoint balance replay complete.");
+                                    }
+                                    Err(e) => {
+                                        warn!("⚠️ [SYNC COMPLETE v10.7.3] Balance replay failed: {} — falling back to RocksDB reload", e);
+                                    }
+                                }
+                            }
+
                             match app_state_sync.storage_engine.load_wallet_balances().await {
                                 Ok(persisted) => {
                                     let count = persisted.len();
@@ -23273,6 +23294,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/search", get(handlers::search_transactions)) // Use existing function
         .route("/api/v1/web-search", post(q_api_server::web_search_api::web_search_handler)) // v9.3.2: GLM-4-Flash AI web search
         .route("/api/v1/ai/chat", post(q_api_server::web_search_api::web_search_handler)) // alias: ad-blocker-safe path for browser AI chat
+        .route("/api/v1/ai/email-assist", post(q_api_server::web_search_api::email_assist_handler)) // Email AI assistant (gemma4)
         // ============================================
         // BLOCKCHAIN SYNCHRONIZATION ENDPOINTS
         // ============================================
@@ -23589,6 +23611,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .nest("/api/v1/chat", chat_api::chat_router())
         // TURN relay credentials — zero IP leak WebRTC
         .route("/api/v1/turn/credentials", get(q_api_server::turn_credentials::get_turn_credentials))
+        // 💬 Group Chat — Discord-like server-backed groups
+        .nest("/api/v1/groups", q_api_server::group_chat_api::group_chat_router())
         // P2P chat persistence routes (nova-chat integration Phase 3)
         .route("/api/v1/peer-chat/messages", get(q_api_server::chat_persistence::get_chat_history).post(q_api_server::chat_persistence::store_message_handler))
         .route("/api/v1/peer-chat/conversations", get(q_api_server::chat_persistence::list_conversations))
