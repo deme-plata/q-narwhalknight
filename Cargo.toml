@@ -78,7 +78,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.7.6"  # v10.7.6: SYNC-006 — dedicated startup replay task with DB-flag guard
+version = "10.7.7"  # v10.7.7: SYNC-006 correctness — get_qblock_any_format + pre-replay reindex + miss-rate gate
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"

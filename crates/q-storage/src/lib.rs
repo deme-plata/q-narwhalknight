@@ -5845,7 +5845,7 @@ impl QStorage {
         &self,
         wallet_balances: &Arc<tokio::sync::RwLock<std::collections::HashMap<[u8; 32], u128>>>,
         total_minted_supply: &Arc<tokio::sync::RwLock<u128>>,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         use crate::balance_checkpoint::{CHECKPOINT_HEIGHT, CHECKPOINT_DATA};
 
         let height_pass1_end = self
@@ -5891,7 +5891,7 @@ impl QStorage {
         let mut blocks_missing = 0u64;
 
         for height in (CHECKPOINT_HEIGHT + 1)..=height_pass1_end {
-            match self.get_qblock_by_height(height).await {
+            match self.get_qblock_any_format(height).await {
                 Ok(Some(block)) => {
                     for tx in &block.transactions {
                         match tx.tx_type as u8 {
@@ -5957,7 +5957,7 @@ impl QStorage {
                 height_pass2_end
             );
             for height in (height_pass1_end + 1)..=height_pass2_end {
-                if let Ok(Some(block)) = self.get_qblock_by_height(height).await {
+                if let Ok(Some(block)) = self.get_qblock_any_format(height).await {
                     for tx in &block.transactions {
                         match tx.tx_type as u8 {
                             0x01 => {
@@ -6010,13 +6010,14 @@ impl QStorage {
         }
 
         warn!(
-            "✅ [POST-SYNC REPLAY v10.7.3] Complete: {} wallets, {:.6} QUG total (replayed through {})",
+            "✅ [POST-SYNC REPLAY v10.7.3] Complete: {} wallets, {:.6} QUG total (replayed through {}, {} blocks missed)",
             count,
             total as f64 / 1_000_000_000_000_000_000_000_000f64,
-            height_pass2_end
+            height_pass2_end,
+            blocks_missing
         );
 
-        Ok(())
+        Ok(blocks_missing)
     }
 
     /// Purge all DEX pools, contracts, token balances, and related state

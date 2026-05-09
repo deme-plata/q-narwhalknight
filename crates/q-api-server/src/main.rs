@@ -7837,10 +7837,26 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     info!("🔭 [SYNC-006] Latest block {} ≤ checkpoint {} — waiting…", latest, CHECKPOINT_HEIGHT);
                     continue;
                 }
-                info!("🏁 [SYNC-006] Chain at height {} — starting post-checkpoint balance replay.", latest);
+                info!("🏁 [SYNC-006] Chain at height {} — reindexing DAG blocks then starting replay.", latest);
+                // Pre-replay reindex: convert qblock:dag:{N}:{proposer} keys to qblock:height:{N}
+                // so that get_qblock_any_format() can find all gossip-received blocks.
+                if let Err(e) = replay_storage.reindex_dag_blocks_to_height_keys().await {
+                    warn!("⚠️ [SYNC-006] Pre-replay reindex failed: {} — replay may miss DAG-format blocks.", e);
+                }
                 match replay_storage.replay_post_checkpoint_balances(&replay_balances, &replay_supply).await {
-                    Ok(()) => {
-                        info!("✅ [SYNC-006] Replay complete — reloading in-memory balances from RocksDB.");
+                    Ok(blocks_missing) => {
+                        let total_range = latest.saturating_sub(CHECKPOINT_HEIGHT);
+                        let miss_pct = if total_range > 0 {
+                            blocks_missing * 100 / total_range
+                        } else {
+                            0
+                        };
+                        if miss_pct > 1 {
+                            warn!("⚠️ [SYNC-006] Replay miss rate {}% ({}/{}) exceeds 1% threshold — \
+                                   NOT marking done, will retry in 30s.", miss_pct, blocks_missing, total_range);
+                            continue;
+                        }
+                        info!("✅ [SYNC-006] Replay complete (miss rate {}%) — reloading in-memory balances from RocksDB.", miss_pct);
                         // Reload the in-memory map so live queries immediately reflect the replayed state.
                         if let Ok(persisted) = replay_storage.load_wallet_balances().await {
                             let count = persisted.len();
@@ -20988,13 +21004,15 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             // post-checkpoint blocks are stored but never credited. Run the replay
                             // now that all blocks are on disk.
                             if app_state_sync.storage_engine.is_checkpoint_applied().await {
-                                info!("🏁 [SYNC COMPLETE v10.7.3] Checkpoint detected — starting post-sync balance replay...");
+                                info!("🏁 [SYNC COMPLETE v10.7.3] Checkpoint detected — reindexing DAG blocks then starting post-sync balance replay...");
+                                // Reindex DAG-format blocks so replay can find gossip-received blocks (P1 fix).
+                                let _ = app_state_sync.storage_engine.reindex_dag_blocks_to_height_keys().await;
                                 match app_state_sync.storage_engine.replay_post_checkpoint_balances(
                                     &app_state_sync.wallet_balances,
                                     &app_state_sync.total_minted_supply,
                                 ).await {
-                                    Ok(()) => {
-                                        info!("✅ [SYNC COMPLETE v10.7.3] Post-checkpoint balance replay complete.");
+                                    Ok(missed) => {
+                                        info!("✅ [SYNC COMPLETE v10.7.3] Post-checkpoint balance replay complete ({} blocks missed).", missed);
                                     }
                                     Err(e) => {
                                         warn!("⚠️ [SYNC COMPLETE v10.7.3] Balance replay failed: {} — falling back to RocksDB reload", e);
