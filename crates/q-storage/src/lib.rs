@@ -5863,7 +5863,7 @@ impl QStorage {
                 "🏁 [POST-SYNC REPLAY v10.7.3] height {} ≤ checkpoint {}, nothing to replay.",
                 height_pass1_end, CHECKPOINT_HEIGHT
             );
-            return Ok(());
+            return Ok(0);
         }
 
         warn!(
