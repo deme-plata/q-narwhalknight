@@ -3198,9 +3198,14 @@ impl TurboSyncManager {
 
     /// Blocking implementation of network gap probe (runs on spawn_blocking thread).
     fn probe_network_gap_blocking(target_height: u64) -> u64 {
+        // Epsilon (89.149.241.126) is the 10Gbit supernode with the deepest block history
+        // (~292K floor vs ~13.9M on Beta). It must be first so the binary search converges
+        // to the earliest available height rather than Beta's truncated floor.
         let bootstrap_urls = [
-            "http://185.182.185.227:8080",  // Beta
-            "http://89.149.241.126:8080",   // Epsilon
+            "http://89.149.241.126:8080",   // Epsilon  — 10Gbit supernode, PRIMARY (deepest history)
+            "http://5.79.79.158:8080",      // Delta    — 1Gbit, secondary
+            "http://109.205.176.60:8080",   // Gamma    — 1Gbit, tertiary
+            "http://185.182.185.227:8080",  // Beta     — 100Mbit, fallback
         ];
 
         // Probe helper: check if ANY peer has a block at height h
@@ -6267,7 +6272,7 @@ impl TurboSyncManager {
             error!("   Looking for peers with height > {} (v2.2.1 fix)", local_height);
             error!("");
             error!("🔧 REQUIRED ACTIONS:");
-            error!("   1. Ensure bootstrap node is reachable (http://185.182.185.227:8080)");
+            error!("   1. Ensure bootstrap node is reachable (http://89.149.241.126:8080 — Epsilon supernode)");
             error!("   2. Verify gossipsub peer discovery is working");
             error!("   3. Check if peer height announcements are being processed");
             error!("   4. Verify TurboSync peer registry is being populated");

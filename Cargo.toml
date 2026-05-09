@@ -78,7 +78,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.7.3"  # v10.7.3: post-sync balance replay for checkpoint nodes (SYNC-004/BAL-001)
+version = "10.7.4"  # v10.7.4: prioritise Epsilon supernode in checkpoint probe and error messages
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"
