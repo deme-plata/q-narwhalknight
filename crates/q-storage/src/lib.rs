@@ -5876,6 +5876,7 @@ impl QStorage {
                     for tx in &block.transactions {
                         match tx.tx_type as u8 {
                             0x01 => {
+                                // Coinbase — always native QUG
                                 if tx.to != [0u8; 32] && tx.amount > 0 {
                                     *replay_map.entry(tx.to).or_insert(0) =
                                         replay_map.get(&tx.to).copied().unwrap_or(0)
@@ -5884,7 +5885,13 @@ impl QStorage {
                                 }
                             }
                             0x00 => {
-                                if tx.amount > 0 && tx.from != [0u8; 32] {
+                                // Transfer — only credit native QUG wallet_balances.
+                                // QUGUSD / custom-token transfers share tx_type=0x00 but
+                                // use token_type != QUG; those go to token_balances and
+                                // must NOT touch the native balance map (REPLAY-001).
+                                let is_native =
+                                    matches!(tx.token_type, q_types::TokenType::QUG);
+                                if is_native && tx.amount > 0 && tx.from != [0u8; 32] {
                                     if let Some(s) = replay_map.get_mut(&tx.from) {
                                         *s = s.saturating_sub(tx.amount);
                                     }
@@ -5941,7 +5948,10 @@ impl QStorage {
                                 }
                             }
                             0x00 => {
-                                if tx.amount > 0 && tx.from != [0u8; 32] {
+                                // REPLAY-001: skip token transfers (QUGUSD / custom)
+                                let is_native =
+                                    matches!(tx.token_type, q_types::TokenType::QUG);
+                                if is_native && tx.amount > 0 && tx.from != [0u8; 32] {
                                     if let Some(s) = replay_map.get_mut(&tx.from) {
                                         *s = s.saturating_sub(tx.amount);
                                     }
