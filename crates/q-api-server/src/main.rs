@@ -7818,6 +7818,13 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         let replay_balances = state.wallet_balances.clone();
         let replay_supply   = state.total_minted_supply.clone();
         tokio::spawn(async move {
+            // Allow genesis/archive nodes to opt out via env var. Marks replay done permanently
+            // so this skip persists across restarts without re-checking the env var.
+            if std::env::var("Q_SKIP_BALANCE_REPLAY").ok().as_deref() == Some("1") {
+                info!("✅ [SYNC-006] Q_SKIP_BALANCE_REPLAY=1 — genesis/archive node, marking replay done and skipping.");
+                let _ = replay_storage.mark_balance_replay_done().await;
+                return;
+            }
             // Skip if checkpoint was not applied (non-checkpoint nodes need no replay).
             if !replay_storage.is_checkpoint_applied().await {
                 return;
