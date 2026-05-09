@@ -648,3 +648,283 @@ pub async fn web_search_handler(
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Email AI Assistant  POST /api/v1/ai/email-assist
+// Streams Ollama (gemma4) tokens back as SSE "token" events.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const EMAIL_SYSTEM_PROMPT: &str = "\
+You are a professional email writing assistant for Quillon Mail, a decentralised \
+crypto email platform. Write concise, clear email content. \
+Output ONLY the email body text — no subject lines, no \"Subject:\" labels, \
+no greetings or signatures unless specifically asked. Be direct and helpful.";
+
+#[derive(Deserialize)]
+pub struct EmailAssistRequest {
+    pub messages: Vec<EmailMessage>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct EmailMessage {
+    pub role: String,
+    pub content: String,
+}
+
+pub async fn email_assist_handler(
+    State(_state): State<Arc<AppState>>,
+    Json(req): Json<EmailAssistRequest>,
+) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, (StatusCode, Json<ErrorResponse>)> {
+    let ollama_url = std::env::var("OLLAMA_URL")
+        .unwrap_or_else(|_| DEFAULT_OLLAMA_URL.to_string());
+    let model = std::env::var("OLLAMA_EMAIL_MODEL")
+        .or_else(|_| std::env::var("OLLAMA_MODEL"))
+        .unwrap_or_else(|_| "gemma4".to_string());
+
+    // Prepend the system prompt then pass through the caller's messages
+    let mut messages: Vec<OllamaMessage> = Vec::with_capacity(req.messages.len() + 1);
+    // Only prepend system if the caller hasn't already included one
+    let has_system = req.messages.first().map(|m| m.role == "system").unwrap_or(false);
+    if !has_system {
+        messages.push(OllamaMessage {
+            role: "system".to_string(),
+            content: EMAIL_SYSTEM_PROMPT.to_string(),
+        });
+    }
+    for m in req.messages {
+        messages.push(OllamaMessage { role: m.role, content: m.content });
+    }
+
+    let stream = async_stream::stream! {
+        let ollama_req = OllamaChatRequest {
+            model,
+            messages,
+            stream: true,
+            think: false,
+        };
+
+        let client = match reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(30))
+            .read_timeout(Duration::from_secs(300))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                error!("[EmailAI] Failed to create HTTP client: {}", e);
+                let err = ErrorEvent { message: "Internal error".to_string() };
+                if let Ok(json) = serde_json::to_string(&err) {
+                    yield Ok(Event::default().event("error").data(json));
+                }
+                return;
+            }
+        };
+
+        let chat_url = format!("{}/api/chat", ollama_url);
+        let response = match client.post(&chat_url)
+            .header("Content-Type", "application/json")
+            .json(&ollama_req)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                error!("[EmailAI] Ollama unreachable at {}: {}", chat_url, e);
+                let err = ErrorEvent { message: format!("AI unavailable: {}", e) };
+                if let Ok(json) = serde_json::to_string(&err) {
+                    yield Ok(Event::default().event("error").data(json));
+                }
+                return;
+            }
+        };
+
+        if !response.status().is_success() {
+            let status = response.status();
+            error!("[EmailAI] Ollama HTTP {}", status);
+            let err = ErrorEvent { message: format!("AI returned HTTP {}", status) };
+            if let Ok(json) = serde_json::to_string(&err) {
+                yield Ok(Event::default().event("error").data(json));
+            }
+            return;
+        }
+
+        let byte_stream = response.bytes_stream();
+        let mut pinned = std::pin::pin!(byte_stream);
+        let mut buffer = String::new();
+
+        while let Some(chunk_result) = pinned.next().await {
+            match chunk_result {
+                Ok(bytes) => {
+                    buffer.push_str(&String::from_utf8_lossy(&bytes));
+                    while let Some(line_end) = buffer.find('\n') {
+                        let line = buffer[..line_end].trim().to_string();
+                        buffer = buffer[line_end + 1..].to_string();
+                        if line.is_empty() { continue; }
+                        if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(&line) {
+                            if let Some(content) = chunk
+                                .get("message")
+                                .and_then(|m| m.get("content"))
+                                .and_then(|c| c.as_str())
+                            {
+                                if !content.is_empty() {
+                                    let tok = TokenEvent { content: content.to_string() };
+                                    if let Ok(json) = serde_json::to_string(&tok) {
+                                        yield Ok(Event::default().event("token").data(json));
+                                    }
+                                }
+                            }
+                            if chunk.get("done").and_then(|d| d.as_bool()).unwrap_or(false) {
+                                let done = DoneEvent { total_tokens: None };
+                                if let Ok(json) = serde_json::to_string(&done) {
+                                    yield Ok(Event::default().event("done").data(json));
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("[EmailAI] Stream error: {}", e);
+                    break;
+                }
+            }
+        }
+    };
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Call Assistant — real-time AI help during voice/video calls
+// POST /api/v1/ai/call-assist
+// Streams SSE "token" events from Gemma 4 based on live call transcript.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const CALL_ASSIST_SYSTEM_PROMPT: &str = "\
+You are a real-time AI call assistant. The user is on a voice call and has just said something. \
+Provide a brief, actionable suggestion for how they could respond or what to say next. \
+Keep it to 2-3 sentences maximum. Be direct and practical. \
+Do NOT repeat what they said. Do NOT start with phrases like 'I suggest' or 'You could say'. \
+Just give the suggestion naturally as if coaching them quietly.";
+
+#[derive(Deserialize)]
+pub struct CallAssistRequest {
+    pub transcript: String,
+    pub context: Option<String>,
+}
+
+pub async fn call_assist_handler(
+    State(_state): State<Arc<AppState>>,
+    Json(req): Json<CallAssistRequest>,
+) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, (StatusCode, Json<ErrorResponse>)> {
+    let ollama_url = std::env::var("OLLAMA_URL")
+        .unwrap_or_else(|_| DEFAULT_OLLAMA_URL.to_string());
+    let model = std::env::var("OLLAMA_CALL_MODEL")
+        .or_else(|_| std::env::var("OLLAMA_MODEL"))
+        .unwrap_or_else(|_| "gemma4".to_string());
+
+    let user_content = if let Some(ctx) = req.context.filter(|s| !s.is_empty()) {
+        format!("Call context: {}\n\nThe caller just said: \"{}\"", ctx, req.transcript)
+    } else {
+        format!("The caller just said: \"{}\"", req.transcript)
+    };
+
+    let messages = vec![
+        OllamaMessage { role: "system".to_string(), content: CALL_ASSIST_SYSTEM_PROMPT.to_string() },
+        OllamaMessage { role: "user".to_string(), content: user_content },
+    ];
+
+    let stream = async_stream::stream! {
+        let ollama_req = OllamaChatRequest {
+            model,
+            messages,
+            stream: true,
+            think: false,
+        };
+
+        let client = match reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .read_timeout(Duration::from_secs(60))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                let err = ErrorEvent { message: format!("Internal error: {}", e) };
+                if let Ok(json) = serde_json::to_string(&err) {
+                    yield Ok(Event::default().event("error").data(json));
+                }
+                return;
+            }
+        };
+
+        let chat_url = format!("{}/api/chat", ollama_url);
+        let response = match client.post(&chat_url)
+            .header("Content-Type", "application/json")
+            .json(&ollama_req)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                error!("[CallAI] Ollama unreachable at {}: {}", chat_url, e);
+                let err = ErrorEvent { message: format!("AI unavailable: {}", e) };
+                if let Ok(json) = serde_json::to_string(&err) {
+                    yield Ok(Event::default().event("error").data(json));
+                }
+                return;
+            }
+        };
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let err = ErrorEvent { message: format!("AI returned HTTP {}", status) };
+            if let Ok(json) = serde_json::to_string(&err) {
+                yield Ok(Event::default().event("error").data(json));
+            }
+            return;
+        }
+
+        let byte_stream = response.bytes_stream();
+        let mut pinned = std::pin::pin!(byte_stream);
+        let mut buffer = String::new();
+
+        while let Some(chunk_result) = pinned.next().await {
+            match chunk_result {
+                Ok(bytes) => {
+                    buffer.push_str(&String::from_utf8_lossy(&bytes));
+                    while let Some(line_end) = buffer.find('\n') {
+                        let line = buffer[..line_end].trim().to_string();
+                        buffer = buffer[line_end + 1..].to_string();
+                        if line.is_empty() { continue; }
+                        if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(&line) {
+                            if let Some(content) = chunk
+                                .get("message")
+                                .and_then(|m| m.get("content"))
+                                .and_then(|c| c.as_str())
+                            {
+                                if !content.is_empty() {
+                                    let tok = TokenEvent { content: content.to_string() };
+                                    if let Ok(json) = serde_json::to_string(&tok) {
+                                        yield Ok(Event::default().event("token").data(json));
+                                    }
+                                }
+                            }
+                            if chunk.get("done").and_then(|d| d.as_bool()).unwrap_or(false) {
+                                let done = DoneEvent { total_tokens: None };
+                                if let Ok(json) = serde_json::to_string(&done) {
+                                    yield Ok(Event::default().event("done").data(json));
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("[CallAI] Stream error: {}", e);
+                    break;
+                }
+            }
+        }
+    };
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
+}

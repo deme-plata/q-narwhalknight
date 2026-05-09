@@ -9,12 +9,17 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   MessageSquare, Phone, PhoneOff, Video, VideoOff, Mic, MicOff,
-  Monitor, Users, X, Send, ChevronLeft, UserPlus, Hash,
-  Loader2, Shield, Lock,
+  Monitor, Users, X, Send, UserPlus, Hash,
+  Loader2, Shield, Lock, Search, Star, ChevronRight, Plus, Bot,
 } from 'lucide-react';
-import { SignalingService, SignalingEnvelope, PeerInfo, CallType } from '../services/SignalingService';
-import { WebRTCManager, ConnectionState } from '../webrtc/WebRTCManager';
-import { walletSession } from '../services/walletAuth';
+import { SignalingService } from '../services/SignalingService';
+import type { SignalingEnvelope, PeerInfo, CallType } from '../services/SignalingService';
+import { WebRTCManager } from '../webrtc/WebRTCManager';
+import type { ConnectionState } from '../webrtc/WebRTCManager';
+import { walletSession, generateAuthHeader } from '../services/walletAuth';
+import { getConnectionInfo, qnkAPI } from '../services/api';
+import GroupsTab from './GroupsTab';
+import AddressBook from './AddressBook';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -40,7 +45,14 @@ interface MeetingRoom {
   calls: Map<string, CallInfo>;
 }
 
-type Tab = 'messages' | 'calls' | 'meetings';
+interface SavedContact {
+  id: string;
+  address: string;
+  label: string;
+  favorite?: boolean;
+}
+
+type Tab = 'messages' | 'calls' | 'meetings' | 'groups';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -49,8 +61,17 @@ function shortId(peerId: string): string {
   return peerId.length > 12 ? `${peerId.slice(0, 6)}…${peerId.slice(-4)}` : peerId;
 }
 
-function timestamp(): string {
-  return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+function truncAddr(addr: string): string {
+  if (!addr || addr.length < 14) return addr;
+  return `${addr.slice(0, 8)}…${addr.slice(-6)}`;
+}
+
+function randomRoomId(): string {
+  const words = ['nova','echo','quant','delta','orbit','flux','cipher','nexus','lunar','spark'];
+  const a = words[Math.floor(Math.random() * words.length)];
+  const b = words[Math.floor(Math.random() * words.length)];
+  const n = Math.floor(Math.random() * 900) + 100;
+  return `${a}-${b}-${n}`;
 }
 
 // ── Sub-components ─────────────────────────────────────────────────────────
@@ -103,24 +124,59 @@ export default function ChatScreen() {
   const [roomInput, setRoomInput] = useState('');
   const [isConnected, setIsConnected] = useState(false);
   const [incomingCall, setIncomingCall] = useState<{ from: string; sdp: string; callType: 'audio' | 'video'; sessionId: string | null } | null>(null);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // Contact sidebar state
+  const [contacts, setContacts] = useState<SavedContact[]>([]);
+  const [contactSearch, setContactSearch] = useState('');
+  const [addressInput, setAddressInput] = useState('');
+  const [showAddressBook, setShowAddressBook] = useState(false);
+
+  // AI call assistant state
+  const [aiEnabled, setAiEnabled] = useState(false);
+  const [aiTranscript, setAiTranscript] = useState('');
+  const [aiSuggestion, setAiSuggestion] = useState('');
+  const [aiStreaming, setAiStreaming] = useState(false);
+
+  const messagesEndRef = useRef<HTMLDivElement>(null);
   const signalingRef = useRef<SignalingService | null>(null);
   const webrtcRef = useRef<WebRTCManager | null>(null);
+  const recognitionRef = useRef<any>(null);
+  const aiAbortRef = useRef<AbortController | null>(null);
 
   // Scroll chat to bottom
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  // Load address book contacts whenever the messages tab is active
+  useEffect(() => {
+    if (tab !== 'messages') return;
+    qnkAPI.getAddressBook().then((res: any) => {
+      // Handle multiple possible response shapes
+      const addrs =
+        res?.data?.addresses ??
+        res?.data ??
+        res?.addresses ??
+        (Array.isArray(res) ? res : []);
+      setContacts(Array.isArray(addrs) ? addrs : []);
+    }).catch((err: any) => {
+      console.warn('[ChatScreen] failed to load address book:', err);
+    });
+  }, [tab]);
+
   // Init signaling + WebRTC
   useEffect(() => {
     if (!walletAddress) return;
 
-    // Pass private key getter so SignalingService can sign auth header (CRIT-1 fix)
     const getPrivateKey = () => walletSession.getSession()?.privateKey ?? null;
     const signaling = new SignalingService(walletAddress, getPrivateKey);
     signalingRef.current = signaling;
+
+    const getTurnAuthHeader = async (): Promise<string | null> => {
+      const session = walletSession.getSession();
+      if (!session) return null;
+      return generateAuthHeader(session.privateKey, session.address, '/api/v1/turn/credentials');
+    };
 
     const webrtc = new WebRTCManager({
       onStateChange: (peerId, state) => {
@@ -170,7 +226,7 @@ export default function ChatScreen() {
       onLocalAnswer: (peerId, sdp) => {
         signaling.send(peerId, null, { type: 'call_answer', sdp });
       },
-    });
+    }, getTurnAuthHeader);
     webrtcRef.current = webrtc;
 
     const unsub = signaling.onMessage((envelope: SignalingEnvelope) => {
@@ -208,8 +264,9 @@ export default function ChatScreen() {
         break;
       }
       case 'call_offer': {
-        // Show incoming call UI — user must tap Accept before media is activated (CRIT-4 fix)
-        setIncomingCall({ from, sdp: payload.sdp, callType: payload.call_type, sessionId: envelope.session_id });
+        const callDetail = { from, sdp: payload.sdp, callType: payload.call_type, sessionId: envelope.session_id };
+        setIncomingCall(callDetail);
+        window.dispatchEvent(new CustomEvent('qnk-incoming-call', { detail: { from, callType: payload.call_type } }));
         break;
       }
       case 'call_answer': {
@@ -223,10 +280,16 @@ export default function ChatScreen() {
       case 'call_end': {
         webrtc.hangup(from);
         setActiveCall(null);
+        setIncomingCall((prev) => {
+          if (prev?.from === from) {
+            window.dispatchEvent(new CustomEvent('qnk-incoming-call-cleared'));
+            return null;
+          }
+          return prev;
+        });
         break;
       }
       case 'meeting_peers': {
-        // Server sent us the existing peer list — initiate calls to each
         setMeeting((prev) => {
           if (!prev || prev.roomId !== payload.room_id) return prev;
           return { ...prev, peers: payload.peers };
@@ -250,7 +313,6 @@ export default function ChatScreen() {
           const peers = [...prev.peers.filter((p) => p.peer_id !== payload.peer.peer_id), payload.peer];
           return { ...prev, peers };
         });
-        // New peer will initiate a call to us (they received our existing presence)
         break;
       }
       case 'meeting_peer_left': {
@@ -265,29 +327,42 @@ export default function ChatScreen() {
         break;
       }
       case 'pong':
-        // Server replied to our ping — signaling channel is alive
         setIsConnected(true);
         break;
     }
   }, []);
 
-  // ── Incoming call consent handlers ───────────────────────────────────────
+  // ── Incoming call handlers ────────────────────────────────────────────────
 
   const handleAcceptCall = async () => {
     if (!incomingCall || !webrtcRef.current || !signalingRef.current) return;
     const { from, sdp, callType } = incomingCall;
     setIncomingCall(null);
+    window.dispatchEvent(new CustomEvent('qnk-incoming-call-cleared'));
+    setActiveCall({ peerId: from, callType, state: 'connecting', remoteStream: null, localStream: null });
+    setTab('calls');
     await webrtcRef.current.handleOffer(from, sdp, callType);
     const localStream = webrtcRef.current.getLocalStream(from);
-    setActiveCall({ peerId: from, callType, state: 'connecting', remoteStream: null, localStream });
-    setTab('calls');
+    setActiveCall((prev) => prev?.peerId === from ? { ...prev, localStream } : prev);
   };
 
   const handleRejectCall = () => {
     if (!incomingCall || !signalingRef.current) return;
     signalingRef.current.send(incomingCall.from, incomingCall.sessionId, { type: 'call_end', reason: 'rejected' });
     setIncomingCall(null);
+    window.dispatchEvent(new CustomEvent('qnk-incoming-call-cleared'));
   };
+
+  useEffect(() => {
+    const onAccept = () => { handleAcceptCall(); };
+    const onReject = () => { handleRejectCall(); };
+    window.addEventListener('qnk-accept-call', onAccept);
+    window.addEventListener('qnk-reject-call', onReject);
+    return () => {
+      window.removeEventListener('qnk-accept-call', onAccept);
+      window.removeEventListener('qnk-reject-call', onReject);
+    };
+  }, [incomingCall]);
 
   // ── Actions ───────────────────────────────────────────────────────────────
 
@@ -320,19 +395,108 @@ export default function ChatScreen() {
     webrtcRef.current.hangup(activeCall.peerId);
     signalingRef.current.send(activeCall.peerId, null, { type: 'call_end', reason: 'user_hangup' });
     setActiveCall(null);
+    // Stop AI when call ends
+    recognitionRef.current?.stop();
+    aiAbortRef.current?.abort();
+    setAiEnabled(false);
+    setAiTranscript('');
+    setAiSuggestion('');
   };
+
+  const askAI = useCallback(async (transcript: string) => {
+    aiAbortRef.current?.abort();
+    const controller = new AbortController();
+    aiAbortRef.current = controller;
+    setAiStreaming(true);
+    setAiSuggestion('');
+    try {
+      const res = await fetch('/api/v1/ai/call-assist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transcript }),
+        signal: controller.signal,
+      });
+      if (!res.ok || !res.body) { setAiStreaming(false); return; }
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop() ?? '';
+        for (const line of lines) {
+          if (line.startsWith('data:')) {
+            try {
+              const json = JSON.parse(line.slice(5).trim());
+              if (json.content) setAiSuggestion((p) => p + json.content);
+            } catch {}
+          }
+        }
+      }
+    } catch (e: any) {
+      if (e?.name !== 'AbortError') setAiSuggestion('⚠ AI unavailable — check Ollama on Epsilon.');
+    } finally {
+      setAiStreaming(false);
+    }
+  }, []);
+
+  const toggleAI = useCallback(() => {
+    setAiEnabled((prev) => {
+      if (prev) {
+        recognitionRef.current?.stop();
+        recognitionRef.current = null;
+        aiAbortRef.current?.abort();
+        setAiTranscript('');
+        setAiSuggestion('');
+        return false;
+      }
+      // Start Web Speech API
+      const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      if (!SR) {
+        setAiSuggestion('⚠ Speech recognition not supported in this browser.');
+        return true;
+      }
+      const rec = new SR();
+      rec.continuous = true;
+      rec.interimResults = true;
+      rec.lang = 'en-US';
+      rec.onresult = (event: any) => {
+        let interim = '';
+        let final = '';
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          if (event.results[i].isFinal) {
+            final += event.results[i][0].transcript;
+          } else {
+            interim += event.results[i][0].transcript;
+          }
+        }
+        setAiTranscript(interim || final);
+        if (final.trim().length > 4) askAI(final.trim());
+      };
+      rec.onerror = () => { setAiSuggestion('⚠ Microphone access denied or error.'); };
+      rec.onend = () => {
+        // Auto-restart if still enabled
+        setAiEnabled((still) => {
+          if (still && recognitionRef.current === rec) rec.start();
+          return still;
+        });
+      };
+      rec.start();
+      recognitionRef.current = rec;
+      return true;
+    });
+  }, [askAI]);
 
   const toggleMic = () => {
     setMicOn((prev) => {
       const newVal = !prev;
-      // mute/unmute local audio tracks for active call or meeting
       const muteStream = (stream: MediaStream | null) => {
         stream?.getAudioTracks().forEach((t) => (t.enabled = newVal));
       };
       if (activeCall) muteStream(activeCall.localStream);
-      if (meeting) {
-        meeting.calls.forEach((c) => muteStream(c.localStream));
-      }
+      if (meeting) meeting.calls.forEach((c) => muteStream(c.localStream));
       return newVal;
     });
   };
@@ -344,9 +508,7 @@ export default function ChatScreen() {
         stream?.getVideoTracks().forEach((t) => (t.enabled = newVal));
       };
       if (activeCall) muteStream(activeCall.localStream);
-      if (meeting) {
-        meeting.calls.forEach((c) => muteStream(c.localStream));
-      }
+      if (meeting) meeting.calls.forEach((c) => muteStream(c.localStream));
       return newVal;
     });
   };
@@ -371,33 +533,33 @@ export default function ChatScreen() {
     setRoomInput('');
   };
 
+  // ── Derived ───────────────────────────────────────────────────────────────
+
+  const filteredContacts = contacts
+    .filter((c) => {
+      const q = contactSearch.toLowerCase();
+      return !q || c.label.toLowerCase().includes(q) || c.address.toLowerCase().includes(q);
+    })
+    .sort((a, b) => (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0));
+
+  const selectedContact = contacts.find((c) => c.address === targetPeerId);
+
+  const sidebarBg = 'rgba(10,8,30,0.95)';
+  const sidebarBorder = 'rgba(212,175,55,0.12)';
+
+  // ── Tab definitions ───────────────────────────────────────────────────────
+
+  const tabs: { id: Tab; icon: React.ReactNode; label: string; badge?: number }[] = [
+    { id: 'messages', icon: <MessageSquare className="w-4 h-4" />, label: 'Messages' },
+    { id: 'calls', icon: <Phone className="w-4 h-4" />, label: 'Calls', badge: activeCall ? 1 : undefined },
+    { id: 'meetings', icon: <Users className="w-4 h-4" />, label: 'Meetings', badge: meeting ? 1 : undefined },
+    { id: 'groups', icon: <Hash className="w-4 h-4" />, label: 'Groups' },
+  ];
+
   // ── Render ────────────────────────────────────────────────────────────────
 
-  const tabBtn = (id: Tab, icon: React.ReactNode, label: string, badge?: number) => (
-    <button
-      onClick={() => setTab(id)}
-      className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all relative ${
-        tab === id
-          ? 'text-amber-50'
-          : 'text-amber-300/50 hover:text-amber-200'
-      }`}
-      style={tab === id ? {
-        background: 'linear-gradient(135deg, rgba(212,175,55,0.2), rgba(255,215,0,0.1))',
-        border: '1.5px solid rgba(212,175,55,0.4)',
-      } : { border: '1.5px solid transparent' }}
-    >
-      {icon}
-      {label}
-      {badge ? (
-        <span className="absolute -top-1 -right-1 w-4 h-4 text-xs rounded-full bg-amber-400 text-slate-900 flex items-center justify-center">
-          {badge}
-        </span>
-      ) : null}
-    </button>
-  );
-
   return (
-    <div className="flex flex-col h-full" style={{ minHeight: 0 }}>
+    <div className="flex flex-col h-full relative" style={{ minHeight: 0 }}>
 
       {/* Incoming call consent banner */}
       {incomingCall && (
@@ -406,7 +568,7 @@ export default function ChatScreen() {
           style={{ background: 'rgba(212,175,55,0.15)', borderBottom: '1px solid rgba(212,175,55,0.3)' }}
         >
           <span className="text-amber-200 text-sm font-medium">
-            📞 Incoming {incomingCall.callType} call from {incomingCall.from.slice(0, 12)}…
+            Incoming {incomingCall.callType} call from {incomingCall.from.slice(0, 12)}…
           </span>
           <div className="flex gap-2">
             <button
@@ -423,201 +585,821 @@ export default function ChatScreen() {
         </div>
       )}
 
-      {/* Header */}
-      <div
-        className="flex items-center justify-between px-6 py-4 border-b shrink-0"
-        style={{ borderColor: 'rgba(212,175,55,0.15)', background: 'rgba(15,23,42,0.6)' }}
-      >
-        <div className="flex items-center gap-3">
-          <div
-            className="w-9 h-9 rounded-lg flex items-center justify-center"
-            style={{ background: 'linear-gradient(135deg, rgba(212,175,55,0.2), rgba(255,215,0,0.1))' }}
-          >
-            <MessageSquare className="w-5 h-5 text-amber-400" />
-          </div>
-          <div>
-            <h1 className="text-lg font-bold text-amber-100">Chat & Calls</h1>
-            <p className="text-xs text-amber-300/50 flex items-center gap-1">
-              <Lock className="w-3 h-3" /> End-to-end encrypted · WebRTC
-            </p>
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <div
-            className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-400' : 'bg-slate-500'}`}
-            style={isConnected ? { boxShadow: '0 0 6px rgba(74,222,128,0.6)' } : {}}
-          />
-          <span className="text-xs text-amber-300/50">{isConnected ? 'Signaling online' : 'Connecting…'}</span>
-        </div>
-      </div>
+      {/* Two-column body */}
+      <div className="flex flex-1 min-h-0 overflow-hidden">
 
-      {/* Tabs */}
-      <div className="flex gap-2 px-6 py-3 shrink-0">
-        {tabBtn('messages', <MessageSquare className="w-4 h-4" />, 'Messages')}
-        {tabBtn('calls', <Phone className="w-4 h-4" />, 'Calls', activeCall ? 1 : undefined)}
-        {tabBtn('meetings', <Users className="w-4 h-4" />, 'Meetings', meeting ? 1 : undefined)}
-      </div>
-
-      {/* Body */}
-      <div className="flex-1 overflow-hidden" style={{ minHeight: 0 }}>
-        <AnimatePresence mode="wait">
-
-          {/* ── Messages Tab ── */}
-          {tab === 'messages' && (
-            <motion.div
-              key="messages"
-              initial={{ opacity: 0, x: -10 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: 10 }}
-              className="flex flex-col h-full"
-              style={{ minHeight: 0 }}
-            >
-              {/* Peer address bar */}
-              <div className="flex gap-2 px-6 py-3 border-b shrink-0" style={{ borderColor: 'rgba(212,175,55,0.1)' }}>
-                <div className="relative flex-1">
-                  <Hash className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-amber-400/50" />
-                  <input
-                    className="w-full pl-9 pr-4 py-2 rounded-lg text-sm text-amber-100 placeholder-amber-300/30 outline-none"
-                    style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(212,175,55,0.2)' }}
-                    placeholder="Recipient wallet address…"
-                    value={targetPeerId}
-                    onChange={(e) => setTargetPeerId(e.target.value)}
-                  />
+        {/* ── Left Sidebar ── */}
+        <div
+          className="w-60 flex-shrink-0 flex flex-col"
+          style={{ background: sidebarBg, borderRight: `1px solid ${sidebarBorder}` }}
+        >
+          {/* Sidebar header */}
+          <div className="px-4 py-3 shrink-0" style={{ borderBottom: `1px solid ${sidebarBorder}` }}>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div
+                  className="w-7 h-7 rounded-lg flex items-center justify-center"
+                  style={{ background: 'linear-gradient(135deg, rgba(212,175,55,0.25), rgba(255,215,0,0.12))' }}
+                >
+                  <MessageSquare className="w-4 h-4 text-amber-400" />
                 </div>
-                <button
-                  onClick={() => startCall('audio')}
-                  className="p-2 rounded-lg text-amber-300/60 hover:text-amber-300 transition-colors"
-                  style={{ border: '1px solid rgba(212,175,55,0.2)' }}
-                  title="Voice call"
-                >
-                  <Phone className="w-4 h-4" />
-                </button>
-                <button
-                  onClick={() => startCall('video')}
-                  className="p-2 rounded-lg text-amber-300/60 hover:text-amber-300 transition-colors"
-                  style={{ border: '1px solid rgba(212,175,55,0.2)' }}
-                  title="Video call"
-                >
-                  <Video className="w-4 h-4" />
-                </button>
+                <span className="text-sm font-bold text-amber-100">Chat & Calls</span>
               </div>
-
-              {/* Message list */}
-              <div className="flex-1 overflow-y-auto px-6 py-4 space-y-3" style={{ minHeight: 0 }}>
-                {messages.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center h-full gap-3 text-amber-300/30">
-                    <Shield className="w-10 h-10" />
-                    <p className="text-sm">No messages yet</p>
-                    <p className="text-xs">Enter a wallet address above and start talking.</p>
-                  </div>
-                ) : messages.map((msg) => (
-                  <div key={msg.id} className={`flex ${msg.self ? 'justify-end' : 'justify-start'}`}>
-                    <div
-                      className="max-w-xs lg:max-w-md px-4 py-2 rounded-2xl text-sm"
-                      style={msg.self ? {
-                        background: 'linear-gradient(135deg, rgba(212,175,55,0.3), rgba(255,215,0,0.2))',
-                        border: '1px solid rgba(212,175,55,0.3)',
-                        color: '#fef3c7',
-                      } : {
-                        background: 'rgba(255,255,255,0.07)',
-                        border: '1px solid rgba(255,255,255,0.08)',
-                        color: '#cbd5e1',
-                      }}
-                    >
-                      {!msg.self && (
-                        <p className="text-xs text-amber-400/60 mb-1">{shortId(msg.from)}</p>
-                      )}
-                      <p>{msg.content}</p>
-                      <p className="text-xs opacity-50 mt-1 text-right">
-                        {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                      </p>
-                    </div>
-                  </div>
-                ))}
-                <div ref={messagesEndRef} />
-              </div>
-
-              {/* Input */}
-              <div
-                className="flex gap-2 px-6 py-4 border-t shrink-0"
-                style={{ borderColor: 'rgba(212,175,55,0.1)' }}
-              >
-                <input
-                  className="flex-1 px-4 py-2 rounded-xl text-sm text-amber-100 placeholder-amber-300/30 outline-none"
-                  style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(212,175,55,0.2)' }}
-                  placeholder="Type a message…"
-                  value={inputText}
-                  onChange={(e) => setInputText(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } }}
+              <div className="flex items-center gap-2">
+                <div
+                  className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-400' : 'bg-slate-500'}`}
+                  style={isConnected ? { boxShadow: '0 0 5px rgba(74,222,128,0.6)' } : {}}
                 />
                 <button
-                  onClick={sendMessage}
-                  className="p-2 rounded-xl transition-all"
-                  style={{
-                    background: 'linear-gradient(135deg, rgba(212,175,55,0.4), rgba(255,215,0,0.25))',
-                    border: '1px solid rgba(212,175,55,0.4)',
-                  }}
+                  onClick={() => setShowAddressBook(true)}
+                  className="p-1 rounded-lg transition-colors text-amber-400/50 hover:text-amber-300"
+                  style={{ border: '1px solid rgba(212,175,55,0.15)' }}
+                  title="Address Book"
                 >
-                  <Send className="w-5 h-5 text-amber-300" />
+                  <Users className="w-3.5 h-3.5" />
                 </button>
               </div>
-            </motion.div>
-          )}
+            </div>
+          </div>
 
-          {/* ── Calls Tab ── */}
-          {tab === 'calls' && (
-            <motion.div
-              key="calls"
-              initial={{ opacity: 0, x: -10 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: 10 }}
-              className="flex flex-col h-full p-6 gap-4"
-              style={{ minHeight: 0 }}
-            >
-              {activeCall ? (
-                <div className="flex flex-col gap-4 h-full">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm text-amber-300/60">Call with</p>
-                      <p className="font-bold text-amber-100">{shortId(activeCall.peerId)}</p>
-                    </div>
-                    <span className={`text-xs px-2 py-1 rounded-full ${
-                      activeCall.state === 'connected'
-                        ? 'bg-green-500/20 text-green-300'
-                        : 'bg-amber-500/20 text-amber-300'
-                    }`}>
-                      {activeCall.state === 'connected' ? 'Connected' : 'Connecting…'}
-                    </span>
+          {/* Tab navigation */}
+          <nav className="px-2 pt-2 pb-1 shrink-0">
+            {tabs.map(({ id, icon, label, badge }) => (
+              <button
+                key={id}
+                onClick={() => setTab(id)}
+                className="w-full flex items-center gap-3 px-3 py-2 rounded-lg mb-0.5 text-sm transition-all relative"
+                style={tab === id ? {
+                  background: 'linear-gradient(135deg, rgba(212,175,55,0.18), rgba(255,215,0,0.08))',
+                  border: '1px solid rgba(212,175,55,0.3)',
+                  color: '#fef3c7',
+                } : {
+                  border: '1px solid transparent',
+                  color: 'rgba(252,211,77,0.45)',
+                }}
+              >
+                <span style={tab === id ? { color: '#fbbf24' } : {}}>{icon}</span>
+                <span className="font-medium">{label}</span>
+                {badge !== undefined && (
+                  <span
+                    className="ml-auto w-4 h-4 text-xs rounded-full flex items-center justify-center font-bold"
+                    style={{ background: 'rgba(212,175,55,0.9)', color: '#1a1200' }}
+                  >
+                    {badge}
+                  </span>
+                )}
+              </button>
+            ))}
+          </nav>
+
+          {/* Meetings sidebar panel */}
+          {tab === 'meetings' && (
+            <div className="flex-1 flex flex-col px-3 py-3 gap-3" style={{ borderTop: `1px solid ${sidebarBorder}` }}>
+              {meeting ? (
+                <div
+                  className="rounded-xl p-3 text-center"
+                  style={{ background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.2)' }}
+                >
+                  <p className="text-xs font-bold text-green-400 mb-0.5">In meeting</p>
+                  <p className="text-[10px] font-mono text-green-400/60 truncate">{meeting.roomId}</p>
+                  <p className="text-[10px] text-green-400/50 mt-1">{meeting.peers.length} peer{meeting.peers.length !== 1 ? 's' : ''} connected</p>
+                  <button
+                    onClick={leaveMeeting}
+                    className="mt-2 w-full flex items-center justify-center gap-1 py-1.5 rounded-lg text-xs font-semibold text-red-300 transition-colors"
+                    style={{ background: 'rgba(239,68,68,0.15)', border: '1px solid rgba(239,68,68,0.25)' }}
+                  >
+                    <X className="w-3 h-3" /> Leave
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <button
+                    onClick={() => {
+                      const id = randomRoomId();
+                      setRoomInput(id);
+                      setTimeout(() => {
+                        setMeeting({ roomId: id, peers: [], calls: new Map() });
+                        signalingRef.current?.send(null, null, { type: 'meeting_join', room_id: id, display_name: displayName });
+                      }, 0);
+                    }}
+                    className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-semibold transition-all"
+                    style={{
+                      background: 'linear-gradient(135deg, rgba(212,175,55,0.35), rgba(255,215,0,0.2))',
+                      border: '1.5px solid rgba(212,175,55,0.4)',
+                      color: '#fef3c7',
+                    }}
+                  >
+                    <Plus className="w-4 h-4" /> Create Room
+                  </button>
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1 h-px" style={{ background: sidebarBorder }} />
+                    <span className="text-[10px] text-amber-400/30 uppercase tracking-widest">or join</span>
+                    <div className="flex-1 h-px" style={{ background: sidebarBorder }} />
                   </div>
-
-                  {/* Video area */}
-                  <div className="flex-1 relative rounded-2xl overflow-hidden bg-slate-900 min-h-0">
-                    {activeCall.remoteStream ? (
-                      <RemoteVideo stream={activeCall.remoteStream} peerId={activeCall.peerId} />
-                    ) : (
-                      <div className="flex flex-col items-center justify-center h-full gap-3 text-amber-300/40">
-                        <Loader2 className="w-8 h-8 animate-spin" />
-                        <p className="text-sm">Waiting for peer…</p>
-                      </div>
-                    )}
-                    {activeCall.callType === 'video' && activeCall.localStream && (
-                      <LocalVideo stream={activeCall.localStream} />
-                    )}
-                  </div>
-
-                  {/* Call controls */}
-                  <div className="flex items-center justify-center gap-4 shrink-0">
+                  <div className="flex gap-1.5">
+                    <input
+                      className="flex-1 px-2.5 py-1.5 rounded-lg text-xs text-amber-100 placeholder-amber-300/25 outline-none"
+                      style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(212,175,55,0.15)' }}
+                      placeholder="Room ID…"
+                      value={roomInput}
+                      onChange={(e) => setRoomInput(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') joinMeeting(); }}
+                    />
                     <button
-                      onClick={toggleMic}
-                      className="w-12 h-12 rounded-full flex items-center justify-center transition-all"
+                      onClick={joinMeeting}
+                      className="p-1.5 rounded-lg flex-shrink-0 transition-colors"
                       style={{
-                        background: micOn ? 'rgba(255,255,255,0.1)' : 'rgba(239,68,68,0.3)',
-                        border: `1.5px solid ${micOn ? 'rgba(255,255,255,0.15)' : 'rgba(239,68,68,0.5)'}`,
+                        background: 'rgba(212,175,55,0.15)',
+                        border: '1px solid rgba(212,175,55,0.25)',
+                        color: '#d4af37',
                       }}
                     >
-                      {micOn ? <Mic className="w-5 h-5 text-white" /> : <MicOff className="w-5 h-5 text-red-300" />}
+                      <ChevronRight className="w-3.5 h-3.5" />
                     </button>
-                    {activeCall.callType === 'video' && (
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* Calls sidebar panel */}
+          {tab === 'calls' && (
+            <div className="flex-1 flex flex-col items-center justify-center px-3 py-4 gap-3" style={{ borderTop: `1px solid ${sidebarBorder}` }}>
+              {activeCall ? (
+                <div
+                  className="w-full rounded-xl p-3 text-center"
+                  style={{ background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.2)' }}
+                >
+                  <p className="text-xs font-bold text-green-400 mb-0.5">Active call</p>
+                  <p className="text-[10px] font-mono text-green-400/60 truncate">{shortId(activeCall.peerId)}</p>
+                  <span className={`text-[10px] px-2 py-0.5 rounded-full mt-1 inline-block ${
+                    activeCall.state === 'connected' ? 'bg-green-500/20 text-green-300' : 'bg-amber-500/20 text-amber-300'
+                  }`}>
+                    {activeCall.state === 'connected' ? 'Connected' : 'Connecting…'}
+                  </span>
+                </div>
+              ) : (
+                <div className="text-center">
+                  <Phone className="w-8 h-8 text-amber-400/20 mx-auto mb-2" />
+                  <p className="text-xs text-amber-300/30">Select a contact in</p>
+                  <p className="text-xs text-amber-300/30">Messages to call them</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Contact list — only in messages tab */}
+          {tab === 'messages' && (
+            <>
+              <div className="px-3 py-2 shrink-0" style={{ borderTop: `1px solid ${sidebarBorder}` }}>
+                <div className="relative">
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-amber-400/40" />
+                  <input
+                    className="w-full pl-8 pr-3 py-1.5 rounded-lg text-xs text-amber-100 placeholder-amber-300/30 outline-none"
+                    style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(212,175,55,0.15)' }}
+                    placeholder="Search contacts…"
+                    value={contactSearch}
+                    onChange={(e) => setContactSearch(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              <div className="flex-1 overflow-y-auto px-2 pb-2" style={{ minHeight: 0 }}>
+                {filteredContacts.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-8 text-center gap-2">
+                    <Users className="w-6 h-6 text-amber-400/20" />
+                    <p className="text-xs text-amber-300/30">
+                      {contactSearch ? 'No matches' : 'No saved contacts'}
+                    </p>
+                    <p className="text-[10px] text-amber-300/20">Add contacts in the Address Book</p>
+                  </div>
+                ) : (
+                  filteredContacts.map((contact) => {
+                    const isSelected = contact.address === targetPeerId;
+                    const initials = contact.label.slice(0, 2).toUpperCase();
+                    return (
+                      <button
+                        key={contact.id}
+                        onClick={() => setTargetPeerId(contact.address)}
+                        className="w-full flex items-center gap-2.5 px-2 py-2 rounded-lg mb-0.5 text-left transition-all group"
+                        style={isSelected ? {
+                          background: 'linear-gradient(135deg, rgba(212,175,55,0.15), rgba(255,215,0,0.07))',
+                          border: '1px solid rgba(212,175,55,0.3)',
+                        } : {
+                          border: '1px solid transparent',
+                        }}
+                      >
+                        <div
+                          className="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 text-xs font-bold"
+                          style={{
+                            background: isSelected
+                              ? 'linear-gradient(135deg, rgba(212,175,55,0.5), rgba(255,165,0,0.3))'
+                              : 'rgba(212,175,55,0.15)',
+                            color: '#d4af37',
+                          }}
+                        >
+                          {initials}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1">
+                            {contact.favorite && (
+                              <Star className="w-2.5 h-2.5 text-amber-400 flex-shrink-0" style={{ fill: 'currentColor' }} />
+                            )}
+                            <span className="text-xs font-semibold truncate" style={{ color: isSelected ? '#fef3c7' : 'rgba(254,243,199,0.7)' }}>
+                              {contact.label}
+                            </span>
+                          </div>
+                          <p className="text-[10px] font-mono truncate" style={{ color: 'rgba(212,175,55,0.35)' }}>
+                            {truncAddr(contact.address)}
+                          </p>
+                        </div>
+                        {isSelected && <ChevronRight className="w-3 h-3 text-amber-400/50 flex-shrink-0" />}
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+
+            </>
+          )}
+
+          {/* Sidebar footer */}
+          <div
+            className="px-3 py-2 shrink-0 flex items-center justify-between"
+            style={{ borderTop: `1px solid ${sidebarBorder}` }}
+          >
+            <div className="flex items-center gap-1.5">
+              <Lock className="w-3 h-3 text-amber-400/30" />
+              <span className="text-[10px] text-amber-300/30">E2E encrypted</span>
+            </div>
+            <button
+              onClick={() => setShowAddressBook(true)}
+              className="flex items-center gap-1 text-[10px] font-semibold text-amber-400/50 hover:text-amber-300 transition-colors"
+            >
+              <Users className="w-3 h-3" />
+              Address Book
+            </button>
+          </div>
+        </div>
+
+        {/* ── Right Panel ── */}
+        <div className="flex-1 flex flex-col min-w-0" style={{ minHeight: 0 }}>
+          <AnimatePresence mode="wait">
+
+            {/* ── Messages Tab ── */}
+            {tab === 'messages' && (
+              <motion.div
+                key="messages"
+                initial={{ opacity: 0, x: 8 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -8 }}
+                className="flex flex-col h-full"
+                style={{ minHeight: 0 }}
+              >
+                {/* Conversation header */}
+                <div
+                  className="flex items-center justify-between px-5 py-3 shrink-0"
+                  style={{
+                    borderBottom: '1px solid rgba(212,175,55,0.1)',
+                    background: 'rgba(15,23,42,0.5)',
+                  }}
+                >
+                  {targetPeerId ? (
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div
+                        className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0"
+                        style={{ background: 'linear-gradient(135deg, rgba(212,175,55,0.35), rgba(255,165,0,0.2))', color: '#d4af37' }}
+                      >
+                        {(selectedContact?.label || targetPeerId).slice(0, 2).toUpperCase()}
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold text-amber-100 truncate">
+                          {selectedContact?.label || truncAddr(targetPeerId)}
+                        </p>
+                        {selectedContact && (
+                          <p className="text-[10px] font-mono text-amber-400/40 truncate">
+                            {truncAddr(targetPeerId)}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 text-amber-300/40">
+                      <MessageSquare className="w-4 h-4" />
+                      <span className="text-sm">Select a contact or enter an address</span>
+                    </div>
+                  )}
+
+                  {/* Call buttons */}
+                  {targetPeerId && (
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        onClick={() => startCall('audio')}
+                        className="p-2 rounded-lg text-amber-300/50 hover:text-amber-300 transition-colors"
+                        style={{ border: '1px solid rgba(212,175,55,0.15)' }}
+                        title="Voice call"
+                      >
+                        <Phone className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={() => startCall('video')}
+                        className="p-2 rounded-lg text-amber-300/50 hover:text-amber-300 transition-colors"
+                        style={{ border: '1px solid rgba(212,175,55,0.15)' }}
+                        title="Video call"
+                      >
+                        <Video className="w-4 h-4" />
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* No conversation selected — big picker UI */}
+                {!targetPeerId && (
+                  <div className="flex-1 flex flex-col items-center justify-center px-8 py-10" style={{ minHeight: 0 }}>
+                    <div
+                      className="w-full max-w-md rounded-3xl p-8"
+                      style={{
+                        background: 'linear-gradient(135deg, rgba(20,14,50,0.98) 0%, rgba(35,20,65,0.98) 100%)',
+                        border: '1.5px solid rgba(212,175,55,0.25)',
+                        boxShadow: '0 0 48px rgba(212,175,55,0.08), inset 0 0 24px rgba(212,175,55,0.03)',
+                      }}
+                    >
+                      <div className="flex items-center gap-3 mb-6">
+                        <div
+                          className="w-10 h-10 rounded-xl flex items-center justify-center"
+                          style={{ background: 'linear-gradient(135deg, rgba(212,175,55,0.25), rgba(255,215,0,0.12))' }}
+                        >
+                          <MessageSquare className="w-5 h-5 text-amber-400" />
+                        </div>
+                        <div>
+                          <h2 className="text-base font-bold text-amber-100">New Conversation</h2>
+                          <p className="text-xs text-amber-400/50">Enter a wallet address to start chatting</p>
+                        </div>
+                      </div>
+
+                      {/* Address input */}
+                      <div className="mb-4">
+                        <label className="text-xs font-semibold text-amber-400/60 uppercase tracking-widest mb-2 block">
+                          Wallet Address
+                        </label>
+                        <div className="flex gap-2">
+                          <input
+                            className="flex-1 px-4 py-3 rounded-xl text-sm text-amber-100 placeholder-amber-300/25 outline-none font-mono"
+                            style={{ background: 'rgba(255,255,255,0.05)', border: '1.5px solid rgba(212,175,55,0.2)' }}
+                            placeholder="0x…"
+                            value={addressInput}
+                            onChange={(e) => setAddressInput(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && addressInput.trim()) {
+                                setTargetPeerId(addressInput.trim());
+                                setAddressInput('');
+                              }
+                            }}
+                            autoFocus
+                          />
+                          <button
+                            onClick={() => {
+                              if (addressInput.trim()) {
+                                setTargetPeerId(addressInput.trim());
+                                setAddressInput('');
+                              }
+                            }}
+                            className="px-4 py-3 rounded-xl font-semibold text-sm transition-all"
+                            style={{
+                              background: addressInput.trim()
+                                ? 'linear-gradient(135deg, rgba(212,175,55,0.5), rgba(255,215,0,0.3))'
+                                : 'rgba(212,175,55,0.1)',
+                              border: '1.5px solid rgba(212,175,55,0.35)',
+                              color: addressInput.trim() ? '#fef3c7' : 'rgba(212,175,55,0.4)',
+                            }}
+                            title="Start chat"
+                          >
+                            <Send className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => {
+                              if (addressInput.trim()) {
+                                setTargetPeerId(addressInput.trim());
+                                setAddressInput('');
+                                startCall('audio');
+                              }
+                            }}
+                            className="px-3 py-3 rounded-xl transition-all"
+                            style={{
+                              background: addressInput.trim() ? 'rgba(212,175,55,0.15)' : 'rgba(212,175,55,0.06)',
+                              border: '1.5px solid rgba(212,175,55,0.25)',
+                              color: addressInput.trim() ? '#d4af37' : 'rgba(212,175,55,0.3)',
+                            }}
+                            title="Voice call"
+                          >
+                            <Phone className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => {
+                              if (addressInput.trim()) {
+                                setTargetPeerId(addressInput.trim());
+                                setAddressInput('');
+                                startCall('video');
+                              }
+                            }}
+                            className="px-3 py-3 rounded-xl transition-all"
+                            style={{
+                              background: addressInput.trim() ? 'rgba(212,175,55,0.15)' : 'rgba(212,175,55,0.06)',
+                              border: '1.5px solid rgba(212,175,55,0.25)',
+                              color: addressInput.trim() ? '#d4af37' : 'rgba(212,175,55,0.3)',
+                            }}
+                            title="Video call"
+                          >
+                            <Video className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Or pick from contacts */}
+                      {contacts.length > 0 && (
+                        <>
+                          <div className="flex items-center gap-3 my-5">
+                            <div className="flex-1 h-px" style={{ background: 'rgba(212,175,55,0.12)' }} />
+                            <span className="text-[10px] text-amber-400/30 uppercase tracking-widest">or pick a contact</span>
+                            <div className="flex-1 h-px" style={{ background: 'rgba(212,175,55,0.12)' }} />
+                          </div>
+                          <div className="space-y-1.5 max-h-52 overflow-y-auto pr-1">
+                            {contacts
+                              .sort((a, b) => (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0))
+                              .map((c) => (
+                                <button
+                                  key={c.id}
+                                  onClick={() => setTargetPeerId(c.address)}
+                                  className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left transition-all group"
+                                  style={{ border: '1px solid rgba(212,175,55,0.08)', background: 'rgba(255,255,255,0.02)' }}
+                                  onMouseEnter={(e) => {
+                                    (e.currentTarget as HTMLElement).style.background = 'rgba(212,175,55,0.08)';
+                                    (e.currentTarget as HTMLElement).style.borderColor = 'rgba(212,175,55,0.22)';
+                                  }}
+                                  onMouseLeave={(e) => {
+                                    (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.02)';
+                                    (e.currentTarget as HTMLElement).style.borderColor = 'rgba(212,175,55,0.08)';
+                                  }}
+                                >
+                                  <div
+                                    className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 text-xs font-bold"
+                                    style={{ background: 'rgba(212,175,55,0.15)', color: '#d4af37' }}
+                                  >
+                                    {c.label.slice(0, 2).toUpperCase()}
+                                  </div>
+                                  <div className="flex-1 min-w-0">
+                                    <div className="flex items-center gap-1.5">
+                                      {c.favorite && <Star className="w-2.5 h-2.5 text-amber-400 flex-shrink-0" style={{ fill: 'currentColor' }} />}
+                                      <span className="text-sm font-semibold text-amber-100 truncate">{c.label}</span>
+                                    </div>
+                                    <p className="text-[10px] font-mono text-amber-400/35 truncate">{truncAddr(c.address)}</p>
+                                  </div>
+                                  <ChevronRight className="w-4 h-4 text-amber-400/25 group-hover:text-amber-400/60 transition-colors flex-shrink-0" />
+                                </button>
+                              ))}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Message list */}
+                {targetPeerId && (
+                <div className="flex-1 overflow-y-auto px-5 py-4 space-y-3" style={{ minHeight: 0 }}>
+                  {messages.filter((m) => m.from === targetPeerId || m.self).length === 0 ? (
+                    <div className="flex flex-col items-center justify-center h-full gap-3 text-amber-300/30">
+                      <Shield className="w-10 h-10" />
+                      <div className="text-center">
+                        <p className="text-sm">No messages yet</p>
+                        <p className="text-xs mt-1">Say hello to {selectedContact?.label || truncAddr(targetPeerId)}</p>
+                      </div>
+                    </div>
+                  ) : (
+                    messages.map((msg) => (
+                      <div key={msg.id} className={`flex ${msg.self ? 'justify-end' : 'justify-start'}`}>
+                        <div
+                          className="max-w-xs lg:max-w-md px-4 py-2 rounded-2xl text-sm"
+                          style={msg.self ? {
+                            background: 'linear-gradient(135deg, rgba(212,175,55,0.3), rgba(255,215,0,0.18))',
+                            border: '1px solid rgba(212,175,55,0.3)',
+                            color: '#fef3c7',
+                          } : {
+                            background: 'rgba(255,255,255,0.07)',
+                            border: '1px solid rgba(255,255,255,0.08)',
+                            color: '#cbd5e1',
+                          }}
+                        >
+                          {!msg.self && (
+                            <p className="text-xs text-amber-400/60 mb-1">{shortId(msg.from)}</p>
+                          )}
+                          <p>{msg.content}</p>
+                          <p className="text-xs opacity-50 mt-1 text-right">
+                            {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                          </p>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                  <div ref={messagesEndRef} />
+                </div>
+                )}
+
+                {/* Input bar */}
+                {targetPeerId && (
+                  <div
+                    className="flex gap-2 px-5 py-3 border-t shrink-0"
+                    style={{ borderColor: 'rgba(212,175,55,0.1)' }}
+                  >
+                    <input
+                      className="flex-1 px-4 py-2 rounded-xl text-sm text-amber-100 placeholder-amber-300/30 outline-none"
+                      style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(212,175,55,0.2)' }}
+                      placeholder="Type a message…"
+                      value={inputText}
+                      onChange={(e) => setInputText(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } }}
+                    />
+                    <button
+                      onClick={sendMessage}
+                      className="p-2 rounded-xl transition-all"
+                      style={{
+                        background: 'linear-gradient(135deg, rgba(212,175,55,0.4), rgba(255,215,0,0.25))',
+                        border: '1px solid rgba(212,175,55,0.4)',
+                      }}
+                    >
+                      <Send className="w-5 h-5 text-amber-300" />
+                    </button>
+                  </div>
+                )}
+              </motion.div>
+            )}
+
+            {/* ── Calls Tab ── */}
+            {tab === 'calls' && (
+              <motion.div
+                key="calls"
+                initial={{ opacity: 0, x: 8 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -8 }}
+                className="flex flex-col h-full p-6 gap-4"
+                style={{ minHeight: 0 }}
+              >
+                {activeCall ? (
+                  <div className="flex flex-col gap-4 h-full">
+                    <div className="flex items-center justify-between shrink-0">
+                      <div>
+                        <p className="text-xs text-amber-300/60">Call with</p>
+                        <p className="font-bold text-amber-100">{shortId(activeCall.peerId)}</p>
+                      </div>
+                      <span className={`text-xs px-2 py-1 rounded-full ${
+                        activeCall.state === 'connected'
+                          ? 'bg-green-500/20 text-green-300'
+                          : 'bg-amber-500/20 text-amber-300'
+                      }`}>
+                        {activeCall.state === 'connected' ? 'Connected' : 'Connecting…'}
+                      </span>
+                    </div>
+
+                    <div className="flex-1 relative rounded-2xl overflow-hidden bg-slate-900 min-h-0">
+                      {activeCall.remoteStream ? (
+                        <RemoteVideo stream={activeCall.remoteStream} peerId={activeCall.peerId} />
+                      ) : (
+                        <div className="flex flex-col items-center justify-center h-full gap-3 text-amber-300/40">
+                          <Loader2 className="w-8 h-8 animate-spin" />
+                          <p className="text-sm">Waiting for peer…</p>
+                        </div>
+                      )}
+                      {activeCall.callType === 'video' && activeCall.localStream && (
+                        <LocalVideo stream={activeCall.localStream} />
+                      )}
+
+                      {/* AI assistant overlay panel */}
+                      <AnimatePresence>
+                        {aiEnabled && (
+                          <motion.div
+                            initial={{ opacity: 0, y: 16 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: 16 }}
+                            transition={{ type: 'spring', damping: 22, stiffness: 260 }}
+                            className="absolute bottom-0 left-0 right-0 p-3"
+                            style={{
+                              background: 'linear-gradient(to top, rgba(8,5,28,0.97) 0%, rgba(8,5,28,0.85) 80%, transparent 100%)',
+                            }}
+                          >
+                            <div
+                              className="rounded-2xl p-3.5"
+                              style={{
+                                background: 'linear-gradient(135deg, rgba(20,14,50,0.98), rgba(35,20,65,0.96))',
+                                border: '1.5px solid rgba(139,92,246,0.35)',
+                                boxShadow: '0 0 24px rgba(139,92,246,0.15)',
+                              }}
+                            >
+                              {/* Header */}
+                              <div className="flex items-center gap-2 mb-2.5">
+                                <div
+                                  className="w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0"
+                                  style={{ background: 'linear-gradient(135deg, rgba(139,92,246,0.4), rgba(109,40,217,0.25))' }}
+                                >
+                                  <Bot className="w-3.5 h-3.5 text-violet-300" />
+                                </div>
+                                <span className="text-xs font-bold text-violet-300">Gemma 4 Call Assistant</span>
+                                {aiStreaming && (
+                                  <div className="flex gap-0.5 ml-auto">
+                                    {[0,1,2].map((i) => (
+                                      <motion.div
+                                        key={i}
+                                        className="w-1.5 h-1.5 rounded-full bg-violet-400"
+                                        animate={{ opacity: [0.3, 1, 0.3] }}
+                                        transition={{ duration: 1.2, repeat: Infinity, delay: i * 0.2 }}
+                                      />
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+
+                              {/* Transcript */}
+                              {aiTranscript && (
+                                <div className="mb-2 px-3 py-2 rounded-lg" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.07)' }}>
+                                  <p className="text-[10px] text-slate-400/70 mb-0.5 uppercase tracking-wider">You said</p>
+                                  <p className="text-xs text-slate-300 leading-relaxed">{aiTranscript}</p>
+                                </div>
+                              )}
+
+                              {/* AI suggestion */}
+                              {(aiSuggestion || aiStreaming) && (
+                                <div className="px-3 py-2 rounded-lg" style={{ background: 'rgba(139,92,246,0.08)', border: '1px solid rgba(139,92,246,0.2)' }}>
+                                  <p className="text-[10px] text-violet-400/70 mb-0.5 uppercase tracking-wider">Suggestion</p>
+                                  <p className="text-xs text-violet-100 leading-relaxed">
+                                    {aiSuggestion || <span className="text-violet-400/40">Thinking…</span>}
+                                  </p>
+                                </div>
+                              )}
+
+                              {!aiTranscript && !aiSuggestion && !aiStreaming && (
+                                <p className="text-xs text-violet-300/40 text-center py-1">Listening… speak to get suggestions</p>
+                              )}
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+
+                    <div className="flex items-center justify-center gap-4 shrink-0">
+                      <button
+                        onClick={toggleMic}
+                        className="w-12 h-12 rounded-full flex items-center justify-center transition-all"
+                        style={{
+                          background: micOn ? 'rgba(255,255,255,0.1)' : 'rgba(239,68,68,0.3)',
+                          border: `1.5px solid ${micOn ? 'rgba(255,255,255,0.15)' : 'rgba(239,68,68,0.5)'}`,
+                        }}
+                      >
+                        {micOn ? <Mic className="w-5 h-5 text-white" /> : <MicOff className="w-5 h-5 text-red-300" />}
+                      </button>
+                      {activeCall.callType === 'video' && (
+                        <button
+                          onClick={toggleCam}
+                          className="w-12 h-12 rounded-full flex items-center justify-center transition-all"
+                          style={{
+                            background: camOn ? 'rgba(255,255,255,0.1)' : 'rgba(239,68,68,0.3)',
+                            border: `1.5px solid ${camOn ? 'rgba(255,255,255,0.15)' : 'rgba(239,68,68,0.5)'}`,
+                          }}
+                        >
+                          {camOn ? <Video className="w-5 h-5 text-white" /> : <VideoOff className="w-5 h-5 text-red-300" />}
+                        </button>
+                      )}
+                      {/* AI toggle button */}
+                      <motion.button
+                        onClick={toggleAI}
+                        whileHover={{ scale: 1.05 }}
+                        whileTap={{ scale: 0.95 }}
+                        className="w-12 h-12 rounded-full flex items-center justify-center transition-all relative"
+                        style={{
+                          background: aiEnabled
+                            ? 'linear-gradient(135deg, rgba(139,92,246,0.6), rgba(109,40,217,0.4))'
+                            : 'rgba(255,255,255,0.08)',
+                          border: `1.5px solid ${aiEnabled ? 'rgba(139,92,246,0.7)' : 'rgba(255,255,255,0.12)'}`,
+                          boxShadow: aiEnabled ? '0 0 16px rgba(139,92,246,0.5)' : 'none',
+                        }}
+                        title={aiEnabled ? 'Turn off AI assistant' : 'Turn on AI assistant (Gemma 4)'}
+                      >
+                        <Bot className={`w-5 h-5 ${aiEnabled ? 'text-violet-200' : 'text-white/50'}`} />
+                        {aiEnabled && (
+                          <motion.div
+                            className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-violet-400"
+                            animate={{ scale: [1, 1.3, 1] }}
+                            transition={{ duration: 2, repeat: Infinity }}
+                          />
+                        )}
+                      </motion.button>
+                      <button
+                        onClick={hangup}
+                        className="w-14 h-14 rounded-full flex items-center justify-center"
+                        style={{ background: 'rgba(239,68,68,0.8)', border: '1.5px solid rgba(239,68,68,0.6)' }}
+                      >
+                        <PhoneOff className="w-6 h-6 text-white" />
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center justify-center h-full gap-6 text-amber-300/40">
+                    <Phone className="w-12 h-12" />
+                    <div className="text-center">
+                      <p className="font-semibold text-amber-200/50">No active call</p>
+                      <p className="text-sm mt-1">Select a contact in Messages and tap the call button.</p>
+                    </div>
+                  </div>
+                )}
+              </motion.div>
+            )}
+
+            {/* ── Meetings Tab ── */}
+            {tab === 'meetings' && (
+              <motion.div
+                key="meetings"
+                initial={{ opacity: 0, x: 8 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -8 }}
+                className="flex flex-col h-full p-6 gap-4"
+                style={{ minHeight: 0 }}
+              >
+                {meeting ? (
+                  <div className="flex flex-col h-full gap-4">
+                    <div className="flex items-center justify-between shrink-0">
+                      <div>
+                        <p className="text-xs text-amber-300/50">Room</p>
+                        <p className="font-bold text-amber-100">{meeting.roomId}</p>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <span className="text-xs text-amber-300/50">
+                          {meeting.peers.length} peer{meeting.peers.length !== 1 ? 's' : ''}
+                        </span>
+                        <button
+                          onClick={leaveMeeting}
+                          className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-sm text-red-300 transition-all"
+                          style={{ background: 'rgba(239,68,68,0.15)', border: '1px solid rgba(239,68,68,0.3)' }}
+                        >
+                          <X className="w-4 h-4" /> Leave
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="flex-1 min-h-0 overflow-y-auto">
+                      {meeting.peers.length === 0 ? (
+                        <div className="flex flex-col items-center justify-center h-full gap-3 text-amber-300/30">
+                          <Loader2 className="w-8 h-8 animate-spin" />
+                          <p className="text-sm">Waiting for others to join…</p>
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
+                          {meeting.peers.map((peer) => {
+                            const callInfo = meeting.calls.get(peer.peer_id);
+                            return (
+                              <div
+                                key={peer.peer_id}
+                                className="aspect-video rounded-xl overflow-hidden bg-slate-900 flex items-center justify-center relative"
+                              >
+                                {callInfo?.remoteStream ? (
+                                  <RemoteVideo stream={callInfo.remoteStream} peerId={peer.peer_id} />
+                                ) : (
+                                  <>
+                                    <div
+                                      className="w-12 h-12 rounded-full flex items-center justify-center text-lg font-bold"
+                                      style={{ background: 'rgba(212,175,55,0.2)', color: '#d4af37' }}
+                                    >
+                                      {peer.display_name.slice(0, 2).toUpperCase()}
+                                    </div>
+                                    <span className="absolute bottom-2 left-2 text-xs text-white bg-black/50 px-2 py-0.5 rounded">
+                                      {peer.display_name}
+                                    </span>
+                                  </>
+                                )}
+                              </div>
+                            );
+                          })}
+                          <div className="aspect-video rounded-xl overflow-hidden bg-slate-800 flex items-center justify-center relative border border-amber-400/20">
+                            <div
+                              className="w-12 h-12 rounded-full flex items-center justify-center text-lg font-bold"
+                              style={{ background: 'rgba(212,175,55,0.3)', color: '#d4af37' }}
+                            >
+                              {displayName.slice(0, 2).toUpperCase()}
+                            </div>
+                            <span className="absolute bottom-2 left-2 text-xs text-amber-300 px-2 py-0.5 rounded">You</span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="flex items-center justify-center gap-4 shrink-0">
+                      <button
+                        onClick={toggleMic}
+                        className="w-12 h-12 rounded-full flex items-center justify-center transition-all"
+                        style={{
+                          background: micOn ? 'rgba(255,255,255,0.1)' : 'rgba(239,68,68,0.3)',
+                          border: `1.5px solid ${micOn ? 'rgba(255,255,255,0.15)' : 'rgba(239,68,68,0.5)'}`,
+                        }}
+                      >
+                        {micOn ? <Mic className="w-5 h-5 text-white" /> : <MicOff className="w-5 h-5 text-red-300" />}
+                      </button>
                       <button
                         onClick={toggleCam}
                         className="w-12 h-12 rounded-full flex items-center justify-center transition-all"
@@ -628,197 +1410,110 @@ export default function ChatScreen() {
                       >
                         {camOn ? <Video className="w-5 h-5 text-white" /> : <VideoOff className="w-5 h-5 text-red-300" />}
                       </button>
-                    )}
-                    <button
-                      onClick={hangup}
-                      className="w-14 h-14 rounded-full flex items-center justify-center"
-                      style={{ background: 'rgba(239,68,68,0.8)', border: '1.5px solid rgba(239,68,68,0.6)' }}
-                    >
-                      <PhoneOff className="w-6 h-6 text-white" />
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div className="flex flex-col items-center justify-center h-full gap-6 text-amber-300/40">
-                  <Phone className="w-12 h-12" />
-                  <div className="text-center">
-                    <p className="font-semibold text-amber-200/50">No active call</p>
-                    <p className="text-sm mt-1">Enter a wallet address in Messages and tap the call button.</p>
-                  </div>
-                </div>
-              )}
-            </motion.div>
-          )}
-
-          {/* ── Meetings Tab ── */}
-          {tab === 'meetings' && (
-            <motion.div
-              key="meetings"
-              initial={{ opacity: 0, x: -10 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: 10 }}
-              className="flex flex-col h-full p-6 gap-4"
-              style={{ minHeight: 0 }}
-            >
-              {meeting ? (
-                <div className="flex flex-col h-full gap-4">
-                  {/* Room header */}
-                  <div className="flex items-center justify-between shrink-0">
-                    <div>
-                      <p className="text-xs text-amber-300/50">Room</p>
-                      <p className="font-bold text-amber-100">{meeting.roomId}</p>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <span className="text-xs text-amber-300/50">
-                        {meeting.peers.length} peer{meeting.peers.length !== 1 ? 's' : ''}
-                      </span>
-                      <button
-                        onClick={leaveMeeting}
-                        className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-sm text-red-300 transition-all"
-                        style={{ background: 'rgba(239,68,68,0.15)', border: '1px solid rgba(239,68,68,0.3)' }}
-                      >
-                        <X className="w-4 h-4" /> Leave
-                      </button>
                     </div>
                   </div>
-
-                  {/* Peer video grid */}
-                  <div className="flex-1 min-h-0 overflow-y-auto">
-                    {meeting.peers.length === 0 ? (
-                      <div className="flex flex-col items-center justify-center h-full gap-3 text-amber-300/30">
-                        <Loader2 className="w-8 h-8 animate-spin" />
-                        <p className="text-sm">Waiting for others to join…</p>
-                      </div>
-                    ) : (
-                      <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
-                        {meeting.peers.map((peer) => {
-                          const callInfo = meeting.calls.get(peer.peer_id);
-                          return (
-                            <div
-                              key={peer.peer_id}
-                              className="aspect-video rounded-xl overflow-hidden bg-slate-900 flex items-center justify-center relative"
-                            >
-                              {callInfo?.remoteStream ? (
-                                <RemoteVideo stream={callInfo.remoteStream} peerId={peer.peer_id} />
-                              ) : (
-                                <>
-                                  <div
-                                    className="w-12 h-12 rounded-full flex items-center justify-center text-lg font-bold"
-                                    style={{ background: 'rgba(212,175,55,0.2)', color: '#d4af37' }}
-                                  >
-                                    {peer.display_name.slice(0, 2).toUpperCase()}
-                                  </div>
-                                  <span className="absolute bottom-2 left-2 text-xs text-white bg-black/50 px-2 py-0.5 rounded">
-                                    {peer.display_name}
-                                  </span>
-                                </>
-                              )}
-                            </div>
-                          );
-                        })}
-                        {/* Self tile */}
-                        <div className="aspect-video rounded-xl overflow-hidden bg-slate-800 flex items-center justify-center relative border border-amber-400/20">
-                          <div
-                            className="w-12 h-12 rounded-full flex items-center justify-center text-lg font-bold"
-                            style={{ background: 'rgba(212,175,55,0.3)', color: '#d4af37' }}
-                          >
-                            {displayName.slice(0, 2).toUpperCase()}
-                          </div>
-                          <span className="absolute bottom-2 left-2 text-xs text-amber-300 px-2 py-0.5 rounded">
-                            You
-                          </span>
+                ) : (
+                  <div className="flex flex-col items-center justify-center h-full gap-6 text-amber-300/30">
+                    <Users className="w-14 h-14 text-amber-400/15" />
+                    <div className="text-center">
+                      <p className="font-semibold text-amber-200/40 mb-1">No active meeting</p>
+                      <p className="text-sm">Use the left panel to create or join a room</p>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 max-w-xs w-full">
+                      {[
+                        { icon: <Lock className="w-3.5 h-3.5" />, text: 'E2E Encrypted' },
+                        { icon: <Shield className="w-3.5 h-3.5" />, text: 'Dilithium5 keys' },
+                        { icon: <Monitor className="w-3.5 h-3.5" />, text: 'Screen sharing' },
+                        { icon: <Users className="w-3.5 h-3.5" />, text: 'Up to 49 peers' },
+                      ].map(({ icon, text }) => (
+                        <div
+                          key={text}
+                          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs text-amber-300/40"
+                          style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(212,175,55,0.08)' }}
+                        >
+                          <span className="text-amber-400/30">{icon}</span>
+                          {text}
                         </div>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Meeting controls */}
-                  <div className="flex items-center justify-center gap-4 shrink-0">
-                    <button
-                      onClick={toggleMic}
-                      className="w-12 h-12 rounded-full flex items-center justify-center transition-all"
-                      style={{
-                        background: micOn ? 'rgba(255,255,255,0.1)' : 'rgba(239,68,68,0.3)',
-                        border: `1.5px solid ${micOn ? 'rgba(255,255,255,0.15)' : 'rgba(239,68,68,0.5)'}`,
-                      }}
-                    >
-                      {micOn ? <Mic className="w-5 h-5 text-white" /> : <MicOff className="w-5 h-5 text-red-300" />}
-                    </button>
-                    <button
-                      onClick={toggleCam}
-                      className="w-12 h-12 rounded-full flex items-center justify-center transition-all"
-                      style={{
-                        background: camOn ? 'rgba(255,255,255,0.1)' : 'rgba(239,68,68,0.3)',
-                        border: `1.5px solid ${camOn ? 'rgba(255,255,255,0.15)' : 'rgba(239,68,68,0.5)'}`,
-                      }}
-                    >
-                      {camOn ? <Video className="w-5 h-5 text-white" /> : <VideoOff className="w-5 h-5 text-red-300" />}
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div className="flex flex-col gap-6">
-                  {/* Join / create room */}
-                  <div
-                    className="rounded-2xl p-6"
-                    style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(212,175,55,0.15)' }}
-                  >
-                    <div className="flex items-center gap-2 mb-4">
-                      <Users className="w-5 h-5 text-amber-400" />
-                      <h2 className="font-bold text-amber-100">Start or join a meeting</h2>
-                    </div>
-                    <p className="text-xs text-amber-300/50 mb-4">
-                      End-to-end encrypted · Up to 49 participants · No account needed
-                    </p>
-                    <div className="flex gap-2">
-                      <input
-                        className="flex-1 px-4 py-2 rounded-xl text-sm text-amber-100 placeholder-amber-300/30 outline-none"
-                        style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(212,175,55,0.2)' }}
-                        placeholder="Room name or ID…"
-                        value={roomInput}
-                        onChange={(e) => setRoomInput(e.target.value)}
-                        onKeyDown={(e) => { if (e.key === 'Enter') joinMeeting(); }}
-                      />
-                      <button
-                        onClick={joinMeeting}
-                        className="flex items-center gap-2 px-4 py-2 rounded-xl font-semibold text-sm transition-all"
-                        style={{
-                          background: 'linear-gradient(135deg, rgba(212,175,55,0.4), rgba(255,215,0,0.25))',
-                          border: '1px solid rgba(212,175,55,0.5)',
-                          color: '#fef3c7',
-                        }}
-                      >
-                        <UserPlus className="w-4 h-4" />
-                        Join
-                      </button>
+                      ))}
                     </div>
                   </div>
+                )}
+              </motion.div>
+            )}
 
-                  {/* Feature pills */}
-                  <div className="grid grid-cols-2 gap-3">
-                    {[
-                      { icon: <Lock className="w-4 h-4" />, text: 'E2E Encrypted' },
-                      { icon: <Shield className="w-4 h-4" />, text: 'Dilithium5 keys' },
-                      { icon: <Monitor className="w-4 h-4" />, text: 'Screen sharing' },
-                      { icon: <Users className="w-4 h-4" />, text: 'Up to 49 peers' },
-                    ].map(({ icon, text }) => (
-                      <div
-                        key={text}
-                        className="flex items-center gap-2 px-3 py-2 rounded-lg text-xs text-amber-300/60"
-                        style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(212,175,55,0.1)' }}
-                      >
-                        <span className="text-amber-400/50">{icon}</span>
-                        {text}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </motion.div>
-          )}
+            {/* ── Groups Tab ── */}
+            {tab === 'groups' && (
+              <motion.div
+                key="groups"
+                initial={{ opacity: 0, x: 8 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -8 }}
+                className="h-full"
+                style={{ minHeight: 0 }}
+              >
+                <GroupsTab
+                  walletAddress={walletAddress}
+                  getAuthHeader={async () => {
+                    const session = walletSession.getSession();
+                    if (!session) return null;
+                    return generateAuthHeader(session.privateKey, session.address, '/api/v1/groups');
+                  }}
+                  apiBaseUrl={getConnectionInfo().apiBaseUrl}
+                />
+              </motion.div>
+            )}
 
-        </AnimatePresence>
+          </AnimatePresence>
+        </div>
+
       </div>
+
+      {/* ── Address Book Drawer ── */}
+      <AnimatePresence>
+        {showAddressBook && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="absolute inset-0 z-50 flex"
+            style={{ background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)' }}
+            onClick={() => setShowAddressBook(false)}
+          >
+            <motion.div
+              initial={{ x: '100%' }}
+              animate={{ x: 0 }}
+              exit={{ x: '100%' }}
+              transition={{ type: 'spring', damping: 28, stiffness: 260 }}
+              className="ml-auto w-full max-w-md h-full overflow-y-auto"
+              style={{
+                background: 'linear-gradient(135deg, rgba(14,10,40,0.99) 0%, rgba(30,18,60,0.99) 100%)',
+                borderLeft: '1.5px solid rgba(212,175,55,0.2)',
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between px-4 py-3" style={{ borderBottom: '1px solid rgba(212,175,55,0.12)' }}>
+                <div className="flex items-center gap-2">
+                  <Users className="w-4 h-4 text-amber-400" />
+                  <span className="text-sm font-bold text-amber-100">Address Book</span>
+                </div>
+                <button
+                  onClick={() => setShowAddressBook(false)}
+                  className="p-1.5 rounded-lg hover:bg-white/5 transition-colors"
+                >
+                  <X className="w-4 h-4 text-amber-400/60" />
+                </button>
+              </div>
+              <AddressBook
+                onSelectAddress={(addr) => {
+                  setTargetPeerId(addr);
+                  setShowAddressBook(false);
+                  setTab('messages');
+                }}
+              />
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

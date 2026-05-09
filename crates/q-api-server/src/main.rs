@@ -23376,6 +23376,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/web-search", post(q_api_server::web_search_api::web_search_handler)) // v9.3.2: GLM-4-Flash AI web search
         .route("/api/v1/ai/chat", post(q_api_server::web_search_api::web_search_handler)) // alias: ad-blocker-safe path for browser AI chat
         .route("/api/v1/ai/email-assist", post(q_api_server::web_search_api::email_assist_handler)) // Email AI assistant (gemma4)
+        .route("/api/v1/ai/call-assist", post(q_api_server::web_search_api::call_assist_handler)) // Call AI assistant — real-time voice call suggestions (gemma4, SSE)
         // ============================================
         // BLOCKCHAIN SYNCHRONIZATION ENDPOINTS
         // ============================================
