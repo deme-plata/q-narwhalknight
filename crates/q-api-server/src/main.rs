@@ -21003,7 +21003,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             // download). For checkpoint-bootstrapped nodes, this means all ~1M
                             // post-checkpoint blocks are stored but never credited. Run the replay
                             // now that all blocks are on disk.
-                            if app_state_sync.storage_engine.is_checkpoint_applied().await {
+                            // Gate on is_balance_replay_done() so the replay doesn't re-run every
+                            // time the sync-gap transitions 0→nonzero→0 (e.g. new blocks arriving).
+                            if app_state_sync.storage_engine.is_checkpoint_applied().await
+                                && !app_state_sync.storage_engine.is_balance_replay_done().await
+                            {
                                 info!("🏁 [SYNC COMPLETE v10.7.3] Checkpoint detected — reindexing DAG blocks then starting post-sync balance replay...");
                                 // Reindex DAG-format blocks so replay can find gossip-received blocks (P1 fix).
                                 let _ = app_state_sync.storage_engine.reindex_dag_blocks_to_height_keys().await;
