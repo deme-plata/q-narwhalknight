@@ -4351,10 +4351,13 @@ impl QStorage {
                 let delta_abs = if *amount >= old_balance { *amount - old_balance } else { old_balance - *amount };
                 let direction = if *amount >= old_balance { "+" } else { "-" };
                 if *amount < old_balance {
+                    // MAX-WINS GUARD: never write a lower balance than what's already in RocksDB.
+                    // Replay/batch callers may have incomplete data; the existing value is authoritative.
                     error!(
-                        "🔴 [BALANCE WRITE] save_wallet_balances(): wallet={} old={} new={} delta={}{} caller=BATCH_OVERWRITE height=N/A",
-                        &addr_hex[..16.min(addr_hex.len())], old_balance, amount, direction, delta_abs
+                        "🔴 [BALANCE WRITE] save_wallet_balances(): wallet={} SKIPPED (max-wins: old={} > new={}) caller=BATCH_OVERWRITE",
+                        &addr_hex[..16.min(addr_hex.len())], old_balance, amount
                     );
+                    continue; // do NOT write — existing value is higher and must be preserved
                 } else {
                     warn!(
                         "🔴 [BALANCE WRITE] save_wallet_balances(): wallet={} old={} new={} delta={}{} caller=BATCH_OVERWRITE height=N/A",

@@ -1,5 +1,23 @@
 # CLAUDE.md - Multi-Server Development Guide
 
+## 🚨 BALANCE INTEGRITY — NON-NEGOTIABLE RULES
+
+These rules exist because balance-corrupting code was written and destroyed correct wallet balances on Epsilon in May 2026. Do not repeat this.
+
+### Rule 1: save_wallet_balances MUST be max-wins
+Any code that writes wallet balances to RocksDB MUST check `existing >= new` first and skip the write if the existing value is higher. `save_wallet_balances` is a batch overwrite — it will silently destroy correct higher balances if called with stale/partial data. This is how a replay bug dropped a user wallet from 3200 QUG → 1484 QUG.
+
+### Rule 2: Replay code MUST gate on is_checkpoint_applied()
+Balance replay (`replay_post_checkpoint_balances`) exists ONLY for nodes that bootstrapped from the checkpoint snapshot. It MUST check `is_checkpoint_applied()` before running — if that returns false, the node ran from genesis and already has correct balances. Never run replay on Epsilon.
+
+### Rule 3: Epsilon's wallet balances are authoritative — never overwrite them
+Epsilon has been running since genesis. Its RocksDB wallet balances are the ground truth for the network. No code path should ever write a lower balance to any wallet on Epsilon. If a feature needs to modify balances on checkpoint nodes (Beta/Gamma), add an explicit `is_genesis_node()` guard that skips Epsilon.
+
+### Rule 4: Test balance-modifying code on Alpha Docker ONLY
+Any new code that touches `save_wallet_balance`, `save_wallet_balances`, or the replay path must be tested in a fresh Docker container on Alpha before it gets near Beta, Gamma, or Epsilon. Verify wallet counts and total supply match expected values before deploying.
+
+---
+
 ## Claude Code Distributed Development for Q-NarwhalKnight
 
 This guide explains how to set up distributed development with multiple Claude Code servers working collaboratively on the Q-NarwhalKnight quantum consensus system.
