@@ -5868,13 +5868,14 @@ impl QStorage {
 
         // Genesis/archive node detection: if we have blocks from well before the checkpoint,
         // this node ran from genesis and already has correct balances — skip the replay.
-        // Checkpoint-bootstrapped nodes start from ~16.75M and have no pre-checkpoint blocks.
-        let is_genesis_node = self.get_qblock_any_format(1_000).await
+        // Checkpoint-bootstrapped nodes start from ~16.75M and have no blocks below that.
+        // Use height 1,000,000 — reliably stored on all genesis nodes, absent on checkpoint nodes.
+        let is_genesis_node = self.get_qblock_any_format(1_000_000).await
             .unwrap_or(None)
             .is_some();
         if is_genesis_node {
             warn!(
-                "🏁 [POST-SYNC REPLAY v10.7.3] Genesis/archive node detected (has block at height 1000) \
+                "🏁 [POST-SYNC REPLAY v10.7.3] Genesis/archive node detected (has block at height 1,000,000) \
                  — balances already correct from genesis, skipping replay."
             );
             return Ok(0);
