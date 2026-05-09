@@ -6596,6 +6596,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                     block_hash: None,
                                     block_height: blocks.last().map(|b| b.header.height),
                                     confirmation_status: "confirmed".to_string(),
+                                    from_address: None,
+                                    tx_hash: None,
+                                    memo: None,
                                 }
                             ).await;
                         }
@@ -7800,6 +7803,63 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 if let Err(e) = turbo_sync_gap.fill_gap_p2p(first_gap, last_gap).await {
                     warn!("⚠️ [RC-3 GAP-FILL P2P] fetch for {}-{} failed: {}", first_gap, last_gap, e);
                 }
+            }
+        });
+    }
+
+    // v10.7.6 SYNC-006: Dedicated post-checkpoint balance replay task.
+    // The old `now_synced && !was_synced` trigger in the adaptive sync loop is unreliable:
+    // HEIGHT DECAY can create spurious sync_gap=0 events before all blocks are present, and
+    // `continue` statements in the gap-fill path prevent the sync-complete block from being
+    // reached. This task polls every 30s for a reliable completion signal and runs the
+    // replay exactly once, guarded by a RocksDB flag so restarts skip it.
+    {
+        let replay_storage  = state.storage_engine.clone();
+        let replay_balances = state.wallet_balances.clone();
+        let replay_supply   = state.total_minted_supply.clone();
+        tokio::spawn(async move {
+            // Skip if checkpoint was not applied (non-checkpoint nodes need no replay).
+            if !replay_storage.is_checkpoint_applied().await {
+                return;
+            }
+            // Skip if the replay was already completed in a previous run.
+            if replay_storage.is_balance_replay_done().await {
+                info!("✅ [SYNC-006] Post-checkpoint balance replay already done — skipping.");
+                return;
+            }
+            use q_storage::balance_checkpoint::CHECKPOINT_HEIGHT;
+            info!("🔭 [SYNC-006] Waiting for chain to reach post-checkpoint height before replay…");
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                let latest = replay_storage.get_latest_qblock_height().await
+                    .ok().flatten().unwrap_or(0);
+                if latest <= CHECKPOINT_HEIGHT {
+                    info!("🔭 [SYNC-006] Latest block {} ≤ checkpoint {} — waiting…", latest, CHECKPOINT_HEIGHT);
+                    continue;
+                }
+                info!("🏁 [SYNC-006] Chain at height {} — starting post-checkpoint balance replay.", latest);
+                match replay_storage.replay_post_checkpoint_balances(&replay_balances, &replay_supply).await {
+                    Ok(()) => {
+                        info!("✅ [SYNC-006] Replay complete — reloading in-memory balances from RocksDB.");
+                        // Reload the in-memory map so live queries immediately reflect the replayed state.
+                        if let Ok(persisted) = replay_storage.load_wallet_balances().await {
+                            let count = persisted.len();
+                            let mut bal = replay_balances.write().await;
+                            for (addr, amt) in &persisted { bal.insert(*addr, *amt); }
+                            let total: u128 = bal.values().sum();
+                            drop(bal);
+                            *replay_supply.write().await = total;
+                            info!("✅ [SYNC-006] In-memory balances updated: {} wallets, {} QUG",
+                                  count, total / 1_000_000_000_000_000_000_000_000u128);
+                        }
+                        let _ = replay_storage.mark_balance_replay_done().await;
+                    }
+                    Err(e) => {
+                        warn!("⚠️ [SYNC-006] Replay failed: {} — will retry in 30s.", e);
+                        continue; // Retry next loop iteration
+                    }
+                }
+                break; // Done
             }
         });
     }
@@ -9387,6 +9447,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                         block_hash: None, // Legacy gossipsub - no block association
                                         block_height: Some(update.block_height),
                                         confirmation_status: "pending".to_string(), // Not confirmed via DAG-Knight
+                                        from_address: None,
+                                        tx_hash: None,
+                                        memo: None,
                                     }
                                 ).await;
 
@@ -10980,6 +11043,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                                                                     block_hash: Some(block_hash_hex.clone()),
                                                                                     block_height: Some(block_height),
                                                                                     confirmation_status: "confirmed".to_string(),
+                                                                                    from_address: None,
+                                                                                    tx_hash: None,
+                                                                                    memo: None,
                                                                                 }
                                                                             ).await;
                                                                             let sign = if matches!(update.reason, q_storage::ChangeReason::TransferSent) { "-" } else { "+" };
@@ -11524,6 +11590,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                                             block_hash: Some(block_hash_hex.clone()),
                                                             block_height: Some(block_height),
                                                             confirmation_status: "confirmed".to_string(),
+                                                            from_address: None,
+                                                            tx_hash: None,
+                                                            memo: None,
                                                         }
                                                     ).await;
                                                     let sign = if matches!(update.reason, q_storage::ChangeReason::TransferSent) { "-" } else { "+" };
@@ -15793,6 +15862,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             block_hash: None,
                             block_height: None,
                             confirmation_status: "confirmed".to_string(),
+                            from_address: None,
+                            tx_hash: None,
+                            memo: None,
                         })
                         .await;
 
@@ -17747,6 +17819,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                                                 block_hash: None,
                                                                 block_height: Some(update.block_height),
                                                                 confirmation_status: "confirmed".to_string(),
+                                                                from_address: None,
+                                                                tx_hash: None,
+                                                                memo: None,
                                                             }
                                                         ).await;
                                                         trace!("📡 SSE: Balance updated for {}: {} → {} QUG",
@@ -19042,9 +19117,12 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                                         new_balance: new_balance_f64,
                                                         change_reason: format!("{:?}", update.reason),
                                                         timestamp: chrono::Utc::now(),
-                                                        block_hash: None, // Balance consensus, no direct block context
+                                                        block_hash: None,
                                                         block_height: None,
-                                                        confirmation_status: "confirmed".to_string(), // From consensus engine
+                                                        confirmation_status: "confirmed".to_string(),
+                                                        from_address: None,
+                                                        tx_hash: None,
+                                                        memo: None,
                                                     }
                                                 ).await;
                                                 trace!("📡 SSE: Balance updated for {}: {} → {} QUG (+{} QUG reward)",
@@ -19252,6 +19330,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                     block_hash: None, // Time-based update, no direct block
                                     block_height: None,
                                     confirmation_status: "confirmed".to_string(), // Mining rewards
+                                    from_address: None,
+                                    tx_hash: None,
+                                    memo: None,
                                 };
 
                             if let Err(e) = app_state_block_producer

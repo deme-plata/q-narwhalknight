@@ -5811,6 +5811,26 @@ impl QStorage {
         Ok(())
     }
 
+    /// SYNC-006 (v10.7.6): Check whether the one-time post-checkpoint balance replay has
+    /// already been completed and persisted to the DB for this chain instance.
+    pub async fn is_balance_replay_done(&self) -> bool {
+        self.hot_db
+            .get(CF_MANIFEST, b"meta:balance_replay_v10.7.6")
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+    }
+
+    /// SYNC-006 (v10.7.6): Persist the replay-done flag so a restart does not re-run the
+    /// (potentially expensive) replay.
+    pub async fn mark_balance_replay_done(&self) -> Result<()> {
+        self.hot_db
+            .put(CF_MANIFEST, b"meta:balance_replay_v10.7.6", b"1")
+            .await
+            .context("Failed to persist balance replay done flag")
+    }
+
     /// Post-sync balance replay for checkpoint-bootstrapped nodes (SYNC-004 / v10.7.3).
     ///
     /// Turbo sync downloads blocks with `balance_engine=None` — no balance updates during

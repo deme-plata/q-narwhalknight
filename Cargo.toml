@@ -78,7 +78,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.7.5"  # v10.7.5: REPLAY-001 — skip token transfers in post-checkpoint balance replay
+version = "10.7.6"  # v10.7.6: SYNC-006 — dedicated startup replay task with DB-flag guard
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"
