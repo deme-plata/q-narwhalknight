@@ -78,7 +78,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.7.7"  # v10.7.7: SYNC-006 correctness — get_qblock_any_format + pre-replay reindex + miss-rate gate
+version = "10.7.8"  # v10.7.8: restore Epsilon balances — new replay-done key + configurable miss-rate threshold
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"

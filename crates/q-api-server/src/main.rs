@@ -7858,9 +7858,13 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         } else {
                             0
                         };
-                        if miss_pct > 1 {
-                            warn!("⚠️ [SYNC-006] Replay miss rate {}% ({}/{}) exceeds 1% threshold — \
-                                   NOT marking done, will retry in 30s.", miss_pct, blocks_missing, total_range);
+                        let max_miss_pct: u64 = std::env::var("Q_REPLAY_MISS_PCT_MAX")
+                            .ok()
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(1);
+                        if miss_pct > max_miss_pct {
+                            warn!("⚠️ [SYNC-006] Replay miss rate {}% ({}/{}) exceeds {}% threshold — \
+                                   NOT marking done, will retry in 30s.", miss_pct, blocks_missing, total_range, max_miss_pct);
                             continue;
                         }
                         info!("✅ [SYNC-006] Replay complete (miss rate {}%) — reloading in-memory balances from RocksDB.", miss_pct);
