@@ -516,7 +516,16 @@ pub async fn get_group(
         Ok(Some(_)) => {}
     }
 
-    (StatusCode::OK, Json(json!({"group": meta}))).into_response()
+    // Also load full member list so the frontend can populate the members panel
+    let members = match list_members(storage, &group_id).await {
+        Ok(m) => m,
+        Err(e) => {
+            error!("group_chat get_group list_members: {}", e);
+            vec![]
+        }
+    };
+
+    (StatusCode::OK, Json(json!({"group": meta, "members": members}))).into_response()
 }
 
 /// DELETE /:id — delete group (owner-only)
@@ -635,7 +644,8 @@ pub async fn create_invite(
             .into_response();
     }
 
-    (StatusCode::CREATED, Json(json!({"invite": invite}))).into_response()
+    // Return the token at the top level so the frontend can read `data.token` directly
+    (StatusCode::CREATED, Json(json!({"token": token, "invite": invite}))).into_response()
 }
 
 /// POST /join — join a group via invite token

@@ -28,6 +28,7 @@ import EthereumSwapModal from './EthereumSwapModal';
 import EmailScreen from './EmailScreen';
 import CalendarScreen from './CalendarScreen';
 import WebSearchScreen from './WebSearchScreen';
+import ChatScreen from './ChatScreen';
 import { TICKER_SYMBOL } from '../constants/ticker';
 import QuantumLoader from './QuantumLoader';
 
@@ -102,6 +103,7 @@ interface WalletBalance {
 interface DashboardProps {
   onNavigateToSend?: (coinSymbol: string) => void;
   liveBalance?: number; // v8.6.5: Live QUG balance from App.tsx SSE (same source as TopBar)
+  onNavigateToChat?: () => void; // Navigate to App-level chat screen (avoids duplicate SignalingService)
 }
 
 // ── HiBT Listing Donation Banner (v10.5.4) ────────────────────────────────
@@ -124,7 +126,6 @@ function HiBTDonationBanner() {
             src="/hibt-banner.png"
             alt="$QUG listing on HiBT — donate BTC"
             className="w-full h-auto block transition-transform duration-300 group-hover:scale-[1.01]"
-            style={{ maxHeight: 90, objectFit: 'cover', objectPosition: 'center' }}
           />
           {/* Hover overlay */}
           <div
@@ -145,7 +146,7 @@ function HiBTDonationBanner() {
   );
 }
 
-const Dashboard = memo(function Dashboard({ onNavigateToSend, liveBalance }: DashboardProps) {
+const Dashboard = memo(function Dashboard({ onNavigateToSend, liveBalance, onNavigateToChat }: DashboardProps) {
   // 🌐 v3.4.3-browser: P2P real-time block streaming via gossipsub
   const { latestBlock: p2pLatestBlock, blockHistory: p2pBlockHistory, isSubscribed: p2pSubscribed } = useRealtimeBlocks();
 
@@ -175,6 +176,7 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend, liveBalance }: Das
   const [showEthereumSwapModal, setShowEthereumSwapModal] = useState(false);
   const [activeDashboardTab, setActiveDashboardTab] = useState<'wallet' | 'mail' | 'calendar' | 'chat' | 'search'>('wallet');
   const [unreadEmailCount, setUnreadEmailCount] = useState(0);
+  const [chatUnreadCount, setChatUnreadCount] = useState(0);
   const [tabOrder, setTabOrder] = useState<Array<'wallet' | 'mail' | 'calendar' | 'chat' | 'search'>>(() => {
     try {
       const saved = localStorage.getItem('dashboardTabOrder');
@@ -398,14 +400,17 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend, liveBalance }: Das
     };
     const handleEmailRead = () => { fetchUnread(); };
 
+    const handleChatMessage = () => { setChatUnreadCount((n) => n + 1); };
     window.addEventListener('email-received', handleEmailReceived);
     window.addEventListener('email-unread-count', handleUnreadCount);
     window.addEventListener('email-read', handleEmailRead);
+    window.addEventListener('qnk-new-chat-message', handleChatMessage);
     return () => {
       clearInterval(interval);
       window.removeEventListener('email-received', handleEmailReceived);
       window.removeEventListener('email-unread-count', handleUnreadCount);
       window.removeEventListener('email-read', handleEmailRead);
+      window.removeEventListener('qnk-new-chat-message', handleChatMessage);
     };
   }, []);
 
@@ -2683,17 +2688,26 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
                 search: { label: 'SEARCH', Icon: Globe },
                 mail: { label: 'MAIL', Icon: Mail },
                 calendar: { label: 'CALENDAR', Icon: Calendar },
-                chat: { label: 'CHAT', Icon: MessageCircle, comingSoon: true },
+                chat: { label: 'CHAT', Icon: MessageCircle },
               };
               return tabOrder.map((tabId) => {
                 const tab = tabDefs[tabId];
                 if (!tab) return null;
                 const isActive = activeDashboardTab === tabId;
                 const isMail = tabId === 'mail';
+                const isChat = tabId === 'chat';
                 return (
                   <motion.button
                     key={tabId}
-                    onClick={() => !tab.comingSoon && setActiveDashboardTab(tabId)}
+                    onClick={() => {
+                      if (tab.comingSoon) return;
+                      if (tabId === 'chat' && onNavigateToChat) {
+                        setChatUnreadCount(0);
+                        onNavigateToChat();
+                      } else {
+                        setActiveDashboardTab(tabId);
+                      }
+                    }}
                     disabled={tab.comingSoon}
                     className={`
                       flex-1 py-3.5 px-4 rounded-xl font-semibold uppercase tracking-widest
@@ -2728,6 +2742,37 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
                     <div className="relative">
                       <tab.Icon className="w-4 h-4" />
                       {/* Unread email notification badge */}
+                      {isChat && chatUnreadCount > 0 && (
+                        <div className="absolute -top-2.5 -right-3 pointer-events-none">
+                          <motion.div
+                            className="absolute inset-0 rounded-full"
+                            style={{
+                              width: 20, height: 20,
+                              background: 'radial-gradient(circle, rgba(212,175,55,0.5), transparent 70%)',
+                              filter: 'blur(3px)',
+                              transform: 'translate(-3px, -3px)',
+                            }}
+                            animate={{ scale: [1, 1.8, 1], opacity: [0.7, 0, 0.7] }}
+                            transition={{ duration: 2, repeat: Infinity, ease: 'easeInOut' }}
+                          />
+                          <motion.div
+                            className="relative flex items-center justify-center rounded-full"
+                            style={{
+                              minWidth: 16, height: 16,
+                              padding: '0 4px',
+                              background: 'linear-gradient(135deg, #D4AF37, #FFD700, #D4AF37)',
+                              boxShadow: '0 0 8px rgba(212,175,55,0.8), 0 0 16px rgba(212,175,55,0.4)',
+                              border: '1.5px solid rgba(255,235,150,0.5)',
+                            }}
+                            animate={{ scale: [1, 1.12, 1] }}
+                            transition={{ duration: 1.5, repeat: Infinity, ease: 'easeInOut' }}
+                          >
+                            <span className="text-[9px] font-black text-slate-900 leading-none">
+                              {chatUnreadCount > 99 ? '99+' : chatUnreadCount}
+                            </span>
+                          </motion.div>
+                        </div>
+                      )}
                       {isMail && unreadEmailCount > 0 && (
                         <div className="absolute -top-2.5 -right-3 pointer-events-none">
                           {/* Outer pulsing ring */}
@@ -2889,24 +2934,13 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
             <WebSearchScreen />
           </motion.div>
         )}
-        {activeDashboardTab === 'chat' && (
-          <motion.div key="chat-tab" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} transition={{ duration: 0.25 }}>
-            <div
-              className="rounded-2xl p-12 text-center backdrop-blur-xl"
-              style={{ background: 'linear-gradient(135deg, rgba(15, 10, 35, 0.8), rgba(20, 15, 40, 0.8))', border: '1px solid rgba(34, 211, 238, 0.15)' }}
-            >
-              <MessageCircle className="w-16 h-16 mx-auto mb-4 text-cyan-400/30" />
-              <h3 className="text-xl font-bold text-white mb-2">P2P Chat</h3>
-              <p className="text-gray-500 text-sm">Decentralized peer-to-peer chat over libp2p with Tor routing. Coming soon.</p>
-            </div>
-          </motion.div>
-        )}
+        {/* Chat tab navigates to App-level ChatScreen via onNavigateToChat (avoids duplicate SignalingService peer_id conflict) */}
       </AnimatePresence>
 
       {activeDashboardTab === 'wallet' && <>
 
-      {/* ── HiBT Listing Donation Banner — hidden until address verified */}
-      {/* <HiBTDonationBanner /> */}
+      {/* ── HiBT Listing Donation Banner */}
+      <HiBTDonationBanner />
 
       {/* ── News & Blog Row ─────────────────────────────────────────── */}
       <motion.div
@@ -2952,6 +2986,56 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
         >
           {(() => {
             const posts = [
+              {
+                tag: 'Announcement', tagColor: 'text-orange-400', tagBg: 'rgba(251,146,60,0.1)', tagBorder: 'rgba(251,146,60,0.25)',
+                icon: <Globe className="w-3.5 h-3.5 text-orange-400" />,
+                title: 'Community Campaign: Help Get QUG Listed on HiBT Exchange',
+                excerpt: 'The Quillon community is rallying to raise $15,000 toward a QUG/USDT listing on HiBT — a top-40 global exchange with 3.5 million registered users and $7.5 billion in daily spot volume.',
+                date: 'May 2026', accent: 'rgba(251,146,60,0.08)', border: 'rgba(251,146,60,0.2)',
+                fullContent: `## The Opportunity
+
+HiBT is a globally ranked cryptocurrency exchange (CoinMarketCap #38 Spot, #36 Futures) with over 3.5 million registered users and $7.5 billion in daily spot volume. A QUG/USDT listing on HiBT would give Quillon its first major centralized exchange presence, connecting QUG to traders across North America, Europe, Asia-Pacific, the Middle East, and Africa.
+
+## What the Listing Includes
+
+The Standard listing package covers a full marketing launch:
+
+- **QUG/USDT trading pair** on a regulated platform with real order books
+- **Listing announcement** pushed to HiBT's 9 million+ registered user base
+- **Banner placements** across the HiBT website and mobile app
+- **Multilingual Telegram promotions** across 7 languages, 50,000+ community members
+- **Social media blast** across Twitter, LinkedIn, Discord, and Instagram (200,000+ reach)
+- **PR articles** written and distributed by HiBT's editorial team
+- **Weekly Top Gainer** and quarterly newsletter promotions
+
+## Why QUG Belongs on a CEX
+
+Quillon Graph is not a token on someone else's chain — it is a native Layer 1 blockchain with a live mainnet, real miners, and a built-in DEX. A centralized exchange listing gives miners a straightforward way to realize value from their work and opens the door to institutional-scale liquidity. HiBT's Asia-Pacific and Middle East penetration is particularly valuable for QUG given the strong mining communities in those regions.
+
+Key fundamentals that support a CEX listing right now:
+
+- Quantum-resistant cryptography from genesis (Dilithium5 + Kyber1024) — no retrofit required
+- DAG-Knight consensus with sub-3-second finality
+- CPU + GPU dual-lane mining — fair to home hardware and professional farms
+- Built-in AMM decentralized exchange and WASM smart contracts
+- Live mainnet with multiple 10Gbit bootstrap nodes across multiple continents
+
+## The $15,000 Goal — Community Funded
+
+The listing fee is $15,000 USDT. No team treasury funds are being used — this is a community-funded campaign. Every satoshi donated goes directly toward securing the listing. The QUG team has committed to full transparency: all on-chain donations are tracked live and the progress is visible directly in the dashboard.
+
+## How to Contribute
+
+Click the banner at the top of the dashboard to open the donation modal. Send any amount of BTC (on-chain, Bitcoin mainnet) to the listed address. The progress bar updates in real time as contributions arrive. Lightning Network support is being added shortly for smaller, instant contributions.
+
+There is no minimum. Even 0.001 BTC moves the needle. If the goal is not reached, the approach and timeline will be reassessed openly with the community — no funds will be spent without a completed raise.
+
+## What Happens After the Listing
+
+Once live, QUG becomes available to millions of users who have never heard of Quillon. The marketing package activates automatically: announcements, banners, social posts. The built-in DEX remains the primary venue for on-chain swaps, but a CEX listing brings liquidity depth that the DEX alone cannot replicate at this stage.
+
+This is the first step toward broader exchange coverage. Help make it happen.`,
+              },
               {
                 tag: 'Research', tagColor: 'text-purple-400', tagBg: 'rgba(139,92,246,0.12)', tagBorder: 'rgba(139,92,246,0.25)',
                 icon: <Shield className="w-3.5 h-3.5 text-purple-400" />,

@@ -97,6 +97,7 @@ export class SignalingService {
     }
 
     this.ws.onopen = () => {
+      console.log('[SignalingService] WebSocket connected for peer_id:', this.peerId);
       this.reconnectAttempts = 0;
       this.startPing();
     };
@@ -114,7 +115,8 @@ export class SignalingService {
       // onclose fires after onerror, which handles reconnect
     };
 
-    this.ws.onclose = () => {
+    this.ws.onclose = (ev) => {
+      console.warn('[SignalingService] WebSocket closed. code:', ev.code, 'reason:', ev.reason, 'peer_id:', this.peerId);
       this.stopPing();
       if (!this.closed) this.scheduleReconnect();
     };
