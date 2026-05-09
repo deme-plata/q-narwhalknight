@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef, lazy, Suspense } from 'react';
+import { createPortal } from 'react-dom';
 import LoginScreen from './components/LoginScreen';
 import Dashboard from './components/Dashboard';
 import DexScreen from './components/DexScreen';
 import AIChatScreen from './components/AIChatScreen';
+import ChatScreen from './components/ChatScreen';
 import Navigation from './components/Navigation';
 import TopBar from './components/TopBar';
 import TokenBar from './components/TokenBar';
@@ -12,6 +14,7 @@ import OAuthConsentPage from './components/OAuthConsentPage';
 import MinerLoginPage from './components/MinerLoginPage';
 import POSMode from './components/POSMode';
 import { sseManager } from './services/sseManager';
+import IncomingMemoModal from './components/IncomingMemoModal';
 import './App.css';
 
 // Lazy-loaded screens — split into separate chunks, loaded on first navigation
@@ -32,6 +35,7 @@ const BountyModal = lazy(() => import('./components/BountyModal'));
 const BountySiteModal = lazy(() => import('./components/BountyModal').then(m => ({ default: m.BountySiteModal })));
 const MapScreen = lazy(() => import('./components/MapScreen'));
 const BankScreen = lazy(() => import('./components/BankScreen'));
+const TorrentTab = lazy(() => import('./components/TorrentTab'));
 
 // Loading spinner for lazy-loaded screen transitions
 const LoadingSpinner = () => (
@@ -75,7 +79,7 @@ function safeCacheBalance(balance: number): void {
   }
 }
 
-type Screen = 'dashboard' | 'transactions' | 'explorer' | 'dex' | 'mining' | 'vm' | 'rwamarket' | 'gameitems' | 'download' | 'aichat' | 'email' | 'analytics' | 'settings' | 'map' | 'bank';
+type Screen = 'dashboard' | 'transactions' | 'explorer' | 'dex' | 'mining' | 'vm' | 'rwamarket' | 'gameitems' | 'download' | 'aichat' | 'email' | 'analytics' | 'settings' | 'map' | 'bank' | 'chat' | 'torrent';
 
 function App() {
   console.log('🚀 App function executing - TOP OF FUNCTION');
@@ -180,6 +184,16 @@ function App() {
   // Debounce balance updates to prevent flickering
   const [pendingBalanceUpdate, setPendingBalanceUpdate] = useState<number | null>(null);
 
+  // Incoming transaction with memo — shows notification modal
+  const [incomingMemoTx, setIncomingMemoTx] = useState<{
+    amount: number;
+    fromAddress: string;
+    memo: string;
+    txHash: string;
+    timestamp: number;
+  } | null>(null);
+  const shownMemoTxIds = useRef(new Set<string>());
+
   // v5.6.0: Track server version for refresh banner after deploys
   const [newVersionBanner, setNewVersionBanner] = useState<string | null>(null);
 
@@ -190,6 +204,97 @@ function App() {
     const handler = () => setShowBountyModal(true);
     window.addEventListener('open-bounty-modal', handler);
     return () => window.removeEventListener('open-bounty-modal', handler);
+  }, []);
+
+  // Global incoming call overlay — ChatScreen fires qnk-incoming-call even when
+  // it is hidden (display:none), so we render the ringing modal at App level.
+  const [globalIncomingCall, setGlobalIncomingCall] = useState<{
+    from: string; callType: 'audio' | 'video';
+  } | null>(null);
+  const ringAudioRef = useRef<AudioContext | null>(null);
+  const ringIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const startRing = () => {
+    try {
+      const ctx = new AudioContext();
+      ringAudioRef.current = ctx;
+      const playBeep = () => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.frequency.setValueAtTime(880, ctx.currentTime);
+        gain.gain.setValueAtTime(0.3, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5);
+        osc.start(ctx.currentTime);
+        osc.stop(ctx.currentTime + 0.5);
+      };
+      playBeep();
+      ringIntervalRef.current = setInterval(playBeep, 1500);
+    } catch { /* AudioContext not available */ }
+  };
+
+  const stopRing = () => {
+    if (ringIntervalRef.current) {
+      clearInterval(ringIntervalRef.current);
+      ringIntervalRef.current = null;
+    }
+    ringAudioRef.current?.close().catch(() => {});
+    ringAudioRef.current = null;
+  };
+
+  useEffect(() => {
+    console.log('[App] qnk-incoming-call listeners registered');
+    const onCall = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      console.log('[App] qnk-incoming-call received:', detail);
+      setGlobalIncomingCall({ from: detail.from, callType: detail.callType });
+      startRing();
+      // Browser notification for background tabs
+      if (Notification.permission === 'granted') {
+        new Notification(`Incoming ${detail.callType} call`, {
+          body: `From: ${(detail.from as string).slice(0, 20)}…`,
+          icon: '/favicon.ico',
+        });
+      } else if (Notification.permission !== 'denied') {
+        Notification.requestPermission().then(p => {
+          if (p === 'granted') {
+            new Notification(`Incoming ${detail.callType} call`, {
+              body: `From: ${(detail.from as string).slice(0, 20)}…`,
+              icon: '/favicon.ico',
+            });
+          }
+        });
+      }
+    };
+    const onClear = () => {
+      setGlobalIncomingCall(null);
+      stopRing();
+    };
+    window.addEventListener('qnk-incoming-call', onCall);
+    window.addEventListener('qnk-incoming-call-cleared', onClear);
+    return () => {
+      window.removeEventListener('qnk-incoming-call', onCall);
+      window.removeEventListener('qnk-incoming-call-cleared', onClear);
+      stopRing();
+    };
+  }, []);
+
+  // Chat message toast notification — shown when a message arrives outside the Chat screen
+  const [chatMsgAlert, setChatMsgAlert] = useState<{ from: string; content: string; contactName?: string } | null>(null);
+  const chatMsgTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const currentScreenRef = useRef(currentScreen);
+  useEffect(() => { currentScreenRef.current = currentScreen; }, [currentScreen]);
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { from: string; content: string; contactName?: string };
+      if (currentScreenRef.current === 'chat') return; // already on chat, ChatScreen handles it
+      setChatMsgAlert(detail);
+      if (chatMsgTimerRef.current) clearTimeout(chatMsgTimerRef.current);
+      chatMsgTimerRef.current = setTimeout(() => setChatMsgAlert(null), 7000);
+    };
+    window.addEventListener('qnk-new-chat-message', handler);
+    return () => window.removeEventListener('qnk-new-chat-message', handler);
   }, []);
 
   // v2.3.11-beta: Track when DEX swap just happened to ignore stale SSE updates
@@ -548,6 +653,21 @@ function App() {
         const changeReason = balanceData.change_reason || '';
         const confirmationStatus = balanceData.confirmation_status || '';
 
+        // Incoming transaction with memo — show notification modal before any filters
+        if (changeReason === 'transaction_received' && balanceData.memo && balanceData.tx_hash) {
+          const txId = balanceData.tx_hash as string;
+          if (!shownMemoTxIds.current.has(txId)) {
+            shownMemoTxIds.current.add(txId);
+            setIncomingMemoTx({
+              amount: (balanceData.new_balance - balanceData.old_balance) * 1e10,
+              fromAddress: balanceData.from_address || '',
+              memo: balanceData.memo,
+              txHash: txId,
+              timestamp: Date.now(),
+            });
+          }
+        }
+
         // Skip pending-only balance events — they inflate nodeDataBalanceRef temporarily
         // during restart bursts. Confirmed balance updates come from block processing.
         // The PendingMiningReward SSE event handles UI notification separately.
@@ -798,6 +918,7 @@ function App() {
   };
 
   return (
+    <>
     <AnimatedBorder>
       {/* Background and content are INSIDE the border so they don't cover the ornate frame */}
       <div className="min-h-full relative overflow-hidden" style={{ background: 'transparent' }}>
@@ -859,6 +980,7 @@ function App() {
               currentScreen={currentScreen}
               onNavigate={setCurrentScreen}
               className="lg:w-20 xl:w-64"
+              walletAddress={localStorage.getItem('walletAddress') || ''}
             />
 
             <main className="flex-1 p-4 lg:p-8 pb-20 lg:pb-8">
@@ -866,19 +988,28 @@ function App() {
               {/* Without this, Dashboard unmounts when on DEX, misses balance update events, */}
               {/* then refetches stale data from API when remounted - causing "two balances" bug */}
               <div style={{ display: currentScreen === 'dashboard' ? 'block' : 'none' }}>
-                <Dashboard key="dashboard-stable" onNavigateToSend={handleCoinSendClick} liveBalance={nodeData.balance} />
+                <Dashboard key="dashboard-stable" onNavigateToSend={handleCoinSendClick} liveBalance={nodeData.balance} onNavigateToChat={() => setCurrentScreen('chat')} />
               </div>
               {/* v2.3.12-beta: Keep DexScreen mounted to preserve swap state */}
               <div style={{ display: currentScreen === 'dex' ? 'block' : 'none' }}>
                 <DexScreen isActive={currentScreen === 'dex'} />
               </div>
+              {/* Keep ChatScreen mounted to preserve call/meeting state */}
+              <div style={{ display: currentScreen === 'chat' ? 'block' : 'none', height: '100%' }}>
+                <ChatScreen />
+              </div>
               {/* Keep AIChatScreen mounted to preserve state (messages, currentChatId, isGenerating) */}
               <div style={{ display: currentScreen === 'aichat' ? 'block' : 'none' }}>
                 <AIChatScreen />
               </div>
+              {/* Keep ExplorerScreen mounted — on remount, 7 optional-metric requests contend with core stats for rate-limiter slots, causing stats to never load */}
+              <div style={{ display: currentScreen === 'explorer' ? 'block' : 'none' }}>
+                <Suspense fallback={null}>
+                  <ExplorerScreen isActive={currentScreen === 'explorer'} />
+                </Suspense>
+              </div>
               <Suspense fallback={<LoadingSpinner />}>
                 {currentScreen === 'transactions' && <TransactionScreenV2 currentBalance={nodeData.balance} />}
-                {currentScreen === 'explorer' && <ExplorerScreen />}
                 {currentScreen === 'mining' && <MiningScreen />}
                 {currentScreen === 'vm' && <VittuaVMScreen />}
                 {currentScreen === 'map' && <MapScreen />}
@@ -889,6 +1020,7 @@ function App() {
                 {currentScreen === 'analytics' && <AnalyticsScreen />}
                 {currentScreen === 'download' && <DownloadNodeScreen />}
                 {currentScreen === 'settings' && <SettingsScreen onLogout={handleLogout} />}
+                {currentScreen === 'torrent' && <TorrentTab />}
               </Suspense>
             </main>
 
@@ -898,6 +1030,159 @@ function App() {
       {/* v8.9.0: AI Wheel Button — floating AI assistant with radial tool wheel */}
       <Suspense fallback={null}><AIWheelButton /></Suspense>
     </AnimatedBorder>
+
+    {/* Incoming transaction memo notification */}
+    <IncomingMemoModal
+      tx={incomingMemoTx}
+      onClose={() => setIncomingMemoTx(null)}
+    />
+
+    {/* Global incoming call modal — rendered via portal directly into document.body
+        so it escapes the AnimatedBorder isolation:isolate stacking context and
+        is guaranteed to sit above everything else in the viewport. */}
+    {globalIncomingCall && createPortal(
+      <div
+        style={{
+          position: 'fixed', inset: 0, zIndex: 2147483647,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          background: 'rgba(0,0,0,0.72)', backdropFilter: 'blur(8px)',
+          fontFamily: 'system-ui, sans-serif',
+        }}
+      >
+        <div style={{
+          background: 'linear-gradient(135deg, #0f172a, #1e293b)',
+          border: '1.5px solid rgba(212,175,55,0.5)',
+          borderRadius: 24, padding: '40px 44px', textAlign: 'center',
+          boxShadow: '0 0 80px rgba(212,175,55,0.2), 0 32px 64px rgba(0,0,0,0.7)',
+          minWidth: 320, maxWidth: 420,
+        }}>
+          <div style={{
+            width: 80, height: 80, borderRadius: '50%', margin: '0 auto 24px',
+            background: 'linear-gradient(135deg, rgba(212,175,55,0.3), rgba(255,215,0,0.1))',
+            border: '2px solid rgba(212,175,55,0.6)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: 36,
+          }}>
+            {globalIncomingCall.callType === 'video' ? '📹' : '📞'}
+          </div>
+          <p style={{ color: 'rgba(212,175,55,0.7)', fontSize: 11, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 2 }}>
+            Incoming {globalIncomingCall.callType} call
+          </p>
+          <p style={{ color: '#f1f5f9', fontSize: 15, fontWeight: 600, marginBottom: 32, wordBreak: 'break-all', lineHeight: 1.4 }}>
+            {globalIncomingCall.from.length > 20
+              ? `${globalIncomingCall.from.slice(0, 10)}…${globalIncomingCall.from.slice(-8)}`
+              : globalIncomingCall.from}
+          </p>
+          <div style={{ display: 'flex', gap: 12, justifyContent: 'center' }}>
+            <button
+              onClick={() => {
+                stopRing();
+                setGlobalIncomingCall(null);
+                window.dispatchEvent(new CustomEvent('qnk-reject-call'));
+              }}
+              style={{
+                padding: '14px 32px', borderRadius: 14, border: '1px solid rgba(239,68,68,0.5)',
+                background: 'rgba(239,68,68,0.2)', color: '#fca5a5',
+                fontWeight: 700, fontSize: 14, cursor: 'pointer', letterSpacing: 0.5,
+              }}
+            >
+              Decline
+            </button>
+            <button
+              onClick={() => {
+                stopRing();
+                setGlobalIncomingCall(null);
+                setCurrentScreen('chat');
+                window.dispatchEvent(new CustomEvent('qnk-accept-call'));
+              }}
+              style={{
+                padding: '14px 32px', borderRadius: 14, border: '1px solid rgba(34,197,94,0.5)',
+                background: 'rgba(34,197,94,0.25)', color: '#86efac',
+                fontWeight: 700, fontSize: 14, cursor: 'pointer', letterSpacing: 0.5,
+              }}
+            >
+              Accept
+            </button>
+          </div>
+        </div>
+      </div>,
+      document.body
+    )}
+    {/* Chat message toast — appears when a message arrives while on another screen */}
+    {chatMsgAlert && createPortal(
+      <div
+        style={{
+          position: 'fixed', top: 20, right: 20, zIndex: 2147483646,
+          maxWidth: 340, fontFamily: 'system-ui, sans-serif',
+          animation: 'slideInRight 0.3s ease-out',
+        }}
+      >
+        <style>{`@keyframes slideInRight{from{transform:translateX(110%);opacity:0}to{transform:translateX(0);opacity:1}}`}</style>
+        <div style={{
+          background: 'linear-gradient(135deg, rgba(14,10,40,0.98), rgba(28,18,56,0.98))',
+          border: '1.5px solid rgba(212,175,55,0.35)',
+          borderRadius: 16, padding: '14px 16px',
+          boxShadow: '0 8px 32px rgba(0,0,0,0.6), 0 0 24px rgba(212,175,55,0.1)',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 10 }}>
+            <div style={{
+              width: 36, height: 36, borderRadius: '50%', flexShrink: 0,
+              background: 'linear-gradient(135deg, rgba(212,175,55,0.3), rgba(255,165,0,0.15))',
+              border: '1.5px solid rgba(212,175,55,0.4)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 16, color: '#d4af37', fontWeight: 700,
+            }}>
+              {(chatMsgAlert.contactName || chatMsgAlert.from).slice(0, 2).toUpperCase()}
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <p style={{ color: '#fef3c7', fontSize: 13, fontWeight: 600, marginBottom: 2 }}>
+                {chatMsgAlert.contactName || `${chatMsgAlert.from.slice(0, 8)}…${chatMsgAlert.from.slice(-6)}`}
+              </p>
+              <p style={{ color: 'rgba(203,213,225,0.75)', fontSize: 12, lineHeight: 1.4,
+                overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2,
+                WebkitBoxOrient: 'vertical' as any,
+              }}>
+                {chatMsgAlert.content}
+              </p>
+            </div>
+            <button
+              onClick={() => { setChatMsgAlert(null); if (chatMsgTimerRef.current) clearTimeout(chatMsgTimerRef.current); }}
+              style={{ background: 'none', border: 'none', color: 'rgba(212,175,55,0.4)', cursor: 'pointer', padding: 2, flexShrink: 0, fontSize: 16, lineHeight: 1 }}
+            >✕</button>
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              onClick={() => {
+                setChatMsgAlert(null);
+                if (chatMsgTimerRef.current) clearTimeout(chatMsgTimerRef.current);
+              }}
+              style={{
+                flex: 1, padding: '7px 0', borderRadius: 10,
+                background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(212,175,55,0.15)',
+                color: 'rgba(212,175,55,0.6)', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+              }}
+            >Dismiss</button>
+            <button
+              onClick={() => {
+                const addr = chatMsgAlert.from;
+                setChatMsgAlert(null);
+                if (chatMsgTimerRef.current) clearTimeout(chatMsgTimerRef.current);
+                setCurrentScreen('chat');
+                setTimeout(() => window.dispatchEvent(new CustomEvent('qnk-open-conversation', { detail: { address: addr } })), 80);
+              }}
+              style={{
+                flex: 1, padding: '7px 0', borderRadius: 10,
+                background: 'linear-gradient(135deg, rgba(212,175,55,0.4), rgba(255,215,0,0.25))',
+                border: '1px solid rgba(212,175,55,0.5)',
+                color: '#fef3c7', fontSize: 12, fontWeight: 700, cursor: 'pointer',
+              }}
+            >Reply →</button>
+          </div>
+        </div>
+      </div>,
+      document.body
+    )}
+    </>
   );
 }
 

@@ -199,6 +199,15 @@ pub enum StreamEvent {
         /// - "instant": Immediate local update (faucet, debugging)
         #[serde(default = "default_confirmation_status")]
         confirmation_status: String,
+        /// Sender address (hex) — populated for transaction_received events
+        #[serde(skip_serializing_if = "Option::is_none")]
+        from_address: Option<String>,
+        /// Transaction hash (hex) — populated for transaction_received events
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tx_hash: Option<String>,
+        /// Memo attached to the transaction — populated when sender included one
+        #[serde(skip_serializing_if = "Option::is_none")]
+        memo: Option<String>,
     },
     /// v1.4.10-beta: Custom token balance updated (for instant DEX updates)
     TokenBalanceUpdated {

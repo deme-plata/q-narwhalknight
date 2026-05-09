@@ -348,6 +348,9 @@ pub async fn emit_instant_balance_update(
         block_hash: Some(hex::encode(&reward.solution_hash)), // Use solution hash as identifier
         block_height: Some(reward.block_height),
         confirmation_status: "confirmed".to_string(), // Mining rewards are immediately confirmed
+        from_address: None,
+        tx_hash: None,
+        memo: None,
     };
 
     broadcaster.broadcast(balance_event).await

@@ -1312,6 +1312,9 @@ pub async fn credit_qug_for_weth_deposit(
         block_hash: None,
         block_height: None,
         confirmation_status: "confirmed".to_string(),
+        from_address: None,
+        tx_hash: None,
+        memo: None,
     }).await;
 
     info!(

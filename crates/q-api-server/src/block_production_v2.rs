@@ -280,6 +280,9 @@ async fn production_loop(
                             block_hash: Some(hex::encode(blk.calculate_hash())),
                             block_height: Some(blk.header.height),
                             confirmation_status: "confirmed".to_string(),
+                            from_address: None,
+                            tx_hash: None,
+                            memo: None,
                         };
 
                         if let Err(e) = app.event_broadcaster.broadcast(balance_event).await {

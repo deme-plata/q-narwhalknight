@@ -486,6 +486,25 @@ impl BitcoinRpcClient {
         Ok(result.get("isvalid").and_then(|v| v.as_bool()).unwrap_or(false))
     }
 
+    /// Get total amount received at a specific address (min_conf = min confirmations)
+    pub async fn get_received_by_address(&self, address: &str, min_conf: u32) -> Result<f64> {
+        // Use wallet endpoint for getreceivedbyaddress
+        let url = format!("{}/wallet/qug-bridge", self.config.rpc_url);
+        let body = json!({
+            "jsonrpc": "1.0",
+            "id": "donation",
+            "method": "getreceivedbyaddress",
+            "params": [address, min_conf],
+        });
+        let response = self.http_client.post(&url)
+            .basic_auth(&self.config.rpc_user, Some(&self.config.rpc_password))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send().await?;
+        let json: serde_json::Value = response.json().await?;
+        Ok(json.get("result").and_then(|v| v.as_f64()).unwrap_or(0.0))
+    }
+
     /// Parse transaction from listtransactions response
     fn parse_transaction(json: &serde_json::Value) -> Result<BitcoinTransaction> {
         let txid = json.get("txid").and_then(|v| v.as_str())

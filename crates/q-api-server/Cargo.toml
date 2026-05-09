@@ -32,6 +32,7 @@ ringbuf = "0.3"
 # Vendored OpenSSL for cross-compilation (ARM64, etc.)
 openssl = { version = "0.10", features = ["vendored"], optional = true }
 
+q-chat-types = { path = "../q-chat-types" }          # Nova-chat wire types (P2P chat, calls, routing)
 q-types = { path = "../q-types", features = ["signing"] }  # ✨ v1.0.15-beta: Enable PQC signing
 q-wallet = { path = "../q-wallet" }
 # 🔐 v1.3.12-beta: Required for SQIsign post-quantum consensus signatures

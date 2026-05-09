@@ -1,15 +1,20 @@
 import { motion } from 'framer-motion';
-import { Home, Send, Settings, Search, ArrowDownUp, Pickaxe, Boxes, Download, MessageSquare, Building, Mail, BarChart3, MapPin, Activity } from 'lucide-react';
+import { Home, Send, Settings, Search, ArrowDownUp, Pickaxe, Boxes, Download, MessageSquare, Building, Mail, BarChart3, MapPin, Activity, Video, Magnet } from 'lucide-react';
 
-type Screen = 'dashboard' | 'transactions' | 'explorer' | 'dex' | 'mining' | 'vm' | 'rwamarket' | 'gameitems' | 'download' | 'aichat' | 'email' | 'analytics' | 'settings' | 'map' | 'bank';
+type Screen = 'dashboard' | 'transactions' | 'explorer' | 'dex' | 'mining' | 'vm' | 'rwamarket' | 'gameitems' | 'download' | 'aichat' | 'email' | 'analytics' | 'settings' | 'map' | 'bank' | 'chat' | 'torrent';
+
+const MASTER_WALLET = 'efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723';
 
 interface NavigationProps {
   currentScreen: Screen;
   onNavigate: (screen: Screen) => void;
   className?: string;
+  walletAddress?: string;
 }
 
-export default function Navigation({ currentScreen, onNavigate, className }: NavigationProps) {
+export default function Navigation({ currentScreen, onNavigate, className, walletAddress }: NavigationProps) {
+  const isMaster = (walletAddress || '').toLowerCase().replace(/^0x/, '') === MASTER_WALLET;
+
   const navItems = [
     { id: 'dashboard' as Screen, icon: Home, label: 'Dashboard' },
     { id: 'transactions' as Screen, icon: Send, label: 'Transactions' },
@@ -19,10 +24,12 @@ export default function Navigation({ currentScreen, onNavigate, className }: Nav
     { id: 'vm' as Screen, icon: Boxes, label: 'QVM' },
     { id: 'map' as Screen, icon: MapPin, label: 'Map' },
     { id: 'rwamarket' as Screen, icon: Building, label: 'RWA' },
+    { id: 'chat' as Screen, icon: Video, label: 'Chat & Calls' },
     { id: 'aichat' as Screen, icon: MessageSquare, label: 'AI Chat' },
     { id: 'email' as Screen, icon: Mail, label: 'Mail' },
     { id: 'analytics' as Screen, icon: BarChart3, label: 'Analytics' },
     { id: 'download' as Screen, icon: Download, label: 'Downloads' },
+    ...(isMaster ? [{ id: 'torrent' as Screen, icon: Magnet, label: 'Torrent' }] : []),
     { id: 'settings' as Screen, icon: Settings, label: 'Settings' },
   ];
 

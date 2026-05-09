@@ -742,7 +742,7 @@ pub async fn get_btc_balance(
 pub async fn get_bridge_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    let connected = state.atomic_swap_manager.is_some();
+    let connected = state.atomic_swap_manager.is_some() || state.deposit_bridge.is_some();
 
     let btc_rpc_url = std::env::var("BTC_RPC_URL")
         .unwrap_or_else(|_| "http://5.79.79.158:8332".to_string());

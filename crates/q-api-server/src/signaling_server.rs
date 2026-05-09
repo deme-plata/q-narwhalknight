@@ -424,7 +424,17 @@ async fn route_message(state: &SignalingState, envelope: SignalingEnvelope) {
     // Direct peer routing
     if let Some(target) = &envelope.to {
         if let Some(sender) = state.peers.get(target) {
-            let _ = sender.try_send(envelope.clone());
+            let msg_type = match &envelope.payload {
+                SignalingPayload::CallOffer { .. } => "call_offer",
+                SignalingPayload::CallAnswer { .. } => "call_answer",
+                SignalingPayload::CallEnd { .. } => "call_end",
+                SignalingPayload::IceCandidate { .. } => "ice_candidate",
+                _ => "other",
+            };
+            match sender.try_send(envelope.clone()) {
+                Ok(_) => warn!("Signaling: delivered {} from {} to {}", msg_type, envelope.from, target),
+                Err(e) => warn!("Signaling: FAILED to deliver {} to {} — {}", msg_type, target, e),
+            }
         } else {
             warn!("Signaling: target peer {} not connected", target);
             // Notify sender that target is offline

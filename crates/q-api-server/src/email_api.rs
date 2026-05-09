@@ -911,6 +911,9 @@ async fn process_crypto_transfer(
                 block_hash: None,
                 block_height: None,
                 confirmation_status: "confirmed".to_string(),
+                from_address: None,
+                tx_hash: None,
+                memo: None,
             })
             .await;
 

@@ -3310,24 +3310,30 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
                                 new_balance: new_sender_balance as f64 / QUG_DISPLAY_DIVISOR,
                                 change_reason: "transaction_sent".to_string(),
                                 timestamp: chrono::Utc::now(),
-                                block_hash: None, // Transaction not yet in a block
+                                block_hash: None,
                                 block_height: None,
                                 confirmation_status: "pending".to_string(),
+                                from_address: None,
+                                tx_hash: None,
+                                memo: None,
                             };
                             if let Err(e) = state.event_emitter.emit_immediate(sender_event).await {
                                 warn!("Failed to emit sender balance update: {}", e);
                             }
 
-                            // Recipient balance update
+                            // Recipient balance update — includes from, tx_hash, and memo for notification modal
                             let recipient_event = crate::streaming::StreamEvent::BalanceUpdated {
                                 wallet_address: hex::encode(tx.to),
                                 old_balance: old_recipient_balance as f64 / QUG_DISPLAY_DIVISOR,
                                 new_balance: new_recipient_balance as f64 / QUG_DISPLAY_DIVISOR,
                                 change_reason: "transaction_received".to_string(),
                                 timestamp: chrono::Utc::now(),
-                                block_hash: None, // Transaction not yet in a block
+                                block_hash: None,
                                 block_height: None,
                                 confirmation_status: "pending".to_string(),
+                                from_address: Some(hex::encode(tx.from)),
+                                tx_hash: Some(hex::encode(tx_hash)),
+                                memo: tx.memo.clone(),
                             };
                             if let Err(e) = state.event_emitter.emit_immediate(recipient_event).await {
                                 warn!("Failed to emit recipient balance update: {}", e);
@@ -4562,6 +4568,9 @@ async fn send_transaction_inner(
                     block_hash: None,
                     block_height: None,
                     confirmation_status: "pending".to_string(),
+                    from_address: None,
+                    tx_hash: None,
+                    memo: None,
                 };
                 if let Err(e) = state.event_emitter.emit_immediate(balance_event).await {
                     warn!("Failed to emit optimistic balance update: {}", e);
@@ -8601,9 +8610,12 @@ async fn complete_mixing_process(
         new_balance: final_sender_balance as f64 / QUG_DISPLAY_DIVISOR,
         change_reason: "transaction_sent".to_string(),
         timestamp: chrono::Utc::now(),
-        block_hash: None, // Privacy mix not yet in block
+        block_hash: None,
         block_height: None,
         confirmation_status: "pending".to_string(),
+        from_address: None,
+        tx_hash: None,
+        memo: None,
     };
 
     let recipient_event = StreamEvent::BalanceUpdated {
@@ -8612,9 +8624,12 @@ async fn complete_mixing_process(
         new_balance: final_recipient_balance as f64 / QUG_DISPLAY_DIVISOR,
         change_reason: "transaction_received".to_string(),
         timestamp: chrono::Utc::now(),
-        block_hash: None, // Privacy mix not yet in block
+        block_hash: None,
         block_height: None,
         confirmation_status: "pending".to_string(),
+        from_address: None,
+        tx_hash: None,
+        memo: None,
     };
 
     // Emit both balance update events
