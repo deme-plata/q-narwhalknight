@@ -1,40 +1,91 @@
 # Technical Review: Consensus Layer State — May 10, 2026
 
-**Prepared by:** Multi-agent codebase audit  
-**Scope:** Block consensus, balance state agreement, fault tolerance, recovery mechanisms  
-**Motivation:** The May 9 balance replay incident destroyed correct wallet balances on Epsilon and revealed that no other node held correct state to recover from. This document explains why, and what needs to be built.
+**Prepared by:** Multi-agent codebase audit (3 parallel agents)
+**Scope:** Block consensus, balance state agreement, BalanceRootV1 plan, fault tolerance, recovery mechanisms
+**Motivation:** The May 9 balance replay incident destroyed correct wallet balances on Epsilon. No other node held correct state to recover from. This document explains the architectural reason why, documents what is built and what is planned, and maps a concrete path forward.
 
 ---
 
-## 1. Executive Summary
+## 1. Current Architecture (Where We Are)
 
-After weeks of work on sync reliability, block propagation, and replay logic, the consensus layer has a clear and honest status: **block ordering is solved; balance state agreement is not.**
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                    BLOCK PRODUCTION — CENTRALIZED                        │
+│                                                                          │
+│   Epsilon (89.149.241.126)          Beta (185.182.185.227)               │
+│   ┌───────────────────────┐         ┌───────────────────┐                │
+│   │  Block Producer x4    │         │  Block Consumer   │                │
+│   │  (4 parallel workers) │         │  (receives only)  │                │
+│   │  total_validators=1   │         │  total_validators │                │
+│   │                       │         │  not set          │                │
+│   │  ┌─────────────────┐  │         └───────────────────┘                │
+│   │  │ Produce block   │  │                                              │
+│   │  │ at height N+1   │──┼──────► gossipsub /qnk/mainnet-genesis/blocks │
+│   │  │ (no DAG-Knight  │  │                ▼              ▼              │
+│   │  │  ordering)      │  │         Gamma (109.205.176.60)               │
+│   │  └─────────────────┘  │         ┌───────────────────┐                │
+│   └───────────────────────┘         │  Block Consumer   │                │
+│                                     │  (receives only)  │                │
+│           ▲                         └───────────────────┘                │
+│           │ only Epsilon can                                             │
+│           │ produce blocks                                               │
+│           │                                                              │
+│   If Epsilon goes offline → NO new blocks → network halts               │
+└──────────────────────────────────────────────────────────────────────────┘
+```
 
-The network reaches consensus on *which blocks exist and in what order* via DAG-Knight and gossipsub. That part works. But there is **no Byzantine-fault-tolerant mechanism for agreeing on wallet balances** — the state that results from applying those blocks. Each node computes balances independently. When nodes diverge, the system detects it (via balance hash comparison) but does nothing to correct it.
-
-The practical consequence: Epsilon has been the de facto ground truth for wallet state since genesis. When its balances were corrupted, there was no peer to recover from. The three other nodes (Beta, Gamma, Alpha) either had incomplete state (checkpoint-bootstrapped, missing early history) or no mechanism to assert their values as authoritative.
-
-This is not a bug that was introduced recently. It is a gap that was always present in the design, masked by the fact that Epsilon had never diverged before.
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                  BALANCE STATE — NOT UNDER CONSENSUS                     │
+│                                                                          │
+│   Miner submits solution to Epsilon                                      │
+│          │                                                               │
+│          ▼                                                               │
+│   Epsilon produces block (height N)                                      │
+│   • Embeds coinbase tx (reward for miner)                                │
+│   • Applies to local RocksDB: wallet[miner] += reward                   │
+│   • Broadcasts block via gossipsub                                       │
+│          │                                                               │
+│          ▼                              ▼                                │
+│   Beta receives block               Gamma receives block                 │
+│   • Applies same coinbase tx         • Applies same coinbase tx          │
+│   • wallet[miner] += reward          • wallet[miner] += reward           │
+│   • ✅ All 3 nodes agree on reward                                       │
+│                                                                          │
+│   But for TRANSFER transactions:                                         │
+│                                                                          │
+│   User submits transfer to Epsilon                                       │
+│          │                                                               │
+│          ▼                                                               │
+│   Epsilon adds to mempool (local only)                                   │
+│   Beta/Gamma DO NOT know about this tx yet                               │
+│          │                                                               │
+│          ▼                                                               │
+│   Next block includes the transfer                                       │
+│   All nodes apply it ── BUT ──                                           │
+│                                                                          │
+│   If the sender's balance is WRONG on Epsilon (e.g., post-replay bug):  │
+│   • Epsilon skips the tx (insufficient funds error, continues)           │
+│   • Beta/Gamma also had wrong balance (synced from Epsilon)              │
+│   • No node detects the skip — silent consensus failure                  │
+└──────────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
 ## 2. What Works Today
 
-**Block production and propagation** function correctly:
-- Epsilon produces blocks sequentially by height
-- Blocks are gossiped to all peers via gossipsub (`/qnk/mainnet-genesis/blocks`)
-- Peers validate block signatures and store blocks in RocksDB
-- Turbo sync fills gaps in block history when nodes are behind
+**Block propagation** — gossipsub delivers blocks to all peers within seconds.
 
-**P2P connectivity** is healthy:
-- 24 peers connected to Epsilon at time of audit
-- Kademlia DHT handles peer discovery
-- Block-pack (turbo sync) protocol delivers historical blocks reliably
+**Turbo sync** — nodes that fall behind receive historical blocks in batch via the block-pack protocol.
 
-**Balance tracking** works in the happy path:
-- Mining rewards embedded in blocks are applied deterministically on every node
-- SSE stream broadcasts mining events in real time
-- In-memory wallet balances stay consistent with RocksDB under normal operation
+**Mining rewards** — coinbase transactions in blocks are processed deterministically on every node that receives the block. Reward consensus works because rewards are embedded in blocks.
+
+**P2P connectivity** — Epsilon had 24 peers at time of audit; DHT routing and peer discovery are healthy.
+
+**Balance divergence detection** — every 5 minutes, nodes compare a BLAKE3 hash of their wallet state with a peer. Mismatches are logged.
+
+**SSE streaming** — real-time mining reward events work end-to-end from block receipt through frontend.
 
 ---
 
@@ -42,239 +93,667 @@ This is not a bug that was introduced recently. It is a gap that was always pres
 
 ### 3.1 Block Production Is Centralized
 
-`default_total_validators = 1` in `crates/q-api-server/src/config.rs`. The four "producers" in the block producer pool are four parallel workers within a single Epsilon process — not four independent validators. Epsilon is the only node that produces blocks. If it goes offline, block production halts entirely.
+```
+config.rs default: total_validators = 1
 
-**Impact:** No blocks = no mining rewards, no confirmed transactions, no chain progress. The other three nodes (Beta, Gamma, Gamma) are passive consumers of Epsilon's block stream, not co-producers.
+  ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+  │   Epsilon   │     │    Beta     │     │    Gamma    │
+  │  VALIDATOR  │     │  observer   │     │  observer   │
+  │  produces   │     │  receives   │     │  receives   │
+  │  ALL blocks │     │  blocks     │     │  blocks     │
+  └──────┬──────┘     └─────────────┘     └─────────────┘
+         │
+         │  if offline: ┌─────────────────────────────────┐
+         └─────────────►│ NETWORK HALT — no new blocks    │
+                         │ miners earn nothing              │
+                         │ transfers cannot confirm         │
+                         └─────────────────────────────────┘
+```
+
+The four "producers" visible in the block producer pool are four parallel goroutines inside Epsilon's single process — not four independent validators. Beta and Gamma are not configured as block producers.
 
 ### 3.2 Block Validation Does Not Verify Balance Correctness
 
-When a node receives a block via gossip (`crates/q-api-server/src/main.rs` gossipsub handler), it validates:
-- Block signature (Ed25519)
-- Network ID match
-- Height monotonicity
-
-It does **not** validate whether the transactions in the block are affordable. A block containing a transfer from an address with zero balance will pass validation. The invalid transfer is silently skipped during processing (`continue` in `balance_consensus.rs:857`), meaning the producing node and the receiving node end up with different balance states — a consensus divergence from a single block.
+```
+Block arrives at Beta via gossipsub
+         │
+         ▼
+  ┌──────────────────────────────────────────────┐
+  │  Current validation checks:                  │
+  │  ✅ Network ID matches                        │
+  │  ✅ Block signature (Ed25519) valid           │
+  │  ✅ Height is monotonically increasing        │
+  │  ✅ Parent hash is known                      │
+  │                                              │
+  │  NOT checked:                                │
+  │  ❌ Are the transfers in this block affordable?│
+  │  ❌ Does the state_root match our balance state?│
+  │  ❌ Is the coinbase amount within emission bounds?│
+  └──────────────────────────────────────────────┘
+         │
+         ▼
+  Block accepted. Transactions applied.
+  If a transfer was from a zero-balance wallet:
+  balance_consensus.rs line 857: `continue;`  ← silently skipped
+         │
+         ▼
+  Epsilon had balance X for wallet A  ──► Skips transfer from A
+  Beta had balance Y for wallet A    ──► Applies transfer from A
+  
+  Result: silent consensus divergence from a single block
+```
 
 ### 3.3 DAG-Knight Is Not Driving Block Ordering
 
-The DAG-Knight code exists in `crates/q-dag-knight/` and is wired into the AppState. But block production in `block_producer.rs` does not call DAG-Knight's ordering engine to determine the next canonical block. Blocks are produced at `current_height + 1` deterministically. DAG-Knight runs in parallel and logs metrics, but the main chain is a simple linear chain, not a DAG with BFT-ordered finality.
+```
+What the code says:              What actually happens:
+                                 
+ block_producer.rs               block_producer.rs
+ ┌──────────────────────┐        ┌──────────────────────┐
+ │ dag_knight.committed │        │ produce at height N+1│
+ │ _round → select next │  ──►  │ (ignores DAG output)  │
+ │ block to produce     │        │ 60s timeout bypasses │
+ └──────────────────────┘        │ any DAG-Knight hang  │
+                                 └──────────────────────┘
 
-The `produce_blocks()` loop has a 60-second timeout that's designed to work around DAG-Knight hanging (comment at main.rs line 16970). In practice, block production proceeds without waiting for DAG-Knight confirmation.
-
-**Impact:** The theoretical guarantees of DAG-Knight (BFT finality, O(1) amortized communication) are not in effect. The chain is linear with a single producer — equivalent to a simple PoW-style chain without the mining competition.
-
-### 3.4 Bracha Reliable Broadcast Is Neutered
-
-The Bracha RB engine in `balance_finality_engine.rs` is architecturally sound. It implements the correct three-phase protocol (SEND → ECHO → READY) with proper signature handling. But it is initialized with:
-
-```rust
-BalanceFinalityEngine::new(
-    0,  // f = 0 (shadow mode)
-    ...
-)
+DAG-Knight crates exist and run in parallel.
+They log metrics. They do not control block ordering.
+Chain is linear: height N → N+1 → N+2 (single producer).
 ```
 
-With `f = 0`:
-- Echo quorum = `2f+1 = 1`
-- Ready amplify = `f+1 = 1`
+### 3.4 Bracha Reliable Broadcast Is Neutered (f=0)
 
-A single message from a single node immediately delivers and writes to RocksDB. This is not Byzantine fault-tolerant — it is a simple gossip relay. The Bracha protocol provides ordering guarantees here, not safety guarantees.
-
-Additionally, Bracha only handles *non-block* balance updates (DEX credits, out-of-band rewards). Mining rewards come from blocks and bypass the Bracha path entirely.
-
-**Status:** Bracha is deployed but provides zero Byzantine resilience. Raising `f` to 1 would require a hard fork (nodes with `f=0` and `f=1` have incompatible quorum expectations).
-
-### 3.5 Balance Divergence Detection Does Not Trigger Recovery
-
-Every 5 minutes, each node calls `do_combined_state_sync()`, which includes a divergence check:
-
-```rust
-// state_sync_api.rs ~line 983
-if &our_hash != peer_hash {
-    error!("🚨 [DIVERGENCE CHECK] CRITICAL: Balance hash MISMATCH with peer!");
-    error!("   Our hash:  {}", &our_hash[..24]);
-    error!("   Peer hash: {}", &peer_hash[..24]);
-    error!("   Run convergence migration to fix: ...");
-    // ← nothing else happens here
-}
+```
+Standard Bracha Reliable Broadcast (f=1, 4 nodes):
+                                                    
+  Proposer                Node A    Node B    Node C  
+     │                      │         │         │    
+     │──── SEND(v) ─────────►──────────►──────────►   
+     │                      │         │         │    
+     │    ◄── ECHO(v) ───────◄─────────◄─────────◄   
+     │                      │         │         │    
+  Wait for 2f+1=3 ECHOs     │         │         │    
+     │──── READY(v) ────────►──────────►──────────►   
+     │                      │         │         │    
+  Wait for 2f+1=3 READYs    │         │         │    
+     │                      │         │         │    
+  ✅  DELIVER(v)             ✅        ✅        ✅   
+                                                    
+─────────────────────────────────────────────────────
+                                                    
+Current implementation (f=0, shadow mode):          
+                                                    
+  Proposer                                          
+     │                                              
+     │──── SEND(v) ─────────►  ANY one node        
+     │                                              
+  echo_quorum = 2*0+1 = 1    ◄── ECHO from 1 node  
+     │                                              
+  ✅  DELIVER immediately                           
+                                                    
+  One message = delivered.                          
+  Byzantine fault tolerance = ZERO.                 
 ```
 
-The check computes a BLAKE3 hash of all wallet balances, compares it with a peer's hash, and logs a CRITICAL error if they differ. **It does not correct the divergence.** No peer querying, no majority vote, no automatic repair. The error sits in the log while both nodes continue with their inconsistent views of wallet state.
+Code: `BalanceFinalityEngine::new(0, ...)` in `main.rs:3636`
+Changing `0` to `1` requires quorum = 3 across all active validators — a coordinated hard fork.
 
-### 3.6 CHECKPOINT_DATA Is a Static, Unverified Snapshot
+### 3.5 Divergence Detection Does Not Trigger Recovery
 
-The balance checkpoint embedded in the binary (`crates/q-storage/src/balance_checkpoint.rs`) contains 1,326 wallet balances at height 16,538,868. It was generated offline from Epsilon's RocksDB and has a SHA256 hash for integrity checking — but the hash proves only that the data hasn't changed since it was embedded, not that it was correct when generated.
+```
+Every 5 minutes on each node:
 
-No validator signatures from Beta or Gamma were collected when the checkpoint was created. There is no quorum certificate. This is a unilateral snapshot from a single node, distributed as a binary constant.
-
-When nodes bootstrap from this checkpoint, they are trusting Epsilon's historical state implicitly. If Epsilon had a bug at checkpoint height, that bug is now permanent across all checkpoint-bootstrapped nodes.
-
-### 3.7 FullStateSnapshot Sync Is Add-Only
-
-Every 5 minutes, nodes pull `GET /api/v1/sync/full-state` from peers. The merge logic is:
-
-```rust
-// For each wallet in snapshot:
-// - If we already have a balance for this wallet: KEEP OURS (never overwrite)
-// - If we don't have this wallet: ADD IT
+  state_sync_api.rs: do_combined_state_sync()
+         │
+         ▼
+  Compute our balance hash:
+  BLAKE3( sorted(wallet_addr || balance_amount) )
+         │
+         ▼
+  Fetch peer's balance_state_hash
+         │
+         ├── hashes match ──► ✅ log INFO, continue
+         │
+         └── hashes differ ──► 🚨 log CRITICAL error
+                                    │
+                                    ▼
+                                "CRITICAL: Balance hash MISMATCH"
+                                    │
+                                    ▼
+                                ← nothing else happens →
+                                
+  Nodes continue with divergent state forever.
+  No peer query. No majority vote. No self-correction.
 ```
 
-This prevents a fast-syncing or malicious peer from overwriting correct balances with lower values — intentional after the replay incident. But it also means **a node with corrupted state can never be corrected by peers**. If Epsilon had wallet X at 1484 QUG (wrong) and Gamma had wallet X at 3200 QUG (correct), Epsilon would keep 1484 forever under this merge policy, because it "already has a value."
+### 3.6 State Sync Is Add-Only (Cannot Correct Corruption)
 
-The only escape from this is `Q_BALANCE_AUTHORITY_PEER`, which does a full overwrite — but that is a manual one-time operation, not consensus.
+```
+FullStateSnapshot sync (every 5 min, pull-based):
 
-### 3.8 Transfer Transactions Are Not Gossiped Until In a Block
-
-When a user submits a transfer to a node, the node adds it to its local mempool (`tx_pool`). The transaction is included in the next block Epsilon produces. Until it appears in a block, **other nodes have no knowledge of it**.
-
-If Epsilon crashes between receiving the transaction and producing the next block, the transaction is permanently lost. The user's wallet shows the debit on Epsilon's side (possibly) but the network never confirms it.
-
----
-
-## 4. Why the Epsilon Incident Was Inevitable
-
-The replay bug that corrupted Epsilon's wallet balances is fully documented in `docs/incident-report-balance-replay-2026-05-09.md`. But the deeper reason the incident caused lasting damage is architectural:
-
-1. **Epsilon is the sole block producer.** Its view of world state propagates to all nodes through the blocks it produces. There is no other node to disagree with it at the block level.
-
-2. **Block validation doesn't check balance correctness.** Even if Epsilon produced a block with wrong coinbase amounts, other nodes would accept it.
-
-3. **Divergence detection only logs.** Beta and Gamma's balance hash check disagreed with Epsilon after the corruption, but they had no mechanism to vote Epsilon out or select a correct peer.
-
-4. **The "correct" state existed on no single node.** Gamma had the right checkpoint-era balances. Epsilon had the right genesis-era balances before corruption. Neither had the complete correct picture without the other.
-
-5. **Recovery required manual guesswork.** There was no quorum certificate, no Merkle proof, no `2f+1` agreement on the pre-corruption state.
-
-This is the definition of a system with `f = 0` fault tolerance: any single node's failure breaks the whole thing.
+  Receiving node merge policy:
+  
+  for wallet in peer_snapshot:
+    if wallet in our_local_db:
+      KEEP OURS (never overwrite existing value)   ← intentional after replay bug
+    else:
+      ADD wallet from peer
+      
+  Result:
+  
+  Epsilon has wallet X = 1484 QUG (wrong, post-corruption)
+  Gamma  has wallet X = 3200 QUG (correct)
+  
+  Gamma sends snapshot to Epsilon ──► Epsilon KEEPS 1484 (has existing value)
+  Epsilon sends snapshot to Gamma ──► Gamma KEEPS 3200 (has existing value)
+  
+  Both nodes "win" — neither corrects the other.
+  Manual intervention (Q_BALANCE_AUTHORITY_PEER) is the only escape.
+```
 
 ---
 
-## 5. Current Fault Tolerance
+## 4. BalanceRootV1 — The Bridge Between Block Consensus and Balance Agreement
 
-| Metric | Target | Actual |
-|--------|--------|--------|
-| Block producers | ≥ 3 (f=1) | 1 (Epsilon only) |
-| Balance BFT threshold (f) | 1 (tolerate 1 faulty node) | 0 (any node failure is fatal) |
-| Nodes needed for balance recovery | 2 (majority of 3) | N/A — no recovery mechanism |
-| Transaction loss on node crash | Should be 0 | 100% of mempool at crash time |
-| Auto-correction of divergence | Should be automatic | Never happens |
-| Checkpoint verification | Should require 2f+1 sigs | None — generated by 1 node |
+This is the most important planned piece. It was designed and documented on May 6, 2026 in `docs/technical-review-balance-root-v1-implementation-2026-05-06.md`. Here is where it stands and why it matters for the consensus gap.
+
+### 4.1 What BalanceRootV1 Does
+
+```
+Current block header (mainnet today):
+┌─────────────────────────────────────┐
+│ BlockHeader                         │
+│   height:         17,671,000        │
+│   prev_hash:      0xABCD...         │
+│   timestamp:      1778392616        │
+│   tx_root:        0x1234...         │ ← Merkle root of transactions
+│   state_root:     [0, 0, 0, ...]    │ ← always zero (gate at u64::MAX)
+│   vdf_proof:      ...               │
+└─────────────────────────────────────┘
+
+After BalanceRootV1 activates (height 18,600,000):
+┌─────────────────────────────────────┐
+│ BlockHeader                         │
+│   height:         18,600,000+       │
+│   prev_hash:      0xABCD...         │
+│   timestamp:      ...               │
+│   tx_root:        0x1234...         │ ← transactions
+│   balance_root:   0x9F2A...         │ ← NEW: BLAKE3 of all wallet balances
+│   state_root:     [0, 0, ...]       │ ← still zero (StateRootV1 at u64::MAX)
+└─────────────────────────────────────┘
+```
+
+### 4.2 How the Root Is Computed
+
+```
+compute_balance_root_for_block() — lib.rs line 4429
+                                                        
+  Load all wallet_balance_* keys from RocksDB           
+          │                                             
+          ▼                                             
+  Filter: remove wallets with balance = 0               
+          │                                             
+          ▼                                             
+  Sort: lexicographic ascending on address bytes        
+          │                                             
+          ▼                                             
+  For each (address, balance):                          
+    leaf = BLAKE3(address_bytes || balance_u128_BE)     
+          │                                             
+          ▼                                             
+  root = BLAKE3("balance_root_v1" || leaf_0 || leaf_1 || ... || leaf_N)
+  ▲                                                     
+  └── domain separator "balance_root_v1" prevents       
+      collision with other BLAKE3 uses in the codebase  
+                                                        
+  Balance encoding: big-endian u128 (canonical spec)    
+  Legacy compute_balance_state_hash(): little-endian,   
+    no domain sep — still used for diagnostics only     
+```
+
+### 4.3 What BalanceRootV1 Enables (When Wired)
+
+```
+WITHOUT BalanceRootV1 (today):
+
+  Epsilon produces block ──► All nodes accept it ──► Each node computes
+                                                       its own balances
+                                                       independently ──►
+                                                       
+  Epsilon: wallet A = 1484  ┐
+  Beta:    wallet A = 3200  ├── diverge silently
+  Gamma:   wallet A = 3200  ┘   forever
+
+────────────────────────────────────────────────────────────────────────
+
+WITH BalanceRootV1 (after height 18,600,000):
+
+  Epsilon produces block
+  • Applies transactions to local RocksDB
+  • compute_balance_root_for_block() → root = 0x9F2A...
+  • Sets block.header.balance_root = 0x9F2A...
+  • Broadcasts block
+         │
+         ▼
+  Beta receives block
+  • Applies same transactions to local RocksDB
+  • compute_balance_root_for_block() → root = 0x3B1C...
+  • Compares: 0x9F2A ≠ 0x3B1C
+  • ❌ REJECT BLOCK — balance root mismatch
+  
+  Beta cannot accept new blocks until its balance state
+  agrees with the producing node.
+  
+  This makes divergence VISIBLE and SELF-CORRECTING:
+  diverged node cannot advance ──► must resync ──► reconciles.
+```
+
+### 4.4 Current Implementation Status
+
+```
+Component                                     Status
+─────────────────────────────────────────────────────────────────
+Upgrade gate (height 18,600,000, mandatory)   ✅ Done
+  crates/q-consensus-guard/src/upgrade_gate.rs:139
+
+compute_balance_root_for_block() function      ✅ Done
+  crates/q-storage/src/lib.rs:4429
+
+Balance root called from block producer        ❌ NOT DONE
+  block_producer.rs ~line 954
+  Currently: state_root = [0;32] always
+
+Block validation checks balance_root           ❌ NOT DONE
+  main.rs ~line 11380
+  Currently: no balance root check in gossip block handler
+
+Shadow-mode logging (warn, don't reject)       ❌ NOT DONE
+  The phase before enforcement — essential for soak testing
+
+balance_determinism_tests.rs test suite        ❌ NOT DONE
+  10 tests proving cross-node hash agreement
+
+Health endpoint exposes balance_root_v1        ❌ NOT DONE
+  Needed to compare Epsilon vs Delta during soak
+
+14-day soak on Delta test container            ❌ NOT STARTED
+  Required before any enforcement deploy
+─────────────────────────────────────────────────────────────────
+
+Activation height 18,600,000 is ~928,000 blocks from current tip
+(17,672,000 as of May 10). At 1 bps that is ~10.7 days away.
+
+⚠️  WARNING: The gate will fire in ~11 days regardless of
+    whether the code is wired. At that height, if balance_root
+    is [0;32] in block headers (current state), nodes running
+    any enforcement logic will reject those blocks.
+
+    If enforcement is NOT wired (current state), nothing bad
+    happens — the gate is irrelevant if nobody checks it.
+    But the opportunity to use 18,600,000 as the enforcement
+    height will pass. A new height must then be chosen.
+```
+
+### 4.5 BalanceRootV1 vs the Incident — Would It Have Helped?
+
+```
+Replay bug corrupts Epsilon's balances (May 9):
+
+  Without BalanceRootV1 (what happened):
+  
+  Epsilon (wallet A = 1484) produces block N+1 ──►
+  balance_root not checked ──►
+  Beta/Gamma accept block N+1 ──►
+  Divergence grows silently for hours ──►
+  User sees wrong balance, no automated detection
+
+──────────────────────────────────────────────────────────────
+  
+  With BalanceRootV1 (hypothetical):
+  
+  Epsilon (wallet A = 1484) produces block N+1
+  • compute_balance_root_for_block() → root_epsilon = 0xAAA...
+  • Broadcasts block with balance_root = 0xAAA...
+  
+  Beta (wallet A = 3200) receives block N+1
+  • Applies transactions
+  • compute_balance_root_for_block() → root_beta = 0xBBB...
+  • 0xAAA ≠ 0xBBB → REJECT BLOCK
+  
+  Epsilon can no longer extend the chain with its
+  corrupted state. Block production halts.
+  
+  Alert fires within seconds (block rejected).
+  Operator investigates → finds corruption → manual repair.
+  Network paused, not silently wrong.
+  
+  BalanceRootV1 turns "silent corruption" into "loud halt".
+```
 
 ---
 
-## 6. What Needs to Be Built — Prioritized
+## 5. CHECKPOINT_DATA — Static Unverified Snapshot
 
-### Priority 1: Multi-Producer Block Production (f=1 Block Layer)
+```
+balance_checkpoint.rs:
 
-**What:** Enable at least Beta and Gamma to produce blocks, not just Epsilon.
+  pub static CHECKPOINT_DATA: &[(&str, &str)] = &[
+    ("0a3f...b1c2", "482000000000000000000000000"),
+    ("1b4e...c2d3", "1000000000000000000000000000"),
+    // ... 1,324 more wallets ...
+  ];
 
-**How:**
-- In `config.rs`, change `total_validators` to 3 (Beta, Gamma, Epsilon)
-- Assign each node a `validator_index` (0, 1, 2)
-- Implement round-robin or VRF-based leader election so one validator is block producer per round
-- Each node only produces when it is the elected leader for that round
+  CHECKPOINT_HEIGHT    = 16,538,868
+  CHECKPOINT_SHA256    = "eabbeadf85d0..."
+  CHECKPOINT_WALLET_COUNT = 1,326
 
-**Complexity:** Medium. The block producer infrastructure exists; wiring leader election is the new work.
+How it was generated:
+  scripts/gen_balance_checkpoint.py  ──►  reads Epsilon's RocksDB  ──►
+  outputs Rust constant array
 
-**Impact:** Network survives Epsilon going offline. Block production continues with Beta and Gamma.
+Verification on load:
+  SHA256( sort(wallet_hex || amount_str) ) == CHECKPOINT_SHA256 ?
+  
+  This proves: data wasn't corrupted in transit.
+  This does NOT prove: data was correct when generated.
+  
+  ┌───────────────────────────────────────────────────┐
+  │  Signatures from Beta or Gamma: NONE              │
+  │  Quorum certificate: NONE                         │
+  │  Multiple validator agreement: NONE               │
+  │  Epsilon is trusted unilaterally.                 │
+  └───────────────────────────────────────────────────┘
 
-### Priority 2: Balance Root in Block Headers (Cryptographic State Commitment)
-
-**What:** The block header's `state_root` field exists but is not consistently populated by the producer or enforced by receivers. Make it mandatory.
-
-**How:**
-- After every block's transactions are applied, compute `compute_balance_root_for_block()` (already exists in `lib.rs`)
-- Include this as `state_root` in the block header
-- On block receipt, receiving nodes compute their own state_root after applying the block's transactions
-- Reject blocks where `computed_state_root != block.header.state_root`
-- This makes balance divergence a block rejection, not a silent mismatch
-
-**Complexity:** Low-Medium. The computation already exists. The validation enforcement is the new code (currently the mismatch logs an error but does not reject).
-
-**Impact:** Blocks now cryptographically commit to the resulting balance state. A node with divergent state will refuse new blocks until it reconciles — making divergence visible and self-correcting.
-
-**Warning:** This will cause block rejections at first until all nodes are consistent. Deploy after reconciling all nodes' balances.
-
-### Priority 3: Bracha f=1 with Consensus Upgrade
-
-**What:** Raise `f` in `BalanceFinalityEngine` from 0 to 1. This requires 3 nodes to echo a balance update before it is finalized.
-
-**How:**
-- Change `BalanceFinalityEngine::new(0, ...)` to `BalanceFinalityEngine::new(1, ...)`
-- Echo quorum becomes `2*1+1 = 3`
-- Ready amplify becomes `1+1 = 2`
-- This requires 3 active validators (Beta, Gamma, Epsilon) to process any balance update
-
-**Complexity:** Low in code — one integer change. High in deployment — requires all nodes to upgrade simultaneously (hard fork for the consensus topic).
-
-**Impact:** Any single node's corruption or equivocation fails to finalize a false balance update. Requires coordination with Priority 1 (need 3 producers to have 3 Bracha participants).
-
-### Priority 4: Peer Majority Balance Reconciliation
-
-**What:** When a node detects a balance hash mismatch, instead of just logging it, query all known validators for their balance of each divergent wallet and accept the majority value.
-
-**How:**
-- Add a new P2P endpoint: `GET /api/v1/consensus/wallet-balance?address={hex}` that returns the node's RocksDB value with its validator signature
-- When divergence is detected, call this endpoint on all known validators for all divergent wallets
-- If 2 of 3 nodes agree on a value, write that value locally (with max-wins guard — only accept if ≥ current)
-- This is the missing "corrective" step in the divergence check
-
-**Complexity:** Medium. New endpoint, new reconciliation loop in `state_sync_api.rs`.
-
-**Impact:** Nodes can self-heal after divergence without manual intervention. The Epsilon incident recovery would have been: detect mismatch → query Beta/Gamma → 2-of-3 agree on 3200 QUG → write 3200 to Epsilon's RocksDB.
-
-### Priority 5: Multi-Node Checkpoint Generation
-
-**What:** Future checkpoints should require 2-of-3 validator signatures.
-
-**How:**
-- Add a checkpoint generation endpoint that returns the balance snapshot with the validator's Ed25519 signature
-- Require signatures from at least 2 validators before embedding in the binary
-- Embed the validator signatures alongside the data in `balance_checkpoint.rs`
-- Verify signatures on load (not just SHA256 of data)
-
-**Complexity:** Medium. New tooling for checkpoint generation.
-
-**Impact:** No single node controls the trusted starting state for new joiners.
+If Epsilon's balances were wrong at height 16,538,868
+→ the checkpoint is wrong
+→ all checkpoint-bootstrapped nodes start from wrong state
+→ BalanceRootV1 would immediately detect mismatch (correct behavior)
+→ but recovery still requires manual intervention
+```
 
 ---
 
-## 7. What Can Be Done Without a Hard Fork
+## 6. Fault Tolerance Analysis
 
-Priorities 1, 2, and 4 can be deployed without a protocol-level hard fork:
+```
+Network: Alpha, Beta, Gamma, Epsilon (4 nodes)
+Target: f=1 (tolerate 1 Byzantine faulty node)
+Requirement: n ≥ 2f+1 → n ≥ 3 nodes needed for f=1
 
-- **Multi-producer** requires configuration changes and new leader election code, but is backward-compatible for receiving nodes
-- **State root enforcement** can be deployed as a soft warning first (log but don't reject), then hardened to rejection after all nodes converge
-- **Peer majority reconciliation** is additive — a new optional endpoint plus new logic in the divergence handler
+              Block Production   Balance Consensus   Bracha BFT
+              ─────────────────  ──────────────────  ──────────
+Target (f=1)  3+ producers       2f+1=3 agree        echo_q=3
+              leader election    before finalizing    amplify=2
 
-Priority 3 (Bracha f=1) is the hard fork because it changes quorum thresholds. All nodes must upgrade simultaneously.
+Current state 1 producer         0 nodes needed      echo_q=1
+              (Epsilon only)     (no consensus,       amplify=1
+                                  local compute)      (f=0)
+
+Fault          CRITICAL           CRITICAL            0 faults
+tolerance:     f=0                f=0                 tolerated
+
+Practical f:   0                  0                   0
+
+Even with 4 nodes, actual Byzantine fault tolerance is ZERO.
+Any single node failure disrupts the system:
+  • Epsilon offline → no new blocks
+  • Epsilon corrupted → balances diverge silently
+  • Beta offline → no effect on consensus (it's not producing)
+  • Gamma offline → no effect on consensus (it's not producing)
+```
 
 ---
 
-## 8. Immediate Stabilization (Before Restructuring)
+## 7. The Incident Through an Architectural Lens
 
-While the full consensus layer is being built, these operational measures reduce the risk of another incident:
+```
+Timeline of the May 9 incident:
 
-1. **Daily balance snapshot to all nodes:** Write a cron job that runs `GET /api/v1/sync/full-state` against Epsilon and writes the output to Gamma and Beta's local files. Not a consensus mechanism, but creates a daily backup of Epsilon's authoritative state.
-
-2. **Alert on balance hash mismatch:** Make the divergence check send an email/webhook immediately, not just a log. This would have flagged the Epsilon corruption within 5 minutes instead of 12 hours.
-
-3. **Mandatory balance integrity check before replay:** Add `if !is_checkpoint_applied() { return Ok(0); }` at the very top of `replay_post_checkpoint_balances()` as a hard guard (in addition to the existing check). Never run replay on Epsilon under any circumstances.
-
-4. **Restore user wallet:** The 1,716 QUG gap in the user's wallet requires a targeted repair: query Gamma's RocksDB for the correct value, then write it to Epsilon using a max-wins targeted write tool. Provide wallet address to proceed.
+May 9, ~18:00 UTC
+  │
+  │  v10.7.6 replay ran on Epsilon (genesis node)
+  │  ┌──────────────────────────────────────────────────────┐
+  │  │ replay_post_checkpoint_balances():                   │
+  │  │  1. Load CHECKPOINT_DATA (balances at h=16,538,868) │
+  │  │  2. Replay local blocks 16,538,869 → current        │
+  │  │  3. Call save_wallet_balances(&replay_map)           │
+  │  │     ← NO max-wins guard (since fixed in v10.7.8)    │
+  │  │  4. wallet[user] = 1484 (checkpoint value)           │
+  │  │     overwrites RocksDB where wallet[user] = 3200     │
+  │  └──────────────────────────────────────────────────────┘
+  │
+  ▼
+Epsilon: wallet[user] = 1484 QUG (wrong)
+Beta:    wallet[user] = ??? (synced from Epsilon over time)
+Gamma:   wallet[user] = 3200 QUG (correct, unaffected by replay)
+  │
+  ▼
+Divergence check fires 5 minutes later:
+  "🚨 CRITICAL: Balance hash MISMATCH with peer"
+  → logged → nothing else happens
+  │
+  ▼
+Epsilon continues producing blocks with 1484 in state
+No block rejection (BalanceRootV1 not wired)
+Frontend shows 1484 QUG to user
+User has lost 1,716 QUG they actually earned
+  │
+  ▼
+Recovery requires:
+  • Find a node with correct value (Gamma has 3200)
+  • Manually write correct value to Epsilon
+  • No automated mechanism exists
+  
+ROOT CAUSE SUMMARY:
+  1. Replay ran without is_checkpoint_applied() guard     ← fixed v10.7.8
+  2. save_wallet_balances had no max-wins semantics       ← fixed v10.7.8
+  3. Divergence detection doesn't trigger correction     ← NOT FIXED
+  4. BalanceRootV1 not wired → corruption not detectable ← NOT FIXED
+  5. No multi-producer → only Epsilon enforces state     ← NOT FIXED
+```
 
 ---
 
-## 9. Honest Assessment
+## 8. Fix Priority Map
 
-The system has a solid foundation: RocksDB storage, gossipsub P2P, turbo sync, a working block format, SSE streaming, and the Bracha infrastructure. None of that needs to be thrown away.
+```
+                        NOW          +2 weeks      +4 weeks      +8 weeks
+                         │               │              │              │
+PRIORITY 1               │               │              │              │
+Multi-producer           │◄──── 1-2 weeks work ────────►│              │
+leader election          │               │              │              │
+  • Beta + Gamma can     │               │              │              │
+    produce blocks       │               │              │              │
+  • Round-robin or VRF   │               │              │              │
+  • f=1 block layer      │               │              │              │
+                         │               │              │              │
+PRIORITY 2               │               │              │              │
+BalanceRootV1 wiring     │◄── 1 week ───►│              │              │
+  • Wire into producer   │               │              │              │
+  • Shadow-mode logging  │ ⚠️ height      │              │              │
+  • 14-day Delta soak    │ 18,600,000    │              │              │
+  • Enforce at gate      │ fires ~May 21 │              │              │
+                         │               │              │              │
+PRIORITY 3               │               │              │              │
+Peer majority            │               │◄─── 1-2 weeks ───►│         │
+reconciliation           │               │              │    │         │
+  • /consensus/wallet    │               │              │    │         │
+    -balance endpoint    │               │              │    │         │
+  • Auto-correct on      │               │              │    │         │
+    divergence detect    │               │              │    │         │
+                         │               │              │    │         │
+PRIORITY 4               │               │              │    │         │
+Bracha f=1 hard fork     │               │              │    ◄─ 2-3w ─►│
+  • Coordinated upgrade  │               │              │              │
+  • quorum: 3 nodes      │               │              │              │
+  • All nodes same day   │               │              │              │
+```
 
-What's missing is the layer that ties it together into a fault-tolerant network: leader election for multi-producer blocks, state root enforcement that makes balance divergence cause block rejection rather than a silent log entry, and a reconciliation mechanism that lets nodes correct themselves when they fall out of sync.
+---
 
-This is approximately 4-8 weeks of focused engineering:
-- 1-2 weeks: multi-producer leader election + Priority 2 state root enforcement
-- 1-2 weeks: peer reconciliation endpoint + divergence auto-correction  
-- 2-3 weeks: Bracha f=1 coordinated upgrade + testing across all nodes
-- 1 week: multi-node checkpoint tooling
+## 9. Proposed: Peer Majority Balance Reconciliation
 
-Until then, the operational risk is: Epsilon is a single point of failure for both block production and balance state truth. The improvements from this session (max-wins guard, is_checkpoint_applied guard) prevent the specific replay bug from recurring, but do not address the underlying architecture.
+This is the missing corrective step that must accompany BalanceRootV1. When a block is rejected due to balance root mismatch, the diverged node needs a way to repair itself.
+
+```
+New endpoint: GET /api/v1/consensus/wallet-balance?address={hex}
+Response: { "address": "...", "balance": 3200000000..., "height": 17671391,
+            "validator_sig": "ed25519:...", "node_id": "..." }
+
+Reconciliation flow (triggers on block rejection OR divergence detection):
+
+  Diverged node (Epsilon, has 1484)
+         │
+         ▼
+  Query ALL known validators:
+  GET Beta:  /consensus/wallet-balance?address=<wallet>  → 3200  sig_B
+  GET Gamma: /consensus/wallet-balance?address=<wallet>  → 3200  sig_G
+         │
+         ▼
+  Count responses: 2-of-2 agree on 3200
+  (need 2-of-3 for Byzantine safety with f=1)
+         │
+         ▼
+  Max-wins guard: 3200 > 1484 (current local value)
+  ✅ Write 3200 to RocksDB
+         │
+         ▼
+  wallet[user] = 3200  ✅ Corrected automatically
+
+Design notes:
+  • Each response must carry a validator Ed25519 signature
+  • Max-wins guard prevents a Byzantine peer from writing a LOWER value
+  • Reconciliation only writes higher values (add-only semantics for amounts)
+  • Works for recovery from replay bugs AND from block replay gaps
+```
+
+---
+
+## 10. Recommended Immediate Actions
+
+### 10.1 Wire BalanceRootV1 into Shadow Mode (This Week)
+
+```
+Files to change:
+
+1. block_producer.rs (~line 954)
+   Add: balance_root = compute_balance_root_for_block()
+         when is_upgrade_active(BalanceRootV1, next_height)
+
+2. main.rs (~line 11380, gossip block handler)
+   Add: compare block.header.balance_root with computed root
+         WARN on mismatch (shadow mode — do not reject yet)
+
+3. handlers.rs (health endpoint)
+   Add: balance_root_v1: hex::encode(computed_root)
+        balance_root_active: is_upgrade_active(BalanceRootV1, height)
+
+4. balance_determinism_tests.rs (new file)
+   10 tests per the May 6 design doc
+
+Risk: LOW — shadow mode logs but never rejects. Zero production impact.
+Deadline: Before height 18,600,000 (~May 21, 2026 at 1 bps)
+```
+
+### 10.2 Alert on Balance Hash Mismatch (This Week)
+
+```
+state_sync_api.rs divergence check — change from:
+  error!("🚨 CRITICAL: Balance hash MISMATCH")
+  // nothing else
+
+To:
+  error!("🚨 CRITICAL: Balance hash MISMATCH");
+  // send webhook / email notification
+  trigger_balance_mismatch_alert(&our_hash, peer_hash, our_height).await;
+
+Implementation: post to a webhook URL from Q_ALERT_WEBHOOK env var.
+This gives ops team <5 min awareness instead of discovering during
+user complaints.
+```
+
+### 10.3 Restore User Wallet (Immediate)
+
+```
+User wallet address: [not yet provided]
+
+Recovery plan:
+  1. Get wallet address from user
+  2. Query Gamma (unaffected): GET /api/v1/consensus/wallet-balance?address=...
+     (or direct RocksDB read on Gamma: rocksdb_cli get wallet_balance_{hex})
+  3. Verify value is 3200 QUG (matches user's recollection)
+  4. Write targeted correction to Epsilon's RocksDB with max-wins guard:
+     if gamma_value > epsilon_value: write gamma_value to Epsilon
+  5. Verify: fetch balance from Epsilon frontend after write
+```
+
+---
+
+## 11. Honest State Summary
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│              CONSENSUS LAYER STATUS — MAY 10, 2026             │
+├──────────────────────────────┬─────────────────────────────────┤
+│ Block ordering (which blocks │ ✅ WORKS                         │
+│ are canonical)               │    gossipsub + linear chain      │
+│                              │    (not DAG-Knight ordered)      │
+├──────────────────────────────┼─────────────────────────────────┤
+│ DAG-Knight BFT finality      │ ⚠️  INFRASTRUCTURE ONLY          │
+│                              │    runs in parallel, not used   │
+│                              │    for block ordering            │
+├──────────────────────────────┼─────────────────────────────────┤
+│ Mining reward consensus      │ ✅ WORKS (via blocks)            │
+│                              │    deterministic from coinbase  │
+├──────────────────────────────┼─────────────────────────────────┤
+│ Transfer tx consensus        │ ⚠️  PARTIAL                      │
+│                              │    applied when in block        │
+│                              │    lost if node crashes before  │
+│                              │    including in block           │
+├──────────────────────────────┼─────────────────────────────────┤
+│ Balance state commitment     │ ⚠️  PLANNED, NOT WIRED           │
+│ (BalanceRootV1)              │    function exists, gate set    │
+│                              │    producer + validator not done│
+│                              │    fires height ~18,600,000     │
+├──────────────────────────────┼─────────────────────────────────┤
+│ Balance divergence detection │ ✅ DETECTS                       │
+│                              │ ❌ DOES NOT CORRECT              │
+├──────────────────────────────┼─────────────────────────────────┤
+│ Bracha BFT (f)               │ ⚠️  DEPLOYED, f=0 (shadow)       │
+│                              │    quorum=1, no Byzantine safety │
+│                              │    f=1 upgrade = hard fork      │
+├──────────────────────────────┼─────────────────────────────────┤
+│ Block producer count         │ ❌ 1 (Epsilon only)              │
+│                              │    Beta/Gamma are consumers     │
+├──────────────────────────────┼─────────────────────────────────┤
+│ Network fault tolerance (f)  │ ❌ f=0                           │
+│                              │    any node failure = problem   │
+└──────────────────────────────┴─────────────────────────────────┘
+
+The infrastructure for f=1 consensus exists: Bracha engine,
+upgrade gate system, balance root computation, divergence detection.
+None of it is fully wired or enforced. The gap is integration,
+not invention.
+```
+
+---
+
+## 12. References
+
+| Topic | Location |
+|---|---|
+| BalanceRootV1 full plan | `docs/technical-review-balance-root-v1-implementation-2026-05-06.md` |
+| Bracha RB design | `docs/technical-review-balance-finality-bracha-rb-2026-05-01.md` |
+| May 9 incident report | `docs/incident-report-balance-replay-2026-05-09.md` |
+| `compute_balance_root_for_block()` | `crates/q-storage/src/lib.rs:4429` |
+| BalanceRootV1 upgrade gate | `crates/q-consensus-guard/src/upgrade_gate.rs:139` |
+| Bracha engine initialization (f=0) | `crates/q-api-server/src/main.rs:3636` |
+| Balance divergence check | `crates/q-api-server/src/state_sync_api.rs:983` |
+| Block producer (single validator) | `crates/q-api-server/src/config.rs:64` |
+| CHECKPOINT_DATA | `crates/q-storage/src/balance_checkpoint.rs` |
+| Transfer tx silent skip | `crates/q-storage/src/balance_consensus.rs:857` |
+| Turbo sync coinbase-only mode | `crates/q-api-server/src/main.rs:6370` |
+
+---
+
+*v2.0 — 2026-05-10 — updated with BalanceRootV1 status and diagrams*
