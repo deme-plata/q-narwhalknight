@@ -93,6 +93,9 @@ pub enum ChangeReason {
     TransferSent,
     /// Transfer received (credited to receiver) - v3.5.14-beta
     TransferReceived,
+    /// Transfer failed — insufficient funds or invalid tx (shadow mode: recorded but no balance change applied)
+    /// Full determinism (TxResult in block format) requires Phase 0 hard fork.
+    TransferFailed,
 }
 
 /// Balance consensus error types
@@ -443,9 +446,17 @@ impl BalanceConsensusEngine {
                                    transfer_amount, token_label, &from_address[..16], block.header.height);
                         }
                         Err(e) => {
-                            warn!("⚠️ [TOKEN TRANSFER] Failed to debit {} {} from {}: {}",
-                                  transfer_amount, token_label, &from_address[..16], e);
-                            continue;
+                            error!("🚫 [TOKEN TRANSFER] INSUFFICIENT FUNDS at height {} — tx skipped (shadow: recording TransferFailed, no balance change): {} {} from {}: {}",
+                                  block.header.height, transfer_amount, token_label, &from_address[..16], e);
+                            updates.push(BalanceUpdate {
+                                address: from_address.clone(),
+                                amount: transfer_amount,
+                                reason: ChangeReason::TransferFailed,
+                                block_height: block.header.height,
+                                solution_index: idx,
+                                token_address: Some(tok_addr),
+                            });
+                            continue; // No balance change applied — deterministic receipt in block format is Phase 0
                         }
                     }
                     storage.add_token_balance(&block_tx.to, &tok_addr, transfer_amount).await
@@ -479,9 +490,17 @@ impl BalanceConsensusEngine {
                                    transfer_amount, &from_address[..16], block.header.height);
                         }
                         Err(e) => {
-                            warn!("⚠️ [TRANSFER] Failed to debit {} from {}: {}",
-                                  transfer_amount, &from_address[..16], e);
-                            continue;
+                            error!("🚫 [TRANSFER] INSUFFICIENT FUNDS at height {} — tx skipped (shadow: recording TransferFailed, no balance change): {} QUG from {}: {}",
+                                  block.header.height, transfer_amount, &from_address[..16], e);
+                            updates.push(BalanceUpdate {
+                                address: from_address.clone(),
+                                amount: transfer_amount,
+                                reason: ChangeReason::TransferFailed,
+                                block_height: block.header.height,
+                                solution_index: idx,
+                                token_address: None,
+                            });
+                            continue; // No balance change applied — deterministic receipt in block format is Phase 0
                         }
                     }
                     storage.add_balance(&to_address, transfer_amount).await
@@ -852,9 +871,17 @@ impl BalanceConsensusEngine {
                                    transfer_amount, token_label, &from_address[..16], block.header.height);
                         }
                         Err(e) => {
-                            warn!("⚠️ [TOKEN TRANSFER TX] Failed to debit {} {} from {}: {}",
-                                  transfer_amount, token_label, &from_address[..16], e);
-                            continue;
+                            error!("🚫 [TOKEN TRANSFER TX] INSUFFICIENT FUNDS at height {} — tx skipped (shadow: recording TransferFailed, no balance change): {} {} from {}: {}",
+                                  block.header.height, transfer_amount, token_label, &from_address[..16], e);
+                            updates.push(BalanceUpdate {
+                                address: from_address.clone(),
+                                amount: transfer_amount,
+                                reason: ChangeReason::TransferFailed,
+                                block_height: block.header.height,
+                                solution_index: idx,
+                                token_address: Some(tok_addr),
+                            });
+                            continue; // No balance change applied — deterministic receipt in block format is Phase 0
                         }
                     }
                     self.add_token_balance_tx(tx, &block_tx.to, &tok_addr, transfer_amount).await
@@ -888,9 +915,17 @@ impl BalanceConsensusEngine {
                                    transfer_amount, &from_address[..16], block.header.height);
                         }
                         Err(e) => {
-                            warn!("⚠️ [TRANSFER TX] Failed to debit {} from {}: {}",
-                                  transfer_amount, &from_address[..16], e);
-                            continue;
+                            error!("🚫 [TRANSFER TX] INSUFFICIENT FUNDS at height {} — tx skipped (shadow: recording TransferFailed, no balance change): {} QUG from {}: {}",
+                                  block.header.height, transfer_amount, &from_address[..16], e);
+                            updates.push(BalanceUpdate {
+                                address: from_address.clone(),
+                                amount: transfer_amount,
+                                reason: ChangeReason::TransferFailed,
+                                block_height: block.header.height,
+                                solution_index: idx,
+                                token_address: None,
+                            });
+                            continue; // No balance change applied — deterministic receipt in block format is Phase 0
                         }
                     }
                     self.add_balance_tx(tx, &to_address, transfer_amount).await
