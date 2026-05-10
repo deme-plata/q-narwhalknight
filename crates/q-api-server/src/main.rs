@@ -11034,6 +11034,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                                                             q_storage::ChangeReason::TransferReceived => "transfer_received",
                                                                             q_storage::ChangeReason::MiningReward => "mining_reward",
                                                                             q_storage::ChangeReason::DevelopmentFee => "development_fee",
+                                                                            q_storage::ChangeReason::TransferFailed => "transfer_failed",
                                                                         };
                                                                         // v10.2.0: Route token updates to token_balances
                                                                         if let Some(tok_addr) = update.token_address {
@@ -11048,6 +11049,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                                                                 Err(_) => {
                                                                                     match update.reason {
                                                                                         q_storage::ChangeReason::TransferSent => current.saturating_sub(update.amount),
+                                                                                        q_storage::ChangeReason::TransferFailed => current, // no balance change on failed tx
                                                                                         _ => current.saturating_add(update.amount),
                                                                                     }
                                                                                 }
@@ -11550,6 +11552,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                                     q_storage::ChangeReason::TransferReceived => "transfer_received",
                                                     q_storage::ChangeReason::MiningReward => "mining_reward",
                                                     q_storage::ChangeReason::DevelopmentFee => "development_fee",
+                                                    q_storage::ChangeReason::TransferFailed => "transfer_failed",
                                                 };
 
                                                 if let Some(tok_addr) = update.token_address {
@@ -11599,6 +11602,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                                         Err(_) => {
                                                             match update.reason {
                                                                 q_storage::ChangeReason::TransferSent => current.saturating_sub(update.amount),
+                                                                q_storage::ChangeReason::TransferFailed => current, // no balance change on failed tx
                                                                 _ => current.saturating_add(update.amount),
                                                             }
                                                         }
