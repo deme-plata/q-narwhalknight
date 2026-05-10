@@ -5566,7 +5566,10 @@ impl QStorage {
                 "🏁 [CHECKPOINT] Already applied (height {}), skipping.",
                 CHECKPOINT_HEIGHT
             );
-            return Ok(vec![]);
+            // Return any pending gap ranges stored from a previous boot so the caller
+            // can schedule P2P backfill even when the full checkpoint doesn't re-run.
+            let pending = self.load_checkpoint_pending_gaps().await;
+            return Ok(pending);
         }
 
         let local_height = self.get_latest_qblock_height().await.unwrap_or(None).unwrap_or(0);
@@ -5799,6 +5802,11 @@ impl QStorage {
                 }
             }
 
+            // Persist gap ranges to RocksDB so subsequent boots can trigger gap-fill
+            // even when the checkpoint is already marked as applied.
+            if !gap_ranges.is_empty() {
+                let _ = self.save_checkpoint_pending_gaps(&gap_ranges).await;
+            }
             (local_height, gap_ranges)
         } else {
             // Node is at or before checkpoint height — no replay needed
@@ -5926,7 +5934,44 @@ impl QStorage {
              Wallets: {}, supply: {} raw.",
             txs_applied, blocks_applied, gap_ranges.len(), snapshot.len(), new_total
         );
+        // Gap-fill complete — clear the pending ranges so this doesn't re-run on next boot
+        let _ = self.clear_checkpoint_pending_gaps().await;
         Ok(())
+    }
+
+    const CHECKPOINT_GAP_RANGES_KEY: &'static [u8] = b"meta:checkpoint_gap_ranges_v1";
+
+    pub async fn save_checkpoint_pending_gaps(&self, ranges: &[(u64, u64)]) -> Result<()> {
+        // Encode as: count(u32 LE) + N × (start u64 LE, end u64 LE)
+        let mut buf = Vec::with_capacity(4 + ranges.len() * 16);
+        buf.extend_from_slice(&(ranges.len() as u32).to_le_bytes());
+        for &(s, e) in ranges {
+            buf.extend_from_slice(&s.to_le_bytes());
+            buf.extend_from_slice(&e.to_le_bytes());
+        }
+        self.hot_db.put(CF_MANIFEST, Self::CHECKPOINT_GAP_RANGES_KEY, &buf).await
+    }
+
+    pub async fn load_checkpoint_pending_gaps(&self) -> Vec<(u64, u64)> {
+        let bytes = match self.hot_db.get(CF_MANIFEST, Self::CHECKPOINT_GAP_RANGES_KEY).await {
+            Ok(Some(b)) => b,
+            _ => return vec![],
+        };
+        if bytes.len() < 4 { return vec![]; }
+        let count = u32::from_le_bytes(bytes[..4].try_into().unwrap_or([0; 4])) as usize;
+        let mut ranges = Vec::with_capacity(count);
+        for i in 0..count {
+            let off = 4 + i * 16;
+            if off + 16 > bytes.len() { break; }
+            let s = u64::from_le_bytes(bytes[off..off+8].try_into().unwrap_or([0;8]));
+            let e = u64::from_le_bytes(bytes[off+8..off+16].try_into().unwrap_or([0;8]));
+            ranges.push((s, e));
+        }
+        ranges
+    }
+
+    pub async fn clear_checkpoint_pending_gaps(&self) -> Result<()> {
+        self.hot_db.delete(CF_MANIFEST, Self::CHECKPOINT_GAP_RANGES_KEY).await.or(Ok(()))
     }
 
     /// SYNC-006 (v10.7.7): Check whether the one-time post-checkpoint balance replay has

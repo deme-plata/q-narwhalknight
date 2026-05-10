@@ -7828,36 +7828,125 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         });
     }
 
-    // v10.8.0: Automatic checkpoint gap-fill — if the initial checkpoint replay found missing
-    // blocks, wait for peers to connect, fetch the missing ranges via P2P, then re-apply their
-    // transactions to correct balances. Only runs on checkpoint nodes (not genesis/Epsilon).
-    if !checkpoint_gap_ranges.is_empty() && state.storage_engine.is_checkpoint_applied().await {
-        let gap_sync   = turbo_sync.clone();
-        let gap_store  = state.storage_engine.clone();
-        let gap_bals   = state.wallet_balances.clone();
-        let gap_supply = state.total_minted_supply.clone();
-        let gap_ranges = checkpoint_gap_ranges;
-        tokio::spawn(async move {
-            let total_missing: u64 = gap_ranges.iter().map(|(s, e)| e - s + 1).sum();
-            warn!(
-                "🏁 [CHECKPOINT GAP-FILL] {} ranges / {} blocks to backfill — \
-                 waiting 90s for peer discovery...",
-                gap_ranges.len(), total_missing
-            );
-            tokio::time::sleep(tokio::time::Duration::from_secs(90)).await;
+    // v10.8.1: Automatic checkpoint gap-fill — handles two cases:
+    //  A) Fresh checkpoint application found gaps (checkpoint_gap_ranges populated above)
+    //  B) Previous boot detected gaps and persisted them (loaded via load_checkpoint_pending_gaps,
+    //     also returned when is_checkpoint_applied() is true)
+    //  Q_RESCAN_CHECKPOINT_GAPS=1: Force a fresh gap scan of the full checkpoint range even if
+    //     checkpoint is already applied and no ranges are stored — useful for nodes like Delta
+    //     whose gaps predated v10.8.1.
+    {
+        let rescan_env = std::env::var("Q_RESCAN_CHECKPOINT_GAPS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
 
-            for &(start, end) in &gap_ranges {
-                warn!("🔧 [CHECKPOINT GAP-FILL] Fetching blocks {}-{} from peers...", start, end);
-                if let Err(e) = gap_sync.fill_gap_p2p(start, end).await {
-                    warn!("⚠️ [CHECKPOINT GAP-FILL] P2P fetch {}-{} failed: {}", start, end, e);
+        let effective_gap_ranges: Vec<(u64, u64)> = if rescan_env
+            && state.storage_engine.is_checkpoint_applied().await
+        {
+            warn!("🔍 [CHECKPOINT GAP-FILL] Q_RESCAN_CHECKPOINT_GAPS=1 — scanning checkpoint range for missing blocks...");
+            let local_h = state.storage_engine
+                .get_latest_qblock_height().await
+                .unwrap_or(None)
+                .unwrap_or(0);
+            let cp_height: u64 = 16_538_868; // CHECKPOINT_HEIGHT constant from q-storage
+            let mut ranges: Vec<(u64, u64)> = Vec::new();
+            let mut gap_start: Option<u64> = None;
+            let mut missing = 0u64;
+            for h in (cp_height + 1)..=local_h {
+                match state.storage_engine.get_qblock_by_height(h).await {
+                    Ok(Some(_)) => {
+                        if let Some(gs) = gap_start.take() {
+                            ranges.push((gs, h - 1));
+                            warn!("🔍 [CHECKPOINT GAP-FILL] Gap detected: blocks {}-{} ({} blocks)", gs, h-1, h-gs);
+                        }
+                    }
+                    _ => {
+                        if gap_start.is_none() { gap_start = Some(h); }
+                        missing += 1;
+                    }
                 }
             }
-
-            warn!("🔧 [CHECKPOINT GAP-FILL] P2P fill done — re-applying transactions...");
-            if let Err(e) = gap_store.replay_gap_blocks(&gap_ranges, &gap_bals, &gap_supply).await {
-                warn!("⚠️ [CHECKPOINT GAP-FILL] Balance re-replay failed: {}", e);
+            if let Some(gs) = gap_start { ranges.push((gs, local_h)); }
+            warn!(
+                "🔍 [CHECKPOINT GAP-FILL] Scan complete: {} missing blocks in {} ranges (scanned {}→{})",
+                missing, ranges.len(), cp_height + 1, local_h
+            );
+            if !ranges.is_empty() {
+                let _ = state.storage_engine.save_checkpoint_pending_gaps(&ranges).await;
             }
-        });
+            ranges
+        } else {
+            checkpoint_gap_ranges
+        };
+
+        if !effective_gap_ranges.is_empty() && state.storage_engine.is_checkpoint_applied().await {
+            let gap_sync   = turbo_sync.clone();
+            let gap_store  = state.storage_engine.clone();
+            let gap_bals   = state.wallet_balances.clone();
+            let gap_supply = state.total_minted_supply.clone();
+            let gap_ranges = effective_gap_ranges;
+            tokio::spawn(async move {
+                let total_missing: u64 = gap_ranges.iter().map(|(s, e)| e - s + 1).sum();
+                warn!(
+                    "🏁 [CHECKPOINT GAP-FILL] Starting: {} ranges / {} total missing blocks — \
+                     waiting 90s for peer discovery before P2P fetch...",
+                    gap_ranges.len(), total_missing
+                );
+                for (i, &(s, e)) in gap_ranges.iter().enumerate() {
+                    warn!("   Range {}/{}: blocks {}-{} ({} blocks)", i+1, gap_ranges.len(), s, e, e-s+1);
+                }
+
+                tokio::time::sleep(tokio::time::Duration::from_secs(90)).await;
+
+                // Check peer registry before fetching
+                {
+                    let peer_count = gap_sync.peer_registry.read().await.active_peer_count();
+                    warn!("🔧 [CHECKPOINT GAP-FILL] Peers available: {} — beginning P2P fetch", peer_count);
+                    if peer_count == 0 {
+                        warn!("⚠️ [CHECKPOINT GAP-FILL] No peers yet — waiting another 60s...");
+                        tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+                        let peer_count2 = gap_sync.peer_registry.read().await.active_peer_count();
+                        warn!("🔧 [CHECKPOINT GAP-FILL] Peers after extra wait: {}", peer_count2);
+                    }
+                }
+
+                let mut ranges_filled = 0usize;
+                let mut ranges_failed = 0usize;
+                for &(start, end) in &gap_ranges {
+                    warn!("🔧 [CHECKPOINT GAP-FILL] Fetching {}-{} ({} blocks) from P2P...", start, end, end-start+1);
+                    match gap_sync.fill_gap_p2p(start, end).await {
+                        Ok(()) => {
+                            // Verify how many blocks were actually stored
+                            let mut stored = 0u64;
+                            for h in start..=end {
+                                if gap_store.get_qblock_by_height(h).await.ok().flatten().is_some() {
+                                    stored += 1;
+                                }
+                            }
+                            warn!("   ✅ {}-{}: {}/{} blocks now in DB", start, end, stored, end-start+1);
+                            ranges_filled += 1;
+                        }
+                        Err(e) => {
+                            warn!("   ❌ {}-{}: P2P fetch failed: {}", start, end, e);
+                            ranges_failed += 1;
+                        }
+                    }
+                }
+
+                warn!(
+                    "🔧 [CHECKPOINT GAP-FILL] P2P phase done: {}/{} ranges filled, {} failed — \
+                     re-applying transactions to fix balances...",
+                    ranges_filled, gap_ranges.len(), ranges_failed
+                );
+                if let Err(e) = gap_store.replay_gap_blocks(&gap_ranges, &gap_bals, &gap_supply).await {
+                    warn!("⚠️ [CHECKPOINT GAP-FILL] Balance re-replay failed: {}", e);
+                } else {
+                    warn!("✅ [CHECKPOINT GAP-FILL] Complete — balances corrected from recovered blocks.");
+                }
+            });
+        } else if effective_gap_ranges.is_empty() && state.storage_engine.is_checkpoint_applied().await {
+            info!("✅ [CHECKPOINT GAP-FILL] No pending gap ranges — checkpoint balances are complete.");
+        }
     }
 
     // v10.7.6 SYNC-006: Dedicated post-checkpoint balance replay task.
