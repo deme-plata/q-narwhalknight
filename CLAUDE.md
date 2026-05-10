@@ -71,7 +71,7 @@ This guide explains how to set up distributed development with multiple Claude C
 - **Working Directory**: `/opt/orobit/shared/q-narwhalknight`
 - **Reverse Proxy**: q-flux (NOT nginx, NOT Caddy — nginx is DISABLED on Epsilon)
 - **Static Files Root**: `/home/orobit/q-narwhalknight/dist-final/` (DIFFERENT from Beta!)
-- **Peer ID**: `12D3KooWAbrVw892T8RSenWy1j89NBrd7p4aXKsSMKAYpH47YbgD`
+- **Peer ID**: `12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM` (changed 2026-05-09 restart; was `12D3KooWAbrVw892T8RSenWy1j89NBrd7p4aXKsSMKAYpH47YbgD`)
 - **⚠️ CRITICAL: ALWAYS use /home paths on Epsilon, NEVER /tmp or /root!**
   - `/tmp` is on a tiny 40GB root partition (always near full)
   - `/home` is on a 1.8TB NVMe partition with ~800GB free
@@ -245,12 +245,12 @@ journalctl -u q-api-server --since "5 minutes ago" | grep -E "Gossipsub BLOCK fr
 - If mining to a non-bootstrap node, check for "DAG-KNIGHT" and "DAG→SSE" log messages on bootstrap
 
 ### **P2P Network Bootstrap (mainnet-genesis — ACTIVE):**
-- **Bootstrap Peer ID (Epsilon)**: `12D3KooWAbrVw892T8RSenWy1j89NBrd7p4aXKsSMKAYpH47YbgD` (10Gbit SUPERNODE — primary sync target)
+- **Bootstrap Peer ID (Epsilon)**: `12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM` (10Gbit SUPERNODE — primary sync target; changed 2026-05-09)
 - **Bootstrap Peer ID (Delta)**: `12D3KooWLJJRvqo6mBoHLpgxVbGKfW3Jv39ziU4kz1adKFv93JbK` (1Gbit — second fastest)
 - **Bootstrap Peer ID (Gamma)**: `12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH` (1Gbit)
 - **Bootstrap Peer ID (Beta)**: `12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH` (100Mbit — DHT coordinator)
 - **Bootstrap Peer ID (Alpha)**: `12D3KooWPwin4nJcU9PzsxNgUVXj5e6zDnACr84H7RZ1XzmnARsY` (canary)
-- **Bootstrap Address**: `/ip4/89.149.241.126/tcp/9001/p2p/12D3KooWAbrVw892T8RSenWy1j89NBrd7p4aXKsSMKAYpH47YbgD`
+- **Bootstrap Address**: `/ip4/89.149.241.126/tcp/9001/p2p/12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM`
 - **Network ID**: `mainnet2026.1`
 - **Gossipsub Topics**:
   - `/qnk/mainnet2026.1/blocks` - Block propagation
