@@ -7898,14 +7898,14 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
                 tokio::time::sleep(tokio::time::Duration::from_secs(90)).await;
 
-                // Check peer registry before fetching
+                // Check peer count before fetching
                 {
-                    let peer_count = gap_sync.peer_registry.read().await.active_peer_count();
+                    let peer_count = gap_sync.peer_count_fast();
                     warn!("🔧 [CHECKPOINT GAP-FILL] Peers available: {} — beginning P2P fetch", peer_count);
                     if peer_count == 0 {
                         warn!("⚠️ [CHECKPOINT GAP-FILL] No peers yet — waiting another 60s...");
                         tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-                        let peer_count2 = gap_sync.peer_registry.read().await.active_peer_count();
+                        let peer_count2 = gap_sync.peer_count_fast();
                         warn!("🔧 [CHECKPOINT GAP-FILL] Peers after extra wait: {}", peer_count2);
                     }
                 }
