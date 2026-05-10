@@ -5532,6 +5532,20 @@ impl QStorage {
             .unwrap_or(false)
     }
 
+    /// Returns true if this is a genesis node (ran from block 0, never bootstrapped from
+    /// the checkpoint snapshot). Genesis nodes have authoritative balances — the replay
+    /// code MUST skip them. The marker value is b"skipped-authoritative" when the checkpoint
+    /// wipe was skipped because the node already had more wallets than the snapshot.
+    pub async fn is_genesis_node(&self) -> bool {
+        self.hot_db
+            .get(CF_MANIFEST, Self::CHECKPOINT_APPLIED_KEY)
+            .await
+            .ok()
+            .flatten()
+            .map(|v| v == b"skipped-authoritative")
+            .unwrap_or(false)
+    }
+
     /// Apply the hardcoded Epsilon balance snapshot exactly once.
     /// - If already applied (marker key present): returns immediately.
     /// - If not yet applied: purges all wallet_balance_ keys, imports CHECKPOINT_DATA,
@@ -5541,7 +5555,7 @@ impl QStorage {
         &self,
         wallet_balances: &Arc<tokio::sync::RwLock<std::collections::HashMap<[u8; 32], u128>>>,
         total_minted_supply: &Arc<tokio::sync::RwLock<u128>>,
-    ) -> Result<()> {
+    ) -> Result<Vec<(u64, u64)>> {
         use crate::balance_checkpoint::{
             CHECKPOINT_DATA, CHECKPOINT_HEIGHT, CHECKPOINT_SHA256,
             CHECKPOINT_TOTAL_SUPPLY, CHECKPOINT_WALLET_COUNT,
@@ -5552,7 +5566,7 @@ impl QStorage {
                 "🏁 [CHECKPOINT] Already applied (height {}), skipping.",
                 CHECKPOINT_HEIGHT
             );
-            return Ok(());
+            return Ok(vec![]);
         }
 
         let local_height = self.get_latest_qblock_height().await.unwrap_or(None).unwrap_or(0);
@@ -5576,7 +5590,7 @@ impl QStorage {
                     existing_wallets, local_height, CHECKPOINT_WALLET_COUNT, CHECKPOINT_HEIGHT
                 );
                 self.hot_db.put_sync(CF_MANIFEST, Self::CHECKPOINT_APPLIED_KEY, b"skipped-authoritative").await?;
-                return Ok(());
+                return Ok(vec![]);
             }
         }
 
@@ -5668,7 +5682,7 @@ impl QStorage {
         //    `local_height` was measured before the purge + import above, so replay covers
         //    exactly the blocks that existed on disk when this function was called.
         //    Any blocks arriving DURING the import are handled by normal block processing.
-        let replayed_through = if local_height > CHECKPOINT_HEIGHT {
+        let (replayed_through, gap_ranges) = if local_height > CHECKPOINT_HEIGHT {
             warn!(
                 "🏁 [CHECKPOINT] Starting post-checkpoint replay: {} → {} ({} blocks)...",
                 CHECKPOINT_HEIGHT + 1, local_height, local_height - CHECKPOINT_HEIGHT
@@ -5682,10 +5696,16 @@ impl QStorage {
 
             let mut txs_applied = 0u64;
             let mut blocks_missing = 0u64;
+            // Collect contiguous missing ranges for post-startup gap-fill
+            let mut gap_ranges: Vec<(u64, u64)> = Vec::new();
+            let mut gap_start: Option<u64> = None;
 
             for height in (CHECKPOINT_HEIGHT + 1)..=local_height {
                 match self.get_qblock_by_height(height).await {
                     Ok(Some(block)) => {
+                        if let Some(start) = gap_start.take() {
+                            gap_ranges.push((start, height - 1));
+                        }
                         for tx in &block.transactions {
                             match tx.tx_type as u8 {
                                 0x01 => {
@@ -5713,13 +5733,23 @@ impl QStorage {
                     }
                     Ok(None) => {
                         debug!("🏁 [CHECKPOINT REPLAY] Block {} not in local DB, skipping.", height);
+                        if gap_start.is_none() {
+                            gap_start = Some(height);
+                        }
                         blocks_missing += 1;
                     }
                     Err(e) => {
                         warn!("⚠️ [CHECKPOINT REPLAY] Error fetching block {}: {}", height, e);
+                        if gap_start.is_none() {
+                            gap_start = Some(height);
+                        }
                         blocks_missing += 1;
                     }
                 }
+            }
+            // Close any trailing gap
+            if let Some(start) = gap_start {
+                gap_ranges.push((start, local_height));
             }
 
             // Drop zero-balance wallets — they don't exist on-chain
@@ -5769,7 +5799,7 @@ impl QStorage {
                 }
             }
 
-            local_height
+            (local_height, gap_ranges)
         } else {
             // Node is at or before checkpoint height — no replay needed
             self.save_total_supply(total).await?;
@@ -5777,7 +5807,7 @@ impl QStorage {
                 let mut supply = total_minted_supply.write().await;
                 *supply = total;
             }
-            CHECKPOINT_HEIGHT
+            (CHECKPOINT_HEIGHT, vec![])
         };
 
         // 5. Write extended marker (40 bytes):
@@ -5811,6 +5841,91 @@ impl QStorage {
             CHECKPOINT_HEIGHT, count, total, replayed_through
         );
 
+        Ok(gap_ranges)
+    }
+
+    /// v10.8.0 CHECKPOINT GAP-FILL: Re-apply transactions from blocks that were missing
+    /// during the initial checkpoint replay. Called after fill_gap_p2p fetches those blocks.
+    /// Uses additive/max-wins updates — safe to call even if some blocks were partially applied.
+    pub async fn replay_gap_blocks(
+        &self,
+        gap_ranges: &[(u64, u64)],
+        wallet_balances: &Arc<tokio::sync::RwLock<std::collections::HashMap<[u8; 32], u128>>>,
+        total_minted_supply: &Arc<tokio::sync::RwLock<u128>>,
+    ) -> Result<()> {
+        if gap_ranges.is_empty() {
+            return Ok(());
+        }
+        let mut txs_applied = 0u64;
+        let mut blocks_applied = 0u64;
+        let mut delta: std::collections::HashMap<[u8; 32], u128> = std::collections::HashMap::new();
+
+        for &(start, end) in gap_ranges {
+            for height in start..=end {
+                match self.get_qblock_by_height(height).await {
+                    Ok(Some(block)) => {
+                        for tx in &block.transactions {
+                            match tx.tx_type as u8 {
+                                0x01 => {
+                                    if tx.to != [0u8; 32] && tx.amount > 0 {
+                                        *delta.entry(tx.to).or_insert(0) += tx.amount;
+                                        txs_applied += 1;
+                                    }
+                                }
+                                0x00 => {
+                                    if tx.amount > 0 && tx.from != [0u8; 32] {
+                                        // For gap-fill replay we only credit receivers to avoid
+                                        // double-deducting senders already debited by forward sync.
+                                        *delta.entry(tx.to).or_insert(0) += tx.amount;
+                                        txs_applied += 1;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        blocks_applied += 1;
+                    }
+                    Ok(None) => {
+                        warn!("🔧 [GAP-FILL REPLAY] Block {} still missing after P2P fill", height);
+                    }
+                    Err(e) => {
+                        warn!("🔧 [GAP-FILL REPLAY] Error reading block {}: {}", height, e);
+                    }
+                }
+            }
+        }
+
+        if delta.is_empty() {
+            warn!("🔧 [GAP-FILL REPLAY] No blocks recovered — P2P fill may not have completed yet");
+            return Ok(());
+        }
+
+        // Apply delta to in-memory balances and persist to RocksDB
+        {
+            let mut wb = wallet_balances.write().await;
+            for (addr, amount) in &delta {
+                let bal = wb.entry(*addr).or_insert(0);
+                *bal = bal.saturating_add(*amount);
+            }
+            let new_total: u128 = wb.values().sum();
+            drop(wb);
+            let mut supply = total_minted_supply.write().await;
+            *supply = new_total;
+        }
+        // Persist updated balances to RocksDB
+        let snapshot = {
+            let wb = wallet_balances.read().await;
+            wb.clone()
+        };
+        self.save_wallet_balances(&snapshot).await?;
+        let new_total: u128 = snapshot.values().sum();
+        self.save_total_supply(new_total).await?;
+
+        warn!(
+            "🔧 [GAP-FILL REPLAY] ✅ Applied {} txs from {} blocks across {} gap ranges. \
+             Wallets: {}, supply: {} raw.",
+            txs_applied, blocks_applied, gap_ranges.len(), snapshot.len(), new_total
+        );
         Ok(())
     }
 

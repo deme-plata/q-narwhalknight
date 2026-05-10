@@ -78,7 +78,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.8.0"  # v10.8.0: Phase 1 quorum commit — multi-validator balance agreement over P2P
+version = "10.8.1"  # v10.8.1: Automatic checkpoint gap-fill — P2P backfill + balance re-replay for nodes with missing historical blocks
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"

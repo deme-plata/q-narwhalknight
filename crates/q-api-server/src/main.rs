@@ -3399,6 +3399,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     //
     // Set Q_SKIP_CHECKPOINT=1 to bypass checkpoint (fresh-sync test / dev mode).
     // The node will start at height 0 and sync all blocks from genesis via P2P.
+    let mut checkpoint_gap_ranges: Vec<(u64, u64)> = Vec::new();
     {
         let skip_checkpoint = std::env::var("Q_SKIP_CHECKPOINT")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -3410,7 +3411,17 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 &state.wallet_balances,
                 &state.total_minted_supply,
             ).await {
-                Ok(()) => {}
+                Ok(gaps) => {
+                    if !gaps.is_empty() {
+                        let total_missing: u64 = gaps.iter().map(|(s, e)| e - s + 1).sum();
+                        warn!(
+                            "🏁 [CHECKPOINT] {} gap ranges ({} blocks) detected — \
+                             will backfill via P2P after peers connect.",
+                            gaps.len(), total_missing
+                        );
+                    }
+                    checkpoint_gap_ranges = gaps;
+                }
                 Err(e) => warn!("⚠️ [CHECKPOINT] Failed to apply balance checkpoint: {} — continuing with existing state", e),
             }
         }
@@ -7813,6 +7824,38 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 if let Err(e) = turbo_sync_gap.fill_gap_p2p(first_gap, last_gap).await {
                     warn!("⚠️ [RC-3 GAP-FILL P2P] fetch for {}-{} failed: {}", first_gap, last_gap, e);
                 }
+            }
+        });
+    }
+
+    // v10.8.0: Automatic checkpoint gap-fill — if the initial checkpoint replay found missing
+    // blocks, wait for peers to connect, fetch the missing ranges via P2P, then re-apply their
+    // transactions to correct balances. Only runs on checkpoint nodes (not genesis/Epsilon).
+    if !checkpoint_gap_ranges.is_empty() && state.storage_engine.is_checkpoint_applied().await {
+        let gap_sync   = turbo_sync.clone();
+        let gap_store  = state.storage_engine.clone();
+        let gap_bals   = state.wallet_balances.clone();
+        let gap_supply = state.total_minted_supply.clone();
+        let gap_ranges = checkpoint_gap_ranges;
+        tokio::spawn(async move {
+            let total_missing: u64 = gap_ranges.iter().map(|(s, e)| e - s + 1).sum();
+            warn!(
+                "🏁 [CHECKPOINT GAP-FILL] {} ranges / {} blocks to backfill — \
+                 waiting 90s for peer discovery...",
+                gap_ranges.len(), total_missing
+            );
+            tokio::time::sleep(tokio::time::Duration::from_secs(90)).await;
+
+            for &(start, end) in &gap_ranges {
+                warn!("🔧 [CHECKPOINT GAP-FILL] Fetching blocks {}-{} from peers...", start, end);
+                if let Err(e) = gap_sync.fill_gap_p2p(start, end).await {
+                    warn!("⚠️ [CHECKPOINT GAP-FILL] P2P fetch {}-{} failed: {}", start, end, e);
+                }
+            }
+
+            warn!("🔧 [CHECKPOINT GAP-FILL] P2P fill done — re-applying transactions...");
+            if let Err(e) = gap_store.replay_gap_blocks(&gap_ranges, &gap_bals, &gap_supply).await {
+                warn!("⚠️ [CHECKPOINT GAP-FILL] Balance re-replay failed: {}", e);
             }
         });
     }
