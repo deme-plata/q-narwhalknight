@@ -359,6 +359,7 @@ pub mod node_auto_updater; // ✅ v8.5.0: P2P auto-update with Ed25519 quorum ve
 pub mod state_sync_api; // ✅ v5.2.0: HTTP full state sync (contracts, pools, balances) from bootstrap peers
 pub mod miner_link_api; // ✅ v7.2.0: WebSocket relay for wallet ↔ personal miner communication
 pub mod node_setup; // v8.6.5: Automatic node setup wizard via OAuth2 device login
+pub mod quorum_commit; // ✅ Phase 1: Multi-validator balance agreement (quorum commit broadcast)
 
 pub use config::Config;
 pub use console_viz::{update_stats, ConsensusStats, ConsoleVisualizer};
@@ -1325,6 +1326,10 @@ pub struct AppState {
     pub dag_knight: Option<Arc<DAGKnightConsensus>>,
     pub anchor_election: Option<Arc<QuantumAnchorElection>>,
     pub narwhal_core: Option<Arc<NarwhalCore>>,
+
+    // Phase 1: Quorum commit collector — tracks validator agreement on balance_root per height.
+    // 3-of-4 validators signing the same (height, balance_root) means QUORUM VERIFIED.
+    pub quorum_commit_collector: Arc<quorum_commit::QuorumCommitCollector>,
     pub production_mempool: Option<Arc<ProductionMempool>>, // HIGH-PERFORMANCE MEMPOOL FOR 200K+ TPS
 
     // ✅ v1.3.11-beta: TRUE DECENTRALIZED CONSENSUS SERVICE
@@ -2884,6 +2889,7 @@ impl AppState {
             production_mempool: None, // Will be initialized in main.rs for high TPS
             reliable_broadcast: None,
             quantum_vdf: None,
+            quorum_commit_collector: Arc::new(quorum_commit::QuorumCommitCollector::new(3)), // 3-of-4 quorum (f=1)
 
             // PHASE 2: Parallel Block Producer Pool - 8 concurrent producers for exciting visualization
             // ✅ v0.9.92-beta: LOCK-FREE ARCHITECTURE - Channel-based message passing (DEADLOCK FIX)
@@ -4366,6 +4372,7 @@ impl AppState {
             production_mempool: None, // Will be initialized in main.rs for high TPS
             reliable_broadcast: None,
             quantum_vdf: None,
+            quorum_commit_collector: Arc::new(quorum_commit::QuorumCommitCollector::new(3)), // 3-of-4 quorum (f=1)
 
             // PHASE 2: Parallel Block Producer Pool - 8 concurrent producers for exciting visualization
             // ✅ v0.9.92-beta: LOCK-FREE ARCHITECTURE - Channel-based message passing (DEADLOCK FIX)

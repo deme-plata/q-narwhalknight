@@ -3118,6 +3118,16 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 }
             }
 
+            // Phase 1: Subscribe to quorum-commit topic for multi-validator balance agreement
+            {
+                let quorum_commit_topic = format!("{}/quorum-commit", network_id.gossipsub_topic_prefix());
+                if let Err(e) = manager.subscribe_topic(&quorum_commit_topic) {
+                    warn!("⚠️  Failed to subscribe to quorum-commit topic: {}", e);
+                } else {
+                    info!("🗳️  Subscribed to quorum-commit topic: {}", quorum_commit_topic);
+                }
+            }
+
             // ✅ v0.9.75-beta: Wrap manager but DON'T spawn event loop yet
             // CRITICAL FIX: Prevents deadlock where event loop locks manager forever,
             // causing Phase 3 storage injection to timeout and breaking BlockPackCodec responses.
@@ -11901,6 +11911,63 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                         // TODO: Wire up ShadowModeCoordinator.process_certificate_hybrid()
                                         // when blocks are committed through DAG-Knight consensus
 
+                                        // ============================================================
+                                        // 🗳️  Phase 1: QUORUM COMMIT BROADCAST
+                                        // After applying the block at tip, sign (height, balance_root,
+                                        // prev_hash) and broadcast so other validators can verify.
+                                        // Only runs when near tip (within 500 of network height) to
+                                        // avoid expensive BLAKE3 scans during turbo sync.
+                                        // ============================================================
+                                        {
+                                            let net_h = app_state_gossip.highest_network_height
+                                                .load(std::sync::atomic::Ordering::Relaxed);
+                                            let near_tip = net_h == 0 || block_height + 500 >= net_h;
+                                            if near_tip {
+                                                let storage_qc = storage.clone();
+                                                let signing_key_qc = app_state_gossip.node_signing_key.clone();
+                                                let network_tx_qc = app_state_gossip.libp2p_command_tx.clone();
+                                                let collector_qc = app_state_gossip.quorum_commit_collector.clone();
+                                                let prev_hash = block.header.prev_block_hash;
+                                                let network_prefix_qc = {
+                                                    // Derive topic prefix from block's network_id field
+                                                    format!("/qnk/{}", block.header.network_id)
+                                                };
+                                                tokio::spawn(async move {
+                                                    match storage_qc.compute_balance_root_for_block().await {
+                                                        Ok(balance_root) if balance_root != [0u8; 32] => {
+                                                            let commit = q_api_server::quorum_commit::ValidatorCommit::sign(
+                                                                block_height,
+                                                                balance_root,
+                                                                prev_hash,
+                                                                &signing_key_qc,
+                                                            );
+                                                            // Also count our own commit in the collector
+                                                            if let Some((count, root)) = collector_qc.add_commit(commit.clone()) {
+                                                                info!("✅ [QUORUM] Block {} agreed by {}/4 validators — balance_root={}",
+                                                                      block_height, count, hex::encode(&root[..8]));
+                                                            }
+                                                            // Broadcast to peers
+                                                            if let Some(ref net_tx) = network_tx_qc {
+                                                                let topic = format!("{}/quorum-commit", network_prefix_qc);
+                                                                if let Ok(bytes) = postcard::to_allocvec(&commit) {
+                                                                    let _ = net_tx.send(q_network::NetworkCommand::PublishConsensusMessage {
+                                                                        topic,
+                                                                        message_bytes: bytes,
+                                                                    });
+                                                                }
+                                                            }
+                                                            // Prune old commits (keep last 200 heights)
+                                                            collector_qc.prune_below(block_height.saturating_sub(200));
+                                                        }
+                                                        Ok(_) => { /* zero root — wallet state empty, skip */ }
+                                                        Err(e) => {
+                                                            debug!("⚠️ [QUORUM] Failed to compute balance_root at {}: {}", block_height, e);
+                                                        }
+                                                    }
+                                                });
+                                            }
+                                        }
+
                                         // 📊 v1.0.10-beta: ENHANCED SYNC PROGRESS LOGGING + HEIGHT SYNCHRONIZATION
                                         // Show sync progress every 10 blocks AND synchronize network height across all app_states
 
@@ -14680,6 +14747,30 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             debug!("⚠️ Failed to deserialize validator announcement: {}", e);
                         }
                     }
+                // ============================================================
+                // 🗳️  Phase 1: QUORUM COMMIT HANDLER
+                // Collect validator signatures over (height, balance_root, prev_hash).
+                // When 3-of-4 validators agree → log QUORUM VERIFIED.
+                // ============================================================
+                } else if topic.ends_with("/quorum-commit") {
+                    match postcard::from_bytes::<q_api_server::quorum_commit::ValidatorCommit>(&data) {
+                        Ok(commit) => {
+                            let height = commit.height;
+                            let root_hex = hex::encode(&commit.balance_root[..8]);
+                            let vk_hex = hex::encode(&commit.verifying_key[..6]);
+                            if let Some((count, root)) = app_state_gossip.quorum_commit_collector.add_commit(commit) {
+                                info!("✅ [QUORUM] Block {} VERIFIED by {}/4 validators — balance_root={}",
+                                      height, count, hex::encode(&root[..8]));
+                            } else {
+                                let n = app_state_gossip.quorum_commit_collector.commit_count(height);
+                                debug!("📥 [QUORUM] Commit from validator {} for block {} root={} ({}/4 so far)",
+                                       vk_hex, height, root_hex, n);
+                            }
+                        }
+                        Err(e) => {
+                            debug!("⚠️ [QUORUM] Failed to deserialize validator commit: {}", e);
+                        }
+                    }
                 // ========================================
                 // 🌐 v2.3.0-beta: DECENTRALIZED MINING POOL P2P HANDLERS
                 // CRDT-based PPLNS with gossipsub coordination
@@ -17244,6 +17335,41 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                             );
                                             save_succeeded = true;
                                             info!("🎯 [v1.0.9-beta] save_succeeded = true (RwLock path)");
+
+                                            // 🗳️ Phase 1: Broadcast quorum commit for locally produced block
+                                            {
+                                                let storage_qc = app_state_mining.storage_engine.clone();
+                                                let signing_key_qc = app_state_mining.node_signing_key.clone();
+                                                let network_tx_qc = app_state_mining.libp2p_command_tx.clone();
+                                                let collector_qc = app_state_mining.quorum_commit_collector.clone();
+                                                let prev_hash = new_block.header.prev_block_hash;
+                                                let block_h = new_block.header.height;
+                                                let network_prefix_qc = format!("/qnk/{}", new_block.header.network_id);
+                                                tokio::spawn(async move {
+                                                    if let Ok(balance_root) = storage_qc.compute_balance_root_for_block().await {
+                                                        if balance_root != [0u8; 32] {
+                                                            let commit = q_api_server::quorum_commit::ValidatorCommit::sign(
+                                                                block_h, balance_root, prev_hash, &signing_key_qc,
+                                                            );
+                                                            if let Some((count, root)) = collector_qc.add_commit(commit.clone()) {
+                                                                info!("✅ [QUORUM] Block {} agreed by {}/4 validators — balance_root={}",
+                                                                      block_h, count, hex::encode(&root[..8]));
+                                                            }
+                                                            if let Some(ref net_tx) = network_tx_qc {
+                                                                let topic = format!("{}/quorum-commit", network_prefix_qc);
+                                                                if let Ok(bytes) = postcard::to_allocvec(&commit) {
+                                                                    let _ = net_tx.send(q_network::NetworkCommand::PublishConsensusMessage {
+                                                                        topic,
+                                                                        message_bytes: bytes,
+                                                                    });
+                                                                }
+                                                            }
+                                                            collector_qc.prune_below(block_h.saturating_sub(200));
+                                                        }
+                                                    }
+                                                });
+                                            }
+
                                             break; // Success!
                                         }
                                         Ok(Err(e))
@@ -24059,6 +24185,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/integrity/upgrades",      get(q_api_server::integrity_api::get_upgrades))
         .route("/api/v1/integrity/compare",       get(q_api_server::integrity_api::get_compare_snapshot))
         .route("/api/v1/integrity/full",          get(q_api_server::integrity_api::get_full_integrity))
+        .route("/api/v1/integrity/quorum",        get(q_api_server::integrity_api::get_quorum_status))
         // v9.6.1: QR code payment requests for brick-and-mortar POS
         .route("/api/v1/payment-requests", post(q_api_server::payment_request_api::create_payment_request))
         .route("/api/v1/payment-requests/:id", get(q_api_server::payment_request_api::get_payment_request))
