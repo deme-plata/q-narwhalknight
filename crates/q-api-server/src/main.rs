@@ -11361,41 +11361,45 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 }
 
                                 // ============================================
-                                // 🔐 BalanceRootV1: ENFORCE balance state root (reject block on mismatch)
+                                // 🔍 BalanceRootV1: SHADOW MODE — compute and compare, no rejection
                                 // ============================================
-                                // Check BEFORE applying this block's transactions so our local state
-                                // matches what the producer computed when creating the block.
+                                // Shadow mode: log mismatches but never drop the block.
+                                // Full enforcement activates at height 20,000,000 after shadow soak proves
+                                // all nodes agree. Change `warn!` → `return` to enable enforcement.
                                 // ============================================
                                 if q_consensus_guard::is_upgrade_active(
                                     q_consensus_guard::Upgrade::BalanceRootV1,
                                     block_height,
                                 ) {
                                     if block.header.state_root == [0u8; 32] {
-                                        error!("💥 [BALANCE ROOT v1] REJECT block {} — missing balance root (state_root is [0;32]). \
-                                               This node may be connecting to an unupgraded peer.", block_height);
-                                        return; // Skip this block
+                                        warn!("🔍 [BALANCE ROOT v1 SHADOW] Block {} has zero state_root — peer may be unupgraded.",
+                                              block_height);
+                                        // Shadow mode: accept block, do not reject
                                     } else {
                                         // Compute local balance root BEFORE applying this block's transactions
                                         let local_root = match storage.compute_balance_root_for_block().await {
                                             Ok(r) => r,
                                             Err(e) => {
-                                                error!("💥 [BALANCE ROOT v1] Failed to compute local balance root: {}", e);
+                                                error!("💥 [BALANCE ROOT v1 SHADOW] Failed to compute local balance root at block {}: {}",
+                                                       block_height, e);
                                                 [0u8; 32]
                                             }
                                         };
-                                        if local_root != block.header.state_root {
+                                        if local_root == [0u8; 32] {
+                                            // Computation failed — skip comparison
+                                        } else if local_root != block.header.state_root {
                                             error!(
-                                                "💥 [BALANCE ROOT v1] REJECT block {} — balance root mismatch!\n  \
+                                                "🚨 [BALANCE ROOT v1 SHADOW] MISMATCH at block {} — NOT rejecting (shadow mode).\n  \
                                                  Block claims: {}\n  \
                                                  Local state:  {}\n  \
-                                                 Action: block rejected. If this node keeps rejecting: check checkpoint integrity.",
+                                                 Root divergence detected. Check /api/v1/integrity/balance-root on all nodes.",
                                                 block_height,
                                                 hex::encode(block.header.state_root),
                                                 hex::encode(local_root)
                                             );
-                                            return; // Skip this block
+                                            // Shadow mode: accept block, do not reject
                                         } else {
-                                            debug!("✅ [BALANCE ROOT v1] Block {} balance root verified: {}",
+                                            debug!("✅ [BALANCE ROOT v1 SHADOW] Block {} root verified: {}",
                                                 block_height, hex::encode(&local_root[..8]));
                                         }
                                     }

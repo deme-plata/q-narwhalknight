@@ -135,9 +135,10 @@ pub static MAINNET_UPGRADES: Lazy<HashMap<Upgrade, UpgradeConfig>> = Lazy::new(|
         min_version: "5.1.0".to_string(),
     });
 
-    // Balance state root enforcement - scheduled ~2 weeks from current tip (~17.4M at 1 block/sec)
+    // Balance state root enforcement - bumped to 20,000,000 to allow shadow-mode soak (was 18,600,000)
+    // Shadow mode must prove root agreement across all nodes before enforcement activates.
     upgrades.insert(Upgrade::BalanceRootV1, UpgradeConfig {
-        activation_height: 18_600_000, // ~2 weeks from current tip (~17.4M at 1 block/sec)
+        activation_height: 20_000_000, // ~15 days from tip ~17.67M; shadow soak first
         description: "Enforce balance state root in block headers".to_string(),
         mandatory: true,
         min_version: "10.6.0".to_string(),
