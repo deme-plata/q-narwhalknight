@@ -418,6 +418,63 @@ pub async fn health_check_simple() -> Result<Json<ApiResponse<String>>, StatusCo
     Ok(Json(ApiResponse::success("OK".to_string())))
 }
 
+/// SYNC-006 admin reset endpoint (v1.0.2).
+/// POST /api/v1/admin/reset-balance-replay
+/// Clears the `meta:balance_replay_v10.7.8` flag in CF_MANIFEST so SYNC-006 will
+/// re-run the post-checkpoint balance replay on the next 30-second poll.
+///
+/// Auth: requires `X-Admin-Token` header matching `Q_ADMIN_TOKEN` env var, OR
+/// the request originating from 127.0.0.1 if `Q_ADMIN_TOKEN` is not set.
+pub async fn admin_reset_balance_replay(
+    headers: HeaderMap,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    State(state): State<std::sync::Arc<AppState>>,
+) -> Result<axum::Json<serde_json::Value>, StatusCode> {
+    // Auth: check Q_ADMIN_TOKEN header, or fall back to localhost-only.
+    let admin_token_env = std::env::var("Q_ADMIN_TOKEN").ok();
+    match admin_token_env {
+        Some(ref expected) if !expected.is_empty() => {
+            let provided = headers
+                .get("x-admin-token")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            if provided != expected.as_str() {
+                tracing::warn!("⚠️ [ADMIN] reset-balance-replay: bad X-Admin-Token from {}", addr);
+                return Err(StatusCode::FORBIDDEN);
+            }
+        }
+        _ => {
+            // No Q_ADMIN_TOKEN set — only allow from 127.0.0.1
+            if !addr.ip().is_loopback() {
+                tracing::warn!("⚠️ [ADMIN] reset-balance-replay: rejected non-loopback request from {} (set Q_ADMIN_TOKEN to allow remote)", addr);
+                return Err(StatusCode::FORBIDDEN);
+            }
+        }
+    }
+
+    // Verify this is a checkpoint node — genesis nodes will never run replay anyway.
+    if !state.storage_engine.is_checkpoint_applied().await {
+        tracing::warn!("⚠️ [ADMIN] reset-balance-replay: checkpoint not applied on this node — SYNC-006 won't run regardless");
+        return Ok(axum::Json(serde_json::json!({
+            "success": false,
+            "error": "Checkpoint not applied on this node. This node ran from genesis and does not need balance replay."
+        })));
+    }
+
+    // Delete the done-flag so SYNC-006 will re-run.
+    state.storage_engine.delete_balance_replay_flag().await.map_err(|e| {
+        tracing::error!("❌ [ADMIN] Failed to delete balance replay flag: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    tracing::warn!("⚠️ [ADMIN] Balance replay flag reset — SYNC-006 will re-run on next 30s poll");
+
+    Ok(axum::Json(serde_json::json!({
+        "success": true,
+        "message": "Balance replay flag cleared. SYNC-006 will re-run within 30 seconds."
+    })))
+}
+
 /// v8.2.0: Admin-only endpoint to rebuild all wallet balances from chain.
 /// Reprocesses every block's transactions to compute deterministic balances.
 /// Returns the new balance state hash for cross-node verification.
@@ -11916,6 +11973,32 @@ pub async fn execute_swap(
                 .unwrap_or(("Bridge Token", "BRIDGE", 8));
             let scale_factor = 10u128.pow(24 - bridge_decimals as u32);
             let credit_native = (final_amount_out as u128) / scale_factor;
+
+            // v10.9.3: Check bridge reserves before issuing wBTC so it's backed by real BTC.
+            // Other bridge tokens (wETH, wZEC, wIRON) have their own reserve checks in their bridges.
+            if bridge_sym == "wBTC" {
+                if let Some(ref bridge) = state.deposit_bridge {
+                    match bridge.check_reserve_available(credit_native as u64).await {
+                        Ok(false) => {
+                            drop(token_balances);
+                            warn!("₿ [SWAP v10.9.3] Insufficient BTC bridge reserves for {} sat wBTC issuance — aborting", credit_native);
+                            return Ok(Json(ApiResponse::error("Insufficient BTC bridge reserves. The bridge wallet does not hold enough BTC to back this wBTC issuance. Deposit BTC first via /api/v1/bitcoin/deposit/address.".to_string())));
+                        }
+                        Err(e) => {
+                            // RPC failed — log but allow swap so a connectivity blip doesn't brick the DEX
+                            warn!("₿ [SWAP v10.9.3] Bridge reserve check failed (allowing swap): {}", e);
+                        }
+                        Ok(true) => {
+                            info!("₿ [SWAP v10.9.3] Bridge reserve check OK — {} sats available for wBTC issuance", credit_native);
+                        }
+                    }
+                } else {
+                    // No bridge configured — reject wBTC swaps so IOUs are never silently issued
+                    drop(token_balances);
+                    warn!("₿ [SWAP v10.9.3] wBTC swap rejected — Bitcoin bridge not configured on this node");
+                    return Ok(Json(ApiResponse::error("wBTC swaps require the Bitcoin bridge to be configured. Set BTC_RPC_URL, BTC_RPC_USER, BTC_RPC_PASS environment variables pointing to the Bitcoin Knots node.".to_string())));
+                }
+            }
 
             let to_key = (wallet_addr, to_token_addr);
             let old_balance = token_balances.get(&to_key).copied().unwrap_or(0);

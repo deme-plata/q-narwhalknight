@@ -6109,6 +6109,15 @@ impl QStorage {
             .context("Failed to persist balance replay done flag")
     }
 
+    /// SYNC-006 admin reset: Delete the replay-done flag so SYNC-006 will re-run on the next
+    /// 30-second poll. Used by the admin endpoint POST /api/v1/admin/reset-balance-replay.
+    pub async fn delete_balance_replay_flag(&self) -> Result<()> {
+        self.hot_db
+            .delete(CF_MANIFEST, b"meta:balance_replay_v10.7.8")
+            .await
+            .context("Failed to delete balance replay done flag")
+    }
+
     /// Post-sync balance replay for checkpoint-bootstrapped nodes (SYNC-004 / v10.7.3).
     ///
     /// Turbo sync downloads blocks with `balance_engine=None` — no balance updates during
@@ -6141,14 +6150,33 @@ impl QStorage {
             return Ok(0);
         }
 
-        // Genesis/archive node detection: if we have blocks from well before the checkpoint,
-        // this node ran from genesis and already has correct balances — skip the replay.
-        // Checkpoint-bootstrapped nodes start from ~16.75M and have no blocks below that.
-        // Use height 1,000,000 — reliably stored on all genesis nodes, absent on checkpoint nodes.
-        let is_genesis_node = self.get_qblock_any_format(1_000_000).await
+        // Genesis/archive node detection: primary check is the checkpoint-applied flag.
+        // Checkpoint-bootstrapped nodes have `__balance_checkpoint_v1__` set in CF_MANIFEST
+        // (either b"1" for normal checkpoint or b"skipped-authoritative" for genesis nodes
+        // that skipped the wipe). If checkpoint was NOT applied at all, this node ran from
+        // genesis with correct balances — skip the replay.
+        // Secondary: also skip if we have blocks from well before the checkpoint (belt & suspenders).
+        if !self.is_checkpoint_applied().await {
+            warn!(
+                "🏁 [POST-SYNC REPLAY v10.7.3] Checkpoint not applied on this node \
+                 — ran from genesis, balances already correct, skipping replay."
+            );
+            return Ok(0);
+        }
+        // Secondary check: if this is a genesis node (marker = b"skipped-authoritative"),
+        // also skip. is_genesis_node() reads the same key and checks the value.
+        if self.is_genesis_node().await {
+            warn!(
+                "🏁 [POST-SYNC REPLAY v10.7.3] Genesis/archive node detected (checkpoint skipped as authoritative) \
+                 — balances already correct from genesis, skipping replay."
+            );
+            return Ok(0);
+        }
+        // Belt-and-suspenders: also skip if we have a block at height 1,000,000 (stored only on genesis nodes).
+        let has_early_block = self.get_qblock_any_format(1_000_000).await
             .unwrap_or(None)
             .is_some();
-        if is_genesis_node {
+        if has_early_block {
             warn!(
                 "🏁 [POST-SYNC REPLAY v10.7.3] Genesis/archive node detected (has block at height 1,000,000) \
                  — balances already correct from genesis, skipping replay."

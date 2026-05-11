@@ -7998,6 +7998,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             }
             // Skip if checkpoint was not applied (non-checkpoint nodes need no replay).
             if !replay_storage.is_checkpoint_applied().await {
+                info!("✅ [SYNC-006] Checkpoint not applied on this node (ran from genesis) — no balance replay needed.");
                 return;
             }
             // Skip if the replay was already completed in a previous run.
@@ -21623,7 +21624,15 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             // now that all blocks are on disk.
                             // Gate on is_balance_replay_done() so the replay doesn't re-run every
                             // time the sync-gap transitions 0→nonzero→0 (e.g. new blocks arriving).
-                            if app_state_sync.storage_engine.is_checkpoint_applied().await
+                            // Q_SKIP_BALANCE_REPLAY=1: genesis/archive nodes (Epsilon) must never
+                            // replay — their balances are already correct from the start.
+                            let skip_replay = std::env::var("Q_SKIP_BALANCE_REPLAY").ok().as_deref() == Some("1");
+                            if skip_replay {
+                                info!("✅ [SYNC COMPLETE] Q_SKIP_BALANCE_REPLAY=1 — genesis node, skipping post-sync replay.");
+                                let _ = app_state_sync.storage_engine.mark_balance_replay_done().await;
+                            }
+                            if !skip_replay
+                                && app_state_sync.storage_engine.is_checkpoint_applied().await
                                 && !app_state_sync.storage_engine.is_balance_replay_done().await
                             {
                                 info!("🏁 [SYNC COMPLETE v10.7.3] Checkpoint detected — reindexing DAG blocks then starting post-sync balance replay...");
@@ -24569,6 +24578,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/admin/flux/stats", get(q_api_server::deploy_admin_api::flux_stats))
         // v8.2.0: Admin-only balance rebuild from chain (deterministic balance consensus)
         .route("/api/v1/admin/rebuild-balances", post(handlers::admin_rebuild_balances))
+        // v1.0.2 SYNC-006: Admin reset to force re-run of post-checkpoint balance replay
+        .route("/api/v1/admin/reset-balance-replay", post(handlers::admin_reset_balance_replay))
         .route("/api/v1/admin/purge-phase-data", post(admin_purge_phase_data))
         // v7.3.0: Node operator admin settings (--admin-wallet)
         .route("/api/v1/admin/is-admin", get(q_api_server::admin_settings_api::is_admin))
@@ -24630,6 +24641,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/bitcoin/deposit/bridge-status", get(q_api_server::bitcoin_deposit_api::get_deposit_bridge_status))
         .route("/api/v1/bitcoin/deposit/:id", get(q_api_server::bitcoin_deposit_api::get_deposit_status))
         .route("/api/v1/bitcoin/deposits", get(q_api_server::bitcoin_deposit_api::list_deposits))
+        // v10.9.3: wBTC withdrawal — redeem wBTC for real on-chain BTC
+        .route("/api/v1/bitcoin/withdraw", post(q_api_server::bitcoin_deposit_api::withdraw_wbtc))
         // v10.5.4: HiBT listing donation campaign — public, no auth
         .route("/api/v1/donation/hibt-status", get(hibt_donation_status))
         // ═══ Zcash Shielded Bridge (v7.2.2) ═══
