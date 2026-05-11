@@ -1,445 +1,277 @@
-# Technical Review: Sync Integrity Issues — Block History Loss & Balance Divergence
+# Technical Review: Sync Integrity — Block History Loss, Balance Divergence, and BAL-001 Enforcement Risk
 
 **Date**: 2026-05-08  
-**Version**: v10.7.0  
-**Severity**: HIGH — affects every fresh node deployment; balance divergence poses BAL-001 activation risk  
-**Discovered via**: Docker sync test (`q-sync-test-v10.7.0`) compared against live Epsilon archive node  
+**Version**: v10.7.1  
+**Severity**: CRITICAL — balance divergence on checkpoint nodes poses imminent network fork risk at BAL-001 enforcement  
+**Discovered via**: Docker sync test against a fresh container, compared to live Epsilon archive node  
+**Author**: Server Alpha (automated technical review)
 
 ---
 
 ## Executive Summary
 
-A sync test against a fresh Docker container revealed two independent but related integrity
-failures in the turbo-sync subsystem:
+A sync test against a fresh Docker container exposed two independent integrity failures in the turbo-sync subsystem, plus a replay-gating defect that prevents existing nodes from self-correcting:
 
-| Issue | Impact | Severity |
-|-------|--------|----------|
-| **SYNC-001**: Fresh nodes silently discard all historical block data | Block explorer returns 404 for any block below ~16.75M | HIGH |
-| **SYNC-002**: Fresh nodes accumulate incorrect balance state during sync | 62 missing wallets, 27,235 QUG supply discrepancy vs archive | HIGH |
+- **SYNC-001 (Block History Loss)**: Fresh nodes that bootstrap from the warp-sync checkpoint acquire only blocks above ~16,750,000. Blocks 1–16,749,999 are never downloaded. The node announces height ~17.5M but cannot answer any explorer or P2P request for pre-checkpoint data. *Short-term fix: archive proxy via `Q_ARCHIVE_NODE_URL`; no code exists yet.*
+- **SYNC-002 (Balance Divergence)**: Three co-contributing bugs caused fresh nodes to accumulate incorrect wallet state during sync — skipped transfer transactions, lost supply counter, and missing post-sync recomputation. *All three were fixed in v10.7.1.*
+- **Replay Gating Defect**: The SYNC-006 replay mechanism that was supposed to correct pre-v10.7.1 nodes (Beta, Gamma, Delta) is being incorrectly skipped due to a genesis-detection false positive. *Fix in progress: admin reset endpoint + corrected detection logic.*
+- **BAL-001 Enforcement Timeline**: Balance root enforcement activates at block **20,000,000** (~245,000 blocks from now, approximately 2.8 days at 1 bps). Checkpoint nodes with diverged balances will compute wrong `state_root` values and their blocks will be rejected by Epsilon. The network will fork unless balance state is corrected before that height.
 
-Both issues trace to deliberate speed optimisations in `turbo_sync.rs` that were made without
-adequately documenting their correctness trade-offs. They compound each other: SYNC-001 means
-fresh nodes cannot serve historical block data, and SYNC-002 means the balance state they do
-hold is wrong. Together they mean **a fresh-synced node cannot be used as a reliable source
-of truth for either block data or wallet balances**.
-
-BAL-001 (balance root enforcement at block 18,600,000, ~1.05M blocks away) will surface
-SYNC-002 as a consensus failure if not fixed before activation.
+All issues must be resolved before block 20,000,000. The replay path exists; the blocker is ensuring it actually runs.
 
 ---
 
-## Issue 1 — SYNC-001: Warp Sync Silently Discards Historical Blocks
+## Issue 1: Block History Loss After Warp-Sync (SYNC-001)
 
-### Observed Symptoms
+### Root Cause
 
-- Fresh node reports `current_height = 17,544,086`
-- `/api/v1/blocks/1000`, `/api/v1/blocks/100000`, `/api/v1/blocks/5000000` all return `404 Not Found`
-- DB size: **19 GB** (180 SST files) vs live archive node's **262 GB** (88,885 SST files)
-- Only the most recent ~1.75M blocks (heights ~15.8M–17.5M) exist in the database
+**File**: `crates/q-storage/src/turbo_sync.rs` (checkpoint probe + `effective_start_height` override)
 
-### Root Cause: `probe_network_gap()` Overrides Sync Start Height
-
-**File**: `crates/q-storage/src/turbo_sync.rs` ~lines 6250–6280
-
-On every fresh boot (when `local_height < 100`), turbo sync calls `probe_network_gap()`.
-This function performs a binary search across peers to find the lowest block height any peer
-can serve. Because peers only retain the most recent ~1.75M blocks (their own warp-sync
-window), `probe_network_gap()` returns approximately `~15,800,000` as the "gap floor".
-
-The code then sets:
+On every fresh boot where `local_height < 100`, `turbo_sync.rs` calls `probe_network_gap()`. This function binary-searches peers to find the lowest block height any peer can serve. Because all production nodes bootstrapped from the same checkpoint snapshot, the lowest available height across the peer set is approximately **16,750,000** — the checkpoint height. `probe_network_gap()` returns this as the gap floor, and the code then sets:
 
 ```rust
-effective_start_height = gap_floor;  // ~15,800,000
+effective_start_height = gap_floor;  // ~16,750,000
 ```
 
-Blocks 1 through `gap_floor - 1` are never requested. They are not available on any peer
-and are simply skipped. The entire pre-checkpoint block history is lost on every fresh node
-deployment.
+Blocks 1 through 16,749,999 are never requested. No peer holds them (Epsilon's 219 GB archive is the only full-history node), and the sync simply skips the entire pre-checkpoint chain.
 
-**File**: `crates/q-api-server/src/main.rs` ~lines 6642–6656
+**File**: `crates/q-api-server/src/main.rs` (current_height_atomic)
 
-Simultaneously, `current_height_atomic` is updated to the MAX block height in any batch
-received — not the contiguous stored height:
+Compounding the deception, `current_height_atomic` is updated to the MAX block height seen in any received batch, not the lowest contiguous stored height:
 
 ```rust
 let max_height = blocks.iter().map(|b| b.header.height).max().unwrap_or(0);
 if max_height > current_atomic {
     current_height_atomic_clone.store(max_height, Ordering::Release);
-    info!("📈 [LIBP2P SYNC] Updated current_height_atomic: {} → {}", ...);
 }
 ```
 
-This creates a misleading picture: the node announces height 17.544M but has no data below
-~15.8M. Explorer queries for any height in that gap return 404.
-
-### Why `Q_SKIP_CHECKPOINT=1` Does Not Help
-
-`Q_SKIP_CHECKPOINT=1` correctly bypasses `probe_network_gap()` — the call is gated by
-`!skip_checkpoint && local_height < 100 && effective_start_height == 0`, so when
-`skip_checkpoint = true` the probe is skipped and `effective_start_height` remains `0`,
-which normalises to height `1` at line 6398. The flag works as designed.
-
-The real reason a fresh node still ends up without historical blocks is that **no peer on
-the network has them**. Every other node also warp-synced and only holds the most recent
-~1.75M blocks. Epsilon's 262 GB archive is the only node retaining the full chain. With
-`Q_SKIP_CHECKPOINT=1`, the node correctly tries to sync from height 1, receives nothing from
-peers for heights 1–15,799,999 (none available), and eventually catches up from whatever
-the lowest available peer height is (~15.8M). The height counter jumps to 15.8M when the
-first available peer blocks arrive, not because of a checkpoint skip.
-
-**The fix is not to patch `Q_SKIP_CHECKPOINT` — it is correct. The fix is to make Epsilon
-the authoritative source for historical block data**, either via the archive proxy fallback
-or by ensuring a full-archive node is always reachable on the network.
-
-### Block Retrieval Has No Archive Fallback
-
-**File**: `crates/q-storage/src/lib.rs` ~line 2379 (`get_qblock_any_format`)
-
-All block lookups search only `hot_db` in `CF_BLOCKS`. Three key formats are tried
-sequentially (`qblock:height:{N}`, `qblock:dag:{N}:{proposer}`, legacy binary key). If none
-match, `Ok(None)` is returned — the API handler converts this to `StatusCode::NOT_FOUND`.
-There is no fallback to a remote archive node.
-
-The same applies to P2P block serving: `create_block_pack()` calls `get_qblocks_range()`,
-which returns an empty `Vec` for missing ranges, causing the block-pack request to fail with
-"No blocks found in range X-Y". A fresh-synced node cannot help peers sync historical data.
+The result: a node that downloaded only blocks 16,750,000–17,500,000 announces itself at height 17,500,000. Any explorer request for a block below 16.75M returns `404 Not Found`. Any P2P request for historical block ranges yields an empty response. The node is a consumer, not a contributor, of block data.
 
 ### Impact
 
-- **Block explorer**: Non-functional for all heights below the warp-sync floor (~15.8M)
-- **P2P**: Fresh nodes cannot contribute block history to new peers; they are sync consumers only
-- **Trust**: A node claiming height 17.5M but unable to answer questions about height 1M is misleading
-- **BAL-001 adjacency**: If a fresh node is elected as a validator, it cannot serve the block
-  history needed for balance root verification by auditing tools
+- Block explorer is non-functional for all heights below the checkpoint (~16.75M). This covers approximately 98.5% of chain history by block count.
+- Fresh nodes cannot serve historical block ranges to new peers via `create_block_pack()`. They propagate the problem: every new node that syncs from another warp-synced node also lacks history.
+- The misleading height announcement erodes trust in height metrics across the network.
+- If a warp-synced node is used for balance auditing against the full chain, results will be incomplete.
 
 ### Fix Design
 
-#### Short-Term Fix (1–2 days): Archive Proxy Fallback
+**Short-term (1–2 days): Archive proxy via `Q_ARCHIVE_NODE_URL`**
 
-Add `Q_ARCHIVE_NODE_URL` environment variable. When `get_qblock_any_format()` returns `None`
-locally, transparently proxy the request to the archive node via HTTP:
+No code for this exists yet. When `get_qblock_any_format()` in `crates/q-storage/src/lib.rs` returns `None` locally, the API handler in `crates/q-api-server/src/handlers.rs` should transparently proxy the request to the archive node:
 
 ```rust
-// crates/q-api-server/src/handlers.rs — get_block_by_height()
-match state.storage_engine.get_qblock_any_format(height).await {
-    Ok(Some(block)) => return Ok(Json(ApiResponse::success(block))),
+// handlers.rs — get_block_by_height
+match state.storage.get_qblock_any_format(height).await {
+    Ok(Some(block)) => return Ok(Json(block)),
     Ok(None) => {
-        // Proxy to archive node if configured
-        if let Some(archive_url) = &state.archive_node_url {
-            let url = format!("{}/api/v1/blocks/{}", archive_url, height);
-            if let Ok(block) = fetch_from_archive(&url).await {
-                return Ok(Json(ApiResponse::success(block)));
+        if let Some(archive_url) = &state.config.archive_node_url {
+            // proxy to Epsilon, 3s timeout
+            if let Ok(block) = fetch_from_archive(archive_url, height).await {
+                return Ok(Json(block));
             }
         }
         return Err(StatusCode::NOT_FOUND);
     }
-    Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    Err(e) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
 }
 ```
 
-This makes block explorer queries work transparently on all nodes without requiring 262 GB
-of local storage. Configure all non-archive nodes with
-`Q_ARCHIVE_NODE_URL=http://89.149.241.126:8080` in their `.env`.
+Configure non-archive nodes: `Q_ARCHIVE_NODE_URL=http://89.149.241.126:8080` in `.env`.
 
-**Risk**: Adds external HTTP dependency to block reads. Mitigate with a short timeout (3s)
-and treat archive failure as a cache miss, not an error.
+**Medium-term (1–2 weeks):**
 
-**Note on `Q_SKIP_CHECKPOINT`**: the flag is correctly implemented and does not need changing.
-The probe is properly gated on `!skip_checkpoint`. The reason nodes still lack historical
-blocks with the flag set is that no peer has them — peers only retain the most recent ~1.75M
-blocks. `Q_SKIP_CHECKPOINT=1` makes the node try from height 1, but gets nothing back from
-peers below ~15.8M. The archive proxy is the correct fix.
+1. Report contiguous stored height in `current_height_atomic`, not the maximum received. Read from `qblock:latest` after each batch commit.
+2. Add a `node_type` field (`"light"` vs `"archive"`) to P2P peer-height announcements so peers know not to request historical ranges from warp-synced nodes.
 
-#### Medium-Term Fix (1–2 weeks): Node Type Declaration + Honest Height Reporting
+### Status
 
-1. **Report contiguous height, not MAX received** in `current_height_atomic`:
-   Read `qblock:latest` (the contiguous stored height) after each batch commit and use that
-   for the atomic. A node that claims height 17.5M but cannot answer queries below 15.8M is
-   dishonest and misleads both users and peers.
-
-2. **Add `node_type` to P2P peer-height announcements**: `"light"` (warp-synced, no history)
-   vs `"archive"` (full chain). Light nodes should not be asked for historical block ranges.
-   Do not proxy archive responses into `create_block_pack()` without explicit opt-in — it
-   adds latency, failure coupling, and creates an implicit archive relay without the storage.
+SHORT-TERM FIX NEEDED. The `Q_ARCHIVE_NODE_URL` proxy has not been implemented. The height-reporting issue is also unaddressed. No deployment blocker for BAL-001, but should be tracked as P1 work.
 
 ---
 
-## Issue 2 — SYNC-002: Balance State Diverges During Turbo Sync
+## Issue 2: Balance Divergence on Fresh-Synced Nodes (SYNC-002)
 
-### Observed Symptoms
+Three co-contributing bugs caused fresh nodes to accumulate incorrect wallet state during turbo sync. All three are fixed in v10.7.1, but nodes that synced before v10.7.1 (Beta, Gamma, Delta) still hold stale data and require a replay run to converge.
 
-At essentially the same block height (49-block difference):
+### Bug A — Transfer Transactions Silently Skipped During Fast Sync (FIXED in v10.7.1)
 
-| Metric | Fresh sync node | Live archive node | Delta |
-|--------|----------------|-------------------|-------|
-| Wallet count | 1,279 | 1,341 | −62 wallets |
-| Total supply | 607,302 QUG | 580,067 QUG | +27,235 QUG |
-| Balance root | `8acdf4cb...` | `9647d692...` | mismatch |
+**File**: `crates/q-storage/src/turbo_sync.rs` ~line 4389 (documented in comment)
 
-The fresh node has **fewer wallets** but **more QUG** — impossible under a correct replay.
+When the node was more than 5,000 blocks behind the network, turbo sync called only `process_block_coinbase_only_tx()` — applying mining reward credits but skipping all wallet-to-wallet transfer transactions. Since every fresh node is always more than 5,000 blocks behind at sync start, this condition applied for the entire sync on every fresh deployment.
 
-### Root Cause: Three Co-Contributing Bugs
+The consequences were severe: any wallet that received QUG exclusively via transfers (never via a coinbase reward) was never created in the local balance DB. Mining rewards were credited to source wallets but the corresponding debits for transfers out of those wallets were never applied, creating net synthetic inflation.
 
-#### Bug A — Transfer Transactions Silently Skipped During Fast Sync
+**Fix**: v10.7.1 removes the skip threshold entirely. All transactions are always processed regardless of how far behind the node is. The comment at `turbo_sync.rs:4389` documents this change and prohibits re-introduction of any balance-skip optimisation.
 
-**File**: `crates/q-storage/src/turbo_sync.rs` ~lines 4367–4401
+### Bug B — `total_minted_supply` Not Persisted to RocksDB (FIXED in v10.7.1)
 
-```rust
-let extreme_skip_balances_threshold: u64 = 5_000;  // hardcoded default
-let blocks_behind = network_height - current_height;
-let skip_balances = blocks_behind > extreme_skip_balances_threshold;
+**File**: `crates/q-storage/src/turbo_sync.rs` (batch commit path)
 
-if skip_balances {
-    engine.process_block_coinbase_only_tx(&tx, block).await  // ← rewards only
-} else {
-    engine.process_block_mining_rewards_tx(&tx, block).await  // ← full processing
-}
-```
+The running total of minted supply was maintained only as an in-memory counter during turbo sync. It was never written to RocksDB. On node restart, the counter reset to zero and was recomputed from the in-memory wallet map — which was already incorrect due to Bug A. The supply figure was therefore doubly wrong: corrupted at accumulation time and lost at restart.
 
-Any fresh node that is more than 5,000 blocks behind (which is every fresh node ever) enters
-`coinbase_only` mode for the **entire** sync. This means transfer transactions — wallet-to-wallet
-sends — are never applied to the balance DB during turbo sync.
+**Fix**: v10.7.1 calls `save_total_supply()` after every batch commit in turbo sync, persisting the supply counter to a durable RocksDB key.
 
-**This is the smoking gun for the 62 missing wallets.** Each of those 62 addresses received
-QUG only via transfers from other wallets, never via a mining coinbase reward. Since transfers
-were skipped, those wallets were never created in the fresh node's balance DB.
+### Bug C — Supply Not Recomputed After Sync Completes (FIXED)
 
-**This is also the root cause of the 27K QUG surplus.** Mining rewards (coinbase) were
-applied: wallets received +QUG. But the corresponding transfer debits (−QUG from sender
-wallets) were not applied. Net result: the system gained QUG that was never balanced by
-deductions. This is effectively synthetic inflation on the fresh node.
+**File**: `crates/q-api-server/src/main.rs` (sync-complete handler)
 
-#### Bug B — `total_minted_supply` Never Persisted to RocksDB
+The original `now_synced && !was_synced` transition trigger was unreliable — it depended on a state edge that could be missed. Even when it fired, it reloaded wallet balances from RocksDB but did not recompute `total_minted_supply` from the reloaded map.
 
-**File**: `crates/q-storage/src/turbo_sync.rs` ~lines 4403–4465
+**Fix**: The edge-triggered handler was replaced with a SYNC-006 polling task in `main.rs`. This task runs on 30-second cycles, waits until the chain height exceeds the checkpoint height, and then calls `replay_post_checkpoint_balances()` to bring the balance state to a consistent and complete post-checkpoint view.
 
-Turbo sync commits wallet balance rows to RocksDB after each batch. However, it never
-persists `total_minted_supply` to a durable key. The supply counter lives only in the
-in-memory `Arc<RwLock<u128>>`. On node restart, it resets to 0 and is recomputed from
-the in-memory wallet map — which is already wrong due to Bug A.
+### Remaining Issue: Replay Gating Incorrectly Skips Pre-v10.7.1 Nodes
 
-#### Bug C — Supply Not Recomputed After Sync Completes
+Nodes that synced before v10.7.1 (Beta, Gamma, Delta) still hold stale balance state from when Bugs A and B were active. The SYNC-006 replay task (`replay_post_checkpoint_balances`) exists to repair them, but it is being incorrectly bypassed:
 
-**File**: `crates/q-api-server/src/main.rs` ~lines 20898–20950
+**Problem 1 — `meta:balance_replay_v10.7.8` flag**: RocksDB stores a flag after the first replay run. If that run executed against corrupted data (which it did, before v10.7.1), the flag prevents a corrective second run. The node considers itself already replayed.
 
-When the sync-complete transition fires (`now_synced && !was_synced`), the code correctly
-reloads `wallet_balances` from RocksDB:
+**Problem 2 — Genesis detection false positive**: The replay is gated by a check that calls `get_qblock_any_format(1_000_000)`. The intent is to detect genesis nodes (which ran from block 1 and don't need replay). However, checkpoint nodes that received blocks below the checkpoint height via P2P gossip also pass this check — they have block 1,000,000 in their DB even though they bootstrapped from the checkpoint snapshot. The check incorrectly classifies them as genesis nodes and skips replay.
 
-```rust
-let persisted = app_state.storage_engine.load_wallet_balances().await?;
-*app_state.wallet_balances.write().await = persisted;
-// ← total_minted_supply is NOT recomputed here
-```
+**Fix in progress**:
 
-`total_minted_supply` keeps its stale turbo-sync value. Even if the wallet balance map were
-correct (which it isn't due to Bug A), the supply figure would not reflect it.
+1. Admin endpoint `POST /api/v1/admin/reset-balance-replay` — clears the `meta:balance_replay_v10.7.8` flag from RocksDB, allowing SYNC-006 to run a fresh replay on next cycle.
 
-### Impact
+2. Replace `get_qblock_any_format(1_000_000)` with `is_checkpoint_applied()` flag — a boolean persisted in RocksDB when the checkpoint snapshot is loaded. This correctly identifies checkpoint nodes regardless of what blocks they later received via gossip. Genesis nodes (Epsilon) never set this flag.
 
-- **Wallet balances are wrong on every fresh-synced node** — 62+ wallets missing, supply
-  inflated by tens of thousands of QUG
-- **The `balance_root` on a fresh node will never match the archive node** — nodes will
-  diverge in consensus
-- **BAL-001 activation risk (HIGH)**: At block 18,600,000 (~1.05M blocks away), producers
-  must embed the balance root in every block and validators check it. If fresh nodes have a
-  different balance DB from the archive node, their produced blocks will be rejected by
-  validators running the correct state. This will partition the network.
-- **The integrity API `wallet_count` and `total_supply_display` fields are unreliable** on
-  any node that was not running continuously from genesis
+Until these fixes are deployed and the replay runs successfully on Beta, Gamma, and Delta, those nodes hold balance state that diverges from Epsilon's authoritative DB.
 
-### Fix Design
+### Status
 
-#### Fix A (Critical): Remove the Balance-Skip Threshold
-
-**File**: `crates/q-storage/src/turbo_sync.rs` ~line 4367
-
-Delete the `extreme_skip_balances_threshold` entirely. Always call the full transaction
-processor:
-
-```rust
-// BEFORE (broken):
-let skip_balances = blocks_behind > extreme_skip_balances_threshold;
-if skip_balances {
-    engine.process_block_coinbase_only_tx(&tx, block).await
-} else {
-    engine.process_block_mining_rewards_tx(&tx, block).await
-}
-
-// AFTER (correct):
-engine.process_block_mining_rewards_tx(&tx, block).await
-```
-
-The sync speed impact is measurable but acceptable — the warp-sync tested at ~47K
-blocks/sec even with full processing for the recent portion. Historical blocks with no
-transfers will process equally fast either way.
-
-#### Fix B (Critical): Persist `total_minted_supply` After Each Batch
-
-**File**: `crates/q-storage/src/lib.rs` — add two functions:
-
-```rust
-pub async fn save_total_minted_supply(&self, supply: u128) -> Result<()> {
-    let value = supply.to_be_bytes();
-    self.hot_db.put(CF_MANIFEST, b"meta:total_minted_supply", &value)?;
-    Ok(())
-}
-
-pub async fn load_total_minted_supply(&self) -> Result<u128> {
-    match self.hot_db.get(CF_MANIFEST, b"meta:total_minted_supply")? {
-        Some(bytes) if bytes.len() == 16 => {
-            Ok(u128::from_be_bytes(bytes.try_into().unwrap()))
-        }
-        _ => Ok(0),
-    }
-}
-```
-
-Call `save_total_minted_supply()` in turbo sync after each batch commit, passing the current
-running sum of all wallet balances.
-
-#### Fix C: Recompute Supply After Sync Completes
-
-**File**: `crates/q-api-server/src/main.rs` ~line 20930
-
-```rust
-if now_synced && !was_synced {
-    // Existing wallet balance reload
-    let persisted = storage.load_wallet_balances().await?;
-    let total: u128 = persisted.values().sum();
-    *app_state.wallet_balances.write().await = persisted;
-    
-    // Fix C: recompute supply from the reloaded balances
-    *app_state.total_minted_supply.write().await = total;
-    info!("🔄 [SYNC COMPLETE] Recomputed total_minted_supply: {} base units", total);
-}
-```
-
-Additionally, on startup, load the persisted supply from RocksDB (Fix B) as the initial value
-rather than starting from 0.
+Bug A, B, C — FIXED in v10.7.1. Replay gating defect — FIX IN PROGRESS. Blocking BAL-001 enforcement.
 
 ---
 
-## BAL-001 Activation Risk Assessment
+## BAL-001 Enforcement Risk
 
-BAL-001 activates at block **18,600,000** (~1,055,000 blocks from now at ~1 block/sec = ~12.2 days).
+Balance root v1 (`BAL-001`) entered shadow mode at block **17,742,000**. As of the discovery of these issues, the current network height is approximately **17,756,000** — the network is 14,000 blocks into shadow mode.
 
-| Scenario | Risk if SYNC-002 unfixed |
-|----------|--------------------------|
-| Fresh node produces blocks | Its blocks embed the wrong `balance_root`; all other validators reject them |
-| Fresh node validates blocks | It incorrectly rejects valid blocks from archive nodes (different balance root) |
-| Network split | Any node with a diverged balance state will fork off from the canonical chain |
+**Shadow mode behaviour**: When a gossiped block carries a `state_root` that does not match the local computation, the mismatch is logged but the block is accepted. Divergence is visible in logs but does not affect consensus.
 
-**The 62-wallet discrepancy on a single test node represents a worst-case delta from the
-archive state. On mainnet, this delta will grow** — every day that mining continues without
-the fix, more transfer-only wallets accumulate on archive nodes that fresh nodes will never
-have. By block 18.6M, the gap may be hundreds of wallets and hundreds of thousands of QUG.
+**Enforcement behaviour** (activates at block **20,000,000**, approximately 244,000 blocks and ~2.8 days from now at 1 bps): Blocks with a missing or incorrect `state_root` are outright rejected. A node with a diverged balance DB will compute a different `state_root` than Epsilon. Every block that node produces will be rejected by Epsilon-adjacent validators.
 
-**Recommendation**: Fix SYNC-002 before block 18,400,000 (~2.3 days of buffer before
-BAL-001 activation). Deploy and run a fresh sync test to verify balance root convergence
-before the activation height.
+### What Breaks If Unfixed
+
+If checkpoint nodes (Beta, Gamma, Delta) still have diverged balance state at block 20,000,000:
+
+- Their produced blocks embed the wrong `state_root` and are rejected by Epsilon.
+- They reject Epsilon's blocks as having the wrong `state_root` from their perspective.
+- The network splits: Epsilon (genesis, authoritative) continues on the canonical chain; checkpoint nodes fork off.
+- Block production on the fork is sustained until enough validators reject its blocks, at which point it stalls.
+- Users connected to Beta or Gamma see their balance state frozen or rolled back when their client reconnects to the canonical chain.
+
+This is a live network fork risk with a hard deadline 2.8 days out.
+
+### Mitigation
+
+1. **Deploy the admin reset endpoint** to Beta, Gamma, and Delta.
+2. **Call `POST /api/v1/admin/reset-balance-replay`** on each node to clear the stale replay flag.
+3. **Deploy the corrected genesis detection** (use `is_checkpoint_applied()` instead of block lookup).
+4. **Verify SYNC-006 replay runs to completion** on each node — check logs for `replay_post_checkpoint_balances` completion message.
+5. **Compare balance roots** across all nodes via the integrity API before block 20,000,000.
 
 ---
 
-## Recommended Fix Priority and Deployment Order
+## Fix Priority and Deployment Order
 
-| Priority | Fix | File(s) | Effort | Deploy by |
-|----------|-----|---------|--------|-----------|
-| 🔴 P0 | SYNC-002 Bug A: remove transfer skip | `turbo_sync.rs` ~4367 | 30 min | Immediately |
-| 🔴 P0 | SYNC-002 Bug C: recompute supply post-sync | `main.rs` ~20930 | 30 min | Immediately |
-| 🟠 P1 | SYNC-002 Bug B: persist supply to RocksDB | `lib.rs`, `turbo_sync.rs` | 2 hours | Before BAL-001 |
-| 🟠 P1 | SYNC-001 Short-term: archive proxy fallback | `handlers.rs`, `main.rs` | 4 hours | This week |
-| 🟡 P2 | SYNC-001 Medium-term: honest height reporting | `main.rs`, P2P layer | 1 day | Next sprint |
-| 🟡 P2 | Add `node_type` to P2P announcements | P2P layer | 2 days | Next sprint |
+The following order minimises risk and respects the BAL-001 deadline:
+
+1. **(IMMEDIATE — P0)** Deploy v10.7.1 binary to Beta, Gamma, Delta. The three core balance bugs (A, B, C) are fixed in this version. Without this, any fresh-synced replacement node would continue diverging.
+
+2. **(IMMEDIATE — P0)** Deploy the corrected genesis detection (`is_checkpoint_applied()` replacing block-1M lookup). This ensures SYNC-006 does not skip replay on checkpoint nodes.
+
+3. **(IMMEDIATE — P0)** Deploy the admin reset endpoint (`POST /api/v1/admin/reset-balance-replay`). Call it on Beta, Gamma, and Delta to clear the stale replay flag and allow SYNC-006 to rerun.
+
+4. **(WITHIN 24 HOURS — P0)** Confirm SYNC-006 replay completed on all three nodes. Compare balance roots against Epsilon. All four nodes must agree on `state_root` by block 20,000,000.
+
+5. **(THIS WEEK — P1)** Implement the `Q_ARCHIVE_NODE_URL` archive proxy fallback for block lookups. Needed for explorer functionality but not a BAL-001 blocker.
+
+6. **(NEXT SPRINT — P2)** Honest height reporting (contiguous stored height, not MAX received). Node type annotations in P2P peer announcements.
 
 ---
 
 ## Test Plan
 
-### After Implementing P0 Fixes
+### Verifying Balance Convergence on Existing Nodes (Steps 1–4)
 
-1. Stop the existing `q-sync-test-v10.7.0` container
-2. Delete its DB: `rm -rf /home/orobit/docker-sync-test-v10.7.0/`
-3. Build a new binary with the fixes (bump version to v10.7.1)
-4. Spin a fresh container with the same parameters
-5. Let it sync to tip (expected: ~6–10 min to warp-sync floor, then gradual catch-up)
-6. Run comparison:
+After deploying the corrected genesis detection and triggering a fresh replay on each checkpoint node:
 
 ```bash
-# Balance root must match (allow ±10 block height difference)
-curl -sf http://localhost:8086/api/v1/integrity/balance-root
-curl -sf http://localhost:8080/api/v1/integrity/balance-root
+# On each checkpoint node (Beta port 8080, Gamma port 8808, Delta port 8080):
+curl -sf http://<host>:<port>/api/v1/integrity/balance-root | python3 -m json.tool
 
-# Wallet count must be within ±5 of live node
-# total_supply must be within 0.1% of live node
+# Compare against Epsilon (authoritative):
+curl -sf http://89.149.241.126:8080/api/v1/integrity/balance-root | python3 -m json.tool
+```
 
-# Supply health must be true on both (already fixed in v10.7.0)
-curl -sf http://localhost:8086/api/v1/integrity/full | python3 -c '
-import sys,json; d=json.load(sys.stdin)["data"]
-print("supply_healthy:", d["supply_healthy"])
+All nodes must return the same `balance_root` hash (allowing for a ±10 block height difference due to live block production during the comparison window).
+
+Additionally verify:
+
+```bash
+# Wallet count within ±5 across all nodes
+# Total supply within 0.01% across all nodes
+# supply_healthy = true on all nodes
+curl -sf http://<host>:<port>/api/v1/integrity/full | python3 -c '
+import sys, json
+d = json.load(sys.stdin)["data"]
 print("wallet_count:", d["wallet_count"])
+print("total_supply_display:", d.get("total_supply_display"))
+print("supply_healthy:", d["supply_healthy"])
 print("all_healthy:", d["all_healthy"])
 '
 ```
 
-### After Implementing P1 Fix (Archive Proxy)
+### Verifying Fix on a Fresh Sync (Regression Test)
+
+After all fixes are deployed:
+
+1. Spin a fresh Docker container with a v10.7.1+ binary and an empty database.
+2. Let it sync to chain tip (expected ~6 hours from genesis sync, or warp-sync to checkpoint in ~30 minutes).
+3. Compare balance root and wallet count against Epsilon.
+4. The balance root must match Epsilon's within a 10-block window. Wallet count must be within ±5.
+5. Verify no `coinbase_only` log lines appear during sync (confirming the skip threshold is removed).
+
+### Verifying Archive Proxy (After P1 Fix)
+
+On a fresh warp-synced node with `Q_ARCHIVE_NODE_URL=http://89.149.241.126:8080`:
 
 ```bash
-# On a fresh node with Q_ARCHIVE_NODE_URL=http://89.149.241.126:8080:
-curl http://localhost:8086/api/v1/blocks/1000       # must return block data
-curl http://localhost:8086/api/v1/blocks/100000     # must return block data
-curl http://localhost:8086/api/v1/blocks/5000000    # must return block data
-curl http://localhost:8086/api/v1/blocks/16000000   # must return block data
+curl http://localhost:8080/api/v1/blocks/1000        # must return block JSON (proxied from Epsilon)
+curl http://localhost:8080/api/v1/blocks/5000000     # must return block JSON
+curl http://localhost:8080/api/v1/blocks/16000000    # must return block JSON
+curl http://localhost:8080/api/v1/blocks/16750000    # must return block JSON (at checkpoint boundary)
+curl http://localhost:8080/api/v1/blocks/17000000    # must return block JSON (locally stored)
 ```
 
-All four must return valid block JSON (not 404).
+All five requests must return valid block data. The first four proxy through Epsilon; the last is served locally.
 
-### Regression Tests to Add
+### Regression Test Suite to Add
 
 ```
-crates/q-storage/tests/sync_balance_determinism_tests.rs
-  - test_fresh_sync_wallet_count_matches_archive()
-  - test_fresh_sync_supply_matches_archive()
-  - test_transfer_wallets_present_after_sync()
-  - test_total_supply_persisted_across_restart()
+crates/q-storage/tests/sync_balance_integrity_v2_tests.rs
 
-  # Minimal deterministic transfer correctness test (most important):
-  # Block 1: coinbase A +100
-  # Block 2: transfer A → B 40
-  # Expected: A=60, B=40, supply=100, wallet_count=2
-  # Must produce identical result from both normal processing and turbo sync.
-  - test_turbo_sync_applies_transfer_debits_and_credits()
-  - test_coinbase_only_processor_not_used_during_fresh_sync()
-  - test_balance_root_stable_across_restart()
-  - test_current_height_reports_contiguous_height_not_max_seen()
-  - test_missing_historical_block_returns_archive_proxy_source_when_configured()
-  - test_light_node_does_not_advertise_archive_capability()
-```
-
-### Hard Invariant: No Balance Skipping
-
-Now that the balance-skip variables are removed, add a compile-time guard against
-re-introduction. Place in `turbo_sync.rs` as a module-level comment or assertion:
-
-```rust
-// INVARIANT (v10.7.1+): Balance skipping during sync is FORBIDDEN.
-// Wallet state is consensus-critical (BAL-001, block 18,600,000).
-// Any optimization that skips transfer debits/credits creates a different
-// state machine from archive replay. Do not re-introduce Q_EXTREME_SKIP_BALANCES.
-// If this needs revisiting, balance roots must be verified identical post-sync first.
+  test_fresh_sync_applies_all_transfer_transactions()
+  test_fresh_sync_wallet_count_matches_genesis_node()
+  test_fresh_sync_supply_matches_genesis_node()
+  test_total_minted_supply_survives_restart()
+  test_balance_root_converges_between_checkpoint_and_genesis_node()
+  test_replay_gating_uses_is_checkpoint_applied_not_block_lookup()
+  test_replay_flag_reset_allows_second_replay()
+  test_coinbase_only_processor_never_used_during_fresh_sync()
 ```
 
 ---
 
 ## Appendix: Key File Reference
 
-| File | Line Range | Topic |
-|------|-----------|-------|
-| `crates/q-storage/src/turbo_sync.rs` | 6250–6280 | Checkpoint probe overrides `effective_start_height` |
-| `crates/q-storage/src/turbo_sync.rs` | 4367–4401 | Balance skip threshold (Bug A) |
-| `crates/q-storage/src/turbo_sync.rs` | 4403–4465 | Missing `save_total_minted_supply` (Bug B) |
-| `crates/q-api-server/src/main.rs` | 6642–6656 | `current_height_atomic` set to MAX, not contiguous |
-| `crates/q-api-server/src/main.rs` | 20898–20950 | Post-sync reload missing supply recompute (Bug C) |
-| `crates/q-storage/src/lib.rs` | 2379–2510 | `get_qblock_any_format` — no archive fallback |
-| `crates/q-storage/src/lib.rs` | 2011–2150 | `get_qblocks_range` — returns empty Vec silently |
-| `crates/q-api-server/src/handlers.rs` | 735–758 | Block handler — 404 on miss, no proxy |
-| `crates/q-api-server/src/integrity_api.rs` | 186, 419 | `supply_healthy` check (already fixed in v10.7.0) |
+| File | Topic |
+|------|-------|
+| `crates/q-storage/src/turbo_sync.rs` ~line 4389 | Bug A fix — skip threshold removal; comment documents invariant |
+| `crates/q-storage/src/turbo_sync.rs` (batch commit) | Bug B fix — `save_total_supply()` call after each commit |
+| `crates/q-storage/src/turbo_sync.rs` ~line 6250 | `probe_network_gap()` — sets `effective_start_height` to checkpoint floor |
+| `crates/q-api-server/src/main.rs` ~line 6642 | `current_height_atomic` set to MAX received (honest reporting not yet fixed) |
+| `crates/q-api-server/src/main.rs` (SYNC-006 task) | Polling replay task replacing edge-triggered sync-complete handler |
+| `crates/q-storage/src/lib.rs` `get_qblock_any_format()` | Block lookup — no archive fallback exists yet |
+| `crates/q-api-server/src/handlers.rs` (block endpoint) | Returns 404 on miss — archive proxy not yet implemented |
