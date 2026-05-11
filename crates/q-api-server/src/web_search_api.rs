@@ -928,3 +928,156 @@ pub async fn call_assist_handler(
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AI Chat — Gemma4 via Ollama with live network context injection
+// POST /api/v1/ai/chat
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct AiChatRequest {
+    pub messages: Vec<EmailMessage>,
+    pub wallet: Option<String>,
+}
+
+async fn build_live_network_context(state: &crate::AppState) -> String {
+    use q_storage::PEER_COMPUTE_POWER;
+
+    let status = state.node_status.read().await;
+    let height = status.current_height;
+    let peers = status.connected_peers;
+    drop(status);
+
+    let (hashrate_raw, active_miners) = if let Some(ref ms) = state.mining_statistics {
+        let mut ms = ms.write().await;
+        let local = ms.calculate_network_hashrate();
+        let miners = ms.active_miner_count();
+        let peer_hr: f64 = PEER_COMPUTE_POWER.iter().map(|e| e.value().0).sum();
+        let peer_cnt = PEER_COMPUTE_POWER.len();
+        (local + peer_hr, miners + peer_cnt)
+    } else {
+        let peer_hr: f64 = PEER_COMPUTE_POWER.iter().map(|e| e.value().0).sum();
+        (peer_hr, PEER_COMPUTE_POWER.len())
+    };
+
+    let hashrate_str = if hashrate_raw >= 1e12 {
+        format!("{:.2} TH/s", hashrate_raw / 1e12)
+    } else if hashrate_raw >= 1e9 {
+        format!("{:.2} GH/s", hashrate_raw / 1e9)
+    } else if hashrate_raw >= 1e6 {
+        format!("{:.2} MH/s", hashrate_raw / 1e6)
+    } else if hashrate_raw >= 1e3 {
+        format!("{:.2} KH/s", hashrate_raw / 1e3)
+    } else {
+        format!("{:.0} H/s", hashrate_raw)
+    };
+
+    let supply_raw = *state.total_minted_supply.read().await;
+    let supply_qug = supply_raw as f64 / 1e24;
+
+    let genesis_ts = crate::handlers::active_genesis_timestamp();
+    let now_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let reward_raw = crate::handlers::calculate_block_reward_time_based(genesis_ts, now_ts);
+    let reward_qug = reward_raw as f64 / 1e24;
+
+    format!(
+        "LIVE NETWORK DATA (as of this request):\n\
+         - Block height: {height}\n\
+         - Connected peers: {peers}\n\
+         - Network hashrate: {hashrate_str}\n\
+         - Active miners: {active_miners}\n\
+         - Total mined supply: {supply_qug:.2} QUG / 21,000,000 QUG max\n\
+         - Current block reward: {reward_qug:.4} QUG\n"
+    )
+}
+
+pub async fn ai_chat_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AiChatRequest>,
+) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, (StatusCode, Json<ErrorResponse>)> {
+    let ollama_url = std::env::var("OLLAMA_URL").unwrap_or_else(|_| DEFAULT_OLLAMA_URL.to_string());
+    let model = std::env::var("OLLAMA_CHAT_MODEL")
+        .or_else(|_| std::env::var("OLLAMA_MODEL"))
+        .unwrap_or_else(|_| "gemma4".to_string());
+
+    let live_ctx = build_live_network_context(&state).await;
+    let system_content = format!("{}\n\n{}", DIRECT_CHAT_PROMPT, live_ctx);
+
+    let mut messages: Vec<OllamaMessage> = Vec::with_capacity(req.messages.len() + 1);
+    if !req.messages.first().map(|m| m.role == "system").unwrap_or(false) {
+        messages.push(OllamaMessage { role: "system".to_string(), content: system_content });
+    }
+    for m in req.messages {
+        messages.push(OllamaMessage { role: m.role, content: m.content });
+    }
+
+    let stream = async_stream::stream! {
+        let ollama_req = OllamaChatRequest { model, messages, stream: true, think: false };
+        let client = match reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(30))
+            .read_timeout(Duration::from_secs(300))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                let err = ErrorEvent { message: format!("Internal error: {}", e) };
+                if let Ok(json) = serde_json::to_string(&err) { yield Ok(Event::default().event("error").data(json)); }
+                return;
+            }
+        };
+
+        let chat_url = format!("{}/api/chat", ollama_url);
+        let response = match client.post(&chat_url).header("Content-Type", "application/json").json(&ollama_req).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                error!("[AiChat] Ollama unreachable at {}: {}", chat_url, e);
+                let err = ErrorEvent { message: format!("AI unavailable — is Ollama running? ({})", e) };
+                if let Ok(json) = serde_json::to_string(&err) { yield Ok(Event::default().event("error").data(json)); }
+                return;
+            }
+        };
+
+        if !response.status().is_success() {
+            let status = response.status();
+            error!("[AiChat] Ollama HTTP {}", status);
+            let err = ErrorEvent { message: format!("AI returned HTTP {}", status) };
+            if let Ok(json) = serde_json::to_string(&err) { yield Ok(Event::default().event("error").data(json)); }
+            return;
+        }
+
+        let byte_stream = response.bytes_stream();
+        let mut pinned = std::pin::pin!(byte_stream);
+        let mut buffer = String::new();
+        while let Some(chunk_result) = pinned.next().await {
+            match chunk_result {
+                Ok(bytes) => {
+                    buffer.push_str(&String::from_utf8_lossy(&bytes));
+                    while let Some(line_end) = buffer.find('\n') {
+                        let line = buffer[..line_end].trim().to_string();
+                        buffer = buffer[line_end + 1..].to_string();
+                        if line.is_empty() { continue; }
+                        if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(&line) {
+                            if let Some(content) = chunk.get("message").and_then(|m| m.get("content")).and_then(|c| c.as_str()) {
+                                if !content.is_empty() {
+                                    let tok = TokenEvent { content: content.to_string() };
+                                    if let Ok(json) = serde_json::to_string(&tok) { yield Ok(Event::default().event("token").data(json)); }
+                                }
+                            }
+                            if chunk.get("done").and_then(|d| d.as_bool()).unwrap_or(false) {
+                                let done = DoneEvent { total_tokens: None };
+                                if let Ok(json) = serde_json::to_string(&done) { yield Ok(Event::default().event("done").data(json)); }
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(e) => { error!("[AiChat] Stream error: {}", e); break; }
+            }
+        }
+    };
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
+}
