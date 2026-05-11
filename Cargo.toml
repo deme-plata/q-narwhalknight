@@ -78,7 +78,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.8.8"  # v10.8.8: replay completeness — mark_done in SYNC-004 (BAL-002) + replay_done in /integrity/full (BAL-003)
+version = "10.8.9"  # v10.8.9: BAL-001 shadow mode at h=17,742,000 (~30 min post-deploy) + rich mismatch diagnostics
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"

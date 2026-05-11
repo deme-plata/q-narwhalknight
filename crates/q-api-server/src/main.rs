@@ -11538,7 +11538,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 //          ENFORCEMENT at h>=20,000,000
                                 // ============================================
                                 //
-                                // SHADOW MODE (h >= 18,000,000 and h < 20,000,000):
+                                // SHADOW MODE (h >= 17,742,000 and h < 20,000,000):
                                 //   Compute and compare balance roots on every received block.
                                 //   Log mismatches loudly but ACCEPT the block.
                                 //   Purpose: prove all nodes converge before enforcement locks things in.
@@ -11606,42 +11606,90 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                         }
                                     }
                                 } else {
-                                    // ---- SHADOW MODE (18,000,000 <= h < 20,000,000) ----
+                                    // ---- SHADOW MODE (17,800,000 <= h < 20,000,000) ----
                                     // Gate not yet active — run shadow checks but never reject.
                                     // Mismatches here are early warnings; resolve before h=20,000,000.
-                                    const BALANCE_ROOT_SHADOW_START: u64 = 18_000_000;
+                                    // v10.8.9: Lowered from 18,000,000 → 17,742,000 so shadow monitoring
+                                    // begins ~30 min after deploy (network at 17,736,582 on 2026-05-11;
+                                    // 1 block/sec → 5,418 blocks ≈ 90 min deploy window before shadow fires).
+                                    const BALANCE_ROOT_SHADOW_START: u64 = 17_742_000;
                                     if block_height >= BALANCE_ROOT_SHADOW_START {
+                                        // Announce shadow mode activation once at the boundary
+                                        if block_height == BALANCE_ROOT_SHADOW_START {
+                                            warn!(
+                                                "🔍 [BALANCE ROOT v1 SHADOW] ═══════════════════════════════════\n\
+                                                 🔍 [BALANCE ROOT v1 SHADOW] SHADOW MODE ACTIVE from block {}\n\
+                                                 🔍 [BALANCE ROOT v1 SHADOW] Every received block will be balance-root verified.\n\
+                                                 🔍 [BALANCE ROOT v1 SHADOW] Mismatches are LOGGED but NOT rejected until h=20,000,000.\n\
+                                                 🔍 [BALANCE ROOT v1 SHADOW] Monitor: journalctl -u q-api-server | grep 'BALANCE ROOT v1'\n\
+                                                 🔍 [BALANCE ROOT v1 SHADOW] ═══════════════════════════════════",
+                                                block_height
+                                            );
+                                        }
+
                                         if block.header.state_root == [0u8; 32] {
-                                            warn!("🔍 [BALANCE ROOT v1 SHADOW] Block {} has zero state_root — peer may be unupgraded. \
-                                                   Must be resolved before enforcement at h=20,000,000.",
-                                                  block_height);
+                                            warn!(
+                                                "🔍 [BALANCE ROOT v1 SHADOW] Block {} — zero state_root from peer.\n  \
+                                                 Producer may be running an unupgraded binary (pre-v10.8.8).\n  \
+                                                 This MUST be resolved before enforcement at h=20,000,000.\n  \
+                                                 Blocks until enforcement: {}",
+                                                block_height,
+                                                20_000_000u64.saturating_sub(block_height)
+                                            );
                                             // Shadow mode: accept block, do not reject
                                         } else {
                                             let local_root = match storage.compute_balance_root_for_block().await {
                                                 Ok(r) => r,
                                                 Err(e) => {
-                                                    error!("💥 [BALANCE ROOT v1 SHADOW] Failed to compute local balance root at block {}: {}",
-                                                           block_height, e);
+                                                    error!(
+                                                        "💥 [BALANCE ROOT v1 SHADOW] Block {} — local root computation failed: {}\n  \
+                                                         Cannot compare — check storage health (/api/v1/integrity/full).",
+                                                        block_height, e
+                                                    );
                                                     [0u8; 32]
                                                 }
                                             };
                                             if local_root == [0u8; 32] {
                                                 // Computation failed — skip comparison
                                             } else if local_root != block.header.state_root {
+                                                // Load wallet count and supply for diagnostics
+                                                let (wallet_count, total_supply) = {
+                                                    let wb = state_clone.wallet_balances.read().await;
+                                                    let count = wb.len();
+                                                    let supply: u128 = wb.values().sum();
+                                                    (count, supply)
+                                                };
                                                 error!(
-                                                    "🚨 [BALANCE ROOT v1 SHADOW] MISMATCH at block {} — NOT rejecting (shadow mode, enforcement at h=20,000,000).\n  \
-                                                     Block claims: {}\n  \
-                                                     Local state:  {}\n  \
-                                                     Root divergence MUST be resolved before enforcement. \
-                                                     Check /api/v1/integrity/balance-root on all nodes.",
+                                                    "🚨 [BALANCE ROOT v1 SHADOW] MISMATCH at block {} ══════════════════\n\
+                                                     🚨  Block state_root (peer): {}\n\
+                                                     🚨  Local state_root:        {}\n\
+                                                     🚨  Local wallet count:       {}\n\
+                                                     🚨  Local total supply (raw): {}\n\
+                                                     🚨  NOT rejecting (shadow mode — enforcement at h=20,000,000).\n\
+                                                     🚨  Blocks until enforcement: {}\n\
+                                                     🚨  Diagnose: curl http://localhost:8080/api/v1/integrity/full\n\
+                                                     🚨 ════════════════════════════════════════════════════════════",
                                                     block_height,
                                                     hex::encode(block.header.state_root),
-                                                    hex::encode(local_root)
+                                                    hex::encode(local_root),
+                                                    wallet_count,
+                                                    total_supply,
+                                                    20_000_000u64.saturating_sub(block_height)
                                                 );
                                                 // Shadow mode: accept block, do not reject
                                             } else {
-                                                debug!("✅ [BALANCE ROOT v1 SHADOW] Block {} root verified: {}",
-                                                    block_height, hex::encode(&local_root[..8]));
+                                                // Log every 10,000 blocks to confirm shadow mode is healthy
+                                                if block_height % 10_000 == 0 {
+                                                    info!(
+                                                        "✅ [BALANCE ROOT v1 SHADOW] Block {} root verified: {} (shadow healthy, {} blocks to enforcement)",
+                                                        block_height,
+                                                        hex::encode(&local_root[..8]),
+                                                        20_000_000u64.saturating_sub(block_height)
+                                                    );
+                                                } else {
+                                                    debug!("✅ [BALANCE ROOT v1 SHADOW] Block {} root OK: {}",
+                                                        block_height, hex::encode(&local_root[..8]));
+                                                }
                                             }
                                         }
                                     }
