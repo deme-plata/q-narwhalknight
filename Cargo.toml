@@ -78,7 +78,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.8.5"  # v10.8.5: fix height_atomic jump — guard sequential-batch update to ±5000 blocks
+version = "10.8.8"  # v10.8.8: replay completeness — mark_done in SYNC-004 (BAL-002) + replay_done in /integrity/full (BAL-003)
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"

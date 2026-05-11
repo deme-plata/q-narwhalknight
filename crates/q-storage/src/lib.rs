@@ -2500,6 +2500,70 @@ impl QStorage {
             }
         }
 
+        // === Format 4: Archive node HTTP fallback ===
+        // Nodes that warp-synced from a checkpoint (~height 16,538,868) have no blocks
+        // below that height locally.  For those gaps, transparently fetch from the
+        // archive node (Epsilon) which holds full history from genesis.
+        //
+        // Guard: only for heights at or below the checkpoint so we never create a
+        // recursive loop (the archive node itself always has these blocks locally).
+        // The env var Q_ARCHIVE_NODE_URL lets operators override the default URL.
+        const ARCHIVE_CHECKPOINT_HEIGHT: u64 = 16_538_868;
+        if height <= ARCHIVE_CHECKPOINT_HEIGHT {
+            // Resolve the archive base URL at call-time (cheap env-var read, no lock).
+            let archive_base = std::env::var("Q_ARCHIVE_NODE_URL")
+                .unwrap_or_else(|_| "http://89.149.241.126:8080".to_string());
+            let url = format!("{}/api/v1/blocks/{}", archive_base, height);
+
+            // ureq is a blocking HTTP client — must run inside spawn_blocking to avoid
+            // stalling the async executor.
+            let url_clone = url.clone();
+            let fetch_result = tokio::task::spawn_blocking(move || -> Option<q_types::block::QBlock> {
+                match ureq::get(&url_clone)
+                    .timeout(std::time::Duration::from_secs(10))
+                    .call()
+                {
+                    Ok(resp) => {
+                        match resp.into_string() {
+                            Ok(body) => {
+                                // Response is ApiResponse<QBlock>: {"success":true,"data":{...},...}
+                                #[derive(serde::Deserialize)]
+                                struct ArchiveResponse {
+                                    success: bool,
+                                    data: Option<q_types::block::QBlock>,
+                                }
+                                match serde_json::from_str::<ArchiveResponse>(&body) {
+                                    Ok(r) if r.success => r.data,
+                                    Ok(_) => None,
+                                    Err(_) => None,
+                                }
+                            }
+                            Err(_) => None,
+                        }
+                    }
+                    Err(_) => None,
+                }
+            })
+            .await;
+
+            match fetch_result {
+                Ok(Some(block)) => {
+                    debug!("📡 [ARCHIVE] Fetched block at height {} from archive node ({})", height, url);
+                    // Cache the block locally so future queries hit the local DB.
+                    if let Err(e) = self.save_qblock(&block).await {
+                        debug!("⚠️ [ARCHIVE] Failed to cache block at height {} locally: {}", height, e);
+                    }
+                    return Ok(Some(block));
+                }
+                Ok(None) => {
+                    debug!("📡 [ARCHIVE] Archive node returned no block at height {} ({})", height, url);
+                }
+                Err(e) => {
+                    debug!("📡 [ARCHIVE] spawn_blocking error for archive fetch at height {}: {}", height, e);
+                }
+            }
+        }
+
         Ok(None)
     }
 
@@ -4294,7 +4358,10 @@ impl QStorage {
                         }
                     }
                 }
-                info!(
+                // BAL-001: Demoted from info! to debug! — this is called once per block during
+                // balance root computation (shadow mode + enforcement). At 1 bps and ~17M+ blocks,
+                // info-level here generates one log line per second indefinitely, filling syslog.
+                debug!(
                     "💰 Loaded {} wallet balances from persistent storage",
                     balances.len()
                 );
@@ -4426,9 +4493,44 @@ impl QStorage {
     /// This is intentionally SEPARATE from `compute_balance_state_hash()`:
     /// - `compute_balance_state_hash()` uses little-endian and no domain separator (legacy)
     /// - `compute_balance_root_for_block()` uses big-endian + domain separator (canonical spec)
+    ///
+    /// ## Determinism guarantees (BAL-001 audit, 2026-05-11)
+    ///
+    /// This function is deterministic across all nodes IF AND ONLY IF the wallet balance
+    /// state in RocksDB is identical. Specifically:
+    ///
+    /// 1. **Zero-balance filtering**: wallets with amount == 0 are excluded. Any code path
+    ///    that writes a zero balance via `save_wallet_balance` / `save_wallet_balances`
+    ///    will cause a root mismatch vs a node that never wrote that zero entry. The
+    ///    max-wins guard in `save_wallet_balances` prevents going from non-zero → zero;
+    ///    however `save_wallet_balance` (singular) has no such guard on zero writes.
+    ///    Writers MUST NOT persist zero balances — use the wallet's absence in the DB to
+    ///    represent a zero balance instead.
+    ///
+    /// 2. **Sort order**: sorted by raw `[u8; 32]` address bytes (unsigned lexicographic).
+    ///    This is independent of RocksDB key order (which sorts by hex-string keys).
+    ///    The re-sort here is what makes it deterministic regardless of scan order.
+    ///
+    /// 3. **Encoding**: u128 amounts serialised as 16-byte big-endian. Unchanged since
+    ///    BalanceRootV1 was introduced. Do NOT change endianness — it would invalidate
+    ///    all historical shadow checks.
+    ///
+    /// 4. **Legacy u64 entries**: `load_wallet_balances` converts 8-byte legacy entries
+    ///    to u128 via `* 10^16`. If some nodes have already been rewritten to 16-byte
+    ///    and others still hold 8-byte entries for the same wallet, the amounts differ
+    ///    and roots will diverge. Ensure all nodes have migrated to the 16-byte format
+    ///    before enforcement activates at height 20,000,000.
+    ///
+    /// 5. **Checkpoint replay**: nodes that bootstrapped from a checkpoint snapshot run
+    ///    `replay_post_checkpoint_balances` (gated on `is_checkpoint_applied()`). If
+    ///    replay produces a different balance set than Epsilon's genesis-derived state,
+    ///    roots will diverge. Shadow-mode mismatch logs are the early warning system.
     pub async fn compute_balance_root_for_block(&self) -> Result<[u8; 32]> {
         let balances = self.load_wallet_balances().await?;
 
+        // BAL-001: Explicit zero-balance exclusion — zero-balance entries must NOT appear in
+        // the root. A node that has stored a zero balance for a wallet (e.g. after a drain)
+        // MUST NOT include it here. Nodes that never wrote the entry agree: both see nothing.
         let mut sorted: Vec<([u8; 32], u128)> = balances
             .into_iter()
             .filter(|(_, amount)| *amount > 0)
@@ -4438,15 +4540,16 @@ impl QStorage {
             return Ok([0u8; 32]);
         }
 
+        // BAL-001: Sort by raw address bytes — deterministic regardless of HashMap or DB order.
         sorted.sort_by_key(|(addr, _)| *addr);
 
         let mut root_hasher = blake3::Hasher::new();
-        root_hasher.update(b"balance_root_v1"); // domain separator
+        root_hasher.update(b"balance_root_v1"); // domain separator — NEVER change
 
         for (addr, amount) in &sorted {
             let mut leaf_hasher = blake3::Hasher::new();
             leaf_hasher.update(addr.as_slice());
-            leaf_hasher.update(&amount.to_be_bytes()); // big-endian per spec
+            leaf_hasher.update(&amount.to_be_bytes()); // big-endian per spec — NEVER change
             let leaf = leaf_hasher.finalize();
             root_hasher.update(leaf.as_bytes());
         }

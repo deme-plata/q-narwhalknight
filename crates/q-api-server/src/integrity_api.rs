@@ -379,6 +379,11 @@ pub struct FullIntegrityReport {
     pub decentralization_healthy: bool,
     pub balance_root_v1_active: bool,
     pub blocks_until_balance_root_v1: i64,
+    /// Whether this node bootstrapped from the balance checkpoint (vs. from genesis).
+    pub is_checkpoint_node: bool,
+    /// Whether the post-checkpoint balance replay has completed successfully.
+    /// false on a checkpoint node means balances are incomplete (transfer-only wallets missing).
+    pub balance_replay_done: bool,
     /// Overall health: true only if all sub-checks pass.
     pub all_healthy: bool,
 }
@@ -457,10 +462,22 @@ pub async fn get_full_integrity(
         q_consensus_guard::Upgrade::BalanceRootV1, height);
     let blocks_until = ((ACTIVATION as i64) - (height as i64)).max(0);
 
+    // Replay status — relevant for diagnosing 62-wallet / supply divergence
+    let is_checkpoint_node = state.storage_engine.is_checkpoint_applied().await;
+    let balance_replay_done = if is_checkpoint_node {
+        state.storage_engine.is_balance_replay_done().await
+    } else {
+        true // genesis nodes don't need replay; treat as "done"
+    };
+
+    // A checkpoint node whose replay is not yet done has incomplete balances.
+    let replay_healthy = !is_checkpoint_node || balance_replay_done;
+
     let all_healthy = balance_root != "error"
         && supply_healthy
         && pools_consistent
-        && (peer_count >= 2);
+        && (peer_count >= 2)
+        && replay_healthy;
 
     Ok(IntegrityResponse::ok(FullIntegrityReport {
         balance_root,
@@ -480,6 +497,8 @@ pub async fn get_full_integrity(
         decentralization_healthy,
         balance_root_v1_active,
         blocks_until_balance_root_v1: blocks_until,
+        is_checkpoint_node,
+        balance_replay_done,
         all_healthy,
     }))
 }

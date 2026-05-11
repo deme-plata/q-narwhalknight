@@ -11534,46 +11534,115 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 }
 
                                 // ============================================
-                                // 🔍 BalanceRootV1: SHADOW MODE — compute and compare, no rejection
+                                // BAL-001: BalanceRootV1 — SHADOW MODE before h=20,000,000,
+                                //          ENFORCEMENT at h>=20,000,000
                                 // ============================================
-                                // Shadow mode: log mismatches but never drop the block.
-                                // Full enforcement activates at height 20,000,000 after shadow soak proves
-                                // all nodes agree. Change `warn!` → `return` to enable enforcement.
+                                //
+                                // SHADOW MODE (h >= 18,000,000 and h < 20,000,000):
+                                //   Compute and compare balance roots on every received block.
+                                //   Log mismatches loudly but ACCEPT the block.
+                                //   Purpose: prove all nodes converge before enforcement locks things in.
+                                //
+                                // ENFORCEMENT MODE (h >= 20,000,000, via BalanceRootV1 upgrade gate):
+                                //   A root mismatch is a hard consensus failure → REJECT the block (return).
+                                //   A zero state_root from the peer means unupgraded binary → REJECT.
+                                //
+                                // PRE-CONDITIONS that MUST hold before enforcement activates:
+                                //   1. Zero [BALANCE ROOT v1 SHADOW] MISMATCH errors in the 10,000 blocks
+                                //      preceding h=20,000,000 on ALL bootstrap nodes (Beta/Gamma/Epsilon/Delta).
+                                //   2. All nodes have completed post-checkpoint balance replay
+                                //      (is_checkpoint_applied() + replay_post_checkpoint_balances succeeded).
+                                //   3. No legacy 8-byte u64 wallet entries remain in any node's RocksDB
+                                //      (see load_wallet_balances u64→u128 conversion in lib.rs).
+                                //   4. Binary version >= 10.8.6 deployed on ALL nodes before h=20,000,000.
+                                //
                                 // ============================================
-                                if q_consensus_guard::is_upgrade_active(
+                                let bal_root_enforcement = q_consensus_guard::is_upgrade_active(
                                     q_consensus_guard::Upgrade::BalanceRootV1,
                                     block_height,
-                                ) {
+                                );
+                                if bal_root_enforcement {
+                                    // ---- ENFORCEMENT MODE (h >= 20,000,000) ----
                                     if block.header.state_root == [0u8; 32] {
-                                        warn!("🔍 [BALANCE ROOT v1 SHADOW] Block {} has zero state_root — peer may be unupgraded.",
-                                              block_height);
-                                        // Shadow mode: accept block, do not reject
+                                        // Peer has not written a balance root — unupgraded binary
+                                        // or block producer failed compute_balance_root_for_block.
+                                        // Hard reject: unupgraded peers cannot participate post-enforcement.
+                                        error!(
+                                            "🚨 [BALANCE ROOT v1] REJECT block {} — zero state_root from peer (unupgraded or producer failure). \
+                                             Enforcement active at h>=20,000,000.",
+                                            block_height
+                                        );
+                                        return; // BAL-001 ENFORCEMENT: reject zero state_root
                                     } else {
-                                        // Compute local balance root BEFORE applying this block's transactions
+                                        // Compute local balance root BEFORE applying this block's transactions.
                                         let local_root = match storage.compute_balance_root_for_block().await {
                                             Ok(r) => r,
                                             Err(e) => {
-                                                error!("💥 [BALANCE ROOT v1 SHADOW] Failed to compute local balance root at block {}: {}",
+                                                error!("💥 [BALANCE ROOT v1] Failed to compute local balance root at block {}: {}. \
+                                                        Cannot verify — accepting (storage error, not peer fault).",
                                                        block_height, e);
                                                 [0u8; 32]
                                             }
                                         };
                                         if local_root == [0u8; 32] {
-                                            // Computation failed — skip comparison
+                                            // Our own computation failed (storage error) — cannot enforce.
+                                            // Accept and warn; do NOT punish the peer for our storage fault.
+                                            warn!("⚠️ [BALANCE ROOT v1] Block {} accepted despite local root computation failure — check storage health.",
+                                                  block_height);
                                         } else if local_root != block.header.state_root {
                                             error!(
-                                                "🚨 [BALANCE ROOT v1 SHADOW] MISMATCH at block {} — NOT rejecting (shadow mode).\n  \
+                                                "🚨 [BALANCE ROOT v1] REJECT block {} — root MISMATCH (enforcement active h>=20,000,000).\n  \
                                                  Block claims: {}\n  \
                                                  Local state:  {}\n  \
-                                                 Root divergence detected. Check /api/v1/integrity/balance-root on all nodes.",
+                                                 Hard consensus failure. Check /api/v1/integrity/balance-root on all nodes.",
                                                 block_height,
                                                 hex::encode(block.header.state_root),
                                                 hex::encode(local_root)
                                             );
+                                            return; // BAL-001 ENFORCEMENT: reject mismatched balance root
+                                        } else {
+                                            debug!("✅ [BALANCE ROOT v1] Block {} balance root verified: {}",
+                                                block_height, hex::encode(&local_root[..8]));
+                                        }
+                                    }
+                                } else {
+                                    // ---- SHADOW MODE (18,000,000 <= h < 20,000,000) ----
+                                    // Gate not yet active — run shadow checks but never reject.
+                                    // Mismatches here are early warnings; resolve before h=20,000,000.
+                                    const BALANCE_ROOT_SHADOW_START: u64 = 18_000_000;
+                                    if block_height >= BALANCE_ROOT_SHADOW_START {
+                                        if block.header.state_root == [0u8; 32] {
+                                            warn!("🔍 [BALANCE ROOT v1 SHADOW] Block {} has zero state_root — peer may be unupgraded. \
+                                                   Must be resolved before enforcement at h=20,000,000.",
+                                                  block_height);
                                             // Shadow mode: accept block, do not reject
                                         } else {
-                                            debug!("✅ [BALANCE ROOT v1 SHADOW] Block {} root verified: {}",
-                                                block_height, hex::encode(&local_root[..8]));
+                                            let local_root = match storage.compute_balance_root_for_block().await {
+                                                Ok(r) => r,
+                                                Err(e) => {
+                                                    error!("💥 [BALANCE ROOT v1 SHADOW] Failed to compute local balance root at block {}: {}",
+                                                           block_height, e);
+                                                    [0u8; 32]
+                                                }
+                                            };
+                                            if local_root == [0u8; 32] {
+                                                // Computation failed — skip comparison
+                                            } else if local_root != block.header.state_root {
+                                                error!(
+                                                    "🚨 [BALANCE ROOT v1 SHADOW] MISMATCH at block {} — NOT rejecting (shadow mode, enforcement at h=20,000,000).\n  \
+                                                     Block claims: {}\n  \
+                                                     Local state:  {}\n  \
+                                                     Root divergence MUST be resolved before enforcement. \
+                                                     Check /api/v1/integrity/balance-root on all nodes.",
+                                                    block_height,
+                                                    hex::encode(block.header.state_root),
+                                                    hex::encode(local_root)
+                                                );
+                                                // Shadow mode: accept block, do not reject
+                                            } else {
+                                                debug!("✅ [BALANCE ROOT v1 SHADOW] Block {} root verified: {}",
+                                                    block_height, hex::encode(&local_root[..8]));
+                                            }
                                         }
                                     }
                                 }
@@ -21323,6 +21392,32 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 ).await {
                                     Ok(missed) => {
                                         info!("✅ [SYNC COMPLETE v10.7.3] Post-checkpoint balance replay complete ({} blocks missed).", missed);
+                                        // BAL-002: Mark replay done so it does not re-run on the next
+                                        // now_synced transition (e.g. new blocks arriving after brief gap).
+                                        // Without this, each sync-gap→0 re-ran the replay from the
+                                        // checkpoint map, potentially resetting balances that grew higher.
+                                        if let Err(e) = app_state_sync.storage_engine.mark_balance_replay_done().await {
+                                            warn!("⚠️ [SYNC COMPLETE v10.7.3] Failed to persist replay-done flag: {}", e);
+                                        }
+                                        // BAL-003: After replay, reload the in-memory map as a full
+                                        // replace (not merge-insert) so that wallets that dropped to
+                                        // zero in the replay result are evicted from memory and the
+                                        // supply counter is recomputed from the authoritative RocksDB state.
+                                        if let Ok(replayed) = app_state_sync.storage_engine.load_wallet_balances().await {
+                                            let replayed_count = replayed.len();
+                                            let replayed_total: u128 = replayed.values().sum();
+                                            {
+                                                let mut wb = app_state_sync.wallet_balances.write().await;
+                                                *wb = replayed;
+                                            }
+                                            {
+                                                let mut sup = app_state_sync.total_minted_supply.write().await;
+                                                *sup = replayed_total;
+                                            }
+                                            info!("✅ [SYNC COMPLETE v10.7.3] Post-replay in-memory reload: {} wallets, {:.6} QUG",
+                                                  replayed_count,
+                                                  replayed_total as f64 / 1_000_000_000_000_000_000_000_000f64);
+                                        }
                                     }
                                     Err(e) => {
                                         warn!("⚠️ [SYNC COMPLETE v10.7.3] Balance replay failed: {} — falling back to RocksDB reload", e);
