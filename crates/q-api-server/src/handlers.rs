@@ -14553,6 +14553,30 @@ pub async fn get_finality_metrics(
     let avg_broadcast_latency_ms = avg_broadcast_latency_us as f64 / 1000.0;
     let avg_total_latency_ms = avg_production_latency_ms + avg_broadcast_latency_ms;
 
+    // Real-time BPS/TPS from rolling 60-second window
+    let (bps_60s, tps_60s, avg_block_interval_ms, time_since_last_block_ms) = {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let window = metrics.block_window.lock().unwrap_or_else(|e| e.into_inner());
+        let cutoff = now_ms.saturating_sub(60_000);
+        let recent: Vec<(u64, u64)> = window.iter().filter(|(t, _)| *t >= cutoff).copied().collect();
+        let block_count = recent.len() as f64;
+        let tx_sum: u64 = recent.iter().map(|(_, tx)| tx).sum();
+        let bps = block_count / 60.0;
+        let tps = tx_sum as f64 / 60.0;
+        let avg_interval = if recent.len() > 1 {
+            let oldest = recent.first().map(|(t, _)| *t).unwrap_or(now_ms);
+            let newest = recent.last().map(|(t, _)| *t).unwrap_or(now_ms);
+            (newest - oldest) as f64 / (block_count - 1.0)
+        } else {
+            0.0
+        };
+        let since_last = window.back().map(|(t, _)| now_ms.saturating_sub(*t)).unwrap_or(0);
+        (bps, tps, avg_interval, since_last)
+    };
+
     // Determine sub-50ms compliance
     let sub_50ms_compliant = avg_total_latency_ms < 50.0;
     let latency_status = if avg_total_latency_ms < 50.0 {
@@ -14591,6 +14615,11 @@ pub async fn get_finality_metrics(
                 "blocks_produced": blocks_produced,
                 "user_txs_included": user_txs_included,
                 "avg_txs_per_block": if blocks_produced > 0 { user_txs_included as f64 / blocks_produced as f64 } else { 0.0 },
+                "bps_60s": bps_60s,
+                "tps_60s": tps_60s,
+                "avg_block_interval_ms": avg_block_interval_ms,
+                "time_since_last_block_ms": time_since_last_block_ms,
+                "block_production_health": if time_since_last_block_ms < 30_000 { "healthy" } else if time_since_last_block_ms < 120_000 { "slow" } else { "stalled" },
             },
             "consensus": {
                 "algorithm": "DAG-Knight + Bullshark",

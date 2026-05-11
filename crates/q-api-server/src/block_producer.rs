@@ -217,6 +217,25 @@ pub struct FinalityMetrics {
     pub avg_broadcast_latency_us: std::sync::atomic::AtomicU64,
     /// User transactions included in blocks
     pub user_txs_included: std::sync::atomic::AtomicU64,
+    /// Rolling window of (epoch_ms, tx_count) for real-time BPS/TPS — last 200 blocks
+    pub block_window: std::sync::Mutex<std::collections::VecDeque<(u64, u64)>>,
+}
+
+impl FinalityMetrics {
+    pub fn record_block(&self, tx_count: u64) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        if let Ok(mut w) = self.block_window.lock() {
+            w.push_back((now_ms, tx_count));
+            if w.len() > 200 {
+                w.pop_front();
+            }
+        }
+        self.blocks_produced.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.user_txs_included.fetch_add(tx_count, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// v10.3.4: Distribute `total` among solutions proportional to their difficulty weight.

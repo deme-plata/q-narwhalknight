@@ -17422,6 +17422,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 new_block.mining_solutions.len() as u128 * reward_per_solution;
                             let tx_count = new_block.transactions.len();
 
+                            app_state_mining.finality_metrics.record_block(tx_count as u64);
+
                             let _ = app_state_mining
                                 .event_broadcaster
                                 .broadcast(q_api_server::streaming::StreamEvent::NewBlock {
