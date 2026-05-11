@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, memo, useRef, lazy, Suspense } from 'react';
 import { motion, AnimatePresence, Reorder } from 'framer-motion';
 import { Activity, Zap, AlertCircle, Copy, Check, Wallet, ChevronLeft, ChevronRight, Calendar, DollarSign, TrendingUp, TrendingDown, QrCode, Info, Plus, Send, BarChart3, Radio, Mail, MessageCircle, Settings2, GripVertical, ArrowUp, ArrowDown, Globe, Newspaper, ExternalLink, Cpu, Shield, Layers } from 'lucide-react';
-import { qnkAPI, type NodeStatus } from '../services/api'; // debounce not needed - SSE in App.tsx
+import { qnkAPI, type NodeStatus, type EmissionDailyRecord } from '../services/api'; // debounce not needed - SSE in App.tsx
 import { sseManager } from '../services/sseManager';
 import TransactionDetailsModal from './TransactionDetailsModal';
 // 🌐 v3.4.3-browser: P2P real-time block streaming
@@ -143,6 +143,464 @@ function HiBTDonationBanner() {
       </motion.div>
       <HiBTDonationModal isOpen={open} onClose={() => setOpen(false)} />
     </>
+  );
+}
+
+// ── Emission Trajectory Visualization (v10.7.8) ──────────────────────────────
+function EmissionCurveViz() {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const animFrame = useRef<number>(0);
+  const [emData, setEmData] = useState<{
+    daily: EmissionDailyRecord[];
+    totalSupply: number;
+    maxSupply: number;
+    pctMined: number;
+    era: number;
+  } | null>(null);
+
+  useEffect(() => {
+    qnkAPI.getEmissionStats(90).then(resp => {
+      if (resp.success && resp.data?.summary && resp.data?.daily_history?.length) {
+        setEmData({
+          daily: resp.data.daily_history,
+          totalSupply: resp.data.summary.total_supply_qug,
+          maxSupply: resp.data.summary.max_supply_qug,
+          pctMined: resp.data.summary.pct_mined,
+          era: resp.data.summary.current_era,
+        });
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !emData || emData.daily.length < 2) return;
+
+    const draw = () => {
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      const dpr = window.devicePixelRatio || 1;
+      const W = canvas.offsetWidth;
+      const H = canvas.offsetHeight;
+      if (W === 0 || H === 0) { animFrame.current = requestAnimationFrame(draw); return; }
+      if (canvas.width !== Math.round(W * dpr) || canvas.height !== Math.round(H * dpr)) {
+        canvas.width = Math.round(W * dpr);
+        canvas.height = Math.round(H * dpr);
+        ctx.scale(dpr, dpr);
+      }
+
+      const P = { t: 28, r: 24, b: 36, l: 52 };
+      const pw = W - P.l - P.r;
+      const ph = H - P.t - P.b;
+      const maxY = emData.maxSupply;
+      const days = emData.daily;
+      const n = days.length;
+
+      ctx.clearRect(0, 0, W, H);
+
+      const toX = (i: number) => P.l + (i / (n - 1)) * pw;
+      const toY = (v: number) => P.t + ph - (v / maxY) * ph;
+
+      // Build target cumulative supply
+      let cumTarget = days[0].cumulative_supply_qug - days[0].target_daily_qug;
+      const targetCumuls = days.map(d => { cumTarget += d.target_daily_qug; return cumTarget; });
+
+      // Grid lines
+      for (let g = 0; g <= 4; g++) {
+        const yy = P.t + (g / 4) * ph;
+        ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+        ctx.lineWidth = 0.5;
+        ctx.beginPath(); ctx.moveTo(P.l, yy); ctx.lineTo(P.l + pw, yy); ctx.stroke();
+        ctx.fillStyle = 'rgba(255,255,255,0.22)';
+        ctx.font = '9px "JetBrains Mono",monospace';
+        ctx.textAlign = 'right';
+        const label = ((maxY * (1 - g / 4)) / 1_000_000).toFixed(1) + 'M';
+        ctx.fillText(label, P.l - 5, yy + 3.5);
+      }
+
+      // X-axis date ticks
+      ctx.textAlign = 'center';
+      ctx.font = '9px "JetBrains Mono",monospace';
+      [0, Math.floor(n / 3), Math.floor((2 * n) / 3), n - 1].forEach(idx => {
+        const x = toX(idx);
+        ctx.strokeStyle = 'rgba(255,255,255,0.03)';
+        ctx.lineWidth = 0.5;
+        ctx.beginPath(); ctx.moveTo(x, P.t); ctx.lineTo(x, P.t + ph); ctx.stroke();
+        ctx.fillStyle = 'rgba(255,255,255,0.18)';
+        ctx.fillText((days[idx]?.date || '').slice(5), x, P.t + ph + 18);
+      });
+
+      // Deviation fill between actual and target
+      ctx.save();
+      ctx.beginPath();
+      days.forEach((d, i) => { i === 0 ? ctx.moveTo(toX(i), toY(d.cumulative_supply_qug)) : ctx.lineTo(toX(i), toY(d.cumulative_supply_qug)); });
+      for (let i = n - 1; i >= 0; i--) ctx.lineTo(toX(i), toY(targetCumuls[i]));
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(139,92,246,0.07)';
+      ctx.fill();
+      ctx.restore();
+
+      // Target curve (dashed indigo)
+      ctx.save();
+      ctx.setLineDash([3, 6]);
+      ctx.strokeStyle = 'rgba(139,92,246,0.55)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      targetCumuls.forEach((v, i) => { i === 0 ? ctx.moveTo(toX(i), toY(v)) : ctx.lineTo(toX(i), toY(v)); });
+      ctx.stroke();
+      ctx.restore();
+
+      // Actual curve — amber gradient fill
+      ctx.save();
+      const fillGrad = ctx.createLinearGradient(0, P.t, 0, P.t + ph);
+      fillGrad.addColorStop(0, 'rgba(245,158,11,0.28)');
+      fillGrad.addColorStop(1, 'rgba(245,158,11,0.02)');
+      ctx.beginPath();
+      days.forEach((d, i) => { i === 0 ? ctx.moveTo(toX(i), toY(d.cumulative_supply_qug)) : ctx.lineTo(toX(i), toY(d.cumulative_supply_qug)); });
+      ctx.lineTo(toX(n - 1), P.t + ph);
+      ctx.lineTo(toX(0), P.t + ph);
+      ctx.closePath();
+      ctx.fillStyle = fillGrad;
+      ctx.fill();
+      ctx.restore();
+
+      // Actual curve line
+      ctx.save();
+      ctx.strokeStyle = '#F59E0B';
+      ctx.lineWidth = 2.2;
+      ctx.shadowColor = 'rgba(245,158,11,0.55)';
+      ctx.shadowBlur = 8;
+      ctx.beginPath();
+      days.forEach((d, i) => { i === 0 ? ctx.moveTo(toX(i), toY(d.cumulative_supply_qug)) : ctx.lineTo(toX(i), toY(d.cumulative_supply_qug)); });
+      ctx.stroke();
+      ctx.restore();
+
+      // Pulsing live dot at last data point
+      const lx = toX(n - 1);
+      const ly = toY(days[n - 1].cumulative_supply_qug);
+      const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 420);
+      ctx.beginPath();
+      ctx.arc(lx, ly, 7 + pulse * 4, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(245,158,11,${0.10 + 0.07 * pulse})`;
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(lx, ly, 3.5, 0, Math.PI * 2);
+      ctx.fillStyle = '#FBBF24';
+      ctx.shadowColor = '#F59E0B';
+      ctx.shadowBlur = 12;
+      ctx.fill();
+      ctx.shadowBlur = 0;
+
+      animFrame.current = requestAnimationFrame(draw);
+    };
+    draw();
+    return () => cancelAnimationFrame(animFrame.current);
+  }, [emData]);
+
+  const pct = emData?.pctMined ?? 0;
+  const era = emData?.era ?? 0;
+
+  return (
+    <div className="backdrop-blur-xl rounded-3xl overflow-hidden" style={{
+      background: 'linear-gradient(135deg, rgba(15,15,25,0.92) 0%, rgba(28,20,8,0.92) 100%)',
+      border: '2px solid rgba(245,158,11,0.22)',
+      boxShadow: '0 0 32px rgba(245,158,11,0.06)',
+    }}>
+      <div className="p-4" style={{ borderBottom: '1px solid rgba(245,158,11,0.12)' }}>
+        <div className="flex items-start justify-between">
+          <div>
+            <h3 className="text-base font-semibold text-amber-100 flex items-center gap-2">
+              <span style={{ fontSize: 18 }}>📈</span>
+              Emission Trajectory
+            </h3>
+            <p className="text-xs mt-0.5" style={{ color: 'rgba(245,158,11,0.45)' }}>
+              Actual vs. scheduled emission · Era {era} · 90-day window
+            </p>
+          </div>
+          <div className="text-right">
+            <div className="text-xl font-bold text-amber-400 tabular-nums">{pct.toFixed(3)}%</div>
+            <div className="text-[10px] font-mono" style={{ color: 'rgba(245,158,11,0.45)' }}>of 21M mined</div>
+          </div>
+        </div>
+        <div className="mt-3 h-1 rounded-full overflow-hidden" style={{ background: 'rgba(245,158,11,0.08)' }}>
+          <motion.div className="h-full rounded-full"
+            style={{ background: 'linear-gradient(90deg, #B45309, #F59E0B, #FCD34D)' }}
+            initial={{ width: '0%' }} animate={{ width: `${Math.min(pct, 100)}%` }}
+            transition={{ duration: 1.6, ease: 'easeOut' }} />
+        </div>
+        <div className="flex justify-between mt-1">
+          <span className="text-[9px] font-mono" style={{ color: 'rgba(245,158,11,0.3)' }}>Genesis</span>
+          <span className="text-[9px] font-mono" style={{ color: 'rgba(245,158,11,0.3)' }}>21,000,000 QUG</span>
+        </div>
+      </div>
+      <div className="px-2 pt-2 pb-0">
+        <canvas ref={canvasRef} style={{ width: '100%', height: '200px', display: 'block' }} />
+      </div>
+      <div className="px-4 py-3 flex items-center gap-5">
+        <div className="flex items-center gap-1.5">
+          <div className="w-5 h-0.5 rounded" style={{ background: '#F59E0B', boxShadow: '0 0 4px #F59E0B' }} />
+          <span className="text-[10px] font-mono" style={{ color: 'rgba(245,158,11,0.55)' }}>Actual</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <div className="w-5 h-0 rounded border-t border-dashed" style={{ borderColor: 'rgba(139,92,246,0.6)' }} />
+          <span className="text-[10px] font-mono" style={{ color: 'rgba(139,92,246,0.55)' }}>Target</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <div className="w-2 h-2 rounded-full" style={{ background: '#FBBF24', boxShadow: '0 0 6px #F59E0B' }} />
+          <span className="text-[10px] font-mono" style={{ color: 'rgba(245,158,11,0.45)' }}>Live</span>
+        </div>
+        <div className="ml-auto flex items-center gap-1">
+          <div className="w-3 h-3 rounded-sm opacity-30" style={{ background: 'rgba(139,92,246,0.3)' }} />
+          <span className="text-[10px] font-mono" style={{ color: 'rgba(139,92,246,0.4)' }}>Deviation</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Mining Decentralization — Lorenz Curve (v10.7.8) ─────────────────────────
+function MiningDecentralizationViz() {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const animFrame = useRef<number>(0);
+  const [vizData, setVizData] = useState<{
+    gini: number;
+    nakaCoeff: number;
+    lorenz: Array<[number, number]>;
+    totalMiners: number;
+    totalHashTH: number;
+  } | null>(null);
+
+  useEffect(() => {
+    const fetchData = async () => {
+      const resp = await qnkAPI.getNetworkMiners();
+      if (!resp.success || resp.miners.length === 0) return;
+      const sorted = resp.miners
+        .map(m => m.hash_rate)
+        .filter(h => h > 0)
+        .sort((a, b) => a - b);
+      const n = sorted.length;
+      const totalHash = sorted.reduce((s, h) => s + h, 0);
+
+      // Lorenz curve
+      const lorenz: Array<[number, number]> = [[0, 0]];
+      let cumH = 0;
+      sorted.forEach((h, i) => { cumH += h; lorenz.push([(i + 1) / n, cumH / totalHash]); });
+
+      // Gini coefficient
+      let gSum = 0;
+      sorted.forEach((h, i) => { gSum += (2 * (i + 1) - n - 1) * h; });
+      const gini = n > 1 ? gSum / (n * totalHash) : 0;
+
+      // Nakamoto coefficient (fewest miners controlling 51%)
+      let cumulative = 0;
+      let naka = 0;
+      for (const h of [...sorted].sort((a, b) => b - a)) {
+        cumulative += h; naka++;
+        if (cumulative / totalHash >= 0.51) break;
+      }
+
+      setVizData({ gini, nakaCoeff: naka, lorenz, totalMiners: n, totalHashTH: totalHash / 1e12 });
+    };
+    fetchData();
+    const iv = setInterval(fetchData, 30_000);
+    return () => clearInterval(iv);
+  }, []);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !vizData) return;
+
+    const draw = () => {
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      const dpr = window.devicePixelRatio || 1;
+      const W = canvas.offsetWidth;
+      const H = canvas.offsetHeight;
+      if (W === 0 || H === 0) { animFrame.current = requestAnimationFrame(draw); return; }
+      if (canvas.width !== Math.round(W * dpr) || canvas.height !== Math.round(H * dpr)) {
+        canvas.width = Math.round(W * dpr);
+        canvas.height = Math.round(H * dpr);
+        ctx.scale(dpr, dpr);
+      }
+
+      const P = { t: 20, r: 24, b: 38, l: 50 };
+      const pw = W - P.l - P.r;
+      const ph = H - P.t - P.b;
+      ctx.clearRect(0, 0, W, H);
+
+      const toX = (f: number) => P.l + f * pw;
+      const toY = (f: number) => P.t + ph - f * ph;
+
+      // Grid
+      for (let g = 0; g <= 4; g++) {
+        const f = g / 4;
+        ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+        ctx.lineWidth = 0.5;
+        ctx.beginPath(); ctx.moveTo(P.l, toY(f)); ctx.lineTo(P.l + pw, toY(f)); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(toX(f), P.t); ctx.lineTo(toX(f), P.t + ph); ctx.stroke();
+        ctx.fillStyle = 'rgba(255,255,255,0.2)';
+        ctx.font = '9px "JetBrains Mono",monospace';
+        ctx.textAlign = 'right';
+        ctx.fillText(`${(f * 100).toFixed(0)}%`, P.l - 5, toY(f) + 3.5);
+        if (g > 0 && g < 4) {
+          ctx.textAlign = 'center';
+          ctx.fillStyle = 'rgba(255,255,255,0.14)';
+          ctx.fillText(`${(f * 100).toFixed(0)}%`, toX(f), P.t + ph + 18);
+        }
+      }
+      // X-axis endpoints
+      ctx.textAlign = 'center';
+      ctx.font = '9px "JetBrains Mono",monospace';
+      ctx.fillStyle = 'rgba(255,255,255,0.2)';
+      ctx.fillText('0%', toX(0), P.t + ph + 18);
+      ctx.fillText('100%', toX(1), P.t + ph + 18);
+
+      // Perfect equality diagonal
+      ctx.save();
+      ctx.setLineDash([4, 5]);
+      ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(toX(0), toY(0)); ctx.lineTo(toX(1), toY(1)); ctx.stroke();
+      ctx.restore();
+
+      // Inequality zone (above Lorenz, below equality)
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(toX(0), toY(0));
+      ctx.lineTo(toX(1), toY(1));
+      for (let i = vizData.lorenz.length - 1; i >= 0; i--) {
+        ctx.lineTo(toX(vizData.lorenz[i][0]), toY(vizData.lorenz[i][1]));
+      }
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(239,68,68,0.07)';
+      ctx.fill();
+      ctx.restore();
+
+      // Lorenz curve fill
+      ctx.save();
+      const fillGrad = ctx.createLinearGradient(0, P.t, 0, P.t + ph);
+      fillGrad.addColorStop(0, 'rgba(16,185,129,0.18)');
+      fillGrad.addColorStop(1, 'rgba(16,185,129,0.02)');
+      ctx.beginPath();
+      vizData.lorenz.forEach(([x, y], i) => { i === 0 ? ctx.moveTo(toX(x), toY(y)) : ctx.lineTo(toX(x), toY(y)); });
+      ctx.lineTo(toX(1), P.t + ph);
+      ctx.lineTo(toX(0), P.t + ph);
+      ctx.closePath();
+      ctx.fillStyle = fillGrad;
+      ctx.fill();
+      ctx.restore();
+
+      // Lorenz curve line
+      ctx.save();
+      ctx.strokeStyle = '#10B981';
+      ctx.lineWidth = 2.2;
+      ctx.shadowColor = 'rgba(16,185,129,0.5)';
+      ctx.shadowBlur = 7;
+      ctx.beginPath();
+      vizData.lorenz.forEach(([x, y], i) => { i === 0 ? ctx.moveTo(toX(x), toY(y)) : ctx.lineTo(toX(x), toY(y)); });
+      ctx.stroke();
+      ctx.restore();
+
+      // Scatter dots for each miner
+      if (vizData.lorenz.length <= 40) {
+        ctx.save();
+        ctx.shadowColor = 'rgba(16,185,129,0.4)';
+        ctx.shadowBlur = 4;
+        vizData.lorenz.slice(1).forEach(([x, y]) => {
+          ctx.beginPath();
+          ctx.arc(toX(x), toY(y), 2.8, 0, Math.PI * 2);
+          ctx.fillStyle = '#10B981';
+          ctx.fill();
+        });
+        ctx.restore();
+      }
+
+      // Nakamoto threshold line (pulsing red vertical)
+      if (vizData.totalMiners > 0) {
+        const nakaFrac = vizData.nakaCoeff / vizData.totalMiners;
+        const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 700);
+        const nx = toX(1 - nakaFrac); // largest miners are at right side (sorted asc, so right = largest)
+        ctx.save();
+        ctx.setLineDash([2, 4]);
+        ctx.strokeStyle = `rgba(239,68,68,${0.35 + 0.2 * pulse})`;
+        ctx.lineWidth = 1.2;
+        ctx.beginPath(); ctx.moveTo(nx, P.t); ctx.lineTo(nx, P.t + ph); ctx.stroke();
+        ctx.restore();
+        ctx.fillStyle = `rgba(239,68,68,${0.5 + 0.2 * pulse})`;
+        ctx.font = '8px system-ui';
+        ctx.textAlign = 'center';
+        ctx.fillText('51%', nx, P.t + 10);
+      }
+
+      animFrame.current = requestAnimationFrame(draw);
+    };
+    draw();
+    return () => cancelAnimationFrame(animFrame.current);
+  }, [vizData]);
+
+  const giniPct = vizData ? (vizData.gini * 100).toFixed(1) : '—';
+  const decentralized = vizData ? vizData.gini < 0.5 : null;
+
+  return (
+    <div className="backdrop-blur-xl rounded-3xl overflow-hidden" style={{
+      background: 'linear-gradient(135deg, rgba(10,20,15,0.92) 0%, rgba(15,25,20,0.92) 100%)',
+      border: '2px solid rgba(16,185,129,0.2)',
+      boxShadow: '0 0 32px rgba(16,185,129,0.05)',
+    }}>
+      <div className="p-4" style={{ borderBottom: '1px solid rgba(16,185,129,0.1)' }}>
+        <div className="flex items-start justify-between">
+          <div>
+            <h3 className="text-base font-semibold flex items-center gap-2" style={{ color: 'rgba(167,243,208,0.95)' }}>
+              <span style={{ fontSize: 18 }}>⚖️</span>
+              Mining Decentralization
+            </h3>
+            <p className="text-xs mt-0.5" style={{ color: 'rgba(16,185,129,0.4)' }}>
+              Lorenz curve · hashrate distribution across {vizData?.totalMiners ?? '…'} active miners
+            </p>
+          </div>
+          <div className="text-right">
+            <div className="flex items-baseline gap-1 justify-end">
+              <span className="text-xl font-bold tabular-nums" style={{ color: decentralized === null ? '#9CA3AF' : decentralized ? '#10B981' : '#F59E0B' }}>
+                {giniPct}%
+              </span>
+            </div>
+            <div className="text-[10px] font-mono" style={{ color: 'rgba(16,185,129,0.4)' }}>Gini coefficient</div>
+          </div>
+        </div>
+        {vizData && (
+          <div className="mt-3 grid grid-cols-3 gap-2">
+            {[
+              { label: 'Gini', value: (vizData.gini * 100).toFixed(1) + '%', sub: 'inequality index', color: vizData.gini < 0.5 ? '#10B981' : '#F59E0B' },
+              { label: 'Nakamoto', value: vizData.nakaCoeff.toString(), sub: 'miners for 51%', color: vizData.nakaCoeff >= 3 ? '#10B981' : '#EF4444' },
+              { label: 'Network', value: vizData.totalHashTH < 1 ? (vizData.totalHashTH * 1000).toFixed(1) + ' GH/s' : vizData.totalHashTH.toFixed(2) + ' TH/s', sub: 'total hashrate', color: '#6EE7B7' },
+            ].map(stat => (
+              <div key={stat.label} className="rounded-xl p-2 text-center" style={{ background: 'rgba(16,185,129,0.06)', border: '1px solid rgba(16,185,129,0.1)' }}>
+                <div className="text-sm font-bold tabular-nums" style={{ color: stat.color }}>{stat.value}</div>
+                <div className="text-[9px] font-mono mt-0.5" style={{ color: 'rgba(16,185,129,0.4)' }}>{stat.label}</div>
+                <div className="text-[8px]" style={{ color: 'rgba(255,255,255,0.2)' }}>{stat.sub}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      <div className="px-2 pt-2 pb-0">
+        <canvas ref={canvasRef} style={{ width: '100%', height: '200px', display: 'block' }} />
+      </div>
+      <div className="px-4 py-3 flex items-center gap-5">
+        <div className="flex items-center gap-1.5">
+          <div className="w-5 h-0.5 rounded" style={{ background: '#10B981', boxShadow: '0 0 4px #10B981' }} />
+          <span className="text-[10px] font-mono" style={{ color: 'rgba(16,185,129,0.5)' }}>Lorenz curve</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <div className="w-5 h-0 border-t border-dashed" style={{ borderColor: 'rgba(255,255,255,0.25)' }} />
+          <span className="text-[10px] font-mono" style={{ color: 'rgba(255,255,255,0.3)' }}>Perfect equality</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <div className="w-5 h-0 border-t border-dashed" style={{ borderColor: 'rgba(239,68,68,0.5)' }} />
+          <span className="text-[10px] font-mono" style={{ color: 'rgba(239,68,68,0.45)' }}>51% threshold</span>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -3533,6 +3991,24 @@ We thank the community members who reported degraded sync speeds and helped us r
             </motion.div>
           )}
         </div>
+      </motion.div>
+
+      {/* Emission Trajectory — actual vs target supply curve */}
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.32 }}
+      >
+        <EmissionCurveViz />
+      </motion.div>
+
+      {/* Mining Decentralization — Lorenz curve & Gini coefficient */}
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.34 }}
+      >
+        <MiningDecentralizationViz />
       </motion.div>
 
       {/* Active Loans Card */}

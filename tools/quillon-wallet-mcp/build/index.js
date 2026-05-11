@@ -19,14 +19,41 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-const API_BASE = process.env.QUILLON_API_URL || "https://quillon.xyz/api/v1";
-const DOWNLOAD_BASE = process.env.QUILLON_DOWNLOAD_URL || "https://quillon.xyz/downloads";
+// ═══════════════════════════════════════════════════════════════
+// SECURITY FIX 5: API URL validation — prevent SSRF/phishing via env vars
+// ═══════════════════════════════════════════════════════════════
+const ALLOWED_API_DOMAINS = ["quillon.xyz", "localhost", "127.0.0.1"];
+function validateApiUrl(url) {
+    try {
+        const parsed = new URL(url);
+        // Enforce HTTPS for non-local URLs
+        if (parsed.hostname !== "localhost" && parsed.hostname !== "127.0.0.1") {
+            if (parsed.protocol !== "https:") {
+                console.error(`SECURITY: Rejecting non-HTTPS API URL: ${url}`);
+                return "https://quillon.xyz/api/v1";
+            }
+        }
+        // Validate domain against allowlist
+        if (!ALLOWED_API_DOMAINS.some(d => parsed.hostname === d || parsed.hostname.endsWith(`.${d}`))) {
+            console.error(`SECURITY: Rejecting untrusted API domain: ${parsed.hostname}`);
+            return "https://quillon.xyz/api/v1";
+        }
+        return url;
+    }
+    catch {
+        console.error(`SECURITY: Invalid API URL: ${url}`);
+        return "https://quillon.xyz/api/v1";
+    }
+}
+const API_BASE = validateApiUrl(process.env.QUILLON_API_URL || "https://quillon.xyz/api/v1");
+const DOWNLOAD_BASE = validateApiUrl(process.env.QUILLON_DOWNLOAD_URL || "https://quillon.xyz/downloads");
 // --- HTTP helper ---
 async function api(path, method = "GET", body) {
     const url = `${API_BASE}${path}`;
     const opts = {
         method,
         headers: { "Content-Type": "application/json" },
+        redirect: "error", // SECURITY: Never follow redirects (prevents open redirect attacks)
     };
     if (body)
         opts.body = JSON.stringify(body);
@@ -66,6 +93,10 @@ server.resource("welcome", "quillon://welcome", async () => ({
                 `  NETWORK`,
                 `    "Network status"                — Height, peers, block rate`,
                 ``,
+                `  NODE`,
+                `    "Set up a node on this machine" — Download binary + systemd service`,
+                `    "Set up node from source"       — Build with Rust, then install`,
+                ``,
                 `  SETUP`,
                 `    "Set up Claude Code integration" — Auto-configure MCP for another machine`,
                 ``,
@@ -87,9 +118,10 @@ server.prompt("welcome", "Show available Quillon wallet and mining features", as
                     ``,
                     `WALLET: Create wallets, check balances, send QUG, import from mnemonic`,
                     `MINING: Set up and start mining on Linux, check mining stats`,
+                    `NODE: Set up a full node on this machine — binary install or build from source`,
                     `NETWORK: Check network status, block height, connected peers`,
                     ``,
-                    `Ask anything naturally — "create a wallet for my friend" or "start mining on this server".`,
+                    `Ask anything naturally — "create a wallet", "start mining on this server", or "set up a node".`,
                     `Everything works with the Quillon Graph post-quantum blockchain at quillon.xyz.`,
                 ].join("\n"),
             },
@@ -267,10 +299,33 @@ server.tool("import_wallet", "Recover a wallet from a 12 or 24-word mnemonic phr
             }],
     };
 });
-// --- Device auth state (in-memory, per MCP session) ---
+// ═══════════════════════════════════════════════════════════════
+// SECURITY FIX 4: Per-session wallet isolation with expiry
+// ═══════════════════════════════════════════════════════════════
+// Auth state expires after 30 minutes of inactivity. Each MCP stdio
+// session is already process-isolated, but token expiry prevents stale
+// sessions from accumulating risk.
+const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 let activeDeviceCode = null;
 let activeWalletAddress = null;
 let authToken = null;
+let sessionAuthenticatedAt = null;
+function isSessionValid() {
+    if (!activeWalletAddress || !sessionAuthenticatedAt)
+        return false;
+    if (Date.now() - sessionAuthenticatedAt > SESSION_TIMEOUT_MS) {
+        // Session expired — clear all auth state
+        activeWalletAddress = null;
+        authToken = null;
+        sessionAuthenticatedAt = null;
+        return false;
+    }
+    return true;
+}
+function refreshSession() {
+    if (sessionAuthenticatedAt)
+        sessionAuthenticatedAt = Date.now();
+}
 server.tool("authenticate_wallet", "Authenticate your wallet using the device login flow. Opens a browser link where you approve access. Required before sending QUG.", {}, async () => {
     try {
         // Step 1: Request device code
@@ -315,6 +370,8 @@ server.tool("check_auth", "Check if wallet authentication is complete (after ope
         }
         if (res.data.status === "complete") {
             activeWalletAddress = res.data.wallet_address;
+            authToken = res.data.token || null;
+            sessionAuthenticatedAt = Date.now();
             activeDeviceCode = null;
             return {
                 content: [{
@@ -346,12 +403,12 @@ server.tool("send_qug", "Send QUG from your authenticated wallet to another addr
     to_address: z.string().describe("Recipient qnk... address"),
     amount: z.number().describe("Amount of QUG to send"),
 }, async ({ to_address, amount }) => {
-    if (!activeWalletAddress) {
+    if (!isSessionValid()) {
         return {
             content: [{
                     type: "text",
                     text: [
-                        `Wallet not authenticated. To send QUG:`,
+                        `Wallet not authenticated${sessionAuthenticatedAt ? ' (session expired)' : ''}. To send QUG:`,
                         ``,
                         `  1. Say "authenticate wallet"`,
                         `  2. Open the link in your browser and approve`,
@@ -361,11 +418,69 @@ server.tool("send_qug", "Send QUG from your authenticated wallet to another addr
                 }],
         };
     }
+    refreshSession(); // Keep session alive on activity
+    // ═══════════════════════════════════════════════════════════════
+    // SECURITY FIX 1: Validate wallet address format
+    // ═══════════════════════════════════════════════════════════════
+    if (!to_address.startsWith('qnk') || to_address.length !== 67 || !/^qnk[0-9a-f]{64}$/.test(to_address)) {
+        return {
+            content: [{
+                    type: "text",
+                    text: `Invalid recipient address. Must be 'qnk' + 64 hex characters (67 total). Got: ${to_address.slice(0, 20)}...`,
+                }],
+        };
+    }
+    // ═══════════════════════════════════════════════════════════════
+    // SECURITY FIX 2: Require explicit confirmation for transactions
+    // ═══════════════════════════════════════════════════════════════
+    // Return a confirmation prompt instead of executing immediately.
+    // The AI must relay this to the user and get explicit approval.
+    if (!to_address.startsWith('qnk_CONFIRMED_')) {
+        return {
+            content: [{
+                    type: "text",
+                    text: [
+                        `⚠️ TRANSACTION CONFIRMATION REQUIRED`,
+                        ``,
+                        `  From:   ${activeWalletAddress.slice(0, 20)}...`,
+                        `  To:     ${to_address.slice(0, 20)}...`,
+                        `  Amount: ${amount} QUG`,
+                        ``,
+                        `Please confirm: do you want to send ${amount} QUG to ${to_address}?`,
+                        `Reply "yes, send ${amount} QUG to ${to_address}" to proceed.`,
+                        ``,
+                        `⚠️ This action is irreversible. Verify the recipient address carefully.`,
+                    ].join("\n"),
+                }],
+        };
+    }
+    // Strip confirmation prefix
+    const confirmed_address = to_address.replace('qnk_CONFIRMED_', 'qnk');
+    // ═══════════════════════════════════════════════════════════════
+    // SECURITY FIX 3: Spending limits
+    // ═══════════════════════════════════════════════════════════════
+    if (amount > 1000) {
+        return {
+            content: [{
+                    type: "text",
+                    text: `⚠️ Amount exceeds MCP spending limit (1000 QUG). For larger transfers, use the web wallet at quillon.xyz.`,
+                }],
+        };
+    }
+    if (amount <= 0) {
+        return {
+            content: [{
+                    type: "text",
+                    text: `Invalid amount: must be greater than 0.`,
+                }],
+        };
+    }
     try {
         const res = await api("/transactions/send", "POST", {
             from: activeWalletAddress,
-            to: to_address,
+            to: confirmed_address,
             amount: Math.floor(amount * 1e24).toString(),
+            ...(authToken ? { auth_token: authToken } : {}),
         });
         if (res.success) {
             return {
@@ -584,6 +699,261 @@ server.tool("mining_status", "Check current mining statistics — hashrate, solu
     catch (e) {
         return { content: [{ type: "text", text: `Error checking mining status: ${e}` }] };
     }
+});
+// ============================================================
+// NODE SETUP
+// ============================================================
+server.tool("setup_node", "Set up a full Quillon (QNK) blockchain node on this Debian/Ubuntu Linux machine. Downloads the latest binary, creates the data directory, and installs a systemd service that survives reboots. After setup the node will sync automatically.", {
+    install_dir: z.string().optional().describe("Directory to install the node (default: /opt/quillon)"),
+    data_dir: z.string().optional().describe("Directory for blockchain data (default: /opt/quillon/data)"),
+    api_port: z.number().optional().describe("HTTP API port (default: 8080)"),
+    p2p_port: z.number().optional().describe("P2P gossip port (default: 9001)"),
+    wallet_address: z.string().optional().describe("Your qnk... wallet address to use as the node admin wallet. If omitted, the setup wizard will ask interactively."),
+    build_from_source: z.boolean().optional().describe("Build from source using Rust instead of downloading pre-built binary (default: false)"),
+}, async ({ install_dir, data_dir, api_port, p2p_port, build_from_source, wallet_address }) => {
+    const installDir = install_dir || "/opt/quillon";
+    const dataDir = data_dir || `${installDir}/data`;
+    const apiPort = api_port || 8080;
+    const p2pPort = p2p_port || 9001;
+    const binaryUrl = `${DOWNLOAD_BASE}/q-api-server-linux-x86_64`;
+    // Auto-create a fresh wallet for this node if none supplied
+    let adminWallet = wallet_address || "";
+    let newWalletMnemonic = "";
+    if (!adminWallet) {
+        try {
+            const res = await api("/wallets/create", "POST", {});
+            if (res.success && res.data?.address_formatted) {
+                adminWallet = res.data.address_formatted;
+                newWalletMnemonic = res.data.mnemonic || "";
+            }
+        }
+        catch { }
+    }
+    // Systemd service file content
+    const serviceFile = [
+        `[Unit]`,
+        `Description=Quillon Graph Node`,
+        `Documentation=https://quillon.xyz`,
+        `After=network-online.target`,
+        `Wants=network-online.target`,
+        ``,
+        `[Service]`,
+        `Type=simple`,
+        `User=root`,
+        `WorkingDirectory=${installDir}`,
+        `Environment="Q_DB_PATH=${dataDir}"`,
+        `Environment="Q_NETWORK_ID=mainnet-genesis"`,
+        `Environment="RUST_LOG=warn"`,
+        `ExecStart=${installDir}/q-api-server --port ${apiPort}`,
+        `Restart=on-failure`,
+        `RestartSec=10`,
+        `LimitNOFILE=65536`,
+        ``,
+        `[Install]`,
+        `WantedBy=multi-user.target`,
+    ].join("\n");
+    if (build_from_source) {
+        // Build-from-source script
+        const script = [
+            `#!/bin/bash`,
+            `# Quillon Node — Build from Source`,
+            `# Requires: Debian 12 / Ubuntu 22.04+`,
+            `set -e`,
+            ``,
+            `INSTALL_DIR="${installDir}"`,
+            `DATA_DIR="${dataDir}"`,
+            ``,
+            `echo "=== Quillon Node — Build from Source ==="`,
+            `echo ""`,
+            ``,
+            `# 1. Install Rust`,
+            `if ! command -v cargo &>/dev/null; then`,
+            `  echo "Installing Rust..."`,
+            `  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable`,
+            `  source "$HOME/.cargo/env"`,
+            `  echo "✓ Rust installed: $(rustc --version)"`,
+            `else`,
+            `  source "$HOME/.cargo/env" 2>/dev/null || true`,
+            `  echo "✓ Rust found: $(rustc --version)"`,
+            `fi`,
+            ``,
+            `# 2. Install build dependencies`,
+            `echo "Installing build dependencies..."`,
+            `apt-get update -qq 2>/dev/null || true`,
+            `apt-get install -y -qq build-essential pkg-config libssl-dev cmake clang libudev-dev libclang-dev git 2>/dev/null || true`,
+            `echo "✓ Build dependencies ready"`,
+            ``,
+            `# 3. Clone and build`,
+            `echo "Cloning Quillon source..."`,
+            `TMPDIR=$(mktemp -d)`,
+            `git clone --depth 1 https://code.quillon.xyz/repo.git "$TMPDIR/q-narwhalknight" 2>/dev/null || {`,
+            `  echo "Clone failed. Downloading pre-built binary instead..."`,
+            `  curl -fSL "${binaryUrl}" -o "$TMPDIR/q-api-server"`,
+            `  chmod +x "$TMPDIR/q-api-server"`,
+            `}`,
+            ``,
+            `if [ -d "$TMPDIR/q-narwhalknight" ]; then`,
+            `  echo "Building... (this takes 10-30 minutes on first build)"`,
+            `  cd "$TMPDIR/q-narwhalknight"`,
+            `  cargo build --release --package q-api-server`,
+            `  cp target/release/q-api-server "$TMPDIR/q-api-server"`,
+            `  cd / && rm -rf "$TMPDIR/q-narwhalknight"`,
+            `fi`,
+            ``,
+            `# 4. Install binary`,
+            `mkdir -p "$INSTALL_DIR" "$DATA_DIR"`,
+            `cp "$TMPDIR/q-api-server" "$INSTALL_DIR/q-api-server"`,
+            `chmod +x "$INSTALL_DIR/q-api-server"`,
+            `rm -rf "$TMPDIR"`,
+            `echo "✓ Binary installed to $INSTALL_DIR/q-api-server"`,
+            ``,
+            `# 5. Install systemd service`,
+            `cat > /etc/systemd/system/quillon-node.service << 'SVCEOF'`,
+            serviceFile,
+            `SVCEOF`,
+            ``,
+            `systemctl daemon-reload`,
+            `systemctl enable quillon-node`,
+            `systemctl start quillon-node`,
+            ``,
+            `echo ""`,
+            `echo "=== Quillon Node Running! ==="`,
+            `echo "API:     http://localhost:${apiPort}"`,
+            `echo "Data:    $DATA_DIR"`,
+            `echo "Status:  systemctl status quillon-node"`,
+            `echo "Logs:    journalctl -u quillon-node -f"`,
+            `echo ""`,
+            `echo "The node will sync automatically. Full sync takes ~2-6 hours."`,
+            `echo "Check progress: curl http://localhost:${apiPort}/api/v1/node/status"`,
+            `echo ""`,
+        ].join("\n");
+        return {
+            content: [{
+                    type: "text",
+                    text: [
+                        `Node setup script (build from source):\n`,
+                        `\`\`\`bash`,
+                        script,
+                        `\`\`\``,
+                        ``,
+                        `Save to a file and run as root:`,
+                        `  sudo bash setup-node.sh`,
+                        ``,
+                        `This will:`,
+                        `1. Install Rust (if not present)`,
+                        `2. Install build dependencies`,
+                        `3. Clone + build the node binary (~10-30 min first build)`,
+                        `4. Install systemd service that auto-starts on reboot`,
+                        `5. Begin syncing the blockchain automatically`,
+                        ``,
+                        `Minimum requirements: 4GB RAM, 50GB disk, Debian 12 / Ubuntu 22.04`,
+                    ].join("\n"),
+                }],
+        };
+    }
+    // Pre-built binary (default, fast)
+    const script = [
+        `#!/bin/bash`,
+        `# Quillon Node — Quick Install (pre-built binary)`,
+        `# Run as root: curl -fsSL https://quillon.xyz/setup-node.sh | bash`,
+        `set -e`,
+        ``,
+        `INSTALL_DIR="${installDir}"`,
+        `DATA_DIR="${dataDir}"`,
+        `BINARY_URL="${binaryUrl}"`,
+        ``,
+        `echo ""`,
+        `echo "  Quillon Graph — Node Setup"`,
+        `echo "  =========================="`,
+        `echo ""`,
+        ``,
+        `# 1. Create directories`,
+        `mkdir -p "$INSTALL_DIR" "$DATA_DIR"`,
+        `echo "  ✓ Directories created: $INSTALL_DIR"`,
+        ``,
+        `# 2. Download latest binary`,
+        `echo "  Downloading node binary..."`,
+        `curl -fSL "$BINARY_URL" -o "$INSTALL_DIR/q-api-server"`,
+        `chmod +x "$INSTALL_DIR/q-api-server"`,
+        ``,
+        `# Verify it runs`,
+        `"$INSTALL_DIR/q-api-server" --version 2>/dev/null && echo "  ✓ Binary verified" || echo "  ✓ Binary downloaded"`,
+        ``,
+        `# 3. Write .env (skips interactive setup wizard)`,
+        `cat > "$INSTALL_DIR/.env" << ENVEOF`,
+        `Q_DB_PATH=${dataDir}`,
+        `Q_NETWORK_ID=mainnet-genesis`,
+        `RUST_LOG=warn`,
+        adminWallet ? `Q_ADMIN_WALLET=${adminWallet}` : `# Q_ADMIN_WALLET=qnk...  (set this to your wallet address)`,
+        `ENVEOF`,
+        `echo "  ✓ Config written"`,
+        ``,
+        `# 4. Install systemd service`,
+        `cat > /etc/systemd/system/quillon-node.service << 'SVCEOF'`,
+        serviceFile,
+        `SVCEOF`,
+        ``,
+        `echo "  ✓ Systemd service installed"`,
+        ``,
+        `# 5. Enable and start`,
+        `systemctl daemon-reload`,
+        `systemctl enable quillon-node`,
+        `systemctl start quillon-node`,
+        ``,
+        `echo "  ✓ Node started"`,
+        `echo ""`,
+        `echo "  ╔═══════════════════════════════════════════════╗"`,
+        `echo "  ║        Node is Running!                       ║"`,
+        `echo "  ╠═══════════════════════════════════════════════╣"`,
+        `echo "  ║                                               ║"`,
+        `echo "  ║  API:   http://localhost:${apiPort}              ║"`,
+        `echo "  ║  Data:  $DATA_DIR          ║"`,
+        `echo "  ║                                               ║"`,
+        `echo "  ║  Check status:                                ║"`,
+        `echo "  ║    systemctl status quillon-node              ║"`,
+        `echo "  ║    journalctl -u quillon-node -f              ║"`,
+        `echo "  ║                                               ║"`,
+        `echo "  ║  Sync progress (check after 30s):            ║"`,
+        `echo "  ║    curl http://localhost:${apiPort}/api/v1/node/status | python3 -m json.tool"`,
+        `echo "  ║                                               ║"`,
+        `echo "  ║  Full sync takes 2-6 hours via turbo-sync.   ║"`,
+        `echo "  ╚═══════════════════════════════════════════════╝"`,
+        `echo ""`,
+    ].join("\n");
+    return {
+        content: [{
+                type: "text",
+                text: [
+                    adminWallet && newWalletMnemonic ? [
+                        `🔑 New wallet created for this node:`,
+                        ``,
+                        `  Address:  ${adminWallet}`,
+                        `  Mnemonic: ${newWalletMnemonic}`,
+                        ``,
+                        `  ⚠️  Save the mnemonic — it's the only way to recover this wallet.`,
+                        ``,
+                    ].join("\n") : adminWallet ? `Using wallet: ${adminWallet}\n` : "",
+                    `Node setup script (pre-built binary, fast):\n`,
+                    `\`\`\`bash`,
+                    script,
+                    `\`\`\``,
+                    ``,
+                    `Run as root on your Debian/Ubuntu server:`,
+                    `  sudo bash setup-node.sh`,
+                    ``,
+                    `What this does:`,
+                    `1. Creates a fresh wallet for this node`,
+                    `2. Downloads the latest pre-built binary (~30 seconds)`,
+                    `3. Writes .env config (no interactive wizard)`,
+                    `4. Installs systemd service — auto-starts on reboot`,
+                    `5. Node syncs 17M+ blocks via turbo-sync (2-6 hours)`,
+                    ``,
+                    `Requirements: Debian 12 / Ubuntu 22.04, root access, 50GB disk, 4GB RAM`,
+                    ``,
+                    `To build from source instead: say "setup node from source"`,
+                ].filter(Boolean).join("\n"),
+            }],
+    };
 });
 // ============================================================
 // START SERVER

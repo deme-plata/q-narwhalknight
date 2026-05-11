@@ -40,6 +40,8 @@ export const TOPICS = {
   TELEMETRY: `/qnk/${NETWORK_ID}/telemetry`,
   // v3.5.8: Browser peer discovery - browsers announce themselves to find each other
   BROWSER_PEERS: `/qnk/${NETWORK_ID}/browser-peers`,
+  // Chat: P2P text messaging between browser peers
+  CHAT: `/qnk/${NETWORK_ID}/chat`,
 } as const
 
 /**

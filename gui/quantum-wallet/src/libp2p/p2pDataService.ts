@@ -619,15 +619,19 @@ class P2PDataService {
       const requestData = msgpackEncode(request)
       await stream.sink([requestData])
 
-      // Read response
-      const chunks: Uint8Array[] = []
-      for await (const chunk of stream.source) {
-        if (chunk instanceof Uint8Array) {
-          chunks.push(chunk)
-        } else if (chunk.subarray) {
-          chunks.push(chunk.subarray())
+      // Read response — race against 8s timeout so stale half-open streams never hang forever
+      const readChunks = async (): Promise<Uint8Array[]> => {
+        const acc: Uint8Array[] = []
+        for await (const chunk of stream.source) {
+          if (chunk instanceof Uint8Array) acc.push(chunk)
+          else if (chunk.subarray) acc.push(chunk.subarray())
         }
+        return acc
       }
+      const readTimeout = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('Stream read timeout')), 8000)
+      )
+      const chunks = await Promise.race([readChunks(), readTimeout])
 
       await stream.close()
 

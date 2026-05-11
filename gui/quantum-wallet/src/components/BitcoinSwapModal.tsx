@@ -5,6 +5,7 @@ import {
   Loader2, Bitcoin, Send, Download, RefreshCw, ChevronRight,
   Shield, Zap, TrendingUp
 } from 'lucide-react';
+import { QRCodeSVG } from 'qrcode.react';
 import { qnkAPI } from '../services/api';
 
 interface BitcoinSwapModalProps {
@@ -405,11 +406,24 @@ const BitcoinSwapModal = ({ isOpen, onClose, walletAddress }: BitcoinSwapModalPr
                     </div>
                   ) : (
                     <div className="space-y-3">
-                      {/* Address display */}
+                      {/* Address display + QR */}
                       <div className="rounded-xl p-4 text-center"
                         style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(34,197,94,0.2)' }}>
-                        <div className="text-[10px] text-gray-500 uppercase tracking-widest mb-2">Your Bitcoin Deposit Address</div>
-                        <div className="font-mono text-sm text-green-300 break-all mb-3">{depositAddr.address}</div>
+                        <div className="text-[10px] text-gray-500 uppercase tracking-widest mb-3">Your Bitcoin Deposit Address</div>
+                        {/* QR Code */}
+                        <div className="flex justify-center mb-3">
+                          <div className="rounded-xl p-2.5" style={{ background: 'white' }}>
+                            <QRCodeSVG
+                              value={`bitcoin:${depositAddr.address}`}
+                              size={140}
+                              level="M"
+                              includeMargin={false}
+                              fgColor="#000000"
+                              bgColor="#ffffff"
+                            />
+                          </div>
+                        </div>
+                        <div className="font-mono text-xs text-green-300 break-all mb-3 px-2 select-all leading-relaxed">{depositAddr.address}</div>
                         <button
                           onClick={() => copy(depositAddr.address, 'btcaddr')}
                           className="flex items-center gap-2 mx-auto px-4 py-2 rounded-lg text-xs font-medium transition-colors"

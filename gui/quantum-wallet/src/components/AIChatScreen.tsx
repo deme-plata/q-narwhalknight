@@ -135,8 +135,8 @@ export default function AIChatScreen() {
   const [topP, setTopP] = useState(0.9);
   const [frequencyPenalty, setFrequencyPenalty] = useState(0.0);
   const [presencePenalty, setPresencePenalty] = useState(0.0);
-  // v4.0.5: Default to BitNet b1.58-2B-4T (1-bit quantized, fast inference via llama-server)
-  const [selectedModel, setSelectedModel] = useState('BitNet-b1.58-2B-4T');
+  // Default to Gemma4 (Ollama) — has live network context (hashrate, height, supply)
+  const [selectedModel, setSelectedModel] = useState('Gemma4-Ollama');
   const [isSwitchingModel, setIsSwitchingModel] = useState(false);
   const [modelSwitchStatus, setModelSwitchStatus] = useState<string | null>(null);
 
@@ -1582,6 +1582,93 @@ User: "send a message to bob saying meeting at 3pm"
 Response: "I'll send a mail to **Bob** through the node's P2P messaging.\n\n[ACTION:mail to_name=bob subject=Meeting body=Meeting at 3pm]"`;
   };
 
+  // Gemma4 via Ollama — streaming from /api/v1/ai/chat with live network context
+  const sendGemma4Message = async (userMessage: string) => {
+    setIsGenerating(true);
+    setStreamingMessage('');
+
+    const userMsg: Message = {
+      id: `user-${Date.now()}`,
+      role: 'user',
+      content: userMessage,
+      timestamp: Date.now() / 1000,
+    };
+    setMessages(prev => [...prev, userMsg]);
+
+    // Build conversation history for multi-turn context (last 20 messages)
+    const history = [...messages.slice(-20), userMsg].map(m => ({
+      role: m.role,
+      content: m.content,
+    }));
+
+    const walletAddress = localStorage.getItem('walletAddress') || undefined;
+    const startTime = Date.now();
+
+    try {
+      const response = await fetch('/api/v1/ai/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: history, wallet: walletAddress }),
+      });
+
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('ReadableStream not supported');
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let accumulated = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        let eventType = '';
+        for (const line of lines) {
+          if (line.startsWith('event:')) { eventType = line.slice(6).trim(); continue; }
+          if (!line.startsWith('data:')) continue;
+          const data = line.slice(5).trim();
+          if (!data) continue;
+          try {
+            const parsed = JSON.parse(data);
+            if (eventType === 'token' && parsed.content) {
+              accumulated += parsed.content;
+              setStreamingMessage(accumulated);
+            } else if (eventType === 'error') {
+              throw new Error(parsed.message || 'AI error');
+            }
+          } catch { /* skip malformed */ }
+        }
+      }
+
+      const elapsed = Date.now() - startTime;
+      const tokenCount = Math.round(accumulated.length / 4);
+      const assistantMsg: Message = {
+        id: `gemma4-${Date.now()}`,
+        role: 'assistant',
+        content: accumulated || '*(no response)*',
+        timestamp: Date.now() / 1000,
+        stats: { tokens: tokenCount, latency_ms: elapsed, tokens_per_second: tokenCount / (elapsed / 1000) },
+      };
+      setMessages(prev => [...prev, assistantMsg]);
+      setStreamingMessage('');
+    } catch (error: any) {
+      const errMsg: Message = {
+        id: `err-${Date.now()}`,
+        role: 'assistant',
+        content: `**Error:** ${error?.message || 'Failed to reach AI'}`,
+        timestamp: Date.now() / 1000,
+      };
+      setMessages(prev => [...prev, errMsg]);
+      setStreamingMessage('');
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
   // BitNet b1.58-2B-4T streaming via OpenAI-compatible API
   const sendBitNetMessage = async (userMessage: string) => {
     setIsGenerating(true);
@@ -1812,6 +1899,14 @@ Response: "I'll send a mail to **Bob** through the node's P2P messaging.\n\n[ACT
       };
       setMessages(prev => [...prev, assistantMsg]);
       return; // Skip AI model entirely
+    }
+
+    // Gemma4 (Ollama) — live network context, handles hashrate + general questions
+    if (selectedModel === 'Gemma4-Ollama') {
+      const userMessage = input;
+      setInput('');
+      await sendGemma4Message(userMessage);
+      return;
     }
 
     // BitNet uses its own streaming path (OpenAI-compatible API)
@@ -2328,7 +2423,7 @@ Response: "I'll send a mail to **Bob** through the node's P2P messaging.\n\n[ACT
                   QNK Financial Assistant
                 </h3>
                 <p className="text-amber-200/50 text-sm mb-8">
-                  Powered by BitNet b1.58 — ask questions, execute transactions, swap tokens, check balances
+                  {selectedModel === 'Gemma4-Ollama' ? 'Powered by Gemma 4 — knows live hashrate, block height, supply and more' : 'Powered by BitNet b1.58 — ask questions, execute transactions, swap tokens, check balances'}
                 </p>
 
                 {/* Command Suggestion Chips */}
@@ -3048,7 +3143,7 @@ Response: "I'll send a mail to **Bob** through the node's P2P messaging.\n\n[ACT
                         AI Model
                       </label>
                       <span className="text-amber-400 font-mono text-xs px-3 py-1 rounded-lg bg-amber-500/10 border border-amber-500/20">
-                        {selectedModel.includes('BitNet') ? '2B 1-bit' : selectedModel.includes('Small') ? '24B params' : selectedModel.includes('Ministral-3B') ? '3B params' : selectedModel.includes('Qwen3') ? '8B params' : '7B params'}
+                        {selectedModel === 'Gemma4-Ollama' ? 'live context' : selectedModel.includes('BitNet') ? '2B 1-bit' : selectedModel.includes('Small') ? '24B params' : selectedModel.includes('Ministral-3B') ? '3B params' : selectedModel.includes('Qwen3') ? '8B params' : '7B params'}
                       </span>
                     </div>
                     <select
@@ -3060,6 +3155,7 @@ Response: "I'll send a mail to **Bob** through the node's P2P messaging.\n\n[ACT
                         boxShadow: '0 0 20px rgba(212, 175, 55, 0.1)',
                       }}
                     >
+                      <option value="Gemma4-Ollama">✨ Gemma 4 (Ollama) - Live Network Data</option>
                       <option value="BitNet-b1.58-2B-4T">⚡ BitNet b1.58 2B (0.4 GB) - 1-Bit Quantized</option>
                       <option value="Ministral-3B-Instruct">🔧 Ministral 3B (2.1 GB) - Agentic + Functions</option>
                       <option value="Mistral-7B-Instruct-v0.3">Mistral 7B Instruct (4.3 GB) - Fast</option>

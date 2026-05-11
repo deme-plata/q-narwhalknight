@@ -1,11 +1,45 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 
 // Module-level cache so emails survive tab switches and show instantly on return.
-// Each folder has its own entry: { emails, timestamp }.
-// Cache is considered fresh for 60s — after that a background revalidation fires
-// but the stale data is shown immediately so the UI never blanks.
 const _emailCache: Map<string, { emails: any[]; ts: number }> = new Map();
 const EMAIL_CACHE_TTL_MS = 60_000;
+
+// Derive a colored avatar from a sender email/address string
+function senderAvatar(sender: string): { initials: string; bg: string; glow: string } {
+  const name = sender.split('@')[0].replace(/[._\-+]/g, ' ');
+  const words = name.split(' ').filter(Boolean);
+  const initials = words.length >= 2
+    ? (words[0][0] + words[words.length - 1][0]).toUpperCase()
+    : name.slice(0, 2).toUpperCase() || '??';
+  let hash = 0;
+  for (let i = 0; i < sender.length; i++) hash = sender.charCodeAt(i) + ((hash << 5) - hash);
+  const palette = [
+    { bg: 'linear-gradient(135deg,#FFD700,#FF9800)', glow: 'rgba(255,215,0,0.35)' },
+    { bg: 'linear-gradient(135deg,#00E5FF,#0288D1)', glow: 'rgba(0,229,255,0.35)' },
+    { bg: 'linear-gradient(135deg,#7C4DFF,#9C27B0)', glow: 'rgba(124,77,255,0.35)' },
+    { bg: 'linear-gradient(135deg,#00E676,#00897B)', glow: 'rgba(0,230,118,0.35)' },
+    { bg: 'linear-gradient(135deg,#FF6B35,#E91E63)', glow: 'rgba(255,107,53,0.35)' },
+    { bg: 'linear-gradient(135deg,#26C6DA,#00ACC1)', glow: 'rgba(38,198,218,0.35)' },
+    { bg: 'linear-gradient(135deg,#FF4081,#C2185B)', glow: 'rgba(255,64,129,0.35)' },
+  ];
+  const { bg, glow } = palette[Math.abs(hash) % palette.length];
+  return { initials, bg, glow };
+}
+
+// Group emails into time buckets for display
+function groupEmailsByTime(emails: any[]): { label: string; emails: any[] }[] {
+  const now = Date.now();
+  const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+  const yesterdayStart = new Date(todayStart); yesterdayStart.setDate(yesterdayStart.getDate() - 1);
+  const weekStart = new Date(todayStart); weekStart.setDate(weekStart.getDate() - 7);
+  const toMs = (ts: number) => ts > 1e10 ? ts : ts * 1000; // handle s or ms
+  return [
+    { label: 'Today',      emails: emails.filter(e => toMs(e.timestamp) >= todayStart.getTime()) },
+    { label: 'Yesterday',  emails: emails.filter(e => toMs(e.timestamp) >= yesterdayStart.getTime() && toMs(e.timestamp) < todayStart.getTime()) },
+    { label: 'This Week',  emails: emails.filter(e => toMs(e.timestamp) >= weekStart.getTime() && toMs(e.timestamp) < yesterdayStart.getTime()) },
+    { label: 'Older',      emails: emails.filter(e => toMs(e.timestamp) < weekStart.getTime()) },
+  ].filter(g => g.emails.length > 0);
+}
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Mail, Send, Inbox, Archive, Trash2, Search, Plus, ArrowLeft,
@@ -633,17 +667,17 @@ export default function EmailScreen() {
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && fetchEmails({ forceRefresh: true })}
-              className="w-full pl-9 pr-3 py-2 rounded-lg text-sm text-white placeholder-gray-700 focus:outline-none transition-all"
+              className="w-full pl-10 pr-4 py-3 rounded-xl text-sm text-white placeholder-gray-600 focus:outline-none transition-all"
               style={{
                 background: 'rgba(0,229,255,0.04)',
-                border: '1px solid rgba(34,211,238,0.1)',
+                border: '1px solid rgba(34,211,238,0.12)',
               }}
               onFocus={(e) => {
-                e.currentTarget.style.borderColor = 'rgba(0,229,255,0.35)';
-                e.currentTarget.style.boxShadow = '0 0 12px rgba(0,229,255,0.1)';
+                e.currentTarget.style.borderColor = 'rgba(0,229,255,0.4)';
+                e.currentTarget.style.boxShadow = '0 0 16px rgba(0,229,255,0.08)';
               }}
               onBlur={(e) => {
-                e.currentTarget.style.borderColor = 'rgba(34,211,238,0.1)';
+                e.currentTarget.style.borderColor = 'rgba(34,211,238,0.12)';
                 e.currentTarget.style.boxShadow = 'none';
               }}
             />
@@ -706,106 +740,128 @@ export default function EmailScreen() {
               <span className="text-sm" style={{ color: 'rgba(107,114,128,0.6)' }}>No emails yet</span>
             </div>
           ) : (
-            emails.map((email, idx) => (
-              <motion.button
-                key={email.id}
-                initial={{ opacity: 0, x: -10 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ delay: idx * 0.03, duration: 0.2 }}
-                onClick={() => openEmail(email)}
-                className="w-full text-left px-4 py-3 transition-all email-item-hover relative"
-                style={{
-                  borderBottom: '1px solid rgba(34,211,238,0.04)',
-                  borderLeft: selectedEmail?.id === email.id
-                    ? '2px solid #FFD700'
-                    : '2px solid transparent',
-                  background: selectedEmail?.id === email.id
-                    ? 'linear-gradient(135deg, rgba(255,215,0,0.06), rgba(0,229,255,0.03))'
-                    : !email.read
-                      ? 'rgba(255,215,0,0.02)'
-                      : 'transparent',
-                }}
-              >
-                <div className="flex items-center gap-2 mb-1">
-                  {!email.read && (
-                    <div
-                      className="w-2 h-2 rounded-full flex-shrink-0"
-                      style={{
-                        background: '#00E5FF',
-                        boxShadow: '0 0 5px rgba(0,229,255,0.8)',
-                        animation: 'emailUnreadPulse 2.2s ease-in-out infinite',
-                      }}
-                    />
-                  )}
-                  <span
-                    className="text-xs truncate flex-1"
-                    style={{
-                      color: !email.read ? '#E5E7EB' : 'rgba(156,163,175,0.55)',
-                      fontWeight: !email.read ? 600 : 400,
-                    }}
-                  >
-                    {email.from_email || walletToAddress(email.from_wallet)}
-                  </span>
-                  <span className="text-xs flex-shrink-0" style={{ color: 'rgba(255,215,0,0.35)' }}>
-                    {formatTime(email.timestamp)}
-                  </span>
-                </div>
+            groupEmailsByTime(emails).map(({ label, emails: group }) => (
+              <div key={label}>
+                {/* Time group header */}
                 <div
-                  className="text-sm truncate mb-0.5"
-                  style={{
-                    color: !email.read ? '#E5E7EB' : 'rgba(156,163,175,0.5)',
-                    fontWeight: !email.read ? 500 : 400,
-                  }}
+                  className="px-4 py-1.5 flex items-center gap-2"
+                  style={{ position: 'sticky', top: 0, zIndex: 1, background: 'rgba(10,14,26,0.92)', backdropFilter: 'blur(8px)' }}
                 >
-                  {email.subject || '(No Subject)'}
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs truncate flex-1" style={{ color: 'rgba(107,114,128,0.6)' }}>
-                    {email.body.slice(0, 80)}
+                  <span className="text-[10px] font-bold uppercase tracking-widest" style={{ color: 'rgba(0,229,255,0.35)' }}>
+                    {label}
                   </span>
-                  {email.crypto_transfer && (
-                    <span
-                      className="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs flex-shrink-0"
+                  <div className="flex-1 h-px" style={{ background: 'rgba(34,211,238,0.06)' }} />
+                </div>
+
+                {group.map((email, idx) => {
+                  const sender = email.from_email || walletToAddress(email.from_wallet);
+                  const av = senderAvatar(sender);
+                  const isSelected = selectedEmail?.id === email.id;
+                  return (
+                    <motion.button
+                      key={email.id}
+                      initial={{ opacity: 0, y: 6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ delay: idx * 0.025, duration: 0.18 }}
+                      whileHover={{ y: -1, boxShadow: '0 4px 20px rgba(0,0,0,0.25)' }}
+                      onClick={() => openEmail(email)}
+                      className="w-full text-left px-3 py-3 mx-1 transition-all relative group"
                       style={{
-                        background: 'rgba(0,230,118,0.08)',
-                        color: '#00E676',
-                        border: '1px solid rgba(0,230,118,0.18)',
-                        boxShadow: '0 0 6px rgba(0,230,118,0.12)',
+                        width: 'calc(100% - 8px)',
+                        borderRadius: 12,
+                        marginBottom: 2,
+                        borderLeft: isSelected ? '2px solid #FFD700' : '2px solid transparent',
+                        background: isSelected
+                          ? 'linear-gradient(135deg, rgba(255,215,0,0.08), rgba(0,229,255,0.04))'
+                          : !email.read
+                            ? 'rgba(255,215,0,0.025)'
+                            : 'transparent',
                       }}
                     >
-                      <Coins className="w-3 h-3" />
-                      {formatCryptoAmount(email.crypto_transfer.amount, email.crypto_transfer.token_type)}
-                    </span>
-                  )}
-                  {email.encrypted && (
-                    <span title="E2E Encrypted">
-                      <Shield
-                        className="w-3 h-3 flex-shrink-0"
-                        style={{ color: 'rgba(0,229,255,0.5)' }}
-                      />
-                    </span>
-                  )}
-                  {/* Delivery method badge */}
-                  <span
-                    className="px-1 py-0.5 rounded text-[9px] font-semibold flex-shrink-0 uppercase tracking-wide"
-                    style={
-                      email.delivery_method === 'P2PGossipsub'
-                        ? {
-                            background: 'rgba(0,229,255,0.08)',
-                            color: 'rgba(0,229,255,0.7)',
-                            border: '1px solid rgba(0,229,255,0.15)',
-                          }
-                        : {
-                            background: 'rgba(255,215,0,0.08)',
-                            color: 'rgba(255,215,0,0.65)',
-                            border: '1px solid rgba(255,215,0,0.15)',
-                          }
-                    }
-                  >
-                    {email.delivery_method === 'P2PGossipsub' ? 'P2P' : 'SMTP'}
-                  </span>
-                </div>
-              </motion.button>
+                      <div className="flex items-start gap-3">
+                        {/* Avatar */}
+                        <div
+                          className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 text-xs font-bold"
+                          style={{
+                            background: av.bg,
+                            boxShadow: `0 0 10px ${av.glow}`,
+                            color: '#0a0e1a',
+                            fontSize: 11,
+                            letterSpacing: '0.02em',
+                          }}
+                        >
+                          {av.initials}
+                        </div>
+
+                        {/* Content */}
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1.5 mb-0.5">
+                            {!email.read && (
+                              <div
+                                className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+                                style={{ background: '#00E5FF', boxShadow: '0 0 5px rgba(0,229,255,0.8)' }}
+                              />
+                            )}
+                            <span
+                              className="text-xs truncate flex-1"
+                              style={{ color: !email.read ? '#E5E7EB' : 'rgba(156,163,175,0.55)', fontWeight: !email.read ? 600 : 400 }}
+                            >
+                              {sender}
+                            </span>
+                            <span className="text-[10px] flex-shrink-0" style={{ color: 'rgba(255,215,0,0.35)' }}>
+                              {formatTime(email.timestamp)}
+                            </span>
+                          </div>
+                          <div
+                            className="text-sm truncate mb-0.5"
+                            style={{ color: !email.read ? '#E5E7EB' : 'rgba(156,163,175,0.5)', fontWeight: !email.read ? 500 : 400 }}
+                          >
+                            {email.subject || '(No Subject)'}
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-xs truncate flex-1" style={{ color: 'rgba(107,114,128,0.55)' }}>
+                              {email.body.slice(0, 70)}
+                            </span>
+                            {email.crypto_transfer && (
+                              <span
+                                className="flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] flex-shrink-0 font-semibold"
+                                style={{ background: 'rgba(0,230,118,0.1)', color: '#00E676', border: '1px solid rgba(0,230,118,0.2)' }}
+                              >
+                                <Coins className="w-2.5 h-2.5" />
+                                {formatCryptoAmount(email.crypto_transfer.amount, email.crypto_transfer.token_type)}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Hover actions — slide in from right */}
+                        <div
+                          className="flex items-center gap-1 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
+                          style={{ marginTop: 2 }}
+                          onClick={e => e.stopPropagation()}
+                        >
+                          <button
+                            onClick={() => { openEmail(email); handleReply(email); }}
+                            className="p-1 rounded-lg transition-colors"
+                            style={{ color: 'rgba(0,229,255,0.5)' }}
+                            title="Reply"
+                          >
+                            <Reply className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onClick={() => handleDelete(email.id)}
+                            className="p-1 rounded-lg transition-colors"
+                            style={{ color: 'rgba(239,68,68,0.4)' }}
+                            title="Delete"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    </motion.button>
+                  );
+                })}
+              </div>
             ))
           )}
         </div>
@@ -1235,22 +1291,15 @@ function useAIAssistant() {
     let fullText = '';
 
     try {
-      const response = await fetch('/bitnet-api/v1/chat/completions', {
+      // Email AI assistant — /api/v1/ai/email-assist proxies to gemma4 on Epsilon Ollama
+      const response = await fetch('/api/v1/ai/email-assist', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: 'bitnet-b1.58-2B-4T',
           messages: [
-            {
-              role: 'system',
-              content: 'You are a professional email writing assistant for Quillon Mail, a decentralized crypto email platform. Write concise, clear email content. Output ONLY the email body text — no subject lines, no "Subject:" labels, no greetings or signatures unless specifically asked. Be direct and helpful.',
-            },
             ...aiMessages.slice(-4),
             { role: 'user', content: prompt },
           ],
-          stream: true,
-          max_tokens: 500,
-          temperature: 0.7,
         }),
         signal: controller.signal,
       });
@@ -1273,26 +1322,24 @@ function useAIAssistant() {
 
         for (const line of lines) {
           if (!line.startsWith('data:')) continue;
-          const data = line.substring(5).trim();
-          if (!data || data === '[DONE]') continue;
+          const raw = line.substring(5).trim();
+          if (!raw) continue;
           try {
-            const parsed = JSON.parse(data);
-            // OpenAI-compatible: choices[0].delta.content
-            const token = parsed.choices?.[0]?.delta?.content;
-            if (token) {
-              fullText += token;
+            const parsed = JSON.parse(raw);
+            // SSE "token" event: { content: "..." }
+            if (parsed.content) {
+              fullText += parsed.content;
               setAiStreamText(fullText);
               onToken(fullText);
             }
           } catch {
-            // JSON parse failed — skip this chunk to avoid double-appending raw data
-            console.warn('Failed to parse SSE chunk, skipping:', data?.substring(0, 80));
+            console.warn('Failed to parse email AI SSE chunk:', raw?.substring(0, 80));
           }
         }
       }
     } catch (e: any) {
       if (e.name !== 'AbortError') {
-        console.error('BitNet email AI error:', e);
+        console.error('Email AI error:', e);
       }
     } finally {
       setAiStreaming(false);
@@ -1442,7 +1489,7 @@ function ComposePanel({
           >
             <Mail className="w-4 h-4" style={{ color: '#FFD700' }} />
           </div>
-          <h3 className="font-semibold email-neon-text text-sm">New Email</h3>
+          <h3 className="font-semibold email-neon-text text-base">New Email</h3>
         </div>
         <motion.button
           whileHover={{ scale: 1.1, rotate: 90 }}
@@ -1457,47 +1504,64 @@ function ComposePanel({
 
       {/* Fields */}
       <div
-        className="px-6 py-3 space-y-0"
-        style={{ borderBottom: '1px solid rgba(34,211,238,0.06)' }}
+        className="px-6 pt-5 pb-2 space-y-3"
+        style={{ borderBottom: '1px solid rgba(34,211,238,0.07)' }}
       >
-        <div
-          className="flex items-center gap-3 py-2"
-          style={{ borderBottom: '1px solid rgba(34,211,238,0.04)' }}
-        >
-          <label className="text-xs w-14 font-semibold uppercase tracking-widest" style={{ color: 'rgba(0,229,255,0.45)', fontSize: '10px' }}>
-            To:
+        <div className="flex items-center gap-3">
+          <label className="text-xs w-16 font-semibold uppercase tracking-widest flex-shrink-0" style={{ color: 'rgba(0,229,255,0.5)' }}>
+            To
           </label>
           <input
             type="text"
             placeholder="Wallet address or email"
             value={composeTo}
             onChange={(e) => setComposeTo(e.target.value)}
-            className="flex-1 bg-transparent text-white text-sm placeholder-gray-700 focus:outline-none"
+            className="flex-1 px-4 py-3 rounded-xl text-white text-base placeholder-gray-600 focus:outline-none transition-all"
+            style={{
+              background: 'rgba(0,229,255,0.04)',
+              border: '1px solid rgba(34,211,238,0.12)',
+            }}
+            onFocus={e => { e.currentTarget.style.borderColor = 'rgba(0,229,255,0.4)'; e.currentTarget.style.boxShadow = '0 0 16px rgba(0,229,255,0.08)'; }}
+            onBlur={e => { e.currentTarget.style.borderColor = 'rgba(34,211,238,0.12)'; e.currentTarget.style.boxShadow = 'none'; }}
           />
         </div>
-        <div className="flex items-center gap-3 py-2">
-          <label className="text-xs w-14 font-semibold uppercase tracking-widest" style={{ color: 'rgba(0,229,255,0.45)', fontSize: '10px' }}>
-            Subject:
+        <div className="flex items-center gap-3 pb-2">
+          <label className="text-xs w-16 font-semibold uppercase tracking-widest flex-shrink-0" style={{ color: 'rgba(0,229,255,0.5)' }}>
+            Subject
           </label>
           <input
             type="text"
             placeholder="Email subject"
             value={composeSubject}
             onChange={(e) => setComposeSubject(e.target.value)}
-            className="flex-1 bg-transparent text-white text-sm placeholder-gray-700 focus:outline-none"
+            className="flex-1 px-4 py-3 rounded-xl text-white text-base placeholder-gray-600 focus:outline-none transition-all"
+            style={{
+              background: 'rgba(0,229,255,0.04)',
+              border: '1px solid rgba(34,211,238,0.12)',
+            }}
+            onFocus={e => { e.currentTarget.style.borderColor = 'rgba(0,229,255,0.4)'; e.currentTarget.style.boxShadow = '0 0 16px rgba(0,229,255,0.08)'; }}
+            onBlur={e => { e.currentTarget.style.borderColor = 'rgba(34,211,238,0.12)'; e.currentTarget.style.boxShadow = 'none'; }}
           />
         </div>
       </div>
 
       {/* Body */}
-      <div className="flex-1 p-6 relative" style={{ minHeight: 0 }}>
+      <div className="flex-1 px-6 pt-5 pb-4 relative" style={{ minHeight: 0 }}>
         <textarea
           ref={composeRef}
           placeholder="Write your message..."
           value={composeBody}
           onChange={(e) => setComposeBody(e.target.value)}
-          className="w-full h-full bg-transparent text-white text-sm placeholder-gray-700 resize-none focus:outline-none email-scrollbar"
-          style={{ minHeight: '120px', color: '#E5E7EB' }}
+          className="w-full h-full px-4 py-4 rounded-xl text-base placeholder-gray-600 resize-none focus:outline-none email-scrollbar transition-all"
+          style={{
+            minHeight: '160px',
+            color: '#E5E7EB',
+            background: 'rgba(0,229,255,0.03)',
+            border: '1px solid rgba(34,211,238,0.08)',
+            lineHeight: '1.7',
+          }}
+          onFocus={e => { e.currentTarget.style.borderColor = 'rgba(0,229,255,0.25)'; e.currentTarget.style.background = 'rgba(0,229,255,0.05)'; }}
+          onBlur={e => { e.currentTarget.style.borderColor = 'rgba(34,211,238,0.08)'; e.currentTarget.style.background = 'rgba(0,229,255,0.03)'; }}
         />
       </div>
 

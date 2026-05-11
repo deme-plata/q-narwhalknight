@@ -254,9 +254,12 @@ class RequestRateLimiter {
     this.maxConcurrent = maxConcurrent;
   }
 
-  async acquire(): Promise<void> {
+  async acquire(maxWaitMs = 5000): Promise<void> {
+    const deadline = Date.now() + maxWaitMs;
     while (this.activeRequests >= this.maxConcurrent) {
-      console.log(`⏸️ [RATE LIMIT] Max concurrent requests reached (${this.maxConcurrent}), waiting...`);
+      if (Date.now() >= deadline) {
+        throw new Error(`Rate limiter timeout after ${maxWaitMs}ms — too many concurrent requests`);
+      }
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     this.activeRequests++;
@@ -271,7 +274,7 @@ class RequestRateLimiter {
   }
 }
 
-const rateLimiter = new RequestRateLimiter(10); // Max 10 concurrent requests (balanced for performance)
+const rateLimiter = new RequestRateLimiter(20); // Max 20 concurrent requests
 
 // Global password prompt function - will be set by PasswordModalProvider
 let globalPasswordPrompt: (() => Promise<string>) | null = null;
@@ -805,7 +808,7 @@ class QNarwhalKnightAPI {
     } finally {
       // Always release rate limit token
       rateLimiter.release();
-      console.log(`📊 [RATE LIMITER] Active requests: ${rateLimiter.getActiveCount()}/10`);
+      console.log(`📊 [RATE LIMITER] Active requests: ${rateLimiter.getActiveCount()}/20`);
     }
   }
 

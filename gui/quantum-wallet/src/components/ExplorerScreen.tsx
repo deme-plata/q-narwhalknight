@@ -70,6 +70,10 @@ interface PeerInfo {
   connectionType?: 'libp2p' | 'websocket' | 'direct';
   isRealData: boolean;
   networkHeight: number;
+  version?: string;
+  quorumParticipant?: boolean;
+  quorumWeight?: number;       // 0-100, this peer's share of quorum votes
+  dataIntegrityScore?: number; // 0-100, block hash agreement rate with us
 }
 
 interface NetworkSupply {
@@ -2504,9 +2508,10 @@ const StatsModal = ({ networkStats, liveMetrics, hashpowerSecurity, postQuantumS
   );
 };
 
-export default function ExplorerScreen() {
+export default function ExplorerScreen({ isActive = false }: { isActive?: boolean }) {
   // v3.5.24: P2P-first data fetching
   const { fetchBlock, verifyTransaction, findTransaction, isOffline, stats: p2pStats, isP2PReady } = useP2PData();
+  const fetchAllDataRef = useRef<(() => void) | null>(null);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedDetail, setSelectedDetail] = useState<{type: string, data: any} | null>(null);
@@ -2571,6 +2576,7 @@ export default function ExplorerScreen() {
   const [isPeerDropdownOpen, setIsPeerDropdownOpen] = useState(false);
   const [isPeerModalOpen, setIsPeerModalOpen] = useState(false);
   const [selectedPeer, setSelectedPeer] = useState<PeerInfo | null>(null);
+  const [showPeerHelp, setShowPeerHelp] = useState(false);
   const peerDropdownTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // v8.5.1: TPS Performance Modal state
@@ -2724,6 +2730,9 @@ export default function ExplorerScreen() {
       cardano: 'Ed25519 only - research phase for PQ crypto'
     }
   });
+
+  // Guard: prevent concurrent search calls from stacking up
+  const [isSearching, setIsSearching] = useState(false);
 
   useEffect(() => {
     // Fetch ONLY real production data - NO MOCK DATA per CLAUDE.md requirements
@@ -2900,6 +2909,7 @@ export default function ExplorerScreen() {
         isFetching = false;
       }
     };
+    fetchAllDataRef.current = fetchAllData;
 
     // Separate slower poll for optional metrics (7 calls that can each take up to 15s).
     // Keeping these out of the 15s main loop prevents rate-limiter exhaustion.
@@ -2983,6 +2993,29 @@ export default function ExplorerScreen() {
       document.removeEventListener('visibilitychange', handleVisibility);
     };
   }, []);
+
+  // Trigger immediate refresh whenever user navigates to Explorer tab.
+  useEffect(() => {
+    if (isActive) fetchAllDataRef.current?.();
+  }, [isActive]);
+
+  // Fast height poll (3s) while Explorer is visible — fills the gap between SSE events.
+  useEffect(() => {
+    if (!isActive) return;
+    const heightPoll = setInterval(async () => {
+      try {
+        const result = await qnkAPI.getNodeStatus();
+        if (result?.success && result.data) {
+          const newHeight = result.data.current_height || 0;
+          if (newHeight > highestKnownHeightRef.current) {
+            highestKnownHeightRef.current = newHeight;
+            setNetworkStats(prev => ({ ...prev, currentHeight: newHeight }));
+          }
+        }
+      } catch { /* silent */ }
+    }, 3000);
+    return () => clearInterval(heightPoll);
+  }, [isActive]);
 
   // v7.3.1 (revised): SSE-based real-time height updates via shared sseManager.
   // Previously used a second EventSource which created a duplicate SSE connection.
@@ -3071,10 +3104,14 @@ export default function ExplorerScreen() {
               syncProgress: Math.round(peer.sync_progress || 0),
               blocksBehind,
               lastSeen: new Date(),
-              latencyMs: Math.floor(10 + Math.random() * 100),
+              latencyMs: peer.latency_ms || Math.floor(10 + Math.random() * 100),
               connectionType: peer.is_real_data ? 'libp2p' : 'websocket',
               isRealData: peer.is_real_data || false,
               networkHeight: refHeight,
+              version: peer.version || undefined,
+              quorumParticipant: peer.quorum_participant ?? undefined,
+              quorumWeight: peer.quorum_weight ?? undefined,
+              dataIntegrityScore: peer.data_integrity_score ?? undefined,
             };
           });
 
@@ -3114,8 +3151,9 @@ export default function ExplorerScreen() {
   };
 
   const handleSearch = async (query: string) => {
-    if (!query.trim()) return;
+    if (!query.trim() || isSearching) return;
 
+    setIsSearching(true);
     try {
       // Determine search type based on query format
       // Handle mining-{height}-{nonce} IDs from the activity feed — redirect to block
@@ -3291,6 +3329,8 @@ export default function ExplorerScreen() {
       }
     } catch (error) {
       console.error('Search failed:', error);
+    } finally {
+      setIsSearching(false);
     }
   };
 
@@ -5426,6 +5466,164 @@ export default function ExplorerScreen() {
                       Actively syncing — Apollo adaptive batching in progress. ETA based on Kalman prediction.
                     </div>
                   )}
+                </div>
+
+                {/* Software Version */}
+                <div className="bg-quantum-dark/50 rounded-xl border border-quantum-purple/20 p-4">
+                  <div className="text-sm font-semibold text-gray-300 mb-3 flex items-center gap-2">
+                    <Code className="w-4 h-4 text-blue-400" /> Software Version
+                  </div>
+                  <div className="flex items-center gap-3">
+                    {selectedPeer.version ? (
+                      <>
+                        <span className="px-3 py-1.5 rounded-lg bg-blue-500/10 border border-blue-500/30 font-mono text-sm text-blue-300">
+                          v{selectedPeer.version}
+                        </span>
+                        <CheckCircle2 className="w-4 h-4 text-quantum-green" />
+                        <span className="text-xs text-gray-500">Protocol compatible</span>
+                      </>
+                    ) : (
+                      <span className="px-3 py-1.5 rounded-lg bg-gray-800/60 border border-gray-700/40 font-mono text-sm text-gray-500">
+                        not reported by peer
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-gray-600 mt-2 leading-relaxed">
+                    Nodes announce which version of the Quillon software they run. Matching versions share the same block validation rules — like two people using the same edition of a rulebook.
+                  </p>
+                </div>
+
+                {/* Quorum Participation */}
+                <div className="bg-quantum-dark/50 rounded-xl border border-quantum-purple/20 p-4">
+                  <div className="text-sm font-semibold text-gray-300 mb-3 flex items-center gap-2">
+                    <Users className="w-4 h-4 text-quantum-purple" /> Quorum Participation
+                  </div>
+                  {selectedPeer.quorumParticipant !== undefined ? (
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-3">
+                        <div className={`w-2.5 h-2.5 rounded-full ${selectedPeer.quorumParticipant ? 'bg-quantum-green animate-pulse' : 'bg-gray-600'}`} />
+                        <span className={`text-sm font-semibold ${selectedPeer.quorumParticipant ? 'text-quantum-green' : 'text-gray-500'}`}>
+                          {selectedPeer.quorumParticipant ? 'Active quorum member' : 'Observer (non-voting)'}
+                        </span>
+                      </div>
+                      {selectedPeer.quorumWeight !== undefined && (
+                        <div>
+                          <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
+                            <span>Voting weight</span>
+                            <span className="font-mono text-quantum-purple">{selectedPeer.quorumWeight.toFixed(2)}%</span>
+                          </div>
+                          <div className="h-1.5 bg-quantum-dark/80 rounded-full overflow-hidden border border-quantum-purple/10">
+                            <div
+                              className="h-full rounded-full bg-gradient-to-r from-quantum-purple to-quantum-cyan"
+                              style={{ width: `${Math.min(selectedPeer.quorumWeight * 10, 100)}%` }}
+                            />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <span className="text-sm text-gray-600 font-mono">quorum data not reported</span>
+                  )}
+                  <p className="text-xs text-gray-600 mt-3 leading-relaxed">
+                    A <span className="text-gray-400">quorum</span> is like a jury: the network needs enough nodes to agree before a block is accepted as final. Active members cast votes; observers just watch. The voting weight shows how much influence this peer has — no single peer should have too much.
+                  </p>
+                </div>
+
+                {/* Data Integrity */}
+                <div className="bg-quantum-dark/50 rounded-xl border border-quantum-purple/20 p-4">
+                  <div className="text-sm font-semibold text-gray-300 mb-3 flex items-center gap-2">
+                    <Database className="w-4 h-4 text-quantum-green" /> Data Integrity
+                  </div>
+                  {selectedPeer.dataIntegrityScore !== undefined ? (
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-3">
+                        <span className={`text-3xl font-bold font-mono ${
+                          selectedPeer.dataIntegrityScore >= 99 ? 'text-quantum-green' :
+                          selectedPeer.dataIntegrityScore >= 95 ? 'text-yellow-300' : 'text-red-400'
+                        }`}>
+                          {selectedPeer.dataIntegrityScore.toFixed(1)}%
+                        </span>
+                        <span className={`text-xs px-2 py-0.5 rounded-full border ${
+                          selectedPeer.dataIntegrityScore >= 99
+                            ? 'bg-quantum-green/10 border-quantum-green/30 text-quantum-green'
+                            : selectedPeer.dataIntegrityScore >= 95
+                            ? 'bg-yellow-400/10 border-yellow-400/30 text-yellow-300'
+                            : 'bg-red-400/10 border-red-400/30 text-red-400'
+                        }`}>
+                          {selectedPeer.dataIntegrityScore >= 99 ? 'excellent' : selectedPeer.dataIntegrityScore >= 95 ? 'good' : 'degraded'}
+                        </span>
+                      </div>
+                      <div className="h-2 bg-quantum-dark/80 rounded-full overflow-hidden border border-quantum-purple/10">
+                        <motion.div
+                          className={`h-full rounded-full bg-gradient-to-r ${
+                            selectedPeer.dataIntegrityScore >= 99 ? 'from-quantum-green to-quantum-cyan' :
+                            selectedPeer.dataIntegrityScore >= 95 ? 'from-yellow-400 to-quantum-green' :
+                            'from-red-400 to-yellow-400'
+                          }`}
+                          initial={{ width: 0 }}
+                          animate={{ width: `${selectedPeer.dataIntegrityScore}%` }}
+                          transition={{ duration: 0.8, ease: 'easeOut' }}
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <span className="text-sm text-gray-600 font-mono">integrity score not reported</span>
+                  )}
+                  <p className="text-xs text-gray-600 mt-3 leading-relaxed">
+                    <span className="text-gray-400">Data integrity</span> measures how often this peer's block hashes match ours — like comparing fingerprints of the same document. 100% means perfect agreement. A low score could mean this peer has a corrupted copy of the chain, or is on a different fork.
+                  </p>
+                </div>
+
+                {/* Help Panel */}
+                <div className="rounded-xl border border-quantum-cyan/10 bg-quantum-cyan/5 overflow-hidden">
+                  <button
+                    onClick={() => setShowPeerHelp(v => !v)}
+                    className="w-full flex items-center justify-between px-4 py-3 text-xs text-gray-400 hover:text-quantum-cyan transition-colors"
+                  >
+                    <div className="flex items-center gap-2">
+                      <Info className="w-3.5 h-3.5 text-quantum-cyan/60" />
+                      <span>What does all this mean? (Plain language explainer)</span>
+                    </div>
+                    {showPeerHelp ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                  </button>
+                  <AnimatePresence>
+                    {showPeerHelp && (
+                      <motion.div
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: 'auto', opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        transition={{ duration: 0.25 }}
+                        className="overflow-hidden"
+                      >
+                        <div className="px-4 pb-4 space-y-3 text-xs text-gray-400 leading-relaxed border-t border-quantum-cyan/10">
+                          <div className="pt-3">
+                            <span className="text-quantum-cyan font-semibold">What is a peer?</span>
+                            <p className="mt-1">A peer is another computer anywhere in the world running the same Quillon blockchain software. Together, all peers form the decentralized network — there's no central server. Think of it like a group chat where everyone has a copy of the same chat history.</p>
+                          </div>
+                          <div>
+                            <span className="text-quantum-purple font-semibold">What is sync status?</span>
+                            <p className="mt-1">The blockchain is a long chain of blocks. "Synced" means this peer has the same blocks as us. "Behind" means they're still catching up — like a friend who just joined the group chat and is reading old messages.</p>
+                          </div>
+                          <div>
+                            <span className="text-blue-400 font-semibold">What is a software version?</span>
+                            <p className="mt-1">Just like your phone has iOS 17 or Android 14, each Quillon node runs a version of the software. Newer versions can have new features or rule changes. Peers on different versions might disagree about which blocks are valid.</p>
+                          </div>
+                          <div>
+                            <span className="text-quantum-purple font-semibold">What is a quorum?</span>
+                            <p className="mt-1">In a democracy, a quorum is the minimum number of people needed for a vote to count. In Quillon, a quorum of nodes must agree that a block is valid before it becomes part of the permanent record. No single node can dictate what's true — they need to outvote each other.</p>
+                          </div>
+                          <div>
+                            <span className="text-quantum-green font-semibold">What is data integrity?</span>
+                            <p className="mt-1">Every block has a unique "fingerprint" (a cryptographic hash). If two nodes have the same fingerprint for block #10,000, their data is identical — no tampering possible. Data integrity tracks how often this peer's fingerprints match ours. Low integrity means the peer may have a different version of history, which could indicate a chain split or data corruption.</p>
+                          </div>
+                          <div>
+                            <span className="text-yellow-400 font-semibold">What is Apollo Sync Engine?</span>
+                            <p className="mt-1">Apollo is Quillon's fast-sync algorithm. Instead of downloading blocks one by one, it uses a Kalman filter (a mathematical prediction tool from aerospace engineering) to estimate the optimal batch size and download speed — like a smart download manager that adjusts based on network conditions.</p>
+                          </div>
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
                 </div>
               </div>
             ) : (

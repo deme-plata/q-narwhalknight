@@ -36,7 +36,8 @@ export default defineConfig({
     }
   },
   esbuild: {
-    drop: ['console', 'debugger'], // Strip console.* and debugger from production
+    // Console logs temporarily enabled for signaling debug (re-enable drop after fix)
+    // drop: ['console', 'debugger'],
   },
   server: {
     port: 5173,

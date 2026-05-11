@@ -2203,9 +2203,9 @@ cargo build --release --package q-api-server
               <div className="mt-5 p-4 bg-slate-800/40 rounded-xl border border-amber-500/10">
                 <h3 className="text-sm font-bold text-amber-300 mb-2">Quick Start (Linux)</h3>
                 <code className="text-xs text-amber-100/70 block whitespace-pre-wrap break-all font-mono">
-{`wget https://quillon.xyz/downloads/q-miner-v10.3.8
-chmod +x q-miner-v10.3.8
-./q-miner-v10.3.8 --mode solo --wallet YOUR_WALLET --threads 4 --server https://quillon.xyz`}
+{`wget https://quillon.xyz/downloads/q-miner-v10.5.3
+chmod +x q-miner-v10.5.3
+./q-miner-v10.5.3 --mode solo --wallet YOUR_WALLET --threads 4 --server https://quillon.xyz`}
                 </code>
               </div>
 
