@@ -78,7 +78,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.8.3"  # v10.8.3: Fix gap-fill fail-fast — drop pending_block_requests on OutboundFailure so fill_gap_p2p errors in ms not 120s
+version = "10.8.4"  # v10.8.4: gap-fill timeout 120s→25s, chunk 200→50; auto pre-checkpoint history fill (blocks 1→16.75M)
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"

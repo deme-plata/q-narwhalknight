@@ -3320,12 +3320,12 @@ impl TurboSyncManager {
     /// instead of HTTP bootstrap. Does NOT touch the contiguous height pointer; the
     /// integrity monitor advances it on its next scan once gaps are confirmed filled.
     pub async fn fill_gap_p2p(&self, first_gap: u64, last_gap: u64) -> Result<()> {
-        const CHUNK: u64 = 200; // Match block-pack server cap per response
-        // 120s: historical blocks require a forward-seek scan on the serving peer;
-        // 30s was too short when the slow multi-format path ran first (now fixed
-        // server-side, but keep a generous timeout for any remaining edge cases).
-        const TIMEOUT_SECS: u64 = 120;
-        const MAX_RETRIES: u32 = 2;
+        const CHUNK: u64 = 50; // Smaller chunks — faster per-request, less wasted time on peer timeout
+        // v10.8.4: Reduced from 120s. v10.8.2 fixed the server-side forward-seek to O(1),
+        // so responses should arrive in <10s when the peer has the blocks.
+        // 25s gives a generous margin; if a peer can't respond in 25s it won't in 120s either.
+        const TIMEOUT_SECS: u64 = 25;
+        const MAX_RETRIES: u32 = 1; // Fewer retries — cycle to next range faster on persistent failures
 
         let network_tx = match &self.network_tx {
             Some(tx) => tx.clone(),

@@ -7840,7 +7840,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
-        let effective_gap_ranges: Vec<(u64, u64)> = if rescan_env
+        const CP_HEIGHT: u64 = 16_538_868; // CHECKPOINT_HEIGHT — hardcoded for gap detection
+
+        let mut effective_gap_ranges: Vec<(u64, u64)> = if rescan_env
             && state.storage_engine.is_checkpoint_applied().await
         {
             warn!("🔍 [CHECKPOINT GAP-FILL] Q_RESCAN_CHECKPOINT_GAPS=1 — scanning checkpoint range for missing blocks...");
@@ -7848,11 +7850,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 .get_latest_qblock_height().await
                 .unwrap_or(None)
                 .unwrap_or(0);
-            let cp_height: u64 = 16_538_868; // CHECKPOINT_HEIGHT constant from q-storage
             let mut ranges: Vec<(u64, u64)> = Vec::new();
             let mut gap_start: Option<u64> = None;
             let mut missing = 0u64;
-            for h in (cp_height + 1)..=local_h {
+            for h in (CP_HEIGHT + 1)..=local_h {
                 match state.storage_engine.get_qblock_by_height(h).await {
                     Ok(Some(_)) => {
                         if let Some(gs) = gap_start.take() {
@@ -7869,7 +7870,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             if let Some(gs) = gap_start { ranges.push((gs, local_h)); }
             warn!(
                 "🔍 [CHECKPOINT GAP-FILL] Scan complete: {} missing blocks in {} ranges (scanned {}→{})",
-                missing, ranges.len(), cp_height + 1, local_h
+                missing, ranges.len(), CP_HEIGHT + 1, local_h
             );
             if !ranges.is_empty() {
                 let _ = state.storage_engine.save_checkpoint_pending_gaps(&ranges).await;
@@ -7878,6 +7879,24 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         } else {
             checkpoint_gap_ranges
         };
+
+        // v10.8.4: Auto-detect pre-checkpoint history gap.
+        // Any checkpoint-synced node is missing blocks 1..=CP_HEIGHT (skipped during warp-sync).
+        // Add this range so the background gap-fill downloads full history from peers (Epsilon archive).
+        // Balances for this range are already correct via the checkpoint snapshot — no replay needed.
+        if state.storage_engine.is_checkpoint_applied().await {
+            let has_genesis = state.storage_engine.get_qblock_by_height(1).await
+                .ok().flatten().is_some();
+            if !has_genesis {
+                warn!(
+                    "🔍 [CHECKPOINT GAP-FILL] Pre-checkpoint history missing (blocks 1-{}) — \
+                     scheduling background download for full chain history.",
+                    CP_HEIGHT
+                );
+                // Append at end: post-checkpoint operational gaps fill first (higher priority)
+                effective_gap_ranges.push((1, CP_HEIGHT));
+            }
+        }
 
         if !effective_gap_ranges.is_empty() && state.storage_engine.is_checkpoint_applied().await {
             let gap_sync   = turbo_sync.clone();
@@ -7938,10 +7957,21 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                      re-applying transactions to fix balances...",
                     ranges_filled, gap_ranges.len(), ranges_failed
                 );
-                if let Err(e) = gap_store.replay_gap_blocks(&gap_ranges, &gap_bals, &gap_supply).await {
-                    warn!("⚠️ [CHECKPOINT GAP-FILL] Balance re-replay failed: {}", e);
+                // Pre-checkpoint blocks (1..=CP_HEIGHT) don't need replay — the checkpoint
+                // snapshot already has correct balances. Only replay post-checkpoint ranges.
+                const CP_HEIGHT_REPLAY: u64 = 16_538_868;
+                let post_cp_ranges: Vec<(u64, u64)> = gap_ranges.iter()
+                    .filter(|&&(_, e)| e > CP_HEIGHT_REPLAY)
+                    .copied()
+                    .collect();
+                if !post_cp_ranges.is_empty() {
+                    if let Err(e) = gap_store.replay_gap_blocks(&post_cp_ranges, &gap_bals, &gap_supply).await {
+                        warn!("⚠️ [CHECKPOINT GAP-FILL] Balance re-replay failed: {}", e);
+                    } else {
+                        warn!("✅ [CHECKPOINT GAP-FILL] Complete — balances corrected from recovered blocks.");
+                    }
                 } else {
-                    warn!("✅ [CHECKPOINT GAP-FILL] Complete — balances corrected from recovered blocks.");
+                    warn!("✅ [CHECKPOINT GAP-FILL] Complete — pre-checkpoint history queued (balances already correct from checkpoint snapshot).");
                 }
             });
         } else if effective_gap_ranges.is_empty() && state.storage_engine.is_checkpoint_applied().await {
@@ -23673,7 +23703,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         ) // Explorer transactions (no auth)
         .route("/api/v1/search", get(handlers::search_transactions)) // Use existing function
         .route("/api/v1/web-search", post(q_api_server::web_search_api::web_search_handler)) // v9.3.2: GLM-4-Flash AI web search
-        .route("/api/v1/ai/chat", post(q_api_server::web_search_api::web_search_handler)) // alias: ad-blocker-safe path for browser AI chat
+        .route("/api/v1/ai/chat", post(q_api_server::web_search_api::ai_chat_handler)) // AI Chat tab — Gemma4 with live network context (hashrate, height, supply, peers)
         .route("/api/v1/ai/email-assist", post(q_api_server::web_search_api::email_assist_handler)) // Email AI assistant (gemma4)
         .route("/api/v1/ai/call-assist", post(q_api_server::web_search_api::call_assist_handler)) // Call AI assistant — real-time voice call suggestions (gemma4, SSE)
         // ============================================
