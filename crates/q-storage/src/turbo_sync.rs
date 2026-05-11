@@ -3321,7 +3321,11 @@ impl TurboSyncManager {
     /// integrity monitor advances it on its next scan once gaps are confirmed filled.
     pub async fn fill_gap_p2p(&self, first_gap: u64, last_gap: u64) -> Result<()> {
         const CHUNK: u64 = 200; // Match block-pack server cap per response
-        const TIMEOUT_SECS: u64 = 30;
+        // 120s: historical blocks require a forward-seek scan on the serving peer;
+        // 30s was too short when the slow multi-format path ran first (now fixed
+        // server-side, but keep a generous timeout for any remaining edge cases).
+        const TIMEOUT_SECS: u64 = 120;
+        const MAX_RETRIES: u32 = 2;
 
         let network_tx = match &self.network_tx {
             Some(tx) => tx.clone(),
@@ -3335,53 +3339,66 @@ impl TurboSyncManager {
         while cursor <= last_gap {
             let end = (cursor + CHUNK - 1).min(last_gap);
 
-            // Pick the best peer at or above the required height
-            let best_peer = {
-                let registry = self.peer_registry.read().await;
-                registry.active_peers_by_height()
-                    .into_iter()
-                    .find(|p| p.height >= end)
-                    .map(|p| p.peer_id.to_string())
-            };
+            let mut stored = false;
+            for attempt in 0..=MAX_RETRIES {
+                // Pick the best peer at or above the required height.
+                // On retry pick a DIFFERENT peer (skip the one used in attempt 0).
+                let best_peer = {
+                    let registry = self.peer_registry.read().await;
+                    registry.active_peers_by_height()
+                        .into_iter()
+                        .nth(attempt as usize) // 0 = best, 1 = second-best, …
+                        .filter(|p| p.height >= end)
+                        .map(|p| p.peer_id.to_string())
+                };
 
-            if best_peer.is_none() {
-                warn!("🔧 [RC-3 GAP-FILL P2P] No peer at height {} — aborting gap fill for now", end);
-                break;
-            }
+                if best_peer.is_none() {
+                    warn!("🔧 [RC-3 GAP-FILL P2P] No eligible peer at height {} (attempt {}) — aborting gap fill for now", end, attempt);
+                    break;
+                }
 
-            let (response_tx, response_rx) = oneshot::channel();
-            if let Err(e) = network_tx.send(NetworkRequest::RequestBlockRangeDirect {
-                peer_id: best_peer,
-                start_height: cursor,
-                end_height: end,
-                response_tx,
-            }) {
-                warn!("🔧 [RC-3 GAP-FILL P2P] Failed to send request {}-{}: {}", cursor, end, e);
-                cursor = end + 1;
-                continue;
-            }
+                let (response_tx, response_rx) = oneshot::channel();
+                if let Err(e) = network_tx.send(NetworkRequest::RequestBlockRangeDirect {
+                    peer_id: best_peer,
+                    start_height: cursor,
+                    end_height: end,
+                    response_tx,
+                }) {
+                    warn!("🔧 [RC-3 GAP-FILL P2P] Failed to send request {}-{} (attempt {}): {}", cursor, end, attempt, e);
+                    break;
+                }
 
-            match tokio::time::timeout(Duration::from_secs(TIMEOUT_SECS), response_rx).await {
-                Ok(Ok(Ok(blocks))) if !blocks.is_empty() => {
-                    warn!("🔧 [RC-3 GAP-FILL P2P] Storing {} blocks for {}-{}", blocks.len(), cursor, end);
-                    for block in &blocks {
-                        if let Err(e) = self.storage.save_qblock(block).await {
-                            warn!("🔧 [RC-3 GAP-FILL P2P] Failed to store block {}: {}", block.header.height, e);
+                match tokio::time::timeout(Duration::from_secs(TIMEOUT_SECS), response_rx).await {
+                    Ok(Ok(Ok(blocks))) if !blocks.is_empty() => {
+                        info!("🔧 [RC-3 GAP-FILL P2P] Storing {} blocks for {}-{} (attempt {})", blocks.len(), cursor, end, attempt);
+                        for block in &blocks {
+                            if let Err(e) = self.storage.save_qblock(block).await {
+                                warn!("🔧 [RC-3 GAP-FILL P2P] Failed to store block {}: {}", block.header.height, e);
+                            }
                         }
+                        stored = true;
+                        break;
+                    }
+                    Ok(Ok(Ok(_))) => {
+                        warn!("🔧 [RC-3 GAP-FILL P2P] No blocks returned for {}-{} (attempt {})", cursor, end, attempt);
+                        // Empty response — peer may not have this range; try next peer
+                    }
+                    Ok(Ok(Err(e))) => {
+                        warn!("🔧 [RC-3 GAP-FILL P2P] Peer error for {}-{} (attempt {}): {}", cursor, end, attempt, e);
+                    }
+                    Ok(Err(_)) => {
+                        warn!("🔧 [RC-3 GAP-FILL P2P] Response channel closed for {}-{} (attempt {})", cursor, end, attempt);
+                        break;
+                    }
+                    Err(_) => {
+                        warn!("🔧 [RC-3 GAP-FILL P2P] Timeout ({}s) fetching {}-{} (attempt {})", TIMEOUT_SECS, cursor, end, attempt);
+                        // Timeout — retry with next peer
                     }
                 }
-                Ok(Ok(Ok(_))) => {
-                    warn!("🔧 [RC-3 GAP-FILL P2P] No blocks returned for {}-{}", cursor, end);
-                }
-                Ok(Ok(Err(e))) => {
-                    warn!("🔧 [RC-3 GAP-FILL P2P] Peer error for {}-{}: {}", cursor, end, e);
-                }
-                Ok(Err(_)) => {
-                    warn!("🔧 [RC-3 GAP-FILL P2P] Response channel closed for {}-{}", cursor, end);
-                }
-                Err(_) => {
-                    warn!("🔧 [RC-3 GAP-FILL P2P] Timeout ({}s) fetching {}-{}", TIMEOUT_SECS, cursor, end);
-                }
+            }
+
+            if !stored {
+                warn!("🔧 [RC-3 GAP-FILL P2P] Could not fill {}-{} after {} attempts — will retry on next cycle", cursor, end, MAX_RETRIES + 1);
             }
 
             cursor = end + 1;

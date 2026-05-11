@@ -78,7 +78,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.8.1"  # v10.8.1: Automatic checkpoint gap-fill — P2P backfill + balance re-replay for nodes with missing historical blocks
+version = "10.8.2"  # v10.8.2: Fix P2P gap-fill timeouts — forward-seek before slow per-block scan, 120s timeout + retry
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"

@@ -3511,30 +3511,34 @@ impl UnifiedNetworkManager {
                                                 fast_blocks
                                             }
                                             Ok(fast_blocks) => {
-                                                // Partial or empty — try multi-format fallback for sparse data
+                                                // Partial or empty — try forward-seek FIRST (O(1) seek, fast for
+                                                // historical DAG-format blocks), then fall back to the slow
+                                                // per-block multi-format scan only as a last resort.
+                                                // Root-cause fix: old code ran get_qblocks_range_any_format
+                                                // (200 × 3 prefix-scans = ~60s) before get_qblocks_forward
+                                                // (single iterator seek = <1s), causing 30s timeouts on peers.
                                                 if fast_blocks.is_empty() {
-                                                    info!("🔍 [BLOCK-PACK] Fast path empty for {}-{}, trying multi-format scan...",
+                                                    info!("🔍 [BLOCK-PACK] Fast path empty for {}-{}, trying forward-seek...",
                                                           start_height, start_height + limit as u64);
                                                 } else {
-                                                    info!("🔍 [BLOCK-PACK] Fast path partial ({}/{}) for {}-{}, supplementing with multi-format...",
+                                                    info!("🔍 [BLOCK-PACK] Fast path partial ({}/{}) for {}-{}, trying forward-seek...",
                                                           fast_blocks.len(), limit, start_height, start_height + limit as u64);
                                                 }
-                                                match storage.get_qblocks_range_any_format(start_height, limit).await {
-                                                    Ok(any_blocks) if !any_blocks.is_empty() => {
-                                                        info!("✅ [BLOCK-PACK] Multi-format found {} blocks (fast={}, total={}) for {}",
-                                                              any_blocks.len(), fast_blocks.len(), any_blocks.len(), peer_clone);
-                                                        any_blocks
+                                                match storage.get_qblocks_forward(start_height, limit).await {
+                                                    Ok(fwd_blocks) if !fwd_blocks.is_empty() => {
+                                                        info!("🚀 [BLOCK-PACK] Forward-seek found {} blocks starting at {} for {}",
+                                                              fwd_blocks.len(), fwd_blocks[0].header.height, peer_clone);
+                                                        fwd_blocks
                                                     }
                                                     _ => {
-                                                        // v10.3.7: Forward-seek for sparse DAG ranges
-                                                        // Both fast path and multi-format returned empty.
-                                                        // Try forward-seek which does ONE RocksDB seek and
-                                                        // collects next N blocks regardless of height gaps.
-                                                        match storage.get_qblocks_forward(start_height, limit).await {
-                                                            Ok(fwd_blocks) if !fwd_blocks.is_empty() => {
-                                                                info!("🚀 [BLOCK-PACK] Forward-seek found {} blocks starting at {} for {}",
-                                                                      fwd_blocks.len(), fwd_blocks[0].header.height, peer_clone);
-                                                                fwd_blocks
+                                                        // Forward-seek also empty — last resort: slow per-block scan.
+                                                        // This path is only hit when blocks exist in a format that
+                                                        // the DAG iterator cannot traverse (very rare / old data).
+                                                        match storage.get_qblocks_range_any_format(start_height, limit).await {
+                                                            Ok(any_blocks) if !any_blocks.is_empty() => {
+                                                                info!("✅ [BLOCK-PACK] Multi-format fallback found {} blocks for {}",
+                                                                      any_blocks.len(), peer_clone);
+                                                                any_blocks
                                                             }
                                                             _ => fast_blocks // Nothing found anywhere
                                                         }
