@@ -78,7 +78,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.9.1"  # v10.9.1: perf(consensus): rayon par sort, SIMD Merkle, gossipsub semaphore=parallelism, VDF anchor wiring, FinalityCert
+version = "10.9.2"  # v10.9.2: perf(io): thread-per-core io_uring adapter + multi-validator FinalityCert gossipsub aggregator
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"

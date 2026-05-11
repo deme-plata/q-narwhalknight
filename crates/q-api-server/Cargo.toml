@@ -239,6 +239,7 @@ q-consensus-guard = { path = "../q-consensus-guard" }
 [target.'cfg(target_os = "linux")'.dependencies]
 q-kernel-io = { path = "../q-kernel-io" }
 q-benchmarks = { path = "../q-benchmarks" }
+tokio-uring = "0.4"
 
 # v6.4.0: jemalloc only on unix (doesn't cross-compile to Windows with MinGW)
 [target.'cfg(unix)'.dependencies]
