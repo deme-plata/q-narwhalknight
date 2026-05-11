@@ -78,7 +78,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.8.4"  # v10.8.4: gap-fill timeout 120s→25s, chunk 200→50; auto pre-checkpoint history fill (blocks 1→16.75M)
+version = "10.8.5"  # v10.8.5: fix height_atomic jump — guard sequential-batch update to ±5000 blocks
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"

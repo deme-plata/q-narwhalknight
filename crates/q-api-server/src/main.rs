@@ -6663,23 +6663,22 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     }
                 }
 
-                // 🔧 v1.0.33-beta: CRITICAL FIX - Update atomic height after libp2p sync
-                // BUG: Mining API was reading stale height because libp2p sync never updated current_height_atomic
-                // This caused mining to report "Current: 10000" even when node was at 102,629
+                // v10.8.4: Only advance current_height_atomic for sequential batches.
+                // During turbo sync, parallel streams deliver blocks far ahead of the
+                // contiguous chain tip, causing the atomic to jump millions of blocks at once.
+                // This makes the node falsely advertise height 13.9M when contiguous is 105K,
+                // causing peers to request blocks this node can't serve.
+                // Guard: only update if the batch is within 5000 blocks of the current atomic.
+                // The periodic height-reconcile task (fetch_max from DB) handles wider advances.
                 if !blocks.is_empty() {
-                    // Get the highest block height from this batch
                     let max_height = blocks.iter().map(|b| b.header.height).max().unwrap_or(0);
-
-                    // Update atomic height for mining API
                     let current_atomic = current_height_atomic_clone.load(std::sync::atomic::Ordering::Acquire);
-                    if max_height > current_atomic {
+                    if max_height > current_atomic && max_height <= current_atomic + 5_000 {
                         current_height_atomic_clone.store(
                             max_height,
                             std::sync::atomic::Ordering::Release
                         );
                         info!("📈 [LIBP2P SYNC] Updated current_height_atomic: {} → {}", current_atomic, max_height);
-
-                        // Clear cached mining challenge when height changes
                         *current_challenge_clone.write().await = None;
                     }
                 }
