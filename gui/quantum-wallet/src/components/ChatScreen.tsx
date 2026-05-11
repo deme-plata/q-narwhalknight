@@ -132,6 +132,7 @@ export default function ChatScreen() {
   const [inputText, setInputText] = useState('');
   const [targetPeerId, setTargetPeerId] = useState('');
   const [activeCall, setActiveCall] = useState<CallInfo | null>(null);
+  const [callError, setCallError] = useState<string | null>(null);
   const [micOn, setMicOn] = useState(true);
   const [camOn, setCamOn] = useState(true);
   const [meeting, setMeeting] = useState<MeetingRoom | null>(null);
@@ -421,10 +422,17 @@ export default function ChatScreen() {
     window.dispatchEvent(new CustomEvent('qnk-incoming-call-cleared'));
     callStartTimeRef.current = Date.now();
     setActiveCall({ peerId: from, callType, state: 'connecting', remoteStream: null, localStream: null });
+    setCallError(null);
     setTab('calls');
-    await webrtcRef.current.handleOffer(from, sdp, callType);
-    const localStream = webrtcRef.current.getLocalStream(from);
-    setActiveCall((prev) => prev?.peerId === from ? { ...prev, localStream } : prev);
+    try {
+      await webrtcRef.current.handleOffer(from, sdp, callType);
+      const localStream = webrtcRef.current.getLocalStream(from);
+      setActiveCall((prev) => prev?.peerId === from ? { ...prev, localStream } : prev);
+    } catch (e: any) {
+      setActiveCall(null);
+      callStartTimeRef.current = null;
+      setCallError(e?.message ?? 'Failed to start call');
+    }
   };
 
   const handleRejectCall = () => {
@@ -477,14 +485,16 @@ export default function ChatScreen() {
     const peerId = targetPeerId.trim();
     callStartTimeRef.current = Date.now();
     setActiveCall({ peerId, callType, state: 'connecting', remoteStream: null, localStream: null });
+    setCallError(null);
     setTab('calls');
     try {
       await webrtcRef.current.initiateCall(peerId, callType);
       const localStream = webrtcRef.current.getLocalStream(peerId);
       setActiveCall((prev) => prev?.peerId === peerId ? { ...prev, localStream } : prev);
-    } catch {
+    } catch (e: any) {
       setActiveCall(null);
       callStartTimeRef.current = null;
+      setCallError(e?.message ?? 'Failed to start call');
     }
   };
 
@@ -941,6 +951,22 @@ export default function ChatScreen() {
           {/* Calls sidebar panel */}
           {tab === 'calls' && (
             <div className="flex-1 flex flex-col px-3 py-3 gap-2 overflow-y-auto" style={{ borderTop: `1px solid ${sidebarBorder}`, minHeight: 0 }}>
+              {callError && (
+                <div
+                  className="w-full rounded-xl p-3 shrink-0"
+                  style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)' }}
+                >
+                  <p className="text-xs font-bold text-red-400 mb-1">Call failed</p>
+                  <p className="text-[10px] text-red-300/80 leading-relaxed">{callError}</p>
+                  <button
+                    className="mt-2 text-[9px] text-red-400/60 hover:text-red-400 underline"
+                    onClick={() => setCallError(null)}
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              )}
+
               {activeCall ? (
                 <div
                   className="w-full rounded-xl p-3 text-center shrink-0"
@@ -957,7 +983,7 @@ export default function ChatScreen() {
                      activeCall.state === 'disconnected' ? 'Reconnecting…' : 'Connecting…'}
                   </span>
                 </div>
-              ) : callHistory.length === 0 ? (
+              ) : !callError && callHistory.length === 0 ? (
                 <div className="flex flex-col items-center justify-center flex-1 text-center">
                   <Phone className="w-8 h-8 text-amber-400/20 mx-auto mb-2" />
                   <p className="text-xs text-amber-300/30">No recent calls</p>
@@ -1697,6 +1723,23 @@ export default function ChatScreen() {
                         style={{ background: 'rgba(239,68,68,0.8)', border: '1.5px solid rgba(239,68,68,0.6)' }}
                       >
                         <PhoneOff className="w-6 h-6 text-white" />
+                      </button>
+                    </div>
+                  </div>
+                ) : callError ? (
+                  <div className="flex flex-col items-center justify-center h-full gap-4 px-4">
+                    <div
+                      className="w-full rounded-2xl p-5 text-center"
+                      style={{ background: 'rgba(239,68,68,0.07)', border: '1px solid rgba(239,68,68,0.2)' }}
+                    >
+                      <PhoneOff className="w-8 h-8 text-red-400/60 mx-auto mb-3" />
+                      <p className="text-sm font-semibold text-red-300 mb-2">Call failed</p>
+                      <p className="text-xs text-red-300/70 leading-relaxed">{callError}</p>
+                      <button
+                        className="mt-4 text-xs text-red-400/60 hover:text-red-400 underline"
+                        onClick={() => setCallError(null)}
+                      >
+                        Dismiss
                       </button>
                     </div>
                   </div>

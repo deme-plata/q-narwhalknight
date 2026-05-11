@@ -40,6 +40,28 @@ interface PeerCall {
 
 let turnCredsCache: { creds: TurnCredentials; fetchedAt: number } | null = null;
 
+// Build a single RTCIceServer that covers both UDP and TCP TURN transport.
+// Tor Browser is TCP-only, so plain turn: URIs (UDP) will silently fail.
+// Adding ?transport=tcp variants ensures TURN works through Tor when WebRTC
+// is enabled (about:config → media.peerconnection.enabled = true).
+function buildTurnIceServer(uris: string[], username: string, password: string): RTCIceServer {
+  const expanded: string[] = [];
+  for (const uri of uris) {
+    expanded.push(uri);
+    // If this is a plain turn: URI with no transport query, add TCP variant
+    if (uri.startsWith('turn:') && !uri.includes('transport=')) {
+      expanded.push(uri + '?transport=tcp');
+    }
+    // turns: (TLS) URIs default to TCP — no extra variant needed
+  }
+  return { urls: expanded, username, credential: password };
+}
+
+// ICE connection timeout: if the peer connection is still in 'connecting' state
+// after this many ms, force it to 'failed'. Without this, Tor Browser users with
+// WebRTC enabled but no working TURN path hang at "Connecting…" indefinitely.
+const ICE_TIMEOUT_MS = 30_000;
+
 // ─── Quality targets ──────────────────────────────────────────────────────────
 
 // Video: ideal 4K60, no hard minimums — accepts any camera resolution.
@@ -186,7 +208,7 @@ export class WebRTCManager {
     const now = Date.now() / 1000;
     if (turnCredsCache && now - turnCredsCache.fetchedAt < turnCredsCache.creds.ttl - 60) {
       const c = turnCredsCache.creds;
-      return [{ urls: c.uris, username: c.username, credential: c.password }];
+      return [buildTurnIceServer(c.uris, c.username, c.password)];
     }
     try {
       const { apiBaseUrl } = getConnectionInfo();
@@ -203,7 +225,7 @@ export class WebRTCManager {
       const creds: TurnCredentials = await res.json();
       turnCredsCache = { creds, fetchedAt: now };
       console.log('[WebRTC] TURN credentials fetched, URIs:', creds.uris);
-      return [{ urls: creds.uris, username: creds.username, credential: creds.password }];
+      return [buildTurnIceServer(creds.uris, creds.username, creds.password)];
     } catch (e) {
       console.warn('[WebRTC] TURN credentials unavailable, falling back to STUN:', e);
       return [];
@@ -226,10 +248,23 @@ export class WebRTCManager {
   // transceiver is in a clean state and setRemoteDescription matches by kind.
 
   private async buildPeerConnection(peerId: string, callType: CallType): Promise<RTCPeerConnection> {
+    // Tor Browser disables WebRTC by default (media.peerconnection.enabled = false).
+    // Throw immediately so the caller can show a meaningful error instead of
+    // the call UI hanging at "Connecting…" forever.
+    if (!window.RTCPeerConnection) {
+      throw new Error(
+        'WebRTC is not available. ' +
+        'If you are using Tor Browser, go to about:config and set ' +
+        'media.peerconnection.enabled = true to enable voice/video calls.'
+      );
+    }
+
     const turnServers = await this.fetchTurnCredentials();
 
     // Use all ICE candidate types (host, srflx, relay) for maximum compatibility.
     // Include TURN relay for NAT traversal plus STUN for srflx discovery.
+    // Note: Tor Browser (when WebRTC is enabled) filters out host/srflx candidates
+    // automatically — only relay candidates via TURN will be used in that case.
     const iceServers: RTCIceServer[] = [
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
@@ -263,6 +298,23 @@ export class WebRTCManager {
         applyEncodingParams(pc, callType);
       }
     };
+
+    // Tor Browser (WebRTC enabled but TCP-only): ICE may never reach 'connected'
+    // or 'failed' if the TURN server only responds on UDP. After ICE_TIMEOUT_MS,
+    // force the state to 'failed' so the UI shows an error rather than hanging.
+    const iceTimer = setTimeout(() => {
+      if (pc.connectionState !== 'connected' && pc.connectionState !== 'closed') {
+        console.warn('[WebRTC] ICE timeout after', ICE_TIMEOUT_MS, 'ms — forcing failed for', peerId.slice(-8));
+        const call = this.calls.get(peerId);
+        if (call) call.state = 'failed';
+        this.callbacks.onStateChange(peerId, 'failed');
+      }
+    }, ICE_TIMEOUT_MS);
+    pc.addEventListener('connectionstatechange', () => {
+      if (pc.connectionState === 'connected' || pc.connectionState === 'closed' || pc.connectionState === 'failed') {
+        clearTimeout(iceTimer);
+      }
+    });
 
     pc.onicecandidate = (e) => {
       if (e.candidate) this.callbacks.onIceCandidate(peerId, e.candidate);
