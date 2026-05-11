@@ -966,12 +966,15 @@ impl BlockProducer {
 
         // 🔐 v5.1.0 / BalanceRootV1: Compute state root (height-gated)
         // Priority order: BalanceRootV1 > StateRootV1 > zero
+        // Producer starts including state_root at shadow start height (17,742,000) so shadow
+        // validators have real roots to compare against, not just zero from legacy peers.
+        const BALANCE_ROOT_PRODUCER_START: u64 = 17_742_000;
         let next_height = self.current_height + 1;
         let state_root = if q_consensus_guard::is_upgrade_active(
             q_consensus_guard::Upgrade::BalanceRootV1,
             next_height,
-        ) {
-            // 🔐 BalanceRootV1: Full balance state root enforcement
+        ) || next_height >= BALANCE_ROOT_PRODUCER_START {
+            // 🔐 BalanceRootV1: Full balance state root enforcement (or shadow pre-population)
             match self.storage.as_ref() {
                 Some(storage) => {
                     match storage.compute_balance_root_for_block().await {

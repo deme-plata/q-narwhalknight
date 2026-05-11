@@ -78,7 +78,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.8.9"  # v10.8.9: BAL-001 shadow mode at h=17,742,000 (~30 min post-deploy) + rich mismatch diagnostics
+version = "10.9.0"  # v10.9.0: BAL-001 producer includes state_root from h=17,742,000 (shadow pre-population)
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"
