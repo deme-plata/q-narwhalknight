@@ -235,10 +235,33 @@ export class WebRTCManager {
   // ─── Media acquisition ──────────────────────────────────────────────────────
 
   private async acquireLocalStream(callType: CallType): Promise<MediaStream> {
-    return navigator.mediaDevices.getUserMedia({
-      audio: AUDIO_CONSTRAINTS,
-      video: callType === 'video' ? VIDEO_CONSTRAINTS : false,
-    });
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error(
+        'Camera/microphone access is unavailable. Two steps required in Tor Browser: ' +
+        '(1) Set Security Level to Standard — click the Shield icon → Change Security Settings → Standard. ' +
+        '(2) Open about:config and set media.peerconnection.enabled = true. ' +
+        'Then reload the page. ' +
+        'Note: calls cannot work at Safer or Safest security levels regardless of about:config settings.'
+      );
+    }
+    try {
+      return await navigator.mediaDevices.getUserMedia({
+        audio: AUDIO_CONSTRAINTS,
+        video: callType === 'video' ? VIDEO_CONSTRAINTS : false,
+      });
+    } catch (e: any) {
+      if (e?.name === 'NotAllowedError' || e?.name === 'PermissionDeniedError') {
+        throw new Error(
+          'Camera/microphone permission was denied. ' +
+          'Click the camera/lock icon in the address bar and allow access, then try again. ' +
+          'In Tor Browser you may need to grant permissions each session.'
+        );
+      }
+      if (e?.name === 'NotFoundError' || e?.name === 'DevicesNotFoundError') {
+        throw new Error('No camera or microphone found. Please connect a device and try again.');
+      }
+      throw e;
+    }
   }
 
   // ─── PeerConnection factory ──────────────────────────────────────────────────
