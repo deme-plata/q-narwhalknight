@@ -14648,6 +14648,47 @@ pub async fn get_finality_metrics(
 }
 
 // ============================================================================
+// Item 8: Block Finality Certificate endpoint
+// ============================================================================
+
+/// GET /api/v1/blocks/:height/finality
+///
+/// Returns the self-signed FinalityCertificate for a locally-produced block.
+/// Certificate is signed Blake3(dag_round || anchor_vertex_id || block_hash)
+/// with this node's Ed25519 key.  Returns 404 when the height is outside the
+/// 10,000-block sliding window or the block was not produced locally.
+pub async fn get_block_finality_cert(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(height): axum::extract::Path<u64>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let cert = state
+        .finality_certs
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&height).cloned());
+
+    match cert {
+        Some(c) => {
+            let sigs: std::collections::HashMap<String, String> = c
+                .validator_signatures
+                .iter()
+                .map(|(k, v)| (k.clone(), hex::encode(v)))
+                .collect();
+            Ok(Json(ApiResponse::success(serde_json::json!({
+                "height": height,
+                "block_hash": hex::encode(&c.block_hash),
+                "commit_round": c.commit_round,
+                "bft_threshold_met": c.bft_threshold_met,
+                "total_stake": c.total_stake,
+                "validator_signatures": sigs,
+                "commit_path_proof": c.commit_path_proof.iter().map(hex::encode).collect::<Vec<_>>(),
+            }))))
+        }
+        None => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+// ============================================================================
 // v7.0.0: THEORETICAL PHYSICS METRICS - Live whitepaper data
 // ============================================================================
 

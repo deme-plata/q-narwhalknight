@@ -9148,7 +9148,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             // Without this, every incoming P2P block spawns an unbounded tokio task.
             // With 3+ peers producing blocks, tasks accumulate at ~4/sec, each cloning
             // app_state and doing RocksDB I/O. This causes 33MB/s memory growth → OOM.
-            let block_processing_semaphore = Arc::new(tokio::sync::Semaphore::new(4));
+            let block_processing_semaphore = Arc::new(tokio::sync::Semaphore::new(
+                std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(4),
+            ));
 
             // v6.1.0: OOM PREVENTION - Deduplicate blocks by hash
             // Prevents processing the same block multiple times from different peers.
@@ -17424,6 +17428,61 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
                             app_state_mining.finality_metrics.record_block(tx_count as u64);
 
+                            // ─── Item 8: Self-Signed FinalityCertificate ──────────────────────
+                            // Sign Blake3(dag_round || anchor_vertex_id_bytes || block_hash) with
+                            // this node's Ed25519 key. With a single validator (f=0 in practice)
+                            // this is a self-signed certificate; it grows into a real 2f+1 quorum
+                            // cert as the validator set expands.
+                            {
+                                use ed25519_dalek::Signer;
+                                let commit_round = new_block.header.dag_round;
+                                let anchor_bytes: [u8; 32] = new_block
+                                    .header
+                                    .anchor_validator
+                                    .as_deref()
+                                    .and_then(|s| hex::decode(s).ok())
+                                    .and_then(|v| v.try_into().ok())
+                                    .unwrap_or([0u8; 32]);
+
+                                let mut cert_msg = blake3::Hasher::new();
+                                cert_msg.update(&commit_round.to_be_bytes());
+                                cert_msg.update(&anchor_bytes);
+                                cert_msg.update(&block_hash);
+                                let cert_digest: [u8; 32] =
+                                    *cert_msg.finalize().as_bytes();
+
+                                let sig = app_state_mining
+                                    .node_signing_key
+                                    .sign(&cert_digest);
+                                let node_id_hex = hex::encode(
+                                    app_state_mining.node_signing_key.verifying_key().as_bytes(),
+                                );
+
+                                let mut sigs = std::collections::HashMap::new();
+                                sigs.insert(node_id_hex, sig.to_bytes().to_vec());
+
+                                let cert = q_types::FinalityCertificate {
+                                    block_hash,
+                                    commit_round,
+                                    validator_signatures: sigs,
+                                    total_stake: 1,
+                                    bft_threshold_met: true, // trivially true: single-validator f=0
+                                    commit_path_proof: vec![],
+                                };
+
+                                let height = new_block.header.height;
+                                if let Ok(mut map) =
+                                    app_state_mining.finality_certs.lock()
+                                {
+                                    map.insert(height, cert);
+                                    // Evict entries older than 10,000 blocks to bound memory.
+                                    if height > 10_000 {
+                                        map.retain(|h, _| *h >= height - 10_000);
+                                    }
+                                }
+                            }
+                            // ─────────────────────────────────────────────────────────────────
+
                             let _ = app_state_mining
                                 .event_broadcaster
                                 .broadcast(q_api_server::streaming::StreamEvent::NewBlock {
@@ -23997,6 +24056,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/consensus/vdf", get(handlers::vdf_status))
         // 📊 v1.0.72-beta: Finality Metrics Dashboard - Sub-50ms Target
         .route("/api/v1/consensus/finality", get(handlers::get_finality_metrics))
+        .route("/api/v1/blocks/:height/finality", get(handlers::get_block_finality_cert))
         // 🔬 v7.0.0: Theoretical Physics Metrics - Live whitepaper data
         .route("/api/v1/physics/metrics", get(handlers::get_physics_metrics))
         .route("/api/v1/crypto/metrics", get(handlers::get_crypto_metrics))

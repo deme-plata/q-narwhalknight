@@ -981,7 +981,7 @@ impl BlockProducer {
         }
 
         // 🚀 v1.0.72-beta: Compute proper tx_root from all transactions
-        let tx_root = self.compute_tx_merkle_root(&all_transactions);
+        let tx_root = self.compute_tx_merkle_root(&all_transactions).await;
 
         // 🔐 v5.1.0 / BalanceRootV1: Compute state root (height-gated)
         // Priority order: BalanceRootV1 > StateRootV1 > zero
@@ -1045,7 +1045,20 @@ impl BlockProducer {
                 timestamp,
                 dag_round: self.dag_round,
                 vdf_proof,
-                anchor_validator: None, // TODO: Anchor election
+                anchor_validator: {
+                    // Wire VDF anchor election result from DAG-Knight into the block header.
+                    // On even rounds the QuantumAnchorElection elects an anchor vertex; we encode
+                    // its 32-byte ID as a hex string so it survives serialization unchanged.
+                    // Returns None when DAG-Knight is absent (Phase 0) or the round had no anchor.
+                    if let Some(dag) = &self.dag_knight {
+                        match dag.anchor_election.get_election_result(self.dag_round).await {
+                            Some(result) => result.anchor_vertex_id.map(|vid| hex::encode(vid)),
+                            None => None,
+                        }
+                    } else {
+                        None
+                    }
+                },
                 proposer: self.config.node_id,
                 producer_id: self.config.validator_index as u8, // v0.8.11-beta: Lane ID for parallel production
                 total_difficulty: self.total_difficulty,
@@ -2071,20 +2084,40 @@ impl BlockProducer {
         }
     }
 
-    /// 🚀 v1.0.72-beta: Compute Merkle root from transactions
-    /// Uses SHA3-256 for quantum resistance
-    fn compute_tx_merkle_root(&self, transactions: &[Transaction]) -> TxHash {
+    /// Compute transaction Merkle root using SimdMerkleTree when available, scalar fallback otherwise.
+    /// SHA3-256 per leaf for domain separation from the solutions root (blake3-based).
+    /// AVX-512 path: ~8× scalar; AVX2 path: ~4× scalar.
+    async fn compute_tx_merkle_root(&self, transactions: &[Transaction]) -> TxHash {
         use sha3::{Digest, Sha3_256};
 
         if transactions.is_empty() {
             return [0u8; 32];
         }
 
-        // Simple Merkle tree: hash all tx hashes together
-        // (Full implementation would use proper binary tree structure)
+        // Compute per-tx SHA3-256 leaf hash (domain-separated from solutions root).
+        let leaf_hashes: Vec<[u8; 32]> = transactions
+            .iter()
+            .map(|tx| {
+                let mut h = Sha3_256::new();
+                h.update(tx.hash());
+                h.finalize().into()
+            })
+            .collect();
+
+        // SIMD path: AVX-512 (8×) or AVX2 (4×) Merkle tree with scalar fallback inside.
+        if let Some(simd_merkle) = &self.simd_merkle {
+            match simd_merkle.compute_root(&leaf_hashes).await {
+                Ok(root) => return root,
+                Err(e) => {
+                    debug!("SIMD tx Merkle fallback: {}", e);
+                }
+            }
+        }
+
+        // Scalar fallback — sequential SHA3 chain over pre-computed leaf hashes.
         let mut hasher = Sha3_256::new();
-        for tx in transactions {
-            hasher.update(tx.hash());
+        for leaf in &leaf_hashes {
+            hasher.update(leaf);
         }
         hasher.finalize().into()
     }

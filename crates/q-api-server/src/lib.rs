@@ -1346,6 +1346,11 @@ pub struct AppState {
     /// 📊 v1.0.72-beta: Finality Metrics - Sub-50ms latency tracking for consensus dashboard
     pub finality_metrics: Arc<crate::block_producer::FinalityMetrics>,
 
+    /// Self-signed finality certificates for locally-produced blocks (item 8 / consensus foundation).
+    /// Key = block height, value = FinalityCertificate signed by this node's Ed25519 key.
+    /// Bounded ring: evicts entries for heights older than (tip - 10_000).
+    pub finality_certs: Arc<std::sync::Mutex<std::collections::HashMap<u64, q_types::FinalityCertificate>>>,
+
     // AI Model Management - Lazy Loading with HTTP Download
     pub ai_model_manager: Option<Arc<q_ai_inference::ModelManager>>,
 
@@ -2958,6 +2963,7 @@ impl AppState {
 
             /// 📊 v1.0.72-beta: Finality Metrics - Sub-50ms latency tracking
             finality_metrics: Arc::new(crate::block_producer::FinalityMetrics::default()),
+            finality_certs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
 
             // AI Model Management - Lazy Loading (initialized later in main.rs if needed)
             ai_model_manager: None,
@@ -4441,6 +4447,7 @@ impl AppState {
 
             /// 📊 v1.0.72-beta: Finality Metrics - Sub-50ms latency tracking
             finality_metrics: Arc::new(crate::block_producer::FinalityMetrics::default()),
+            finality_certs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
 
             // AI Model Management - Lazy Loading (initialized later in main.rs if needed)
             ai_model_manager: None,
