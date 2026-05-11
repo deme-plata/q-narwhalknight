@@ -259,16 +259,31 @@ async fn rayon_parity_small() {
     assert_eq!(rayon_root, seq_root, "5-wallet: rayon output must equal sequential");
 }
 
-/// 500-wallet set with random addresses and amounts.
+/// 500-wallet set with guaranteed-unique addresses and random amounts.
+///
+/// The LCG's low-byte period is 256, so naive `lcg() & 0xFF` for address bytes
+/// produces collisions in large sets (wallet 0 repeats at wallet 256, etc.).
+/// We guarantee uniqueness by encoding the wallet index into the last 4 bytes of
+/// the address — this makes every address distinct and removes the ambiguity
+/// between what save_wallet_balance (max-wins dedup) stores and what the
+/// sequential reference computes from the original vector.
 #[tokio::test]
 async fn rayon_parity_500_random_wallets() {
     let mut rng = 0xFEED_FACE_1234u64;
-    let wallets: Vec<([u8; 32], u128)> = (0..500)
-        .map(|_| {
+    let wallets: Vec<([u8; 32], u128)> = (0u32..500)
+        .map(|i| {
+            // Mix a pseudo-random prefix with a guaranteed-unique index suffix
             let mut addr_bytes = [0u8; 32];
-            for b in &mut addr_bytes {
-                *b = (lcg(&mut rng) & 0xFF) as u8;
-            }
+            let hi = lcg(&mut rng);
+            addr_bytes[0..8].copy_from_slice(&hi.to_be_bytes());
+            let mid = lcg(&mut rng);
+            addr_bytes[8..16].copy_from_slice(&mid.to_be_bytes());
+            let lo = lcg(&mut rng);
+            addr_bytes[16..24].copy_from_slice(&lo.to_be_bytes());
+            // Last 8 bytes: 4 bytes of more randomness + 4 bytes of unique index
+            let extra = lcg(&mut rng);
+            addr_bytes[24..28].copy_from_slice(&(extra as u32).to_be_bytes());
+            addr_bytes[28..32].copy_from_slice(&i.to_be_bytes()); // guaranteed unique
             let amount = (lcg(&mut rng) as u128 % (10_000 * ONE_QUG)) + ONE_QUG;
             (addr_bytes, amount)
         })
