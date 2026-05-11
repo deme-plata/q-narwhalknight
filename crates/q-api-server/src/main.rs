@@ -11654,7 +11654,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                             } else if local_root != block.header.state_root {
                                                 // Load wallet count and supply for diagnostics
                                                 let (wallet_count, total_supply) = {
-                                                    let wb = state_clone.wallet_balances.read().await;
+                                                    let wb = app_state_gossip.wallet_balances.read().await;
                                                     let count = wb.len();
                                                     let supply: u128 = wb.values().sum();
                                                     (count, supply)
