@@ -10610,12 +10610,14 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     match bincode::deserialize::<q_types::FinalityCertificate>(&data) {
                         Ok(incoming_cert) => {
                             let cert_height = {
-                                // We identify height by block_hash lookup in our block store
+                                // Identify height by fetching the block by its hash
                                 let bh = incoming_cert.block_hash;
                                 app_state_gossip.storage_engine
-                                    .get_block_height_by_hash(&bh)
+                                    .get_qblock_by_hash(&bh)
                                     .await
-                                    .unwrap_or(None)
+                                    .ok()
+                                    .flatten()
+                                    .map(|b| b.header.height)
                             };
 
                             if let Some(height) = cert_height {
@@ -10637,9 +10639,13 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
                                     for (signer_hex, sig_bytes) in &incoming_cert.validator_signatures {
                                         if let Ok(pk_bytes) = hex::decode(signer_hex) {
-                                            if let Ok(pk_arr) = pk_bytes.as_slice().try_into() as Result<[u8;32], _> {
+                                            if let Ok(pk_arr) = <[u8;32]>::try_from(pk_bytes.as_slice()) {
                                                 if let Some(ed_key) = registry.get_ed25519(&pk_arr) {
-                                                    if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&ed_key.try_into().unwrap_or([0u8;32])) {
+                                                    let ed_arr: [u8;32] = match ed_key.try_into() {
+                                                        Ok(a) => a,
+                                                        Err(_) => continue,
+                                                    };
+                                                    if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&ed_arr) {
                                                         // Message = Blake3(commit_round || anchor_bytes || block_hash)
                                                         let anchor_bytes: [u8;32] = incoming_cert
                                                             .commit_path_proof
