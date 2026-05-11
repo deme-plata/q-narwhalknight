@@ -3720,6 +3720,18 @@ impl UnifiedNetworkManager {
                         warn!("⚠️ [BLOCK-PACK] Outbound failure to {}: {}", peer, error_str);
                         debug!("   [BLOCK-PACK] Request ID: {:?}", request_id);
 
+                        // v10.8.3: Fail-fast for RequestBlockRangeDirect gap-fill.
+                        // When OutboundFailure fires, drop the pending internal_tx immediately
+                        // so fill_gap_p2p gets an Err within milliseconds instead of waiting the
+                        // full 120s timeout. Without this, the dropped tx was never cleaned up
+                        // and the spawned awaiter task blocked until its timeout expired.
+                        let request_id_str = format!("{:?}", request_id);
+                        if let Ok(mut pending) = self.pending_block_requests.lock() {
+                            if pending.remove(&request_id_str).is_some() {
+                                warn!("🚨 [BLOCK-PACK] Dropped pending gap-fill channel for failed request — peer: {}", peer);
+                            }
+                        }
+
                         // Log connection state at debug level
                         let is_connected = self.swarm.is_connected(&peer);
                         debug!("   [BLOCK-PACK] Peer connected?: {}", is_connected);

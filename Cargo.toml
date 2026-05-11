@@ -78,7 +78,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.8.2"  # v10.8.2: Fix P2P gap-fill timeouts — forward-seek before slow per-block scan, 120s timeout + retry
+version = "10.8.3"  # v10.8.3: Fix gap-fill fail-fast — drop pending_block_requests on OutboundFailure so fill_gap_p2p errors in ms not 120s
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"
