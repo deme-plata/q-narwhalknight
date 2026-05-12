@@ -277,6 +277,17 @@ impl BridgeWalletClient {
     pub async fn get_addresses_by_label(&self, label: &str) -> Result<Value> {
         self.wallet_rpc("getaddressesbylabel", json!([label])).await
     }
+
+    /// Send BTC to an external address — returns txid
+    pub async fn send_to_address(&self, btc_address: &str, amount_btc: f64) -> Result<String> {
+        self.wallet_rpc("sendtoaddress", json!([btc_address, amount_btc])).await
+    }
+
+    /// Get spendable wallet balance in satoshis (min 1 confirmation)
+    pub async fn get_balance_sats(&self) -> Result<u64> {
+        let btc: f64 = self.wallet_rpc("getbalance", json!(["*", 1])).await?;
+        Ok((btc * 100_000_000.0).round() as u64)
+    }
 }
 
 // ============================================================================
@@ -539,6 +550,55 @@ impl DepositBridge {
             .filter(|d| d.qug_wallet == *qug_wallet)
             .cloned()
             .collect()
+    }
+
+    /// Check whether the bridge wallet has enough spendable BTC to back `required_sats` of new wBTC.
+    /// Returns Ok(true) if sufficient, Ok(false) if not, Err if the RPC call fails.
+    pub async fn check_reserve_available(&self, required_sats: u64) -> Result<bool> {
+        if !self.is_alive() {
+            return Ok(false);
+        }
+        let balance_sats = self.wallet.get_balance_sats().await?;
+        let already_issued = self.total_minted_sats.load(std::sync::atomic::Ordering::Relaxed);
+        let available = balance_sats.saturating_sub(already_issued);
+        Ok(available >= required_sats)
+    }
+
+    /// Send BTC to a user's on-chain address as part of a wBTC withdrawal.
+    ///
+    /// SECURITY: This MUST only be called AFTER the caller has already deducted
+    /// the wBTC from the user's balance in RocksDB. The caller is responsible for
+    /// that atomic deduction. Returns the on-chain txid.
+    pub async fn send_withdrawal(&self, btc_address: &str, amount_sats: u64) -> Result<String> {
+        if !self.is_alive() {
+            return Err(anyhow!("Bridge is disabled"));
+        }
+        if amount_sats < BTC_MIN_DEPOSIT_SATS {
+            return Err(anyhow!("Amount {} sats below minimum {} sats", amount_sats, BTC_MIN_DEPOSIT_SATS));
+        }
+        if amount_sats > BTC_MAX_DEPOSIT_SATS {
+            return Err(anyhow!("Amount {} sats exceeds maximum {} sats per withdrawal", amount_sats, BTC_MAX_DEPOSIT_SATS));
+        }
+
+        // Verify we have reserves
+        let balance_sats = self.wallet.get_balance_sats().await?;
+        if balance_sats < amount_sats {
+            return Err(anyhow!("Insufficient BTC reserves: have {} sats, need {} sats", balance_sats, amount_sats));
+        }
+
+        let amount_btc = amount_sats as f64 / 100_000_000.0;
+        let txid = self.wallet.send_to_address(btc_address, amount_btc).await?;
+
+        // Reduce total_minted_sats to reflect that BTC left the bridge
+        let prev = self.total_minted_sats.fetch_update(
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+            |v| Some(v.saturating_sub(amount_sats)),
+        );
+        let _ = prev;
+
+        info!("₿ Withdrawal sent: {} sats → {} (txid: {})", amount_sats, btc_address, txid);
+        Ok(txid)
     }
 
     /// Poll for deposit updates — called every DEPOSIT_POLL_INTERVAL_SECS

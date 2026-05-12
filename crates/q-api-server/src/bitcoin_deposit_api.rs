@@ -1,13 +1,13 @@
-/// Bitcoin Deposit Bridge API — Phase 1 (v10.2.11)
+/// Bitcoin Deposit Bridge API — Phase 1 (v10.9.3)
 ///
-/// Endpoints for one-way BTC→wBTC deposits via Bitcoin Knots on Delta.
-/// No HTLC/atomic swaps — simple receive-and-mint model.
+/// Endpoints for BTC↔wBTC via Bitcoin Knots on Delta.
 ///
 /// Endpoints:
-///   POST /api/v1/bitcoin/deposit/address — generate deposit address (auth required)
-///   GET  /api/v1/bitcoin/deposit/:id     — get deposit status
-///   GET  /api/v1/bitcoin/deposits        — list deposits for authenticated wallet
+///   POST /api/v1/bitcoin/deposit/address   — generate deposit address (auth required)
+///   GET  /api/v1/bitcoin/deposit/:id       — get deposit status
+///   GET  /api/v1/bitcoin/deposits          — list deposits for authenticated wallet
 ///   GET  /api/v1/bitcoin/deposit/bridge-status — bridge health/TVL summary
+///   POST /api/v1/bitcoin/withdraw          — redeem wBTC for on-chain BTC (auth required)
 
 use axum::{
     extract::{Path, State},
@@ -21,6 +21,7 @@ use tracing::{info, warn};
 use crate::handlers::ApiResponse;
 use crate::wallet_auth::AuthenticatedWallet;
 use crate::AppState;
+use q_types::WBTC_TOKEN_ADDRESS;
 
 // ============================================================================
 // Request / Response types
@@ -313,6 +314,136 @@ pub async fn list_deposits(
         .collect();
 
     Ok(Json(ApiResponse::success(responses)))
+}
+
+// ============================================================================
+// Withdrawal (wBTC → BTC)
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct WithdrawRequest {
+    /// Destination on-chain BTC address (bech32 bc1q… or legacy)
+    pub btc_address: String,
+    /// Amount to withdraw in satoshis
+    pub amount_sats: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WithdrawResponse {
+    pub txid: String,
+    pub amount_sats: u64,
+    pub amount_btc: f64,
+    pub btc_address: String,
+}
+
+/// POST /api/v1/bitcoin/withdraw
+///
+/// Redeem wBTC for real on-chain BTC.
+/// Deducts wBTC from the caller's balance, then broadcasts a Bitcoin transaction.
+///
+/// SECURITY order: wBTC is deducted BEFORE the Bitcoin transaction is broadcast.
+/// If the broadcast fails, the wBTC is refunded.
+pub async fn withdraw_wbtc(
+    State(state): State<Arc<AppState>>,
+    auth_wallet: Option<AuthenticatedWallet>,
+    Json(request): Json<WithdrawRequest>,
+) -> Result<Json<ApiResponse<WithdrawResponse>>, StatusCode> {
+    let wallet = match auth_wallet {
+        Some(w) => w,
+        None => return Ok(Json(ApiResponse::error("Authentication required.".to_string()))),
+    };
+
+    let bridge = match &state.deposit_bridge {
+        Some(b) => b.clone(),
+        None => return Ok(Json(ApiResponse::error(
+            "Bitcoin bridge is not enabled on this node.".to_string(),
+        ))),
+    };
+
+    // Validate amount
+    if request.amount_sats < q_bitcoin_bridge::deposit_bridge::BTC_MIN_DEPOSIT_SATS {
+        return Ok(Json(ApiResponse::error(format!(
+            "Minimum withdrawal is {} sats",
+            q_bitcoin_bridge::deposit_bridge::BTC_MIN_DEPOSIT_SATS
+        ))));
+    }
+    if request.amount_sats > q_bitcoin_bridge::deposit_bridge::BTC_MAX_DEPOSIT_SATS {
+        return Ok(Json(ApiResponse::error(format!(
+            "Maximum withdrawal is {} sats (0.1 BTC)",
+            q_bitcoin_bridge::deposit_bridge::BTC_MAX_DEPOSIT_SATS
+        ))));
+    }
+
+    // Validate BTC address (basic: must be non-empty and look like an address)
+    let addr = request.btc_address.trim();
+    if addr.is_empty() || addr.len() < 26 || addr.len() > 62 {
+        return Ok(Json(ApiResponse::error("Invalid BTC address.".to_string())));
+    }
+
+    // wBTC is stored in 8-decimal satoshi units
+    let required_wbtc = request.amount_sats; // 1 wBTC sat = 1 BTC sat
+
+    // --- Step 1: Check and deduct wBTC balance ---
+    let token_key = (wallet.address, WBTC_TOKEN_ADDRESS);
+    let old_balance = {
+        let balances = state.token_balances.read().await;
+        balances.get(&token_key).copied().unwrap_or(0)
+    };
+    if old_balance < required_wbtc as u128 {
+        return Ok(Json(ApiResponse::error(format!(
+            "Insufficient wBTC balance: have {} sats, need {} sats",
+            old_balance, required_wbtc
+        ))));
+    }
+
+    let new_balance = old_balance - required_wbtc as u128;
+    {
+        let mut balances = state.token_balances.write().await;
+        balances.insert(token_key, new_balance);
+    }
+    if let Err(e) = state.storage_engine
+        .save_token_balance(&wallet.address, &WBTC_TOKEN_ADDRESS, new_balance)
+        .await
+    {
+        warn!("₿ Failed to persist wBTC deduction before withdrawal: {}", e);
+        // Restore balance and abort — storage error means we can't guarantee atomicity
+        let mut balances = state.token_balances.write().await;
+        balances.insert(token_key, old_balance);
+        return Ok(Json(ApiResponse::error(
+            "Storage error — withdrawal aborted. No funds moved.".to_string(),
+        )));
+    }
+
+    // --- Step 2: Broadcast the Bitcoin transaction ---
+    match bridge.send_withdrawal(addr, request.amount_sats).await {
+        Ok(txid) => {
+            info!(
+                "₿ wBTC withdrawal: {} sats → {} (txid: {}) for wallet {}",
+                request.amount_sats, addr, txid,
+                hex::encode(&wallet.address[..8])
+            );
+            Ok(Json(ApiResponse::success(WithdrawResponse {
+                txid,
+                amount_sats: request.amount_sats,
+                amount_btc: request.amount_sats as f64 / 100_000_000.0,
+                btc_address: addr.to_string(),
+            })))
+        }
+        Err(e) => {
+            // Broadcast failed — refund the wBTC we just deducted
+            warn!("₿ BTC broadcast failed after wBTC deduction — refunding: {}", e);
+            let mut balances = state.token_balances.write().await;
+            balances.insert(token_key, old_balance);
+            drop(balances);
+            let _ = state.storage_engine
+                .save_token_balance(&wallet.address, &WBTC_TOKEN_ADDRESS, old_balance)
+                .await;
+            Ok(Json(ApiResponse::error(format!(
+                "Bitcoin transaction failed — your wBTC was not deducted: {}",
+                e
+            ))))
+        }
+    }
 }
 
 /// GET /api/v1/bitcoin/deposit/bridge-status

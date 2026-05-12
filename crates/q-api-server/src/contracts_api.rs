@@ -1914,9 +1914,12 @@ fn parse_address(address_str: &str) -> Result<[u8; 32], String> {
             ));
         }
         &address_str[3..]
+    } else if address_str.len() == 64 && address_str.chars().all(|c| c.is_ascii_hexdigit()) {
+        // Bare 64-char hex (no prefix) — bridge/internal token addresses
+        address_str
     } else {
         return Err(format!(
-            "Address must start with 0x or qnk (got: {})",
+            "Address must start with 0x or qnk, or be a bare 64-char hex (got: {})",
             address_str
         ));
     };

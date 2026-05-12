@@ -12,7 +12,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use q_types::{ApiResponse, TokenInfo, TokenType, QUGUSD_TOKEN_ADDRESS, QUG_TOKEN_ADDRESS, QCREDIT_TOKEN_ADDRESS, QUSD_TOKEN_ADDRESS};
+use q_types::{ApiResponse, TokenInfo, TokenType, QUGUSD_TOKEN_ADDRESS, QUG_TOKEN_ADDRESS, QCREDIT_TOKEN_ADDRESS, QUSD_TOKEN_ADDRESS, bridge_token_info};
 use q_vm::contracts::{CollateralVault, MintResult, PositionHealth, RedeemResult, VaultStats};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -334,6 +334,49 @@ pub async fn get_multi_token_balance(
 
         // Skip native tokens (already added above)
         if token_addr == &QUG_TOKEN_ADDRESS || token_addr == &QUGUSD_TOKEN_ADDRESS || token_addr == &QUSD_TOKEN_ADDRESS {
+            continue;
+        }
+
+        // v1.0.3: Bridge tokens (wBTC, wZEC, wETH, wIRON) — stored by WBTC_TOKEN_ADDRESS etc.
+        if let Some((bridge_name, bridge_sym, bridge_decimals)) = bridge_token_info(token_addr) {
+            let divisor = 10f64.powi(bridge_decimals as i32);
+            let balance_display = *balance as f64 / divisor;
+
+            // Get USD price from quillon bank oracle
+            let bridge_asset = match bridge_sym {
+                "wBTC" => Some(q_quillon_bank::AssetType::BTC),
+                "wZEC" => Some(q_quillon_bank::AssetType::ZEC),
+                "wETH" => Some(q_quillon_bank::AssetType::ETH),
+                "wIRON" => Some(q_quillon_bank::AssetType::IRON),
+                _ => None,
+            };
+            let bridge_price_usd = if let Some(asset) = bridge_asset {
+                let qb = state.quillon_bank.read().await;
+                let p = qb.oracle_integration.get_price_f64(&asset).await;
+                drop(qb);
+                p.max(0.0)
+            } else {
+                0.0
+            };
+            let usd_value = balance_display * bridge_price_usd;
+
+            info!(
+                "🌉 [v1.0.3] Bridge token for {}: {} = {:.8} @ ${:.2} = ${:.4}",
+                q_log_privacy::mask_addr(&address_hex), bridge_sym, balance_display, bridge_price_usd, usd_value
+            );
+
+            tokens.insert(
+                bridge_sym.to_string(),
+                TokenBalance {
+                    balance: format!("{:.8}", balance_display),
+                    balance_base_units: *balance,
+                    usd_value,
+                    name: Some(bridge_name.to_string()),
+                    contract_address: Some(format!("qnk{}", hex::encode(token_addr))),
+                    decimals: Some(bridge_decimals),
+                },
+            );
+            total_usd_value += usd_value;
             continue;
         }
 
