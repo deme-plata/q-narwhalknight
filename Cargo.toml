@@ -78,7 +78,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.9.2"  # v10.9.2: perf(io): thread-per-core io_uring adapter + multi-validator FinalityCert gossipsub aggregator
+version = "10.9.5"  # v10.9.5: fix(replay): admin reset also fixes 'skipped-authoritative' checkpoint marker on Gamma
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"

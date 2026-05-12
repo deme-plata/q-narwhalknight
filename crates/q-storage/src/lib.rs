@@ -6115,7 +6115,24 @@ impl QStorage {
         self.hot_db
             .delete(CF_MANIFEST, b"meta:balance_replay_v10.7.8")
             .await
-            .context("Failed to delete balance replay done flag")
+            .context("Failed to delete balance replay done flag")?;
+        // If the checkpoint marker is "skipped-authoritative" (set when the node had more
+        // wallets than the snapshot at first boot — possible due to the turbo-sync
+        // coinbase-only bug producing a wrong wallet count), reset it to "1" so that
+        // is_genesis_node() returns false and the replay actually runs on SYNC-006 restart.
+        let marker = self.hot_db
+            .get(CF_MANIFEST, Self::CHECKPOINT_APPLIED_KEY)
+            .await
+            .ok()
+            .flatten();
+        if marker.as_deref() == Some(b"skipped-authoritative") {
+            info!("[ADMIN] Checkpoint marker was 'skipped-authoritative' — resetting to '1' so replay runs on next restart.");
+            self.hot_db
+                .put_sync(CF_MANIFEST, Self::CHECKPOINT_APPLIED_KEY, b"1")
+                .await
+                .context("Failed to reset checkpoint marker")?;
+        }
+        Ok(())
     }
 
     /// Post-sync balance replay for checkpoint-bootstrapped nodes (SYNC-004 / v10.7.3).
