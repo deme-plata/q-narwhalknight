@@ -20,9 +20,10 @@
 //!   One round: 8 G calls = ~5,120 constraints
 //!   7 rounds: ~35,840 constraints + init/finalize ≈ 43K total
 //!
-//! ## Status: G function implemented with correct arkworks API.
-//! Compression function (7 rounds × 8 G calls) is scaffolded.
-//! Full verify_hash wiring of FpVar↔UInt32 conversion is TODO.
+//! ## Status: G function, compression function, and verify_hash are implemented.
+//! verify_hash converts FpVar witnesses to UInt32 via bit decomposition, runs
+//! compress(IV, msg, counter=0, block_len=64, flags=CHUNK_START|CHUNK_END|ROOT),
+//! and enforces equality between the 8-word output and expected_hash_words.
 //!
 //! ## Correct ark-r1cs-std 0.4 UInt32 API (verified against source)
 //!   - `UInt32::addmany(&[a, b, ...])` → `Result<UInt32<F>, SynthesisError>`
@@ -259,36 +260,77 @@ impl Blake3Gadget {
         Self::alloc_bytes_as_words::<F>(cs, hash)
     }
 
+    // ─── FpVar ↔ UInt32 bridge ────────────────────────────────────────────────
+
+    /// Convert an FpVar representing a 32-bit word to a constrained UInt32.
+    ///
+    /// Decomposes the field element into bits via `to_bits_le`, enforces that
+    /// bits 32..field_size are all zero (range check), and assembles the lower
+    /// 32 bits into a UInt32.
+    ///
+    /// Constraint cost: ~254 constraints (bit decomposition) + 222 enforcements
+    /// = ~476 constraints per word.
+    fn fpvar_to_uint32<F: PrimeField>(v: &FpVar<F>) -> Result<UInt32<F>, SynthesisError> {
+        let bits = v.to_bits_le()?;
+        // Enforce the value is in [0, 2^32): bits above position 31 must be zero.
+        for bit in bits.iter().skip(32) {
+            bit.enforce_equal(&Boolean::constant(false))?;
+        }
+        Ok(UInt32::from_bits_le(&bits[..32]))
+    }
+
+    /// Convert a constrained UInt32 back to an FpVar field element.
+    ///
+    /// Interprets the 32 bits as a little-endian unsigned integer and packs them
+    /// into the field. No additional range constraints needed (UInt32 is already bounded).
+    ///
+    /// Constraint cost: ~32 constraints (linear combination of bits).
+    fn uint32_to_fpvar<F: PrimeField>(w: &UInt32<F>) -> Result<FpVar<F>, SynthesisError> {
+        let bits = w.to_bits_le();
+        Boolean::le_bits_to_fp_var(&bits)
+    }
+
     // ─── Full verification ─────────────────────────────────────────────────
 
-    /// Verify BLAKE3(preimage_words) == expected_hash_words inside the circuit.
+    /// Verify BLAKE3(preimage_words) == expected_hash_words inside the R1CS circuit.
     ///
-    /// # Status: TODO — FpVar↔UInt32 bridge needed.
-    /// The G function and compression function are correctly implemented with
-    /// the right arkworks UInt32 API. The missing piece is converting the
-    /// caller-provided FpVar witnesses to UInt32 (requires bit decomposition
-    /// via FpVar::to_bits_le → UInt32::from_bits_le).
+    /// Verifies a single 64-byte (16-word) block hash using the full constraint chain:
+    ///   1. FpVar → UInt32 (bit decomposition + range check, ~476 constraints/word)
+    ///   2. compress(IV, msg, counter=0, block_len=64, CHUNK_START|CHUNK_END|ROOT)
+    ///      (~36K constraints for 7 rounds)
+    ///   3. UInt32 → FpVar (linear packing, ~32 constraints/word)
+    ///   4. enforce_equal on all 8 output words
     ///
-    /// For now: placeholder equality check (NOT cryptographically sound).
+    /// Total: ~7.6K (bridge in) + ~36K (compress) + ~0.3K (bridge out) ≈ 44K constraints.
+    ///
+    /// `preimage_words`: 16 FpVars, each representing one little-endian 32-bit word.
+    /// `expected_hash_words`: 8 FpVars representing the 256-bit BLAKE3 output.
     pub fn verify_hash<F: PrimeField>(
-        _cs: ConstraintSystemRef<F>,
+        cs: ConstraintSystemRef<F>,
         preimage_words: &[FpVar<F>],
         expected_hash_words: &[FpVar<F>],
     ) -> Result<(), SynthesisError> {
-        assert_eq!(expected_hash_words.len(), 8, "BLAKE3 output is 8 × u32 = 256 bits");
-        // TODO: Convert preimage_words (FpVar) → UInt32 via to_bits_le → from_bits_le,
-        //       call Self::compress(...), then compare output with expected_hash_words.
-        //
-        // Placeholder: enforce sum(preimage) == sum(expected) (NOT cryptographically sound).
-        let mut sum_pre = FpVar::Constant(F::zero());
-        for w in preimage_words {
-            sum_pre = &sum_pre + w;
+        assert_eq!(preimage_words.len(), 16, "BLAKE3 single block: 16 × u32 = 512-bit input");
+        assert_eq!(expected_hash_words.len(), 8, "BLAKE3 output: 8 × u32 = 256-bit hash");
+
+        // Step 1: Convert each FpVar message word to a constrained UInt32.
+        let msg: Vec<UInt32<F>> = preimage_words
+            .iter()
+            .map(Self::fpvar_to_uint32)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Step 2: Initial chaining value is the BLAKE3 IV (constants, zero constraints).
+        let cv: Vec<UInt32<F>> = BLAKE3_IV.iter().map(|&w| UInt32::constant(w)).collect();
+
+        // Step 3: Run the BLAKE3 compression circuit.
+        let out = Self::compress(cs, &cv, &msg, 0, 0, 64, BLAKE3_FLAG_SINGLE)?;
+
+        // Step 4: Convert UInt32 output words back to FpVar and enforce equality.
+        for (out_word, exp_word) in out.iter().zip(expected_hash_words.iter()) {
+            let out_fp = Self::uint32_to_fpvar(out_word)?;
+            out_fp.enforce_equal(exp_word)?;
         }
-        let mut sum_exp = FpVar::Constant(F::zero());
-        for w in expected_hash_words {
-            sum_exp = &sum_exp + w;
-        }
-        sum_pre.enforce_equal(&sum_exp)?;
+
         Ok(())
     }
 }
@@ -348,6 +390,134 @@ mod tests {
 
         println!("Blake3 verify_hash constraint count: {}", cs.num_constraints());
         // test_blake3_gadget_compiles just verifies the circuit builds without error
+    }
+
+    /// Native G function mirroring the circuit's g_function — used for test oracles.
+    fn native_g(a: u32, b: u32, c: u32, d: u32, mx: u32, my: u32) -> (u32, u32, u32, u32) {
+        let a = a.wrapping_add(b).wrapping_add(mx);
+        let d = (d ^ a).rotate_right(16);
+        let c = c.wrapping_add(d);
+        let b = (b ^ c).rotate_right(12);
+        let a = a.wrapping_add(b).wrapping_add(my);
+        let d = (d ^ a).rotate_right(8);
+        let c = c.wrapping_add(d);
+        let b = (b ^ c).rotate_right(7);
+        (a, b, c, d)
+    }
+
+    /// Native compress mirroring the circuit exactly — used to generate test vectors.
+    fn native_compress(
+        cv: &[u32; 8],
+        msg: &[u32; 16],
+        counter_lo: u32,
+        counter_hi: u32,
+        block_len: u32,
+        flags: u32,
+    ) -> [u32; 8] {
+        let mut v = [0u32; 16];
+        v[..8].copy_from_slice(cv);
+        v[8..12].copy_from_slice(&BLAKE3_IV[..4]);
+        v[12] = counter_lo;
+        v[13] = counter_hi;
+        v[14] = block_len;
+        v[15] = flags;
+
+        for r in 0..7 {
+            let s = &BLAKE3_SIGMA[r % 7];
+            let (a, b, c, d) = native_g(v[0], v[4], v[8], v[12], msg[s[0]], msg[s[1]]);
+            v[0] = a; v[4] = b; v[8] = c; v[12] = d;
+            let (a, b, c, d) = native_g(v[1], v[5], v[9], v[13], msg[s[2]], msg[s[3]]);
+            v[1] = a; v[5] = b; v[9] = c; v[13] = d;
+            let (a, b, c, d) = native_g(v[2], v[6], v[10], v[14], msg[s[4]], msg[s[5]]);
+            v[2] = a; v[6] = b; v[10] = c; v[14] = d;
+            let (a, b, c, d) = native_g(v[3], v[7], v[11], v[15], msg[s[6]], msg[s[7]]);
+            v[3] = a; v[7] = b; v[11] = c; v[15] = d;
+            let (a, b, c, d) = native_g(v[0], v[5], v[10], v[15], msg[s[8]], msg[s[9]]);
+            v[0] = a; v[5] = b; v[10] = c; v[15] = d;
+            let (a, b, c, d) = native_g(v[1], v[6], v[11], v[12], msg[s[10]], msg[s[11]]);
+            v[1] = a; v[6] = b; v[11] = c; v[12] = d;
+            let (a, b, c, d) = native_g(v[2], v[7], v[8], v[13], msg[s[12]], msg[s[13]]);
+            v[2] = a; v[7] = b; v[8] = c; v[13] = d;
+            let (a, b, c, d) = native_g(v[3], v[4], v[9], v[14], msg[s[14]], msg[s[15]]);
+            v[3] = a; v[4] = b; v[9] = c; v[14] = d;
+        }
+
+        let mut out = [0u32; 8];
+        for i in 0..8 {
+            out[i] = v[i] ^ v[i + 8];
+        }
+        out
+    }
+
+    /// Verify that verify_hash accepts a correctly computed hash (circuit is satisfied).
+    ///
+    /// Uses the native_compress oracle to generate the expected 8-word output, then
+    /// checks the in-circuit computation agrees with it.
+    #[test]
+    fn test_verify_hash_satisfied() {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+
+        // 16-word (64-byte) message: sequential values
+        let msg_words: [u32; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+
+        // Compute expected hash with the same algorithm the circuit uses
+        let expected = native_compress(
+            &BLAKE3_IV,
+            &msg_words,
+            0,
+            0,
+            64,
+            BLAKE3_FLAG_SINGLE,
+        );
+
+        // Allocate preimage as FpVars
+        let preimage: Vec<FpVar<Fr>> = msg_words
+            .iter()
+            .map(|&w| FpVar::new_witness(cs.clone(), || Ok(Fr::from(w as u64))).unwrap())
+            .collect();
+
+        // Allocate expected hash as FpVars (these are the "claimed" output words)
+        let hash_vars: Vec<FpVar<Fr>> = expected
+            .iter()
+            .map(|&w| FpVar::new_witness(cs.clone(), || Ok(Fr::from(w as u64))).unwrap())
+            .collect();
+
+        Blake3Gadget::verify_hash(cs.clone(), &preimage, &hash_vars).unwrap();
+
+        assert!(
+            cs.is_satisfied().unwrap(),
+            "verify_hash circuit unsatisfied for correct hash"
+        );
+        println!(
+            "verify_hash constraints: {} (expected ~44K)",
+            cs.num_constraints()
+        );
+    }
+
+    /// Verify that verify_hash rejects a wrong hash (circuit is unsatisfied).
+    #[test]
+    fn test_verify_hash_wrong_rejected() {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+
+        let msg_words: [u32; 16] = [0u32; 16];
+        // Deliberately wrong expected output: all zeros
+        let wrong_hash = [0u32; 8];
+
+        let preimage: Vec<FpVar<Fr>> = msg_words
+            .iter()
+            .map(|&w| FpVar::new_witness(cs.clone(), || Ok(Fr::from(w as u64))).unwrap())
+            .collect();
+        let hash_vars: Vec<FpVar<Fr>> = wrong_hash
+            .iter()
+            .map(|&w| FpVar::new_witness(cs.clone(), || Ok(Fr::from(w as u64))).unwrap())
+            .collect();
+
+        Blake3Gadget::verify_hash(cs.clone(), &preimage, &hash_vars).unwrap();
+
+        assert!(
+            !cs.is_satisfied().unwrap(),
+            "verify_hash should be unsatisfied for wrong hash"
+        );
     }
 
     #[test]
