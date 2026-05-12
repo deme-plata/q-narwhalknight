@@ -462,23 +462,28 @@ Implements actual Poseidon permutation: AddRoundConstants → x^5 S-box → MDS.
 - Tests: hash2 constraint count assertion (≥240), determinism, collision resistance  
 - Note: Round constants must match LatticeGuard prover transcript exactly.
 
-**`src/gadgets/blake3.rs`** — `Blake3Gadget` (**G function + compression scaffold**)  
-Implements the BLAKE3 G mixing function with correct `ark-r1cs-std 0.4` UInt32 API:  
+**`src/gadgets/blake3.rs`** — `Blake3Gadget` (**G function + compression + verify_hash**)  
+Implements the full BLAKE3 verification chain with correct `ark-r1cs-std 0.4` UInt32 API:  
 - `UInt32::addmany(&[...])` for modular addition (not `wrapping_add` — doesn't exist)  
 - `a.xor(&b)` for XOR (returns `Result<UInt32<F>>`)  
 - `a.rotr(n)` for rotation (free wire permutation, 0 constraints)  
 - Compression function: 7 rounds × 8 G calls (correct BLAKE3 column+diagonal structure)  
-- BLAKE3 IV, σ permutation table, block flags  
-- `verify_hash` still placeholder (FpVar↔UInt32 bridge via `to_bits_le` is TODO)  
-- **~640 constraints per G call, ~35,840 for full 7-round compress**
+- **`verify_hash`: real FpVar↔UInt32 bridge now implemented** (was placeholder):  
+  `fpvar_to_uint32`: `to_bits_le()` → range-enforce bits 32..field_size = 0 → `from_bits_le` (~476c/word)  
+  `uint32_to_fpvar`: `UInt32::to_bits_le()` → `Boolean::le_bits_to_fp_var` (~32c/word)  
+  Full chain: bridge_in + compress + bridge_out + enforce_equal ≈ **44K constraints/block**
+- **~640 constraints per G call, ~35,840 for full 7-round compress**  
+- Tests: `test_verify_hash_satisfied` (oracle from native_compress), `test_verify_hash_wrong_rejected`
 
-**`src/gadgets/ntt.rs`** — `NttVerifierGadget<F>` (**Horner eval + all-coeff norm**)  
-- `verify_polynomial_eval`: real Horner's method (not sum placeholder)  
-  `acc ← c[n-1]; for i rev: acc ← acc×challenge + c[i]` — (n-1) mul constraints  
-- `verify_infinity_norm`: checks ALL n coefficients via `is_cmp` (previous version only  
-  checked the first — silent false positives fixed)  
-- `verify_ntt_product`: stub for pointwise NTT equality (A·z verification, TODO)  
-- Tests include wrong-claim rejection test
+**`src/gadgets/ntt.rs`** — `NttVerifierGadget<F>` (**full NTT butterfly now implemented**)  
+- `verify_polynomial_eval`: real Horner's method — (n-1) mul constraints  
+- `verify_infinity_norm`: checks ALL n coefficients via `is_cmp` (one-sided)  
+- **`verify_ntt_product`: real pointwise a[i]·b[i] == c[i] equality check** (was always-true placeholder)  
+- **`ntt` / `intt`: Cooley-Tukey iterative DIT butterfly** (caller provides bit-reversal-indexed roots)  
+  Each butterfly: 1 R1CS mul + 2 free additions. Cost: (n/2)×log₂(n) multiplications.  
+  For n=256: 1024 constraints per NTT; forward+inverse = ~2K constraints.  
+- **`poly_mul`**: NTT → pointwise_mul → INTT — full polynomial multiplication (~3.6K for n=256)  
+- Tests: NTT+INTT round-trip (n=2), `poly_mul` identity, wrong-claim rejection
 
 **`src/gadgets/dilithium.rs`** — `DilithiumVerifierGadget` (**scaffold**)  
 4-step structure wired to NTT norm + Poseidon challenge hash. BFT threshold counter.  
@@ -492,11 +497,14 @@ Composes all four gadgets. Constraint wiring is correct; constraint bodies are p
 | Gadget | Real | Placeholder remaining |
 |--------|------|-----------------------|
 | Poseidon permutation | ✅ S-box, MDS, round constants | — |
-| BLAKE3 G function | ✅ addmany, xor, rotr | FpVar↔UInt32 bridge in verify_hash |
-| BLAKE3 compress | ✅ 7-round structure | Nothing; compress is real |
-| NTT Horner eval | ✅ | NTT butterfly (Cooley-Tukey, ~100K constraints) |
+| BLAKE3 G function | ✅ addmany, xor, rotr | — |
+| BLAKE3 compress | ✅ 7-round structure | — |
+| BLAKE3 verify_hash | ✅ FpVar↔UInt32 bridge + compress + equality (~44K) | — |
+| NTT Horner eval | ✅ (n-1) constraints | — |
+| NTT Cooley-Tukey butterfly | ✅ ntt/intt/poly_mul (~3.6K for n=256) | Negacyclic ring (X^n+1); root table generation |
 | NTT norm check | ✅ all coefficients, is_cmp | Two-sided (negative field representations) |
-| Dilithium Az product | ❌ | Requires NTT butterfly |
+| NTT product verify | ✅ pointwise a[i]·b[i]==c[i] | — |
+| Dilithium Az product | ❌ | Requires negacyclic NTT + matrix-vector wiring |
 | Recursive verifier | ❌ | Depends on recursion paradigm decision (OQ-6) |
 
 ### Poseidon parameter note
@@ -511,6 +519,7 @@ it invalidates all prior proofs.
 ---
 
 *Review reflects codebase state on branch `feature/safe-batched-sync-v1.0.2`, 2026-05-12.*  
+*Last updated: 2026-05-12 — NTT butterfly, poly_mul, and BLAKE3 verify_hash promoted from placeholder to real.*  
 *Whitepaper reference: `papers/RECURSIVE_SNARK_WEAK_SUBJECTIVITY_ELIMINATION.md` v1.0.0-draft*  
 *Prior review: `docs/technical-review-sync-architecture-2026-05-12.md`*  
 *q-ivc crate: commit `55f20a26`, verified compile on Debian 12 2026-05-12*
