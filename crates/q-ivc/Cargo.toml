@@ -13,7 +13,6 @@ ark-ff = { workspace = true }
 ark-ec = { workspace = true }
 ark-serialize = { workspace = true }
 ark-std = { workspace = true }
-ark-bls12-381 = { workspace = true }
 ark-groth16 = { workspace = true }
 ark-r1cs-std = { workspace = true }
 ark-relations = { workspace = true }
@@ -30,6 +29,9 @@ q-types = { path = "../q-types" }
 
 [dev-dependencies]
 criterion = { workspace = true }
+# ark-r1cs-std 0.4 requires ark-ff 0.4; ark-bls12-381 0.5 uses ark-ff 0.5 — incompatible.
+# Use 0.4 here so test-only Fr matches the Field bound expected by UInt32<Fr>.
+ark-bls12-381 = "0.4"
 
 [features]
 default = []

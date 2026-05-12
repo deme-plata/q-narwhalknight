@@ -39,20 +39,24 @@ pub const DILITHIUM5_BETA: u64 = 196;    // commitment norm bound
 
 // ─── NTT parameter bundle ─────────────────────────────────────────────────────
 
-/// Caller-provided NTT roots and inverse for `compute_az_minus_ct`.
+/// Caller-provided NTT roots for polynomial multiplication.
 ///
-/// `fwd_roots[k] = ω^(bit_rev(k))` for k in 1..n, where ω is a primitive
-/// n-th root of unity in F. `inv_roots[k]` is the corresponding inverse.
-/// `n_inv = n⁻¹` in F. All three must be consistent or poly_mul will silently
-/// produce wrong results.
+/// `fwd[k] = ω^(bit_rev(k))` for k in 1..n, where ω is a primitive n-th root
+/// of unity in F (= ψ² for negacyclic). `inv[k]` is the corresponding inverse.
+/// `n_inv = n⁻¹` in F.
 ///
-/// For negacyclic NTT (Dilithium's X^n+1 ring) the caller must pre-twist
-/// coefficients with a 2n-th root ψ before calling and untwist after;
-/// this struct documents that the choice of roots determines the ring.
+/// For negacyclic NTT (Dilithium's X^n+1 ring), also supply `psi` (primitive
+/// 2n-th root of unity) and `psi_inv` so that `compute_az_minus_ct_negacyclic`
+/// can call `poly_mul_negacyclic` directly.
 pub struct NttRoots<F: PrimeField> {
     pub fwd: Vec<F>,
     pub inv: Vec<F>,
     pub n_inv: F,
+    /// ψ: primitive 2n-th root of unity (ψ^2 = ω, ψ^n = -1).
+    /// Set to F::zero() when using cyclic poly_mul.
+    pub psi: F,
+    /// ψ^{-1}: inverse of psi. Set to F::zero() when using cyclic poly_mul.
+    pub psi_inv: F,
 }
 
 // ─── Az − c·t matrix-vector product ─────────────────────────────────────────
@@ -129,10 +133,75 @@ pub fn compute_az_minus_ct<F: PrimeField>(
     Ok(w_prime)
 }
 
+/// Compute w′ = A·z − c·t using **negacyclic** polynomial multiplication.
+///
+/// Identical structure to `compute_az_minus_ct` but calls `poly_mul_negacyclic`
+/// so the computation is correct in the ring Z_q[X]/(X^n + 1) that Dilithium
+/// actually uses. Requires `roots.psi` and `roots.psi_inv` to be set.
+///
+/// # Constraint cost (Dilithium5: k=8, l=7, n=256)
+///   Same as `compute_az_minus_ct`: ~231K constraints.
+///   The extra twist tables are field constants — zero additional constraints.
+pub fn compute_az_minus_ct_negacyclic<F: PrimeField>(
+    cs: &ConstraintSystemRef<F>,
+    a_mat: &[Vec<FpVar<F>>],
+    z: &[Vec<FpVar<F>>],
+    c_poly: &[FpVar<F>],
+    t_vec: &[Vec<FpVar<F>>],
+    roots: &NttRoots<F>,
+) -> Result<Vec<Vec<FpVar<F>>>, SynthesisError> {
+    let k = t_vec.len();
+    let l = z.len();
+    let n = c_poly.len();
+
+    assert_eq!(a_mat.len(), k * l, "a_mat must have k×l entries");
+    assert_ne!(roots.psi, F::zero(), "psi must be set for negacyclic computation");
+
+    let mut w_prime = Vec::with_capacity(k);
+
+    for i in 0..k {
+        let mut az_i: Vec<FpVar<F>> = vec![FpVar::Constant(F::zero()); n];
+        for j in 0..l {
+            let prod = NttVerifierGadget::<F>::poly_mul_negacyclic(
+                cs,
+                &a_mat[i * l + j],
+                &z[j],
+                &roots.fwd,
+                &roots.inv,
+                roots.n_inv,
+                roots.psi,
+                roots.psi_inv,
+            )?;
+            for idx in 0..n {
+                az_i[idx] = az_i[idx].clone() + prod[idx].clone();
+            }
+        }
+
+        let ct_i = NttVerifierGadget::<F>::poly_mul_negacyclic(
+            cs,
+            c_poly,
+            &t_vec[i],
+            &roots.fwd,
+            &roots.inv,
+            roots.n_inv,
+            roots.psi,
+            roots.psi_inv,
+        )?;
+
+        let w_i: Vec<FpVar<F>> = (0..n)
+            .map(|idx| az_i[idx].clone() - ct_i[idx].clone())
+            .collect();
+
+        w_prime.push(w_i);
+    }
+
+    Ok(w_prime)
+}
+
 /// Enforce that all coefficients in every polynomial in `w` satisfy coeff < bound.
 ///
-/// This is the one-sided infinity norm check from `NttVerifierGadget::verify_infinity_norm`.
-/// For Dilithium, call with bound = γ₁ − β for z-polynomials.
+/// One-sided check (positive range only). Use `enforce_signed_norm_bound` for
+/// Dilithium z-polynomials whose coefficients can be negative.
 pub fn enforce_norm_bound<F: PrimeField>(
     cs: ConstraintSystemRef<F>,
     w: &[Vec<FpVar<F>>],
@@ -140,6 +209,35 @@ pub fn enforce_norm_bound<F: PrimeField>(
 ) -> Result<(), SynthesisError> {
     for poly in w {
         let norm_ok = NttVerifierGadget::verify_infinity_norm(cs.clone(), poly, bound)?;
+        norm_ok.enforce_equal(&Boolean::constant(true))?;
+    }
+    Ok(())
+}
+
+/// Enforce ||w||_∞ < bound with two-sided (signed) range check.
+///
+/// Dilithium's z-polynomials have coefficients in [−(γ₁−β), γ₁−β−1] which are
+/// stored as field elements with negative values represented as p − |v|. The
+/// one-sided `enforce_norm_bound` misses the negative half entirely. This
+/// function uses `verify_signed_norm` to handle both halves.
+///
+/// Call with `bound = DILITHIUM5_GAMMA1 - DILITHIUM5_BETA = 261948`.
+///
+/// Constraint cost: k × n × ~401 ≈ 103K constraints for k=1,n=256.
+pub fn enforce_signed_norm_bound<F: PrimeField>(
+    cs: ConstraintSystemRef<F>,
+    w: &[Vec<FpVar<F>>],
+    bound: u64,
+) -> Result<(), SynthesisError> {
+    for (poly_idx, poly) in w.iter().enumerate() {
+        let norm_ok =
+            NttVerifierGadget::verify_signed_infinity_norm(&cs, poly, bound)?;
+        if !norm_ok.value().unwrap_or(false) {
+            println!(
+                "  [enforce_signed_norm_bound] poly[{}]: norm check FAILED (bound={})",
+                poly_idx, bound
+            );
+        }
         norm_ok.enforce_equal(&Boolean::constant(true))?;
     }
     Ok(())
@@ -182,10 +280,11 @@ impl DilithiumVerifierGadget {
         sig_h: &[Boolean<F>],         // h hint bits (K×N)
         sig_c_tilde: &[FpVar<F>],     // challenge c̃ (8 field elements)
     ) -> Result<Boolean<F>, SynthesisError> {
-        // STEP 1: Norm check — ||z||_∞ < γ₁ - β
+        // STEP 1: Norm check — ||z||_∞ < γ₁ - β  (signed: z coefficients can be negative)
         // Each coefficient of z must satisfy |z[i]| < γ₁ - β = 262144 - 196 = 261948
         let norm_bound = DILITHIUM5_GAMMA1 - DILITHIUM5_BETA;
-        let norm_ok = NttVerifierGadget::verify_infinity_norm(cs.clone(), sig_z, norm_bound)?;
+        let norm_ok =
+            NttVerifierGadget::verify_signed_infinity_norm(&cs, sig_z, norm_bound)?;
 
         // STEP 2: Recompute w' = Az − c·t
         // `compute_az_minus_ct` is the real implementation when the caller provides
@@ -255,19 +354,43 @@ impl DilithiumVerifierGadget {
 mod tests {
     use super::*;
     use ark_bls12_381::Fr;
-    use ark_ff::Field;
+    use ark_ff::{Field, One, Zero};
     use ark_relations::r1cs::ConstraintSystem;
 
     // ─── NTT root helpers ────────────────────────────────────────────────────
 
-    /// Build n=2 NTT roots: roots[1] = -1 (primitive 2nd root of unity).
-    fn roots_n2() -> NttRoots<Fr> {
+    /// Build n=2 cyclic NTT roots (psi fields zeroed — not needed for cyclic).
+    fn roots_n2_cyclic() -> NttRoots<Fr> {
         let neg_one = Fr::from(0u64) - Fr::from(1u64);
         NttRoots {
             fwd: vec![Fr::from(1u64), neg_one],
             inv: vec![Fr::from(1u64), neg_one],
             n_inv: Fr::from(2u64).inverse().unwrap(),
+            psi: Fr::zero(),
+            psi_inv: Fr::zero(),
         }
+    }
+
+    /// Build n=2 negacyclic NTT roots.
+    ///
+    /// ψ = sqrt(-1) in BLS12-381 Fr (exists since p ≡ 1 mod 4).
+    /// ω = ψ^2 = -1 (primitive 2nd root of unity for the inner cyclic NTT).
+    fn roots_n2_negacyclic() -> NttRoots<Fr> {
+        let neg_one = Fr::from(0u64) - Fr::from(1u64);
+        let psi = neg_one.sqrt().expect("sqrt(-1) must exist in BLS12-381 Fr");
+        let psi_inv = psi.inverse().unwrap();
+        NttRoots {
+            fwd: vec![Fr::from(1u64), neg_one],  // ω = ψ^2 = -1
+            inv: vec![Fr::from(1u64), neg_one],
+            n_inv: Fr::from(2u64).inverse().unwrap(),
+            psi,
+            psi_inv,
+        }
+    }
+
+    // Keep old name as alias for tests that still use it (cyclic)
+    fn roots_n2() -> NttRoots<Fr> {
+        roots_n2_cyclic()
     }
 
     // ─── compute_az_minus_ct ─────────────────────────────────────────────────
@@ -421,6 +544,127 @@ mod tests {
         println!("    └─ c_match: placeholder Poseidon transcript (scaffold mismatch expected)");
         assert!(satisfied, "scaffold circuit must be satisfiable even when verify returns false");
         println!("  ✓ PASS (circuit satisfied, scaffold gates wired)");
+    }
+
+    // ─── enforce_signed_norm_bound ───────────────────────────────────────────
+
+    /// Test that a z-polynomial with both positive and negative-encoded coefficients
+    /// passes the signed norm check.
+    #[test]
+    fn test_enforce_signed_norm_bound_passes() {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+
+        // Positive coefficient: 50 < 100 ✓
+        let pos_val = Fr::from(50u64);
+        // Negative coefficient −30 encoded as p − 30 < 100 by signed check ✓
+        let neg_val = Fr::from(0u64) - Fr::from(30u64);
+
+        let w = vec![
+            vec![
+                FpVar::new_witness(cs.clone(), || Ok(pos_val)).unwrap(),
+                FpVar::new_witness(cs.clone(), || Ok(neg_val)).unwrap(),
+            ],
+        ];
+
+        println!("\n=== enforce_signed_norm_bound ===");
+        println!("  Coefficients: [+50, -30 (as p-30)]");
+        println!("  Bound: 100");
+
+        let constraints_before = cs.num_constraints();
+        enforce_signed_norm_bound(cs.clone(), &w, 100).unwrap();
+        let constraints_after = cs.num_constraints();
+
+        let satisfied = cs.is_satisfied().unwrap();
+        println!("  Constraints added: {}", constraints_after - constraints_before);
+        println!("  Circuit satisfied: {}", satisfied);
+        assert!(satisfied, "signed norm bound should pass for ±50, ±30");
+        println!("  ✓ PASS");
+    }
+
+    // ─── compute_az_minus_ct_negacyclic ──────────────────────────────────────
+
+    /// k=1, l=1, n=2: verify (1+x)·(3) − (2)·(1) in F[X]/(X^2+1).
+    ///
+    /// In negacyclic ring X^2+1: [1,0]·[3,0] = [3,0], [2,0]·[1,0] = [2,0]
+    /// (constant polynomials behave the same as cyclic for degree-0 products)
+    /// w' = [3,0] − [2,0] = [1,0]
+    #[test]
+    fn test_compute_az_minus_ct_negacyclic_n2_k1_l1() {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        let alloc = |v: u64| FpVar::new_witness(cs.clone(), || Ok(Fr::from(v))).unwrap();
+
+        let a_mat = vec![vec![alloc(1), alloc(0)]];
+        let z     = vec![vec![alloc(3), alloc(0)]];
+        let c_poly =    vec![alloc(2), alloc(0)];
+        let t_vec = vec![vec![alloc(1), alloc(0)]];
+        let roots = roots_n2_negacyclic();
+
+        println!("\n=== compute_az_minus_ct_negacyclic (k=1, l=1, n=2) ===");
+        println!("  Ring: F[X]/(X^2+1),  ψ = sqrt(-1)");
+        println!("  A = [[1,0]],  z = [[3,0]],  c = [2,0],  t = [[1,0]]");
+        println!("  Expected: w'[0] = [1·3, 0] − [2·1, 0] = [1, 0]");
+
+        let constraints_before = cs.num_constraints();
+        let w_prime = compute_az_minus_ct_negacyclic(
+            &cs, &a_mat, &z, &c_poly, &t_vec, &roots,
+        ).unwrap();
+        let constraints_after = cs.num_constraints();
+
+        let satisfied = cs.is_satisfied().unwrap();
+        println!("  Constraints added: {}", constraints_after - constraints_before);
+        println!("  Circuit satisfied: {}", satisfied);
+        println!("  w'[0] = [{:?}, {:?}]",
+            w_prime[0][0].value().unwrap(),
+            w_prime[0][1].value().unwrap());
+
+        assert!(satisfied, "negacyclic circuit unsatisfied");
+        assert_eq!(w_prime[0][0].value().unwrap(), Fr::from(1u64), "w'[0] should be 1");
+        assert_eq!(w_prime[0][1].value().unwrap(), Fr::from(0u64), "w'[1] should be 0");
+        println!("  ✓ PASS");
+    }
+
+    /// Verify that the negacyclic ring property X^2 = -1 manifests in products.
+    ///
+    /// a = [0,1] = x,  b = [0,1] = x.
+    /// a·b = x·x = x^2 = -1 in F[X]/(X^2+1), so result = [-1, 0].
+    #[test]
+    fn test_negacyclic_xsquared_is_minus_one() {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+
+        let roots = roots_n2_negacyclic();
+
+        // a = b = [0, 1] (polynomial x)
+        let a: Vec<FpVar<Fr>> = [Fr::from(0u64), Fr::from(1u64)]
+            .iter()
+            .map(|&v| FpVar::new_witness(cs.clone(), || Ok(v)).unwrap())
+            .collect();
+        let b: Vec<FpVar<Fr>> = [Fr::from(0u64), Fr::from(1u64)]
+            .iter()
+            .map(|&v| FpVar::new_witness(cs.clone(), || Ok(v)).unwrap())
+            .collect();
+
+        println!("\n=== negacyclic X^2 = -1 property test ===");
+        println!("  a = b = [0, 1]  (polynomial x)");
+        println!("  Expected: x·x = x^2 ≡ -1 (mod X^2+1) → [p-1, 0]");
+
+        let c = NttVerifierGadget::poly_mul_negacyclic(
+            &cs, &a, &b,
+            &roots.fwd, &roots.inv, roots.n_inv,
+            roots.psi, roots.psi_inv,
+        ).unwrap();
+
+        assert!(cs.is_satisfied().unwrap(), "negacyclic x*x circuit unsatisfied");
+
+        let neg_one = Fr::from(0u64) - Fr::from(1u64);
+        let c0 = c[0].value().unwrap();
+        let c1 = c[1].value().unwrap();
+        println!("  c[0] = {:?}  (should be p-1 = -1)", c0);
+        println!("  c[1] = {:?}  (should be 0)", c1);
+        println!("  Constraints: {}", cs.num_constraints());
+
+        assert_eq!(c0, neg_one, "x*x in negacyclic ring: c[0] should be -1");
+        assert_eq!(c1, Fr::from(0u64), "x*x in negacyclic ring: c[1] should be 0");
+        println!("  ✓ PASS: X^2 ≡ -1 correctly enforced in-circuit");
     }
 
     // ─── Constraint scaling projection ───────────────────────────────────────

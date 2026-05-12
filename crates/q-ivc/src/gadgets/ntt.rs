@@ -243,9 +243,8 @@ impl<F: PrimeField> NttVerifierGadget<F> {
     /// Steps: forward NTT on a and b → pointwise mul → inverse NTT.
     ///
     /// Note: This computes the product in the *cyclic* ring F[X]/(X^n − 1).
-    /// For RLWE / Dilithium's negacyclic ring F[X]/(X^n + 1), the caller should
-    /// pre-multiply coefficients by a primitive 2n-th root of unity ψ before
-    /// calling ntt, and divide by ψ after intt.
+    /// For RLWE / Dilithium's negacyclic ring F[X]/(X^n + 1), use
+    /// `poly_mul_negacyclic` which applies the extra twiddle automatically.
     ///
     /// Constraint cost (n=256):
     ///   2 × NTT:           2 × 1024 = 2048 multiplications
@@ -265,13 +264,144 @@ impl<F: PrimeField> NttVerifierGadget<F> {
         let c_ntt = Self::pointwise_mul(&a_ntt, &b_ntt)?;
         Self::intt(cs, &c_ntt, inv_roots, n_inv)
     }
+
+    /// Negacyclic polynomial multiplication: c = a · b in F[X]/(X^n + 1).
+    ///
+    /// Required for RLWE-based schemes (Dilithium, Kyber) which work in the
+    /// quotient ring Z_q[X]/(X^n + 1) where X^n ≡ −1 rather than +1.
+    ///
+    /// Technique — explicit pre-twist / post-untwist:
+    ///   Let ψ be a primitive 2n-th root of unity (ψ^2n = 1, ψ^n = −1).
+    ///   Pre-twist:  a'[i] = a[i] · ψ^i,  b'[i] = b[i] · ψ^i
+    ///   Cyclic NTT: A' = NTT(a'),  B' = NTT(b')  (using ω = ψ²)
+    ///   Pointwise:  C'[i] = A'[i] · B'[i]
+    ///   Cyclic INTT: c' = INTT(C')
+    ///   Post-untwist: c[i] = c'[i] · ψ^{-i}
+    ///
+    /// # Arguments
+    /// * `fwd_roots` / `inv_roots` – length-n tables for ω = ψ², the primitive n-th root
+    /// * `psi` – primitive 2n-th root of unity ψ (caller computes from field)
+    /// * `psi_inv` – ψ^{-1}
+    ///
+    /// # Constraint cost (n=256):
+    ///   pre-twist:    2 × n = 512 multiplications  (ψ^i constants, so free)
+    ///   2 × NTT:      2 × 1024 = 2048 multiplications
+    ///   pointwise:    256 multiplications
+    ///   INTT:         1024 + 256 = 1280 multiplications
+    ///   post-untwist: n = 256 multiplications       (ψ^{-i} constants, so free)
+    ///   Total: ~3.6K R1CS constraints (same as cyclic — twist tables are constants)
+    pub fn poly_mul_negacyclic(
+        cs: &ConstraintSystemRef<F>,
+        a: &[FpVar<F>],
+        b: &[FpVar<F>],
+        fwd_roots: &[F],   // ω = ψ² roots (length n)
+        inv_roots: &[F],   // ω^{-1} inverse roots (length n)
+        n_inv: F,
+        psi: F,            // primitive 2n-th root of unity
+        psi_inv: F,        // ψ^{-1}
+    ) -> Result<Vec<FpVar<F>>, SynthesisError> {
+        let n = a.len();
+        assert_eq!(b.len(), n, "poly_mul_negacyclic: a and b must have same length");
+
+        // Build ψ^i and ψ^{-i} tables (native field constants — zero constraints)
+        let mut psi_pow = F::one();
+        let mut psi_inv_pow = F::one();
+        let mut psi_table: Vec<F> = Vec::with_capacity(n);
+        let mut psi_inv_table: Vec<F> = Vec::with_capacity(n);
+        for _ in 0..n {
+            psi_table.push(psi_pow);
+            psi_inv_table.push(psi_inv_pow);
+            psi_pow *= psi;
+            psi_inv_pow *= psi_inv;
+        }
+
+        // Pre-twist: a'[i] = a[i] · ψ^i  (multiply by a constant — one R1CS mul each,
+        // but arkworks folds Constant × Witness into the witness allocation, so it's
+        // effectively free in the constraint count for non-prover inputs)
+        let a_twist: Vec<FpVar<F>> = a.iter().zip(psi_table.iter())
+            .map(|(ai, &pi)| ai.clone() * FpVar::Constant(pi))
+            .collect();
+        let b_twist: Vec<FpVar<F>> = b.iter().zip(psi_table.iter())
+            .map(|(bi, &pi)| bi.clone() * FpVar::Constant(pi))
+            .collect();
+
+        // Standard cyclic NTT → pointwise → INTT
+        let a_ntt = Self::ntt(cs, &a_twist, fwd_roots)?;
+        let b_ntt = Self::ntt(cs, &b_twist, fwd_roots)?;
+        let c_ntt = Self::pointwise_mul(&a_ntt, &b_ntt)?;
+        let c_twist = Self::intt(cs, &c_ntt, inv_roots, n_inv)?;
+
+        // Post-untwist: c[i] = c'[i] · ψ^{-i}
+        let c: Vec<FpVar<F>> = c_twist.iter().zip(psi_inv_table.iter())
+            .map(|(ci, &pi)| ci.clone() * FpVar::Constant(pi))
+            .collect();
+
+        Ok(c)
+    }
+
+    // ─── Two-sided norm verification ──────────────────────────────────────────
+
+    /// Verify |x| < bound for a coefficient stored as a field element.
+    ///
+    /// Dilithium coefficients are signed integers in [−bound, bound−1], but
+    /// the circuit stores them in F_p where negative values appear as p − |v|.
+    /// A one-sided check (x < bound) misses the negative half.
+    ///
+    /// Two-sided check:
+    ///   pos_ok = (x < bound)          ← positive range [0, bound)
+    ///   neg_ok = (−x < bound)         ← negative range (p−bound, p), since −x in F_p
+    ///   result = pos_ok OR neg_ok
+    ///
+    /// Constraint cost: 2 × is_cmp + 1 OR ≈ 2 × 200 + 1 ≈ 401 constraints.
+    pub fn verify_signed_norm(
+        _cs: &ConstraintSystemRef<F>,
+        x: &FpVar<F>,
+        bound: u64,
+    ) -> Result<Boolean<F>, SynthesisError> {
+        let bound_var = FpVar::Constant(F::from(bound));
+
+        // Positive half: x < bound
+        let pos_ok = x.is_cmp(&bound_var, std::cmp::Ordering::Less, false)?;
+
+        // Negative half: (−x) < bound  ↔  x > p − bound  ↔  x ∈ (p−bound, p)
+        // FpVar has no Neg impl; negate via 0 − x.
+        let zero = FpVar::Constant(F::zero());
+        let neg_x = zero - x.clone();
+        let neg_ok = neg_x.is_cmp(&bound_var, std::cmp::Ordering::Less, false)?;
+
+        pos_ok.or(&neg_ok)
+    }
+
+    /// Verify ||v||_∞ < bound with signed (two-sided) range check.
+    ///
+    /// Applies `verify_signed_norm` to every coefficient. Use this for Dilithium's
+    /// z-polynomial norm check where coefficients can be negative.
+    ///
+    /// Constraint cost: n × ~401 constraints. For n=256: ~103K.
+    pub fn verify_signed_infinity_norm(
+        cs: &ConstraintSystemRef<F>,
+        coeffs: &[FpVar<F>],
+        bound: u64,
+    ) -> Result<Boolean<F>, SynthesisError> {
+        if coeffs.is_empty() {
+            return Ok(Boolean::constant(true));
+        }
+
+        let mut all_ok = Boolean::constant(true);
+        for coeff in coeffs {
+            let in_range = Self::verify_signed_norm(cs, coeff, bound)?;
+            all_ok = all_ok.and(&in_range)?;
+        }
+
+        Ok(all_ok)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ark_bls12_381::Fr;
-    use ark_ff::Field;
+    use ark_ff::{Field, One, Zero};
     use ark_relations::r1cs::ConstraintSystem;
 
     #[test]
@@ -488,5 +618,108 @@ mod tests {
         );
 
         println!("poly_mul (n=2) constraints: {}", cs.num_constraints());
+    }
+
+    /// Test poly_mul_negacyclic: (1 + x)(1 + x) = 2 in F[X]/(X^2 + 1).
+    ///
+    /// Over the negacyclic ring X^2+1: x^2 ≡ −1.
+    /// So (1+x)^2 = 1 + 2x + x^2 = 1 + 2x − 1 = 2x.
+    /// Expected: c = [0, 2].
+    ///
+    /// For n=2 the 2n=4th root of unity ψ satisfies ψ^4=1, ψ≠1, ψ^2=-1.
+    /// In F_p we need ψ such that ψ^4 = 1 and ψ^2 = -1.
+    /// We use a degree-4 extension element, but for a concrete test we can pick
+    /// ψ from the BLS12-381 Fr field (order r ≡ 1 mod 4 so a 4th root exists).
+    #[test]
+    fn test_poly_mul_negacyclic_n2() {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+
+        // BLS12-381 Fr has order r ≡ 1 (mod 4), so a primitive 4th root of unity exists.
+        // ψ = g^{(r-1)/4} where g is a primitive root.
+        // We derive it: find the canonical square root of -1 in Fr.
+        // Fr::from(-1) = p-1; its square root exists since p ≡ 1 (mod 4).
+        let neg_one = Fr::from(0u64) - Fr::one();
+
+        // Compute psi = sqrt(-1) in Fr using Tonelli-Shanks (via ark-ff sqrt)
+        let psi = neg_one.sqrt().expect("Fr must have sqrt(-1) since p ≡ 1 mod 4");
+        // Verify: psi^2 == -1
+        assert_eq!(psi * psi, neg_one, "psi^2 should equal -1");
+        let psi_inv = psi.inverse().unwrap();
+
+        // For negacyclic NTT with n=2, ω = ψ^2 = -1 (primitive 2nd root of unity)
+        // fwd_roots[1] = ω = -1, inv_roots[1] = ω^{-1} = -1
+        let fwd_roots = vec![Fr::one(), neg_one];
+        let inv_roots = vec![Fr::one(), neg_one];
+        let n_inv = Fr::from(2u64).inverse().unwrap();
+
+        // a = b = [1, 1]  (polynomial 1 + x)
+        let a: Vec<FpVar<Fr>> = [Fr::one(), Fr::one()]
+            .iter()
+            .map(|&v| FpVar::new_witness(cs.clone(), || Ok(v)).unwrap())
+            .collect();
+        let b: Vec<FpVar<Fr>> = [Fr::one(), Fr::one()]
+            .iter()
+            .map(|&v| FpVar::new_witness(cs.clone(), || Ok(v)).unwrap())
+            .collect();
+
+        println!("\n=== poly_mul_negacyclic (n=2) ===");
+        println!("  a = [1, 1]  (1 + x)");
+        println!("  b = [1, 1]  (1 + x)");
+        println!("  Ring: F[X]/(X^2 + 1),  x^2 ≡ -1");
+        println!("  Expected: (1+x)^2 = 1 + 2x + x^2 = 1 + 2x - 1 = 2x = [0, 2]");
+
+        let c = NttVerifierGadget::poly_mul_negacyclic(
+            &cs, &a, &b, &fwd_roots, &inv_roots, n_inv, psi, psi_inv,
+        ).unwrap();
+
+        assert!(cs.is_satisfied().unwrap(), "negacyclic poly_mul circuit unsatisfied");
+
+        let c0 = c[0].value().unwrap();
+        let c1 = c[1].value().unwrap();
+        println!("  Result: c[0] = {:?}", c0);
+        println!("  Result: c[1] = {:?}", c1);
+        println!("  Constraints: {}", cs.num_constraints());
+
+        assert_eq!(c0, Fr::from(0u64), "c[0] should be 0");
+        assert_eq!(c1, Fr::from(2u64), "c[1] should be 2");
+        println!("  ✓ PASS: negacyclic product is [0, 2] = 2x  (X^2 ≡ -1 verified)");
+    }
+
+    /// Test verify_signed_norm: positive and negative values in range.
+    #[test]
+    fn test_verify_signed_norm_in_range() {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+
+        // Positive value 50 < 100: should pass
+        let x_pos = FpVar::new_witness(cs.clone(), || Ok(Fr::from(50u64))).unwrap();
+        let ok_pos = NttVerifierGadget::verify_signed_norm(&cs, &x_pos, 100).unwrap();
+        ok_pos.enforce_equal(&Boolean::constant(true)).unwrap();
+
+        // Negative value represented as p - 50: should also pass (|-50| = 50 < 100)
+        let p_minus_50 = Fr::from(0u64) - Fr::from(50u64);
+        let x_neg = FpVar::new_witness(cs.clone(), || Ok(p_minus_50)).unwrap();
+        let ok_neg = NttVerifierGadget::verify_signed_norm(&cs, &x_neg, 100).unwrap();
+        ok_neg.enforce_equal(&Boolean::constant(true)).unwrap();
+
+        assert!(cs.is_satisfied().unwrap(), "signed norm in-range check failed");
+        println!("\n=== verify_signed_norm (in range) ===");
+        println!("  +50 < 100 → pass ✓");
+        println!("  p-50 (= -50) < 100 by signed check → pass ✓");
+        println!("  Constraints: {}", cs.num_constraints());
+    }
+
+    /// Test verify_signed_norm: value outside range rejected.
+    #[test]
+    fn test_verify_signed_norm_out_of_range_rejected() {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+
+        // Value 200 with bound 100: 200 >= 100 AND -(200) = p-200 >= 100 → out of range
+        let x_out = FpVar::new_witness(cs.clone(), || Ok(Fr::from(200u64))).unwrap();
+        let ok = NttVerifierGadget::verify_signed_norm(&cs, &x_out, 100).unwrap();
+        ok.enforce_equal(&Boolean::constant(true)).unwrap();
+
+        assert!(!cs.is_satisfied().unwrap(), "value 200 with bound 100 should be rejected");
+        println!("\n=== verify_signed_norm (out of range rejected) ===");
+        println!("  200 with bound 100: pos_ok=false, neg_ok=false → rejected ✓");
     }
 }

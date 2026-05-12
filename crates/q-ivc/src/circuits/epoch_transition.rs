@@ -37,6 +37,7 @@ use crate::gadgets::{
 pub const BFT_THRESHOLD: usize = 3;
 
 /// Input data for one validator's signature (for the BFT sub-circuit).
+#[derive(Clone)]
 pub struct ValidatorSignatureInput<F: PrimeField> {
     /// Dilithium5 public key components (t, ρ) as field elements.
     pub public_key: Vec<FpVar<F>>,
