@@ -826,6 +826,49 @@ async fn merge_p2p_response(
             debug!("🔒 [STATE SYNC v8.5.4] Skipping {} wallet balances (bootstrap already done)",
                    response.wallet_balances.len());
             }
+
+            // v10.9.6: After replay is done, import any wallet addresses that are completely
+            // absent locally. These are transfer-only wallets missed during coinbase-only turbo
+            // sync. Adding them never violates max-wins (existing=0 < peer_balance).
+            // Gate on replay-done so we don't race with SYNC-006 building the correct balance map.
+            if checkpoint_applied && app_state.storage_engine.is_balance_replay_done().await {
+                let missing: Vec<([u8; 32], u128)> = {
+                    let wb = app_state.wallet_balances.read().await;
+                    response.wallet_balances.iter()
+                        .filter_map(|(addr_hex, amount_str)| {
+                            let addr = hex_to_32bytes(addr_hex)?;
+                            if wb.contains_key(&addr) { return None; }
+                            let amount: u128 = amount_str.parse().ok().filter(|&a| a > 0)?;
+                            Some((addr, amount))
+                        })
+                        .collect()
+                };
+                if !missing.is_empty() {
+                    let count = missing.len();
+                    info!("🔧 [NEW-WALLET IMPORT v10.9.6] Importing {} wallets absent locally (coinbase-only sync gap, peer={})",
+                          count, response.block_height);
+                    let mut wb = app_state.wallet_balances.write().await;
+                    for (addr, amount) in &missing {
+                        if let Err(e) = app_state.storage_engine.save_wallet_balance(addr, *amount).await {
+                            warn!("⚠️ [NEW-WALLET IMPORT] Failed to persist {}: {}", hex::encode(&addr[..8]), e);
+                            continue;
+                        }
+                        wb.insert(*addr, *amount);
+                    }
+                    let new_total = wb.len();
+                    drop(wb);
+                    let total: u128 = {
+                        let wb = app_state.wallet_balances.read().await;
+                        wb.values().sum()
+                    };
+                    {
+                        let mut supply = app_state.total_minted_supply.write().await;
+                        *supply = total;
+                    }
+                    info!("✅ [NEW-WALLET IMPORT v10.9.6] Added {} missing wallets → {} total wallets", count, new_total);
+                    result.wallets_added += count;
+                }
+            }
         } else {
             let our_height = app_state.current_height_atomic
                 .load(std::sync::atomic::Ordering::SeqCst);

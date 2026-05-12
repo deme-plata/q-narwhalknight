@@ -78,7 +78,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.9.5"  # v10.9.5: fix(replay): admin reset also fixes 'skipped-authoritative' checkpoint marker on Gamma
+version = "10.9.6"  # v10.9.6: fix(sync): import missing wallets absent from checkpoint nodes after replay (coinbase-only gap)
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"
