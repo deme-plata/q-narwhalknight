@@ -42,6 +42,7 @@ members = [
     "crates/q-zk-stark",      # ZK-STARK proofs with GPU acceleration
     "crates/q-zk-snark",      # ZK-SNARK toolkit (Groth16, PLONK, Marlin)
     "crates/q-lattice-guard", # Post-quantum lattice-based zk-SNARK (RLWE)
+    "crates/q-ivc",           # IVC circuit gadgets (NTT, Poseidon, Dilithium, BLAKE3 in R1CS)
     "crates/q-recursive-proofs", # Recursive SNARKs for eliminating weak subjectivity
     "crates/q-rlwe-vrf",      # Post-quantum VRF based on Ring-LWE for mining
     "crates/q-zk-p2p",        # Zero-knowledge enhanced P2P networking
