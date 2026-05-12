@@ -367,6 +367,49 @@ accepting degraded new-node UX for ~9 months.
    assign epoch proofs to validators by VRF (Verifiable Random Function), reducing wasted
    compute. Decision needed before ProverNode implementation.
 
+6. **Recursive proof composition paradigm** *(critical — must decide before circuit
+   engineering scales up)*: BLS12-381 is not pairing-friendly for verifying its own proofs
+   natively. Efficient recursion over BLS12-381 R1CS requires one of:
+
+   **Option A — Cycle of curves (e.g. BLS12-381 + BN254)**  
+   - Verify a BLS12-381 Groth16 proof *inside* a BN254 R1CS circuit, then vice versa.  
+   - Well-understood and battle-tested (used by Zcash Sapling, Filecoin).  
+   - Adds a second curve's field arithmetic to the circuit; ~50–100K extra constraints per
+     recursion step for the in-circuit Groth16 verifier.  
+   - Requires maintaining two separate proving pipelines.
+
+   **Option B — Folding scheme (Nova / SuperNova / ProtoStar)**  
+   - No expensive recursive SNARK verifier inside the circuit; instead "fold" two
+     relaxed R1CS instances together. The folding proof is O(1) and cheap.  
+   - Much smaller per-step overhead (hundreds of constraints vs. 100K).  
+   - Less battle-tested; Nova's security model is newer (Kothapalli et al. 2022).  
+   - The final "compression" step still requires a SNARK, but only once at the end.
+
+   **Recommended path**: Start with Option B (Nova-style folding) for prototyping —
+   it avoids the cycle-of-curves complexity and is faster to prototype with arkworks'
+   `nova-snark` crate. Revisit cycle-of-curves if proving-time benchmarks are
+   unsatisfactory. **This decision must be made before spending more than 2 weeks on
+   circuit gadgets**, as it determines whether `EpochTransitionCircuit` embeds a
+   Groth16 verifier or a folding accumulator.
+
+7. **Bootstrap trust minimisation**: The first epoch proof requires running a trusted
+   prover over the entire 17.8M-block history (or at minimum over each epoch boundary
+   state root). If the initial proving is done by the core team, this is a **trusted
+   setup moment** — users must trust that the genesis-state witness was generated
+   honestly. Options to mitigate:
+
+   - **Multi-party witness generation**: Multiple independent nodes each generate
+     witness data for different epochs; compare Merkle roots before proving. Any
+     discrepancy is a signal of manipulation.
+   - **Delay-then-verify**: Publish the epoch proofs publicly; allow a 30-day challenge
+     window before the network accepts them as canonical. Any node that can produce a
+     contradicting valid state root invalidates the proof.
+   - **On-chain transparency log**: Record proof commitments on-chain before bootstrap
+     completes, so the provenance is auditable.
+   
+   Decision needed before designing the bootstrap UX. Without this, IVC's trust
+   model (P3: "new nodes don't need to trust a checkpoint") is weakened at genesis.
+
 ---
 
 ## Verdict: What This Changes About the Roadmap
@@ -398,29 +441,72 @@ and simultaneously start the Poseidon parameterization decision so circuit work 
 
 ---
 
-## Appendix: q-ivc Crate Scaffold
+## Appendix: q-ivc Crate — Gadget Status (2026-05-12)
 
-Commit `55f20a26` introduces `crates/q-ivc/` — a new workspace crate containing all four
-IVC circuit gadgets and the top-level `EpochTransitionCircuit`. The crate compiles clean on
-Debian 12 bookworm (verified via `rust:bookworm` Docker on Epsilon, 2026-05-12):
+### Compile verification (3 independent Debian 12 checks via `rust:bookworm` on Epsilon)
 
-```
-Finished dev profile [optimized + debuginfo] target(s) in 1m 26s
-9 warnings (all unused variables in placeholder stubs), 0 errors
-```
+| Commit | Check | Result |
+|--------|-------|--------|
+| `5c9ec19` | Poseidon real permutation | ✅ 0 errors, 7 warnings, 36.52s |
+| `bb6ebff` | BLAKE3 G function + compress | ✅ 0 errors, 7 warnings, 33.10s |
+| `1044cf8` | NTT Horner + all-coeff norm | ✅ 0 errors, 5 warnings, 35.89s |
 
-**Files:**
-- `src/gadgets/ntt.rs` — `NttVerifierGadget<F>`: polynomial eval + infinity norm (Horner placeholder)
-- `src/gadgets/poseidon.rs` — `PoseidonGadget`: t=3 sponge, hash/hash2/hash_many (additive placeholder)
-- `src/gadgets/dilithium.rs` — `DilithiumVerifierGadget`: 4-step Dilithium verify + BFT threshold count
-- `src/gadgets/blake3.rs` — `Blake3Gadget`: BLAKE3 hash chain verifier (sum placeholder)
-- `src/circuits/epoch_transition.rs` — `EpochTransitionCircuit<F>`: top-level IVC composition
+### Gadget status by file
 
-**Dependencies:** uses `ark-r1cs-std`, `ark-relations`, `ark-ff`, `ark-bls12-381`, `blake3`.
-Integrates with existing crates: `q-zk-snark`, `q-lattice-guard`, `q-types`.
+**`src/gadgets/poseidon.rs`** — `PoseidonGadget` (**real R1CS**)  
+Implements actual Poseidon permutation: AddRoundConstants → x^5 S-box → MDS.  
+- t=3, α=5, 8 full + 57 partial rounds (128-bit on BLS12-381)  
+- MDS: Cauchy construction `1/(xᵢ + yⱼ)` computed via field inversion  
+- Round constants: SHA3-256 with domain separator `POSEIDON_BLS12381_RC_T3_V1`  
+- **~243 R1CS constraints** per permutation (72 from full rounds, 171 from partial)  
+- Tests: hash2 constraint count assertion (≥240), determinism, collision resistance  
+- Note: Round constants must match LatticeGuard prover transcript exactly.
 
-The circuit wiring is complete; arithmetic constraint bodies are scaffolded with safe placeholders
-that compile and satisfy trivially. Implementing actual constraints is the P2A work described above.
+**`src/gadgets/blake3.rs`** — `Blake3Gadget` (**G function + compression scaffold**)  
+Implements the BLAKE3 G mixing function with correct `ark-r1cs-std 0.4` UInt32 API:  
+- `UInt32::addmany(&[...])` for modular addition (not `wrapping_add` — doesn't exist)  
+- `a.xor(&b)` for XOR (returns `Result<UInt32<F>>`)  
+- `a.rotr(n)` for rotation (free wire permutation, 0 constraints)  
+- Compression function: 7 rounds × 8 G calls (correct BLAKE3 column+diagonal structure)  
+- BLAKE3 IV, σ permutation table, block flags  
+- `verify_hash` still placeholder (FpVar↔UInt32 bridge via `to_bits_le` is TODO)  
+- **~640 constraints per G call, ~35,840 for full 7-round compress**
+
+**`src/gadgets/ntt.rs`** — `NttVerifierGadget<F>` (**Horner eval + all-coeff norm**)  
+- `verify_polynomial_eval`: real Horner's method (not sum placeholder)  
+  `acc ← c[n-1]; for i rev: acc ← acc×challenge + c[i]` — (n-1) mul constraints  
+- `verify_infinity_norm`: checks ALL n coefficients via `is_cmp` (previous version only  
+  checked the first — silent false positives fixed)  
+- `verify_ntt_product`: stub for pointwise NTT equality (A·z verification, TODO)  
+- Tests include wrong-claim rejection test
+
+**`src/gadgets/dilithium.rs`** — `DilithiumVerifierGadget` (**scaffold**)  
+4-step structure wired to NTT norm + Poseidon challenge hash. BFT threshold counter.  
+Actual Az matrix-vector product still `w_prime = sig_z[..8].clone()` (requires NTT gadget).
+
+**`src/circuits/epoch_transition.rs`** — `EpochTransitionCircuit<F>` (**scaffold**)  
+Composes all four gadgets. Constraint wiring is correct; constraint bodies are placeholders.
+
+### What "real" means vs. what's still placeholder
+
+| Gadget | Real | Placeholder remaining |
+|--------|------|-----------------------|
+| Poseidon permutation | ✅ S-box, MDS, round constants | — |
+| BLAKE3 G function | ✅ addmany, xor, rotr | FpVar↔UInt32 bridge in verify_hash |
+| BLAKE3 compress | ✅ 7-round structure | Nothing; compress is real |
+| NTT Horner eval | ✅ | NTT butterfly (Cooley-Tukey, ~100K constraints) |
+| NTT norm check | ✅ all coefficients, is_cmp | Two-sided (negative field representations) |
+| Dilithium Az product | ❌ | Requires NTT butterfly |
+| Recursive verifier | ❌ | Depends on recursion paradigm decision (OQ-6) |
+
+### Poseidon parameter note
+
+The Cauchy MDS + SHA3 domain-derived constants in the current implementation are
+cryptographically sound for development. For production, the parameters should be
+re-derived using a seeded MPC ceremony or the `ark-crypto-primitives::crh::poseidon`
+parameter generation pipeline with a published seed (ChaCha20 from a verifiable beacon).
+The current domain separator `POSEIDON_BLS12381_RC_T3_V1` pins the version; changing
+it invalidates all prior proofs.
 
 ---
 
