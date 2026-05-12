@@ -396,6 +396,35 @@ and simultaneously start the Poseidon parameterization decision so circuit work 
 
 ---
 
+---
+
+## Appendix: q-ivc Crate Scaffold
+
+Commit `55f20a26` introduces `crates/q-ivc/` — a new workspace crate containing all four
+IVC circuit gadgets and the top-level `EpochTransitionCircuit`. The crate compiles clean on
+Debian 12 bookworm (verified via `rust:bookworm` Docker on Epsilon, 2026-05-12):
+
+```
+Finished dev profile [optimized + debuginfo] target(s) in 1m 26s
+9 warnings (all unused variables in placeholder stubs), 0 errors
+```
+
+**Files:**
+- `src/gadgets/ntt.rs` — `NttVerifierGadget<F>`: polynomial eval + infinity norm (Horner placeholder)
+- `src/gadgets/poseidon.rs` — `PoseidonGadget`: t=3 sponge, hash/hash2/hash_many (additive placeholder)
+- `src/gadgets/dilithium.rs` — `DilithiumVerifierGadget`: 4-step Dilithium verify + BFT threshold count
+- `src/gadgets/blake3.rs` — `Blake3Gadget`: BLAKE3 hash chain verifier (sum placeholder)
+- `src/circuits/epoch_transition.rs` — `EpochTransitionCircuit<F>`: top-level IVC composition
+
+**Dependencies:** uses `ark-r1cs-std`, `ark-relations`, `ark-ff`, `ark-bls12-381`, `blake3`.
+Integrates with existing crates: `q-zk-snark`, `q-lattice-guard`, `q-types`.
+
+The circuit wiring is complete; arithmetic constraint bodies are scaffolded with safe placeholders
+that compile and satisfy trivially. Implementing actual constraints is the P2A work described above.
+
+---
+
 *Review reflects codebase state on branch `feature/safe-batched-sync-v1.0.2`, 2026-05-12.*  
 *Whitepaper reference: `papers/RECURSIVE_SNARK_WEAK_SUBJECTIVITY_ELIMINATION.md` v1.0.0-draft*  
-*Prior review: `docs/technical-review-sync-architecture-2026-05-12.md`*
+*Prior review: `docs/technical-review-sync-architecture-2026-05-12.md`*  
+*q-ivc crate: commit `55f20a26`, verified compile on Debian 12 2026-05-12*
