@@ -2656,8 +2656,15 @@ class QNarwhalKnightAPI {
   }
 
   async sendBitcoin(params: { to: string; amount_sats: number; fee_priority: string }): Promise<ApiResponse<{ txid: string }>> {
-    return this.authenticatedRequest<any>('/v1/bitcoin/send', {
-      method: 'POST', body: JSON.stringify(params),
+    // The backend exposes wBTC redemption at /v1/bitcoin/withdraw, which burns
+    // the caller's wBTC and broadcasts a real BTC tx from the bridge wallet.
+    return this.authenticatedRequest<any>('/v1/bitcoin/withdraw', {
+      method: 'POST',
+      body: JSON.stringify({
+        btc_address: params.to,
+        amount_sats: params.amount_sats,
+        fee_priority: params.fee_priority,
+      }),
     });
   }
 

@@ -100,9 +100,14 @@ const BitcoinSwapModal = ({ isOpen, onClose, walletAddress }: BitcoinSwapModalPr
   const [btcAmount, setBtcAmount] = useState('');
   const [qnkAmount, setQnkAmount] = useState('');
   const [btcDest, setBtcDest] = useState('');
+  const [userBtcPubkey, setUserBtcPubkey] = useState('');
   const [swapping, setSwapping] = useState(false);
   const [swapResult, setSwapResult] = useState<{ ok: boolean; msg: string } | null>(null);
   const [swaps, setSwaps] = useState<SwapItem[]>([]);
+
+  // 33-byte compressed secp256k1 pubkey = 66 hex chars starting with 02 or 03.
+  const isValidCompressedPubkey = (s: string) =>
+    /^0[23][0-9a-fA-F]{64}$/.test(s.trim());
 
   // Rates
   const [btcUsd, setBtcUsd] = useState(97000);
@@ -210,9 +215,24 @@ const BitcoinSwapModal = ({ isOpen, onClose, walletAddress }: BitcoinSwapModalPr
       const btcSats = Math.round(parseFloat(btcAmount) * 1e8);
       const qnkBase = BigInt(Math.round(parseFloat(qnkAmount) * 1e8)) * BigInt(1e16);
       if (btcSats <= 0) { setSwapResult({ ok: false, msg: 'Enter a valid BTC amount.' }); return; }
-      if (direction === 'buy_btc' && !btcDest) { setSwapResult({ ok: false, msg: 'Enter a Bitcoin destination address.' }); return; }
-      const userBtcPubkey = '02' + walletAddress.replace('qnk', '').slice(0, 64);
-      const res = await qnkAPI.createAtomicSwap({ direction, btc_amount: btcSats, qnk_amount: qnkBase.toString(), user_btc_pubkey: userBtcPubkey, btc_destination: btcDest || undefined });
+      if (direction === 'buy_btc' && !btcDest) {
+        setSwapResult({ ok: false, msg: 'Enter a Bitcoin destination address.' });
+        return;
+      }
+      if (!isValidCompressedPubkey(userBtcPubkey)) {
+        setSwapResult({
+          ok: false,
+          msg: 'Paste a valid 33-byte compressed BTC public key (66 hex chars, prefix 02/03). This key must be one you control — the HTLC refund path requires its private key.',
+        });
+        return;
+      }
+      const res = await qnkAPI.createAtomicSwap({
+        direction,
+        btc_amount: btcSats,
+        qnk_amount: qnkBase.toString(),
+        user_btc_pubkey: userBtcPubkey.trim(),
+        btc_destination: btcDest || undefined,
+      });
       if (res.success && res.data) {
         setSwapResult({ ok: true, msg: `Swap created — ID: ${res.data.swap_id.slice(0, 12)}…` });
         setBtcAmount(''); setQnkAmount(''); setBtcDest('');
@@ -384,7 +404,7 @@ const BitcoinSwapModal = ({ isOpen, onClose, walletAddress }: BitcoinSwapModalPr
                   <div className="text-xs text-gray-400 leading-relaxed p-3 rounded-lg"
                     style={{ background: 'rgba(34,197,94,0.06)', border: '1px solid rgba(34,197,94,0.15)' }}>
                     <CheckCircle size={13} className="inline text-green-400 mr-1.5 -mt-0.5" />
-                    Generate a Bitcoin deposit address. Funds sent here are automatically detected and credited to your QNK wallet after 3+ confirmations.
+                    Generate a Bitcoin deposit address. Funds sent here are automatically detected and credited to your QNK wallet after 6+ confirmations (~60 min).
                   </div>
 
                   {!depositAddr ? (
@@ -440,7 +460,7 @@ const BitcoinSwapModal = ({ isOpen, onClose, walletAddress }: BitcoinSwapModalPr
                         </div>
                         <div className="rounded-lg p-2.5" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)' }}>
                           <div className="text-gray-600 mb-0.5">Min Confirmations</div>
-                          <div className="text-gray-400">3 blocks (~30 min)</div>
+                          <div className="text-gray-400">6 blocks (~60 min)</div>
                         </div>
                       </div>
 
@@ -621,9 +641,32 @@ const BitcoinSwapModal = ({ isOpen, onClose, walletAddress }: BitcoinSwapModalPr
                     </div>
                   )}
 
+                  {/* User-controlled BTC pubkey — required for HTLC refund/claim safety.
+                      The user MUST own the corresponding secp256k1 private key, otherwise
+                      they can never recover funds locked in the HTLC if the swap times out. */}
+                  <div className="rounded-xl p-3" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+                    <div className="flex justify-between text-[10px] text-gray-500 mb-1">
+                      <span>Your Bitcoin Public Key (compressed, 66 hex)</span>
+                      {userBtcPubkey && !isValidCompressedPubkey(userBtcPubkey) && (
+                        <span className="text-red-400">invalid format</span>
+                      )}
+                    </div>
+                    <input
+                      type="text"
+                      value={userBtcPubkey}
+                      onChange={e => setUserBtcPubkey(e.target.value)}
+                      placeholder="02xxxxxxxx… (33-byte compressed pubkey)"
+                      className="w-full bg-transparent text-xs font-mono text-white outline-none placeholder-gray-700"
+                    />
+                    <div className="text-[10px] text-amber-400/70 mt-1 leading-snug">
+                      ⚠ You must control the matching private key. The HTLC refund path
+                      requires it; the bridge cannot recover funds for you on timeout.
+                    </div>
+                  </div>
+
                   <div className="flex items-center justify-between text-[10px] text-gray-600 px-1">
                     <span>Rate: 1 BTC ≈ {BTC_QNK.toFixed(2)} QNK</span>
-                    <span className="flex items-center gap-1"><Clock size={11} />~10 min · 1 BTC confirmation</span>
+                    <span className="flex items-center gap-1"><Clock size={11} />~60 min · 6 BTC confirmations</span>
                   </div>
 
                   {swapResult && (
@@ -633,7 +676,7 @@ const BitcoinSwapModal = ({ isOpen, onClose, walletAddress }: BitcoinSwapModalPr
                     </div>
                   )}
 
-                  <button onClick={handleSwap} disabled={swapping || !btcAmount || parseFloat(btcAmount) <= 0}
+                  <button onClick={handleSwap} disabled={swapping || !btcAmount || parseFloat(btcAmount) <= 0 || !isValidCompressedPubkey(userBtcPubkey) || (direction === 'buy_btc' && !btcDest)}
                     className="w-full py-3 rounded-xl font-semibold text-white transition-all disabled:opacity-40 flex items-center justify-center gap-2"
                     style={{ background: swapping ? 'rgba(251,146,60,0.3)' : 'linear-gradient(135deg, #f97316, #ea580c)' }}>
                     {swapping ? <><Loader2 size={15} className="animate-spin" />Creating swap…</> : <>Initiate {direction === 'sell_btc' ? 'BTC → QNK' : 'QNK → BTC'} Swap</>}

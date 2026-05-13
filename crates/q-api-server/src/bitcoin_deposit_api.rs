@@ -23,6 +23,9 @@ use crate::wallet_auth::AuthenticatedWallet;
 use crate::AppState;
 use q_types::WBTC_TOKEN_ADDRESS;
 
+use q_bitcoin_bridge::bitcoin::{address::NetworkUnchecked, Address, Network as BtcNetwork};
+use std::str::FromStr;
+
 // ============================================================================
 // Request / Response types
 // ============================================================================
@@ -326,6 +329,11 @@ pub struct WithdrawRequest {
     pub btc_address: String,
     /// Amount to withdraw in satoshis
     pub amount_sats: u64,
+    /// Optional fee priority: "economy" (~60min), "normal" (~30min), "fast" (~10min).
+    /// Maps to Knots `conf_target` of 30, 6, and 2 blocks respectively.
+    /// Defaults to "normal" when omitted.
+    #[serde(default)]
+    pub fee_priority: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -374,11 +382,45 @@ pub async fn withdraw_wbtc(
         ))));
     }
 
-    // Validate BTC address (basic: must be non-empty and look like an address)
-    let addr = request.btc_address.trim();
-    if addr.is_empty() || addr.len() < 26 || addr.len() > 62 {
-        return Ok(Json(ApiResponse::error("Invalid BTC address.".to_string())));
-    }
+    // Validate BTC address against mainnet using rust-bitcoin parser.
+    let addr_str = request.btc_address.trim();
+    let parsed = match Address::<NetworkUnchecked>::from_str(addr_str) {
+        Ok(a) => match a.require_network(BtcNetwork::Bitcoin) {
+            Ok(a) => a,
+            Err(e) => {
+                return Ok(Json(ApiResponse::error(format!(
+                    "Address is not on Bitcoin mainnet: {}",
+                    e
+                ))));
+            }
+        },
+        Err(e) => {
+            return Ok(Json(ApiResponse::error(format!(
+                "Invalid BTC address: {}",
+                e
+            ))));
+        }
+    };
+    let canonical = parsed.to_string();
+    let addr = canonical.as_str();
+
+    // Map fee priority → Knots conf_target (blocks).
+    let conf_target: Option<u32> = match request
+        .fee_priority
+        .as_deref()
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("economy") => Some(30),
+        Some("normal") | None | Some("") => Some(6),
+        Some("fast") => Some(2),
+        Some(other) => {
+            return Ok(Json(ApiResponse::error(format!(
+                "Unknown fee_priority '{}'. Use 'economy', 'normal', or 'fast'.",
+                other
+            ))));
+        }
+    };
 
     // wBTC is stored in 8-decimal satoshi units
     let required_wbtc = request.amount_sats; // 1 wBTC sat = 1 BTC sat
@@ -415,7 +457,7 @@ pub async fn withdraw_wbtc(
     }
 
     // --- Step 2: Broadcast the Bitcoin transaction ---
-    match bridge.send_withdrawal(addr, request.amount_sats).await {
+    match bridge.send_withdrawal(addr, request.amount_sats, conf_target).await {
         Ok(txid) => {
             info!(
                 "₿ wBTC withdrawal: {} sats → {} (txid: {}) for wallet {}",

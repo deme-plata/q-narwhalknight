@@ -283,6 +283,24 @@ impl BridgeWalletClient {
         self.wallet_rpc("sendtoaddress", json!([btc_address, amount_btc])).await
     }
 
+    /// Send BTC to an external address with a target confirmation horizon.
+    /// `conf_target` is in blocks; Knots picks fee via fee estimation.
+    /// Empty `comment`/`comment_to` are required positional placeholders.
+    pub async fn send_to_address_with_target(
+        &self,
+        btc_address: &str,
+        amount_btc: f64,
+        conf_target: u32,
+    ) -> Result<String> {
+        // Positional args: address, amount, comment, comment_to, subtractfeefromamount,
+        //   replaceable, conf_target, estimate_mode
+        self.wallet_rpc(
+            "sendtoaddress",
+            json!([btc_address, amount_btc, "", "", false, true, conf_target, "economical"]),
+        )
+        .await
+    }
+
     /// Get spendable wallet balance in satoshis (min 1 confirmation)
     pub async fn get_balance_sats(&self) -> Result<u64> {
         let btc: f64 = self.wallet_rpc("getbalance", json!(["*", 1])).await?;
@@ -569,7 +587,15 @@ impl DepositBridge {
     /// SECURITY: This MUST only be called AFTER the caller has already deducted
     /// the wBTC from the user's balance in RocksDB. The caller is responsible for
     /// that atomic deduction. Returns the on-chain txid.
-    pub async fn send_withdrawal(&self, btc_address: &str, amount_sats: u64) -> Result<String> {
+    ///
+    /// `conf_target` selects Knots fee estimation horizon (blocks). Pass `None`
+    /// for the wallet default.
+    pub async fn send_withdrawal(
+        &self,
+        btc_address: &str,
+        amount_sats: u64,
+        conf_target: Option<u32>,
+    ) -> Result<String> {
         if !self.is_alive() {
             return Err(anyhow!("Bridge is disabled"));
         }
@@ -587,7 +613,10 @@ impl DepositBridge {
         }
 
         let amount_btc = amount_sats as f64 / 100_000_000.0;
-        let txid = self.wallet.send_to_address(btc_address, amount_btc).await?;
+        let txid = match conf_target {
+            Some(t) => self.wallet.send_to_address_with_target(btc_address, amount_btc, t).await?,
+            None => self.wallet.send_to_address(btc_address, amount_btc).await?,
+        };
 
         // Reduce total_minted_sats to reflect that BTC left the bridge
         let prev = self.total_minted_sats.fetch_update(

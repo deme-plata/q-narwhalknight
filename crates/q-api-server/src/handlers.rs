@@ -11974,29 +11974,38 @@ pub async fn execute_swap(
             let scale_factor = 10u128.pow(24 - bridge_decimals as u32);
             let credit_native = (final_amount_out as u128) / scale_factor;
 
-            // v10.9.3: Check bridge reserves before issuing wBTC so it's backed by real BTC.
-            // Other bridge tokens (wETH, wZEC, wIRON) have their own reserve checks in their bridges.
-            if bridge_sym == "wBTC" {
+            // v10.9.3 / v10.9.4: Check bridge reserves ONLY on the oracle (synthetic-mint) path.
+            //
+            // When `use_oracle == true`, no AMM pool exists for QUG/wBTC and the handler is
+            // creating *new* wBTC tokens out of the oracle price — those MUST be backed by real
+            // BTC held by the bridge wallet, otherwise we issue unbacked IOUs.
+            //
+            // When `use_oracle == false`, a QUG/wBTC liquidity pool exists. The wBTC credited
+            // to the user came out of that pool's reserves; total wBTC supply is unchanged.
+            // Backing is whatever was deposited into the pool when it was created — the bridge
+            // reserve check is irrelevant here and would (incorrectly) block every pool swap
+            // on nodes that don't run the Bitcoin bridge.
+            if bridge_sym == "wBTC" && use_oracle {
                 if let Some(ref bridge) = state.deposit_bridge {
                     match bridge.check_reserve_available(credit_native as u64).await {
                         Ok(false) => {
                             drop(token_balances);
-                            warn!("₿ [SWAP v10.9.3] Insufficient BTC bridge reserves for {} sat wBTC issuance — aborting", credit_native);
-                            return Ok(Json(ApiResponse::error("Insufficient BTC bridge reserves. The bridge wallet does not hold enough BTC to back this wBTC issuance. Deposit BTC first via /api/v1/bitcoin/deposit/address.".to_string())));
+                            warn!("₿ [SWAP v10.9.4] Insufficient BTC bridge reserves for {} sat wBTC issuance — aborting", credit_native);
+                            return Ok(Json(ApiResponse::error("Insufficient BTC bridge reserves. The bridge wallet does not hold enough BTC to back this wBTC issuance. Deposit BTC first via /api/v1/bitcoin/deposit/address, or trade against an existing QUG/wBTC pool.".to_string())));
                         }
                         Err(e) => {
                             // RPC failed — log but allow swap so a connectivity blip doesn't brick the DEX
-                            warn!("₿ [SWAP v10.9.3] Bridge reserve check failed (allowing swap): {}", e);
+                            warn!("₿ [SWAP v10.9.4] Bridge reserve check failed (allowing swap): {}", e);
                         }
                         Ok(true) => {
-                            info!("₿ [SWAP v10.9.3] Bridge reserve check OK — {} sats available for wBTC issuance", credit_native);
+                            info!("₿ [SWAP v10.9.4] Bridge reserve check OK — {} sats available for wBTC issuance", credit_native);
                         }
                     }
                 } else {
-                    // No bridge configured — reject wBTC swaps so IOUs are never silently issued
+                    // Oracle path with no bridge configured — reject so IOUs are never silently issued.
                     drop(token_balances);
-                    warn!("₿ [SWAP v10.9.3] wBTC swap rejected — Bitcoin bridge not configured on this node");
-                    return Ok(Json(ApiResponse::error("wBTC swaps require the Bitcoin bridge to be configured. Set BTC_RPC_URL, BTC_RPC_USER, BTC_RPC_PASS environment variables pointing to the Bitcoin Knots node.".to_string())));
+                    warn!("₿ [SWAP v10.9.4] wBTC oracle-mint rejected — Bitcoin bridge not configured on this node");
+                    return Ok(Json(ApiResponse::error("Synthetic wBTC issuance requires the Bitcoin bridge to be configured (set BTC_RPC_URL/USER/PASS). To trade wBTC without the bridge, swap against an existing QUG/wBTC liquidity pool.".to_string())));
                 }
             }
 

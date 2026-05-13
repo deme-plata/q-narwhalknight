@@ -464,29 +464,58 @@ pub async fn bootstrap_bridge_pools(
         // Store reserves in 24-decimal format internally (8-dec → 24-dec)
         let reserve_wrapped_24: u128 = bootstrap_wrapped * 10u128.pow(16);
 
-        // v8.2.9: ALWAYS update bridge pools with fresh oracle prices on restart
-        // Old behavior skipped existing pools, causing stale prices for months
+        // v10.9.4: Preserve trade history across restarts.
+        //
+        // Old v8.2.9 behavior reset reserves to the fixed `native_amount`/QUG-equivalent on
+        // every boot, which erased any AMM swaps that had happened since the last restart and
+        // let users repeatedly drain the same liquidity. New behavior:
+        //   • Brand-new pool: seed with the bootstrap reserves.
+        //   • Existing pool: keep traded reserves untouched. Reseed ONLY if the pool is
+        //     effectively empty (one side drained to dust by trading or by a previous bad
+        //     reset), restoring the configured notional liquidity so trading can resume.
+        //
+        // Note: price drift between restarts is fine — the pool *is* the price source for
+        // its pair under AMM. The oracle is used only when no pool exists (handler.rs
+        // `use_oracle` path).
+        let bootstrap_pool = LiquidityPool {
+            pool_id: pool_id.to_string(),
+            token0: "QUG".to_string(),
+            token1: symbol.to_string(),
+            reserve0: bootstrap_qug,
+            reserve1: reserve_wrapped_24,
+            provider: [0u8; 32], // System-owned bridge liquidity
+            created_at: chrono::Utc::now(),
+            lp_token_supply: ((bootstrap_qug as f64 * reserve_wrapped_24 as f64).sqrt()) as u128,
+            token0_decimals: 24,
+            token1_decimals: 24, // Internal reserves always 24-decimal
+        };
+
+        // Minimum reserve floor on each side: 1% of the bootstrap notional. Below this we
+        // consider the pool drained and reseed it.
+        let floor0 = bootstrap_qug / 100;
+        let floor1 = reserve_wrapped_24 / 100;
+
         if let Some(existing) = liquidity_pools_map.get_mut(*pool_id) {
-            let old_r0 = existing.reserve0;
-            existing.reserve0 = bootstrap_qug;
-            existing.reserve1 = reserve_wrapped_24;
-            existing.lp_token_supply = ((bootstrap_qug as f64 * reserve_wrapped_24 as f64).sqrt()) as u128;
-            tracing::info!("🔄 [BRIDGE] Updated {} reserves with live price: ${:.0} (QUG reserve: {:.2} → {:.2})",
-                symbol, native_price_usd, old_r0 as f64 / 1e24, bootstrap_qug as f64 / 1e24);
+            if existing.reserve0 < floor0 || existing.reserve1 < floor1 {
+                tracing::warn!(
+                    "🌉 [BRIDGE] {} pool drained (r0={:.4}, r1={:.4}) — reseeding to bootstrap liquidity @ ${:.0}",
+                    symbol,
+                    existing.reserve0 as f64 / 1e24,
+                    existing.reserve1 as f64 / 1e24,
+                    native_price_usd
+                );
+                *existing = bootstrap_pool.clone();
+            } else {
+                tracing::info!(
+                    "🌉 [BRIDGE] {} pool already seeded — preserving traded reserves (r0={:.4} QUG, r1={:.4} {})",
+                    symbol,
+                    existing.reserve0 as f64 / 1e24,
+                    existing.reserve1 as f64 / 1e24,
+                    symbol
+                );
+            }
         } else {
-            let pool = LiquidityPool {
-                pool_id: pool_id.to_string(),
-                token0: "QUG".to_string(),
-                token1: symbol.to_string(),
-                reserve0: bootstrap_qug,
-                reserve1: reserve_wrapped_24,
-                provider: [0u8; 32], // System-owned bridge liquidity
-                created_at: chrono::Utc::now(),
-                lp_token_supply: ((bootstrap_qug as f64 * reserve_wrapped_24 as f64).sqrt()) as u128,
-                token0_decimals: 24,
-                token1_decimals: 24, // Internal reserves always 24-decimal
-            };
-            liquidity_pools_map.insert(pool_id.to_string(), pool.clone());
+            liquidity_pools_map.insert(pool_id.to_string(), bootstrap_pool.clone());
             tracing::info!("🌉 [BRIDGE] Created new {} pool with live price: ${:.0}", symbol, native_price_usd);
         }
         // Persist updated/created pool to DB
@@ -516,27 +545,37 @@ pub async fn bootstrap_bridge_pools(
         let bootstrap_wrapped: u128 = (native_amount * 1e8) as u128;
         let reserve_wrapped_24: u128 = bootstrap_wrapped * 10u128.pow(16);
 
+        // v10.9.4: Same restart-preservation rule as QUG pools above.
+        let bootstrap_pool = LiquidityPool {
+            pool_id: pool_id.to_string(),
+            token0: "QUGUSD".to_string(),
+            token1: symbol.to_string(),
+            reserve0: bootstrap_qugusd,
+            reserve1: reserve_wrapped_24,
+            provider: [0u8; 32],
+            created_at: chrono::Utc::now(),
+            lp_token_supply: ((bootstrap_qugusd as f64 * reserve_wrapped_24 as f64).sqrt()) as u128,
+            token0_decimals: 24,
+            token1_decimals: 24,
+        };
+        let floor0 = bootstrap_qugusd / 100;
+        let floor1 = reserve_wrapped_24 / 100;
+
         if let Some(existing) = liquidity_pools_map.get_mut(*pool_id) {
-            let old_r0 = existing.reserve0;
-            existing.reserve0 = bootstrap_qugusd;
-            existing.reserve1 = reserve_wrapped_24;
-            existing.lp_token_supply = ((bootstrap_qugusd as f64 * reserve_wrapped_24 as f64).sqrt()) as u128;
-            tracing::info!("🔄 [BRIDGE] Updated QUGUSD/{} reserves: ${:.0} (QUGUSD reserve: {:.2} → {:.2})",
-                symbol, native_price_usd, old_r0 as f64 / 1e24, bootstrap_qugusd as f64 / 1e24);
+            if existing.reserve0 < floor0 || existing.reserve1 < floor1 {
+                tracing::warn!(
+                    "🌉 [BRIDGE] QUGUSD/{} pool drained — reseeding to bootstrap liquidity @ ${:.0}/unit",
+                    symbol, native_price_usd
+                );
+                *existing = bootstrap_pool.clone();
+            } else {
+                tracing::info!(
+                    "🌉 [BRIDGE] QUGUSD/{} pool already seeded — preserving traded reserves",
+                    symbol
+                );
+            }
         } else {
-            let pool = LiquidityPool {
-                pool_id: pool_id.to_string(),
-                token0: "QUGUSD".to_string(),
-                token1: symbol.to_string(),
-                reserve0: bootstrap_qugusd,
-                reserve1: reserve_wrapped_24,
-                provider: [0u8; 32],
-                created_at: chrono::Utc::now(),
-                lp_token_supply: ((bootstrap_qugusd as f64 * reserve_wrapped_24 as f64).sqrt()) as u128,
-                token0_decimals: 24,
-                token1_decimals: 24,
-            };
-            liquidity_pools_map.insert(pool_id.to_string(), pool.clone());
+            liquidity_pools_map.insert(pool_id.to_string(), bootstrap_pool.clone());
             tracing::info!("🌉 [BRIDGE] Created QUGUSD/{} pool: ${:.0}/unit", symbol, native_price_usd);
         }
         if let Some(p) = liquidity_pools_map.get(*pool_id) {
