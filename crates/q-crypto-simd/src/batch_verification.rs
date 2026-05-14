@@ -212,6 +212,7 @@ mod tests {
         let verifier = BatchSignatureVerifier {
             cpu_features,
             max_batch_size: 64,
+            parallel_verifier: Arc::new(ParallelEd25519Verifier::new(1)),
         };
         
         let gain = verifier.calculate_performance_gain(32);
@@ -225,6 +226,7 @@ mod tests {
         let verifier = BatchSignatureVerifier {
             cpu_features,
             max_batch_size: 128,
+            parallel_verifier: Arc::new(ParallelEd25519Verifier::new(1)),
         };
         
         let batch_size = verifier.optimal_batch_size();

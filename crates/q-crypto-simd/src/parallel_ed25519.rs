@@ -151,7 +151,14 @@ impl ParallelEd25519Verifier {
 mod tests {
     use super::*;
     use ed25519_dalek::{SigningKey, Signer};
-    use rand::rngs::OsRng;
+
+    // Deterministic per-iteration keypair (ed25519-dalek 2.x dropped
+    // SigningKey::generate; we use from_bytes with a counter-derived seed).
+    fn signing_key_from_index(i: usize) -> SigningKey {
+        let mut seed = [0u8; 32];
+        seed[0..8].copy_from_slice(&(i as u64).to_le_bytes());
+        SigningKey::from_bytes(&seed)
+    }
 
     #[test]
     fn test_parallel_verification() {
@@ -164,7 +171,7 @@ mod tests {
         let mut public_keys = Vec::new();
 
         for i in 0..num_sigs {
-            let signing_key = SigningKey::generate(&mut OsRng);
+            let signing_key = signing_key_from_index(i);
             let message = format!("test message {}", i).into_bytes();
             let signature = signing_key.sign(&message);
 
@@ -192,7 +199,7 @@ mod tests {
         let mut public_keys = Vec::new();
 
         for i in 0..num_sigs {
-            let signing_key = SigningKey::generate(&mut OsRng);
+            let signing_key = signing_key_from_index(i);
             let message = format!("test message {}", i).into_bytes();
             let signature = signing_key.sign(&message);
 
@@ -218,7 +225,7 @@ mod tests {
         let mut public_keys = Vec::new();
 
         for i in 0..num_sigs {
-            let signing_key = SigningKey::generate(&mut OsRng);
+            let signing_key = signing_key_from_index(i);
             let message = format!("test message {}", i).into_bytes();
             let mut signature = signing_key.sign(&message).to_bytes().to_vec();
 
