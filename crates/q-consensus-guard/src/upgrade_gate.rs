@@ -70,6 +70,25 @@ pub enum Upgrade {
     /// restricts the producer side so transitional behavior is coordinated.
     HybridSignaturesV1 = 10,
 
+    /// Phase 11: balance_root_v2 — Sparse Merkle Tree balance commitment.
+    ///
+    /// PRE-ACTIVATION (shadow mode): when env var `Q_BALANCE_ROOT_V2_SHADOW=1`
+    /// the node maintains a side-computed SMT root via
+    /// `crates/q-storage/src/balance_smt.rs::BalanceSmt`, logs MISMATCH if it
+    /// disagrees with the canonical v1 flat hash on each block, but does NOT
+    /// enforce the SMT root in headers. v1 stays canonical.
+    ///
+    /// POST-ACTIVATION (height >= activation_height):
+    ///   - `BlockHeader::balance_state_root` MUST equal the SMT root.
+    ///   - Producers compute it via `BalanceSmt::apply_to_batch` in the same
+    ///     WriteBatch as `save_wallet_balances`.
+    ///   - Verifiers re-derive locally and reject mismatches.
+    ///
+    /// Activation is dormant on mainnet (u64::MAX) and only flips once a soak
+    /// period with zero MISMATCH log lines has demonstrated cross-node root
+    /// agreement. See docs/deepseek-handoff-balance-root-v2-2026-05-14.md.
+    BalanceRootV2 = 11,
+
     // Add more as needed - NEVER REMOVE OR REORDER
 }
 
@@ -88,6 +107,7 @@ impl Upgrade {
             Upgrade::BlockEvidenceRequired => "BlockEvidenceRequired",
             Upgrade::BalanceRootV1 => "BalanceRootV1",
             Upgrade::HybridSignaturesV1 => "HybridSignaturesV1",
+            Upgrade::BalanceRootV2 => "BalanceRootV2",
         }
     }
 }
@@ -166,6 +186,24 @@ pub static MAINNET_UPGRADES: Lazy<HashMap<Upgrade, UpgradeConfig>> = Lazy::new(|
         min_version: "10.9.20".to_string(),
     });
 
+    // balance_root_v2 — Sparse Merkle Tree balance commitment.
+    // DORMANT on mainnet (u64::MAX). Before flipping, we need:
+    //   (1) Shadow mode (Q_BALANCE_ROOT_V2_SHADOW=1) running across all nodes
+    //       for at least one week with zero MISMATCH log entries.
+    //   (2) Cross-node determinism test green (multi-node simulation produces
+    //       byte-identical SMT roots at every height).
+    //   (3) Reorg-correctness test green (SMT matches canonical chain after
+    //       a multi-block reorg).
+    //   (4) Activation rebuild path verified — every node successfully
+    //       `BalanceSmt::rebuild_from_balances(&wallet_table)` at the
+    //       activation height with deterministic root agreement.
+    upgrades.insert(Upgrade::BalanceRootV2, UpgradeConfig {
+        activation_height: u64::MAX,
+        description: "Enforce balance_root_v2 (Sparse Merkle Tree) in block headers".to_string(),
+        mandatory: true,
+        min_version: "10.9.22".to_string(),
+    });
+
     // Add more upgrades here as they are scheduled
 
     upgrades
@@ -220,6 +258,16 @@ pub static TESTNET_UPGRADES: Lazy<HashMap<Upgrade, UpgradeConfig>> = Lazy::new(|
         description: "Allow producers to emit Hybrid Ed25519+Dilithium5 signatures".to_string(),
         mandatory: false,
         min_version: "10.9.20".to_string(),
+    });
+
+    // balance_root_v2 — immediate on testnet so the SMT path is exercised on
+    // every block, the shadow-mode plumbing is hot from genesis, and any
+    // determinism issues surface in CI before mainnet activation.
+    upgrades.insert(Upgrade::BalanceRootV2, UpgradeConfig {
+        activation_height: 0,
+        description: "Enforce balance_root_v2 (Sparse Merkle Tree) in block headers".to_string(),
+        mandatory: true,
+        min_version: "10.9.22".to_string(),
     });
 
     upgrades
@@ -416,5 +464,38 @@ mod tests {
         let testnet = UpgradeGate::new(false);
         assert!(testnet.is_active(Upgrade::HybridSignaturesV1, 0));
         assert!(testnet.is_active(Upgrade::HybridSignaturesV1, 1_000_000));
+    }
+
+    #[test]
+    fn test_balance_root_v2_dormant_on_mainnet() {
+        // v10.9.22: BalanceRootV2 must stay dormant on mainnet until at least
+        // one week of green shadow-mode soak demonstrates cross-node SMT root
+        // agreement. Activation is a separate, deliberate operator decision —
+        // it is NOT controlled by this test. Until then, the SMT module sits
+        // unwired and balance_root_v1 stays canonical.
+        let mainnet = UpgradeGate::new(true);
+        assert!(!mainnet.is_active(Upgrade::BalanceRootV2, 0));
+        assert!(!mainnet.is_active(Upgrade::BalanceRootV2, 17_700_000));
+        assert!(!mainnet.is_active(Upgrade::BalanceRootV2, 20_000_000));
+        assert!(!mainnet.is_active(Upgrade::BalanceRootV2, u64::MAX - 1));
+
+        // Testnet activates immediately so the SMT path is exercised on
+        // every block from genesis and any determinism issues surface in CI.
+        let testnet = UpgradeGate::new(false);
+        assert!(testnet.is_active(Upgrade::BalanceRootV2, 0));
+        assert!(testnet.is_active(Upgrade::BalanceRootV2, 1));
+        assert!(testnet.is_active(Upgrade::BalanceRootV2, 1_000_000));
+    }
+
+    #[test]
+    fn test_balance_root_v2_is_distinct_from_v1() {
+        // The v2 SMT upgrade is independent of the v1 flat-hash upgrade.
+        // Don't accidentally couple them — operators should be able to
+        // activate v1 enforcement without flipping v2, and vice versa.
+        let mainnet = UpgradeGate::new(true);
+        // BalanceRootV1 has a real activation height (20,000,000); V2 is u64::MAX.
+        assert!(!mainnet.is_active(Upgrade::BalanceRootV2, 20_000_000));
+        // But BalanceRootV1 *is* active at that height.
+        assert!(mainnet.is_active(Upgrade::BalanceRootV1, 20_000_000));
     }
 }
