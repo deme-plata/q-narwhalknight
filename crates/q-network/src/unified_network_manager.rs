@@ -231,6 +231,48 @@ pub const BOOTSTRAP_HTTP_ENDPOINTS: &[&str] = &[
 /// v8.7.4: Points to Epsilon supernode (10Gbit) for fastest initial sync
 pub const HARDCODED_BOOTSTRAP_PEER: &str = "/ip4/89.149.241.126/tcp/9001/p2p/12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM";
 
+/// v10.9.16: Iterate bootstrap_peer_map in the DECLARATION ORDER of HARDCODED_BOOTSTRAP_PEERS.
+///
+/// HashMap iteration in Rust is intentionally non-deterministic. Without this helper, the
+/// "Epsilon first" priority encoded in the const list is lost the moment peers land in
+/// `bootstrap_peer_map: HashMap<PeerId, Multiaddr>`. That means a fresh node might dial
+/// (Beta-localhost, Gamma, Epsilon, Delta) on one run and (Epsilon, Beta-localhost, Delta, Gamma)
+/// on the next — and since warmup exits as soon as the target is met, Epsilon (the 10Gbit pipe)
+/// can be deprioritized in favor of slower peers.
+///
+/// This helper walks `HARDCODED_BOOTSTRAP_PEERS` in order and yields `(PeerId, Multiaddr)` pairs
+/// for each peer-id that's present in the map. Same peer-id from multiple multiaddrs (e.g.
+/// Epsilon TCP + WSS-443 + WSS-9443) is yielded only once with the address that won the
+/// entry().or_insert_with() race during construction (line 1387 — first address wins, which
+/// matches HARDCODED_BOOTSTRAP_PEERS declaration order: TCP first).
+fn priority_ordered_bootstrap(
+    map: &std::collections::HashMap<PeerId, Multiaddr>,
+) -> Vec<(PeerId, Multiaddr)> {
+    use libp2p::multiaddr::Protocol;
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(map.len());
+    for hardcoded in HARDCODED_BOOTSTRAP_PEERS {
+        if let Ok(addr) = hardcoded.parse::<Multiaddr>() {
+            if let Some(Protocol::P2p(pid)) = addr.iter().last() {
+                if seen.insert(pid) {
+                    if let Some(stored_addr) = map.get(&pid) {
+                        out.push((pid, stored_addr.clone()));
+                    }
+                }
+            }
+        }
+    }
+    // Append any extras in the map that weren't in HARDCODED_BOOTSTRAP_PEERS (config.toml,
+    // DNS-discovered, known_peers.json). Their iteration order is non-deterministic but they
+    // come AFTER the priority-listed peers.
+    for (pid, addr) in map {
+        if seen.insert(*pid) {
+            out.push((*pid, addr.clone()));
+        }
+    }
+    out
+}
+
 /// v5.1.0: Load bootstrap peers from config.toml in data directory
 fn load_config_bootstrap_peers(data_dir: &str) -> Vec<String> {
     let config_path = std::path::Path::new(data_dir).join("config.toml");
@@ -1021,6 +1063,53 @@ const FAILURE_DECAY_INTERVAL_SECS: u64 = 30;
 /// Rationale: Losing bootstrap = network isolation, be very conservative
 const BOOTSTRAP_BLACKLIST_MULTIPLIER: u32 = 3;
 
+/// Adaptive block-pack semaphore — base permits (always available).
+/// During initial sync these are the ONLY permits available, capping concurrent block-pack
+/// responses at this number to prevent OOM from large simultaneous serializations
+/// (each response can be 50MB; 4 × 50MB = 200MB worst case).
+pub const BLOCK_PACK_BASE_PERMITS: usize = 4;
+
+/// Adaptive block-pack semaphore — extra permits (only acquirable once fully synced).
+/// At tip, IO/memory pressure is low and we can comfortably serve more peers in parallel,
+/// speeding up bootstrap for fellow nodes still catching up.
+/// Total parallelism at tip = BASE + EXTRA = 16; during sync = BASE = 4.
+pub const BLOCK_PACK_EXTRA_PERMITS: usize = 12;
+
+/// Adaptive block-pack permit acquisition.
+///
+/// Returns `Some(permit)` if the caller may proceed with serving a block-pack response,
+/// `None` if the request should be dropped (peer will retry).
+///
+/// Policy:
+/// 1. Try the `base` semaphore — these permits are always available.
+/// 2. If base is exhausted AND `is_synced` is `true`, try the `extra` semaphore.
+/// 3. Otherwise return `None`.
+///
+/// This guarantees that during initial sync (`is_synced == false`) the maximum number of
+/// concurrently held permits is exactly `base.permits()` — the OOM-safe invariant is preserved.
+/// At tip, total concurrency expands to `base.permits() + extra.permits()`.
+///
+/// `is_synced` is a closure so tests can inject a fake sync state without constructing
+/// a full `TurboSyncManager`. The closure is called at most once per acquisition attempt;
+/// in production it is a single relaxed atomic load.
+pub(crate) fn try_acquire_block_pack_permit(
+    base: &Arc<tokio::sync::Semaphore>,
+    extra: &Arc<tokio::sync::Semaphore>,
+    is_synced: impl FnOnce() -> bool,
+) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    // Fast path: base permit always usable.
+    if let Ok(permit) = base.clone().try_acquire_owned() {
+        return Some(permit);
+    }
+    // Slow path: only fall through to extras if we're at tip.
+    if is_synced() {
+        if let Ok(permit) = extra.clone().try_acquire_owned() {
+            return Some(permit);
+        }
+    }
+    None
+}
+
 /// 🚀 v1.7.0-LAMINAR (VORTEX ELIMINATION): Lock-free peer compatibility tracking
 /// Uses DashMap for concurrent access without lock contention
 /// Eliminates the lock bottleneck that limited sync throughput to ~500 BPS
@@ -1183,8 +1272,19 @@ pub struct UnifiedNetworkManager {
     pending_response_channels: Arc<std::sync::Mutex<HashMap<u64, libp2p::request_response::ResponseChannel<q_types::BlockPackResponse>>>>,
     /// v1.2.7-beta: Counter for generating unique request IDs for async response tracking
     next_async_request_id: Arc<std::sync::atomic::AtomicU64>,
-    /// v9.1.8: Semaphore to limit concurrent block-pack responses (prevents OOM from simultaneous large serializations)
+    /// v9.1.8: Base semaphore for concurrent block-pack responses (prevents OOM during initial sync).
+    /// Always acquirable regardless of sync state. Combined with `block_pack_extra_semaphore` for
+    /// adaptive sizing — see `try_acquire_block_pack_permit` for the acquisition policy.
     block_pack_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Adaptive: extra block-pack permits only acquirable once the node is fully synced.
+    /// At tip, IO/memory pressure is low and we can serve more peers in parallel, speeding up
+    /// their bootstrap. During initial sync, these permits are intentionally untouched so that
+    /// the maximum concurrency remains capped at `block_pack_semaphore` size (OOM-safe).
+    block_pack_extra_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Adaptive block-pack: shared atomic reflecting `TurboSyncManager::is_fully_synced`.
+    /// Owned externally (wired in via `set_synced_state`); reads are a cheap atomic load on the
+    /// hot path. Defaults to `false` (conservative — extras stay closed until told otherwise).
+    is_synced_state: Arc<std::sync::atomic::AtomicBool>,
     /// v1.3.3-beta: Tor-enabled flag for adaptive timeouts and batch sizes
     /// Set during initialization based on Q_TOR_ENABLED, Q_TOR_PROXY, or SOCKS5 proxy detection
     tor_enabled: bool,
@@ -1499,12 +1599,22 @@ impl UnifiedNetworkManager {
             (total, incoming)
         };
 
+        // v10.9.19: max_established_per_peer tunable via Q_MAX_CONNS_PER_PEER (default 4).
+        // Increased from 2 to 4: allows redundant transport paths (TCP + WSS-443 + WSS-9443
+        // to the same Epsilon peer-id) without rejecting. Helps test nodes whose IP collides
+        // with an existing bootstrap peer's IP — multiple distinct peer-ids from the same
+        // host get more headroom, and the resilience improves for normal users behind NAT
+        // with multiple transport fallbacks.
+        let max_per_peer: u32 = std::env::var("Q_MAX_CONNS_PER_PEER")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(4);
         let limits = ConnectionLimits::default()
             .with_max_pending_incoming(Some(64))
             .with_max_pending_outgoing(Some(64))
             .with_max_established_incoming(Some(max_established_incoming as u32))
             .with_max_established_outgoing(Some(256))
-            .with_max_established_per_peer(Some(2))  // v9.6.1: 2 per peer (was 8)
+            .with_max_established_per_peer(Some(max_per_peer))
             .with_max_established(Some(max_established_total as u32));
 
         info!("🔒 Connection limits configured: max {} total, {} incoming, 8 per peer{}",
@@ -2104,12 +2214,14 @@ impl UnifiedNetworkManager {
 
             // 🔧 v1.0.17-beta: DIAGNOSTIC - Also manually dial bootstrap peers
             // This helps us see connection errors immediately instead of waiting for Kademlia
-            info!("🔧 [BOOTSTRAP-DIAG] Manually dialing {} bootstrap peers for immediate error visibility", bootstrap_count);
-            for (peer_id, addr) in &bootstrap_peer_map {
+            // v10.9.16: Iterate in HARDCODED_BOOTSTRAP_PEERS declaration order so Epsilon
+            // (priority #1, 10Gbit supernode) is dialed first deterministically.
+            info!("🔧 [BOOTSTRAP-DIAG] Manually dialing {} bootstrap peers in priority order for immediate error visibility", bootstrap_count);
+            for (peer_id, addr) in priority_ordered_bootstrap(&bootstrap_peer_map) {
                 // 🔧 v1.0.88-beta: FIX - Skip dialing ourselves as bootstrap peer
                 // CRITICAL: When this node IS the bootstrap peer, it was trying to dial itself
                 // and getting blacklisted after 150 failures, breaking ALL P2P connectivity
-                if *peer_id == local_peer_id {
+                if peer_id == local_peer_id {
                     info!("ℹ️  [BOOTSTRAP] Skipping self-dial - this node IS bootstrap peer {}", peer_id);
                     continue;
                 }
@@ -2236,79 +2348,190 @@ impl UnifiedNetworkManager {
             info!("🔌 [DIRECT] Direct connection mode - using 30s timeouts and 5000-block batches");
         }
 
-        // 🔄 v3.3.7-beta: Connection warmup for NEW identity
-        // When a new libp2p identity is generated, DHT routing tables are empty and
-        // bootstrap connections often fail on first attempt. This warmup period:
-        // 1. Waits for initial connections to establish
-        // 2. Re-triggers Kademlia bootstrap if no connections were established
-        // 3. Re-dials bootstrap peers with exponential backoff
-        // This fixes the "works after restart but not first boot" issue
+        // 🔄 v10.9.16: Connection warmup — keep retrying ALL bootstrap peers individually
+        // until at least `min_peers_target` are established, OR we exhaust the time budget.
+        //
+        // Earlier (v3.3.7-beta) version exited as soon as `established > 0`, which on a
+        // node like Beta resulted in connecting only to the localhost Beta-prod peer and
+        // never to Epsilon / Gamma / Delta — leaving fresh nodes with 1 peer and ~9 b/s sync.
+        //
+        // Tuning:
+        //   - Target: `min(bootstrap_count, Q_BOOTSTRAP_MIN_PEERS or 3)` established peers
+        //   - Schedule: 3s, 6s, 12s, 20s, 30s, 30s (~101s total budget)
+        //   - At each tick: re-bootstrap Kademlia + re-dial *each* missing bootstrap peer
+        //     individually with explicit per-peer dial-result logging.
         if is_new_identity && bootstrap_count > 0 {
-            info!("🔄 [CONNECTION WARMUP] New identity detected - starting connection warmup period");
+            info!("🔄 [CONNECTION WARMUP v10.9.16] New identity detected - starting extended warmup");
 
-            // Clone bootstrap_peer_map before moving into loop
-            let warmup_bootstrap_peers: Vec<(PeerId, Multiaddr)> = bootstrap_peer_map
-                .iter()
-                .filter(|(peer_id, _)| **peer_id != local_peer_id)
-                .map(|(k, v)| (*k, v.clone()))
-                .collect();
+            // v10.9.16: iterate bootstrap peers in HARDCODED_BOOTSTRAP_PEERS declaration order
+            // — Epsilon (priority #1) gets dialed first deterministically. HashMap iteration
+            // would otherwise randomize the order, occasionally putting Epsilon last and letting
+            // warmup exit before it connects.
+            let warmup_bootstrap_peers: Vec<(PeerId, Multiaddr)> =
+                priority_ordered_bootstrap(&bootstrap_peer_map)
+                    .into_iter()
+                    .filter(|(peer_id, _)| *peer_id != local_peer_id)
+                    .collect();
+            let total_bootstrap = warmup_bootstrap_peers.len();
 
-            for warmup_attempt in 1..=3 {
-                // Wait for connections to establish (exponential backoff: 3s, 6s, 12s)
-                let wait_secs = 3 * (1 << (warmup_attempt - 1));
-                info!("🔄 [WARMUP {}/3] Waiting {}s for DHT propagation and connections...",
-                      warmup_attempt, wait_secs);
-                tokio::time::sleep(Duration::from_secs(wait_secs)).await;
+            // Target: try for at least 3 peers, but never more than what bootstrap list contains
+            let min_peers_target: usize = std::env::var("Q_BOOTSTRAP_MIN_PEERS")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(3)
+                .min(total_bootstrap)
+                .max(1);
 
-                // Check connection status
+            info!("🔄 [WARMUP] Targeting ≥{} peer(s) from {} bootstrap candidate(s) before proceeding",
+                  min_peers_target, total_bootstrap);
+
+            // 6 attempts over ~100s — gives DHT propagation, slow links, and remote-side
+            // re-accept timeouts a chance to settle.
+            let schedule_secs: &[u64] = &[3, 6, 12, 20, 30, 30];
+            const MAX_ATTEMPTS: usize = 6;
+
+            for (idx, wait_secs) in schedule_secs.iter().enumerate() {
+                let attempt = idx + 1;
+                info!("🔄 [WARMUP {}/{}] Driving swarm for {}s — dial events will advance...",
+                      attempt, MAX_ATTEMPTS, wait_secs);
+
+                // v10.9.17 CRITICAL FIX: drive the swarm during the wait window.
+                // Previously this used `tokio::time::sleep` which doesn't poll the swarm —
+                // libp2p dials are fire-and-forget, TCP completes via background tasks but the
+                // noise/yamux upgrade requires `swarm.next()` to advance. With plain sleep,
+                // dials accumulated in pending=N forever, 0 peers ever connected during warmup.
+                // Now we poll the swarm via select_next_some() so events actually fire.
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(*wait_secs);
+                loop {
+                    tokio::select! {
+                        _ = tokio::time::sleep_until(deadline) => break,
+                        event = swarm.select_next_some() => {
+                            // Log key events; most full handling waits for the post-construction
+                            // main event loop. The connections established here ARE counted by
+                            // `swarm.connected_peers()` because the swarm's internal state is
+                            // updated regardless of whether downstream handlers are wired.
+                            match &event {
+                                SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
+                                    info!("✅ [WARMUP DRIVE] Connection established to {} via {:?}", peer_id, endpoint);
+                                }
+                                SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
+                                    warn!("⚠️  [WARMUP DRIVE] Connection closed to {}: {:?}", peer_id, cause);
+                                }
+                                SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                                    warn!("❌ [WARMUP DRIVE] Outgoing dial failed to {:?}: {:?}", peer_id, error);
+                                }
+                                SwarmEvent::IncomingConnection { local_addr, send_back_addr, .. } => {
+                                    debug!("📥 [WARMUP DRIVE] Incoming connection: local={} from={}", local_addr, send_back_addr);
+                                }
+                                SwarmEvent::Dialing { peer_id, .. } => {
+                                    debug!("📞 [WARMUP DRIVE] Dialing peer: {:?}", peer_id);
+                                }
+                                SwarmEvent::NewListenAddr { address, .. } => {
+                                    debug!("👂 [WARMUP DRIVE] New listen address: {}", address);
+                                }
+                                _ => {
+                                    // Drop other event types during warmup (Behaviour events,
+                                    // ExternalAddr, etc.). They'll be re-emitted as the swarm
+                                    // continues running post-warmup.
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let conn_info = swarm.network_info();
                 let established = conn_info.connection_counters().num_established();
                 let pending = conn_info.connection_counters().num_pending_outgoing();
 
-                info!("🔄 [WARMUP {}/3] Connection status: established={}, pending={}",
-                      warmup_attempt, established, pending);
+                // Per-peer status — log which bootstrap peers we have and which we lack
+                let connected_set: HashSet<PeerId> = swarm.connected_peers().copied().collect();
+                let connected_bootstrap: Vec<PeerId> = warmup_bootstrap_peers
+                    .iter()
+                    .filter_map(|(pid, _)| if connected_set.contains(pid) { Some(*pid) } else { None })
+                    .collect();
+                let missing_bootstrap: Vec<&(PeerId, Multiaddr)> = warmup_bootstrap_peers
+                    .iter()
+                    .filter(|(pid, _)| !connected_set.contains(pid))
+                    .collect();
 
-                if established > 0 {
-                    info!("✅ [WARMUP] Connection warmup SUCCEEDED! {} established connections", established);
+                info!(
+                    "🔄 [WARMUP {}/{}] established={} pending={} | bootstrap_connected={}/{} missing={}",
+                    attempt, MAX_ATTEMPTS, established, pending,
+                    connected_bootstrap.len(), total_bootstrap, missing_bootstrap.len()
+                );
+
+                if connected_bootstrap.len() >= min_peers_target {
+                    info!(
+                        "✅ [WARMUP] Reached target: {} bootstrap peer(s) connected (target {}). \
+                         Connected: {:?}",
+                        connected_bootstrap.len(), min_peers_target, connected_bootstrap
+                    );
                     break;
                 }
 
-                if warmup_attempt < 3 {
-                    // No connections yet - retry bootstrap
-                    info!("🔄 [WARMUP {}/3] No connections established - retrying bootstrap...", warmup_attempt);
+                // v10.9.16: Early-bail at attempt 3 if no peers AND no pending dials.
+                // Without this, a fully-firewalled node sits for the full ~100s budget before
+                // proceeding. With this, we abort after ~21s (3+6+12) when the network is
+                // demonstrably unreachable. The node continues with background discovery (mDNS,
+                // identify) which may or may not eventually find peers — but at least the boot
+                // tracker doesn't hang.
+                if attempt == 3 && connected_bootstrap.is_empty() && pending == 0 {
+                    error!(
+                        "⚠️  [WARMUP] No peers connected and no pending dials after {}s — \
+                         network unreachable from this host. Aborting warmup early.",
+                        schedule_secs[..attempt].iter().sum::<u64>()
+                    );
+                    error!(
+                        "    Hint: check firewall/NAT, verify bootstrap peers are up via TCP, \
+                         or set Q_BOOTSTRAP_PEER to a known-good multiaddr."
+                    );
+                    break;
+                }
 
-                    // Re-trigger Kademlia bootstrap
+                if attempt < MAX_ATTEMPTS {
+                    info!("🔄 [WARMUP {}/{}] Below target ({} < {}). Re-bootstrapping and re-dialing {} missing peer(s)...",
+                          attempt, MAX_ATTEMPTS, connected_bootstrap.len(), min_peers_target, missing_bootstrap.len());
+
+                    // Re-trigger Kademlia bootstrap (refreshes routing table from disk if any cached peers)
                     match swarm.behaviour_mut().kademlia.bootstrap() {
                         Ok(query_id) => {
-                            info!("🔄 [WARMUP] Kademlia bootstrap re-triggered (query_id: {:?})", query_id);
+                            debug!("🔄 [WARMUP] Kademlia bootstrap re-triggered (query_id: {:?})", query_id);
                         }
                         Err(e) => {
-                            warn!("⚠️  [WARMUP] Kademlia bootstrap retry failed: {}", e);
+                            debug!("⚠️  [WARMUP] Kademlia bootstrap re-trigger failed: {}", e);
                         }
                     }
 
-                    // Re-dial bootstrap peers
-                    for (peer_id, addr) in &warmup_bootstrap_peers {
-                        // Strip /p2p/ for add_peer_address
+                    // Re-dial ONLY the peers we don't yet have. This avoids spamming peers
+                    // we're already connected to and gives each missing peer a fresh
+                    // connect attempt per tick.
+                    for (peer_id, addr) in &missing_bootstrap {
                         let addr_without_p2p: Multiaddr = addr.iter()
                             .filter(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
                             .collect();
                         swarm.add_peer_address(*peer_id, addr_without_p2p);
 
-                        match swarm.dial(addr.clone()) {
+                        match swarm.dial((*addr).clone()) {
                             Ok(_) => {
-                                info!("🔄 [WARMUP] Re-dialing bootstrap peer {}", peer_id);
+                                debug!("🔄 [WARMUP] Re-dial initiated for {} @ {}", peer_id, addr);
                             }
                             Err(e) => {
-                                warn!("⚠️  [WARMUP] Re-dial failed for {}: {:?}", peer_id, e);
+                                warn!("⚠️  [WARMUP] Re-dial failed for {} @ {}: {:?}", peer_id, addr, e);
                             }
                         }
                     }
                 } else {
-                    // Final attempt - log warning but don't fail
-                    warn!("⚠️  [WARMUP] Connection warmup exhausted all 3 attempts");
-                    warn!("   Node will continue with background discovery (mDNS, Identify)");
-                    warn!("   P2P sync may be delayed until connections are established");
+                    warn!(
+                        "⚠️  [WARMUP] Exhausted {} attempts. Connected to {}/{} bootstrap peers — \
+                         node will continue with background discovery but P2P sync may be slow.",
+                        MAX_ATTEMPTS, connected_bootstrap.len(), total_bootstrap
+                    );
+                    if !missing_bootstrap.is_empty() {
+                        warn!("    Missing bootstrap peers (check firewall / peer-status):");
+                        for (peer_id, addr) in &missing_bootstrap {
+                            warn!("      • {} @ {}", peer_id, addr);
+                        }
+                    }
                 }
             }
         }
@@ -2338,7 +2561,9 @@ impl UnifiedNetworkManager {
             block_pack_response_rx: block_pack_response_rx,
             pending_response_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             next_async_request_id: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            block_pack_semaphore: Arc::new(tokio::sync::Semaphore::new(4)), // v9.1.8: max 4 concurrent block-pack responses
+            block_pack_semaphore: Arc::new(tokio::sync::Semaphore::new(BLOCK_PACK_BASE_PERMITS)), // v9.1.8 + adaptive: base, always-on permits (OOM-safe during sync)
+            block_pack_extra_semaphore: Arc::new(tokio::sync::Semaphore::new(BLOCK_PACK_EXTRA_PERMITS)), // adaptive: only acquired when fully synced
+            is_synced_state: Arc::new(std::sync::atomic::AtomicBool::new(false)), // adaptive: default conservative (no extras until wired)
             // v1.3.3-beta: Tor-aware adaptive batch sizes and retry logic
             tor_enabled,
             // v1.3.3-beta: Exponential backoff retry queue for failed sync requests
@@ -2390,6 +2615,23 @@ impl UnifiedNetworkManager {
     pub fn set_storage(&mut self, storage: Arc<q_storage::QStorage>) {
         self.storage = Some(storage);
         info!("🗄️ Storage engine linked to network manager for block sync");
+    }
+
+    /// Adaptive block-pack: wire the shared sync-state atomic from `TurboSyncManager`.
+    ///
+    /// The caller passes `TurboSyncManager::is_fully_synced` (an `Arc<AtomicBool>`) so the
+    /// block-pack handler can read it on the hot path without a method call across crates.
+    /// When this flag is `true`, the handler is allowed to acquire from the "extra" semaphore,
+    /// expanding concurrency from `BLOCK_PACK_BASE_PERMITS` (4) to `BASE + EXTRA` (16).
+    /// When `false`, only the base semaphore is used — preserving the OOM-safe behavior
+    /// during initial sync.
+    ///
+    /// If never called, the field defaults to `false` and the manager behaves exactly as the
+    /// pre-adaptive code (max 4 concurrent block-pack responses).
+    pub fn set_synced_state(&mut self, state: Arc<std::sync::atomic::AtomicBool>) {
+        self.is_synced_state = state;
+        info!("🧭 Adaptive block-pack: sync-state atomic wired (base={}, extra-at-tip={})",
+              BLOCK_PACK_BASE_PERMITS, BLOCK_PACK_EXTRA_PERMITS);
     }
 
     /// Set channel for forwarding synced blocks to consensus (Phase 3b)
@@ -3473,16 +3715,23 @@ impl UnifiedNetworkManager {
                                 let end_height = request.end_height;
                                 let max_blocks = request.max_blocks;
                                 let peer_clone = peer;
-                                let sem = self.block_pack_semaphore.clone();
+                                let base_sem = self.block_pack_semaphore.clone();
+                                let extra_sem = self.block_pack_extra_semaphore.clone();
+                                let synced_state = self.is_synced_state.clone();
 
-                                // Spawn task to do the slow DB work
+                                // Spawn task to do the slow DB work.
                                 // v9.1.8: Semaphore limits concurrent block-pack responses to prevent OOM
                                 // (each response can be 50-150MB; unbounded spawns caused 10GB+ RSS → crash)
+                                // Adaptive: base (4) is always available; extra (12) only when fully synced.
                                 tokio::spawn(async move {
-                                    let _permit = match sem.try_acquire_owned() {
-                                        Ok(permit) => permit,
-                                        Err(_) => {
-                                            warn!("⚠️ [BLOCK-PACK] Semaphore full — dropping request for heights {}-{} from {} (OOM protection)",
+                                    let _permit = match try_acquire_block_pack_permit(
+                                        &base_sem,
+                                        &extra_sem,
+                                        || synced_state.load(std::sync::atomic::Ordering::Relaxed),
+                                    ) {
+                                        Some(permit) => permit,
+                                        None => {
+                                            warn!("⚠️ [BLOCK-PACK] All permits in use — dropping request for heights {}-{} from {} (OOM protection)",
                                                   start_height, end_height, peer_clone);
                                             // Send empty response so peer retries later
                                             let empty = q_types::BlockPackResponse::from_blocks(vec![], end_height, 0);
