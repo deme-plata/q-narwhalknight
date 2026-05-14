@@ -1324,6 +1324,80 @@ scenario has caused or could cause real money loss on mainnet.
 
 #### **⏱️ COMPILATION & BUILD REQUIREMENTS:**
 
+**🚨 CRITICAL: ALWAYS COMPILE / CARGO-CHECK ON EPSILON DOCKER (Debian 12), NEVER ON BETA!**
+
+Beta is a live mainnet bootstrap node serving real users. Running a multi-hour `cargo check`
+or `cargo build` on Beta steals CPU, RAM (10–15 GB peak), and disk I/O from the running
+`q-api-server` process, causes block-production stutter, and risks OOM-killing the node.
+The user has caught this before — DO NOT do it again.
+
+**Where to compile/check instead — Epsilon's `qnk-debian12` Docker image:**
+
+```bash
+# Always cargo-check inside the Epsilon Debian 12 Docker container.
+# Source repo on Epsilon: /home/orobit/q-narwhalknight-src/
+# Persistent target cache: /home/orobit/target-debian12/ (incremental, ~25 min after first build)
+
+ssh root@89.149.241.126 "cd /home/orobit/q-narwhalknight-src && docker run --rm \
+  -v \$(pwd):/src \
+  -v /home/orobit/target-debian12:/src/target \
+  -w /src \
+  rust:bookworm \
+  bash -c '
+    apt-get update -qq && \
+    apt-get install -y -qq libssl-dev pkg-config cmake clang libudev-dev libclang-dev >/dev/null 2>&1 && \
+    cargo check --package q-api-server --message-format=short
+  '"
+```
+
+**For long-running checks** (>5 min), nohup it and tail the log instead of blocking the shell:
+
+```bash
+ssh root@89.149.241.126 "cd /home/orobit/q-narwhalknight-src && nohup docker run --rm \
+  --name qnk-check-v\${VERSION} \
+  -v \$(pwd):/src \
+  -v /home/orobit/target-debian12:/src/target \
+  -w /src --cpus=16 rust:bookworm \
+  bash -c '
+    apt-get update -qq && apt-get install -y -qq libssl-dev pkg-config cmake clang libudev-dev libclang-dev >/dev/null 2>&1 && \
+    cargo check --package q-api-server 2>&1 | tail -100
+  ' > /home/orobit/tmp/check-v\${VERSION}.log 2>&1 &"
+
+# Then poll:
+ssh root@89.149.241.126 "tail -3 /home/orobit/tmp/check-v\${VERSION}.log; grep -c 'Finished\\|error\\[E' /home/orobit/tmp/check-v\${VERSION}.log"
+```
+
+**Workflow when editing files on Beta but checking on Epsilon:**
+
+```bash
+# 1. Edit on Beta (working copy at /opt/orobit/shared/q-narwhalknight/)
+# 2. Push changes to local git server so Epsilon can pull
+git add <files> && git commit -m "..."
+git update-server-info
+
+# 3. Pull on Epsilon
+ssh root@89.149.241.126 "cd /home/orobit/q-narwhalknight-src && git pull origin <branch>"
+
+# 4. Run cargo check there (see Docker commands above)
+```
+
+If the user wants a quick syntax check during interactive work and the changes are small,
+`rsync` can be faster than commit+push+pull:
+
+```bash
+# Sync a single file from Beta → Epsilon (no commit needed for quick iteration)
+rsync -av /opt/orobit/shared/q-narwhalknight/crates/q-api-server/src/handlers.rs \
+  root@89.149.241.126:/home/orobit/q-narwhalknight-src/crates/q-api-server/src/handlers.rs
+# Then run cargo check on Epsilon as above.
+```
+
+**The only acceptable local cargo invocations on Beta:**
+
+- `cargo fmt --check` (no compilation, seconds)
+- `cargo tree`, `cargo metadata` (read-only, no compilation)
+
+Anything that actually compiles → Epsilon Docker.
+
 **🚨 MANDATORY: BUMP VERSION BEFORE EVERY BUILD!**
 
 The `ha-deploy.sh` script will **abort** if the binary version matches the currently running version. You MUST bump the version in `Cargo.toml` before compiling:
@@ -1360,17 +1434,19 @@ version = "7.1.6"  # ← increment this to 7.1.7, 7.2.0, etc.
 # - Has auto-rollback on failure
 ```
 
-**For development/debugging only (NOT for deployments):**
+**For development/debugging only (NOT for deployments) — run these on EPSILON DOCKER, not Beta:**
 ```bash
-# Use 10-hour timeout for ALL cargo operations
+# Inside the Epsilon rust:bookworm container (see the Epsilon-Docker block above).
+# Use 10-hour timeout for ALL cargo operations.
 timeout 36000 cargo check --package q-api-server  # Quick syntax check
 timeout 36000 cargo test --workspace              # Run tests
 timeout 36000 cargo run --bin q-api-server        # Development run
 
 # WRONG - NEVER DO THIS:
-# timeout 120 cargo check   # ❌ TOO SHORT - will terminate prematurely!
-# cargo build              # ❌ NO TIMEOUT - may hang indefinitely!
-# cargo build --release    # ❌ For deployments, use safe-deploy.sh instead!
+# timeout 120 cargo check       # ❌ TOO SHORT - will terminate prematurely!
+# cargo build                   # ❌ NO TIMEOUT - may hang indefinitely!
+# cargo build --release         # ❌ For deployments, use safe-deploy.sh instead!
+# cargo check ... on Beta       # ❌ Compiling on Beta steals CPU/RAM from the live node — use Epsilon Docker!
 ```
 
 **Why 10 hours?** Post-quantum cryptography crates (pqcrypto, kyber, dilithium) plus AI inference

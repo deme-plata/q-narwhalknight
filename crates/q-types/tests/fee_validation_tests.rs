@@ -139,6 +139,11 @@ fn create_test_transaction(fee: u128, tx_type: TransactionType, amount: u128) ->
         pqc_signature: None,
         signature_phase: TxSignaturePhase::Phase0Ed25519,
         pqc_public_key: None,
+        zk_proof_bundle: None,
+        privacy_level: q_types::TransactionPrivacyLevel::Transparent,
+        bulletproof: None,
+        nullifier: None,
+        memo: None,
     }
 }
 

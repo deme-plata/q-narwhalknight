@@ -402,6 +402,16 @@ impl PoolAnnouncementRateLimiter {
 mod tests {
     use super::*;
 
+    /// Deterministic per-test signing key. ed25519-dalek 2.x dropped
+    /// `SigningKey::generate`; we use `from_bytes` with a tag-derived seed
+    /// so each test gets a stable, distinct key without an RNG dependency.
+    #[cfg(feature = "signing")]
+    fn signing_key_from_tag(tag: u64) -> ed25519_dalek::SigningKey {
+        let mut seed = [0u8; 32];
+        seed[0..8].copy_from_slice(&tag.to_le_bytes());
+        ed25519_dalek::SigningKey::from_bytes(&seed)
+    }
+
     #[test]
     fn test_pool_id_generation_is_deterministic() {
         let token0 = [1u8; 32];
@@ -517,10 +527,7 @@ mod tests {
     #[cfg(feature = "signing")]
     #[test]
     fn test_pool_announcement_signature() {
-        use ed25519_dalek::SigningKey;
-        use rand::rngs::OsRng;
-
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let signing_key = signing_key_from_tag(0xA001);
         let public_key: [u8; 32] = signing_key.verifying_key().to_bytes();
 
         let token0 = [1u8; 32];
@@ -549,10 +556,7 @@ mod tests {
     #[cfg(feature = "signing")]
     #[test]
     fn test_pool_sync_request_signature() {
-        use ed25519_dalek::SigningKey;
-        use rand::rngs::OsRng;
-
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let signing_key = signing_key_from_tag(0xA002);
         let public_key: [u8; 32] = signing_key.verifying_key().to_bytes();
 
         let mut request = PoolSyncRequest::new(public_key, Some(1700000000));

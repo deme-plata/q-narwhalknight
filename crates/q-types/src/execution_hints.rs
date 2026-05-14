@@ -339,17 +339,39 @@ impl BlockExecutionHints {
 mod tests {
     use super::*;
     use crate::Transaction;
+    use chrono::Utc;
+    use sha3::{Digest, Sha3_256};
+
+    /// Deterministically derive a 32-byte test address from a string name.
+    /// Stable across runs so dependency-graph asserts are reproducible.
+    fn addr(name: &str) -> [u8; 32] {
+        let mut hasher = Sha3_256::new();
+        hasher.update(name.as_bytes());
+        hasher.finalize().into()
+    }
 
     fn make_tx(from: &str, to: &str) -> Transaction {
         Transaction {
-            from: from.to_string(),
-            to: to.to_string(),
+            id: [0u8; 32],
+            from: addr(from),
+            to: addr(to),
             amount: 100,
+            fee: 0,
             nonce: 0,
-            signature: None,
-            timestamp: 0,
+            signature: vec![],
+            timestamp: Utc::now(),
+            data: vec![],
+            token_type: crate::TokenType::QUG,
+            fee_token_type: crate::TokenType::QUGUSD,
+            tx_type: crate::TransactionType::Transfer,
+            pqc_signature: None,
+            signature_phase: crate::TxSignaturePhase::Phase0Ed25519,
+            pqc_public_key: None,
+            zk_proof_bundle: None,
+            privacy_level: crate::TransactionPrivacyLevel::Transparent,
+            bulletproof: None,
+            nullifier: None,
             memo: None,
-            token: None,
         }
     }
 

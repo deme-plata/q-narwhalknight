@@ -803,6 +803,11 @@ mod tests {
             pqc_signature: None,
             signature_phase: crate::TxSignaturePhase::Phase0Ed25519,
             pqc_public_key: None,
+            zk_proof_bundle: None,
+            privacy_level: crate::TransactionPrivacyLevel::Transparent,
+            bulletproof: None,
+            nullifier: None,
+            memo: None,
         }
     }
 

@@ -41,6 +41,11 @@ fn create_test_transaction(amount: u128, fee: u128) -> Transaction {
         pqc_signature: None,
         signature_phase: TxSignaturePhase::Phase0Ed25519,
         pqc_public_key: None,
+        zk_proof_bundle: None,
+        privacy_level: q_types::TransactionPrivacyLevel::Transparent,
+        bulletproof: None,
+        nullifier: None,
+        memo: None,
     }
 }
 
@@ -287,6 +292,11 @@ fn test_coinbase_transaction_large_reward() {
         pqc_signature: None,
         signature_phase: TxSignaturePhase::Phase0Ed25519,
         pqc_public_key: None,
+        zk_proof_bundle: None,
+        privacy_level: q_types::TransactionPrivacyLevel::Transparent,
+        bulletproof: None,
+        nullifier: None,
+        memo: None,
     };
 
     let serialized = bincode::serialize(&tx).expect("Failed to serialize coinbase");

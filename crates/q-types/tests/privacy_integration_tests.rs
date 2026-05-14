@@ -45,6 +45,11 @@ fn test_private_transaction_structure() {
         pqc_signature: None,
         signature_phase: TxSignaturePhase::Phase0Ed25519,
         pqc_public_key: None,
+        zk_proof_bundle: None,
+        privacy_level: q_types::TransactionPrivacyLevel::Transparent,
+        bulletproof: None,
+        nullifier: None,
+        memo: None,
     };
 
     assert_eq!(tx.amount, 1000);
@@ -73,6 +78,11 @@ fn test_transaction_hash_determinism() {
         pqc_signature: None,
         signature_phase: TxSignaturePhase::Phase0Ed25519,
         pqc_public_key: None,
+        zk_proof_bundle: None,
+        privacy_level: q_types::TransactionPrivacyLevel::Transparent,
+        bulletproof: None,
+        nullifier: None,
+        memo: None,
     };
 
     let tx2 = Transaction {
@@ -91,6 +101,11 @@ fn test_transaction_hash_determinism() {
         pqc_signature: None,
         signature_phase: TxSignaturePhase::Phase0Ed25519,
         pqc_public_key: None,
+        zk_proof_bundle: None,
+        privacy_level: q_types::TransactionPrivacyLevel::Transparent,
+        bulletproof: None,
+        nullifier: None,
+        memo: None,
     };
 
     // Same transaction data should produce same structure
@@ -121,6 +136,11 @@ fn test_transaction_serialization() {
         pqc_signature: None,
         signature_phase: TxSignaturePhase::Phase0Ed25519,
         pqc_public_key: None,
+        zk_proof_bundle: None,
+        privacy_level: q_types::TransactionPrivacyLevel::Transparent,
+        bulletproof: None,
+        nullifier: None,
+        memo: None,
     };
 
     // JSON round-trip
@@ -157,6 +177,11 @@ fn test_transaction_compact_serialization() {
         pqc_signature: None,
         signature_phase: TxSignaturePhase::Phase0Ed25519,
         pqc_public_key: None,
+        zk_proof_bundle: None,
+        privacy_level: q_types::TransactionPrivacyLevel::Transparent,
+        bulletproof: None,
+        nullifier: None,
+        memo: None,
     };
 
     // JSON round-trip (Transaction uses self-describing format)
@@ -280,6 +305,11 @@ fn test_zero_amount_transaction() {
         pqc_signature: None,
         signature_phase: TxSignaturePhase::Phase0Ed25519,
         pqc_public_key: None,
+        zk_proof_bundle: None,
+        privacy_level: q_types::TransactionPrivacyLevel::Transparent,
+        bulletproof: None,
+        nullifier: None,
+        memo: None,
     };
 
     // Zero amount should be allowed (might be used for messages)
@@ -308,6 +338,11 @@ fn test_max_amount_transaction() {
         pqc_signature: None,
         signature_phase: TxSignaturePhase::Phase0Ed25519,
         pqc_public_key: None,
+        zk_proof_bundle: None,
+        privacy_level: q_types::TransactionPrivacyLevel::Transparent,
+        bulletproof: None,
+        nullifier: None,
+        memo: None,
     };
 
     assert_eq!(tx.amount, u128::MAX);
@@ -343,6 +378,11 @@ fn test_large_data_payload() {
         pqc_signature: None,
         signature_phase: TxSignaturePhase::Phase0Ed25519,
         pqc_public_key: None,
+        zk_proof_bundle: None,
+        privacy_level: q_types::TransactionPrivacyLevel::Transparent,
+        bulletproof: None,
+        nullifier: None,
+        memo: None,
     };
 
     assert_eq!(tx.data.len(), 1024);
@@ -374,6 +414,11 @@ fn test_self_transfer() {
         pqc_signature: None,
         signature_phase: TxSignaturePhase::Phase0Ed25519,
         pqc_public_key: None,
+        zk_proof_bundle: None,
+        privacy_level: q_types::TransactionPrivacyLevel::Transparent,
+        bulletproof: None,
+        nullifier: None,
+        memo: None,
     };
 
     // Self-transfer should be structurally valid
@@ -433,6 +478,11 @@ fn test_stress_many_transactions() {
             pqc_signature: None,
             signature_phase: TxSignaturePhase::Phase0Ed25519,
             pqc_public_key: None,
+            zk_proof_bundle: None,
+            privacy_level: q_types::TransactionPrivacyLevel::Transparent,
+            bulletproof: None,
+            nullifier: None,
+            memo: None,
         };
 
         // Serialize and deserialize each (using JSON for self-describing format)
@@ -468,6 +518,11 @@ fn test_concurrent_transaction_creation() {
                     pqc_signature: None,
                     signature_phase: TxSignaturePhase::Phase0Ed25519,
                     pqc_public_key: None,
+                    zk_proof_bundle: None,
+                    privacy_level: q_types::TransactionPrivacyLevel::Transparent,
+                    bulletproof: None,
+                    nullifier: None,
+                    memo: None,
                 };
 
                 let json = serde_json::to_string(&tx).unwrap();

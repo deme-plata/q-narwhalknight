@@ -362,11 +362,17 @@ impl SlashingTransaction {
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
-    use rand::rngs::OsRng;
+
+    /// Deterministic signing key for tests (no rand / OsRng dependency).
+    fn signing_key_from_index(i: u32) -> SigningKey {
+        let mut seed = [0u8; 32];
+        seed[0..4].copy_from_slice(&i.to_le_bytes());
+        SigningKey::from_bytes(&seed)
+    }
 
     fn create_test_equivocation() -> EquivocationProof {
         // Create a signing key
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let signing_key = signing_key_from_index(0);
         let public_key = signing_key.verifying_key();
 
         // Create two different block hashes

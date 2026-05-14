@@ -266,9 +266,16 @@ pub fn load_trusted_signers() -> Vec<VerifyingKey> {
 mod tests {
     use super::*;
 
+    /// Deterministic signing key for tests (no rand / OsRng dependency).
+    fn signing_key_from_index(i: u32) -> SigningKey {
+        let mut seed = [0u8; 32];
+        seed[0..4].copy_from_slice(&i.to_le_bytes());
+        SigningKey::from_bytes(&seed)
+    }
+
     #[test]
     fn test_sign_and_verify() {
-        let signing_key = SigningKey::generate(&mut rand::thread_rng());
+        let signing_key = signing_key_from_index(0);
         let mut announcement = UpdateAnnouncement::new(
             "8.5.0".to_string(),
             "abcd1234".repeat(8),
@@ -291,7 +298,7 @@ mod tests {
 
     #[test]
     fn test_tampered_announcement_fails_verification() {
-        let signing_key = SigningKey::generate(&mut rand::thread_rng());
+        let signing_key = signing_key_from_index(1);
         let mut announcement = UpdateAnnouncement::new(
             "8.5.0".to_string(),
             "abcd1234".repeat(8),
@@ -317,8 +324,8 @@ mod tests {
     fn test_quorum_accumulation() {
         let mut quorum = UpdateQuorum::new();
 
-        let key1 = SigningKey::generate(&mut rand::thread_rng());
-        let key2 = SigningKey::generate(&mut rand::thread_rng());
+        let key1 = signing_key_from_index(2);
+        let key2 = signing_key_from_index(3);
 
         let mut ann1 = UpdateAnnouncement::new(
             "8.5.0".to_string(),
@@ -353,8 +360,8 @@ mod tests {
     fn test_different_checksum_no_quorum() {
         let mut quorum = UpdateQuorum::new();
 
-        let key1 = SigningKey::generate(&mut rand::thread_rng());
-        let key2 = SigningKey::generate(&mut rand::thread_rng());
+        let key1 = signing_key_from_index(4);
+        let key2 = signing_key_from_index(5);
 
         let mut ann1 = UpdateAnnouncement::new(
             "8.5.0".to_string(),
