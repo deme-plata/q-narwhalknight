@@ -1,7 +1,7 @@
 {
   "name": "quillon-wallet-mcp",
-  "version": "1.0.0",
-  "description": "Quillon Wallet & Mining MCP server — create wallets, check balances, start mining via Claude Code",
+  "version": "1.2.0",
+  "description": "Quillon Wallet, Mining, DEX & Consensus MCP server — create wallets, check balances, mine, swap tokens, send tokens, verify decentralization via Claude Code",
   "type": "module",
   "main": "build/index.js",
   "scripts": {
