@@ -389,32 +389,64 @@ impl QTransaction {
                 _ => 0,
             };
 
-            // v10.5.4: DEBUG — show when Transaction advances pointer non-sequentially.
-            // The Transaction path does NOT verify sequential continuity (unlike write_batch_qblocks).
-            // This is intentional for catch-up sync (get to tip fast) but can create a pointer ahead of
-            // actual contiguous chain. The height_cache reflects this pointer, not true sequential height.
+            // v1.0.2 OPTION A: Cap the pointer advance at the highest *contiguous* block.
+            //
+            // PRE-v1.0.2 behaviour: this path unconditionally advanced qblock:latest to
+            // max_saved_height — even if the batch saved blocks at non-contiguous heights
+            // (e.g., catch-up sync jumping the pointer 13M blocks ahead of actual data).
+            // Result: qblock:latest lied about what the node had stored; downstream
+            // `get_latest_qblock_height()` returned a height with gaps below it.
+            //
+            // POST-v1.0.2: walk forward from current_pointer+1 and find the highest
+            // height where every block exists. Cap pointer advance at that height. The
+            // walk is bounded so it never costs more than O(advance) reads — for the
+            // common sequential batch case it's just one read.
+            //
+            // Balance correctness is preserved: this only changes WHEN the pointer
+            // advances, not what wallet balances are stored. Checkpoint balance import
+            // uses a separate code path (apply_balance_checkpoint) that writes balances
+            // directly without going through this pointer logic.
             if max_height > current_pointer {
                 let gap = max_height - current_pointer;
-                if gap > 1000 {
-                    warn!("🔍 [TX POINTER DEBUG] Non-sequential advance: {} → {} (gap: {} blocks). \
-                           This is the catch-up sync jumping pointer ahead of sequential warp sync. \
-                           height_cache will reflect {} but blocks between {} and {} may have gaps.",
-                          current_pointer, max_height, gap, max_height, current_pointer, max_height);
-                } else {
-                    debug!("🔍 [TX POINTER DEBUG] Sequential advance: {} → {} (+{} blocks)",
-                           current_pointer, max_height, gap);
-                }
-            }
+                let _ = gap; // suppress warning; we use a single scan for both branches.
+                // Single scan path: bounded linear walk from current_pointer+1, stops at first gap.
+                let safe_height = self
+                    .highest_contiguous_in_range(current_pointer + 1, max_height)
+                    .await;
 
-            // Only update pointer if we're advancing it (never go backwards!)
-            if max_height > current_pointer {
-                let cf_handle = self.hot_db.get_cf("blocks")?;
-                let height_bytes = max_height.to_be_bytes();
-                batch.put_cf(&cf_handle, b"qblock:latest", &height_bytes);
-                info!(
-                    "✅ [v1.0.64-beta] Transaction {}: Batch sync pointer update {} -> {} (advancing by {} blocks)",
-                    self.tx_id, current_pointer, max_height, max_height - current_pointer
-                );
+                // Capping is the common case during fast sync (chunks arrive out of order),
+                // so log only at debug level. Surface at WARN only when the gap is large
+                // (indicating warp-sync pointer jump being correctly contained).
+                if safe_height < max_height {
+                    let cap_gap = max_height - safe_height;
+                    if cap_gap > 100_000 {
+                        warn!(
+                            "🔍 [TX POINTER] Large cap: max_saved={} but contiguous tip={} (gap-aware, {} blocks ahead)",
+                            max_height, safe_height, cap_gap
+                        );
+                    } else {
+                        debug!(
+                            "🔍 [TX POINTER] Capping max_saved={} → contiguous tip={} (gap {})",
+                            max_height, safe_height, cap_gap
+                        );
+                    }
+                }
+
+                if safe_height > current_pointer {
+                    let cf_handle = self.hot_db.get_cf("blocks")?;
+                    let height_bytes = safe_height.to_be_bytes();
+                    batch.put_cf(&cf_handle, b"qblock:latest", &height_bytes);
+                    info!(
+                        "✅ [v1.0.2] Transaction {}: pointer {} -> {} (+{} blocks contiguous, max_saved was {})",
+                        self.tx_id, current_pointer, safe_height,
+                        safe_height - current_pointer, max_height
+                    );
+                } else {
+                    debug!(
+                        "🔍 [TX POINTER] No contiguous advance possible: current={}, max_saved={} but next block ({}) is missing",
+                        current_pointer, max_height, current_pointer + 1
+                    );
+                }
             }
         }
 
@@ -500,6 +532,40 @@ impl QTransaction {
     pub async fn is_active(&self) -> bool {
         let state = self.state.lock().await;
         *state == TransactionState::Active
+    }
+
+    /// v1.0.2 OPTION A helper: walk forward from `start` and return the highest
+    /// height `h` such that every block at heights `start..=h` exists in CF_BLOCKS.
+    /// Returns `start - 1` if even the first block is missing.
+    ///
+    /// The scan is bounded (max 100K reads) so a catastrophically large requested
+    /// range can't stall a commit. For the common sequential batch case (gap ≤
+    /// batch_size, usually 50-500 blocks), this terminates in ≤ batch_size reads.
+    /// For the catch-up case with huge gaps it terminates at the first missing
+    /// block — usually within a handful of reads since most non-contiguous
+    /// jumps don't actually have the in-between blocks stored.
+    async fn highest_contiguous_in_range(&self, start: u64, end: u64) -> u64 {
+        const MAX_SCAN: u64 = 100_000;
+        let effective_end = end.min(start.saturating_add(MAX_SCAN.saturating_sub(1)));
+
+        // First block must exist for there to be any advance at all.
+        let first_key = format!("qblock:height:{}", start);
+        match self.hot_db.get("blocks", first_key.as_bytes()).await {
+            Ok(Some(_)) => {} // proceed
+            _ => return start.saturating_sub(1),
+        }
+
+        let mut highest = start;
+        let mut h = start + 1;
+        while h <= effective_end {
+            let key = format!("qblock:height:{}", h);
+            match self.hot_db.get("blocks", key.as_bytes()).await {
+                Ok(Some(_)) => highest = h,
+                _ => break, // first gap — stop walking
+            }
+            h += 1;
+        }
+        highest
     }
 }
 

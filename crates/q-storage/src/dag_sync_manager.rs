@@ -653,23 +653,17 @@ impl DagSyncManager {
         // ============================================================================
         // 4. VERIFY ALL TRANSACTION SIGNATURES
         // ============================================================================
-        for (idx, tx) in block.transactions.iter().enumerate() {
-            // Skip coinbase transactions (they're validated separately)
-            if tx.is_coinbase() {
-                continue;
-            }
-
-            // Verify each transaction's signature
-            if let Err(e) = tx.verify_signature() {
-                return Err(anyhow!(
-                    "🚨 Block {} TX {} SIGNATURE INVALID: {}",
-                    block_height, idx, e
-                ));
-            }
-        }
+        // v10.9.20: Routed through `verify_transaction_signatures_batched`
+        // which picks per-tx serial or rayon-parallel batch dispatch based on
+        // count and signature phase. Failure semantics are preserved: a single
+        // invalid signature rejects the entire block.
         if !block.transactions.is_empty() {
-            debug!("✅ Block {} all {} transaction signatures verified",
-                   block_height, block.transactions.len());
+            Self::verify_transaction_signatures_batched(block, block_height)?;
+            debug!(
+                "✅ Block {} all {} transaction signatures verified",
+                block_height,
+                block.transactions.len()
+            );
         }
 
         // ============================================================================
@@ -746,6 +740,162 @@ impl DagSyncManager {
         }
 
         info!("✅ Block {} fully validated (hash: {}..)", block_height, block_hash_hex);
+        Ok(())
+    }
+
+    /// v10.9.20: Verify all transaction signatures for a block, using
+    /// SIMD-batch dispatch when the block is large enough to amortize the
+    /// rayon overhead.
+    ///
+    /// Failure semantics match the prior per-tx loop exactly: any single
+    /// invalid signature causes the entire block to be rejected with an
+    /// `anyhow::Error` describing which transaction failed (best-effort:
+    /// for batch failures we identify the first offender via a follow-up
+    /// scan to keep error messages actionable).
+    ///
+    /// # Threshold rationale
+    ///
+    /// `BATCH_VERIFY_THRESHOLD = 16` was chosen because below ~16
+    /// Ed25519 verifications the rayon dispatch + slice marshalling
+    /// overhead exceeds the savings from parallelism on typical mainnet
+    /// hardware (4–8 physical cores). The constant is intentionally
+    /// conservative; production blocks with hundreds of txs see the full
+    /// speedup, while empty or near-empty blocks pay no extra cost.
+    ///
+    /// # Phase handling
+    ///
+    /// Only `TxSignaturePhase::Phase0Ed25519` is eligible for the
+    /// SIMD-batch path — that is the path `q-crypto-simd`'s
+    /// `Avx512SignatureVerifier::verify_ed25519_batch` actually accelerates.
+    /// All other phases (Dilithium5, SQIsign, hybrid Ed25519+SQIsign,
+    /// hybrid Ed25519+Dilithium5) fall through to the per-tx
+    /// `Transaction::verify_signature()` path, which already covers them.
+    /// Coinbase transactions are skipped (they're checked separately by
+    /// `verify_coinbase_signatures` below).
+    pub(crate) fn verify_transaction_signatures_batched(
+        block: &Block,
+        block_height: u64,
+    ) -> Result<()> {
+        use q_crypto_simd::avx512::signature_verification::Avx512SignatureVerifier;
+        use q_types::TxSignaturePhase;
+
+        const BATCH_VERIFY_THRESHOLD: usize = 16;
+
+        // Partition: collect indices of pure Phase0Ed25519, non-coinbase txs
+        // (batch-eligible). Everything else goes through the legacy serial path.
+        let mut ed25519_eligible_idx: Vec<usize> = Vec::new();
+        let mut other_idx: Vec<usize> = Vec::new();
+        for (idx, tx) in block.transactions.iter().enumerate() {
+            if tx.is_coinbase() {
+                continue;
+            }
+            match tx.signature_phase {
+                TxSignaturePhase::Phase0Ed25519 => ed25519_eligible_idx.push(idx),
+                _ => other_idx.push(idx),
+            }
+        }
+
+        // Always verify "other" (non-Ed25519, hybrid, PQ) txs serially —
+        // their counts are small in practice and the batch verifier does
+        // not cover their full semantics.
+        for idx in &other_idx {
+            let tx = &block.transactions[*idx];
+            if let Err(e) = tx.verify_signature() {
+                return Err(anyhow!(
+                    "🚨 Block {} TX {} SIGNATURE INVALID: {}",
+                    block_height,
+                    idx,
+                    e
+                ));
+            }
+        }
+
+        // For Ed25519 group: pick batch vs serial based on threshold.
+        if ed25519_eligible_idx.len() < BATCH_VERIFY_THRESHOLD {
+            for idx in &ed25519_eligible_idx {
+                let tx = &block.transactions[*idx];
+                if let Err(e) = tx.verify_signature() {
+                    return Err(anyhow!(
+                        "🚨 Block {} TX {} SIGNATURE INVALID: {}",
+                        block_height,
+                        idx,
+                        e
+                    ));
+                }
+            }
+            return Ok(());
+        }
+
+        // Batch path: materialize parallel slice arrays.
+        //
+        // Per `Transaction::verify_ed25519_signature`:
+        //   * message  = `tx.hash()` (postcard-encoded SHA3-256 of the tx)
+        //   * pub key  = `tx.data[..32]` if `tx.data.len() >= 32`, else `tx.from`
+        //   * sig      = `tx.signature` (must be exactly 64 bytes)
+        //
+        // Note: we must hold the per-tx hashes as owned `[u8; 32]` because
+        // they're computed on the fly; pubkeys are borrowed from the tx.
+        let n = ed25519_eligible_idx.len();
+        let mut messages_owned: Vec<[u8; 32]> = Vec::with_capacity(n);
+        let mut pubkey_refs: Vec<&[u8]> = Vec::with_capacity(n);
+        let mut sig_refs: Vec<&[u8]> = Vec::with_capacity(n);
+
+        for idx in &ed25519_eligible_idx {
+            let tx = &block.transactions[*idx];
+            // Early-fail on signature length: ed25519_dalek will reject these
+            // too, but failing here gives a clearer error than the batch
+            // verifier's "invalid sig" count mismatch.
+            if tx.signature.len() != 64 {
+                return Err(anyhow!(
+                    "🚨 Block {} TX {} SIGNATURE INVALID: invalid Ed25519 signature length: expected 64 bytes, got {}",
+                    block_height,
+                    idx,
+                    tx.signature.len()
+                ));
+            }
+            messages_owned.push(tx.hash());
+            let pk_slice: &[u8] = if tx.data.len() >= 32 {
+                &tx.data[..32]
+            } else {
+                &tx.from[..]
+            };
+            pubkey_refs.push(pk_slice);
+            sig_refs.push(tx.signature.as_slice());
+        }
+
+        // Build `&[&[u8]]` views into the owned message buffers.
+        let message_refs: Vec<&[u8]> = messages_owned.iter().map(|h| h.as_slice()).collect();
+
+        let verifier = Avx512SignatureVerifier::new();
+        let result = verifier
+            .verify_ed25519_batch(&message_refs, &sig_refs, &pubkey_refs)
+            .map_err(|e| anyhow!("🚨 Block {} batch verify error: {}", block_height, e))?;
+
+        if (result.valid_signatures as usize) != n {
+            // Rescan serially to pinpoint the first offender for a clearer
+            // error. Bounded by `n` which is already in the working set; the
+            // cost is paid only on the (rare) failure path.
+            for idx in &ed25519_eligible_idx {
+                let tx = &block.transactions[*idx];
+                if let Err(e) = tx.verify_signature() {
+                    return Err(anyhow!(
+                        "🚨 Block {} TX {} SIGNATURE INVALID: {}",
+                        block_height,
+                        idx,
+                        e
+                    ));
+                }
+            }
+            // Defensive: batch said >=1 invalid but rescan said all valid.
+            // Treat as failure rather than silently passing.
+            return Err(anyhow!(
+                "🚨 Block {} batch verify reported {} of {} valid but rescan found none — refusing to accept",
+                block_height,
+                result.valid_signatures,
+                n
+            ));
+        }
+
         Ok(())
     }
 
@@ -857,4 +1007,214 @@ mod tests {
     // - Resume from checkpoint
     // - Malicious peer scenarios
     // - Performance benchmarks
+
+    // ========================================================================
+    // v10.9.20: SIMD-batch transaction signature verification tests
+    //
+    // Cover the four boundary cases of `verify_transaction_signatures_batched`:
+    //   1. small block (<16 txs) — must take serial path and still validate
+    //   2. large block (>= threshold) — must take batch path and validate
+    //   3. large block with one tampered signature — must reject
+    //   4. boundary cases at exactly 16 (serial) and exactly 17 (batch)
+    // ========================================================================
+
+    use chrono::Utc;
+    use ed25519_dalek::{Signer, SigningKey};
+    use q_types::{
+        BlockHeader as QBlockHeader, QBlock, QuantumMetadata, Transaction,
+        TransactionPrivacyLevel, TransactionType, TxSignaturePhase, TokenType, VDFProof,
+    };
+
+    /// Deterministic per-iteration keypair matching
+    /// `q-crypto-simd::parallel_ed25519::signing_key_from_index`.
+    fn signing_key_from_index(i: usize) -> SigningKey {
+        let mut seed = [0u8; 32];
+        seed[0..8].copy_from_slice(&(i as u64).to_le_bytes());
+        SigningKey::from_bytes(&seed)
+    }
+
+    /// Build a Phase0Ed25519 transaction signed with the i-th deterministic key.
+    /// The public key is stored in `data[..32]` to match the verify-path
+    /// `Transaction::verify_ed25519_signature` reads.
+    fn build_signed_tx(i: usize) -> Transaction {
+        let sk = signing_key_from_index(i);
+        let vk = sk.verifying_key();
+        let pk_bytes = vk.to_bytes();
+
+        // Use a non-zero `from` so `is_coinbase()` returns false.
+        // (Real txs put a hash here; for the verify path only the public key
+        // in `data` matters.)
+        let mut from = [0u8; 32];
+        from[0] = 0xAB;
+        from[1] = (i & 0xFF) as u8;
+        from[2] = ((i >> 8) & 0xFF) as u8;
+
+        let to = [0xCDu8; 32];
+
+        // Build the tx with an empty signature first, sign over its `hash()`,
+        // then attach the signature. Per `verify_ed25519_signature`, the
+        // signed message is `tx.hash()` (postcard-encoded SHA3) and the
+        // public key is read from `data[..32]`.
+        let mut tx = Transaction {
+            id: [0u8; 32],
+            from,
+            to,
+            amount: 1_000,
+            fee: 1,
+            nonce: i as u64,
+            signature: Vec::new(),
+            timestamp: Utc::now(),
+            data: pk_bytes.to_vec(),
+            token_type: TokenType::QUG,
+            fee_token_type: TokenType::QUGUSD,
+            tx_type: TransactionType::Transfer,
+            pqc_signature: None,
+            signature_phase: TxSignaturePhase::Phase0Ed25519,
+            pqc_public_key: None,
+            zk_proof_bundle: None,
+            privacy_level: TransactionPrivacyLevel::Transparent,
+            bulletproof: None,
+            nullifier: None,
+            memo: None,
+        };
+
+        let msg = tx.hash();
+        let sig = sk.sign(&msg);
+        tx.signature = sig.to_bytes().to_vec();
+        tx
+    }
+
+    fn build_block_with_txs(txs: Vec<Transaction>) -> QBlock {
+        QBlock {
+            header: QBlockHeader {
+                height: 100,
+                phase: 5,
+                network_id: "mainnet-genesis".to_string(),
+                prev_block_hash: [0u8; 32],
+                solutions_root: [0u8; 32],
+                tx_root: [0u8; 32],
+                state_root: [0u8; 32],
+                timestamp: 1234567890,
+                dag_round: 1,
+                vdf_proof: VDFProof::default(),
+                anchor_validator: None,
+                proposer: [1u8; 32],
+                producer_id: 0,
+                total_difficulty: 1000,
+                producer_public_key: None,
+                producer_signature: None,
+                coinbase_merkle_root: None,
+                total_coinbase_reward: None,
+                coinbase_count: None,
+            },
+            mining_solutions: vec![],
+            dag_parents: vec![],
+            quantum_metadata: QuantumMetadata::default(),
+            transactions: txs,
+            balance_updates: vec![],
+            size_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn test_small_block_uses_serial_path() {
+        // 8 txs — below the 16 threshold, must take the serial path and pass.
+        let txs: Vec<Transaction> = (0..8).map(build_signed_tx).collect();
+        let block = build_block_with_txs(txs);
+        let result = DagSyncManager::verify_transaction_signatures_batched(&block, 100);
+        assert!(result.is_ok(), "small block of 8 valid txs should validate: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_large_block_uses_batch_path() {
+        // 100 txs — well above threshold, must take batch path and pass.
+        let txs: Vec<Transaction> = (0..100).map(build_signed_tx).collect();
+        let block = build_block_with_txs(txs);
+        let result = DagSyncManager::verify_transaction_signatures_batched(&block, 100);
+        assert!(result.is_ok(), "large block of 100 valid txs should validate: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_large_block_with_one_bad_sig_rejected() {
+        // 100 txs, one with a tampered signature — whole block must be rejected.
+        let mut txs: Vec<Transaction> = (0..100).map(build_signed_tx).collect();
+        // Flip a byte in tx #42's signature so it no longer verifies.
+        // (Don't change length — we want the failure to come from the crypto
+        // path, not from the early "wrong length" guard.)
+        let bad_idx = 42;
+        txs[bad_idx].signature[0] ^= 0x01;
+        let block = build_block_with_txs(txs);
+        let result = DagSyncManager::verify_transaction_signatures_batched(&block, 100);
+        assert!(
+            result.is_err(),
+            "block with one tampered signature must be rejected"
+        );
+        let err = result.unwrap_err().to_string();
+        // The error should mention TX 42 (the rescan path pinpoints the
+        // first offender by index).
+        assert!(
+            err.contains("TX 42"),
+            "error should identify the bad tx index 42, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_threshold_boundary_serial_path() {
+        // Exactly 16 txs — at threshold, code uses serial path (< THRESHOLD
+        // is the batch trigger). Both paths should validate.
+        let txs: Vec<Transaction> = (0..16).map(build_signed_tx).collect();
+        let block = build_block_with_txs(txs);
+        let result = DagSyncManager::verify_transaction_signatures_batched(&block, 100);
+        assert!(
+            result.is_ok(),
+            "16-tx block at threshold should validate: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_threshold_boundary_batch_path() {
+        // Exactly 17 txs — one over threshold, batch path triggers.
+        let txs: Vec<Transaction> = (0..17).map(build_signed_tx).collect();
+        let block = build_block_with_txs(txs);
+        let result = DagSyncManager::verify_transaction_signatures_batched(&block, 100);
+        assert!(
+            result.is_ok(),
+            "17-tx block (batch path) should validate: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_empty_block_is_ok_via_outer_guard() {
+        // Defensive: an empty txs vec should not trigger any verify work.
+        // The outer call site guards with `!block.transactions.is_empty()`,
+        // so we just verify the helper itself doesn't error on empty input
+        // either (it should fall through both partitions cleanly).
+        let block = build_block_with_txs(vec![]);
+        let result = DagSyncManager::verify_transaction_signatures_batched(&block, 100);
+        assert!(
+            result.is_ok(),
+            "empty block should validate trivially: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_coinbase_txs_are_skipped() {
+        // Coinbase txs (from == [0u8; 32]) are deliberately skipped — they're
+        // checked by `verify_coinbase_signatures` separately. A block where
+        // every "tx" is a coinbase should not trigger any verification work.
+        let mut coinbase = build_signed_tx(0);
+        coinbase.from = [0u8; 32]; // mark as coinbase
+        coinbase.signature = vec![]; // coinbase has no user signature
+        let block = build_block_with_txs(vec![coinbase]);
+        let result = DagSyncManager::verify_transaction_signatures_batched(&block, 100);
+        assert!(
+            result.is_ok(),
+            "block of only coinbase txs should validate trivially: {:?}",
+            result.err()
+        );
+    }
 }

@@ -168,6 +168,8 @@ pub mod aegis_sync; // v0.9.14-beta: AEGIS-QL signed P2P sync
 pub mod async_engine; // ✅ v1.0.2-beta: AsyncStorageEngine with micro-batching to eliminate mining stalls
 pub mod balance_checkpoint; // v10.4.12: Hardcoded Epsilon balance snapshot — idempotent one-time import
 pub mod balance_consensus;
+pub mod balance_smt; // v10.9.16: Sparse Merkle Tree for balance_root_v2 (IVC SNARK Blueprint 1A)
+pub mod hot_wallet_cache; // Hot-wallet SMT proof prefetch LRU (10K entries, ~80 MB worst-case)
 pub mod batch_sync;
 pub mod sharded_balance;  // 🚀 v3.4.6-beta: 16-shard balance cache for 2-3x lookup speedup // ✅ v1.0.12-beta: Phase 1 batch sync with 512-block batches + parallel validation
 pub mod checkpoint; // ✅ v1.0.79-beta: Height checkpoint files for data loss detection
@@ -180,6 +182,7 @@ pub mod fork_detector; // ✅ v0.9.67-beta: Comprehensive fork detection & autom
 pub mod height_state; // ✅ v1.0.2-beta: Height cache to eliminate binary search storms
 #[cfg(not(target_os = "windows"))]
 pub mod integrity; // ✅ v0.9.76-beta: Database corruption detection & auto-repair
+pub mod integrity_scrubber; // 🧹 v1.0.2: Background random-walk hash verifier (silent corruption detector)
 pub mod kv;
 pub mod manifest;
 pub mod metrics;
@@ -2781,6 +2784,19 @@ impl QStorage {
                 height_array.copy_from_slice(&height_bytes);
                 let height = u64::from_be_bytes(height_array);
 
+                // v1.0.2 OPTION C-A guard: if the pointer is exactly CHECKPOINT_HEIGHT and
+                // the balance checkpoint has been applied, treat it as valid even when the
+                // block at that height isn't stored yet. The checkpoint snapshot established
+                // verified state at CHECKPOINT_HEIGHT atomically; the block DATA for that
+                // height (and pre-checkpoint history) fills in later via Phase 2 backfill.
+                // Without this guard, the v1.1.9 verification below would mis-classify the
+                // legitimate checkpoint-advance as corruption and auto-repair the pointer
+                // back to 0, killing C-A's whole point.
+                use crate::balance_checkpoint::CHECKPOINT_HEIGHT;
+                if height == CHECKPOINT_HEIGHT && self.is_checkpoint_applied().await {
+                    return Ok(Some(height));
+                }
+
                 // 🚨 v1.1.9: POINTER VERIFICATION - Ensure block at pointer height exists
                 // This detects corruption where pointer advances past missing blocks
                 let height_key = format!("qblock:height:{}", height);
@@ -2940,17 +2956,26 @@ impl QStorage {
         let counter = self.cache_verification_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         if counter % 10000 == 0 && cached_height > 0 {
-            // Verify cached height block actually exists
-            let height_key = format!("qblock:height:{}", cached_height);
-            if let Ok(None) = self.hot_db.get(CF_BLOCKS, height_key.as_bytes()).await {
-                // 🚨 Cache desync detected!
-                error!("🚨 [v1.1.9] CACHE DESYNC: Cached height {} but block doesn't exist!", cached_height);
+            // v1.0.2 OPTION C-A guard: same logic as get_latest_qblock_height — if the
+            // cached height is exactly CHECKPOINT_HEIGHT and the balance checkpoint is
+            // applied, skip the existence check. Block data for CHECKPOINT_HEIGHT and
+            // below is fetched in Phase 2; the checkpoint state itself is verified.
+            use crate::balance_checkpoint::CHECKPOINT_HEIGHT;
+            if cached_height == CHECKPOINT_HEIGHT && self.is_checkpoint_applied().await {
+                // Skip verification — checkpoint legitimately establishes state at this height.
+            } else {
+                // Verify cached height block actually exists
+                let height_key = format!("qblock:height:{}", cached_height);
+                if let Ok(None) = self.hot_db.get(CF_BLOCKS, height_key.as_bytes()).await {
+                    // 🚨 Cache desync detected!
+                    error!("🚨 [v1.1.9] CACHE DESYNC: Cached height {} but block doesn't exist!", cached_height);
 
-                // Repair by scanning backwards
-                let repaired = self.repair_pointer_to_contiguous(cached_height).await?;
-                self.height_cache.update(repaired).await;
-                warn!("✅ [v1.1.9] Cache repaired: {} → {}", cached_height, repaired);
-                return Ok(repaired);
+                    // Repair by scanning backwards
+                    let repaired = self.repair_pointer_to_contiguous(cached_height).await?;
+                    self.height_cache.update(repaired).await;
+                    warn!("✅ [v1.1.9] Cache repaired: {} → {}", cached_height, repaired);
+                    return Ok(repaired);
+                }
             }
 
             // Also verify the database pointer matches cache
@@ -5954,6 +5979,31 @@ impl QStorage {
             b"migration_bootstrap_wallet_sync_v882_done",
             b"set_by_checkpoint",
         ).await;
+
+        // v1.0.2 OPTION C-A: Advance qblock:latest to CHECKPOINT_HEIGHT after a fresh
+        // checkpoint apply. The checkpoint imported all wallet balances at this height —
+        // state at heights 1..=CHECKPOINT_HEIGHT is verified by the embedded SHA-256.
+        // The block DATA for those heights isn't stored yet (Phase 2 backfill will fetch
+        // them), but the consensus-relevant STATE is exact. By setting qblock:latest =
+        // CHECKPOINT_HEIGHT, the turbo sync engine starts fetching at CHECKPOINT_HEIGHT+1
+        // instead of grinding through 1..=CHECKPOINT_HEIGHT first — turning a multi-day
+        // bootstrap into a few-minute one.
+        //
+        // Only do this on a TRUE fresh apply (no prior pointer) — if the node already had
+        // a higher pointer from previous sync, don't roll it back. Also only advance if
+        // current pointer is below CHECKPOINT_HEIGHT; the typical fresh case is pointer=0.
+        if local_height < CHECKPOINT_HEIGHT {
+            let height_bytes = CHECKPOINT_HEIGHT.to_be_bytes();
+            self.hot_db
+                .put_sync(CF_BLOCKS, b"qblock:latest", &height_bytes)
+                .await?;
+            self.height_cache.update(CHECKPOINT_HEIGHT).await;
+            info!(
+                "🏁 [CHECKPOINT] Advanced qblock:latest from {} to CHECKPOINT_HEIGHT={} \
+                 (forward sync will start here; pre-checkpoint blocks fetched in Phase 2)",
+                local_height, CHECKPOINT_HEIGHT
+            );
+        }
 
         warn!(
             "🏁 [CHECKPOINT] ✅ Done. Marker written (checkpoint_height={}, wallets={}, \
