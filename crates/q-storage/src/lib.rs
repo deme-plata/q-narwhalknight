@@ -11894,7 +11894,7 @@ impl MockKVStore {
 }
 
 #[cfg(test)]
-#[async_trait]
+#[async_trait::async_trait]
 impl KVStore for MockKVStore {
     async fn put(&self, _cf: &str, _key: &[u8], _value: &[u8]) -> Result<()> {
         Ok(())
