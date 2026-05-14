@@ -25747,6 +25747,41 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     }
 
     // ========================================
+    // 🧹  Background integrity scrubber
+    //
+    // Random-walk block-hash inverse-index verifier. Off by default; opt in
+    // with `Q_INTEGRITY_SCRUBBER_ENABLED=1`. Rate is blocks-per-second and
+    // defaults to 10 (overridable with `Q_INTEGRITY_SCRUBBER_RATE_BPS`).
+    // Designed for tip-mode operation only — it skips iterations while the
+    // chain is empty and uses `get_highest_contiguous_block` so partially-
+    // filled turbo-sync gaps don't generate false-positive corruption alerts.
+    // ========================================
+    let scrubber_enabled = std::env::var("Q_INTEGRITY_SCRUBBER_ENABLED")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let (_scrubber_shutdown_tx, scrubber_shutdown_rx) =
+        tokio::sync::watch::channel::<bool>(false);
+    if scrubber_enabled {
+        let scrubber_rate_bps = std::env::var("Q_INTEGRITY_SCRUBBER_RATE_BPS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(10);
+        let storage_for_scrubber = app_state.storage_engine.clone();
+        tokio::spawn(async move {
+            let scrubber =
+                q_storage::integrity_scrubber::IntegrityScrubber::new(storage_for_scrubber);
+            scrubber.set_rate(scrubber_rate_bps);
+            info!(
+                "🧹 Integrity scrubber spawned (rate={} bps; set Q_INTEGRITY_SCRUBBER_ENABLED=0 to disable)",
+                scrubber_rate_bps
+            );
+            scrubber.run(scrubber_shutdown_rx).await;
+        });
+    } else {
+        info!("🧹 Integrity scrubber disabled (set Q_INTEGRITY_SCRUBBER_ENABLED=1 to enable)");
+    }
+
+    // ========================================
     // 🤖 v1.1.7-beta: PRE-LOAD AI MODEL IN BACKGROUND
     // Prevents 60+ second timeout on first chat request
     // HTTP server starts immediately, AI loads in parallel
