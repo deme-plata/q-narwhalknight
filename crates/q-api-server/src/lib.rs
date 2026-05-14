@@ -464,7 +464,7 @@ pub async fn bootstrap_bridge_pools(
         // Store reserves in 24-decimal format internally (8-dec → 24-dec)
         let reserve_wrapped_24: u128 = bootstrap_wrapped * 10u128.pow(16);
 
-        // v10.9.4: Preserve trade history across restarts.
+        // v10.9.20: Preserve trade history across restarts.
         //
         // Old v8.2.9 behavior reset reserves to the fixed `native_amount`/QUG-equivalent on
         // every boot, which erased any AMM swaps that had happened since the last restart and
@@ -545,7 +545,7 @@ pub async fn bootstrap_bridge_pools(
         let bootstrap_wrapped: u128 = (native_amount * 1e8) as u128;
         let reserve_wrapped_24: u128 = bootstrap_wrapped * 10u128.pow(16);
 
-        // v10.9.4: Same restart-preservation rule as QUG pools above.
+        // v10.9.20: Same restart-preservation rule as QUG pools above.
         let bootstrap_pool = LiquidityPool {
             pool_id: pool_id.to_string(),
             token0: "QUGUSD".to_string(),
