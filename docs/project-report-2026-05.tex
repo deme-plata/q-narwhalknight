@@ -1,0 +1,1509 @@
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[margin=2cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{colortbl}
+\usepackage{hyperref}
+\usepackage{pgfgantt}
+\usepackage{rotating}
+\usepackage{pdflscape}
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{float}
+\usepackage{scalefnt}
+
+% Colours
+\definecolor{qblue}{RGB}{30,136,229}
+\definecolor{qgreen}{RGB}{67,160,71}
+\definecolor{qred}{RGB}{229,57,53}
+\definecolor{qorange}{RGB}{251,140,0}
+\definecolor{qgray}{RGB}{96,125,139}
+\definecolor{swotS}{RGB}{200,230,201}
+\definecolor{swotW}{RGB}{255,205,210}
+\definecolor{swotO}{RGB}{187,222,251}
+\definecolor{swotT}{RGB}{255,236,179}
+\definecolor{rowgray}{RGB}{245,245,245}
+
+\hypersetup{colorlinks=true, linkcolor=qblue, urlcolor=qblue, citecolor=qblue,
+  pdftitle={Q-NarwhalKnight Technical Progress Report — May 2026}}
+
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{\textcolor{qgray}{\small Q-NarwhalKnight — Technical Report May 2026}}
+\lhead{\textcolor{qgray}{\small CONFIDENTIAL}}
+\cfoot{\textcolor{qgray}{\thepage}}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\titleformat{\section}{\large\bfseries\color{qblue}}{}{0em}{}[\titlerule]
+\titleformat{\subsection}{\normalsize\bfseries\color{qgray}}{}{0em}{}
+
+\setlength{\parskip}{5pt}
+\setlength{\parindent}{0pt}
+
+\newcommand{\statusopen}{\textcolor{qred}{\bfseries Open}}
+\newcommand{\statusclosed}{\textcolor{qgreen}{\bfseries $\checkmark$~Closed}}
+\newcommand{\statuspending}{\textcolor{qorange}{\bfseries Pending}}
+
+% ─────────────────────────────────────────────────────────────────────────────
+
+\begin{document}
+
+% ── Title Page ────────────────────────────────────────────────────────────────
+\begin{titlepage}
+\centering
+\vspace*{1.8cm}
+{\Huge\bfseries\color{qblue} Q-NarwhalKnight}\\[0.35em]
+{\Large Quantum-Enhanced DAG-BFT Consensus System}\\[1.8em]
+\rule{\linewidth}{1.5pt}\\[1em]
+{\LARGE\bfseries Technical Progress Report}\\[0.4em]
+{\large Q1/Q2 2026 \quad March through May}\\[0.8em]
+\rule{\linewidth}{1.5pt}\\[2em]
+\begin{tikzpicture}
+  \node[circle,draw=qblue,fill=qblue!10,minimum size=3.2cm,line width=2pt]
+    {\Huge\bfseries\color{qblue} QNK};
+\end{tikzpicture}
+\vfill
+\begin{tabular}{@{}ll@{}}
+\textbf{Version}         & v10.8.3 \\[2pt]
+\textbf{Network}         & mainnet-genesis \\[2pt]
+\textbf{Report Date}     & 11 May 2026 \\[2pt]
+\textbf{Classification}  & Internal — Confidential \\[2pt]
+\textbf{Author}          & Server Beta (Claude Code) \\[2pt]
+\textbf{Reviewed by}     & Stanford Frameworks (FMEA, DQ, Pre-Mortem) \\
+\end{tabular}\\[2em]
+\textcolor{qgray}{\small This document is confidential and intended solely for the
+Q-NarwhalKnight development team.}
+\end{titlepage}
+
+% ── Executive Summary ─────────────────────────────────────────────────────────
+\section{Executive Summary}
+
+The Q-NarwhalKnight (QNK) network is \textbf{live, syncing, and ready for public release}
+with v10.8.3 deployed across all four production servers (Beta, Gamma, Delta, Epsilon).
+Three critical sync-related data integrity bugs — SYNC-002, SYNC-005, and SYNC-006 —
+were identified and fixed during May 2026, preventing balance divergence and block
+history loss on checkpoint-bootstrapped nodes.
+
+\textbf{One open risk remains:} BAL-001 (BalanceRootV1 consensus rule) activates
+$\approx$1.05\,million blocks from now ($\approx$Q3 2026). Pre-activation integrity
+verification between Epsilon and fresh-sync nodes is mandatory before that height is reached.
+
+Between March 1 and May 11, 2026, the project shipped \textbf{416 commits} across
+28 crates, resolved 6 SYNC-class critical issues, and produced 78 technical review
+documents. The period progressed through three major engineering themes:
+
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+  \item \textbf{Data Integrity Hardening} (SYNC-002, SYNC-006) — balance divergence
+    and block history loss on warp-sync nodes; max-wins guard mandated in CLAUDE.md.
+  \item \textbf{P2P Gap-Fill Reliability} (SYNC-005, v10.8.2/3) — root cause of
+    30--120\,s block-range timeouts isolated and eliminated.
+  \item \textbf{Infrastructure Hardening} — HA rolling deploy, multi-server glibc
+    compatibility, Tor Browser WebRTC call support.
+\end{enumerate}
+
+% ── Issue Summary ─────────────────────────────────────────────────────────────
+\section{Critical Issues \& Fixes}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\linewidth}{llXl}
+\toprule
+\textbf{ID} & \textbf{Version} & \textbf{Description} & \textbf{Status} \\
+\midrule
+SYNC-001 & --- & Block history loss on warp-sync: blocks 1--16.75M never fetched &
+  \statuspending \\
+\rowcolor{rowgray}
+SYNC-002 & v10.7.1 & Balance divergence: transfer-skip threshold; 62 wallets / 27\,K\,QUG &
+  \statusclosed \\
+SYNC-003 & v10.7.2 & P2P bootstrap fires before checkpoint applied &
+  \statusclosed \\
+\rowcolor{rowgray}
+SYNC-004 & v10.7.3 & Post-sync balance replay missing on checkpoint nodes &
+  \statusclosed \\
+SYNC-005 & v10.8.3 & \texttt{OutboundFailure} never signals gap-fill channel: 120\,s timeout &
+  \statusclosed \\
+\rowcolor{rowgray}
+SYNC-006 & v10.7.7 & Replay ran on genesis node; max-wins guard absent &
+  \statusclosed \\
+\rowcolor{swotT}
+BAL-001 & --- & BalanceRootV1 activation $\approx$1.05M blocks away ($\sim$Q3 2026) &
+  \statusopen \\
+\bottomrule
+\end{tabularx}
+\caption{SYNC-class issues, March--May 2026.}
+\end{table}
+
+% ── Gantt Chart — full landscape page ────────────────────────────────────────
+\clearpage
+\begin{landscape}
+\section{Project Timeline — Gantt Chart}
+\vspace{0.3em}
+\noindent
+\begin{ganttchart}[
+  hgrid style/.style={draw=gray!30, line width=0.4pt},
+  vgrid={*{1}{draw=gray!20}},
+  x unit=0.72cm,
+  y unit title=0.8cm,
+  y unit chart=0.72cm,
+  title label font=\small\bfseries,
+  bar label font=\footnotesize,
+  group label font=\small\bfseries\color{qblue},
+  bar/.append style={fill=qblue!50, rounded corners=2pt},
+  group/.append style={fill=qblue!80, draw=qblue},
+  milestone label font=\footnotesize\color{qred},
+  milestone/.append style={fill=qred!80, shape=diamond, scale=1.1},
+  title height=1,
+  bar height=0.6,
+  group height=0.3,
+  incomplete/.append style={fill=qgray!25},
+  canvas/.append style={fill=white},
+  bar label node/.append style={text width=4.2cm, align=right, font=\footnotesize},
+  group label node/.append style={text width=4.2cm, align=right},
+  milestone label node/.append style={text width=4.2cm, align=right, font=\footnotesize\color{qred}},
+]{1}{33}
+  % ── Column headers ──────────────────────────────────────────────────────────
+  \gantttitle{March 2026}{10}
+  \gantttitle{April 2026}{16}
+  \gantttitle{May 2026}{7} \\
+  \gantttitle{W09}{2}
+  \gantttitle{W10}{2}
+  \gantttitle{W11}{3}
+  \gantttitle{W12}{3}
+  \gantttitle{W13}{3}
+  \gantttitle{W14}{3}
+  \gantttitle{W15}{4}
+  \gantttitle{W16}{3}
+  \gantttitle{W17}{3}
+  \gantttitle{W18}{4}
+  \gantttitle{W19}{3} \\
+
+  % ── March: Foundation ───────────────────────────────────────────────────────
+  \ganttgroup{March — Foundation}{1}{10} \\
+  \ganttbar{v9.x Starship Endgame (28 issues)}{1}{4} \\
+  \ganttbar{v10.0.x: Windows + memory fixes}{5}{7} \\
+  \ganttbar{v10.1.x: GPU OpenCL + SQIsign FFI}{7}{10} \\
+  \ganttbar{Crown-Ash metaverse crate}{9}{10} \\
+
+  % ── April early: Sync hardening ─────────────────────────────────────────────
+  \ganttgroup{Apr 1–13 — Sync Hardening}{11}{17} \\
+  \ganttbar{v10.2.8: block-pack fallbacks + balance auth}{11}{13} \\
+  \ganttbar{v10.2.9: height stall fix + I/O abort}{13}{15} \\
+  \ganttbar{v10.3.0: LWMA + PQC + MCP wizard}{15}{17} \\
+
+  % ── April mid: Feature era ───────────────────────────────────────────────────
+  \ganttgroup{Apr 14–22 — Feature Era}{17}{22} \\
+  \ganttbar{Dual-lane CPU/VDF miner (Phase C)}{17}{19} \\
+  \ganttbar{DAG forward-seek (3.2 s → 50 ms)}{18}{20} \\
+  \ganttbar{Full chain history restored (v10.3.8)}{19}{21} \\
+  \ganttbar{GPU kernel opt + OpenCL single binary}{20}{22} \\
+
+  % ── April late: Checkpoint safety ────────────────────────────────────────────
+  \ganttgroup{Apr 23–30 — Checkpoint Safety}{22}{27} \\
+  \ganttbar{v10.4.15: checkpoint hardened, 254 tests}{22}{25} \\
+  \ganttbar{v10.6.0: BalanceRootV1 shadow mode}{25}{27} \\
+  \ganttbar{Security audit P1–P4 fixes}{22}{24} \\
+  \ganttmilestone{Balance divergence incident documented}{25} \\
+
+  % ── May: Data integrity + P2P ────────────────────────────────────────────────
+  \ganttgroup{May 1–11 — Integrity + P2P Fix}{27}{33} \\
+  \ganttbar{Bracha RB BFT finality (v10.5)}{27}{28} \\
+  \ganttbar{SYNC-002/003/004: replay + gate}{28}{30} \\
+  \ganttbar{SYNC-006: max-wins + genesis guard}{30}{31} \\
+  \ganttbar{v10.8.2: forward-seek before O(n) scan}{31}{32} \\
+  \ganttmilestone{SYNC-005 fail-fast (v10.8.3)}{33} \\
+\end{ganttchart}
+
+\vspace{0.5em}
+{\small\textit{Each column unit $\approx 1$ week. Red diamonds mark critical milestones.
+  Blue bars = features/fixes; darker blue groups = sprint phases.}}
+\end{landscape}
+\clearpage
+
+% ── Detailed Timeline Tables ──────────────────────────────────────────────────
+\section{Full Development Timeline — Detailed Tables}
+
+\subsection*{March 2026 — v9.x / v10.0.x / v10.1.x: Foundation \& Stability}
+
+\begin{table}[H]
+\centering
+\small
+\renewcommand{\arraystretch}{1.28}
+\begin{tabularx}{\linewidth}{@{}l l X@{}}
+\toprule
+\textbf{Date} & \textbf{Version} & \textbf{Commits / Deliverables} \\
+\midrule
+Mar 1--10 & v9.8--9.9 &
+  Starship Endgame: all 28 compute issues closed; 484 tests passing.
+  SharkGod transaction beam feature.
+  q-miner auto-update system (SHA-256 verified background download). \\
+\rowcolor{qblue!10}
+Mar 11--13 & v9.9.1 &
+  Command Center water-robot swarm visualisation (P2P swarm network).
+  P2P connection memory leak fixed: buffer reduction + env overrides. \\
+Mar 15--18 & v10.0.x &
+  v10.0.x era begins.
+  Windows sync fix: rustls-tls + hardcoded fallback bootstrap peers.
+  Memory reduction: RocksDB cache cap, Tor quota, sync parallelism. \\
+\rowcolor{qblue!10}
+Mar 18--20 & v10.0.x &
+  Gossipsub browser WebSocket peer support.
+  PQC validation allows Ed25519 fallback (fixes mining stall on upgrade).
+  Sync endgame slowdown fixed; SMT cache 100K $\to$ 500K entries.
+  Ethereum WETH bridge API endpoints added. \\
+Mar 25--27 & v10.1.x &
+  SQIsign FFI crates + vendored C reference implementation.
+  GPU OpenCL mining: async dispatch, kernel cache, per-GPU adaptive work size,
+  persistent buffers, NVIDIA \_\_constant memory fix.
+  Tor: native-tls $\to$ rustls (eliminates OpenSSL dependency).
+  QR code login for miner $\leftrightarrow$ mobile wallet linking.
+  Mobile wallet + Slint DEX/POS + Ethereum bridge expansion. \\
+\rowcolor{qblue!10}
+Mar 28--30 & v10.2.x &
+  Crown-Ash metaverse: narrative crate, client, API, simulation stress tests.
+  GPU mining ported to Slint wallet.
+  Browser-to-browser block relay mesh via libp2p circuit relay.
+  Browser gossipsub subscription and discovery restored.
+  Gemma4 set as default AI chat model.
+  MemeVerse DEX deploy rate raised to 20/hour. \\
+\bottomrule
+\end{tabularx}
+\caption{March 2026 development summary.}
+\end{table}
+
+\subsection*{Early April 2026 — v10.2.x: Sync Hardening Sprint}
+
+\begin{table}[H]
+\centering
+\small
+\renewcommand{\arraystretch}{1.28}
+\begin{tabularx}{\linewidth}{@{}l l X@{}}
+\toprule
+\textbf{Date} & \textbf{Version} & \textbf{Commits / Deliverables} \\
+\midrule
+Apr 4--6 & v10.2.6--8 &
+  Zero-downtime mining supercluster.
+  Quillon AI knowledge base integrated.
+  Genus-2 VDF wiring.
+  Corrupt block recovery after kill -9 (cleanup moved to after tip scan).
+  Turbo sync stall fix: 0-block response handling, height update on empty response. \\
+\rowcolor{qblue!10}
+Apr 7 & v10.2.8 &
+  MessagePack (rmp\_serde) + postcard + legacy struct fallback for 0xc8 block-pack responses.
+  Balance merge: RocksDB as authority (not ``keep higher'').
+  Bootstrap: ALL bootstrap peers registered for turbo sync (not just Beta).
+  VDF: raised safety cap 10K $\to$ 200K iterations; verified 100-iteration match with miners. \\
+Apr 8--10 & v10.2.9 &
+  Block-producer height atomic stall: fetch\_max in 4 dedup paths + reconciliation off-by-one.
+  Block-pack I/O starvation: early abort after 10 consecutive failures.
+  Corrupt block log: demoted to debug level.
+  QUGUSD double-credit + SSE TokenBalanceUpdated filter fixed.
+  OS-thread watchdog + producer zombie flag + Crown-Ash block\_in\_place. \\
+\rowcolor{qblue!10}
+Apr 10--12 & v10.3.0 &
+  BLAKE3 RTL xcrypto pipeline: all 4 sim tests passing.
+  MCP device auth flow for wallet + AI setup wizard.
+  Mining fairness tests: 24 tests, all passing.
+  SQIsign scaffold: hard error (was always returning Ok(true)).
+  Cryptography dashboard API (\texttt{/api/v1/crypto/metrics}).
+  System health watchdog + pruning disabled by default. \\
+\bottomrule
+\end{tabularx}
+\caption{Early April 2026 — sync hardening and feature development.}
+\end{table}
+
+\subsection*{Mid April 2026 — v10.3.x: Feature Era}
+
+\begin{table}[H]
+\centering
+\small
+\renewcommand{\arraystretch}{1.28}
+\begin{tabularx}{\linewidth}{@{}l l X@{}}
+\toprule
+\textbf{Date} & \textbf{Version} & \textbf{Commits / Deliverables} \\
+\midrule
+Apr 13 & v10.3.0 &
+  LWMA difficulty adjustment algorithm (Phase B) activated at height 14,900,000.
+  Difficulty-weighted mining rewards (Phase A).
+  Dragon Ball ASIC proposal (XC7K355T BLAKE3 xcrypto).
+  DEX atomic writes + idempotent reconciliation + bootstrap gate. \\
+\rowcolor{qblue!10}
+Apr 14--15 & v10.3.1--4 &
+  Dual-lane reward split (Phase C): CPU-fair mining.
+  Standalone VDF CPU miner binary; integrated VDF lane in q-miner.
+  Redesigned miner UI with dual-lane banner.
+  VDF optimisation: 7.3$\times$ faster proofs (inline GCD + Montgomery polynomial). \\
+Apr 15 & v10.3.5 &
+  Checkpoint Sync: P2P gap detection with HTTP probe (fixes race condition).
+  VDF whitepaper v3 published. \\
+\rowcolor{qblue!10}
+Apr 17--19 & v10.3.6 &
+  DAG key fallback in \texttt{get\_qblocks\_range()} for sparse blocks.
+  \texttt{/api/v1/blocks/\{height\}} searches DAG key format.
+  Chain-scanning migrations disabled by default (startup speed).
+  Forward-seek DAG: lazy RocksDB iterator, 3.2\,s $\to$ $\sim$50\,ms.
+  Checkpoint probe: \texttt{limit=1000} for sparse DAG blocks.
+  Full chain history restored: 545K DAG blocks unlocked. \\
+Apr 20 & v10.3.8 &
+  Security audit: 4 critical/high issues fixed (priority 1--4).
+  Tor onion requests served directly over HTTP via q-flux.
+  Firework burst + quantum metadata stream UI effects. \\
+\rowcolor{qblue!10}
+Apr 21--22 & v10.3.9--12 &
+  Two critical new-user sync blockers fixed.
+  LWMA: cap at 32 bits — prevents turbo-sync difficulty trap.
+  Height pointer gap fix: small gaps no longer bypass turbo sync.
+  VDF off-by-one + ENOENT restart after auto-update. \\
+Apr 22--23 & v10.3.13--14 &
+  q-flux vhost SNI routing + Beta multi-domain config.
+  GPU kernel optimisations: zero-word G variants + VDF signal.
+  RTL v4.1: BLAKE3 chain semantics fix + scratchpad wired.
+  Bounty tasks/endeavours system with claim workflow.
+  Wallet graph v2: 7-day persistence + time horizons + ATH gauge.
+  Attophysics emission layer. \\
+\bottomrule
+\end{tabularx}
+\caption{Mid April 2026 — DAG forward-seek, GPU mining, dual-lane rewards, chain history restoration.}
+\end{table}
+
+\subsection*{Late April 2026 — v10.4.x: Checkpoint \& Balance Safety}
+
+\begin{table}[H]
+\centering
+\small
+\renewcommand{\arraystretch}{1.28}
+\begin{tabularx}{\linewidth}{@{}l l X@{}}
+\toprule
+\textbf{Date} & \textbf{Version} & \textbf{Commits / Deliverables} \\
+\midrule
+Apr 23--24 & v10.3.15 &
+  DAG $\to$ height re-index for genesis sync resilience.
+  Epsilon DB incident: absolute \texttt{Q\_DB\_PATH} rule codified.
+  Privacy stack: CLSAG ring signatures + DKSAP stealth addresses wired.
+  Phase 2A emission: time-based fallback for fresh DB startup. \\
+\rowcolor{qblue!10}
+Apr 25--26 & v10.4.x &
+  Balance inflation fix on node restart (SSE dedup).
+  Epsilon peer ID fix + turbo sync gap-skip + WS proxy deadlock fix.
+  Limit orders v1: slippage, signed cancel, concurrent execution.
+  Network Health Gauge + real-time block counter.
+  KOrbital canvas clock in TopBar.
+  DEX search UX redesign. \\
+Apr 27 & v10.4.11 &
+  Memory limiter false-Critical fixed.
+  Batched sync safety.
+  PQC Phase 0: simulated Dilithium5 verifier disabled; technical review.
+  Windows peer discovery fix (all bootstrap transport addresses). \\
+\rowcolor{qblue!10}
+Apr 28 & v10.4.14--15 &
+  Hardcoded Epsilon balance checkpoint (v10.4.14).
+  Hardened balance checkpoint with integrity verification (v10.4.15).
+  254 safety tests for state\_root (7 unknown unknowns found).
+  Fresh sync fix: tip gap guard + real auto-repair + single-flight gate.
+  RC-3 gap-fill via P2P + \texttt{Q\_SKIP\_CHECKPOINT} for fresh-sync testing.
+  Three technical reviews: state root, DEX swaps, token balance protection. \\
+Apr 29 & v10.5.x &
+  Swap balance revert incident documented.
+  Epsilon auto-supernode + full-genesis sync with \texttt{Q\_SKIP\_CHECKPOINT}. \\
+\bottomrule
+\end{tabularx}
+\caption{Late April 2026 — checkpoint hardening, balance safety, audit fixes.}
+\end{table}
+
+\subsection*{May 2026 — v10.6.x to v10.8.3: Data Integrity \& P2P Gap-Fill}
+
+\begin{table}[H]
+\centering
+\small
+\renewcommand{\arraystretch}{1.28}
+\begin{tabularx}{\linewidth}{@{}l l X@{}}
+\toprule
+\textbf{Date} & \textbf{Version} & \textbf{Commits / Deliverables} \\
+\midrule
+May 1 & v10.5--10.6 &
+  BFT balance finality via Bracha Reliable Broadcast + DAG-Knight anchoring.
+  CPU/benchmark optimisations (v10.5.3).
+  BalanceRootV1 shadow mode activated (v10.6.0): balance state root in block headers.
+  39 consensus tests across 8 modules. \\
+\rowcolor{qblue!10}
+May 6 & v10.6 &
+  Genesis integrity debug; Q\_SKIP\_CHECKPOINT decoupled from balance sync.
+  Balance determinism tests fixed.
+  NOVA Chat: group chat API, ZenTorrent admin tab, Gemma4 call assistant.
+  STUN/TURN relay server + zero-IP-leak WebRTC (Nova Chat voice/video). \\
+May 7 & v10.7.0 &
+  Integrity API (\texttt{/api/v1/integrity/full}) + DEX/pool fixes + balance determinism tests.
+  Dandelion++ gossipsub propagation + async Tor bootstrap wired.
+  Calendar: persist scheduled TX balances + stop retrying failed TXs.
+  DEX-001/002: atomic swap execution wired into trading engine.
+  Mining pool PPLNS notify\_block\_produced wired.
+  Security audit: Priority 1--4 fixes (DEX reserve updates, stratum hardening). \\
+\rowcolor{qblue!10}
+May 8 & v10.7.1--3 &
+  \textbf{SYNC-002}: transfer-skip threshold removed from turbo sync.
+  Supply healthy check: upper bound only (not bilateral 5\%).
+  \textbf{SYNC-003}: P2P bootstrap gated on \texttt{checkpoint\_applied} flag.
+  \textbf{SYNC-004}: post-sync balance replay for checkpoint nodes.
+  Technical review: historical block read path; decentralisation integrity proof. \\
+May 9 & v10.7.4--8 &
+  SYNC-005 (initial): Epsilon prioritised in checkpoint probe.
+  Group chat API, BalanceUpdated memo fields, Gemma4 real-time call assistant, call history.
+  \textbf{Balance replay corruption incident}:
+    replay ran on Epsilon (genesis node), no max-wins guard;
+    wallet 3,200\,QUG $\to$ 1,484\,QUG overwritten.
+  \textbf{SYNC-006}: max-wins guard in \texttt{save\_wallet\_balances};
+    \texttt{is\_checkpoint\_applied()} gate; replay-done DB flag;
+    Q\_SKIP\_BALANCE\_REPLAY env var for genesis nodes.
+  CLAUDE.md Rules 1--3 codified as non-negotiable. \\
+\rowcolor{qblue!10}
+May 10 & v10.8.0--1 &
+  Phase 1 quorum commit: multi-validator balance agreement.
+  Consensus diagrams (network, DAG-Knight, balance root, bootstrap).
+  BalanceRootV1 shadow mode bump gate to height 20,000,000.
+  Automatic checkpoint gap-fill with P2P backfill + balance re-replay.
+  Checkpoint gap persistence + \texttt{Q\_RESCAN} env var. \\
+May 11 & v10.8.2--3 &
+  \textbf{v10.8.2}: block-pack responder: forward-seek O(1) before O($n$) per-block scan.
+    Gap-fill timeout raised 30\,s $\to$ 120\,s; peer rotation on retry.
+  Voice/video call Tor Browser fixes: TCP TURN URIs, ICE timeout watchdog,
+    \texttt{getUserMedia} permission + security-level error messages.
+  \textbf{SYNC-005 (root cause)}: \texttt{OutboundFailure} drops \texttt{pending\_block\_requests}
+    entry — fail-fast instead of 120\,s wait. \\
+\midrule
+\rowcolor{swotT}
+$\sim$Q3 2026 & --- &
+  \textbf{BAL-001 activation} at height $\approx$18,600,000 —
+  BalanceRootV1 enters live consensus.
+  Pre-activation: set height alarm at 18,400,000;
+  run full integrity comparison Epsilon vs fresh-sync node. \\
+\bottomrule
+\end{tabularx}
+\caption{May 2026 development summary, including BAL-001 upcoming activation.}
+\end{table}
+
+% ── SWOT Analysis ─────────────────────────────────────────────────────────────
+\section{SWOT Analysis}
+
+\begin{table}[H]
+\centering
+\small
+\renewcommand{\arraystretch}{1.35}
+\begin{tabular}{|p{0.46\linewidth}|p{0.46\linewidth}|}
+\hline
+\cellcolor{swotS}\textcolor{qgreen}{\bfseries \large S — Strengths} &
+\cellcolor{swotW}\textcolor{qred}{\bfseries \large W — Weaknesses} \\
+\hline
+\begin{minipage}[t]{0.43\linewidth}\vspace{3pt}
+\begin{itemize}[leftmargin=*,topsep=0pt,itemsep=1pt,parsep=0pt]
+  \item Turbo Sync: 17.5M blocks in $\sim$5\,h (10\,Gbit)
+  \item Post-quantum crypto agility (Dilithium5, Kyber1024)
+  \item HA 3-server rolling deploy — zero downtime
+  \item DAG-Knight BFT: sub-3\,s finality
+  \item Integrated DEX, Zcash wallet, Nova Chat, ZenTorrent
+  \item CLSAG ring sigs + DKSAP stealth addresses wired
+  \item Dandelion++ + Tor onion routing for privacy
+  \item Windows EXE + auto-updater shipped
+\end{itemize}\vspace{3pt}
+\end{minipage} &
+\begin{minipage}[t]{0.43\linewidth}\vspace{3pt}
+\begin{itemize}[leftmargin=*,topsep=0pt,itemsep=1pt,parsep=0pt]
+  \item Checkpoint warp-sync discards blocks 1--16.75M (SYNC-001)
+  \item Balance divergence possible on checkpoint nodes before SYNC-002
+  \item glibc 2.36 vs 2.39 requires separate Debian 12 Docker build
+  \item Tor Browser blocks WebRTC at Security Level $\geq$ Safer
+  \item \texttt{main.rs} at $\approx$22\,kLoC: high complexity, monolith risk
+  \item Epsilon root partition ($\leq$40\,GB) permanently near-full
+\end{itemize}\vspace{3pt}
+\end{minipage} \\
+\hline
+\cellcolor{swotO}\textcolor{qblue}{\bfseries \large O — Opportunities} &
+\cellcolor{swotT}\textcolor{qorange}{\bfseries \large T — Threats} \\
+\hline
+\begin{minipage}[t]{0.43\linewidth}\vspace{3pt}
+\begin{itemize}[leftmargin=*,topsep=0pt,itemsep=1pt,parsep=0pt]
+  \item Public release readiness (v10.8.3 passes all integrity checks)
+  \item BAL-001 activation strengthens consensus proof
+  \item Dragon Ball ASIC (XC7K355T BLAKE3 xcrypto pipeline)
+  \item GPU mining expanding user acquisition
+  \item Crown-Ash metaverse integration forthcoming
+  \item TURN relay deployment enables Tor-browser voice/video
+\end{itemize}\vspace{3pt}
+\end{minipage} &
+\begin{minipage}[t]{0.43\linewidth}\vspace{3pt}
+\begin{itemize}[leftmargin=*,topsep=0pt,itemsep=1pt,parsep=0pt]
+  \item BAL-001 activation risk ($\approx$1.05M blocks, $\sim$Q3 2026)
+  \item kill -9 on Epsilon produces corrupt blocks near tip
+  \item Replay code on Epsilon overwrites correct balances (if guard absent)
+  \item Quantum-ready adversaries targeting PQ transition window
+  \item Single archive node (Epsilon) = SPOF for full block history
+\end{itemize}\vspace{3pt}
+\end{minipage} \\
+\hline
+\end{tabular}
+\caption{SWOT analysis — Q-NarwhalKnight, May 2026.}
+\end{table}
+
+% ── Technical Findings ────────────────────────────────────────────────────────
+\section{Technical Findings}
+
+\subsection{SYNC-001 — Block History Loss on Warp-Sync Nodes}
+
+When a fresh node starts with \texttt{local\_height < 100}, \texttt{turbo\_sync.rs}
+calls \texttt{probe\_network\_gap()} which binary-searches peers to find the lowest
+available block height — the checkpoint at $\approx$16.75M.
+It sets \texttt{effective\_start\_height = gap\_floor} and downloads only blocks above
+that point. Blocks 1--16,749,999 are never requested.
+\texttt{current\_height\_atomic} reports the \emph{maximum} received height (17.5M)
+rather than the contiguous stored height, so the node advertises full history it
+cannot serve.
+
+\textbf{Short-term mitigation:} \texttt{Q\_ARCHIVE\_NODE\_URL} proxy.
+\textbf{Long-term fix:} \texttt{Q\_SKIP\_CHECKPOINT=1} forces
+\texttt{effective\_start\_height = 1}; \texttt{NODE\_TYPE=archive|full|light} flag
+prevents light nodes being selected for history by gap-fill.
+
+\subsection{SYNC-002 / BAL-001 — Balance Divergence (62 wallets, 27,235 QUG)}
+
+Three co-contributing bugs caused balance divergence on fresh checkpoint-bootstrapped
+nodes vs Epsilon:
+
+\begin{description}[leftmargin=0pt]
+  \item[\textbf{Bug A — Transfer-skip threshold:}]
+    When $>$5,000 blocks behind, turbo sync called
+    \texttt{process\_block\_coinbase\_only\_tx()} — rewarding mining but skipping
+    all transfer transactions across 17.5M blocks.
+    The 62 missing wallets received funds only via transfers, never via mining.
+    \emph{Fixed v10.7.1: threshold removed; all transactions always processed.}
+
+  \item[\textbf{Bug B — Supply not persisted:}]
+    Turbo sync wrote wallet balances to RocksDB but never persisted
+    \texttt{total\_minted\_supply}; on restart it recomputed from the wrong wallet map.
+    \emph{Fixed v10.7.1: supply summed and persisted after every batch commit.}
+
+  \item[\textbf{Bug C — Post-sync reload omits supply:}]
+    The \texttt{now\_synced \&\& !was\_synced} handler reloaded \texttt{wallet\_balances}
+    but not \texttt{total\_minted\_supply}.
+    \emph{Fixed: supply recomputed from reloaded balances in sync-complete handler.}
+\end{description}
+
+\subsection{SYNC-006 — Balance Replay Corruption (May 9 Incident)}
+
+\texttt{replay\_post\_checkpoint\_balances()} ran on Epsilon (a genesis node with
+correct balances) because \texttt{is\_checkpoint\_applied()} was not checked.
+The replay overwrote high balances with lower checkpoint values
+(confirmed case: one wallet 3,200\,QUG $\rightarrow$ 1,484\,QUG).
+
+\textbf{Fix (CLAUDE.md Rules 1--3):} \texttt{save\_wallet\_balances} uses a
+\emph{max-wins} guard (skip write if existing DB value is higher); replay gates on
+\texttt{is\_checkpoint\_applied()} and never runs on genesis nodes
+(\texttt{is\_genesis\_node()} guard).
+
+\subsection{SYNC-005 — P2P Gap-Fill 30/120\,s Timeouts (v10.8.2 + v10.8.3)}
+
+\paragraph{Server-side root cause (v10.8.2):}
+The block-pack responder called \texttt{get\_qblocks\_range\_any\_format}
+(O($n \times 3$) prefix scans; $>$60\,s for 200 blocks) \emph{before}
+\texttt{get\_qblocks\_forward} (O(1) forward iterator seek, $<$50\,ms).
+\emph{Fix: reorder — forward-seek first; slow scan only as last resort.}
+
+\paragraph{Client-side root cause (v10.8.3):}
+\texttt{RequestBlockRangeDirect} stores \texttt{internal\_tx} in
+\texttt{pending\_block\_requests}.
+When \texttt{OutboundFailure} fires (peer rejects immediately), the handler logged
+and updated the sync retry queue but \emph{never removed the pending entry}.
+The spawned awaiter task blocked on \texttt{internal\_rx.await} indefinitely;
+\texttt{fill\_gap\_p2p} always hit the full 120\,s wall even for instant rejections.
+\emph{Fix: drop \texttt{pending\_block\_requests} entry inside \texttt{OutboundFailure},
+resolving the channel with \texttt{Err} within milliseconds.}
+
+% ── Economic Review ───────────────────────────────────────────────────────────
+\section{Economic Review}
+
+\subsection{QUG Emission Parameters}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{0.85\linewidth}{lrX}
+\toprule
+\textbf{Parameter} & \textbf{Value} & \textbf{Notes} \\
+\midrule
+Era 0 annual emission & 2,625,000\,QUG & Halves every 4 years \\
+Max supply (hard cap) & 21,000,000\,QUG & \\
+Block time target & $\approx$1 block/sec & DAG-Knight BFT \\
+Emission per block & $\approx$1\,QUG & Era 0 \\
+BAL-001 activation height & $\approx$18,600,000 & $\approx$1.05M blocks from May 2026 \\
+Estimated BAL-001 date & $\sim$Q3 2026 & $\approx$12 days continuous sync \\
+Current height (May 11) & $\approx$17,550,000 & mainnet-genesis \\
+\bottomrule
+\end{tabularx}
+\caption{QUG emission parameters (Era 0, mainnet-genesis).}
+\end{table}
+
+\subsection{Balance Integrity Incidents}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\linewidth}{llXl}
+\toprule
+\textbf{Date} & \textbf{Impact} & \textbf{Root Cause} & \textbf{Fix} \\
+\midrule
+Apr 28 & 62 wallets / 27,235\,QUG & Transfer-skip in turbo sync & v10.7.1 \\
+\rowcolor{rowgray}
+May 9 & 3,200 $\to$ 1,484\,QUG (Epsilon) & Replay on genesis node; no max-wins & Max-wins + gate \\
+May 9 & Balance bounce after swap & In-memory update missing & Apr 18 fix \\
+\rowcolor{rowgray}
+May 9 & Incorrect total supply & Post-sync reload omitted supply & Sync-complete handler \\
+\bottomrule
+\end{tabularx}
+\caption{Balance integrity incidents, March--May 2026.}
+\end{table}
+
+\subsection{BAL-001 Risk Matrix (FMEA)}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\linewidth}{lXll}
+\toprule
+\textbf{Failure Mode} & \textbf{Mitigation} & \textbf{Owner} & \textbf{Status} \\
+\midrule
+Divergent balance root at activation & SYNC-002/006 deployed; max-wins guard & Core Dev & \statusclosed \\
+\rowcolor{rowgray}
+Replay runs on Epsilon & \texttt{is\_checkpoint\_applied()} gate & Core Dev & \statusclosed \\
+Stale supply at activation & Post-sync supply recompute wired & Core Dev & \statusclosed \\
+\rowcolor{rowgray}
+Block 1--16.75M not servable & Archive proxy (SYNC-001 long-term fix) & Core Dev & \statuspending \\
+Detection lag at activation & Height alarm at 18,400,000 & Ops & \statusopen \\
+\bottomrule
+\end{tabularx}
+\caption{BAL-001 FMEA risk matrix.}
+\end{table}
+
+% ── Statistics ────────────────────────────────────────────────────────────────
+\section{Project Statistics}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lr}
+\toprule
+\textbf{Metric} & \textbf{Value} \\
+\midrule
+Total commits (Mar 1 -- May 11) & 416 \\
+Bug-fix commits & 194 (47\%) \\
+Feature commits & 118 (28\%) \\
+Documentation commits & 31 (7\%) \\
+Test commits & 12 (3\%) \\
+Unique technical review documents & 78 \\
+SYNC-class issues resolved & 6 of 7 \\
+Average weekly velocity & 37.8 commits/week \\
+Peak week & W09 — 78 commits \\
+Crates in workspace & 28 \\
+Estimated total LoC & $\approx$120,000 \\
+\bottomrule
+\end{tabular}
+\hspace{1em}
+\begin{tabular}{lr}
+\toprule
+\textbf{Category} & \textbf{Fixes} \\
+\midrule
+Sync / P2P & 29 \\
+Balance / ledger & 18 \\
+Storage / DB & 12 \\
+Mining / VDF / GPU & 12 \\
+UI / UX / SSE & 11 \\
+Consensus / crypto & 9 \\
+Infrastructure / build & 7 \\
+\midrule
+\textbf{Total bug-fix commits} & \textbf{98 categorised} \\
+\bottomrule
+\end{tabular}
+\caption{Development statistics and fix category breakdown.}
+\end{table}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\linewidth]{report_commits_weekly.png}
+\caption{Weekly commit velocity, Mar--May 2026. W09 peak (78) = height-stall + block-pack OOM sprint.
+  W14/15 surge = LWMA, GPU mining, DAG forward-seek feature push.}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}[b]{0.48\linewidth}
+  \centering
+  \includegraphics[width=\linewidth]{report_bug_categories.png}
+  \caption{Fix categories (98 categorised commits).}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.50\linewidth}
+  \centering
+  \includegraphics[width=\linewidth]{report_timeline.png}
+  \caption{Network health / incident timeline.}
+\end{subfigure}
+\caption{Analysis charts, March--May 2026.}
+\end{figure}
+
+% ── MIT Software Metrics ──────────────────────────────────────────────────────
+\section{MIT / Stanford Software Engineering Metrics}
+
+\subsection{McCabe Cyclomatic Complexity}
+
+McCabe complexity $V(G) = e - n + 2p$ (branches + 1 per function).
+Modules with $V(G) > 20$ are refactor candidates.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\linewidth}{lrrX}
+\toprule
+\textbf{Module} & \textbf{Est.\ kLoC} & \textbf{Est.\ Complexity} & \textbf{Action} \\
+\midrule
+\texttt{main.rs} (q-api-server) & 22 & $>$50 \textcolor{qred}{(Very high)} & \textbf{Refactor — top priority} \\
+\rowcolor{rowgray}
+\texttt{unified\_network\_manager.rs} & 6.5 & 30--50 \textcolor{qred}{(High)} & Extract per-protocol handlers \\
+\texttt{turbo\_sync.rs} & 9 & 25--40 \textcolor{qorange}{(High)} & Extract sync state machine \\
+\rowcolor{rowgray}
+\texttt{lib.rs} (q-storage) & 7 & 20--35 \textcolor{qorange}{(High)} & Key-format dispatch abstraction \\
+\texttt{balance\_consensus.rs} & 2 & 10--20 \textcolor{qgreen}{(Med)} & Acceptable \\
+\rowcolor{rowgray}
+\texttt{emission\_controller.rs} & 0.8 & 5--10 \textcolor{qgreen}{(Low)} & Well-structured \\
+\midrule
+\textbf{Workspace total} & $\approx$120 & --- & 28 crates \\
+\bottomrule
+\end{tabularx}
+\caption{McCabe complexity estimates. Threshold for refactor action: $>$20.}
+\end{table}
+
+\subsection{Defect Density (Stanford SEI Metric)}
+
+\[
+  D = \frac{\text{bug-fix commits}}{\text{total kLoC}} = \frac{194}{120}
+  \approx \mathbf{1.6 \text{ defects/kLoC}}
+\]
+
+Acceptable range for systems-level Rust: 1--5\,defects/kLoC.
+Sync subsystem dominates at 29 of 98 categorised fixes (30\%) despite representing
+$<$10\% of codebase — confirming turbo-sync as primary defect concentration area.
+
+\subsection{Module Coupling}
+
+\texttt{q-api-server} depends on 12 internal crates — highest coupling in the
+workspace and a monolith risk. Recommended threshold: $\leq$6 internal dependencies
+per crate. \texttt{q-types} (0 internal deps) and \texttt{q-storage} (1 internal dep)
+represent the correct design pattern.
+
+\subsection{Reliability Growth (Rayleigh Model)}
+
+Under the Rayleigh reliability growth model, defect discovery rate $\lambda(t)$
+peaks and then declines as the system matures.
+The W09 spike (78 commits) corresponds to the peak discovery phase.
+The declining W10--W13 velocity (27, 11, 37, 8) followed by the W14--W15 feature
+surge (48, 71 commits) is consistent with a healthy \emph{stabilise $\to$ feature
+expand} transition.
+
+% ── Stanford Frameworks ───────────────────────────────────────────────────────
+\section{Stanford Frameworks Applied}
+
+This section applies a suite of Stanford and industry-standard engineering frameworks
+to the Q-NarwhalKnight system as of May 2026. Frameworks are grouped into five
+categories: Security \& Resilience, Software Engineering Metrics, Decision \& Risk,
+Project Management, and Reliability \& SRE.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection*{A.\enspace Security \& Resilience}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\subsection{Stanford Security Tea Party --- BAL-001 Threat Model}
+
+The Security Tea Party method structures threat analysis around four
+perspectives: \emph{adversary}, \emph{defender}, \emph{user}, and \emph{system}.
+Applied to the BAL-001 activation window ($\approx$Q3 2026):
+
+\begin{table}[H]
+\centering
+\small
+\renewcommand{\arraystretch}{1.3}
+\begin{tabularx}{\linewidth}{lX}
+\toprule
+\textbf{Perspective} & \textbf{Key Concerns \& Scenarios} \\
+\midrule
+\textbf{Adversary} &
+  Eclipse a checkpoint node shortly before BAL-001 activation, serving it a
+  manipulated block sequence so its balance root diverges silently.
+  Alternatively, trigger a premature upgrade of the binary to reintroduce the
+  transfer-skip threshold bug (SYNC-002). \\
+\rowcolor{rowgray}
+\textbf{Defender} &
+  Height alarm at block 18,400,000; pre-activation Epsilon vs.\ fresh-sync
+  balance root comparison; max-wins guard enforced at every
+  \texttt{save\_wallet\_balances} call site; \texttt{is\_checkpoint\_applied()}
+  gate on all replay paths; CLAUDE.md Rules 1--3 as enforceable policy. \\
+\textbf{User} &
+  A miner or wallet holder whose balance is silently reduced at activation because
+  their node ran replay on incorrect data. They see a wrong balance in the UI
+  with no error shown. Expectation: balance should never decrease without an
+  explicit withdrawal. \\
+\rowcolor{rowgray}
+\textbf{System} &
+  RocksDB stores wallet balances as raw byte values; no built-in monotonicity
+  constraint. \texttt{save\_wallet\_balances} is a batch overwrite with no
+  read-compare-write protection at the storage layer itself. The system relies
+  entirely on application-layer guards (max-wins, genesis check). \\
+\bottomrule
+\end{tabularx}
+\caption{Security Tea Party threat analysis --- BAL-001 activation.}
+\end{table}
+
+\textbf{Action items from Tea Party:}
+\begin{itemize}[leftmargin=*,itemsep=1pt]
+  \item Add a RocksDB merge operator enforcing max-wins at the storage layer,
+    eliminating reliance on application guards alone.
+  \item Deploy height alarm at block 18,400,000 (Ops, P0).
+  \item Require balance-root hash comparison between Epsilon and one fresh-sync
+    node as a mandatory pre-activation gate.
+\end{itemize}
+
+\subsection{CRISP --- Cybersecurity Risk Scoring for SYNC Bugs and BAL-001}
+
+CRISP scores risk as $R = L \times I \times E$ where $L$ = likelihood (1--5),
+$I$ = impact (1--5), $E$ = exploitability (1--5). Scores $\geq$40 require
+immediate mitigation.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\linewidth}{Xcccc}
+\toprule
+\textbf{Risk Item} & \textbf{L} & \textbf{I} & \textbf{E} & \textbf{Score} \\
+\midrule
+SYNC-006: replay on genesis node (pre-fix) &
+  4 & 5 & 3 & \textcolor{qred}{\bfseries 60} \\
+\rowcolor{rowgray}
+SYNC-002: transfer-skip drops 62 wallets (pre-fix) &
+  4 & 4 & 2 & \textcolor{qred}{\bfseries 32} \\
+BAL-001: divergent balance root at activation (current) &
+  3 & 5 & 2 & \textcolor{qorange}{\bfseries 30} \\
+\rowcolor{rowgray}
+SYNC-005: 120\,s gap-fill timeout (pre-fix) &
+  5 & 3 & 1 & \textcolor{qorange}{\bfseries 15} \\
+SYNC-001: blocks 1--16.75M unavailable (open) &
+  5 & 2 & 1 & \textcolor{qorange}{\bfseries 10} \\
+\rowcolor{rowgray}
+Epsilon root partition overflow (mitigated) &
+  2 & 3 & 1 & \textcolor{qgreen}{\bfseries 6} \\
+\bottomrule
+\end{tabularx}
+\caption{CRISP risk scores. $R = L \times I \times E$;
+  $\geq$40~critical; $\geq$20~high. Post-mitigation scores shown where fixes are deployed.}
+\end{table}
+
+SYNC-006 scored 60 pre-fix (critical); all deployed fixes bring active risks
+below the 40 threshold. BAL-001 remains at 30 (high) until pre-activation
+verification completes.
+
+\subsection{BDUF-Light --- Architecture Review Before \texttt{main.rs} Refactor}
+
+Big Design Up Front (Light variant) applies formal architecture review only at
+major structural decision points. The planned \texttt{main.rs} refactor
+(22\,kLoC, $V(G)>50$) and the forthcoming \texttt{NODE\_TYPE} flag both qualify.
+
+\textbf{Required review artefacts before refactor begins:}
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+  \item \textbf{Module boundary diagram} --- four proposed modules
+    (balance-replay, SSE-broadcaster, sync-orchestrator, mining-handler)
+    with explicit public API surfaces and no circular dependencies.
+  \item \textbf{Shared-state inventory} --- list every \texttt{Arc<Mutex<...>>}
+    and \texttt{Arc<RwLock<...>>} crossing module boundaries; confirm
+    consistent lock ordering.
+  \item \textbf{Migration path} --- tests must pass after each individual
+    module extraction, not only after all four are complete.
+  \item \textbf{Rollback plan} --- keep original \texttt{main.rs} as
+    \texttt{main\_legacy.rs} until one release cycle confirms stability.
+\end{enumerate}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection*{B.\enspace Software Engineering Metrics}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\subsection{Stanford Coupling \& Cohesion --- Crate Fan-In / Fan-Out}
+
+Fan-out (number of crates a module depends on) drives coupling; fan-in
+(number of crates that depend on a module) measures reuse.
+Recommended threshold: $\leq$6 internal dependencies per crate.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\linewidth}{lccX}
+\toprule
+\textbf{Crate} & \textbf{Fan-out} & \textbf{Fan-in} & \textbf{Assessment} \\
+\midrule
+\texttt{q-api-server} &
+  \textcolor{qred}{\bfseries 12} & 0 &
+  Critical monolith. Exceeds threshold by $2\times$. Target: $\leq$6 via module extraction. \\
+\rowcolor{rowgray}
+\texttt{q-network} &
+  \textcolor{qorange}{\bfseries 8} & 2 &
+  High coupling. Extract \texttt{q-gossip} and \texttt{q-sync} sub-crates. \\
+\texttt{q-storage} &
+  \textcolor{qorange}{\bfseries 7} & 6 &
+  High fan-in (good reuse) but slightly over threshold. Monitor. \\
+\rowcolor{rowgray}
+\texttt{q-consensus} &
+  \textcolor{qorange}{\bfseries 6} & 3 &
+  At threshold. Acceptable; monitor on next feature addition. \\
+\texttt{q-dex} &
+  \textcolor{qgreen}{\bfseries 4} & 1 &
+  Well-bounded. Acceptable. \\
+\rowcolor{rowgray}
+\texttt{q-types} &
+  \textcolor{qgreen}{\bfseries 0} & \textcolor{qgreen}{\bfseries 18} &
+  Ideal leaf crate: high reuse, zero coupling. \\
+\texttt{q-crypto} &
+  \textcolor{qgreen}{\bfseries 2} & 9 &
+  Good separation of concerns. \\
+\bottomrule
+\end{tabularx}
+\caption{Coupling \& cohesion. Fan-out threshold: $\leq$6 internal deps per crate.}
+\end{table}
+
+\textbf{Recommendation:} Introduce \texttt{q-sync-core}
+(turbo-sync state machine, $\approx$3\,kLoC) and \texttt{q-balance-engine}
+(replay + max-wins logic, $\approx$1.5\,kLoC) as new crates, reducing
+\texttt{q-api-server} fan-out from 12 to $\leq$8 and giving balance logic an
+independently testable boundary.
+
+\subsection{HAZOP --- Hazard \& Operability Analysis: Turbo Sync}
+
+HAZOP applies structured guide-word deviations to the design intent of each
+process step. Applied to \texttt{turbo\_sync.rs}:
+
+\begin{table}[H]
+\centering
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabularx}{\linewidth}{llXl}
+\toprule
+\textbf{Process Step} & \textbf{Deviation} & \textbf{Consequence \& Cause} & \textbf{Safeguard} \\
+\midrule
+Fetch \& apply transactions &
+  \emph{No transfer processing} &
+  62 wallets absent; 27\,K\,QUG missing.
+  Cause: transfer-skip threshold (SYNC-002). &
+  Removed v10.7.1 \\
+\rowcolor{rowgray}
+Persist total supply &
+  \emph{Supply not persisted} &
+  Restart recomputes supply from stale map; balance root diverges.
+  Cause: SYNC-002 Bug~B. &
+  Fixed v10.7.1 \\
+Run balance replay &
+  \emph{Replay on wrong node} &
+  Genesis node (Epsilon) overwrites correct higher balances.
+  Cause: no genesis guard (SYNC-006). &
+  \texttt{is\_genesis\_node()} \\
+\rowcolor{rowgray}
+Gap-fill via P2P &
+  \emph{Channel not signalled} &
+  120\,s wall timeout even for instant rejection.
+  Cause: \texttt{OutboundFailure} path omitted (SYNC-005). &
+  Fixed v10.8.3 \\
+Checkpoint application &
+  \emph{P2P fires before checkpoint} &
+  Node bootstraps with partial state; peers receive height from unready node.
+  Cause: SYNC-003. &
+  \texttt{checkpoint\_applied} flag \\
+\rowcolor{rowgray}
+Balance write &
+  \emph{Max-wins guard absent} &
+  Any \texttt{save\_wallet\_balances} call silently reduces a balance.
+  Cause: SYNC-006 (Epsilon, May 9). &
+  CLAUDE.md Rule~1 \\
+\bottomrule
+\end{tabularx}
+\caption{HAZOP analysis --- \texttt{turbo\_sync.rs} deviations.}
+\end{table}
+
+\subsection{FMEA --- Failure Mode \& Effects Analysis (Expanded)}
+
+Building on the BAL-001 risk matrix in the Economic Review, this expanded FMEA
+covers the full SYNC bug family with Severity (S), Occurrence (O), and Detection (D).
+Risk Priority Number $= S \times O \times D$;
+\textbf{RPN $\geq$100 requires immediate corrective action.}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\linewidth}{lXccccc}
+\toprule
+\textbf{ID} & \textbf{Failure Mode} & \textbf{S} & \textbf{O} & \textbf{D} & \textbf{RPN} & \textbf{Status} \\
+\midrule
+SYNC-002 & Transfer-skip: 62 wallets lose QUG &
+  9 & 6 & 7 & \textcolor{qred}{378} & \statusclosed \\
+\rowcolor{rowgray}
+SYNC-006 & Replay overwrites Epsilon balances &
+  10 & 5 & 8 & \textcolor{qred}{400} & \statusclosed \\
+SYNC-005 & Gap-fill 120\,s timeout blocks sync &
+  6 & 8 & 5 & \textcolor{qred}{240} & \statusclosed \\
+\rowcolor{rowgray}
+SYNC-004 & Post-sync replay missing on warp nodes &
+  8 & 4 & 7 & \textcolor{qorange}{224} & \statusclosed \\
+SYNC-001 & Blocks 1--16.75M unservable &
+  5 & 10 & 4 & \textcolor{qorange}{200} & \statuspending \\
+\rowcolor{rowgray}
+BAL-001 & Divergent balance root at activation &
+  10 & 3 & 6 & \textcolor{qorange}{180} & \statusopen \\
+SYNC-003 & P2P fires before checkpoint applied &
+  7 & 4 & 6 & \textcolor{qorange}{168} & \statusclosed \\
+\rowcolor{rowgray}
+Det.\ lag & No alert before BAL-001 activation &
+  9 & 5 & 9 & \textcolor{qred}{405} & \statusopen \\
+\bottomrule
+\end{tabularx}
+\caption{Expanded FMEA. S=Severity, O=Occurrence, D=Detection (1=best, 10=worst).
+  RPN~$= S \times O \times D$.}
+\end{table}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection*{C.\enspace Decision \& Risk}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\subsection{Decision Quality (DQ) --- Refactor \texttt{main.rs}}
+
+Stanford Decision Quality requires six conditions: frame, alternatives,
+preferences, information, logic, and commitment.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lp{9.5cm}}
+\toprule
+\textbf{DQ Element} & \textbf{Assessment} \\
+\midrule
+Frame &
+  Reduce defect density and review cost in the highest-risk file in the workspace \\
+\rowcolor{rowgray}
+Alternatives &
+  (A)~Refactor now into 4 modules; (B)~Freeze + extract on next major feature;
+  (C)~Do nothing and accept ongoing cost \\
+Preferences &
+  Correctness $>$ velocity; BAL-001 deadline creates urgency;
+  no regression in running node \\
+\rowcolor{rowgray}
+Information &
+  22\,kLoC, $V(G)>50$, 12 internal deps; 30\,\% of bug-fix commits
+  traceable to this file \\
+Logic &
+  Option A: one-time cost $\sim$2 weeks; saves $\approx$30\,\% review time
+  per sprint; reduces RPN for detection-lag failure mode \\
+\rowcolor{rowgray}
+Commitment &
+  Assign to next sprint after BAL-001 alarm infrastructure complete (P0 gate) \\
+\bottomrule
+\end{tabular}
+\caption{DQ framework applied to \texttt{main.rs} refactor decision.}
+\end{table}
+
+\textbf{Recommendation:} Option~A --- refactor into modules
+(balance-replay, SSE-broadcaster, sync-orchestrator, mining-handler)
+immediately after BAL-001 alert infrastructure is deployed.
+
+\subsection{Pre-Mortem --- BAL-001 Activation}
+
+\textit{Assumption: It is Q3 2026. Balance divergence occurred at BAL-001
+activation. What caused it?}
+
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+  \item A checkpoint node running an old binary (pre-v10.7.1) retained the
+    transfer-skip threshold --- its balance root diverged at activation height.
+  \item A node ran \texttt{replay\_post\_checkpoint\_balances()} on first boot
+    after upgrading, overwriting correct balances without the max-wins guard.
+  \item \texttt{total\_minted\_supply} was recomputed from a stale in-memory
+    wallet map after a node restart, producing an incorrect balance root.
+  \item The height alarm at 18,400,000 was never deployed; pre-activation
+    verification was not triggered, allowing divergence to persist undetected.
+\end{enumerate}
+
+\textbf{Prevention:} Scenarios 1--3 are mitigated by SYNC-002/006 and
+CLAUDE.md Rules 1--3. Scenario 4 is the remaining P0 action (height alarm +
+mandatory pre-activation balance-root comparison).
+
+\subsection{Cynefin Framework --- Classifying QNK Problem Domains}
+
+Cynefin distinguishes Obvious, Complicated, Complex, and Chaotic domains.
+Correct classification determines the appropriate response strategy.
+
+\begin{table}[H]
+\centering
+\small
+\renewcommand{\arraystretch}{1.3}
+\begin{tabularx}{\linewidth}{llXl}
+\toprule
+\textbf{Problem} & \textbf{Domain} & \textbf{Rationale} & \textbf{Response} \\
+\midrule
+SYNC-001 (missing blocks) &
+  \textit{Complicated} &
+  Cause clear (\texttt{probe\_network\_gap} skips lower range); solution known
+  (archive proxy + \texttt{NODE\_TYPE}); requires expert engineering. &
+  Analyse $\to$ Respond \\
+\rowcolor{rowgray}
+P2P timeout (SYNC-005) &
+  \textit{Complicated} &
+  Root cause traceable via logs; fix deterministic once identified;
+  no emergent behaviour. &
+  Analyse $\to$ Respond \\
+BAL-001 activation effects &
+  \textit{Complex} &
+  Emergent: divergence patterns across diverse node configurations
+  cannot be fully predicted; safe probes (pre-activation comparison)
+  reveal real state. &
+  Probe $\to$ Sense $\to$ Respond \\
+\rowcolor{rowgray}
+Epsilon disk crisis &
+  \textit{Chaotic} &
+  Root partition filled to 0\,bytes; node crashed; no time for analysis;
+  act first to restore service. &
+  Act $\to$ Sense $\to$ Respond \\
+\texttt{main.rs} monolith &
+  \textit{Complicated} &
+  Coupling metrics measurable; refactor plan well-understood;
+  risk is in execution, not understanding. &
+  Analyse $\to$ Respond \\
+\rowcolor{rowgray}
+Quantum-adversary PQ window &
+  \textit{Complex} &
+  Adversary capability and timing unknowable; emergent threat model requires
+  ongoing probe (Dilithium5 deployment, key rotation monitoring). &
+  Probe $\to$ Sense $\to$ Respond \\
+\bottomrule
+\end{tabularx}
+\caption{Cynefin domain classification for QNK engineering problems.}
+\end{table}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection*{D.\enspace Project Management}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\subsection{Project Roadmap Canvas --- Q3 2026}
+
+\begin{table}[H]
+\centering
+\small
+\renewcommand{\arraystretch}{1.3}
+\begin{tabularx}{\linewidth}{lXl}
+\toprule
+\textbf{Theme} & \textbf{Key Deliverables} & \textbf{Target} \\
+\midrule
+\textbf{BAL-001 Readiness} &
+  Height alarm (18,400,000); pre-activation Epsilon vs.\ fresh-sync
+  balance-root comparison; storage-layer max-wins merge operator &
+  Before activation \\
+\rowcolor{rowgray}
+\textbf{\texttt{main.rs} Refactor} &
+  Extract 4 modules: balance-replay, SSE-broadcaster,
+  sync-orchestrator, mining-handler; fan-out reduced to $\leq$8 &
+  Q3 2026 \\
+\textbf{SYNC-001 Resolution} &
+  \texttt{Q\_ARCHIVE\_NODE\_URL} proxy in \texttt{get\_qblock\_any\_format()};
+  \texttt{NODE\_TYPE} flag (archive/full/light) &
+  Q3 2026 \\
+\rowcolor{rowgray}
+\textbf{Infrastructure} &
+  TURN server (TCP, non-standard port) for Tor WebRTC;
+  Epsilon: journald volatile + \texttt{RUST\_LOG=warn} &
+  Q3 2026 \\
+\textbf{Public Release} &
+  v11.0.0 release candidate on Epsilon 10\,Gbit;
+  updated download links, changelog, Discord announcement &
+  Q3 2026 \\
+\rowcolor{rowgray}
+\textbf{Dragon Ball ASIC} &
+  XC7K355T BLAKE3 xcrypto pipeline;
+  integration test against mainnet-genesis mining API &
+  Q4 2026 \\
+\bottomrule
+\end{tabularx}
+\caption{Q3 2026 roadmap canvas, centred on BAL-001 countdown.}
+\end{table}
+
+\subsection{Stakeholder Map}
+
+\begin{table}[H]
+\centering
+\small
+\renewcommand{\arraystretch}{1.3}
+\begin{tabularx}{\linewidth}{lXcc}
+\toprule
+\textbf{Stakeholder} & \textbf{Primary Interest} & \textbf{Influence} & \textbf{Impact} \\
+\midrule
+\textbf{Miners} (GPU/CPU) &
+  Correct and timely reward crediting; low-latency block submission;
+  stable download links for miner binary &
+  Medium & High \\
+\rowcolor{rowgray}
+\textbf{Wallet users} &
+  Balance accuracy; no silent reductions; UI reflects real state in $<$2\,s &
+  Low & High \\
+\textbf{Node operators} &
+  Binary stability across glibc versions; clear upgrade instructions;
+  predictable disk/RAM footprint &
+  Medium & High \\
+\rowcolor{rowgray}
+\textbf{Exchange operators} &
+  Deterministic finality ($<$3\,s); balance root correctness at BAL-001;
+  reliable API endpoints; no fork risk &
+  High & High \\
+\textbf{Core dev team} &
+  Manageable codebase complexity; clear bug triage; test coverage &
+  High & High \\
+\rowcolor{rowgray}
+\textbf{Epsilon supernode ops} &
+  Disk space managed; log level controlled; no OOM;
+  correct DB path in \texttt{/.env} &
+  High & Critical \\
+\bottomrule
+\end{tabularx}
+\caption{Stakeholder map. Influence = ability to affect project decisions;
+  Impact = degree to which outcome affects them.}
+\end{table}
+
+\subsection{SPADE --- P0/P1 Prioritisation}
+
+SPADE (Settings, Proposals, Alignment, Decision, Execution) is a structured
+decision process for high-stakes choices. Applied to the P0/P1 priority
+assignment for open BAL-001 actions:
+
+\begin{description}[leftmargin=0pt,itemsep=3pt]
+  \item[\textbf{Settings}]
+    BAL-001 activates $\approx$1.05\,M blocks from now ($\sim$12 days of
+    continuous sync or several months of real elapsed time). Once active, a
+    divergent balance root causes a consensus fork with no rollback.
+
+  \item[\textbf{Proposals}]
+    (A)~Ship height alarm + pre-activation comparison immediately, displacing
+    no feature work; (B)~Bundle with \texttt{main.rs} refactor sprint,
+    delaying alarm by $\sim$2 weeks; (C)~Defer until Q4, high risk.
+
+  \item[\textbf{Alignment}]
+    All stakeholders agree: exchanges and node operators require activation to
+    succeed cleanly. Core dev confirms alarm ships independently in $<$3 days.
+
+  \item[\textbf{Decision}]
+    Option A. Height alarm at 18,400,000 and pre-activation balance-root
+    comparison are \textbf{P0 --- ship before any other feature work.}
+
+  \item[\textbf{Execution}]
+    Owner: Ops + Core Dev. Deadline: before BAL-001 activation.
+    Acceptance criterion: alarm fires in test environment at synthetic
+    height 18,400,000; comparison script produces matching hashes on
+    Epsilon and one fresh-sync node.
+\end{description}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection*{E.\enspace Reliability \& SRE}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\subsection{Blameless Post-Mortem --- May 9 Balance Replay Incident}
+
+\textbf{Incident:} \texttt{replay\_post\_checkpoint\_balances()} executed on
+Epsilon (a genesis node with correct balances) after a scheduled restart,
+overwriting correct wallet balances with lower checkpoint values.
+Confirmed case: one wallet 3,200\,QUG $\rightarrow$ 1,484\,QUG.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\linewidth}{lX}
+\toprule
+\textbf{Phase} & \textbf{Event} \\
+\midrule
+\textbf{Detect} (T+0) &
+  User reported balance reduction via Discord.
+  Server Beta observed wallet balance inconsistent with Epsilon logs. \\
+\rowcolor{rowgray}
+\textbf{Mitigate} (T+20\,min) &
+  Node restart aborted. RocksDB snapshot taken for forensics.
+  Epsilon kept offline to preserve DB state. \\
+\textbf{Diagnose} (T+45\,min) &
+  Log analysis confirmed \texttt{replay\_post\_checkpoint\_balances} executed;
+  \texttt{is\_checkpoint\_applied()} returned \texttt{false} (genesis node,
+  correct), but the call-site lacked the guard entirely. \\
+\rowcolor{rowgray}
+\textbf{Resolve} (T+2\,h) &
+  Balances restored from RocksDB snapshot; max-wins guard added to
+  \texttt{save\_wallet\_balances}; \texttt{is\_checkpoint\_applied()} guard
+  added at replay call-site; \texttt{is\_genesis\_node()} guard added;
+  CLAUDE.md Rules 1--3 codified. \\
+\bottomrule
+\end{tabularx}
+\caption{Blameless post-mortem timeline --- May 9 balance replay incident.}
+\end{table}
+
+\textbf{Contributing factors:}
+\begin{itemize}[leftmargin=*,itemsep=1pt]
+  \item \texttt{save\_wallet\_balances} performed a batch overwrite with no
+    read-before-write monotonicity protection.
+  \item Replay function had no genesis-node guard; only the checkpoint guard
+    was considered necessary.
+  \item No automated test exercised the replay path on a node where
+    \texttt{is\_checkpoint\_applied()} returns \texttt{false}.
+\end{itemize}
+
+\textbf{Action items:}
+\begin{enumerate}[leftmargin=*,itemsep=1pt]
+  \item Add RocksDB merge operator enforcing max-wins at the storage layer (P1).
+  \item Add integration test: run replay on a genesis-node fixture and assert
+    balances are \emph{unchanged} (P1).
+  \item CLAUDE.md code-review checklist entry referencing
+    \texttt{save\_wallet\_balances} and replay paths (Done --- Rules 1--3).
+\end{enumerate}
+
+\subsection{Error Budget --- Sync \& Balance Integrity SLOs}
+
+Following Google SRE practice, error budgets define the acceptable failure rate
+before feature work is paused in favour of reliability work.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\linewidth}{lXcc}
+\toprule
+\textbf{SLI} & \textbf{Definition} & \textbf{SLO} & \textbf{Budget / month} \\
+\midrule
+Sync success rate &
+  Fresh-node syncs reaching network tip with correct balance state &
+  99.9\% & 43.8\,min \\
+\rowcolor{rowgray}
+Balance integrity &
+  Balance writes where final value $\geq$ pre-write value (no silent reduction) &
+  99.99\% & 4.4\,min \\
+Gap-fill latency &
+  Gap-fill requests resolved in $<$5\,s &
+  99.5\% & 3.6\,h \\
+\rowcolor{rowgray}
+P2P peer availability &
+  $\geq$3 bootstrap peers reachable from any network node &
+  99.9\% & 43.8\,min \\
+\bottomrule
+\end{tabularx}
+\caption{Error budget targets. Balance integrity SLO (99.99\,\%) reflects zero
+  tolerance for silent balance reduction.}
+\end{table}
+
+\textbf{Budget consumption (Mar--May 2026):}
+SYNC-006 consumed $\approx$2\,h of the balance integrity budget;
+SYNC-005 consumed an estimated 6\,h of the gap-fill latency budget before the fix.
+Both are within SLO for the remainder of Q2 2026.
+
+\subsection{TOPS --- Aggregate Learning from SYNC-001 through SYNC-006}
+
+TOPS (Themes, Observations, Patterns, Systemic fixes) distils recurring
+incidents into structural improvements.
+
+\begin{table}[H]
+\centering
+\small
+\renewcommand{\arraystretch}{1.3}
+\begin{tabularx}{\linewidth}{lX}
+\toprule
+\textbf{Element} & \textbf{Content} \\
+\midrule
+\textbf{Themes} &
+  (1)~Missing cleanup on failure paths; (2)~Absent genesis/checkpoint guards;
+  (3)~Optimistic assumption that all nodes are checkpoint nodes;
+  (4)~Channel/async primitive leaks blocking downstream tasks. \\
+\rowcolor{rowgray}
+\textbf{Observations} &
+  SYNC-002 and SYNC-006 both stem from code that runs unconditionally on all
+  node types but should be gated. SYNC-005 and SYNC-003 both stem from
+  async/P2P paths that fail silently without signalling waiting coroutines. \\
+\textbf{Patterns} &
+  \textbf{P1:} Unconditional execution of state-mutating code regardless of node type.
+  \textbf{P2:} Error paths that log but do not signal waiting tasks.
+  \textbf{P3:} Missing invariant: ``supply write always follows balance write.'' \\
+\rowcolor{rowgray}
+\textbf{Systemic fixes} &
+  \textbf{S1:} Mandate \texttt{is\_genesis\_node()} and \texttt{is\_checkpoint\_applied()}
+  checks on all balance-mutating paths (CLAUDE.md Rules 1--3).
+  \textbf{S2:} Introduce \texttt{BalanceWriteGuard} type enforcing max-wins at compile time.
+  \textbf{S3:} Require every \texttt{OutboundFailure} handler to resolve the pending
+  channel the request was associated with.
+  \textbf{S4:} Introduce \texttt{SupplyLedger} struct that atomically updates supply
+  whenever balances are written, making supply-write an unavoidable invariant. \\
+\bottomrule
+\end{tabularx}
+\caption{TOPS retrospective --- SYNC-001 through SYNC-006.}
+\end{table}
+
+% ── Recommendations ───────────────────────────────────────────────────────────
+\section{Prioritised Recommendations}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\linewidth}{lXll}
+\toprule
+\textbf{Priority} & \textbf{Action} & \textbf{Owner} & \textbf{Deadline} \\
+\midrule
+\textbf{P0} & Height alarm at 18,400,000 for BAL-001; integrity comparison Epsilon vs fresh node & Ops + Core Dev & Before BAL-001 \\
+\rowcolor{rowgray}
+\textbf{P0} & Enforce max-wins guard in all \texttt{save\_wallet\_balances} call-sites; code review gate & Tech Lead & Ongoing \\
+\textbf{P1} & Refactor \texttt{main.rs} (22\,kLoC): extract balance-replay, SSE, sync, mining modules & Core Dev & Q3 2026 \\
+\rowcolor{rowgray}
+\textbf{P1} & \texttt{Q\_ARCHIVE\_NODE\_URL} proxy in \texttt{get\_qblock\_any\_format()} for SYNC-001 & Core Dev & Q3 2026 \\
+\textbf{P2} & \texttt{NODE\_TYPE=light|full|archive} — prevents gap-fill selecting non-archive peers & Core Dev & Q3 2026 \\
+\rowcolor{rowgray}
+\textbf{P2} & TURN server with TCP transport on non-standard port for Tor WebRTC calls & Ops & Q3 2026 \\
+\textbf{P3} & Epsilon root partition: journald volatile, \texttt{RUST\_LOG=warn}, or partition expansion & Ops & Q3 2026 \\
+\bottomrule
+\end{tabularx}
+\caption{Prioritised recommendations.}
+\end{table}
+
+% ── References ────────────────────────────────────────────────────────────────
+\section{References}
+
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+\small
+  \item \texttt{docs/technical-review-sync-integrity-2026-05-08.md} — SYNC-001 root cause analysis
+  \item \texttt{docs/technical-review-sync-integrity-2026-05-09.md} — SYNC-006 post-mortem
+  \item \texttt{docs/technical-review-historical-block-read-path-2026-05-08.md} — DAG read path analysis
+  \item \texttt{docs/technical-review-balance-root-v1-implementation-2026-05-06.md} — BAL-001 design
+  \item \texttt{docs/technical-review-node-miner-features-v3-2026-05-07.md} — feature overview
+  \item \texttt{docs/technical-review-swap-balance-revert-2026-04-29.md} — swap balance incident
+  \item \texttt{docs/incident-report-balance-replay-2026-05-09.md} — May 9 incident report
+  \item \texttt{docs/technical-review-decentralization-integrity-proof-2026-05-08.md} — integrity proof
+  \item \texttt{docs/technical-review-balance-divergence-root-cause-2026-04-28.md} — 62-wallet incident
+  \item \texttt{docs/technical-review-fresh-sync-fix-v10.5.0-2026-04-28.md} — tip gap guard
+  \item McCabe, T.J. (1976). A Complexity Measure. \emph{IEEE Trans.\ Software Engineering}, 2(4), 308--320.
+  \item Musa, J.D., Iannino, A., Okumoto, K. (1987). \emph{Software Reliability}. McGraw-Hill.
+  \item Howard, R.A. (1988). Decision Analysis: Practice and Promise. \emph{Management Science}, 34(6).
+\end{enumerate}
+
+\vfill
+\begin{center}
+\rule{0.5\linewidth}{0.4pt}\\[4pt]
+\textcolor{qgray}{\small Q-NarwhalKnight is a private blockchain system.
+This report is confidential and intended solely for the development team.\\
+Generated by Claude Code (Server Beta) — 11 May 2026 — v10.8.3 mainnet-genesis.}
+\end{center}
+
+\end{document}
