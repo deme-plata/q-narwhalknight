@@ -456,6 +456,18 @@ export default function DexScreen({ isActive }: { isActive?: boolean }) {
   const [limitOrders, setLimitOrders] = useState<any[]>([]);
   const [timeInForce, setTimeInForce] = useState<'gtc' | 'ioc' | 'fok' | 'post_only'>('gtc');
 
+  // 💹 v10.8.5: Spot DEX limit orders (price-triggered AMM swaps)
+  const [spotMode, setSpotMode] = useState<'market' | 'limit'>('market');
+  const [limitAmount, setLimitAmount] = useState('');
+  const [limitTriggerPrice, setLimitTriggerPrice] = useState('');
+  const [limitDirection, setLimitDirection] = useState<'below' | 'above'>('below');
+  const [limitExpiry, setLimitExpiry] = useState<'gtc' | '1h' | '24h' | '7d'>('gtc');
+  const [limitSlippage, setLimitSlippage] = useState('3');
+  const [dexLimitOrders, setDexLimitOrders] = useState<any[]>([]);
+  const [isPlacingLimitOrder, setIsPlacingLimitOrder] = useState(false);
+  const [limitOrderMsg, setLimitOrderMsg] = useState<{type: 'error'|'success', text: string} | null>(null);
+  const [showLimitOrdersPanel, setShowLimitOrdersPanel] = useState(false);
+
   // 📝 v2.7.8-beta: Position Editing State
   const [editingPosition, setEditingPosition] = useState<any | null>(null);
   const [editMode, setEditMode] = useState<'addMargin' | 'removeMargin' | 'adjustLeverage' | null>(null);
@@ -786,6 +798,83 @@ export default function DexScreen({ isActive }: { isActive?: boolean }) {
     }
   };
 
+  // 💹 Fetch user's DEX (spot) limit orders
+  const fetchDexLimitOrders = useCallback(async () => {
+    const walletAddr = localStorage.getItem('walletAddress');
+    if (!walletAddr) return;
+    try {
+      const resp = await fetch(`/api/v1/dex/limit-orders/${walletAddr}`);
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data.success) setDexLimitOrders(data.orders || []);
+      }
+    } catch { /* silent */ }
+  }, []);
+
+  // 💹 Place a spot DEX limit order
+  const placeDexLimitOrder = async () => {
+    const walletAddr = localStorage.getItem('walletAddress');
+    if (!walletAddr || !limitAmount || !limitTriggerPrice) return;
+    setIsPlacingLimitOrder(true);
+    setLimitOrderMsg(null);
+    try {
+      const intPart = BigInt(Math.floor(Math.abs(parseFloat(limitAmount))));
+      const fracPart = BigInt(Math.round((Math.abs(parseFloat(limitAmount)) % 1) * 1e6));
+      const amountU128 = (intPart * BigInt('1000000000000000000000000') + fracPart * BigInt('1000000000000000000')).toString();
+      const expiryMs =
+        limitExpiry === '1h'  ? Date.now() + 3_600_000 :
+        limitExpiry === '24h' ? Date.now() + 86_400_000 :
+        limitExpiry === '7d'  ? Date.now() + 604_800_000 : null;
+      const resp = await fetch('/api/v1/dex/limit-orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          wallet_address: walletAddr,
+          from_token: swapFrom,
+          to_token: swapTo,
+          amount: amountU128,
+          trigger_price: parseFloat(limitTriggerPrice),
+          price_token: swapFrom,
+          direction: limitDirection,
+          max_slippage: parseFloat(limitSlippage) / 100,
+          expiry: expiryMs,
+        }),
+      });
+      const data = await resp.json();
+      if (data.success) {
+        setLimitOrderMsg({ type: 'success', text: `Order placed — ID …${(data.order_id || '').slice(-8)}` });
+        setLimitAmount('');
+        setLimitTriggerPrice('');
+        setShowLimitOrdersPanel(true);
+        fetchDexLimitOrders();
+      } else {
+        setLimitOrderMsg({ type: 'error', text: data.message || 'Failed to place order' });
+      }
+    } catch {
+      setLimitOrderMsg({ type: 'error', text: 'Network error — please try again' });
+    } finally {
+      setIsPlacingLimitOrder(false);
+    }
+  };
+
+  // 💹 Cancel a spot DEX limit order (best-effort; server validates ownership)
+  const cancelDexLimitOrder = async (orderId: string) => {
+    const walletAddr = localStorage.getItem('walletAddress');
+    if (!walletAddr) return;
+    const tsMs = Date.now();
+    try {
+      const resp = await fetch(`/api/v1/dex/limit-orders/${walletAddr}/${orderId}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ timestamp_ms: tsMs, signature: '' }),
+      });
+      const data = await resp.json();
+      if (data.success) {
+        setDexLimitOrders(prev => prev.filter(o => o.id !== orderId));
+      }
+    } catch { /* silent */ }
+  };
+
   // Load perp data when switching to perpetual mode
   useEffect(() => {
     if (dexMode === 'perpetual') {
@@ -806,6 +895,13 @@ export default function DexScreen({ isActive }: { isActive?: boolean }) {
       };
     }
   }, [dexMode, fetchPerpMarket, fetchPerpPositions, fetchOrderBook, fetchLimitOrders]);
+
+  // Load spot limit orders on mount and every 30s
+  useEffect(() => {
+    fetchDexLimitOrders();
+    const iv = setInterval(fetchDexLimitOrders, 30_000);
+    return () => clearInterval(iv);
+  }, [fetchDexLimitOrders]);
 
   // v8.2.8: Fetch XLIST crowdfunding campaigns and inject as special DEX tokens
   useEffect(() => {
@@ -4302,7 +4398,325 @@ export default function DexScreen({ isActive }: { isActive?: boolean }) {
                   </div>
                 </div>
 
-              <div className="space-y-4">
+              {/* ── Market / Limit toggle ── */}
+              <div className="flex gap-1 p-1 bg-white/5 rounded-xl">
+                <button
+                  onClick={() => setSpotMode('market')}
+                  className={`flex-1 py-2 rounded-lg text-sm font-semibold transition-all ${
+                    spotMode === 'market'
+                      ? 'bg-gradient-to-r from-quantum-cyan to-quantum-purple text-black'
+                      : 'text-gray-400 hover:text-white'
+                  }`}
+                >
+                  Market
+                </button>
+                <button
+                  onClick={() => setSpotMode('limit')}
+                  className={`flex-1 py-2 rounded-lg text-sm font-semibold transition-all ${
+                    spotMode === 'limit'
+                      ? 'bg-gradient-to-r from-amber-400 to-orange-500 text-black'
+                      : 'text-gray-400 hover:text-white'
+                  }`}
+                >
+                  Limit
+                </button>
+              </div>
+
+              {/* ══════ LIMIT ORDER FORM ══════ */}
+              {spotMode === 'limit' && (
+                <div className="space-y-4">
+                  {/* Token pair — reuses swapFrom / swapTo so the selector works */}
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1">
+                      <div className="text-xs text-gray-500 mb-1">Sell</div>
+                      <button
+                        onClick={() => setIsFromTokenSelectorOpen(true)}
+                        className="w-full py-3 px-4 rounded-xl bg-white/5 border border-white/10 text-white font-bold flex items-center justify-center gap-2 hover:border-quantum-cyan/30 transition-colors"
+                      >
+                        <TokenIcon symbol={swapFrom} icon={findToken(swapFrom)?.icon} logoUrl={findToken(swapFrom)?.logoUrl} size={20} />
+                        <span>{swapFrom}</span>
+                        <span className="text-xs opacity-50">▼</span>
+                      </button>
+                      <div className="text-xs text-gray-600 mt-1 text-right">
+                        Balance: {(findToken(swapFrom)?.balance ?? 0).toFixed(4)}
+                      </div>
+                    </div>
+                    <div className="text-gray-600 mt-4 text-lg">→</div>
+                    <div className="flex-1">
+                      <div className="text-xs text-gray-500 mb-1">Buy</div>
+                      <button
+                        onClick={() => setIsToTokenSelectorOpen(true)}
+                        className="w-full py-3 px-4 rounded-xl bg-white/5 border border-white/10 text-white font-bold flex items-center justify-center gap-2 hover:border-quantum-cyan/30 transition-colors"
+                      >
+                        <TokenIcon symbol={swapTo} icon={findToken(swapTo)?.icon} logoUrl={findToken(swapTo)?.logoUrl} size={20} />
+                        <span>{swapTo}</span>
+                        <span className="text-xs opacity-50">▼</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Amount to spend */}
+                  <div>
+                    <label className="text-sm text-gray-400">Amount ({swapFrom})</label>
+                    <div className="relative mt-1">
+                      <input
+                        type="number"
+                        value={limitAmount}
+                        onChange={e => setLimitAmount(e.target.value)}
+                        placeholder="0.0"
+                        className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 pr-16 text-white text-lg focus:outline-none focus:border-amber-400/50 transition-colors"
+                      />
+                      <button
+                        onClick={() => {
+                          const t = findToken(swapFrom);
+                          if (t) setLimitAmount(t.balance.toString());
+                        }}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-amber-400 hover:text-amber-300 font-bold"
+                      >
+                        MAX
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Order direction */}
+                  <div>
+                    <label className="text-sm text-gray-400 mb-1 block">Trigger Condition</label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        onClick={() => setLimitDirection('below')}
+                        className={`py-2.5 rounded-xl text-sm font-semibold border transition-all ${
+                          limitDirection === 'below'
+                            ? 'bg-quantum-green/20 border-quantum-green/50 text-quantum-green'
+                            : 'bg-white/5 border-white/10 text-gray-400 hover:text-white'
+                        }`}
+                      >
+                        Buy when price ↓ below
+                      </button>
+                      <button
+                        onClick={() => setLimitDirection('above')}
+                        className={`py-2.5 rounded-xl text-sm font-semibold border transition-all ${
+                          limitDirection === 'above'
+                            ? 'bg-red-500/20 border-red-500/50 text-red-400'
+                            : 'bg-white/5 border-white/10 text-gray-400 hover:text-white'
+                        }`}
+                      >
+                        Sell when price ↑ above
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Trigger price */}
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-sm text-gray-400">Trigger Price (USD)</label>
+                      {(() => {
+                        const t = findToken(swapFrom);
+                        const p = t?.price;
+                        return p && p > 0 ? (
+                          <button
+                            onClick={() => setLimitTriggerPrice(p.toFixed(6))}
+                            className="text-xs text-amber-400/70 hover:text-amber-400 transition-colors"
+                          >
+                            Now: ${p < 0.001 ? p.toExponential(3) : p.toFixed(6)} (use)
+                          </button>
+                        ) : null;
+                      })()}
+                    </div>
+                    <input
+                      type="number"
+                      value={limitTriggerPrice}
+                      onChange={e => setLimitTriggerPrice(e.target.value)}
+                      placeholder="0.000000"
+                      className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white text-lg focus:outline-none focus:border-amber-400/50 transition-colors"
+                    />
+                  </div>
+
+                  {/* Slippage + Expiry */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-xs text-gray-500 mb-1 block">Max Slippage</label>
+                      <div className="flex gap-1">
+                        {['1', '3', '5'].map(v => (
+                          <button
+                            key={v}
+                            onClick={() => setLimitSlippage(v)}
+                            className={`flex-1 py-1.5 rounded-lg text-xs font-bold border transition-all ${
+                              limitSlippage === v
+                                ? 'bg-amber-400/20 border-amber-400/40 text-amber-300'
+                                : 'bg-white/5 border-white/10 text-gray-400 hover:text-white'
+                            }`}
+                          >
+                            {v}%
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-500 mb-1 block">Expiry</label>
+                      <select
+                        value={limitExpiry}
+                        onChange={e => setLimitExpiry(e.target.value as any)}
+                        className="w-full bg-gray-900 border border-white/10 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-amber-400/50"
+                      >
+                        <option value="gtc">GTC (no expiry)</option>
+                        <option value="1h">1 Hour</option>
+                        <option value="24h">24 Hours</option>
+                        <option value="7d">7 Days</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Order summary */}
+                  {limitAmount && limitTriggerPrice && (
+                    <div className="p-3 rounded-xl bg-amber-400/5 border border-amber-400/20 text-xs text-gray-300 space-y-1">
+                      <div className="flex justify-between">
+                        <span className="text-gray-500">You spend</span>
+                        <span>{parseFloat(limitAmount).toFixed(4)} {swapFrom}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-500">Trigger</span>
+                        <span className={limitDirection === 'below' ? 'text-quantum-green' : 'text-red-400'}>
+                          {swapFrom} {limitDirection === 'below' ? '≤' : '≥'} ${parseFloat(limitTriggerPrice).toFixed(6)}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-500">Slippage</span>
+                        <span>{limitSlippage}%</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-500">Expiry</span>
+                        <span>{limitExpiry === 'gtc' ? 'Good Till Cancelled' : limitExpiry}</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Feedback */}
+                  {limitOrderMsg && (
+                    <div className={`p-3 rounded-xl text-sm font-medium ${
+                      limitOrderMsg.type === 'success'
+                        ? 'bg-quantum-green/10 border border-quantum-green/30 text-quantum-green'
+                        : 'bg-red-500/10 border border-red-500/30 text-red-400'
+                    }`}>
+                      {limitOrderMsg.text}
+                    </div>
+                  )}
+
+                  {/* Place Order button */}
+                  <button
+                    onClick={placeDexLimitOrder}
+                    disabled={isPlacingLimitOrder || !limitAmount || !limitTriggerPrice || parseFloat(limitAmount) <= 0 || parseFloat(limitTriggerPrice) <= 0}
+                    className={`w-full py-4 rounded-xl font-bold text-black transition-all ${
+                      isPlacingLimitOrder || !limitAmount || !limitTriggerPrice
+                        ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+                        : 'bg-gradient-to-r from-amber-400 to-orange-500 hover:shadow-lg hover:shadow-amber-400/30'
+                    }`}
+                  >
+                    {isPlacingLimitOrder ? (
+                      <span className="flex items-center justify-center gap-2">
+                        <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                        </svg>
+                        Placing Order…
+                      </span>
+                    ) : (
+                      `Place ${limitDirection === 'below' ? 'Buy' : 'Sell'} Limit Order`
+                    )}
+                  </button>
+
+                  {/* My Limit Orders toggle */}
+                  <button
+                    onClick={() => { setShowLimitOrdersPanel(v => !v); fetchDexLimitOrders(); }}
+                    className="w-full py-2 bg-gray-800/50 border border-amber-400/20 rounded-xl text-sm text-amber-400/70 hover:text-amber-400 hover:bg-gray-700/50 transition-all flex items-center justify-center gap-2"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                    </svg>
+                    My Limit Orders ({dexLimitOrders.filter(o => o.status === 'open').length} open)
+                    <svg className={`w-4 h-4 transition-transform ${showLimitOrdersPanel ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </button>
+
+                  {/* Limit Orders Panel */}
+                  {showLimitOrdersPanel && (
+                    <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+                      {dexLimitOrders.length === 0 ? (
+                        <div className="text-center text-gray-600 text-sm py-4">No limit orders yet</div>
+                      ) : (
+                        dexLimitOrders
+                          .slice()
+                          .sort((a, b) => b.created_at - a.created_at)
+                          .map((order: any) => (
+                            <div
+                              key={order.id}
+                              className={`p-3 rounded-xl border text-xs ${
+                                order.status === 'open'
+                                  ? 'bg-amber-400/5 border-amber-400/20'
+                                  : order.status === 'filled'
+                                  ? 'bg-quantum-green/5 border-quantum-green/20'
+                                  : 'bg-gray-800/40 border-gray-700/30'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between mb-1.5">
+                                <div className="flex items-center gap-2">
+                                  <span className={`px-1.5 py-0.5 rounded font-bold ${
+                                    order.status === 'open' ? 'bg-amber-400/20 text-amber-300' :
+                                    order.status === 'filled' ? 'bg-quantum-green/20 text-quantum-green' :
+                                    order.status === 'processing' ? 'bg-blue-400/20 text-blue-300' :
+                                    'bg-gray-700 text-gray-500'
+                                  }`}>
+                                    {order.status?.toUpperCase()}
+                                  </span>
+                                  <span className="text-gray-300 font-mono">
+                                    {order.from_token} → {order.to_token}
+                                  </span>
+                                </div>
+                                {order.status === 'open' && (
+                                  <button
+                                    onClick={() => cancelDexLimitOrder(order.id)}
+                                    className="text-gray-600 hover:text-red-400 transition-colors text-xs px-2 py-0.5 rounded border border-gray-700/50 hover:border-red-400/30"
+                                  >
+                                    Cancel
+                                  </button>
+                                )}
+                              </div>
+                              <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-gray-500">
+                                <span>Amount</span>
+                                <span className="text-gray-300 font-mono text-right">
+                                  {(Number(order.amount) / 1e24).toFixed(4)} {order.from_token}
+                                </span>
+                                <span>Trigger</span>
+                                <span className={`font-mono text-right ${order.direction === 'below' ? 'text-quantum-green' : 'text-red-400'}`}>
+                                  {order.direction === 'below' ? '≤' : '≥'} ${Number(order.trigger_price).toFixed(6)}
+                                </span>
+                                {order.status === 'filled' && order.fill_price && (
+                                  <>
+                                    <span>Filled at</span>
+                                    <span className="text-quantum-green font-mono text-right">${Number(order.fill_price).toFixed(6)}</span>
+                                  </>
+                                )}
+                                {order.status === 'filled' && order.amount_out > 0 && (
+                                  <>
+                                    <span>Received</span>
+                                    <span className="text-quantum-green font-mono text-right">
+                                      {(Number(order.amount_out) / 1e24).toFixed(4)} {order.to_token}
+                                    </span>
+                                  </>
+                                )}
+                                <span>Created</span>
+                                <span className="text-right">{new Date(order.created_at).toLocaleString()}</span>
+                              </div>
+                            </div>
+                          ))
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ══════ MARKET SWAP FORM ══════ */}
+              <div className={`space-y-4${spotMode === 'limit' ? ' hidden' : ''}`}>
               {/* From Token */}
               <div className="space-y-2">
                 <label className="text-sm text-gray-400">From</label>
@@ -4462,6 +4876,17 @@ export default function DexScreen({ isActive }: { isActive?: boolean }) {
                       const formatTokenForBackend = (tokenId: string): string => {
                         if (tokenId === 'native-qug') return 'QUG';
                         if (tokenId === 'qugusd-stable') return 'QUGUSD';
+                        // Hex token address (64 chars = 32 bytes): decode ASCII symbol
+                        // e.g. "7742544300...00" → "wBTC"
+                        if (/^[0-9a-fA-F]{64}$/.test(tokenId)) {
+                          const trimmed = tokenId.replace(/00+$/, '');
+                          let sym = '';
+                          for (let i = 0; i + 1 < trimmed.length; i += 2) {
+                            const byte = parseInt(trimmed.substring(i, i + 2), 16);
+                            if (byte >= 32 && byte < 127) sym += String.fromCharCode(byte);
+                          }
+                          if (sym.length > 0) return sym;
+                        }
                         return tokenId;
                       };
 
@@ -4534,6 +4959,17 @@ export default function DexScreen({ isActive }: { isActive?: boolean }) {
                       const formatTokenForBackend = (tokenId: string): string => {
                         if (tokenId === 'native-qug') return 'QUG';
                         if (tokenId === 'qugusd-stable') return 'QUGUSD';
+                        // Hex token address (64 chars = 32 bytes): decode ASCII symbol
+                        // e.g. "7742544300...00" → "wBTC"
+                        if (/^[0-9a-fA-F]{64}$/.test(tokenId)) {
+                          const trimmed = tokenId.replace(/00+$/, '');
+                          let sym = '';
+                          for (let i = 0; i + 1 < trimmed.length; i += 2) {
+                            const byte = parseInt(trimmed.substring(i, i + 2), 16);
+                            if (byte >= 32 && byte < 127) sym += String.fromCharCode(byte);
+                          }
+                          if (sym.length > 0) return sym;
+                        }
                         return tokenId;
                       };
 
@@ -4655,6 +5091,15 @@ export default function DexScreen({ isActive }: { isActive?: boolean }) {
                   const formatTokenForBackend = (tokenId: string): string => {
                     if (tokenId === 'native-qug') return 'QUG';
                     if (tokenId === 'qugusd-stable') return 'QUGUSD';
+                    if (/^[0-9a-fA-F]{64}$/.test(tokenId)) {
+                      const trimmed = tokenId.replace(/00+$/, '');
+                      let sym = '';
+                      for (let i = 0; i + 1 < trimmed.length; i += 2) {
+                        const byte = parseInt(trimmed.substring(i, i + 2), 16);
+                        if (byte >= 32 && byte < 127) sym += String.fromCharCode(byte);
+                      }
+                      if (sym.length > 0) return sym;
+                    }
                     return tokenId;
                   };
                   const fromFormatted = formatTokenForBackend(fromToken.id);
@@ -4722,6 +5167,15 @@ export default function DexScreen({ isActive }: { isActive?: boolean }) {
                   const formatTokenForBackend = (tokenId: string): string => {
                     if (tokenId === 'native-qug') return 'QUG';
                     if (tokenId === 'qugusd-stable') return 'QUGUSD';
+                    if (/^[0-9a-fA-F]{64}$/.test(tokenId)) {
+                      const trimmed = tokenId.replace(/00+$/, '');
+                      let sym = '';
+                      for (let i = 0; i + 1 < trimmed.length; i += 2) {
+                        const byte = parseInt(trimmed.substring(i, i + 2), 16);
+                        if (byte >= 32 && byte < 127) sym += String.fromCharCode(byte);
+                      }
+                      if (sym.length > 0) return sym;
+                    }
                     return tokenId;
                   };
                   const fromFormatted = formatTokenForBackend(fromToken.id);
@@ -5010,13 +5464,20 @@ export default function DexScreen({ isActive }: { isActive?: boolean }) {
 
                   // Helper function to format token ID for backend
                   const formatTokenForBackend = (tokenId: string): string => {
-                    // Handle special cases for native tokens
                     if (tokenId === 'native-qug') return 'QUG';
                     if (tokenId === 'qugusd-stable') return 'QUGUSD';
-
-                    // Custom tokens: Backend expects addresses WITH "qnk" prefix
-                    // DO NOT strip the prefix - backend parse_wallet_address() requires it
-                    // Return as-is for all other cases (including custom token addresses)
+                    // Bridge wrapped tokens store their symbol as ASCII hex (32-byte zero-padded)
+                    // e.g. "7742544300...00" → "wBTC". Decode before sending to backend.
+                    if (/^[0-9a-fA-F]{64}$/.test(tokenId)) {
+                      const trimmed = tokenId.replace(/00+$/, '');
+                      let sym = '';
+                      for (let i = 0; i + 1 < trimmed.length; i += 2) {
+                        const byte = parseInt(trimmed.substring(i, i + 2), 16);
+                        if (byte >= 32 && byte < 127) sym += String.fromCharCode(byte);
+                      }
+                      if (sym.length > 0) return sym;
+                    }
+                    // Custom contract tokens: backend expects address as-is (with qnk prefix)
                     return tokenId;
                   };
 

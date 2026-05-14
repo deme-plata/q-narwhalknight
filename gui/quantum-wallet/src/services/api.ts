@@ -2668,6 +2668,48 @@ class QNarwhalKnightAPI {
     });
   }
 
+  // ═══ Bitcoin LP-intent API (v10.9.21) ═══
+
+  async createLpIntent(params: {
+    btc_amount_sats: number;
+    qug_amount: string;
+    pool_id?: string;
+  }): Promise<ApiResponse<{
+    intent_id: string;
+    btc_address: string;
+    qr_uri: string;
+    btc_amount_sats: number;
+    qug_amount_escrowed: string;
+    pool_id: string;
+    expires_at: number;
+    status_url: string;
+  }>> {
+    return this.authenticatedRequest<any>('/v1/bitcoin/lp/intent', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+  }
+
+  async listLpIntents(): Promise<ApiResponse<{ intents: any[]; total: number }>> {
+    return this.authenticatedRequest<any>('/v1/bitcoin/lp/intents');
+  }
+
+  async getLpIntent(intentId: string): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>(`/v1/bitcoin/lp/intent/${intentId}`);
+  }
+
+  async cancelLpIntent(intentId: string): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>(`/v1/bitcoin/lp/intent/${intentId}/cancel`, {
+      method: 'POST',
+    });
+  }
+
+  async finalizeLpIntent(intentId: string): Promise<ApiResponse<any>> {
+    return this.authenticatedRequest<any>(`/v1/bitcoin/lp/intent/${intentId}/finalize`, {
+      method: 'POST',
+    });
+  }
+
   // ═══ Zcash Shielded Bridge API (v7.2.2) ═══
 
   async getZcashBridgeStatus(): Promise<ApiResponse<{

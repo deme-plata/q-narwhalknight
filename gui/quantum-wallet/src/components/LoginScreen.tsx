@@ -1704,6 +1704,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
                   {[
                     { cmd: '"Create a wallet"', desc: 'Generate address + recovery phrase', icon: '🔐' },
                     { cmd: '"Start mining"', desc: 'Download miner & begin earning QUG', icon: '⛏️' },
+                    { cmd: '"Create a node"', desc: 'Download & run a full network node', icon: '🖥️' },
                     { cmd: '"What\'s my balance?"', desc: 'Check any wallet instantly', icon: '💰' },
                     { cmd: '"Send 10 QUG to qnk..."', desc: 'Transfer funds with one sentence', icon: '🚀' },
                     { cmd: '"Network status"', desc: 'Height, peers, hashrate', icon: '📡' },
@@ -1753,7 +1754,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
                 {[
                   { step: '1', label: 'Paste in terminal', color: 'violet' },
                   { step: '2', label: 'Open AI assistant', color: 'purple' },
-                  { step: '3', label: 'Say "create a wallet"', color: 'fuchsia' },
+                  { step: '3', label: 'Say "create a wallet" or "create a node"', color: 'fuchsia' },
                 ].map((s, i) => (
                   <div key={i} className="flex-1 text-center">
                     <div className={`w-8 h-8 rounded-full bg-${s.color}-500/20 border border-${s.color}-400/30 flex items-center justify-center mx-auto mb-1`}>

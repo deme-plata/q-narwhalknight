@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   X, ArrowRightLeft, Clock, CheckCircle, AlertCircle, Copy,
   Loader2, Bitcoin, Send, Download, RefreshCw, ChevronRight,
-  Shield, Zap, TrendingUp
+  Shield, Zap, TrendingUp, Sparkles, Droplet, XCircle
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { qnkAPI } from '../services/api';
@@ -14,8 +14,20 @@ interface BitcoinSwapModalProps {
   walletAddress: string;
 }
 
-type Tab = 'wallet' | 'receive' | 'send' | 'swap' | 'history';
+type Tab = 'wallet' | 'receive' | 'send' | 'swap' | 'lp' | 'history';
 type SwapDirection = 'buy_btc' | 'sell_btc';
+
+interface LpIntent {
+  intent_id: string;
+  pool_id: string;
+  btc_amount_sats: number;
+  btc_address: string;
+  qug_amount_escrowed: string;
+  status: any; // { kind: 'awaiting_btc' | 'btc_detected' | 'ready_to_finalize' | 'completed' | 'cancelled' | 'expired' | 'failed', ... }
+  created_at: number;
+  updated_at: number;
+  expires_at: number;
+}
 
 interface DepositAddress {
   address: string;
@@ -113,6 +125,13 @@ const BitcoinSwapModal = ({ isOpen, onClose, walletAddress }: BitcoinSwapModalPr
   const [btcUsd, setBtcUsd] = useState(97000);
   const [qugUsd, setQugUsd] = useState(3000);
 
+  // Bridge LP state
+  const [lpBtcAmount, setLpBtcAmount] = useState('0.01');
+  const [lpIntents, setLpIntents] = useState<LpIntent[]>([]);
+  const [lpCreating, setLpCreating] = useState(false);
+  const [lpResult, setLpResult] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [poolReserve, setPoolReserve] = useState<{ qug: number; wbtc: number; lp_supply: number } | null>(null);
+
   // Copy state
   const [copied, setCopied] = useState<string | null>(null);
 
@@ -125,11 +144,15 @@ const BitcoinSwapModal = ({ isOpen, onClose, walletAddress }: BitcoinSwapModalPr
   const fetchAll = useCallback(async () => {
     try {
       setLoadingBalance(true);
-      const [statusRes, balRes, swapRes, depRes] = await Promise.allSettled([
+      const [statusRes, balRes, swapRes, depRes, lpRes, poolRes] = await Promise.allSettled([
         qnkAPI.getBitcoinBridgeStatus(),
         qnkAPI.getBitcoinBalance(),
         qnkAPI.listSwaps(),
         qnkAPI.listDeposits?.() ?? Promise.resolve({ success: false }),
+        qnkAPI.listLpIntents?.() ?? Promise.resolve({ success: false }),
+        fetch('/api/v1/defi/dex/pools')
+          .then(r => r.ok ? r.json() : null)
+          .catch(() => null),
       ]);
       if (statusRes.status === 'fulfilled' && statusRes.value.success)
         setBridgeOnline(statusRes.value.data?.bridge_enabled ?? false);
@@ -139,6 +162,26 @@ const BitcoinSwapModal = ({ isOpen, onClose, walletAddress }: BitcoinSwapModalPr
         setSwaps(swapRes.value.data?.swaps ?? []);
       if (depRes.status === 'fulfilled' && (depRes.value as any).success)
         setDeposits((depRes.value as any).data?.deposits ?? []);
+      if (lpRes.status === 'fulfilled' && (lpRes.value as any).success)
+        setLpIntents((lpRes.value as any).data?.intents ?? []);
+      if (poolRes.status === 'fulfilled' && poolRes.value) {
+        const data = (poolRes.value as any)?.data ?? poolRes.value;
+        const pools: any[] = Array.isArray(data) ? data : data?.pools ?? [];
+        const wbtcPool = pools.find((p: any) =>
+          (p?.pool_id ?? '').toString().includes('qug-wbtc-bridge') ||
+          ((p?.token0 ?? '').toString().toUpperCase() === 'QUG' &&
+           (p?.token1 ?? '').toString().toUpperCase() === 'WBTC')
+        );
+        if (wbtcPool) {
+          // Reserves are stored in 24-decimal form.
+          const r0 = Number(wbtcPool.reserve0 ?? 0) / 1e24;
+          const r1 = Number(wbtcPool.reserve1 ?? 0) / 1e24;
+          const lp = Number(wbtcPool.lp_token_supply ?? 0) / 1e24;
+          setPoolReserve({ qug: r0, wbtc: r1, lp_supply: lp });
+        } else {
+          setPoolReserve({ qug: 0, wbtc: 0, lp_supply: 0 });
+        }
+      }
     } catch {/* silent */} finally {
       setLoadingBalance(false);
     }
@@ -207,6 +250,72 @@ const BitcoinSwapModal = ({ isOpen, onClose, walletAddress }: BitcoinSwapModalPr
     }
   };
 
+  // ── LP intent (one-click bridge LP) ──────────────────────────
+  const lpBtcSats = Math.max(0, Math.round(parseFloat(lpBtcAmount || '0') * 1e8));
+  // Suggested QUG = BTC_value_usd / qug_price_usd. The pool will use the user-submitted
+  // QUG amount (not this suggestion) so they can over- or under-pair if they want.
+  const suggestedQugForLp = qugUsd > 0 ? (lpBtcSats / 1e8) * (btcUsd / qugUsd) : 0;
+  const handleCreateLpIntent = async () => {
+    setLpCreating(true);
+    setLpResult(null);
+    try {
+      if (lpBtcSats < 10000) {
+        setLpResult({ ok: false, msg: 'Minimum LP deposit is 0.0001 BTC (10,000 sats).' });
+        return;
+      }
+      if (suggestedQugForLp <= 0) {
+        setLpResult({ ok: false, msg: 'Oracle prices not available yet — retry in a moment.' });
+        return;
+      }
+      // qug_amount is in 24-decimal base units.
+      const qugBase = BigInt(Math.round(suggestedQugForLp * 1e8)) * BigInt(1e16);
+      const res = await qnkAPI.createLpIntent({
+        btc_amount_sats: lpBtcSats,
+        qug_amount: qugBase.toString(),
+      });
+      if (res.success && res.data) {
+        setLpResult({
+          ok: true,
+          msg: `LP intent created. Send ${(lpBtcSats / 1e8).toFixed(8)} BTC to ${res.data.btc_address.slice(0, 14)}…`,
+        });
+        fetchAll();
+      } else {
+        setLpResult({ ok: false, msg: res.error || 'Failed to create LP intent.' });
+      }
+    } catch (e: any) {
+      setLpResult({ ok: false, msg: e.message || 'Network error.' });
+    } finally {
+      setLpCreating(false);
+    }
+  };
+  const handleFinalizeLp = async (id: string) => {
+    const res = await qnkAPI.finalizeLpIntent(id);
+    setLpResult(res.success
+      ? { ok: true, msg: 'LP finalized — check your wallet for LP tokens.' }
+      : { ok: false, msg: res.error || 'Finalize failed.' });
+    fetchAll();
+  };
+  const handleCancelLp = async (id: string) => {
+    const res = await qnkAPI.cancelLpIntent(id);
+    setLpResult(res.success
+      ? { ok: true, msg: 'LP intent cancelled, QUG refunded.' }
+      : { ok: false, msg: res.error || 'Cancel failed.' });
+    fetchAll();
+  };
+  const lpStatusLabel = (s: any): string => {
+    if (!s) return 'unknown';
+    if (typeof s === 'string') return s;
+    const k = s.kind || s;
+    if (k === 'btc_detected' && typeof s.confirmations === 'number')
+      return `seen · ${s.confirmations}/6 confs`;
+    if (k === 'ready_to_finalize') return 'ready to finalize';
+    if (k === 'completed') return 'completed';
+    if (k === 'cancelled') return 'cancelled';
+    if (k === 'expired') return 'expired';
+    if (k === 'failed') return `failed: ${s.reason ?? '?'}`;
+    return (k || 'awaiting_btc').replace(/_/g, ' ');
+  };
+
   // ── Swap ─────────────────────────────────────────────────────
   const handleSwap = async () => {
     setSwapping(true);
@@ -254,6 +363,7 @@ const BitcoinSwapModal = ({ isOpen, onClose, walletAddress }: BitcoinSwapModalPr
     { id: 'receive', label: 'Receive', icon: <Download size={13} /> },
     { id: 'send',    label: 'Send',    icon: <Send size={13} /> },
     { id: 'swap',    label: 'Swap',    icon: <ArrowRightLeft size={13} /> },
+    { id: 'lp',      label: 'Bridge LP', icon: <Droplet size={13} /> },
     { id: 'history', label: `History (${swaps.length + deposits.length})`, icon: <Clock size={13} /> },
   ];
 
@@ -683,6 +793,179 @@ const BitcoinSwapModal = ({ isOpen, onClose, walletAddress }: BitcoinSwapModalPr
                   </button>
 
                   <div className="text-[10px] text-gray-600 text-center">HTLC · Trustless · Non-custodial · Auto-refund on timeout</div>
+                </motion.div>
+              )}
+
+              {/* ── BRIDGE LP TAB ── */}
+              {tab === 'lp' && (
+                <motion.div key="lp" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="space-y-4">
+                  {/* Pool status header */}
+                  <div className="rounded-xl p-4"
+                    style={{ background: 'linear-gradient(135deg, rgba(34,197,94,0.10), rgba(20,184,166,0.06))', border: '1px solid rgba(34,197,94,0.25)' }}>
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center gap-1.5">
+                        <Droplet size={14} className="text-emerald-300" />
+                        <span className="text-xs font-semibold text-emerald-200 uppercase tracking-wider">QUG / wBTC Pool</span>
+                      </div>
+                      {poolReserve && poolReserve.lp_supply === 0 && (
+                        <span className="text-[10px] text-amber-300 bg-amber-500/15 border border-amber-500/30 px-2 py-0.5 rounded-full">
+                          Empty — awaiting first LP
+                        </span>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-2 gap-3 mt-2">
+                      <div>
+                        <div className="text-[10px] text-gray-500 uppercase">wBTC reserve</div>
+                        <div className="text-base font-mono text-white">
+                          {poolReserve ? poolReserve.wbtc.toFixed(8) : '…'} <span className="text-xs text-gray-500">wBTC</span>
+                        </div>
+                        <div className="text-[10px] text-gray-600">
+                          ≈ ${poolReserve ? (poolReserve.wbtc * btcUsd).toLocaleString(undefined, { maximumFractionDigits: 0 }) : '—'}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] text-gray-500 uppercase">QUG reserve</div>
+                        <div className="text-base font-mono text-white">
+                          {poolReserve ? poolReserve.qug.toLocaleString(undefined, { maximumFractionDigits: 2 }) : '…'} <span className="text-xs text-gray-500">QUG</span>
+                        </div>
+                        <div className="text-[10px] text-gray-600">
+                          ≈ ${poolReserve ? (poolReserve.qug * qugUsd).toLocaleString(undefined, { maximumFractionDigits: 0 }) : '—'}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="text-[10px] text-emerald-300/70 mt-3 leading-snug">
+                      <Shield size={11} className="inline mr-1 -mt-0.5" />
+                      Liquidity here is 100% backed: every wBTC token in this pool corresponds to real BTC held by the bridge wallet on Delta.
+                    </div>
+                  </div>
+
+                  {/* One-click LP wizard */}
+                  <div className="rounded-xl p-4"
+                    style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)' }}>
+                    <div className="flex items-center gap-1.5 mb-2">
+                      <Sparkles size={13} className="text-amber-300" />
+                      <span className="text-xs font-semibold text-amber-200 uppercase tracking-wider">Become an LP — one click</span>
+                    </div>
+                    <p className="text-[11px] text-gray-400 leading-snug mb-3">
+                      Pick how much BTC you'd like to deposit. We escrow the matching QUG immediately,
+                      give you a Bitcoin deposit address, and once 6 confirmations land we auto-pair
+                      both sides into the pool and mint LP tokens to your wallet. You earn 0.3% of every
+                      trade against this pool.
+                    </p>
+
+                    {/* BTC amount input */}
+                    <div className="rounded-lg p-3 mb-2" style={{ background: 'rgba(0,0,0,0.25)', border: '1px solid rgba(255,255,255,0.06)' }}>
+                      <div className="flex justify-between text-[10px] text-gray-500 mb-1 uppercase tracking-wider">
+                        <span>You deposit (BTC)</span>
+                        <span>≈ ${(lpBtcSats / 1e8 * btcUsd).toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
+                      </div>
+                      <input
+                        type="number"
+                        step="0.0001"
+                        min="0.0001"
+                        max="1"
+                        value={lpBtcAmount}
+                        onChange={e => setLpBtcAmount(e.target.value)}
+                        placeholder="0.01"
+                        className="w-full bg-transparent text-xl font-mono text-white outline-none placeholder-gray-700"
+                      />
+                    </div>
+
+                    {/* Auto-matched QUG */}
+                    <div className="rounded-lg p-3 mb-3" style={{ background: 'rgba(34,197,94,0.05)', border: '1px solid rgba(34,197,94,0.15)' }}>
+                      <div className="flex justify-between text-[10px] text-emerald-300/70 mb-0.5 uppercase tracking-wider">
+                        <span>We pair with</span>
+                        <span>1 BTC = {qugUsd > 0 ? (btcUsd / qugUsd).toFixed(2) : '—'} QUG</span>
+                      </div>
+                      <div className="text-base font-mono text-emerald-200">
+                        {suggestedQugForLp.toLocaleString(undefined, { maximumFractionDigits: 4 })} <span className="text-xs text-emerald-400/60">QUG</span>
+                      </div>
+                      <div className="text-[10px] text-emerald-400/50">
+                        ≈ ${(suggestedQugForLp * qugUsd).toLocaleString(undefined, { maximumFractionDigits: 2 })} · escrowed when you commit
+                      </div>
+                    </div>
+
+                    {lpResult && (
+                      <div className={`flex items-start gap-2 p-3 rounded-lg text-xs mb-3 ${lpResult.ok ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-200' : 'bg-red-500/10 border border-red-500/20 text-red-300'}`}>
+                        {lpResult.ok ? <CheckCircle size={13} className="flex-shrink-0 mt-0.5" /> : <AlertCircle size={13} className="flex-shrink-0 mt-0.5" />}
+                        <span className="leading-snug">{lpResult.msg}</span>
+                      </div>
+                    )}
+
+                    <button
+                      onClick={handleCreateLpIntent}
+                      disabled={lpCreating || lpBtcSats < 10000 || !bridgeOnline}
+                      className="w-full py-3 rounded-xl font-semibold text-white transition-all disabled:opacity-40 flex items-center justify-center gap-2"
+                      style={{ background: lpCreating ? 'rgba(34,197,94,0.3)' : 'linear-gradient(135deg, #10b981, #059669)' }}
+                    >
+                      {lpCreating
+                        ? <><Loader2 size={15} className="animate-spin" />Locking QUG + generating address…</>
+                        : <><Sparkles size={15} />Lock QUG & Get BTC Address</>}
+                    </button>
+                    {!bridgeOnline && (
+                      <p className="text-center text-[10px] text-red-400/80 mt-2">
+                        Bridge offline — LP intents are temporarily unavailable.
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Active intents */}
+                  {lpIntents.length > 0 && (
+                    <div>
+                      <div className="text-[10px] text-gray-600 uppercase tracking-widest mb-2">Your LP intents</div>
+                      {lpIntents.map(it => {
+                        const kind = (it.status?.kind ?? it.status ?? 'awaiting_btc') as string;
+                        const isAwaiting = kind === 'awaiting_btc' || kind === 'btc_detected';
+                        const isReady = kind === 'ready_to_finalize';
+                        const isDone = kind === 'completed';
+                        const isClosed = kind === 'cancelled' || kind === 'expired' || kind === 'failed';
+                        return (
+                          <div key={it.intent_id} className="rounded-xl p-3 mb-1.5"
+                            style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)' }}>
+                            <div className="flex items-center justify-between mb-1.5">
+                              <span className="text-xs font-mono text-gray-300">{it.intent_id.slice(0, 12)}…</span>
+                              <span className={`text-[10px] px-2 py-0.5 rounded-full border ${
+                                isDone ? 'bg-green-500/15 text-green-300 border-green-500/30' :
+                                isReady ? 'bg-blue-500/15 text-blue-300 border-blue-500/30' :
+                                isAwaiting ? 'bg-yellow-500/15 text-yellow-300 border-yellow-500/30' :
+                                'bg-gray-500/15 text-gray-400 border-gray-500/30'
+                              }`}>{lpStatusLabel(it.status)}</span>
+                            </div>
+                            <div className="flex items-center justify-between text-[11px] text-gray-400 font-mono">
+                              <span>{(it.btc_amount_sats / 1e8).toFixed(8)} BTC</span>
+                              <ChevronRight size={11} className="text-gray-700" />
+                              <span>{(Number(it.qug_amount_escrowed || '0') / 1e24).toFixed(2)} QUG</span>
+                            </div>
+                            {isAwaiting && (
+                              <div className="flex items-center justify-between mt-2 text-[10px]">
+                                <button onClick={() => copy(it.btc_address, 'lp-' + it.intent_id)} className="text-gray-500 hover:text-gray-200 flex items-center gap-1">
+                                  <Copy size={11} />{it.btc_address.slice(0, 12)}…{it.btc_address.slice(-6)}
+                                </button>
+                                <button onClick={() => handleCancelLp(it.intent_id)} className="text-red-400 hover:text-red-200 flex items-center gap-1">
+                                  <XCircle size={11} />Cancel & refund
+                                </button>
+                              </div>
+                            )}
+                            {isReady && (
+                              <button onClick={() => handleFinalizeLp(it.intent_id)}
+                                className="w-full mt-2 py-2 rounded-lg text-xs font-medium text-white"
+                                style={{ background: 'linear-gradient(135deg, #3b82f6, #2563eb)' }}>
+                                Claim LP tokens
+                              </button>
+                            )}
+                            {isClosed && (
+                              <div className="text-[10px] text-gray-600 mt-1">closed at {new Date(it.updated_at * 1000).toLocaleString()}</div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  <div className="text-[10px] text-gray-600 text-center leading-snug">
+                    Honest liquidity: every wBTC in this pool is backed 1:1 by BTC in the bridge wallet.<br />
+                    Withdraw wBTC → BTC any time from the Send tab.
+                  </div>
                 </motion.div>
               )}
 
