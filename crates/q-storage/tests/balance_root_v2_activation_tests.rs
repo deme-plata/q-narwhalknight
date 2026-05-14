@@ -405,3 +405,120 @@ fn module_6b_lying_about_balance_does_not_verify() {
         "Proof claiming wrong balance verified against correct root"
     );
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Module 7 — StorageEngine integration (D1 + rebuild helper)
+//
+// Exercises the actual StorageEngine path: open the engine, populate the
+// wallet table, call rebuild_balance_smt_from_wallet_table(), verify the SMT
+// root matches what an independent SMT instance would produce on the same
+// (addr, balance) set. This is the unit-level analog of the cross-node
+// determinism test in the DeepSeek handoff (Job D6/D9) — once Beta/Gamma/
+// Delta/Epsilon run the rebuild on their real wallet tables, their roots
+// must agree.
+// ════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn module_7a_storage_engine_opens_with_balance_smt_at_genesis_root() {
+    let tmp = TempDir::new().unwrap();
+    let engine = q_storage::QStorage::open(tmp.path(), [1u8; 32]).await.unwrap();
+    let smt = engine.balance_smt.clone();
+    // Fresh DB → SMT must be at the empty-tree genesis root.
+    assert_eq!(
+        smt.root(),
+        smt.genesis_root(),
+        "Fresh StorageEngine SMT must start at genesis root (no auto-population yet)"
+    );
+}
+
+#[tokio::test]
+async fn module_7b_rebuild_helper_produces_deterministic_root_across_engines() {
+    // Two independent StorageEngine instances. Save the same wallet balance
+    // sequence to each. Rebuild SMT on each. Roots must match.
+    //
+    // This is the operator-facing version of cross-node determinism: once
+    // D2 lands and the SMT auto-updates, the roots will track the wallet
+    // table continuously. Until then, this rebuild helper is the manual probe.
+    let mut rng = StdRng::seed_from_u64(0xDEADBEEF_0070);
+
+    let tmp_a = TempDir::new().unwrap();
+    let engine_a = q_storage::QStorage::open(tmp_a.path(), [1u8; 32]).await.unwrap();
+    let tmp_b = TempDir::new().unwrap();
+    let engine_b = q_storage::QStorage::open(tmp_b.path(), [2u8; 32]).await.unwrap();
+
+    let mut shared_balances = HashMap::new();
+    for _ in 0..40 {
+        let mut addr = [0u8; 32];
+        rng.fill(&mut addr);
+        let bal: u128 = (rng.gen::<u64>() as u128) * 1_000_000;
+        shared_balances.insert(addr, bal);
+    }
+
+    // Persist the same wallet table to each engine via the canonical writer.
+    // NOTE: save_wallet_balances is the max-wins-guarded entry point. Fresh
+    // DBs → every balance is accepted. We're not testing max-wins here, just
+    // that the post-write wallet table is identical.
+    engine_a.save_wallet_balances(&shared_balances).await.unwrap();
+    engine_b.save_wallet_balances(&shared_balances).await.unwrap();
+
+    let root_a = engine_a.rebuild_balance_smt_from_wallet_table().await.unwrap();
+    let root_b = engine_b.rebuild_balance_smt_from_wallet_table().await.unwrap();
+
+    assert_eq!(
+        root_a, root_b,
+        "Two engines with identical wallet tables produced different SMT roots — \
+         determinism bug blocks activation"
+    );
+    assert_ne!(
+        root_a,
+        engine_a.balance_smt.genesis_root(),
+        "Rebuild produced genesis root despite non-empty wallet table"
+    );
+}
+
+#[tokio::test]
+async fn module_7c_rebuild_is_idempotent_for_the_same_wallet_table() {
+    // Calling the rebuild twice in a row on the same wallet table must
+    // return the same root. (BalanceSmt::rebuild_from_balances is idempotent
+    // at the unit level; this verifies StorageEngine doesn't mutate state
+    // between calls in a way that breaks idempotency.)
+    let mut rng = StdRng::seed_from_u64(0xDEADBEEF_0071);
+    let tmp = TempDir::new().unwrap();
+    let engine = q_storage::QStorage::open(tmp.path(), [1u8; 32]).await.unwrap();
+
+    let mut balances = HashMap::new();
+    for _ in 0..30 {
+        let mut addr = [0u8; 32];
+        rng.fill(&mut addr);
+        let bal: u128 = (rng.gen::<u64>() as u128) * 500_000;
+        balances.insert(addr, bal);
+    }
+    engine.save_wallet_balances(&balances).await.unwrap();
+
+    let r1 = engine.rebuild_balance_smt_from_wallet_table().await.unwrap();
+    let r2 = engine.rebuild_balance_smt_from_wallet_table().await.unwrap();
+    assert_eq!(r1, r2, "rebuild_balance_smt_from_wallet_table is not idempotent");
+}
+
+#[tokio::test]
+async fn module_7d_rebuild_root_changes_when_wallet_table_changes() {
+    // Sanity check: rebuilding after a balance change produces a different root.
+    let tmp = TempDir::new().unwrap();
+    let engine = q_storage::QStorage::open(tmp.path(), [1u8; 32]).await.unwrap();
+
+    let mut initial = HashMap::new();
+    initial.insert([0x42u8; 32], 1_000u128);
+    engine.save_wallet_balances(&initial).await.unwrap();
+    let root_initial = engine.rebuild_balance_smt_from_wallet_table().await.unwrap();
+
+    // Add a new wallet.
+    let mut updated = HashMap::new();
+    updated.insert([0x43u8; 32], 5_000u128);
+    engine.save_wallet_balances(&updated).await.unwrap();
+    let root_after_add = engine.rebuild_balance_smt_from_wallet_table().await.unwrap();
+
+    assert_ne!(
+        root_initial, root_after_add,
+        "SMT root did not change after adding a wallet to the table"
+    );
+}

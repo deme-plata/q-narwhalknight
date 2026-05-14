@@ -497,6 +497,12 @@ impl RocksDBKV {
             Self::create_calendar_by_date_cf(&block_cache),
             Self::create_calendar_scheduled_tx_cf(&block_cache),
             Self::create_calendar_community_cf(&block_cache),
+            // ========== v10.9.23: balance_root_v2 — Sparse Merkle Tree ==========
+            // CF for the SMT internal nodes + root pointer used by
+            // `crates/q-storage/src/balance_smt.rs::BalanceSmt`. Added to the
+            // hot DB so SMT updates can be batched atomically with wallet
+            // balance writes (see crates/q-storage/src/balance_smt.rs).
+            Self::create_balance_smt_cf(&block_cache),
         ];
 
         let mut kv = Self::open_with_cfs(path, opts, cfs).await?;
@@ -770,6 +776,23 @@ impl RocksDBKV {
 
         Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(CF_BULLSHARK_CERT, opts)
+    }
+
+    /// Create balance_root_v2 SMT column family.
+    ///
+    /// Stores Sparse Merkle Tree internal nodes (path_prefix -> 32-byte hash)
+    /// plus the persisted root pointer at `\xff__root__`. Reads are random-access
+    /// (each proof walks 256 internal nodes); writes happen in batches keyed by
+    /// the wallet address path. Lz4 for compression — most values are 32 bytes,
+    /// but the tree gets up to 256× the wallet count of internal nodes so
+    /// compression helps.
+    fn create_balance_smt_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(Self::scale_write_buffer(16));
+        opts.set_max_write_buffer_number(2);
+        Self::apply_shared_block_cache(&mut opts, cache);
+        ColumnFamilyDescriptor::new(crate::balance_smt::CF_BALANCE_SMT, opts)
     }
 
     /// Create manifest column family (metadata -> value)

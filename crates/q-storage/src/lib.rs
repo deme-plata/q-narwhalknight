@@ -668,6 +668,18 @@ pub struct QStorage {
     /// 🚨 v1.1.9: Counter for cache verification
     /// Every 100 heights, we verify the cache matches the actual database
     cache_verification_counter: std::sync::atomic::AtomicU64,
+    /// 📊 v10.9.23: Sparse Merkle Tree for balance_root_v2.
+    ///
+    /// Opened on the same physical RocksDB instance as `hot_db_concrete` so
+    /// SMT updates can be composed atomically with wallet balance writes
+    /// (via `BalanceSmt::apply_to_batch`). Currently DORMANT — the SMT is
+    /// instantiated but no production code path calls `apply_to_batch`. The
+    /// wiring into `save_wallet_balances` is deferred to the DeepSeek handoff
+    /// (docs/deepseek-handoff-balance-root-v2-activation-2026-05-14.md,
+    /// Job D2). Until that lands, the SMT root remains `genesis_root` and
+    /// operators can use `rebuild_balance_smt_from_wallet_table()` to
+    /// generate a deterministic root for cross-node manual verification.
+    pub balance_smt: Arc<crate::balance_smt::BalanceSmt>,
 }
 
 /// Type alias for compatibility with API server
@@ -753,6 +765,17 @@ impl QStorage {
         // Will be populated after storage is created using scan_highest_contiguous_block_internal
         let height_cache = HeightState::new(0);
 
+        // v10.9.23: Open the balance_root_v2 SMT on the SAME hot RocksDB
+        // instance. The CF (`cf_balance_smt`) is in the hot CF descriptor
+        // list (see crates/q-storage/src/kv.rs::open_hot_db). On existing
+        // DBs the CF is auto-created at first open via the migration path.
+        // BalanceSmt::open is idempotent: if there's a persisted root, it's
+        // loaded; otherwise the cached root is the genesis empty-tree hash.
+        let balance_smt = Arc::new(
+            crate::balance_smt::BalanceSmt::open(hot_db_concrete.get_raw_db())
+                .context("Failed to open BalanceSmt on hot DB")?,
+        );
+
         let storage = Self {
             hot_db: hot_db.clone(),
             hot_db_concrete,
@@ -772,6 +795,8 @@ impl QStorage {
             global_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             // 🚨 v1.1.9: Cache verification counter
             cache_verification_counter: std::sync::atomic::AtomicU64::new(0),
+            // 📊 v10.9.23: BalanceSmt for balance_root_v2 (dormant until D2 wires it)
+            balance_smt,
         };
 
         // Perform crash recovery and get recovered height
@@ -4397,6 +4422,50 @@ impl QStorage {
         }
 
         Ok(balances)
+    }
+
+    /// Operator-callable: rebuild the balance_root_v2 Sparse Merkle Tree from
+    /// the current persisted wallet table. Returns the new SMT root.
+    ///
+    /// This is the pre-activation determinism probe described in the DeepSeek
+    /// handoff (docs/deepseek-handoff-balance-root-v2-activation-2026-05-14.md,
+    /// Job D9). Until D2 (atomic SMT update in save_wallet_balances) lands,
+    /// the SMT does NOT auto-update — the only way to populate it is to call
+    /// this method. The SMT writes go to its own column family
+    /// (`cf_balance_smt`) and do NOT touch the wallet balance CF.
+    ///
+    /// Usage:
+    ///   - On Beta/Gamma/Delta/Epsilon, call this once via a future admin
+    ///     endpoint or CLI binary (e.g. crates/q-storage/src/bin/verify_smt_rebuild.rs
+    ///     planned in the DeepSeek handoff Job D9).
+    ///   - Compare the returned root across all four production nodes — if
+    ///     any two disagree at the same observed wallet table snapshot, the
+    ///     wallet tables themselves are divergent and we have a balance-
+    ///     integrity bug to fix BEFORE activation.
+    ///
+    /// **NOT consensus-affecting** — purely reads the wallet table, writes to
+    /// the SMT CF, returns the root. Safe to call at any time on mainnet
+    /// (besides the I/O cost of writing ~256·N SMT nodes).
+    pub async fn rebuild_balance_smt_from_wallet_table(&self) -> Result<[u8; 32]> {
+        info!("📊 [SMT-REBUILD] Loading wallet table for balance_root_v2 rebuild…");
+        let balances = self.load_wallet_balances().await
+            .context("rebuild_balance_smt_from_wallet_table: load_wallet_balances")?;
+        let wallet_count = balances.len();
+        info!("📊 [SMT-REBUILD] Wallet table loaded ({} entries). Rebuilding SMT…", wallet_count);
+
+        let started = std::time::Instant::now();
+        let root = self.balance_smt
+            .rebuild_from_balances(&balances)
+            .context("rebuild_balance_smt_from_wallet_table: BalanceSmt::rebuild_from_balances")?;
+        let elapsed = started.elapsed();
+
+        info!(
+            "📊 [SMT-REBUILD] ✅ Done. wallet_count={} smt_root={} elapsed={:?}",
+            wallet_count,
+            hex::encode(&root[..8]),
+            elapsed
+        );
+        Ok(root)
     }
 
     /// Find a wallet whose hex address starts with the given prefix.
