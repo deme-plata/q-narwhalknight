@@ -1,5 +1,5 @@
 use crate::app::{App, LogLevel};
-use crate::metrics::Metrics;
+use crate::metrics::{Metrics, MoverDirection, ReadinessMode};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -7,6 +7,71 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph, Sparkline},
     Frame,
 };
+
+/// v10.9.19 — Track A: draw the 3-row readiness banner at the top of the dashboard.
+/// Renders into the provided `area` (caller is responsible for reserving the 3 rows).
+/// Flashes for 300ms on transition between readiness modes.
+fn draw_readiness_banner(f: &mut Frame, area: Rect, m: &Metrics) {
+    let (color, icon, label, detail) = match m.readiness_mode {
+        ReadinessMode::Bootstrapping => (
+            Color::Gray,
+            "⏳",
+            "BOOTSTRAPPING",
+            "verifying proof / dialing peers".to_string(),
+        ),
+        ReadinessMode::FastReady => (
+            Color::Green,
+            "⚡",
+            "FAST-READY",
+            "mine · transact · query state".to_string(),
+        ),
+        ReadinessMode::CheckpointTrust => (
+            Color::Yellow,
+            "📜",
+            "CHECKPOINT-TRUST",
+            "mine · transact · query state".to_string(),
+        ),
+        ReadinessMode::GenesisSync => (
+            Color::Cyan,
+            "🌅",
+            "GENESIS-SYNC",
+            format!(
+                "syncing from height 1 · at {}/{}",
+                m.archive_lowest_indexed_height, m.archive_tip_height
+            ),
+        ),
+        ReadinessMode::ArchiveComplete => (
+            Color::LightGreen,
+            "⚓",
+            "ARCHIVE-COMPLETE",
+            "full history · all queries available".to_string(),
+        ),
+    };
+
+    let flash = m
+        .readiness_changed_at
+        .map(|t| t.elapsed() < std::time::Duration::from_millis(300))
+        .unwrap_or(false);
+
+    let style = if flash {
+        Style::default()
+            .fg(Color::Black)
+            .bg(color)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(color).add_modifier(Modifier::BOLD)
+    };
+
+    let line = Line::from(vec![
+        Span::styled(format!("  {}  ", icon), style),
+        Span::styled(format!("{:<18}", label), style),
+        Span::raw("  "),
+        Span::styled(detail, Style::default().fg(Color::Gray)),
+    ]);
+
+    let block = Block::default().borders(Borders::ALL).border_style(style);
+    f.render_widget(Paragraph::new(line).block(block), area);
+}
 
 pub fn render(f: &mut Frame, app: &App) {
     let metrics = app.metrics.read().unwrap();
@@ -16,6 +81,9 @@ pub fn render(f: &mut Frame, app: &App) {
         || metrics.compute_connected_peers > 0
         || !metrics.compute_simd_tier.is_empty();
     let has_kparam = metrics.kparam_rounds > 0 || metrics.kparam_k_value > 0.0;
+    // 🔥 Top Movers panel: 5 rows + header + borders = 7 rows tall.
+    // Always rendered so users see the "No data yet" placeholder on a fresh node.
+    let movers_height: u16 = 7;
     let constraints = if metrics.is_syncing {
         let mut v = vec![
             Constraint::Length(3),   // Header
@@ -24,6 +92,7 @@ pub fn render(f: &mut Frame, app: &App) {
         ];
         if has_compute { v.push(Constraint::Length(5)); } // Compute Power cards
         if has_kparam { v.push(Constraint::Length(5)); }  // K-Parameter Health Gauge
+        v.push(Constraint::Length(movers_height));        // 🔥 Top Movers (NEW)
         v.push(Constraint::Length(9));  // APOLLO Control Systems
         v.push(Constraint::Min(4));    // Logs
         v.push(Constraint::Length(3)); // Footer
@@ -35,17 +104,29 @@ pub fn render(f: &mut Frame, app: &App) {
         ];
         if has_compute { v.push(Constraint::Length(5)); } // Compute Power cards
         if has_kparam { v.push(Constraint::Length(5)); }  // K-Parameter Health Gauge
+        v.push(Constraint::Length(movers_height));        // 🔥 Top Movers (NEW)
         v.push(Constraint::Length(7)); // TPS Chart or AI Metrics
         v.push(Constraint::Min(8));   // Logs
         v.push(Constraint::Length(3)); // Footer
         v
     };
+    // v10.9.19 — Track A: reserve the top 3 rows for the readiness banner.
+    // Banner renders above all dashboard panes (header, sync progress, etc.).
+    let banner_area_render = {
+        let outer = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(0)])
+            .split(f.size());
+        draw_readiness_banner(f, outer[0], &metrics);
+        outer[1]
+    };
+
     drop(metrics); // Release lock
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
-        .split(f.size());
+        .split(banner_area_render);
 
     let metrics = app.metrics.read().unwrap();
     let has_compute_data = metrics.compute_network_hashrate_hs > 0.0
@@ -79,6 +160,11 @@ pub fn render(f: &mut Frame, app: &App) {
         render_kparam_health_gauge(f, chunks[idx], app);
         idx += 1;
     }
+
+    // 🔥 Top Movers (last 60 blocks) — added per task spec.
+    // Always reserved a slot so first-boot nodes show the "No data yet" placeholder.
+    render_top_movers(f, chunks[idx], app);
+    idx += 1;
 
     // Always show APOLLO control systems — they track live network state even when synced
     {
@@ -511,13 +597,16 @@ fn render_compute_power_cards(f: &mut Frame, area: Rect, app: &App) {
 fn render_kparam_health_gauge(f: &mut Frame, area: Rect, app: &App) {
     let metrics = app.metrics.read().unwrap();
 
+    // v10.9.19: extended from 4-card to 5-card row — added Engine Pulse column
+    // (data-integrity ✓, quorum peers, API req-served counter, P2P bytes).
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(28),
-            Constraint::Percentage(22),
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
+            Constraint::Percentage(22),  // K-Parameter (was 28)
+            Constraint::Percentage(18),  // Phase state (was 22)
+            Constraint::Percentage(18),  // VDF / rounds (was 25)
+            Constraint::Percentage(18),  // Challenge expiry (was 25)
+            Constraint::Percentage(24),  // v10.9.19: Engine Pulse — NEW
         ])
         .split(area);
 
@@ -669,6 +758,130 @@ fn render_kparam_health_gauge(f: &mut Frame, area: Rect, app: &App) {
             ))
             .style(Style::default().fg(Color::Yellow)));
     f.render_widget(expiry_widget, cols[3]);
+
+    // ── Card 5: Engine Pulse (v10.9.19) ──
+    // Data integrity status + quorum peer count + API request counter + P2P throughput.
+    // The K-parameter gauge is the "network health" panel; engine pulse is the
+    // hot-path companion that makes the engine "almost hum."
+    let di_ok = metrics.engine_data_integrity_ok;
+    let di_color = if di_ok { Color::Green } else { Color::Yellow };
+    let di_icon = if di_ok { "\u{2713}" } else { "\u{25CB}" }; // ✓ or ○
+    let quorum = metrics.engine_quorum_peers;
+    let quorum_color = if quorum >= 3 { Color::Green }
+        else if quorum >= 1 { Color::Yellow }
+        else { Color::Red };
+    let api_total = metrics.engine_api_requests_total;
+    let bytes_in_mb = metrics.engine_p2p_bytes_in as f64 / 1_048_576.0;
+    let bytes_out_mb = metrics.engine_p2p_bytes_out as f64 / 1_048_576.0;
+
+    let engine_items = vec![
+        ListItem::new(Line::from(vec![
+            Span::styled(format!(" {} ", di_icon), Style::default().fg(di_color).add_modifier(Modifier::BOLD)),
+            Span::styled("integrity ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                if di_ok { "OK" } else { "PENDING" },
+                Style::default().fg(di_color).add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled(" quorum: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{}", quorum),
+                Style::default().fg(quorum_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" peers", Style::default().fg(Color::DarkGray)),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled(" api: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{}", api_total),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" req", Style::default().fg(Color::DarkGray)),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled(" p2p: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("\u{2191}{:.1}MB \u{2193}{:.1}MB", bytes_out_mb, bytes_in_mb),
+                Style::default().fg(Color::Magenta),
+            ),
+        ])),
+    ];
+    let engine_widget = List::new(engine_items)
+        .block(Block::default().borders(Borders::ALL)
+            .title(Span::styled(
+                "\u{2699} Engine Pulse",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ))
+            .style(Style::default().fg(Color::Cyan)));
+    f.render_widget(engine_widget, cols[4]);
+}
+
+/// 🔥 Top Movers panel — 5 wallets with the largest |Δ balance| over the last
+/// 60 blocks. Header + 5 rows. Renders a "No data yet" placeholder when the
+/// ring buffer is empty (fresh node or first ingest tick).
+///
+/// Data shape: `Metrics.top_movers: Vec<TopMover>` — populated by the
+/// `update_tui_metrics` task in q-api-server every tick.
+fn render_top_movers(f: &mut Frame, area: Rect, app: &App) {
+    let metrics = app.metrics.read().unwrap();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(
+            "🔥 Top Movers (last 60 blocks)",
+            Style::default()
+                .fg(Color::LightRed)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().fg(Color::DarkGray));
+
+    if metrics.top_movers.is_empty() {
+        let placeholder = Paragraph::new(Line::from(vec![Span::styled(
+            "  No data yet — waiting for blocks…",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        )]))
+        .block(block);
+        f.render_widget(placeholder, area);
+        return;
+    }
+
+    let items: Vec<ListItem> = metrics
+        .top_movers
+        .iter()
+        .take(5)
+        .map(|m| {
+            // Direction glyph + color: ▲ green for inflows, ▼ red for outflows,
+            // ● dim gray for the defensive zero case.
+            let (arrow, arrow_color) = match m.direction {
+                MoverDirection::Up => ("▲", Color::Green),
+                MoverDirection::Down => ("▼", Color::Red),
+                MoverDirection::Flat => ("●", Color::DarkGray),
+            };
+
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!(" {} ", arrow),
+                    Style::default().fg(arrow_color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    // 8-char hex prefix in dim gray
+                    format!("{}…  ", m.format_addr()),
+                    Style::default().fg(Color::Gray),
+                ),
+                Span::styled(
+                    // Signed delta in white with K/M/B suffix
+                    m.format_delta(),
+                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                ),
+            ]))
+        })
+        .collect();
+
+    let list = List::new(items).block(block);
+    f.render_widget(list, area);
 }
 
 fn render_tps_chart(f: &mut Frame, area: Rect, app: &App) {

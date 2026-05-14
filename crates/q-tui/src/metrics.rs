@@ -1,5 +1,56 @@
 use serde::{Deserialize, Serialize};
 
+/// Direction of a top-mover wallet's net balance change over the ring-buffer window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MoverDirection {
+    Up,
+    Down,
+    Flat, // zero delta (defensive — shouldn't occur in top 5)
+}
+
+/// A wallet whose balance changed rapidly over the recent block window.
+/// Rendered in the dashboard "Top Movers" panel. `addr_prefix` holds the first
+/// 4 bytes of the 32-byte address (enough for an 8-hex-char display label).
+/// `delta_qug` is the signed sum of balance deltas in 24-decimal QUG units
+/// (so 1 QUG = 1e24). Positive means net inflow, negative means net outflow.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopMover {
+    pub addr_prefix: [u8; 4],
+    pub delta_qug: i128,
+    pub direction: MoverDirection,
+}
+
+impl TopMover {
+    /// Format the signed delta as a human-readable QUG amount with K/M/B suffix.
+    /// Internal `delta_qug` is in 24-decimal units, so we divide by 1e24 first.
+    pub fn format_delta(&self) -> String {
+        let qug = self.delta_qug as f64 / 1e24;
+        let abs = qug.abs();
+        let sign = if qug >= 0.0 { "+" } else { "-" };
+        if abs >= 1e9 {
+            format!("{}{:.2}B QUG", sign, abs / 1e9)
+        } else if abs >= 1e6 {
+            format!("{}{:.2}M QUG", sign, abs / 1e6)
+        } else if abs >= 1e3 {
+            format!("{}{:.2}K QUG", sign, abs / 1e3)
+        } else {
+            format!("{}{:.0} QUG", sign, abs)
+        }
+    }
+
+    /// Format the 4-byte address prefix as 8 hex chars (lowercase).
+    /// Hand-rolled to avoid adding a `hex` dependency to q-tui.
+    pub fn format_addr(&self) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(8);
+        for b in &self.addr_prefix {
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0x0f) as usize] as char);
+        }
+        out
+    }
+}
+
 /// Network throttle mode — controls P2P aggressiveness
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NetworkThrottleMode {
@@ -50,6 +101,26 @@ impl NetworkThrottleMode {
             1 => NetworkThrottleMode::Normal,
             _ => NetworkThrottleMode::Turbo,
         }
+    }
+}
+
+// v10.9.19 — Track A: Node readiness mode for the TUI top banner.
+/// Each mode corresponds to a specific phase of node bootstrapping and
+/// archive construction. The TUI renders a colored banner accordingly.
+/// `FastReady` is the post-SNARK-bootstrap state and lights up when
+/// `verified_proof_height` becomes Some (currently unwired; future work).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReadinessMode {
+    Bootstrapping,    // grey
+    FastReady,        // green — proof-bootstrap verified
+    CheckpointTrust,  // yellow — BAL-001 snapshot accepted
+    GenesisSync,      // cyan — sync from height 1
+    ArchiveComplete,  // bright green — full history available
+}
+
+impl Default for ReadinessMode {
+    fn default() -> Self {
+        Self::Bootstrapping
     }
 }
 
@@ -219,6 +290,40 @@ pub struct Metrics {
     pub operator_fee_total_qug: f64,
     pub operator_fee_tx_count: u64,
     pub founder_wallet_balance: f64,
+
+    // v10.9.19 — Engine pulse metrics (sourced from AppState atomics every update tick)
+    /// Total API requests served since process start. Compute req/sec by diffing
+    /// against previous tick's value.
+    pub engine_api_requests_total: u64,
+    /// Total P2P bytes in / out since process start.
+    pub engine_p2p_bytes_in: u64,
+    pub engine_p2p_bytes_out: u64,
+    /// True iff data integrity is currently consistent (checkpoint applied OR
+    /// contiguous height ≥ tip). Reflects whether local state-root computation
+    /// is trustworthy for queries.
+    pub engine_data_integrity_ok: bool,
+    /// Quorum: current connected peer count, used for BFT-style health display.
+    pub engine_quorum_peers: usize,
+
+    // v10.9.19 — Track A: fast-readiness banner state
+    pub readiness_mode: ReadinessMode,
+    /// Wall-clock when `readiness_mode` last changed. Used for a 300ms flash
+    /// animation on transition. `#[serde(skip)]` because Instant isn't serialisable
+    /// and the timestamp is purely render-side.
+    #[serde(skip)]
+    pub readiness_changed_at: Option<std::time::Instant>,
+    /// Lowest block height with contiguous archive coverage. Sourced from
+    /// `AppState.contiguous_height_atomic`.
+    pub archive_lowest_indexed_height: u64,
+    /// Network tip height. Sourced from `AppState.current_height_atomic`.
+    pub archive_tip_height: u64,
+    /// True iff full chain history from genesis to tip is locally indexed.
+    pub archive_complete: bool,
+
+    /// 🔥 Top Movers (last 60 blocks): up to 5 wallets ranked by |Δ balance|.
+    /// Populated by `update_tui_metrics` from `AppState.recent_balance_deltas`.
+    /// Empty until the ring buffer has ingested at least one block.
+    pub top_movers: Vec<TopMover>,
 }
 
 impl Default for Metrics {
@@ -351,6 +456,20 @@ impl Default for Metrics {
             operator_fee_total_qug: 0.0,
             operator_fee_tx_count: 0,
             founder_wallet_balance: 0.0,
+            // v10.9.19 — Engine pulse defaults
+            engine_api_requests_total: 0,
+            engine_p2p_bytes_in: 0,
+            engine_p2p_bytes_out: 0,
+            engine_data_integrity_ok: false,
+            engine_quorum_peers: 0,
+            // v10.9.19 — Track A defaults
+            readiness_mode: ReadinessMode::default(),
+            readiness_changed_at: None,
+            archive_lowest_indexed_height: 0,
+            archive_tip_height: 0,
+            archive_complete: false,
+            // 🔥 Top Movers defaults — empty until first block ingestion
+            top_movers: Vec::new(),
         }
     }
 }
@@ -403,5 +522,105 @@ impl Metrics {
         } else {
             format!("{}m", mins)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 1e24 doesn't fit in i128? It does: 1e24 ≈ 10^24, i128::MAX ≈ 1.7e38.
+    const QUG_SCALE: i128 = 1_000_000_000_000_000_000_000_000; // 10^24
+
+    fn mover(delta_qug: i128) -> TopMover {
+        TopMover {
+            addr_prefix: [0xa3, 0xb4, 0xc8, 0xd9],
+            delta_qug,
+            direction: if delta_qug > 0 {
+                MoverDirection::Up
+            } else if delta_qug < 0 {
+                MoverDirection::Down
+            } else {
+                MoverDirection::Flat
+            },
+        }
+    }
+
+    #[test]
+    fn test_format_delta_billions() {
+        // 12.45M (millions of QUG) — task spec example.
+        // 12_450_000 QUG * 1e24 = 1.245e31 raw units
+        let m = mover(12_450_000_i128.saturating_mul(QUG_SCALE));
+        let s = m.format_delta();
+        assert!(
+            s.starts_with("+12.45M"),
+            "expected leading +12.45M, got {}",
+            s
+        );
+    }
+
+    #[test]
+    fn test_format_delta_negative() {
+        let m = mover(-3_100_000_i128.saturating_mul(QUG_SCALE));
+        let s = m.format_delta();
+        assert!(s.starts_with("-"), "expected negative sign, got {}", s);
+        assert!(s.contains("3.10M"), "expected 3.10M magnitude, got {}", s);
+    }
+
+    #[test]
+    fn test_format_delta_small() {
+        let m = mover(500_i128.saturating_mul(QUG_SCALE));
+        let s = m.format_delta();
+        assert!(s.starts_with("+500"), "expected +500, got {}", s);
+        // 500 is below the 1e3 threshold so no K/M/B suffix.
+        assert!(!s.contains("K"), "should not have K suffix, got {}", s);
+        assert!(!s.contains("M"), "should not have M suffix, got {}", s);
+    }
+
+    #[test]
+    fn test_format_delta_zero() {
+        let m = mover(0);
+        let s = m.format_delta();
+        // Zero rendered with '+' sign — defensive case (shouldn't appear in top 5).
+        assert!(s.starts_with("+0"), "expected +0 for zero delta, got {}", s);
+    }
+
+    #[test]
+    fn test_format_delta_billions_huge() {
+        // 12.45B QUG = 12_450_000_000 QUG
+        let m = mover(12_450_000_000_i128.saturating_mul(QUG_SCALE));
+        let s = m.format_delta();
+        assert!(
+            s.starts_with("+12.45B"),
+            "expected leading +12.45B, got {}",
+            s
+        );
+    }
+
+    #[test]
+    fn test_format_addr() {
+        let m = mover(0);
+        // addr_prefix is [0xa3, 0xb4, 0xc8, 0xd9] per the helper above.
+        assert_eq!(m.format_addr(), "a3b4c8d9");
+    }
+
+    #[test]
+    fn test_format_addr_zero_bytes() {
+        let m = TopMover {
+            addr_prefix: [0x00, 0x00, 0x00, 0x00],
+            delta_qug: 1,
+            direction: MoverDirection::Up,
+        };
+        assert_eq!(m.format_addr(), "00000000");
+    }
+
+    #[test]
+    fn test_format_addr_all_ff() {
+        let m = TopMover {
+            addr_prefix: [0xff, 0xff, 0xff, 0xff],
+            delta_qug: 1,
+            direction: MoverDirection::Up,
+        };
+        assert_eq!(m.format_addr(), "ffffffff");
     }
 }
