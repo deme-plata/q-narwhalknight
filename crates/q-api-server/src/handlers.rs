@@ -9791,11 +9791,19 @@ pub async fn get_mining_challenge(
         let blocks_behind = network_height.saturating_sub(local_height);
 
         if blocks_behind > 10 && !allow_solo_mining {
-            warn!(
-                "🚫 [MINING-DIAG] Challenge rejected (503): blocks_behind={} | local={} | network={} | solo={}",
-                blocks_behind, local_height, network_height, allow_solo_mining
-            );
-            let eta_minutes = blocks_behind / 1000;
+            // v10.9.22: Rate-limit this warn! to once per 30s (was firing 2000+/sec
+            // with 400 miners → ~5K log lines/sec including tower's ERROR trace,
+            // saturating journald and starving libp2p so the node could never
+            // catch up. Symmetric with the success log below.
+            static LAST_REJECT_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let now_s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+            let prev = LAST_REJECT_LOG.load(std::sync::atomic::Ordering::Relaxed);
+            if now_s >= prev + 30 && LAST_REJECT_LOG.compare_exchange(prev, now_s, std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed).is_ok() {
+                warn!(
+                    "🚫 [MINING-DIAG] Challenge rejected (503): blocks_behind={} | local={} | network={} | solo={} (suppressed for next 30s)",
+                    blocks_behind, local_height, network_height, allow_solo_mining
+                );
+            }
             return Err(StatusCode::SERVICE_UNAVAILABLE);
         }
 
