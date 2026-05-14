@@ -67,7 +67,12 @@ pub struct BalanceRootReport {
 pub async fn get_balance_root(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<IntegrityResponse<BalanceRootReport>>, StatusCode> {
-    let height = state.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
+    // v1.0.2: Use contiguous height for `at_height`. compute_balance_root_for_block()
+    // hashes the wallet table that was built from contiguous data; reporting max-seen
+    // height here was misleading — clients comparing roots across nodes need to compare
+    // at matching heights and "max-seen" can differ between nodes for the same archive
+    // state. Contiguous height is the correct anchor for cross-node hash comparison.
+    let height = state.contiguous_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
 
     let root = match state.storage_engine.compute_balance_root_for_block().await {
         Ok(r) => r,
@@ -166,7 +171,12 @@ pub struct EmissionReport {
 pub async fn get_emission(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<IntegrityResponse<EmissionReport>>, StatusCode> {
-    let height = state.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
+    // v1.0.2: Use contiguous height. `total_minted_supply` is the sum of coinbase
+    // amounts from blocks we've actually processed (contiguous data). Comparing it
+    // against `expected = per_block_reward * max_seen_height` would always show a
+    // node-is-under-emitted divergence for any node with gaps. Anchoring both sides
+    // at contiguous height makes the comparison meaningful.
+    let height = state.contiguous_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
     let total_minted = *state.total_minted_supply.read().await;
 
     // Era-0 emission: 2,625,000 QUG/year at 1 block/sec = 31,536,000 blocks/year

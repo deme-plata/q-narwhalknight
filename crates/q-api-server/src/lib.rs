@@ -332,6 +332,7 @@ pub mod ai_api; // ✅ v9.5.0: Starship Endgame — AI Inference Pool API
 pub mod k_parameter_gauge; // ✅ v9.3.1: Lightweight K-parameter network health gauge (no q-resonance dep)
 pub mod bitcoin_bridge_api; // ✅ v7.2.0: Bitcoin atomic swap bridge (QNK ↔ BTC)
 pub mod bitcoin_deposit_api; // ✅ v10.2.11: Bitcoin deposit bridge — receive BTC, mint wBTC
+pub mod bitcoin_lp_api; // ✅ v10.9.21: One-click "deposit BTC → become bridge LP"
 pub mod bitcoin_rpc; // ✅ v9.6.5: Bitcoin Knots RPC client (balance, address, send, txs)
 pub mod zcash_bridge_api; // ✅ v7.2.2: Zcash shielded atomic swap bridge (QNK ↔ ZEC)
 pub mod ironfish_bridge_api; // ✅ v7.2.4: Iron Fish privacy atomic swap bridge (QNK ↔ IRON)
@@ -360,6 +361,7 @@ pub mod state_sync_api; // ✅ v5.2.0: HTTP full state sync (contracts, pools, b
 pub mod miner_link_api; // ✅ v7.2.0: WebSocket relay for wallet ↔ personal miner communication
 pub mod node_setup; // v8.6.5: Automatic node setup wizard via OAuth2 device login
 pub mod quorum_commit; // ✅ Phase 1: Multi-validator balance agreement (quorum commit broadcast)
+pub mod equivocation_watcher; // 🛡️  Background anti-equivocation detector (double-signing alarm)
 
 pub use config::Config;
 pub use console_viz::{update_stats, ConsensusStats, ConsoleVisualizer};
@@ -424,7 +426,10 @@ fn default_token_decimals() -> u8 {
 pub async fn bootstrap_bridge_pools(
     liquidity_pools_map: &mut HashMap<String, LiquidityPool>,
     storage_engine: &std::sync::Arc<q_storage::StorageEngine>,
-    qug_price: f64,
+    // v10.9.21: Kept in the signature for callsite compat. Empty-shell pools don't price
+    // themselves — the first LP defines the QUG/wBTC ratio — so the bootstrap QUG price
+    // is no longer needed here.
+    _qug_price: f64,
     oracle: Option<&q_quillon_bank::oracle_integration::BankingOracleIntegration>,
 ) {
     // v9.0.4: Fetch LIVE prices from oracle (CoinGecko → Binance fallback)
@@ -455,68 +460,66 @@ pub async fn bootstrap_bridge_pools(
         ("pool-qug-wiron-bridge", "wIRON", iron_price, 50_000.0),  // 50K IRON
     ];
 
-    for (pool_id, symbol, native_price_usd, native_amount) in &bridge_pools {
-        // Calculate QUG equivalent: native_amount * native_price / qug_price
-        let qug_equivalent = native_amount * native_price_usd / qug_price;
-        let bootstrap_qug: u128 = (qug_equivalent * 1e24) as u128;
-        // Wrapped token amount in 8-decimal base units (satoshis/zatoshis/ore)
-        let bootstrap_wrapped: u128 = (native_amount * 1e8) as u128;
-        // Store reserves in 24-decimal format internally (8-dec → 24-dec)
-        let reserve_wrapped_24: u128 = bootstrap_wrapped * 10u128.pow(16);
-
-        // v10.9.20: Preserve trade history across restarts.
+    for (pool_id, symbol, native_price_usd, _native_amount) in &bridge_pools {
+        // v10.9.21: HONEST LIQUIDITY MODEL.
         //
-        // Old v8.2.9 behavior reset reserves to the fixed `native_amount`/QUG-equivalent on
-        // every boot, which erased any AMM swaps that had happened since the last restart and
-        // let users repeatedly drain the same liquidity. New behavior:
-        //   • Brand-new pool: seed with the bootstrap reserves.
-        //   • Existing pool: keep traded reserves untouched. Reseed ONLY if the pool is
-        //     effectively empty (one side drained to dust by trading or by a previous bad
-        //     reset), restoring the configured notional liquidity so trading can resume.
+        // Previously this function minted ~0.25 BTC worth of wBTC (and matching wZEC/wETH/wIRON)
+        // *out of thin air* on every restart. The pool let users buy wBTC tokens, but the
+        // bridge wallet on Delta held 0 BTC — so withdrawals to real Bitcoin always failed,
+        // and users ended up holding unredeemable IOUs.
         //
-        // Note: price drift between restarts is fine — the pool *is* the price source for
-        // its pair under AMM. The oracle is used only when no pool exists (handler.rs
-        // `use_oracle` path).
-        let bootstrap_pool = LiquidityPool {
+        // New behaviour: pool exists as an empty shell. Both reserves start at 0. The pool
+        // only gets liquidity from real user LP deposits (see /api/v1/bitcoin/lp/intent for
+        // the one-click "deposit BTC + pair with QUG" flow). Until at least one LP arrives,
+        // the swap handler returns "no liquidity yet — be the first LP" instead of trading
+        // against fake supply.
+        //
+        // Invariant after this change: `total_wrapped_token_supply <= bridge_wallet_balance`
+        // for each bridge token. Trading is honest; withdrawals always work.
+        let empty_pool = LiquidityPool {
             pool_id: pool_id.to_string(),
             token0: "QUG".to_string(),
             token1: symbol.to_string(),
-            reserve0: bootstrap_qug,
-            reserve1: reserve_wrapped_24,
-            provider: [0u8; 32], // System-owned bridge liquidity
+            reserve0: 0,
+            reserve1: 0,
+            provider: [0u8; 32], // System-owned shell; LPs are tracked via lp_token_supply
             created_at: chrono::Utc::now(),
-            lp_token_supply: ((bootstrap_qug as f64 * reserve_wrapped_24 as f64).sqrt()) as u128,
+            lp_token_supply: 0,
             token0_decimals: 24,
-            token1_decimals: 24, // Internal reserves always 24-decimal
+            token1_decimals: 24,
         };
 
-        // Minimum reserve floor on each side: 1% of the bootstrap notional. Below this we
-        // consider the pool drained and reseed it.
-        let floor0 = bootstrap_qug / 100;
-        let floor1 = reserve_wrapped_24 / 100;
-
         if let Some(existing) = liquidity_pools_map.get_mut(*pool_id) {
-            if existing.reserve0 < floor0 || existing.reserve1 < floor1 {
+            // Detect legacy fake-seeded reserves (lp_token_supply > 0 but provider is the
+            // system zero-address). Those were minted by the old bootstrap code and have no
+            // real BTC backing. Drain them once on this upgrade so users can't trade against
+            // unbacked supply.
+            let is_legacy_fake_seed = existing.lp_token_supply > 0 && existing.provider == [0u8; 32];
+            if is_legacy_fake_seed {
                 tracing::warn!(
-                    "🌉 [BRIDGE] {} pool drained (r0={:.4}, r1={:.4}) — reseeding to bootstrap liquidity @ ${:.0}",
+                    "🌉 [BRIDGE] {} pool had legacy fake-seeded reserves (r0={:.4}, r1={:.4}) — \
+                     draining to zero. Real LPs must deposit via /api/v1/bitcoin/lp/intent.",
                     symbol,
                     existing.reserve0 as f64 / 1e24,
                     existing.reserve1 as f64 / 1e24,
-                    native_price_usd
                 );
-                *existing = bootstrap_pool.clone();
+                *existing = empty_pool.clone();
             } else {
                 tracing::info!(
-                    "🌉 [BRIDGE] {} pool already seeded — preserving traded reserves (r0={:.4} QUG, r1={:.4} {})",
+                    "🌉 [BRIDGE] {} pool: live LP reserves preserved (r0={:.4} QUG, r1={:.4} {}, lp_supply={:.4})",
                     symbol,
                     existing.reserve0 as f64 / 1e24,
                     existing.reserve1 as f64 / 1e24,
-                    symbol
+                    symbol,
+                    existing.lp_token_supply as f64 / 1e24,
                 );
             }
         } else {
-            liquidity_pools_map.insert(pool_id.to_string(), bootstrap_pool.clone());
-            tracing::info!("🌉 [BRIDGE] Created new {} pool with live price: ${:.0}", symbol, native_price_usd);
+            liquidity_pools_map.insert(pool_id.to_string(), empty_pool.clone());
+            tracing::info!(
+                "🌉 [BRIDGE] Created empty {} pool shell @ ${:.0}/unit reference — awaiting first LP",
+                symbol, native_price_usd
+            );
         }
         // Persist updated/created pool to DB
         if let Some(p) = liquidity_pools_map.get(*pool_id) {
@@ -537,46 +540,41 @@ pub async fn bootstrap_bridge_pools(
         ("pool-qugusd-wiron-bridge", "wIRON", iron_price, 50_000.0),
     ];
 
-    for (pool_id, symbol, native_price_usd, native_amount) in &qugusd_bridge_pools {
-        // QUGUSD side: native_amount * native_price_usd worth of QUGUSD (1 QUGUSD = $1)
-        let qugusd_equivalent = native_amount * native_price_usd; // in dollars = QUGUSD units
-        let bootstrap_qugusd: u128 = (qugusd_equivalent * 1e24) as u128;
-        // Wrapped token side (same as QUG pools)
-        let bootstrap_wrapped: u128 = (native_amount * 1e8) as u128;
-        let reserve_wrapped_24: u128 = bootstrap_wrapped * 10u128.pow(16);
-
-        // v10.9.20: Same restart-preservation rule as QUG pools above.
-        let bootstrap_pool = LiquidityPool {
+    for (pool_id, symbol, native_price_usd, _native_amount) in &qugusd_bridge_pools {
+        // v10.9.21: Empty-shell pool (see QUG/wBTC explanation above). No fake seeding.
+        let empty_pool = LiquidityPool {
             pool_id: pool_id.to_string(),
             token0: "QUGUSD".to_string(),
             token1: symbol.to_string(),
-            reserve0: bootstrap_qugusd,
-            reserve1: reserve_wrapped_24,
+            reserve0: 0,
+            reserve1: 0,
             provider: [0u8; 32],
             created_at: chrono::Utc::now(),
-            lp_token_supply: ((bootstrap_qugusd as f64 * reserve_wrapped_24 as f64).sqrt()) as u128,
+            lp_token_supply: 0,
             token0_decimals: 24,
             token1_decimals: 24,
         };
-        let floor0 = bootstrap_qugusd / 100;
-        let floor1 = reserve_wrapped_24 / 100;
 
         if let Some(existing) = liquidity_pools_map.get_mut(*pool_id) {
-            if existing.reserve0 < floor0 || existing.reserve1 < floor1 {
+            let is_legacy_fake_seed = existing.lp_token_supply > 0 && existing.provider == [0u8; 32];
+            if is_legacy_fake_seed {
                 tracing::warn!(
-                    "🌉 [BRIDGE] QUGUSD/{} pool drained — reseeding to bootstrap liquidity @ ${:.0}/unit",
-                    symbol, native_price_usd
+                    "🌉 [BRIDGE] QUGUSD/{} pool had legacy fake-seeded reserves — draining to zero.",
+                    symbol
                 );
-                *existing = bootstrap_pool.clone();
+                *existing = empty_pool.clone();
             } else {
                 tracing::info!(
-                    "🌉 [BRIDGE] QUGUSD/{} pool already seeded — preserving traded reserves",
+                    "🌉 [BRIDGE] QUGUSD/{} pool: live LP reserves preserved",
                     symbol
                 );
             }
         } else {
-            liquidity_pools_map.insert(pool_id.to_string(), bootstrap_pool.clone());
-            tracing::info!("🌉 [BRIDGE] Created QUGUSD/{} pool: ${:.0}/unit", symbol, native_price_usd);
+            liquidity_pools_map.insert(pool_id.to_string(), empty_pool.clone());
+            tracing::info!(
+                "🌉 [BRIDGE] Created empty QUGUSD/{} pool shell @ ${:.0}/unit reference — awaiting first LP",
+                symbol, native_price_usd
+            );
         }
         if let Some(p) = liquidity_pools_map.get(*pool_id) {
             if let Ok(pool_bytes) = serde_json::to_vec(p) {
@@ -1209,6 +1207,16 @@ pub struct AppState {
     pub p2p_bytes_in: Arc<std::sync::atomic::AtomicU64>,
     pub p2p_bytes_out: Arc<std::sync::atomic::AtomicU64>,
 
+    // 🔥 Top Movers ring buffer (last 60 blocks of per-address balance deltas).
+    // Each entry is a HashMap<Address, i128> for one block. Bounded to length 60
+    // via push_back + pop_front in `update_tui_metrics`. Memory cost: roughly
+    // 60 × ~100 addrs × (32 + 16) bytes ≈ 290 KB worst case.
+    pub recent_balance_deltas:
+        Arc<RwLock<std::collections::VecDeque<HashMap<Address, i128>>>>,
+    // Highest block height already ingested into `recent_balance_deltas`.
+    // Used to pull only the new blocks each TUI tick (typically 0-3 per tick at 1 bps).
+    pub top_movers_last_ingested_height: Arc<std::sync::atomic::AtomicU64>,
+
     // v8.5.4: Network throttle mode (0=Conservative, 1=Normal, 2=Turbo) — set by TUI, read by sync loop
     // Conservative: 2 in-flight chunks, 200ms delay (SSD-friendly for cheap hardware)
     // Normal: half parallelism, 10ms delay (balanced)
@@ -1248,12 +1256,28 @@ pub struct AppState {
     pub operator_fee_tx_count: Arc<std::sync::atomic::AtomicU64>,
 
     // ⚡ v0.9.66-beta: Lock-free current blockchain height for fast mining challenge generation
-    // Updated atomically when blocks are produced, avoids RwLock contention on node_status
+    // Updated atomically when blocks are produced, avoids RwLock contention on node_status.
+    // SEMANTICS: max-seen height. Updated via fetch_max() whenever any block arrives via P2P
+    // or batch sync. Used by sync logic to decide "am I behind?" relative to the network.
+    // After Option A (v1.0.2) this can be higher than `contiguous_height_atomic` for a node
+    // that has gaps in its archive history (e.g. fresh checkpoint-synced node still doing backfill).
     pub current_height_atomic: Arc<std::sync::atomic::AtomicU64>,
+
+    // v1.0.2: Honest archive-height reporting. Reflects the highest height where every
+    // block 1..=N is stored locally (contiguous storage), refreshed every 5s from
+    // `get_highest_contiguous_block()`. Diverges from `current_height_atomic` whenever
+    // the node has gaps. Used for API status, integrity reporting, and peer announcements
+    // so other nodes don't try to fetch blocks from us that we don't actually have.
+    pub contiguous_height_atomic: Arc<std::sync::atomic::AtomicU64>,
 
     // v8.2.9: Peak height — maximum height ever reached, never decreases
     // Prevents "rollback scare" in admin panel when node restarts and syncs back up
     pub peak_height_atomic: Arc<std::sync::atomic::AtomicU64>,
+
+    // v10.9.19: API request counter — incremented by /api/v1/engine/pulse on every
+    // call. Lets clients compute API throughput by polling pulse and computing the
+    // delta. Initialized to 0 in both AppState constructors.
+    pub api_requests_served: Arc<std::sync::atomic::AtomicU64>,
 
     // 🚀 v1.0.2-beta: HeightState cache - Eliminates binary search storm during shutdown
     // Cached height value (lock-free reads) with time-based freshness and shutdown mode
@@ -2827,6 +2851,9 @@ impl AppState {
             stripe_client: crate::payment_api::init_stripe_client().ok(),
             p2p_bytes_in: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             p2p_bytes_out: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            // 🔥 Top Movers ring buffer — empty deque + zero ingest height.
+            recent_balance_deltas: Arc::new(RwLock::new(std::collections::VecDeque::new())),
+            top_movers_last_ingested_height: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             network_throttle_mode: Arc::new(std::sync::atomic::AtomicU8::new(2)), // 2 = Turbo (default)
             highest_network_height: Arc::new(std::sync::atomic::AtomicU64::new(0)), // Sync mode tracking
             last_peer_height_update: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v5.2.0: Peer height staleness
@@ -2838,8 +2865,10 @@ impl AppState {
             operator_fees_earned_session: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v8.1.1
             operator_fees_earned_total: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v8.1.1
             operator_fee_tx_count: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v8.1.1
-            current_height_atomic: Arc::new(std::sync::atomic::AtomicU64::new(initial_height)), // ⚡ v0.9.66-beta: Lock-free height
+            current_height_atomic: Arc::new(std::sync::atomic::AtomicU64::new(initial_height)), // ⚡ v0.9.66-beta: Lock-free height (max-seen)
+            contiguous_height_atomic: Arc::new(std::sync::atomic::AtomicU64::new(initial_height)), // v1.0.2: Honest contiguous height; refreshed every 5s
             peak_height_atomic: Arc::new(std::sync::atomic::AtomicU64::new(initial_height)), // v8.2.9: Peak height (never decreases)
+            api_requests_served: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v10.9.19: engine_pulse counter
             height_state: q_storage::HeightState::new(initial_height), // 🚀 v1.0.2-beta: HeightState cache - Eliminates binary search storm
             shutdown_tx: {
                 let (tx, _rx) = tokio::sync::broadcast::channel(1);
@@ -4211,6 +4240,9 @@ impl AppState {
             stripe_client: crate::payment_api::init_stripe_client().ok(),
             p2p_bytes_in: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             p2p_bytes_out: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            // 🔥 Top Movers ring buffer — empty deque + zero ingest height.
+            recent_balance_deltas: Arc::new(RwLock::new(std::collections::VecDeque::new())),
+            top_movers_last_ingested_height: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             network_throttle_mode: Arc::new(std::sync::atomic::AtomicU8::new(2)), // 2 = Turbo (default)
             highest_network_height: Arc::new(std::sync::atomic::AtomicU64::new(0)), // Sync mode tracking
             last_peer_height_update: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v5.2.0: Peer height staleness
@@ -4222,8 +4254,10 @@ impl AppState {
             operator_fees_earned_session: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v8.1.1
             operator_fees_earned_total: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v8.1.1
             operator_fee_tx_count: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v8.1.1
-            current_height_atomic: Arc::new(std::sync::atomic::AtomicU64::new(initial_height)), // ⚡ v0.9.66-beta: Lock-free height
+            current_height_atomic: Arc::new(std::sync::atomic::AtomicU64::new(initial_height)), // ⚡ v0.9.66-beta: Lock-free height (max-seen)
+            contiguous_height_atomic: Arc::new(std::sync::atomic::AtomicU64::new(initial_height)), // v1.0.2: Honest contiguous height; refreshed every 5s
             peak_height_atomic: Arc::new(std::sync::atomic::AtomicU64::new(initial_height)), // v8.2.9: Peak height (never decreases)
+            api_requests_served: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v10.9.19: engine_pulse counter
             height_state: q_storage::HeightState::new(initial_height), // 🚀 v1.0.2-beta: HeightState cache - Eliminates binary search storm
             shutdown_tx: {
                 let (tx, _rx) = tokio::sync::broadcast::channel(1);

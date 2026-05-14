@@ -1117,6 +1117,156 @@ async fn update_tui_metrics(
         (None, None, vec![])
     };
 
+    // v10.9.19 — Track A: compute readiness fields BEFORE acquiring write lock.
+    // `is_checkpoint_applied().await` needs to happen outside the sync write block.
+    let readiness_tip = app_state
+        .current_height_atomic
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let readiness_contiguous = app_state
+        .contiguous_height_atomic
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let readiness_archive_complete = readiness_contiguous >= readiness_tip && readiness_tip > 0;
+    let readiness_checkpoint_applied = app_state.storage_engine.is_checkpoint_applied().await;
+    let computed_readiness_mode = if readiness_archive_complete {
+        q_tui::metrics::ReadinessMode::ArchiveComplete
+    } else if readiness_checkpoint_applied {
+        q_tui::metrics::ReadinessMode::CheckpointTrust
+    } else if readiness_tip > 0 && readiness_contiguous < 100 {
+        q_tui::metrics::ReadinessMode::GenesisSync
+    } else {
+        q_tui::metrics::ReadinessMode::Bootstrapping
+    };
+
+    // 🔥 Top Movers: ingest any blocks newer than `top_movers_last_ingested_height`
+    // into the ring buffer, then compute the top 5 |Δ| wallets across the window.
+    // Cheap in steady state (0-3 new blocks per second at 1 bps). Catch-up after
+    // a stall is bounded to 60 blocks per tick so we never block >50ms.
+    //
+    // Anti-patterns avoided:
+    //   - No `unwrap()` — all storage lookups use `if let Ok(...) = ...` and skip
+    //     gaps silently rather than panicking.
+    //   - No DB scan if no new blocks (early-return when last_ingested == tip).
+    //   - Ring is capped at RING_CAPACITY via pop_front before push_back.
+    const RING_CAPACITY: usize = 60;
+    const MAX_INGEST_PER_TICK: u64 = 60; // bound catch-up so we don't hog the tick
+
+    let top_movers_computed: Vec<q_tui::metrics::TopMover> = {
+        let last_ingested = app_state
+            .top_movers_last_ingested_height
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let tip = block_height;
+
+        // Only walk storage when we're actually behind. On a freshly started node
+        // last_ingested=0 and tip>0 — we'll backfill up to MAX_INGEST_PER_TICK
+        // blocks here, and pick up the rest on subsequent ticks.
+        if tip > last_ingested {
+            let start = last_ingested.saturating_add(1);
+            // Inclusive end height: don't scan beyond tip, and bound per tick.
+            let end = tip.min(start.saturating_add(MAX_INGEST_PER_TICK).saturating_sub(1));
+
+            // Pull each new block's transactions and build a per-block delta map.
+            // We hold the write lock on `recent_balance_deltas` for the full ingest
+            // loop — this is fine because the deque has no readers except this
+            // task. If contention ever appears we can move to per-block locking.
+            if let Ok(mut deltas) = app_state.recent_balance_deltas.try_write() {
+                for h in start..=end {
+                    let qblock = match app_state.storage_engine.get_qblock_by_height(h).await {
+                        Ok(Some(b)) => b,
+                        // Missing or unreadable — record an empty map so the ring stays in lockstep with height
+                        _ => {
+                            // Maintain ring length even on gap so old entries age out correctly.
+                            if deltas.len() >= RING_CAPACITY {
+                                deltas.pop_front();
+                            }
+                            deltas.push_back(HashMap::new());
+                            continue;
+                        }
+                    };
+
+                    let mut block_deltas: HashMap<q_types::Address, i128> = HashMap::new();
+                    for tx in &qblock.transactions {
+                        // Sender loses (amount + fee), receiver gains amount.
+                        // i128 holds u128 fine for QUG values (max ~21M * 1e24 ≈ 2.1e31, fits).
+                        let amount_i128 = tx.amount as i128;
+                        let fee_i128 = tx.fee as i128;
+                        // Skip coinbase-style txs that have a synthetic `from` of all zeros:
+                        // they would otherwise pollute the leaderboard with a single
+                        // hot "zero address" entry. Real wallets have non-zero prefixes.
+                        let from_is_zero = tx.from.iter().all(|b| *b == 0);
+                        if !from_is_zero {
+                            let entry = block_deltas.entry(tx.from).or_insert(0);
+                            *entry = entry.saturating_sub(amount_i128.saturating_add(fee_i128));
+                        }
+                        let entry = block_deltas.entry(tx.to).or_insert(0);
+                        *entry = entry.saturating_add(amount_i128);
+                    }
+
+                    if deltas.len() >= RING_CAPACITY {
+                        deltas.pop_front();
+                    }
+                    deltas.push_back(block_deltas);
+                }
+
+                // Advance pointer to the last height we tried to ingest. Even on a
+                // missing block we still consumed that slot (with an empty map),
+                // so the next tick should start from `end+1`.
+                app_state
+                    .top_movers_last_ingested_height
+                    .store(end, std::sync::atomic::Ordering::Relaxed);
+            }
+            // If try_write() failed, just skip ingestion this tick — we'll catch up
+            // on the next one. Better than blocking the metrics task.
+        }
+
+        // Aggregate per-address totals across the ring buffer.
+        // Cost: O(60 × avg_unique_addrs_per_block). At ~100 addrs/block ≈ 6k ops, well under 50ms.
+        // On rare contention we yield an empty aggregate (= empty top_movers); other
+        // metric fields still update normally.
+        let aggregated: HashMap<q_types::Address, i128> =
+            if let Ok(deltas) = app_state.recent_balance_deltas.try_read() {
+                let mut acc: HashMap<q_types::Address, i128> = HashMap::new();
+                for block_map in deltas.iter() {
+                    for (addr, delta) in block_map.iter() {
+                        let entry = acc.entry(*addr).or_insert(0);
+                        *entry = entry.saturating_add(*delta);
+                    }
+                }
+                acc
+            } else {
+                HashMap::new()
+            };
+
+        // Take top 5 by |delta|, descending. Tiebreak by address for determinism.
+        let mut ranked: Vec<(q_types::Address, i128)> = aggregated
+            .into_iter()
+            .filter(|(_, d)| *d != 0)
+            .collect();
+        ranked.sort_by(|a, b| {
+            b.1.abs().cmp(&a.1.abs()).then_with(|| a.0.cmp(&b.0))
+        });
+        ranked.truncate(5);
+
+        ranked
+            .into_iter()
+            .map(|(addr, delta)| {
+                let mut prefix = [0u8; 4];
+                prefix.copy_from_slice(&addr[..4]);
+                let direction = if delta > 0 {
+                    q_tui::metrics::MoverDirection::Up
+                } else if delta < 0 {
+                    q_tui::metrics::MoverDirection::Down
+                } else {
+                    q_tui::metrics::MoverDirection::Flat
+                };
+                q_tui::metrics::TopMover {
+                    addr_prefix: prefix,
+                    delta_qug: delta,
+                    direction,
+                }
+            })
+            .collect()
+    };
+
     // Now acquire write lock and update metrics (no awaits here!)
     // Use ok() instead of unwrap() to prevent panic on lock poisoning
     if let Ok(mut metrics) = tui_metrics.write() {
@@ -1150,6 +1300,35 @@ async fn update_tui_metrics(
         metrics.sync_current_height = block_height;
         metrics.sync_target_height = network_height;
         metrics.sync_speed_blocks_per_sec = sync_speed;
+
+        // v10.9.19 — Track A: readiness banner fields
+        if computed_readiness_mode != metrics.readiness_mode {
+            metrics.readiness_changed_at = Some(std::time::Instant::now());
+            metrics.readiness_mode = computed_readiness_mode;
+        }
+        metrics.archive_tip_height = readiness_tip;
+        metrics.archive_lowest_indexed_height = readiness_contiguous;
+        metrics.archive_complete = readiness_archive_complete;
+
+        // 🔥 Top Movers: hand the pre-computed Vec<TopMover> over. Owned move
+        // is fine — we built it above outside the lock.
+        metrics.top_movers = top_movers_computed;
+
+        // v10.9.19 — Engine pulse: snapshot current atomics for the TUI's K-parameter
+        // gauge engine-pulse card. Computed cheaply from existing AppState atomics.
+        metrics.engine_api_requests_total = app_state
+            .api_requests_served
+            .load(std::sync::atomic::Ordering::Relaxed);
+        metrics.engine_p2p_bytes_in = app_state
+            .p2p_bytes_in
+            .load(std::sync::atomic::Ordering::Relaxed);
+        metrics.engine_p2p_bytes_out = app_state
+            .p2p_bytes_out
+            .load(std::sync::atomic::Ordering::Relaxed);
+        // Data integrity: trustworthy iff checkpoint applied (we trust BAL-001 snapshot)
+        // OR we have full contiguous chain from genesis to tip.
+        metrics.engine_data_integrity_ok = readiness_checkpoint_applied || readiness_archive_complete;
+        metrics.engine_quorum_peers = peer_count;
         metrics.inbound_peers = peer_count; // P2P doesn't distinguish in/out yet
         metrics.outbound_peers = 0;
 
@@ -1841,23 +2020,93 @@ fn crown_ash_event_to_strings(event: &crown_ash_types::GameEvent) -> (String, St
     }
 }
 
-// v9.1.6: Worker threads configurable via TOKIO_WORKER_THREADS env var.
-// Without it, Tokio defaults to num_cpus (48 on Epsilon).
-// Set TOKIO_WORKER_THREADS=44 in systemd to reserve 4 cores for Caddy/OS.
-// Previously hardcoded to 19 (v7.1.6) which underutilized 48-core Epsilon.
+// v10.9.15: Pretty boot — ASCII banner + step tracker so the wait before TUI takeover
+// (or just before the first real log line on headless runs) is informative, not dead air.
+
+fn boot_banner() {
+    // ANSI color: cyan title, dim border, magenta tagline. Falls back to plain on dumb terms.
+    let color = std::env::var("NO_COLOR").is_err() && std::env::var("TERM").map(|t| t != "dumb").unwrap_or(true);
+    let (c_cy, c_mg, c_di, c_b, c_r) = if color {
+        ("\x1b[1;36m", "\x1b[1;35m", "\x1b[2m", "\x1b[1m", "\x1b[0m")
+    } else { ("", "", "", "", "") };
+
+    let version = env!("CARGO_PKG_VERSION");
+    let host = std::env::var("HOSTNAME").or_else(|_| {
+        std::process::Command::new("hostname")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .map_err(|e| e.to_string())
+    }).unwrap_or_else(|_| "node".to_string());
+    let cores = num_cpus::get();
+
+    // Rotating inspirational line — picked from build epoch so it varies per binary.
+    let lines = [
+        "When silicon dreams of qubits, the chain endures.",
+        "In quantum consensus we trust — but verify with cryptography.",
+        "The DAG remembers what consensus declares.",
+        "Every block is a heartbeat of the decentralized future.",
+        "Post-quantum is not a destination — it is a discipline.",
+        "Adversaries adapt. So does the protocol.",
+        "Anchor election by VDF: the leader nobody can predict.",
+        "Latency is a tax. Throughput is a craft. Finality is a promise.",
+    ];
+    let pick = (env!("CARGO_PKG_VERSION").bytes().fold(0u32, |a, b| a.wrapping_add(b as u32)) as usize) % lines.len();
+    let tagline = lines[pick];
+
+    let host_trim: String = host.chars().take(20).collect();
+
+    eprintln!();
+    eprintln!("{c_di}    ────────────────────────────────────────────────────────────────────{c_r}");
+    eprintln!();
+    eprintln!("         {c_cy}██████╗     ██╗   ██╗   ██████╗{c_r}");
+    eprintln!("        {c_cy}██╔═══██╗    ██║   ██║  ██╔════╝{c_r}     {c_b}Quillon Graph{c_r}");
+    eprintln!("        {c_cy}██║   ██║    ██║   ██║  ██║ ███╗{c_r}     {c_di}quantum-enhanced{c_r}");
+    eprintln!("        {c_cy}██║▄▄ ██║    ██║   ██║  ██║  ██║{c_r}     {c_di}DAG-BFT consensus{c_r}");
+    eprintln!("        {c_cy}╚██████╔╝    ╚██████╔╝  ╚█████╔╝{c_r}     {c_di}codename ·{c_r} {c_mg}NarwhalKnight{c_r}");
+    eprintln!("         {c_cy}╚══▀▀═╝      ╚═════╝    ╚════╝{c_r}");
+    eprintln!();
+    eprintln!("         {c_b}v{}{c_r}  {c_di}·{c_r}  {} cores  {c_di}·{c_r}  host {c_b}{}{c_r}", version, cores, host_trim);
+    eprintln!();
+    eprintln!("         {c_mg}\"{}\"{c_r}", tagline);
+    eprintln!();
+    eprintln!("{c_di}    ────────────────────────────────────────────────────────────────────{c_r}");
+    eprintln!();
+    eprintln!("    {c_b}▶ Initializing node{c_r}{c_di}  ·  press {c_r}{c_b}q{c_r}{c_di} once TUI loads to quit cleanly{c_r}");
+    eprintln!();
+}
+
+fn boot_step(n: u8, status: char, label: &str, detail: &str) {
+    let color = std::env::var("NO_COLOR").is_err() && std::env::var("TERM").map(|t| t != "dumb").unwrap_or(true);
+    let (icon, c_status) = if color {
+        match status {
+            '✓' => ("\x1b[1;32m✓\x1b[0m", "\x1b[32m"),
+            '⚠' => ("\x1b[1;33m⚠\x1b[0m", "\x1b[33m"),
+            '✗' => ("\x1b[1;31m✗\x1b[0m", "\x1b[31m"),
+            _   => ("\x1b[1;36m▶\x1b[0m", "\x1b[36m"),
+        }
+    } else {
+        (match status { '✓' => "[OK]", '⚠' => "[!!]", '✗' => "[XX]", _ => "[..]" }, "")
+    };
+    let c_r = if color { "\x1b[0m" } else { "" };
+    let c_dim = if color { "\x1b[2m" } else { "" };
+    eprintln!("    [{:02}] {} {:<22}{} {}{}{}", n, icon, label, c_dim, c_status, detail, c_r);
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
+    // v10.9.15: Pretty boot banner FIRST, before any other output.
+    boot_banner();
+
     // v6.2.1: Disable Transparent Huge Pages for this process to prevent jemalloc OOM.
     // THP=always/madvise causes jemalloc to use 2MB pages that fragment under high
     // gossipsub message rates. PR_SET_THP_DISABLE ensures all allocations use 4KB pages.
     #[cfg(target_os = "linux")]
     {
-        // Disable THP for this process via prctl
         unsafe {
             // PR_SET_THP_DISABLE = 41, enable = 1
             libc::prctl(41, 1, 0, 0, 0);
         }
-        eprintln!("🛡️ [OOM PROTECTION] THP disabled via prctl, using jemalloc allocator");
+        boot_step(1, '✓', "Memory protection", "THP disabled · jemalloc engaged");
     }
 
     // v9.1.6: Log effective Tokio worker thread count
@@ -1867,26 +2116,26 @@ async fn main() -> anyhow::Result<()> {
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or_else(num_cpus::get);
         let total_cpus = num_cpus::get();
-        eprintln!("⚡ [TOKIO] {} worker threads on {} logical cores ({}% utilization)",
-            worker_count, total_cpus,
-            (worker_count as f64 / total_cpus as f64 * 100.0) as u32);
+        let pct = (worker_count as f64 / total_cpus as f64 * 100.0) as u32;
+        boot_step(2, '✓', "Async runtime",
+            &format!("{} workers / {} cores · {}%", worker_count, total_cpus, pct));
     }
 
     // v8.8.1: Install rustls CryptoProvider FIRST — before any tokio worker can use rustls.
     // Without this, tokio workers that use reqwest/tungstenite/SMTP panic with:
     // "Could not automatically determine the process-level CryptoProvider"
     let _ = rustls::crypto::ring::default_provider().install_default();
+    boot_step(3, '✓', "Crypto provider", "rustls + ring loaded");
 
     // Load environment variables from .env file (for Stripe API keys, etc.)
-    if let Err(e) = dotenvy::dotenv() {
-        eprintln!("⚠️  Warning: Could not load .env file: {}", e);
-        eprintln!("    Continuing without .env (environment variables must be set externally)");
-    } else {
-        eprintln!("✅ Loaded environment variables from .env file");
+    match dotenvy::dotenv() {
+        Ok(_) => boot_step(4, '✓', "Environment", ".env loaded"),
+        Err(_) => boot_step(4, '⚠', "Environment", "no .env found · using process env / defaults"),
     }
 
     // Validate environment configuration (logs warnings for invalid values)
     validate_env_config();
+    boot_step(5, '✓', "Config validation", "checked");
 
     // Parse command line arguments
     let matches = Command::new("q-api-server")
@@ -2065,6 +2314,15 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 .required(false),
         )
         .arg(
+            Arg::new("from-genesis")
+                .long("from-genesis")
+                .help("Sync from height 0 instead of bootstrapping from the BAL-001 balance checkpoint. \
+                       Equivalent to setting Q_SKIP_CHECKPOINT=1 and Q_GENESIS_SYNC_ONLY=1. \
+                       Use for test/audit nodes that want full chain history. \
+                       Production users normally want the default (checkpoint bootstrap, ~16M height jump).")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
             Arg::new("cheap-ssd")
                 .long("cheap-ssd")
                 .help("SSD-friendly mode: limits RocksDB write rate to 50 MB/s, starts in Conservative throttle. Use this if your SSD is a budget SATA drive or you see high disk latency during sync.")
@@ -2084,6 +2342,52 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 .required(false),
         )
         .get_matches();
+
+    // v10.9.16: --from-genesis is a UX-friendly shorthand for "test/audit sync from height 0".
+    // It sets both env vars BEFORE any code path reads them — the checkpoint apply at ~line 3500
+    // checks Q_SKIP_CHECKPOINT; the catch-up loop at ~line 21115 checks Q_GENESIS_SYNC_ONLY.
+    // Setting these here (post-arg-parse, pre-startup) guarantees they take effect.
+    if matches.get_flag("from-genesis") {
+        std::env::set_var("Q_SKIP_CHECKPOINT", "1");
+        std::env::set_var("Q_GENESIS_SYNC_ONLY", "1");
+        eprintln!("    \x1b[1;33m▶\x1b[0m \x1b[1m--from-genesis\x1b[0m         \x1b[2mset Q_SKIP_CHECKPOINT=1 + Q_GENESIS_SYNC_ONLY=1 — node will sync from height 0\x1b[0m");
+    }
+
+    // v10.9.15: Echo parsed args in the boot tracker so the user sees what's about to happen.
+    {
+        let port_str = matches.get_one::<String>("port").map(|s| s.as_str()).unwrap_or("8080");
+        let tui_on = matches.get_flag("tui");
+        let admin_wallet = matches.get_one::<String>("admin-wallet")
+            .map(|w| {
+                let hex = w.trim_start_matches("qnk").trim_start_matches("qug");
+                if hex.len() > 16 {
+                    format!("{}…{}", &hex[..10], &hex[hex.len() - 6..])
+                } else { hex.to_string() }
+            })
+            .unwrap_or_else(|| "(none — admin panel disabled)".to_string());
+        let network = matches.get_one::<String>("network")
+            .cloned()
+            .or_else(|| std::env::var("Q_NETWORK_ID").ok())
+            .unwrap_or_else(|| "testnet (default)".to_string());
+        let db_path = std::env::var("Q_DB_PATH").unwrap_or_else(|_| "./data (default)".to_string());
+
+        boot_step(6, '✓', "Arguments parsed", &format!("port={} tui={}", port_str, if tui_on { "on" } else { "off" }));
+        boot_step(7, '✓', "Network",          &network);
+        boot_step(8, '✓', "Database",         &db_path);
+        boot_step(9, '✓', "Admin wallet",     &admin_wallet);
+        // v10.9.19: surface the bootstrap-peer target so the knob is discoverable.
+        let bs_target: usize = std::env::var("Q_BOOTSTRAP_MIN_PEERS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(3);
+        boot_step(
+            10,
+            '▶',
+            "Starting subsystems",
+            &format!("RocksDB · libp2p (target ≥{} peers; Q_BOOTSTRAP_MIN_PEERS) · gossipsub · API · TUI", bs_target),
+        );
+        eprintln!();
+    }
 
     // v8.5.9: --cheap-ssd mode — limits RocksDB write rate and starts in Conservative throttle
     let cheap_ssd_mode = matches.get_flag("cheap-ssd") ||
@@ -4090,10 +4394,47 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         // Only update if we have blocks (avoid resetting to 0)
         if db_height > 0 {
             state.current_height_atomic.store(db_height, std::sync::atomic::Ordering::SeqCst);
-            info!("📊 Initialized current_height_atomic from database: {} blocks", db_height);
+            state.contiguous_height_atomic.store(db_height, std::sync::atomic::Ordering::SeqCst);
+            info!("📊 Initialized current_height_atomic + contiguous_height_atomic from database: {} blocks", db_height);
         } else {
             info!("📊 Database empty, current_height_atomic = 0 (genesis)");
         }
+    }
+
+    // v1.0.2: Periodic contiguous-height refresher. Pairs with Option A (which made
+    // qblock:latest reflect contiguous-only storage) to give the API + integrity
+    // endpoints + peer announcements a lock-free atomic for "what we actually have".
+    // current_height_atomic remains max-seen for sync logic; contiguous_height_atomic
+    // is the honest archive truth, polled from storage every 5s.
+    {
+        let storage_clone = state.storage_engine.clone();
+        let contig_atom = state.contiguous_height_atomic.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            interval.tick().await; // skip immediate first tick
+            let mut last: u64 = contig_atom.load(std::sync::atomic::Ordering::Relaxed);
+            loop {
+                interval.tick().await;
+                match storage_clone.get_highest_contiguous_block().await {
+                    Ok(h) => {
+                        if h != last {
+                            contig_atom.store(h, std::sync::atomic::Ordering::Release);
+                            if h > last + 10_000 {
+                                info!(
+                                    "📐 [CONTIG HEIGHT] Jumped {} → {} (+{} blocks of archive history filled in)",
+                                    last, h, h - last
+                                );
+                            }
+                            last = h;
+                        }
+                    }
+                    Err(e) => {
+                        debug!("📐 [CONTIG HEIGHT] storage read failed: {} — keeping prior value {}", e, last);
+                    }
+                }
+            }
+        });
+        info!("📐 [CONTIG HEIGHT] Periodic refresher spawned (5s cadence)");
     }
 
     // 🚀 v1.0.4-beta: Set Phase 2 DAG-Aware Sync feature flag
@@ -6326,35 +6667,13 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 const BATCH_SIZE: usize = 50;  // Commit every 50 blocks (tunable)
                 const LOG_INTERVAL: usize = 100;  // Log every 100 blocks to reduce I/O
 
-                // 🚀 v3.4.12-beta: EXTREME_SKIP_BALANCES - Skip balance processing for 10x speed
-                // When Q_EXTREME_SKIP_BALANCES=1 or auto-detected (>100k behind), skip balance
-                // processing to achieve 2000+ BPS. Balances can be rebuilt after sync completes.
-                let skip_balances_env = std::env::var("Q_EXTREME_SKIP_BALANCES")
-                    .map(|v| v == "1" || v.to_lowercase() == "true")
-                    .unwrap_or(false);
-
-                let extreme_skip_balances_threshold: u64 = std::env::var("Q_EXTREME_SKIP_BALANCES_THRESHOLD")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(10_000);  // v8.2.0: Lowered 100K→10K — coinbase-only mode kicks in sooner for 10x faster last-mile sync
-
-                let current_db_height = storage_clone.get_latest_qblock_height().await.ok().flatten().unwrap_or(0);
-                let first_block_height = blocks.first().map(|b| b.header.height).unwrap_or(0);
-                let blocks_behind_estimate = network_height_sync.load(std::sync::atomic::Ordering::Relaxed)
-                    .saturating_sub(current_db_height);
-
-                let skip_balances = skip_balances_env || blocks_behind_estimate > extreme_skip_balances_threshold;
-
-                if skip_balances {
-                    // Log once per batch
-                    if first_block_height % 10000 == 0 || first_block_height < 1000 {
-                        warn!(
-                            "🔥 [EXTREME v3.4.12] SKIPPING BALANCE PROCESSING ({} blocks behind > {}k threshold) - 10x SPEED BOOST!",
-                            blocks_behind_estimate, extreme_skip_balances_threshold / 1000
-                        );
-                    }
-                }
-
+                // v1.0.2: ALWAYS process full balance state (coinbase + transfers).
+                // DO NOT reintroduce Q_EXTREME_SKIP_BALANCES or any analogous threshold here.
+                // Coinbase-only sync silently drops transfer transactions, producing missing
+                // wallets and inflated supply. The resulting state diverges from the network,
+                // and at BAL-001 (block 20,000,000) such nodes produce wrong state_root and
+                // are rejected. Wallet balances are consensus-critical — there is no valid
+                // "fast but approximate" mode. See docs/technical-review-sync-architecture-2026-05-12.md.
                 let mut balance_updates_total = 0;
                 let mut blocks_committed = 0;
                 let mut blocks_already_processed = 0;
@@ -6386,41 +6705,44 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     let mut batch_blocks_saved = 0;
                     let mut batch_already_processed = 0;
 
-                    // Process all blocks in this batch within the same transaction
+                    // v1.0.2 debug: tally coinbase vs transfer tx counts up-front so we
+                    // can prove transfers are being processed (vs the old coinbase-only path).
+                    // Mirrors turbo_sync.rs:4411 — both sync paths now have identical logging.
+                    let (mut batch_coinbase_tx, mut batch_transfer_tx) = (0u64, 0u64);
                     for block in batch_chunk {
-                        // v7.1.2: Even in skip_balances mode, process coinbase (mining rewards)
-                        // This ensures miners get credited during sync. Only transfers are skipped.
-                        let updates = if skip_balances {
-                            match balance_engine_sync
-                                .process_block_coinbase_only_tx(&tx, block)
-                                .await
-                            {
-                                Ok(updates) => updates,
-                                Err(BalanceConsensusError::AlreadyProcessed(_)) => Vec::new(),
-                                Err(e) => {
-                                    debug!("⚠️ [COINBASE-ONLY] Failed for block {}: {:?}", block.header.height, e);
-                                    Vec::new()
-                                }
+                        for tx_item in &block.transactions {
+                            if tx_item.is_coinbase() {
+                                batch_coinbase_tx += 1;
+                            } else {
+                                batch_transfer_tx += 1;
                             }
-                        } else {
-                            // Process balance rewards normally
-                            match balance_engine_sync
-                                .process_block_mining_rewards_tx(&tx, block)
-                                .await
-                            {
-                                Ok(updates) => updates,
-                                Err(BalanceConsensusError::AlreadyProcessed(_hash)) => {
-                                    batch_already_processed += 1;
-                                    Vec::new()
+                        }
+                    }
+                    debug!(
+                        "📊 [BATCH-SYNC] Tx breakdown: {} coinbase, {} transfer across {} blocks ({}-{})",
+                        batch_coinbase_tx, batch_transfer_tx, batch_chunk.len(),
+                        batch_start_height, batch_end_height
+                    );
+
+                    // Process all blocks in this batch within the same transaction.
+                    // Always process coinbase + transfers — see invariant comment above.
+                    for block in batch_chunk {
+                        let updates = match balance_engine_sync
+                            .process_block_mining_rewards_tx(&tx, block)
+                            .await
+                        {
+                            Ok(updates) => updates,
+                            Err(BalanceConsensusError::AlreadyProcessed(_hash)) => {
+                                batch_already_processed += 1;
+                                Vec::new()
+                            }
+                            Err(e) => {
+                                // Log only first error in batch
+                                if batch_blocks_saved == 0 {
+                                    error!("❌ [BATCH-SYNC] Balance processing failed for block {}: {:?}",
+                                        block.header.height, e);
                                 }
-                                Err(e) => {
-                                    // Log only first error in batch
-                                    if batch_blocks_saved == 0 {
-                                        error!("❌ [BATCH-SYNC] Balance processing failed for block {}: {:?}",
-                                            block.header.height, e);
-                                    }
-                                    continue;
-                                }
+                                continue;
                             }
                         };
 
@@ -6469,8 +6791,41 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
                             // Log batch completion (reduced frequency)
                             if batch_end_height % LOG_INTERVAL as u64 == 0 || batch_end_height == blocks.last().map(|b| b.header.height).unwrap_or(0) {
-                                info!("✅ [BATCH-SYNC] Committed {} blocks ({}-{}), {} balance updates",
-                                    batch_blocks_saved, batch_start_height, batch_end_height, batch_balance_updates);
+                                info!(
+                                    "✅ [BATCH-SYNC] Committed {} blocks ({}-{}), {} balance updates (coinbase={} transfer={})",
+                                    batch_blocks_saved, batch_start_height, batch_end_height,
+                                    batch_balance_updates, batch_coinbase_tx, batch_transfer_tx
+                                );
+                            }
+
+                            // v1.0.2: Periodic wallet/supply snapshot — every 10k blocks during sync.
+                            // Lets us watch the divergence story unfold in real time: if a fresh
+                            // node ends up with fewer wallets / lower supply than Epsilon at the
+                            // same height, something is silently dropping state updates.
+                            if batch_end_height % 10_000 == 0 && batch_end_height > 0 {
+                                if let Ok(balances) = storage_clone.load_wallet_balances().await {
+                                    let wallet_count = balances.len();
+                                    let total: u128 = balances.values().copied().sum();
+                                    let total_qug = total / 1_000_000_000_000_000_000_000_000u128;
+                                    info!(
+                                        "📈 [BATCH-SYNC SNAPSHOT] h={} wallets={} supply={} QUG \
+                                         (compare with another node at same height to detect divergence)",
+                                        batch_end_height, wallet_count, total_qug
+                                    );
+                                    // Compute balance_root for cross-node comparison. This is the
+                                    // SAME hash that ends up in block.header.state_root, so two
+                                    // nodes with identical state will compute identical roots.
+                                    match storage_clone.compute_balance_root_for_block().await {
+                                        Ok(root) if root != [0u8; 32] => {
+                                            info!(
+                                                "🔐 [BATCH-SYNC SNAPSHOT] h={} balance_root={} (cross-node should match)",
+                                                batch_end_height, hex::encode(&root[..8])
+                                            );
+                                        }
+                                        Ok(_) => debug!("🔐 [BATCH-SYNC SNAPSHOT] h={} balance_root=zero (empty state)", batch_end_height),
+                                        Err(e) => warn!("⚠️ [BATCH-SYNC SNAPSHOT] h={} balance_root compute failed: {}", batch_end_height, e),
+                                    }
+                                }
                             }
                         }
                         Err(e) => {
@@ -7498,10 +7853,17 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 }
 
                 // --- Log level based on health ---
+                // v10.9.19: when cgroup_high is 0 (unbounded), show "unbounded" rather than
+                // "0.0G (0%)" to avoid the misleading-looking display in HEALTH logs.
+                let cgroup_high_disp = if cgroup_high_bytes > 0 {
+                    format!("{:.1}G ({:.0}%)", cgroup_high_gb, pressure_pct)
+                } else {
+                    "unbounded (no pressure metric)".to_string()
+                };
                 if pressure_pct > 90.0 || zero_peer_count >= 3 || stall_count >= 3 {
                     tracing::error!(
-                        "🚨 HEALTH CRITICAL: RSS={:.1}G cgroup={:.1}G/{:.1}G ({:.0}%) high_events={} | peers={} height={} gap={} stall_count={} zero_peers_count={}",
-                        rss_gb, cgroup_current_gb, cgroup_high_gb, pressure_pct, cgroup_events_high,
+                        "🚨 HEALTH CRITICAL: RSS={:.1}G cgroup_current={:.1}G high={} high_events={} | peers={} height={} gap={} stall_count={} zero_peers_count={}",
+                        rss_gb, cgroup_current_gb, cgroup_high_disp, cgroup_events_high,
                         peers, height, height_gap, stall_count, zero_peer_count
                     );
                 } else if pressure_pct > 75.0 || peers < 3 || stall_count >= 1 {
@@ -7879,23 +8241,34 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             checkpoint_gap_ranges
         };
 
-        // v10.8.4: Auto-detect pre-checkpoint history gap.
-        // Any checkpoint-synced node is missing blocks 1..=CP_HEIGHT (skipped during warp-sync).
-        // Add this range so the background gap-fill downloads full history from peers (Epsilon archive).
-        // Balances for this range are already correct via the checkpoint snapshot — no replay needed.
-        if state.storage_engine.is_checkpoint_applied().await {
+        // v1.0.2 OPTION C-A: Two-phase sync.
+        // Phase 1 (now): post-checkpoint operational gap-fill — runs immediately so the node
+        //                reaches network tip fast (~3 min for the 1.34M post-checkpoint blocks).
+        // Phase 2 (deferred): pre-checkpoint history backfill — kicks off automatically once
+        //                Phase 1 reaches tip. Every node ends up with full history; we just
+        //                sequence post-checkpoint first so the node is operational quickly.
+        //
+        // Previous behaviour: queued both ranges at startup, both compete for the same 8
+        // in-flight network slots; pre-checkpoint chunks at heights 1-1000, 1000-2000, …
+        // monopolize the queue's front and starve the forward-sync chunks. Observed: the
+        // contiguous frontier stalled at ~25K for 30+ minutes while pre-checkpoint chunks
+        // landed at random heights elsewhere. Two-phase removes the contention.
+        let needs_pre_checkpoint_backfill = if state.storage_engine.is_checkpoint_applied().await {
             let has_genesis = state.storage_engine.get_qblock_by_height(1).await
                 .ok().flatten().is_some();
             if !has_genesis {
-                warn!(
-                    "🔍 [CHECKPOINT GAP-FILL] Pre-checkpoint history missing (blocks 1-{}) — \
-                     scheduling background download for full chain history.",
+                info!(
+                    "🔭 [CHECKPOINT GAP-FILL Phase 2 queued] Pre-checkpoint history (blocks 1-{}) \
+                     will be backfilled in the background once Phase 1 reaches network tip.",
                     CP_HEIGHT
                 );
-                // Append at end: post-checkpoint operational gaps fill first (higher priority)
-                effective_gap_ranges.push((1, CP_HEIGHT));
+                true
+            } else {
+                false
             }
-        }
+        } else {
+            false
+        };
 
         if !effective_gap_ranges.is_empty() && state.storage_engine.is_checkpoint_applied().await {
             let gap_sync   = turbo_sync.clone();
@@ -7976,6 +8349,147 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         } else if effective_gap_ranges.is_empty() && state.storage_engine.is_checkpoint_applied().await {
             info!("✅ [CHECKPOINT GAP-FILL] No pending gap ranges — checkpoint balances are complete.");
         }
+
+        // v1.0.2 OPTION C-A Phase 2: Pre-checkpoint history backfill.
+        // Spawn a watcher that waits until forward sync (Phase 1) reaches network tip, then
+        // queues the (1, CP_HEIGHT) range for download. This is what makes every node
+        // archive-complete by default — same outcome as the old auto-queue-at-startup
+        // behavior, just sequenced so Phase 1 isn't starved.
+        //
+        // "Reaches tip" = contiguous_height_atomic within READY_GAP blocks of the highest
+        // height we've seen from any peer (current_height_atomic). Once that gate closes,
+        // we kick off the 16.5M-block backfill which then runs at full turbo bandwidth
+        // because Phase 1 is done.
+        if needs_pre_checkpoint_backfill {
+            let phase2_sync    = turbo_sync.clone();
+            let phase2_storage = state.storage_engine.clone();
+            let phase2_current = state.current_height_atomic.clone();
+            let phase2_contig  = state.contiguous_height_atomic.clone();
+            tokio::spawn(async move {
+                const READY_GAP: u64 = 100;          // within 100 blocks of network tip
+                const POLL_INTERVAL: u64 = 30;
+                info!(
+                    "🔭 [CHECKPOINT GAP-FILL Phase 2 watcher] Started — will fire when forward \
+                     sync is within {} blocks of network tip.",
+                    READY_GAP
+                );
+
+                let mut last_logged_gap: Option<u64> = None;
+                // v10.9.19: require N consecutive ticks of gap ≤ READY_GAP before firing.
+                // Without this, a single transient gap=0 reading (often when peer_count is
+                // small and the one peer's announced height temporarily matches ours) fires
+                // Phase 2 prematurely. With this, we need ≥ READY_TICKS_REQUIRED stable
+                // readings — about 90 seconds of sustained convergence (3 × 30s polls).
+                const READY_TICKS_REQUIRED: u32 = 3;
+                let mut consecutive_ready_ticks: u32 = 0;
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(POLL_INTERVAL)).await;
+                    let atom_max_seen = phase2_current.load(std::sync::atomic::Ordering::Relaxed);
+                    let contiguous = phase2_contig.load(std::sync::atomic::Ordering::Relaxed);
+
+                    // v1.0.2 FIX (#15): use peer-discovered tip, not just current_height_atomic.
+                    // current_height_atomic plateaus at the height of blocks we've actually
+                    // received; it doesn't reflect what peers have announced as their tip.
+                    // For "are we at network tip?" the right source is peer_registry.max_height()
+                    // (the highest height any peer has told us about). Take max of both —
+                    // current_height_atomic catches local-stored tip, peer_registry catches
+                    // network-known tip.
+                    let peer_max = phase2_sync.get_enhanced_registry().await
+                        .max_height()
+                        .unwrap_or(0);
+                    let effective_tip = peer_max.max(atom_max_seen);
+                    if effective_tip == 0 {
+                        continue; // no peers seen yet, no atom data yet
+                    }
+                    let gap = effective_tip.saturating_sub(contiguous);
+                    let max_seen = effective_tip;
+
+                    // Throttled progress logging — every order of magnitude or so.
+                    let bucket = if gap > 10_000_000 { Some(10_000_000) }
+                        else if gap > 1_000_000 { Some(1_000_000) }
+                        else if gap > 100_000 { Some(100_000) }
+                        else if gap > 10_000 { Some(10_000) }
+                        else if gap > 1_000 { Some(1_000) }
+                        else { Some(0) };
+                    if bucket != last_logged_gap {
+                        info!(
+                            "🔭 [Phase 2 watcher] contiguous={} max_seen={} gap={} (waiting for gap ≤ {})",
+                            contiguous, max_seen, gap, READY_GAP
+                        );
+                        last_logged_gap = bucket;
+                    }
+
+                    // v10.9.19: require N consecutive ready ticks before firing
+                    if gap <= READY_GAP {
+                        consecutive_ready_ticks = consecutive_ready_ticks.saturating_add(1);
+                        if consecutive_ready_ticks < READY_TICKS_REQUIRED {
+                            info!(
+                                "🔭 [Phase 2 watcher] gap ≤ {} ({} consecutive ready ticks, need {}) — \
+                                 holding fire to avoid transient-tip false positives.",
+                                READY_GAP, consecutive_ready_ticks, READY_TICKS_REQUIRED
+                            );
+                            continue;
+                        }
+                    } else {
+                        // Gap re-opened — reset the consecutive counter.
+                        if consecutive_ready_ticks > 0 {
+                            debug!(
+                                "🔭 [Phase 2 watcher] gap reopened from ready state to {} — resetting consecutive counter",
+                                gap
+                            );
+                            consecutive_ready_ticks = 0;
+                        }
+                    }
+                    if gap <= READY_GAP {
+                        info!(
+                            "🚀 [Phase 2 START] Forward sync caught up (contiguous={}, max_seen={}, gap={}, after {} stable ticks). \
+                             Kicking off pre-checkpoint backfill (blocks 1-{}).",
+                            contiguous, max_seen, gap, consecutive_ready_ticks, CP_HEIGHT
+                        );
+                        // fill_gap_p2p routes >100K to fill_gap_via_turbo (Option B).
+                        // After fix #16, that path probes peers for archive capability and returns
+                        // Err if no archive peer reachable — in which case we retry on the next tick.
+                        match phase2_sync.fill_gap_p2p(1, CP_HEIGHT).await {
+                            Ok(()) => {
+                                // Verify how many landed
+                                let mut stored = 0u64;
+                                let sample_step = 100_000u64;
+                                let mut h = 1u64;
+                                while h <= CP_HEIGHT {
+                                    if phase2_storage.get_qblock_by_height(h).await
+                                        .ok().flatten().is_some() {
+                                        stored += 1;
+                                    }
+                                    h += sample_step;
+                                }
+                                let total_samples = (CP_HEIGHT / sample_step) + 1;
+                                if stored < total_samples / 2 {
+                                    warn!(
+                                        "⚠️ [Phase 2] Coverage check failed: only {} of {} sampled \
+                                         blocks present. Treating as partial completion — will retry on next tick.",
+                                        stored, total_samples
+                                    );
+                                    continue;
+                                }
+                                info!(
+                                    "✅ [Phase 2 DONE] Pre-checkpoint backfill complete \
+                                     (sampled {} of {} blocks present).",
+                                    stored, total_samples
+                                );
+                                break; // success — watcher's job done
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "⚠️ [Phase 2] Backfill returned error: {} — will retry on next 30s tick.",
+                                    e
+                                );
+                                continue;
+                            }
+                        }
+                    }
+                }
+            });
+        }
     }
 
     // v10.7.6 SYNC-006: Dedicated post-checkpoint balance replay task.
@@ -7997,31 +8511,74 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 return;
             }
             // Skip if checkpoint was not applied (non-checkpoint nodes need no replay).
+            // This is a one-time decision per node — checkpoint-applied status does not
+            // change at runtime, so an early return is safe.
             if !replay_storage.is_checkpoint_applied().await {
                 info!("✅ [SYNC-006] Checkpoint not applied on this node (ran from genesis) — no balance replay needed.");
                 return;
             }
-            // Skip if the replay was already completed in a previous run.
-            if replay_storage.is_balance_replay_done().await {
-                info!("✅ [SYNC-006] Post-checkpoint balance replay already done — skipping.");
-                return;
-            }
             use q_storage::balance_checkpoint::CHECKPOINT_HEIGHT;
-            info!("🔭 [SYNC-006] Waiting for chain to reach post-checkpoint height before replay…");
+            // v1.0.2: Persistent polling loop. The done-flag is checked INSIDE the loop
+            // (not as an outer early-return) so the admin reset endpoint can re-trigger
+            // a replay on the next 30s tick without requiring a service restart.
+            // After a successful replay we keep polling — if the flag is later cleared,
+            // the next iteration will detect it and re-run.
+            info!("🔁 [SYNC-006] Persistent replay watcher started — checks done-flag every 30s.");
+            let mut already_logged_waiting = false;
+            let mut already_logged_done = false;
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                // Done-flag check inside the loop: if a previous iteration marked done,
+                // skip cheaply. If the admin endpoint clears the flag, we pick it up here.
+                if replay_storage.is_balance_replay_done().await {
+                    if !already_logged_done {
+                        info!("✅ [SYNC-006] Replay marked done — idling (will re-run if admin reset clears the flag).");
+                        already_logged_done = true;
+                        already_logged_waiting = false;
+                    }
+                    continue;
+                }
+                // Flag cleared (or never set) — replay is eligible. Reset the "done" log
+                // gate so the next completion logs again.
+                already_logged_done = false;
                 let latest = replay_storage.get_latest_qblock_height().await
                     .ok().flatten().unwrap_or(0);
                 if latest <= CHECKPOINT_HEIGHT {
-                    info!("🔭 [SYNC-006] Latest block {} ≤ checkpoint {} — waiting…", latest, CHECKPOINT_HEIGHT);
+                    if !already_logged_waiting {
+                        info!("🔭 [SYNC-006] Latest block {} ≤ checkpoint {} — waiting…", latest, CHECKPOINT_HEIGHT);
+                        already_logged_waiting = true;
+                    }
                     continue;
                 }
+                already_logged_waiting = false;
                 info!("🏁 [SYNC-006] Chain at height {} — reindexing DAG blocks then starting replay.", latest);
+
+                // v1.0.2 debug: snapshot wallet count + supply + balance_root BEFORE replay.
+                // Pair with the post-replay snapshot below to see exactly what changed.
+                let (pre_wallets, pre_supply, pre_root) = {
+                    let balances = replay_storage.load_wallet_balances().await.unwrap_or_default();
+                    let count = balances.len();
+                    let total: u128 = balances.values().copied().sum();
+                    let root = replay_storage.compute_balance_root_for_block().await.unwrap_or([0u8; 32]);
+                    (count, total, root)
+                };
+                info!(
+                    "📸 [SYNC-006 PRE] h={} wallets={} supply={} QUG balance_root={}",
+                    latest,
+                    pre_wallets,
+                    pre_supply / 1_000_000_000_000_000_000_000_000u128,
+                    hex::encode(&pre_root[..8])
+                );
+
                 // Pre-replay reindex: convert qblock:dag:{N}:{proposer} keys to qblock:height:{N}
                 // so that get_qblock_any_format() can find all gossip-received blocks.
+                let reindex_start = std::time::Instant::now();
                 if let Err(e) = replay_storage.reindex_dag_blocks_to_height_keys().await {
                     warn!("⚠️ [SYNC-006] Pre-replay reindex failed: {} — replay may miss DAG-format blocks.", e);
+                } else {
+                    info!("🔁 [SYNC-006] Pre-replay reindex completed in {:?}", reindex_start.elapsed());
                 }
+                let replay_start = std::time::Instant::now();
                 match replay_storage.replay_post_checkpoint_balances(&replay_balances, &replay_supply).await {
                     Ok(blocks_missing) => {
                         let total_range = latest.saturating_sub(CHECKPOINT_HEIGHT);
@@ -8039,7 +8596,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                    NOT marking done, will retry in 30s.", miss_pct, blocks_missing, total_range, max_miss_pct);
                             continue;
                         }
-                        info!("✅ [SYNC-006] Replay complete (miss rate {}%) — reloading in-memory balances from RocksDB.", miss_pct);
+                        info!(
+                            "✅ [SYNC-006] Replay complete in {:?} (miss rate {}%, missed {}/{}) — reloading in-memory balances from RocksDB.",
+                            replay_start.elapsed(), miss_pct, blocks_missing, total_range
+                        );
                         // Reload the in-memory map so live queries immediately reflect the replayed state.
                         if let Ok(persisted) = replay_storage.load_wallet_balances().await {
                             let count = persisted.len();
@@ -8048,6 +8608,33 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             let total: u128 = bal.values().sum();
                             drop(bal);
                             *replay_supply.write().await = total;
+
+                            // v1.0.2 debug: POST snapshot — match against PRE snapshot above
+                            // to see exactly what replay changed. balance_root delta is the
+                            // single most useful number for cross-node comparison.
+                            let post_root = replay_storage.compute_balance_root_for_block().await.unwrap_or([0u8; 32]);
+                            let wallet_delta = count as i64 - pre_wallets as i64;
+                            let supply_delta_qug = (total as i128 - pre_supply as i128)
+                                / 1_000_000_000_000_000_000_000_000i128;
+                            info!(
+                                "📸 [SYNC-006 POST] h={} wallets={} ({:+}) supply={} QUG ({:+} QUG) balance_root={} (was {})",
+                                latest,
+                                count,
+                                wallet_delta,
+                                total / 1_000_000_000_000_000_000_000_000u128,
+                                supply_delta_qug,
+                                hex::encode(&post_root[..8]),
+                                hex::encode(&pre_root[..8])
+                            );
+                            if post_root == pre_root {
+                                info!("🟰 [SYNC-006] balance_root unchanged — no state divergence detected.");
+                            } else {
+                                warn!(
+                                    "🔀 [SYNC-006] balance_root CHANGED — replay corrected state. \
+                                     Compare {} (POST) against another node's hash at same height.",
+                                    hex::encode(&post_root[..8])
+                                );
+                            }
                             info!("✅ [SYNC-006] In-memory balances updated: {} wallets, {} QUG",
                                   count, total / 1_000_000_000_000_000_000_000_000u128);
                         }
@@ -8058,7 +8645,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         continue; // Retry next loop iteration
                     }
                 }
-                break; // Done
+                // No `break` — keep polling so admin reset (which clears the done-flag)
+                // can re-trigger a replay on the next 30s tick.
             }
         });
     }
@@ -23924,6 +24512,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         // Added conditionally below based on config.allow_manual_trigger
         // Chain endpoints
         .route("/api/v1/status", get(handlers::bootstrap_peers)) // Bootstrap peer discovery (fast, no locks)
+        .route("/api/v1/status/archive", get(handlers::archive_status)) // v10.9.18: archive backfill state for wallets/explorers
+        .route("/api/v1/engine/pulse", get(handlers::engine_pulse)) // v10.9.19: live engine vitals — "almost hear it hum"
+        .route("/api/v1/proof/tip", get(handlers::proof_tip)) // v10.9.19 Job G: recursive-SNARK proof tip (Phase 1 placeholder)
         .route("/api/v1/node/status", get(handlers::node_status)) // Dashboard status (detailed, may wait for locks)
         .route("/api/v1/network/supply", get(handlers::network_supply)) // Network supply statistics (max supply, mined coins, hashrate)
         .route("/api/v1/totalsupply", get(handlers::total_supply_plain)) // v9.9.2: Plain-text total supply for CMC/CoinGecko
@@ -24643,6 +25234,12 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/bitcoin/deposits", get(q_api_server::bitcoin_deposit_api::list_deposits))
         // v10.9.3: wBTC withdrawal — redeem wBTC for real on-chain BTC
         .route("/api/v1/bitcoin/withdraw", post(q_api_server::bitcoin_deposit_api::withdraw_wbtc))
+        // v10.9.21: One-click "deposit BTC → become bridge LP" flow
+        .route("/api/v1/bitcoin/lp/intent", post(q_api_server::bitcoin_lp_api::create_lp_intent))
+        .route("/api/v1/bitcoin/lp/intents", get(q_api_server::bitcoin_lp_api::list_lp_intents))
+        .route("/api/v1/bitcoin/lp/intent/:id", get(q_api_server::bitcoin_lp_api::get_lp_intent))
+        .route("/api/v1/bitcoin/lp/intent/:id/cancel", post(q_api_server::bitcoin_lp_api::cancel_lp_intent))
+        .route("/api/v1/bitcoin/lp/intent/:id/finalize", post(q_api_server::bitcoin_lp_api::finalize_lp_intent))
         // v10.5.4: HiBT listing donation campaign — public, no auth
         .route("/api/v1/donation/hibt-status", get(hibt_donation_status))
         // ═══ Zcash Shielded Bridge (v7.2.2) ═══
@@ -25095,6 +25692,40 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             q_api_server::state_sync_api::spawn_state_sync_task(app_state_for_sync, our_port);
             info!("🔄 [STATE SYNC] Background balance state sync task spawned (queries Epsilon first)");
         }
+    }
+
+    // ========================================
+    // 🛡️  Background anti-equivocation watcher
+    //
+    // Spawns the watcher in standalone mode: the bounded `(Block, NodeId)`
+    // mpsc sender side is held alive in `_equivocation_tx` so the channel
+    // doesn't close immediately, but it is NOT yet wired to the gossipsub
+    // dispatch loop in `crates/q-network/src/unified_network_manager.rs`.
+    //
+    // TODO(equivocation-watcher): plumb decoded blocks from the
+    // unified_network_manager block-receive site (search for
+    // "Gossipsub BLOCK from") into `_equivocation_tx.try_send(...)`. Use
+    // `try_send` so backpressure manifests as dropped detections, never
+    // as a stalled gossipsub loop. The watcher's observe() side is
+    // already fully implemented and tested in
+    // `crates/q-api-server/src/equivocation_watcher.rs`.
+    // ========================================
+    let (_equivocation_tx, equivocation_rx) =
+        tokio::sync::mpsc::channel::<(q_types::Block, q_types::NodeId)>(
+            q_api_server::equivocation_watcher::RECOMMENDED_CHANNEL_CAPACITY,
+        );
+    let (_equivocation_shutdown_tx, equivocation_shutdown_rx) =
+        tokio::sync::watch::channel::<bool>(false);
+    {
+        let storage_for_equivocation = app_state.storage_engine.clone();
+        tokio::spawn(async move {
+            let watcher =
+                q_api_server::equivocation_watcher::EquivocationWatcher::new(
+                    storage_for_equivocation,
+                );
+            info!("🛡️  Equivocation watcher task spawned (gossipsub wiring pending)");
+            watcher.run(equivocation_rx, equivocation_shutdown_rx).await;
+        });
     }
 
     // ========================================

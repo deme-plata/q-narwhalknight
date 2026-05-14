@@ -1057,12 +1057,28 @@ pub async fn node_status(
         0
     };
 
+    // v1.0.2: Honest height fields alongside backward-compat current_height.
+    //   current_height          — preserved for backwards compat (max-seen)
+    //   max_seen_height         — explicit max-seen for new clients
+    //   contiguous_height       — height of the highest contiguous block we actually
+    //                             have stored locally; differs from max_seen when the
+    //                             node is still backfilling historical gaps
+    //   archive_gap             — max_seen - contiguous; 0 means we are an archive node
+    //                             with full history up to the tip we know about
+    let contiguous_height = state
+        .contiguous_height_atomic
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let archive_gap = real_current_height.saturating_sub(contiguous_height);
+
     // Create a dashboard-friendly response with properly formatted numeric values
     // v1.0.70-beta: Use real_current_height from atomic counter for accurate height display
     let dashboard_status = serde_json::json!({
         "node_id": hex::encode(&status.node_id),
         "current_round": status.current_round,
         "current_height": real_current_height,
+        "max_seen_height": real_current_height,
+        "contiguous_height": contiguous_height,
+        "archive_gap": archive_gap,
         "highest_network_height": network_height,
         "is_syncing": is_syncing,
         "blocks_behind": blocks_behind,
@@ -1300,6 +1316,325 @@ pub async fn bootstrap_peers(
     });
 
     Ok(Json(ApiResponse::success(bootstrap_info)))
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// v10.9.19 — Job G: Proof-tip scaffold for recursive-SNARK bootstrap
+// ════════════════════════════════════════════════════════════════════════════
+
+/// GET /api/v1/proof/tip
+///
+/// Returns the chain-tip recursive SNARK proof. Wallets and fresh-bootstrap
+/// nodes call this to obtain `(state_root, π_tip, block_header)`, verify
+/// `π_tip` locally in ≤ 10 ms, and accept `state_root` as cryptographically
+/// trusted — enabling immediate mining, transactions, and state queries.
+///
+/// ⚠️ **Phase 1 placeholder.** Until the Nova IVC wrapper (Job D) lands:
+/// - `proof_version` is `"placeholder-v0"`
+/// - `proof_b64` is a fixed 32-byte all-zero array (NOT cryptographically meaningful)
+/// - `state_root` and `block_header` ARE live from real AppState
+///
+/// The JSON schema is **contractual** and stable from Phase 1 through the
+/// eventual lattice migration (Phase 4). Phase 2 swaps the `proof_b64` body
+/// to a real Nova proof and updates `proof_version` to `"nova-bn254-v1"`.
+/// JavaScript callers (browser wallet, MCP, monitoring) do NOT need to
+/// change their integration when the proof system upgrades.
+///
+/// Wallet integration MUST check `proof_version`:
+/// - `"placeholder-v0"` → show banner "⚠️ proof verification not yet active —
+///   fall back to checkpoint trust"
+/// - `"nova-bn254-v1"` → show ✓ "verified by recursive zk-SNARK in N ms"
+///
+/// See `docs/blueprints-ivc-snark-2026-05-13.md` Blueprint 5 for the
+/// full wire-protocol spec.
+pub async fn proof_tip(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    use std::sync::atomic::Ordering;
+    use base64::Engine as _;
+
+    let tip_height = state.current_height_atomic.load(Ordering::Relaxed);
+
+    // Fetch the latest QBlock from storage. Best-effort: if unavailable,
+    // we return a minimal header reflecting only the tip height.
+    // (`get_qblock_by_height` returns `Option<QBlock>` which has the structured
+    // `header` substruct; `get_block_by_height` returns the legacy `Block` without one.)
+    let (state_root_hex, parent_hash_hex, tx_root_hex, timestamp, producer_id) =
+        match state.storage_engine.get_qblock_by_height(tip_height).await {
+            Ok(Some(block)) => (
+                format!("0x{}", hex::encode(&block.header.state_root)),
+                format!("0x{}", hex::encode(&block.header.prev_block_hash)),
+                format!("0x{}", hex::encode(&block.header.tx_root)),
+                block.header.timestamp,
+                block.header.producer_id,
+            ),
+            _ => (
+                "0x".to_string() + &"0".repeat(64),
+                "0x".to_string() + &"0".repeat(64),
+                "0x".to_string() + &"0".repeat(64),
+                0u64,
+                0u8,
+            ),
+        };
+
+    // Phase 1: 32-byte all-zero placeholder proof. Wire-shape correct,
+    // cryptographically meaningless. Phase 2 (after Job D Nova wrapper lands)
+    // replaces this with real proof bytes from `QnkFolder::current_proof()`.
+    let placeholder_proof_bytes = [0u8; 32];
+    let proof_b64 = base64::engine::general_purpose::STANDARD.encode(placeholder_proof_bytes);
+
+    let body = serde_json::json!({
+        "tip_height": tip_height,
+        "state_root": state_root_hex,
+        "block_header": {
+            "height": tip_height,
+            "parent_hash": parent_hash_hex,
+            "tx_root": tx_root_hex,
+            "state_root": state_root_hex,
+            "timestamp": timestamp,
+            "producer_id": producer_id,
+        },
+        "proof_version": "placeholder-v0",
+        "proof_size_bytes": placeholder_proof_bytes.len(),
+        "proof_b64": proof_b64,
+        "verifier_advice": {
+            "warning": "Phase 1 placeholder — DO NOT trust this proof for security. Use checkpoint bootstrap instead until proof_version becomes 'nova-bn254-v1'.",
+            "checkpoint_height_fallback": 16538868u64,
+        },
+    });
+
+    Ok(Json(ApiResponse::success(body)))
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// v10.9.19 — Engine pulse endpoint ("hear it hum")
+// ════════════════════════════════════════════════════════════════════════════
+
+/// GET /api/v1/engine/pulse
+///
+/// Live vitals from the engine — aggregated from existing AppState atomics
+/// with no new instrumentation in hot paths. Poll every 1-5 seconds and
+/// compute deltas to derive rates (`p2p_bytes_in` between polls = bytes/sec).
+///
+/// This is the "almost hear it hum" endpoint — block heights ticking, mining
+/// solutions accumulating, network bytes flowing, peer-height gossip arriving.
+/// Designed for the TUI's planned engine-vitals panel and for external monitors.
+///
+/// Response shape:
+/// ```json
+/// {
+///   "version": "10.9.19",
+///   "ts_unix_ms": 1715620000000,
+///   "uptime_secs": 12345,
+///   "sync": {
+///     "current_height": 17966654,
+///     "contiguous_height": 17966654,
+///     "peak_height_seen": 17966654,
+///     "highest_network_height": 17966654
+///   },
+///   "mining": {
+///     "solutions_submitted_total": 4321,
+///     "solutions_accepted_total": 4310,
+///     "accept_ratio": 99.75,
+///     "last_solution_unix_ms": 1715619995000,
+///     "is_healthy": true
+///   },
+///   "p2p": {
+///     "bytes_in_total": 12345678901,
+///     "bytes_out_total": 9876543210
+///   },
+///   "consensus": {
+///     "decentralization_ema": 0.834,
+///     "throttle_mode_u8": 2
+///   },
+///   "fees": {
+///     "operator_fees_earned_session": 1234,
+///     "operator_fees_earned_total": 567890,
+///     "operator_fee_tx_count": 4321,
+///     "dev_fee_bps": 190,
+///     "operator_fee_promille": 5
+///   },
+///   "engine": {
+///     "api_requests_served_total": 12345,
+///     "last_peer_height_update_unix_ms": 1715619998000
+///   }
+/// }
+/// ```
+pub async fn engine_pulse(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    use std::sync::atomic::Ordering;
+
+    // Pull every counter atomically. None of these block — pure Relaxed loads.
+    let current_height = state.current_height_atomic.load(Ordering::Relaxed);
+    let contiguous_height = state.contiguous_height_atomic.load(Ordering::Relaxed);
+    let peak_height = state.peak_height_atomic.load(Ordering::Relaxed);
+    let highest_network = state.highest_network_height.load(Ordering::Relaxed);
+    let last_peer_height_update = state.last_peer_height_update.load(Ordering::Relaxed);
+
+    let mining_submitted = state.mining_solutions_submitted.load(Ordering::Relaxed);
+    let mining_accepted = state.mining_solutions_accepted.load(Ordering::Relaxed);
+    let last_solution_ts = state.last_mining_solution_time.load(Ordering::Relaxed);
+    let mining_healthy = state.mining_is_healthy.load(Ordering::Relaxed);
+    let accept_ratio = if mining_submitted > 0 {
+        (mining_accepted as f64 / mining_submitted as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let p2p_bytes_in = state.p2p_bytes_in.load(Ordering::Relaxed);
+    let p2p_bytes_out = state.p2p_bytes_out.load(Ordering::Relaxed);
+
+    let di_ema_bits = state.di_ema.load(Ordering::Relaxed);
+    let di_ema = f64::from_bits(di_ema_bits);
+    let throttle_mode = state.network_throttle_mode.load(Ordering::Relaxed);
+
+    let operator_fees_session = state.operator_fees_earned_session.load(Ordering::Relaxed);
+    let operator_fees_total = state.operator_fees_earned_total.load(Ordering::Relaxed);
+    let operator_fee_tx_count = state.operator_fee_tx_count.load(Ordering::Relaxed);
+    let dev_fee_bps = state.dev_fee_bps.load(Ordering::Relaxed);
+    let operator_fee_promille = state.node_operator_fee_promille.load(Ordering::Relaxed);
+
+    // v10.9.19: API-request counter. Increment here so the endpoint counts itself.
+    let api_requests_total = state
+        .api_requests_served
+        .fetch_add(1, Ordering::Relaxed)
+        .saturating_add(1);
+
+    let ts_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    // v10.9.19: additional "hum" fields — mempool, sync rate, Tor, gossipsub mesh size
+    let mempool_size = state.tx_pool.len();
+    // tx_status & blocks RwLock are read-only here so try_read won't block;
+    // skip if contested to keep this endpoint fast/non-blocking.
+    let tx_status_count = state.tx_status.len();
+    let known_wallet_count = state
+        .wallet_balances
+        .try_read()
+        .map(|w| w.len())
+        .unwrap_or(0);
+    // Gap-to-tip — if positive, we're behind
+    let gap_to_tip = highest_network.saturating_sub(current_height);
+
+    let body = serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "ts_unix_ms": ts_unix_ms,
+        "sync": {
+            "current_height": current_height,
+            "contiguous_height": contiguous_height,
+            "peak_height_seen": peak_height,
+            "highest_network_height": highest_network,
+            "gap_to_tip": gap_to_tip,
+            "is_caught_up": gap_to_tip == 0 && current_height > 0,
+        },
+        "mempool": {
+            "tx_pool_size": mempool_size,
+            "tx_status_tracked": tx_status_count,
+        },
+        "wallets": {
+            "known_count": known_wallet_count,
+        },
+        "mining": {
+            "solutions_submitted_total": mining_submitted,
+            "solutions_accepted_total": mining_accepted,
+            "accept_ratio_pct": accept_ratio,
+            "last_solution_unix_ms": last_solution_ts,
+            "is_healthy": mining_healthy,
+        },
+        "p2p": {
+            "bytes_in_total": p2p_bytes_in,
+            "bytes_out_total": p2p_bytes_out,
+        },
+        "consensus": {
+            "decentralization_ema": di_ema,
+            "throttle_mode_u8": throttle_mode,
+        },
+        "fees": {
+            "operator_fees_earned_session": operator_fees_session,
+            "operator_fees_earned_total": operator_fees_total,
+            "operator_fee_tx_count": operator_fee_tx_count,
+            "dev_fee_bps": dev_fee_bps,
+            "operator_fee_promille": operator_fee_promille,
+        },
+        "engine": {
+            "api_requests_served_total": api_requests_total,
+            "last_peer_height_update_unix_ms": last_peer_height_update,
+        }
+    });
+
+    Ok(Json(ApiResponse::success(body)))
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// v10.9.18 — Archive status endpoint (Blueprint 7 / SNARK progressive-archive prep)
+// ════════════════════════════════════════════════════════════════════════════
+
+/// GET /api/v1/status/archive
+///
+/// Reports archive backfill state to wallets and explorers so they can show
+/// "block N not yet indexed, ETA T" instead of failing silently on historical
+/// queries against a fresh-bootstrap node. This is decoupled from the recursive
+/// SNARK work — the underlying data already exists from Phase 2 backfill.
+///
+/// Response shape (success):
+/// ```json
+/// {
+///   "tip_height": 17966654,
+///   "lowest_indexed_height": 4321001,
+///   "archive_complete": false,
+///   "archive_progress_pct": 37.9,
+///   "archive_eta_seconds": 64800,
+///   "blocks_per_sec_recent": 175.0,
+///   "verified_proof_height": null
+/// }
+/// ```
+///
+/// `verified_proof_height` is reserved for the recursive-SNARK Phase 3 advisory
+/// integration. Populated once `--bootstrap-mode=proof` is wired (lands in a
+/// later release). For v10.9.18 it's always `null`.
+pub async fn archive_status(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    use std::sync::atomic::Ordering;
+
+    let tip_height = state.current_height_atomic.load(Ordering::Relaxed);
+    let lowest_indexed_height = state.contiguous_height_atomic.load(Ordering::Relaxed);
+
+    // Progress fraction: fraction of [1, tip] that's actually indexed locally.
+    // `lowest_indexed_height` is the highest contiguous-from-genesis tip. If the
+    // backfill has reached block H from genesis, [1, H] are indexed, [H+1, tip]
+    // are not (or are partial via post-checkpoint sync).
+    let archive_complete = lowest_indexed_height >= tip_height && tip_height > 0;
+    let archive_progress_pct = if tip_height > 0 {
+        (lowest_indexed_height as f64 / tip_height as f64) * 100.0
+    } else {
+        100.0
+    };
+
+    // ETA computation: v10.9.18 doesn't yet wire a real moving-average from
+    // turbo-sync metrics. v10.9.19 will surface a `recent_blocks_per_sec` atomic
+    // populated by the sync loop. For now we report `null` for the rate and
+    // omit ETA when we can't compute it confidently.
+    let pending = tip_height.saturating_sub(lowest_indexed_height);
+    let blocks_per_sec_recent: Option<f64> = None; // TODO v10.9.19: wire real metric
+    let archive_eta_seconds: Option<u64> = None;
+    let _ = pending; // unused until ETA is wired
+
+    let body = serde_json::json!({
+        "tip_height": tip_height,
+        "lowest_indexed_height": lowest_indexed_height,
+        "archive_complete": archive_complete,
+        "archive_progress_pct": archive_progress_pct,
+        "archive_eta_seconds": archive_eta_seconds.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null),
+        "blocks_per_sec_recent": blocks_per_sec_recent.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null),
+        "verified_proof_height": serde_json::Value::Null,
+        "version": env!("CARGO_PKG_VERSION"),
+    });
+
+    Ok(Json(ApiResponse::success(body)))
 }
 
 /// Network supply statistics endpoint - max supply, mined coins, total hashrate
@@ -10761,6 +11096,30 @@ pub async fn execute_swap(
             None => None,
         }
     };
+
+    // v10.9.21: Empty-pool guard for bridge tokens. When the pool matched but its
+    // reserves are zero (which is the post-v10.9.21 default — pools start as empty
+    // shells, real LPs must deposit), refuse with an actionable error that points
+    // the user at the LP flow. Without this guard the AMM math returns ~0 output,
+    // which surfaces as a confusing slippage error.
+    if let Some((ref _id, ref p, ref _reversed)) = pool_id {
+        if (from_is_bridge || to_is_bridge) && (p.reserve0 == 0 || p.reserve1 == 0) {
+            let wanted = if to_is_bridge { &to_upper } else { &from_upper };
+            let msg = if wanted == "WBTC" {
+                "No wBTC liquidity in this pool yet. Become the first LP and earn 0.3% of every trade — \
+                 open the Bridge Liquidity tab, deposit real BTC, and we'll pair it with your QUG \
+                 automatically. Until then, wBTC is unbacked and cannot be traded."
+                    .to_string()
+            } else {
+                format!(
+                    "No {} liquidity in this pool yet. The pool is an empty shell awaiting its first LP. \
+                     Add liquidity (or wait for someone else) before trading.",
+                    wanted
+                )
+            };
+            return Ok(Json(ApiResponse::error(msg)));
+        }
+    }
 
     // ✅ FIX: If no pool exists for QUG<->QUGUSD, use oracle price directly
     let (use_oracle, final_amount_out) = if pool_id.is_none()
