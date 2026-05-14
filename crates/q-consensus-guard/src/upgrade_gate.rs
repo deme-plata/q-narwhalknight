@@ -60,6 +60,16 @@ pub enum Upgrade {
     /// Phase 9: Balance state root enforced in block headers
     BalanceRootV1 = 9,
 
+    /// Phase 10: Hybrid Ed25519 + Dilithium5 block signatures.
+    ///
+    /// Producers MAY emit `SpectralSignature` with
+    /// `crypto_phase = HybridEd25519Dilithium5` (both signatures present) once
+    /// active. Before activation, producers fall back to Phase0Ed25519 even if
+    /// their `ValidatorKeypair::preferred_phase` is set to Hybrid.
+    /// Verifiers always accept whatever phase a block carries; this gate only
+    /// restricts the producer side so transitional behavior is coordinated.
+    HybridSignaturesV1 = 10,
+
     // Add more as needed - NEVER REMOVE OR REORDER
 }
 
@@ -77,6 +87,7 @@ impl Upgrade {
             Upgrade::StateRootV1 => "StateRootV1",
             Upgrade::BlockEvidenceRequired => "BlockEvidenceRequired",
             Upgrade::BalanceRootV1 => "BalanceRootV1",
+            Upgrade::HybridSignaturesV1 => "HybridSignaturesV1",
         }
     }
 }
@@ -144,6 +155,17 @@ pub static MAINNET_UPGRADES: Lazy<HashMap<Upgrade, UpgradeConfig>> = Lazy::new(|
         min_version: "10.6.0".to_string(),
     });
 
+    // Hybrid Ed25519 + Dilithium5 producer-side gate.
+    // Dormant on mainnet (u64::MAX) until a concrete activation height is
+    // chosen after canary soak. Until then, producers with
+    // preferred_phase = Hybrid fall back to Phase0Ed25519.
+    upgrades.insert(Upgrade::HybridSignaturesV1, UpgradeConfig {
+        activation_height: u64::MAX,
+        description: "Allow producers to emit Hybrid Ed25519+Dilithium5 signatures".to_string(),
+        mandatory: false,
+        min_version: "10.9.20".to_string(),
+    });
+
     // Add more upgrades here as they are scheduled
 
     upgrades
@@ -190,6 +212,14 @@ pub static TESTNET_UPGRADES: Lazy<HashMap<Upgrade, UpgradeConfig>> = Lazy::new(|
         description: "Enforce balance state root in block headers".to_string(),
         mandatory: true,
         min_version: "10.6.0".to_string(),
+    });
+
+    // Hybrid signatures - immediate on testnet so canaries exercise the path
+    upgrades.insert(Upgrade::HybridSignaturesV1, UpgradeConfig {
+        activation_height: 0,
+        description: "Allow producers to emit Hybrid Ed25519+Dilithium5 signatures".to_string(),
+        mandatory: false,
+        min_version: "10.9.20".to_string(),
     });
 
     upgrades
@@ -370,5 +400,21 @@ mod tests {
         // PQ sigs NOT scheduled on mainnet (u64::MAX)
         assert!(!gate.is_active(Upgrade::PostQuantumSignatures, 1_000_000));
         assert!(!gate.is_active(Upgrade::PostQuantumSignatures, u64::MAX - 1));
+    }
+
+    #[test]
+    fn test_hybrid_signatures_dormant_on_mainnet() {
+        // v10.9.20: HybridSignaturesV1 must stay dormant on mainnet until a
+        // concrete activation height is chosen. Until then, producers fall
+        // back to Phase0Ed25519 even if their preferred_phase is Hybrid.
+        let mainnet = UpgradeGate::new(true);
+        assert!(!mainnet.is_active(Upgrade::HybridSignaturesV1, 0));
+        assert!(!mainnet.is_active(Upgrade::HybridSignaturesV1, 17_700_000));
+        assert!(!mainnet.is_active(Upgrade::HybridSignaturesV1, u64::MAX - 1));
+
+        // Testnet activates immediately so canary nodes exercise the path.
+        let testnet = UpgradeGate::new(false);
+        assert!(testnet.is_active(Upgrade::HybridSignaturesV1, 0));
+        assert!(testnet.is_active(Upgrade::HybridSignaturesV1, 1_000_000));
     }
 }

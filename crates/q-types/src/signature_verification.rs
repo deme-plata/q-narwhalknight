@@ -502,15 +502,26 @@ pub fn verify_block_signature(
     }
 }
 
-#[cfg(test)]
+// Tests exercise sign_ed25519 / sign_dilithium5, which are gated on `signing`.
+// Compiling them without the feature would be a missing-symbol error,
+// so the whole module is gated to match.
+#[cfg(all(test, feature = "signing"))]
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
 
+    /// Deterministic test signing key — no `rand` dep, no `OsRng`.
+    /// Mirrors the helper used in q-crypto-simd/src/parallel_ed25519.rs.
+    fn signing_key_from_index(i: u32) -> SigningKey {
+        let mut seed = [0u8; 32];
+        seed[0..4].copy_from_slice(&i.to_le_bytes());
+        SigningKey::from_bytes(&seed)
+    }
+
     #[test]
     fn test_ed25519_signature_verification() {
         // Generate keypair
-        let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let signing_key = signing_key_from_index(0);
         let verifying_key = signing_key.verifying_key();
 
         // Sign message
@@ -548,7 +559,7 @@ mod tests {
 
     #[test]
     fn test_spectral_signature_phase0() {
-        let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let signing_key = signing_key_from_index(1);
         let verifying_key = signing_key.verifying_key();
 
         let message = b"block hash to sign";
@@ -607,7 +618,7 @@ mod tests {
     #[allow(deprecated)]
     #[test]
     fn test_spectral_signature_hybrid() {
-        let ed_signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let ed_signing_key = signing_key_from_index(2);
         let ed_verifying_key = ed_signing_key.verifying_key();
         let (pqc_pk, pqc_sk) = dilithium5::keypair();
 
@@ -719,7 +730,7 @@ mod tests {
 
     #[test]
     fn test_spectral_signature_hybrid_sqisign() {
-        let ed_signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let ed_signing_key = signing_key_from_index(3);
         let ed_verifying_key = ed_signing_key.verifying_key();
 
         let mut sqisign_secret = [0u8; 64];
@@ -852,7 +863,7 @@ mod tests {
     #[test]
     fn test_hybrid_insufficient_key_material_rejected() {
         // Create a valid hybrid signature
-        let ed_signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let ed_signing_key = signing_key_from_index(4);
         let ed_verifying_key = ed_signing_key.verifying_key();
 
         let mut sqisign_secret = [0u8; 64];
@@ -894,7 +905,7 @@ mod tests {
 
     #[test]
     fn test_ed25519_invalid_signature_rejected() {
-        let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let signing_key = signing_key_from_index(5);
         let verifying_key = signing_key.verifying_key();
 
         let message = b"test message";

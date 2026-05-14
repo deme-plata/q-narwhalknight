@@ -2257,8 +2257,37 @@ impl BlockProducer {
 
         let timestamp = chrono::Utc::now().timestamp() as u64;
 
-        // Use the keypair's preferred phase
-        match keypair.preferred_phase {
+        // 🔐 v10.9.20: Producer-side upgrade gate.
+        //
+        // Mainnet rule: until Upgrade::HybridSignaturesV1 activates, producers
+        // must emit Phase0Ed25519 signatures even if their ValidatorKeypair has
+        // a Hybrid/Phase1 preferred_phase. This keeps the network coordinated
+        // — every node produces the same on-the-wire shape before activation,
+        // even after operators flip their config to PQC ahead of time.
+        let next_height = self.current_height.saturating_add(1);
+        let effective_phase = match keypair.preferred_phase {
+            SignaturePhase::Phase0Ed25519 => SignaturePhase::Phase0Ed25519,
+            SignaturePhase::Phase1Dilithium5
+            | SignaturePhase::HybridEd25519Dilithium5 => {
+                if q_consensus_guard::is_upgrade_active(
+                    q_consensus_guard::Upgrade::HybridSignaturesV1,
+                    next_height,
+                ) {
+                    keypair.preferred_phase
+                } else {
+                    warn!(
+                        "🔐 [PQC GATE] {:?} requested but HybridSignaturesV1 not active at height {}; falling back to Phase0Ed25519",
+                        keypair.preferred_phase, next_height
+                    );
+                    SignaturePhase::Phase0Ed25519
+                }
+            }
+            // SQIsign / Hybrid+SQIsign paths follow their own gate (not yet defined);
+            // pass through for now.
+            other => other,
+        };
+
+        match effective_phase {
             SignaturePhase::Phase0Ed25519 => {
                 // Sign with Ed25519 only
                 let signature = keypair.ed25519_signing.sign(block_hash);

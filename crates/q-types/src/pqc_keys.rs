@@ -27,31 +27,42 @@ use zeroize::Zeroize;
 
 /// Validator keypair containing both classical and PQC keys
 ///
-/// v1.0.86-beta: Added SQIsign compact signatures (95.6% smaller than Dilithium5)
+/// **Canonical PQC scheme: Dilithium5 (CRYSTALS-Dilithium, FIPS 204 / NIST Level 5).**
+///
+/// Dilithium5 is the signature scheme verified in-circuit by the IVC stack
+/// (`crates/q-ivc/src/gadgets/dilithium.rs`) and is what every Phase 1 /
+/// Hybrid block signature uses on the wire.
+///
+/// SQIsign is kept as an experimental compact-signature track (204 B vs
+/// 4,627 B) but is **not** the production PQC scheme; the SQIsign fields here
+/// are filled with random bytes from a stub generator and the matching
+/// verifier is incomplete. Don't promote SQIsign to a preferred phase
+/// without a real implementation.
 #[derive(Clone)]
 pub struct ValidatorKeypair {
     /// Node ID (derived from Ed25519 public key)
     pub node_id: NodeId,
 
-    /// Ed25519 signing key (classical)
+    /// Ed25519 signing key (classical, Phase 0)
     pub ed25519_signing: SigningKey,
 
-    /// Ed25519 verifying key (classical)
+    /// Ed25519 verifying key (classical, Phase 0)
     pub ed25519_verifying: VerifyingKey,
 
-    /// Dilithium5 secret key (post-quantum) - DEPRECATED
-    /// ⚠️ Use sqisign_secret for new validators (95.6% smaller signatures)
+    /// Dilithium5 secret key — **canonical post-quantum signing key**.
+    /// FIPS 204 / NIST Level 5. Used for Phase 1 and Hybrid signatures and
+    /// for the IVC in-circuit verifier.
     pub dilithium5_secret: dilithium5::SecretKey,
 
-    /// Dilithium5 public key (post-quantum) - DEPRECATED
+    /// Dilithium5 public key — canonical post-quantum verification key.
     pub dilithium5_public: dilithium5::PublicKey,
 
-    /// SQIsign secret key (post-quantum compact) - v1.0.86-beta
-    /// 🚀 95.6% smaller signatures than Dilithium5 (204 vs 4,627 bytes)
+    /// SQIsign secret key — **experimental** compact-signature track.
+    /// Not used by the production signing path. Kept for future evaluation.
     pub sqisign_secret: Vec<u8>,
 
-    /// SQIsign public key (post-quantum compact) - v1.0.86-beta
-    /// 64 bytes (vs 2,592 for Dilithium5)
+    /// SQIsign public key — experimental, not used by the production
+    /// verifier. See `sqisign_secret`.
     pub sqisign_public: Vec<u8>,
 
     /// Preferred signing phase for this validator
