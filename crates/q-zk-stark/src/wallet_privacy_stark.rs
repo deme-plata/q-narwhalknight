@@ -119,12 +119,20 @@ impl WalletPrivacyStarkProver {
 
         let start = std::time::Instant::now();
 
-        // Build execution trace for balance range proof
-        // Trace represents the computation: min <= balance <= max
-        let trace = build_range_proof_trace(actual_balance, min_balance, max_balance);
-
         // Generate address commitment
         let address_commitment = blake3::hash(wallet_address);
+
+        // Build execution trace for balance range proof.
+        // CONVENTION: row 0 of the trace MUST equal the verifier's public inputs
+        // — `StarkProver::prove` copies `trace[0]` into `proof.public_inputs`,
+        // and `StarkVerifier::verify` rejects when those don't match the inputs
+        // it was passed. The verifier passes [min, max, addr_hash_u64].
+        let trace = build_range_proof_trace(
+            actual_balance,
+            min_balance,
+            max_balance,
+            &address_commitment,
+        );
 
         // Generate STARK constraints (range check + address binding)
         let constraints = build_range_constraints(min_balance, max_balance, &address_commitment);
@@ -200,7 +208,7 @@ impl WalletPrivacyStarkProver {
             wallet_address: *wallet_address,
             challenge: *challenge,
             timestamp: chrono::Utc::now().timestamp(),
-            generation_time_ms: generation_time.as_millis() as u64,
+            generation_time_ms: elapsed_ms_round_up(generation_time),
         })
     }
 
@@ -290,7 +298,7 @@ impl WalletPrivacyStarkProver {
             nullifier: nullifier.into(),
             timestamp: chrono::Utc::now().timestamp(),
             proof_size_bytes: proof_bytes.len(),
-            generation_time_ms: generation_time.as_millis() as u64,
+            generation_time_ms: elapsed_ms_round_up(generation_time),
         })
     }
 
@@ -326,12 +334,24 @@ impl WalletPrivacyStarkProver {
 // Helper functions for building execution traces and constraints
 
 /// Build execution trace for range proof
-fn build_range_proof_trace(balance: u64, min: u64, max: u64) -> Vec<Vec<u64>> {
-    // Simplified trace: [balance, min, max, balance-min, max-balance]
+///
+/// Row 0 IS the public-input row by STARK convention (see `StarkProver::prove`,
+/// which uses `trace[0]` as `proof.public_inputs`). The verifier passes
+/// `[min, max, addr_hash_u64]`, so row 0 must mirror that exactly.
+fn build_range_proof_trace(
+    balance: u64,
+    min: u64,
+    max: u64,
+    address_commitment: &blake3::Hash,
+) -> Vec<Vec<u64>> {
+    let addr_u64 = bytes_to_u64(&address_commitment.as_bytes()[..8]);
     vec![
-        vec![balance, min, max],
-        vec![balance - min, max - balance, 0], // Differences (must be >= 0)
-        vec![1, 1, 1], // Validity flags
+        // Row 0: public inputs (must match verifier-side `public_inputs` vec)
+        vec![min, max, addr_u64],
+        // Row 1: witness — secret balance + slack values that show the range holds
+        vec![balance, balance - min, max - balance],
+        // Row 2: validity flags
+        vec![1, 1, 1],
     ]
 }
 
@@ -346,22 +366,29 @@ fn build_range_constraints(min: u64, max: u64, address_commitment: &blake3::Hash
 }
 
 /// Build execution trace for ownership proof
+///
+/// Row 0 IS the public-input row (see `StarkProver::prove` — `trace[0]` becomes
+/// `proof.public_inputs` which the verifier compares byte-for-byte against
+/// the inputs supplied at `verify` time). The verifier passes
+/// `[wallet_address_u64, challenge_u64]`, so row 0 must mirror that exactly.
 fn build_ownership_proof_trace(
     private_key: &[u8; 32],
     wallet_address: &[u8; 32],
     challenge: &[u8; 32],
 ) -> Vec<Vec<u64>> {
-    // Trace: hash(private_key) = address
+    // Witness: hash(private_key) — should equal wallet_address for a valid proof
     let derived_address = blake3::hash(private_key);
 
     vec![
+        // Row 0: public inputs (must match verifier-side `public_inputs` vec)
         vec![
-            bytes_to_u64(&private_key[..8]),
             bytes_to_u64(&wallet_address[..8]),
+            bytes_to_u64(&challenge[..8]),
         ],
+        // Row 1: witness — derived address from secret key + the secret key itself
         vec![
             bytes_to_u64(derived_address.as_bytes()),
-            bytes_to_u64(&challenge[..8]),
+            bytes_to_u64(&private_key[..8]),
         ],
         vec![1, 1], // Validity
     ]
@@ -376,6 +403,11 @@ fn build_ownership_constraints(wallet_address: &[u8; 32], challenge: &[u8; 32]) 
 }
 
 /// Build execution trace for transaction proof
+///
+/// Row 0 IS the public-input row (see `StarkProver::prove` — `trace[0]` becomes
+/// `proof.public_inputs` which the verifier compares byte-for-byte against
+/// the inputs supplied at `verify` time). The verifier passes
+/// `[tx_commitment_u64, nullifier_u64]`, so row 0 must mirror that exactly.
 fn build_transaction_proof_trace(
     sender: &[u8; 32],
     receiver: &[u8; 32],
@@ -385,13 +417,17 @@ fn build_transaction_proof_trace(
     nullifier: &blake3::Hash,
 ) -> Vec<Vec<u64>> {
     vec![
-        vec![bytes_to_u64(&sender[..8]), bytes_to_u64(&receiver[..8])],
-        vec![amount, balance, balance - amount],
+        // Row 0: public inputs (must match verifier-side `public_inputs` vec)
         vec![
             bytes_to_u64(tx_commitment.as_bytes()),
             bytes_to_u64(nullifier.as_bytes()),
         ],
-        vec![1, 1, 1], // Validity flags
+        // Row 1: witness — secret sender/receiver identities
+        vec![bytes_to_u64(&sender[..8]), bytes_to_u64(&receiver[..8])],
+        // Row 2: witness — amount, balance, and post-spend slack (proves balance >= amount)
+        vec![amount, balance, balance - amount],
+        // Row 3: validity flags
+        vec![1, 1, 1],
     ]
 }
 
@@ -409,6 +445,25 @@ fn bytes_to_u64(bytes: &[u8]) -> u64 {
     let len = std::cmp::min(bytes.len(), 8);
     arr[..len].copy_from_slice(&bytes[..len]);
     u64::from_le_bytes(arr)
+}
+
+/// Convert an elapsed Duration to whole milliseconds, rounding any non-zero
+/// sub-millisecond timing UP to 1ms.
+///
+/// `Duration::as_millis()` truncates toward zero, which produces a misleading
+/// `generation_time_ms = 0` for proofs that did real work but completed in
+/// under 1ms on fast hardware. Reporting 0 there is dishonest — the work
+/// happened, it just rounded away. Round up so any measurable wall time
+/// surfaces as ≥1ms.
+fn elapsed_ms_round_up(d: std::time::Duration) -> u64 {
+    let nanos = d.as_nanos();
+    if nanos == 0 {
+        0
+    } else {
+        // Ceil-divide nanos by 1_000_000 to get ms, capped at u64::MAX.
+        let ms_ceil = (nanos + 999_999) / 1_000_000;
+        u64::try_from(ms_ceil).unwrap_or(u64::MAX)
+    }
 }
 
 #[cfg(test)]

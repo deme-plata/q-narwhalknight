@@ -13,6 +13,7 @@ pub mod air;
 pub mod batch_prover;
 pub mod blockchain_state_circuit;
 pub mod gpu;
+pub mod nova_srs_generator_air; // v10.9.20 Job E: transparent-setup STARK attestation for Nova SRS
 pub mod performance;
 pub mod polynomials;
 pub mod stark_prover;

@@ -150,9 +150,22 @@ impl StarkVerifier {
 
             let query_proof = &query_section[query_start..query_end];
 
+            // Recover the leaf position from the proof. The prover embeds it at
+            // offset 48 (after leaf + eval_x + eval_neg_x) so the verifier can
+            // walk the Merkle tree with correct left/right parity.
+            let query_position = if query_proof.len() >= 56 {
+                u64::from_le_bytes(query_proof[48..56].try_into().unwrap_or([0u8; 8])) as usize
+            } else {
+                i
+            };
+
             // Verify Merkle path for this query
-            if !self.verify_merkle_path(root_commitment, query_proof, i) {
-                tracing::warn!("🚨 [STARK] FRI query {} Merkle path invalid", i);
+            if !self.verify_merkle_path(root_commitment, query_proof, query_position) {
+                tracing::warn!(
+                    "🚨 [STARK] FRI query {} Merkle path invalid (pos={})",
+                    i,
+                    query_position
+                );
                 return Ok(false);
             }
 
@@ -168,8 +181,17 @@ impl StarkVerifier {
     }
 
     /// Verify a Merkle authentication path
+    ///
+    /// Prover query-proof layout (see stark_prover::generate_fri_proof_cpu):
+    ///   [0..32]   leaf hash
+    ///   [32..40]  eval_x   (u64 LE — checked separately by verify_folding_consistency)
+    ///   [40..48]  eval_neg_x
+    ///   [48..56]  query_pos (u64 LE — leaf index, used as walking parity)
+    ///   [56..]    Merkle path siblings (32-byte hashes), zero-padded to 256B
     fn verify_merkle_path(&self, root: &[u8], proof: &[u8], query_index: usize) -> bool {
-        if proof.len() < 64 {
+        // leaf(32) + eval_x(8) + eval_neg_x(8) + query_pos(8)
+        const SIBLING_OFFSET: usize = 56;
+        if proof.len() < SIBLING_OFFSET + 32 {
             return false;
         }
 
@@ -178,12 +200,13 @@ impl StarkVerifier {
         let mut current_hash = [0u8; 32];
         current_hash.copy_from_slice(leaf);
 
-        // Walk up the Merkle tree
-        let num_siblings = (proof.len() - 32) / 32;
+        // Walk up the Merkle tree. Trailing zero-padding produces all-zero
+        // "siblings" which we must skip rather than mix into the hash chain.
+        let raw_num_siblings = (proof.len() - SIBLING_OFFSET) / 32;
         let mut index = query_index;
 
-        for i in 0..num_siblings {
-            let sibling_start = 32 + i * 32;
+        for i in 0..raw_num_siblings {
+            let sibling_start = SIBLING_OFFSET + i * 32;
             let sibling_end = sibling_start + 32;
 
             if sibling_end > proof.len() {
@@ -191,6 +214,13 @@ impl StarkVerifier {
             }
 
             let sibling = &proof[sibling_start..sibling_end];
+
+            // Zero-padding marks the end of the real Merkle path. The prover
+            // pads each 256B query slot with zeros after the actual siblings,
+            // so a zero hash here means we've walked all the way to the root.
+            if sibling.iter().all(|&b| b == 0) {
+                break;
+            }
 
             // Hash with sibling (order depends on index parity)
             let mut hasher = Sha3_256::new();
