@@ -1147,6 +1147,7 @@ async fn update_tui_metrics(
     //     gaps silently rather than panicking.
     //   - No DB scan if no new blocks (early-return when last_ingested == tip).
     //   - Ring is capped at RING_CAPACITY via pop_front before push_back.
+    use std::collections::HashMap;
     const RING_CAPACITY: usize = 60;
     const MAX_INGEST_PER_TICK: u64 = 60; // bound catch-up so we don't hog the tick
 
@@ -25318,7 +25319,24 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 // BEFORE handlers run, so no application-level logging).
                 // On 48-core 62GB Epsilon with Caddy Connection:close, 100K is safe.
                 .layer(tower::limit::ConcurrencyLimitLayer::new(100_000))
-                .layer(TraceLayer::new_for_http())
+                // v10.9.22: Custom on_failure that suppresses 503s.
+                // Default TraceLayer logs ERROR on every failed response, which during a
+                // mining-rejection storm (~2K req/s of 503s) saturated journald and
+                // starved libp2p so Epsilon could never catch up to network tip.
+                // The handler logs its own (rate-limited) WARN for legitimate 503s.
+                .layer(
+                    TraceLayer::new_for_http()
+                        .on_failure(|error: tower_http::classify::ServerErrorsFailureClass,
+                                    latency: std::time::Duration,
+                                    _: &tracing::Span| {
+                            if let tower_http::classify::ServerErrorsFailureClass::StatusCode(s) = error {
+                                if s == axum::http::StatusCode::SERVICE_UNAVAILABLE {
+                                    return;
+                                }
+                            }
+                            tracing::error!(classification = %error, latency = ?latency, "response failed");
+                        }),
+                )
                 .layer(tower_http::timeout::TimeoutLayer::new(std::time::Duration::from_secs(30)))
                 .layer(CorsLayer::permissive())
                 // Increase body size limit to 50MB for large transaction batches (50K tx)
