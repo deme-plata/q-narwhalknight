@@ -509,6 +509,12 @@ pub struct QNarwhalBehaviour {
     /// Connection Limits: Prevent accidental supernodes
     /// Limits connections per peer and total connections
     connection_limits: libp2p::connection_limits::Behaviour,
+    /// v10.9.27: Memory Connection Limits — refuse new connections when
+    /// process memory usage exceeds a configured fraction of available RAM.
+    /// Default: refuse new conns when process RSS > 1 GiB. Prevents the OOM
+    /// cascade that wedged Epsilon at 26.9GB RSS (memory.md 2026-02-19).
+    /// Tune via Q_MAX_MEMORY_BYTES env var.
+    memory_connection_limits: libp2p::memory_connection_limits::Behaviour,
 }
 
 #[derive(Debug)]
@@ -1925,6 +1931,23 @@ impl UnifiedNetworkManager {
                 // 🔒 Connection limits
                 let connection_limits = ConnLimitsBehaviour::new(limits.clone());
 
+                // v10.9.27: Memory-pressure connection limits. Refuse new
+                // inbound/outbound connections when the process exceeds the
+                // configured RSS threshold. Acts as a last-line defence
+                // against OOM cascades during sync bursts (see Epsilon's
+                // 26.9GB RSS incident in memory.md). Default 1 GiB; operators
+                // can tune via Q_MAX_MEMORY_BYTES.
+                let max_memory_bytes: usize = std::env::var("Q_MAX_MEMORY_BYTES")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(1usize.saturating_mul(1024).saturating_mul(1024).saturating_mul(1024));
+                let memory_connection_limits =
+                    libp2p::memory_connection_limits::Behaviour::with_max_bytes(max_memory_bytes);
+                info!(
+                    "🧠 Memory connection limits enabled: refuse new conns above {} MiB RSS",
+                    max_memory_bytes / 1024 / 1024
+                );
+
                 Ok(QNarwhalBehaviour {
                     #[cfg(not(target_os = "windows"))]
                     mdns,
@@ -1940,6 +1963,7 @@ impl UnifiedNetworkManager {
                     relay_server,
                     dcutr,
                     connection_limits,
+                    memory_connection_limits,
                 })
             })?
             .with_swarm_config(|c| {

@@ -117,7 +117,10 @@ hyper = "1.0"
 # mdns removed from default features - will be added conditionally in q-network for Linux only
 # 🔥 v2.0.0: Upgraded to libp2p 0.56 with WebRTC support via separate crate
 # NOTE: connection-limits is built-in to libp2p 0.56, not a feature flag
-libp2p = { version = "0.56", features = ["noise", "yamux", "tcp", "gossipsub", "identify", "ping", "kad", "upnp", "macros", "tokio", "request-response", "dns", "quic", "websocket", "autonat", "relay", "dcutr"] }
+# v10.9.27: enabled "memory-connection-limits" (OOM-safety: refuse new conns under memory pressure)
+# and "metrics" (Prometheus-format /metrics endpoint with peer count, gossipsub mesh, connection
+# close reasons, request-response latency — diagnostic gold for "why did this peer disconnect")
+libp2p = { version = "0.56", features = ["noise", "yamux", "tcp", "gossipsub", "identify", "ping", "kad", "upnp", "macros", "tokio", "request-response", "dns", "quic", "websocket", "autonat", "relay", "dcutr", "memory-connection-limits", "metrics"] }
 # 🌐 WebRTC-Direct transport for browser P2P connectivity (alpha) - NOT in workspace (optional per-crate)
 reqwest = { version = "0.12", features = ["json", "socks", "stream", "rustls-tls", "blocking"] }
 
