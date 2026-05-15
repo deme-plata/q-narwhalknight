@@ -38,7 +38,7 @@ use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::prelude::Boolean;
 use ark_r1cs_std::alloc::AllocVar;
 use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
-use sha3::{Shake256, digest::{Update, ExtendableOutput, XofReader}};
+use sha3::{Shake128, Shake256, digest::{Update, ExtendableOutput, XofReader}};
 
 use crate::gadgets::dilithium::{NttRoots, PublicKeyVar, SignatureVar};
 
@@ -134,15 +134,20 @@ impl DilithiumKeyBytes {
 
     /// Allocate as in-circuit `PublicKeyVar`.
     ///
-    /// Implements two of the three sub-tasks listed in this file's docstring:
+    /// Implements all three sub-tasks listed in this file's docstring:
     ///   • t₁ unpacking via `unpack_t1_native` + per-coefficient `FpVar`
     ///     allocation as witnesses.
-    ///   • a_mat: PARTIAL. Returns an empty `Vec<Vec<FpVar<F>>>` for now.
-    ///     The proper fill-in needs `ExpandA(ρ)` — SHAKE-128 keyed
-    ///     polynomial sampling per FIPS-204 §3.2. SHAKE-128 in pure Rust
-    ///     is available via the `sha3` crate (already in workspace), so
-    ///     this is a finite follow-up (~150 LOC). Tracked as
-    ///     `dilithium-witness-expand-a`.
+    ///   • a_mat: ExpandA(ρ) per FIPS-204 §3.2. Produces NTT-DOMAIN A
+    ///     matrix (k×l = 56 polynomials of 256 coefficients each).
+    ///     **The downstream `DilithiumVerifierGadget::compute_az_minus_ct`
+    ///     applies poly_mul that internally NTTs the inputs — so a_mat
+    ///     must be in STANDARD polynomial form for that path. This
+    ///     function currently emits NTT-domain values and the gadget
+    ///     adapter (tracked as `dilithium-witness-a-mat-domain-bridge`)
+    ///     will need to either (a) inverse-NTT before passing to
+    ///     compute_az_minus_ct, or (b) switch to a pointwise-multiply
+    ///     gadget that consumes NTT-form inputs directly. Decision
+    ///     deferred to the Dilithium-end-to-end test commit.**
     ///
     /// **Soundness note**: the DilithiumVerifierGadget::verify_structured
     /// implementation in `gadgets/dilithium.rs` consumes `a_mat` directly
@@ -177,12 +182,18 @@ impl DilithiumKeyBytes {
             t_vec.push(fp_poly);
         }
 
-        // ─── a_mat: STUB ──────────────────────────────────────────────
-        // See `dilithium-witness-expand-a` follow-up. Empty Vec for now;
-        // downstream verify_structured asserts `a_mat.len() == k*l` and
-        // will fail with the empty Vec — the caller must NOT pass this
-        // PublicKeyVar to verify_structured until ExpandA is implemented.
-        let a_mat: Vec<Vec<FpVar<F>>> = Vec::new();
+        // ─── a_mat: ExpandA(ρ) ─────────────────────────────────────────
+        // 56 polynomials × 256 coefficients in NTT domain.
+        let rho = self.rho();
+        let a_native = expand_a_native(&rho);
+        let mut a_mat: Vec<Vec<FpVar<F>>> = Vec::with_capacity(K * L);
+        for poly in a_native.iter() {
+            let mut fp_poly: Vec<FpVar<F>> = Vec::with_capacity(N);
+            for &coeff in poly.iter() {
+                fp_poly.push(FpVar::new_witness(cs.clone(), || Ok(F::from(coeff)))?);
+            }
+            a_mat.push(fp_poly);
+        }
 
         Ok(PublicKeyVar { a_mat, t_vec })
     }
@@ -190,6 +201,55 @@ impl DilithiumKeyBytes {
 
 /// Bytes per packed t₁ polynomial: ceil(256 × 10 / 8) = 320.
 const T1_PACKED_POLY_BYTES: usize = 320;
+
+/// Native (off-circuit) implementation of FIPS-204 §3.2 Algorithm 8
+/// "ExpandA". Given a 32-byte seed ρ, produces the public-key matrix
+/// A — k × l = 56 polynomials of 256 coefficients each in [0, q).
+///
+/// **Output domain**: NTT-domain coefficients per FIPS-204. The reference
+/// signer/verifier keeps A in NTT form throughout; consumers of this
+/// function that expect standard-polynomial form must apply an inverse
+/// NTT first. See `DilithiumKeyBytes::allocate` for the gadget-bridge
+/// caveat.
+///
+/// Algorithm per polynomial (rows×cols indexed (i,j)):
+///   1. SHAKE-128 seeded with ρ ∥ IntegerToBytes(j, 1) ∥ IntegerToBytes(i, 1)
+///   2. Rejection-sample 256 coefficients: read 3 bytes, parse as a
+///      23-bit value (mask off top bit), accept if < q.
+///
+/// Returns `Vec<[u32; N]>` of length K * L = 56, row-major ordered.
+pub fn expand_a_native(rho: &[u8; 32]) -> Vec<[u32; N]> {
+    let mut out: Vec<[u32; N]> = Vec::with_capacity(K * L);
+    for i in 0..K {
+        for j in 0..L {
+            // SHAKE-128(ρ ∥ j ∥ i)
+            let mut shake = Shake128::default();
+            Update::update(&mut shake, rho);
+            Update::update(&mut shake, &[j as u8]);
+            Update::update(&mut shake, &[i as u8]);
+            let mut reader = shake.finalize_xof();
+
+            let mut poly = [0u32; N];
+            let mut filled = 0usize;
+            while filled < N {
+                // Read 3 bytes at a time.
+                let mut buf = [0u8; 3];
+                reader.read(&mut buf);
+                // Parse as 23-bit unsigned integer (top bit of the third
+                // byte is masked off per FIPS-204 §A.1).
+                let v: u32 = (buf[0] as u32)
+                    | ((buf[1] as u32) << 8)
+                    | (((buf[2] & 0x7F) as u32) << 16);
+                if (v as u64) < Q {
+                    poly[filled] = v;
+                    filled += 1;
+                }
+            }
+            out.push(poly);
+        }
+    }
+    out
+}
 
 /// Native (off-circuit) implementation of FIPS-204 §4 Algorithm 3
 /// "SampleInBall". Given a 64-byte challenge seed c̃, produces the
@@ -1025,6 +1085,78 @@ mod tests {
         let c1 = sample_in_ball_native(&c_tilde);
         let c2 = sample_in_ball_native(&c_tilde);
         assert_eq!(c1, c2);
+    }
+
+    // ─── ExpandA tests ────────────────────────────────────────────────
+
+    #[test]
+    fn expand_a_produces_k_times_l_polynomials() {
+        let rho = [0x42u8; 32];
+        let a = expand_a_native(&rho);
+        assert_eq!(a.len(), K * L, "ExpandA must produce K×L=56 polynomials");
+        for poly in &a {
+            assert_eq!(poly.len(), N);
+        }
+    }
+
+    #[test]
+    fn expand_a_coefficients_are_in_zq() {
+        // Every coefficient must satisfy 0 ≤ v < q. The rejection
+        // sampling step in ExpandA enforces this; we double-check.
+        let rho = [0xAAu8; 32];
+        let a = expand_a_native(&rho);
+        for (idx, poly) in a.iter().enumerate() {
+            for (j, &v) in poly.iter().enumerate() {
+                assert!(v < Q as u32, "A[{}][{}] = {} ≥ q = {}", idx, j, v, Q);
+            }
+        }
+    }
+
+    #[test]
+    fn expand_a_is_deterministic() {
+        let rho = [0x11u8; 32];
+        let a1 = expand_a_native(&rho);
+        let a2 = expand_a_native(&rho);
+        assert_eq!(a1, a2);
+    }
+
+    #[test]
+    fn expand_a_different_seeds_produce_different_matrices() {
+        let mut rho_a = [0u8; 32];
+        let mut rho_b = [0u8; 32];
+        rho_b[0] = 1;
+        let a = expand_a_native(&rho_a);
+        let b = expand_a_native(&rho_b);
+        assert_ne!(a, b, "Different ρ MUST produce different A");
+        // Address compiler complaint about unused mut.
+        let _ = &mut rho_a;
+    }
+
+    #[test]
+    fn expand_a_coefficients_appear_uniformly_distributed() {
+        // Light statistical check: across 56 polys × 256 coeffs = 14336
+        // samples, count how many fall in each of 4 equal q-quartile
+        // buckets. Each bucket should hold ~3584 ± noise. Reject if
+        // any bucket is < 60% or > 140% of expected (very lax bounds
+        // — this is a sanity test, not a real chi-squared).
+        let rho = [0x55u8; 32];
+        let a = expand_a_native(&rho);
+        let bucket_size = Q as u32 / 4;
+        let mut buckets = [0usize; 4];
+        for poly in &a {
+            for &v in poly.iter() {
+                let b = (v / bucket_size).min(3) as usize;
+                buckets[b] += 1;
+            }
+        }
+        let expected = (K * L * N) / 4;
+        for (i, &count) in buckets.iter().enumerate() {
+            assert!(
+                count > expected * 6 / 10 && count < expected * 14 / 10,
+                "bucket {} count {} far from expected {} (60–140% bounds)",
+                i, count, expected
+            );
+        }
     }
 
     #[test]
