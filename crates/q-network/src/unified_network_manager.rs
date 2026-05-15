@@ -72,6 +72,55 @@ fn pow_stamps_enabled() -> bool {
     })
 }
 
+/// v10.9.27 Step 4: Pick a default P2P port when Q_P2P_PORT is unset.
+///
+/// Prefers the canonical 9001 (matches all hardcoded bootstrap addresses
+/// and what the systemd service uses). If that port is already bound on
+/// the host — typically because production node is running and the
+/// operator is launching a sync test binary — walk the 9100-9999 range
+/// and pick the first port whose `TcpListener::bind(0.0.0.0:N)` succeeds.
+/// Loudly log which port was chosen so the operator knows.
+///
+/// Returns 0 only if NO port in the entire 9001 + 9100-9999 range was
+/// bindable (extremely unusual; would mean the host is heavily port-
+/// exhausted, in which case libp2p will still try the OS-assigned path
+/// when listen_on is called with port 0).
+fn pick_default_p2p_port() -> u16 {
+    use std::net::TcpListener;
+
+    // Helper: try to bind & immediately drop the listener (releases port).
+    let port_is_free = |port: u16| -> bool {
+        TcpListener::bind(("0.0.0.0", port)).is_ok()
+    };
+
+    if port_is_free(9001) {
+        tracing::info!("🎯 [PORT-AUTO] Default Q_P2P_PORT unset, 9001 is free — using canonical libp2p port");
+        return 9001;
+    }
+
+    tracing::warn!(
+        "⚠️  [PORT-AUTO] 9001 already bound on host (production node? other test?). \
+         Walking 9100-9999 for a free port..."
+    );
+    for candidate in 9100..=9999 {
+        if port_is_free(candidate) {
+            tracing::warn!(
+                "⚠️  [PORT-AUTO] Bound P2P on {} (NOT 9001). Inbound peers using the hardcoded \
+                 bootstrap list will NOT find this node; set Q_EXTERNAL_TCP_ADDRESS and update \
+                 the bootstrap registration if this node is publicly reachable.",
+                candidate
+            );
+            return candidate;
+        }
+    }
+
+    tracing::error!(
+        "🚨 [PORT-AUTO] No port in 9001 + 9100-9999 is bindable. Falling back to OS random port. \
+         Inbound P2P will not work consistently."
+    );
+    0 // OS-assigned random port (libp2p's listen_on with port 0)
+}
+
 /// v8.6.2: Bandwidth tier classification for peer selection
 /// Determines sync boost multiplier and max serve chunk size based on reported bandwidth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2101,12 +2150,30 @@ impl UnifiedNetworkManager {
               crate::handshake_validator::ProtocolVersion::CURRENT.minor,
               crate::handshake_validator::ProtocolVersion::CURRENT.patch);
 
-        // Listen on configured port or random port
-        // Check for Q_P2P_PORT environment variable for fixed port (bootstrap nodes)
-        let p2p_port = std::env::var("Q_P2P_PORT")
-            .ok()
-            .and_then(|p| p.parse::<u16>().ok())
-            .unwrap_or(0); // 0 = random port (default)
+        // Listen on configured port or auto-pick a sensible default.
+        //
+        // v10.9.27 Step 4: Q_P2P_PORT auto-fallback. Previous behaviour:
+        // unset Q_P2P_PORT → OS picks a random ephemeral port. That's
+        // hostile to peer discovery (no peer can dial you on a port that
+        // changes every boot, and the bootstrap-peers list in our
+        // hardcoded config all reference :9001). New behaviour: prefer
+        // the canonical 9001; if that's already bound on the host
+        // (typical: production node is up and the user is running a
+        // sync test), walk the 9100-9999 range and pick the first free
+        // port. Loudly log which one was chosen so operators know.
+        //
+        // Explicit Q_P2P_PORT operators (Beta/Gamma/Delta/Epsilon
+        // systemd, Docker test containers) are unaffected — their value
+        // is taken verbatim, including 0 if they explicitly want random.
+        let p2p_port: u16 = match std::env::var("Q_P2P_PORT").ok().and_then(|p| p.parse::<u16>().ok()) {
+            Some(explicit) => {
+                if explicit == 0 {
+                    info!("🎲 Q_P2P_PORT=0 — OS will assign a random ephemeral port");
+                }
+                explicit
+            }
+            None => pick_default_p2p_port(),
+        };
 
         if p2p_port > 0 {
             info!("🔒 Using fixed libp2p port: {}", p2p_port);
