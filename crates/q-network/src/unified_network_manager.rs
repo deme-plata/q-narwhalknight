@@ -1075,6 +1075,27 @@ pub const BLOCK_PACK_BASE_PERMITS: usize = 4;
 /// Total parallelism at tip = BASE + EXTRA = 16; during sync = BASE = 4.
 pub const BLOCK_PACK_EXTRA_PERMITS: usize = 12;
 
+/// v10.9.27: Client-side per-peer block-pack inflight cap.
+///
+/// Mirrors the *server-side* `BLOCK_PACK_BASE_PERMITS` (4) on the remote peer's
+/// `block_pack_semaphore`. A syncing client should not fire more concurrent
+/// block-pack requests at a single peer than that peer can drain — otherwise
+/// the extra requests sit in libp2p's request queue, the 10s+ request-response
+/// timeout fires, and the chunk scheduler's retry loop wastes its budget on
+/// what is really local back-pressure.
+///
+/// Backward compatible with v10.9.23 Epsilon: the static cap (4) matches the
+/// server semaphore size exactly, so no handshake or capability negotiation is
+/// required. If a future peer raises its server-side cap we can lift this
+/// number; lowering it client-side is always safe.
+pub const CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER: usize = 4;
+
+/// v10.9.27: Marker substring used by the chunk scheduler in `turbo_sync.rs`
+/// to recognise a client-throttle error and avoid consuming its retry budget.
+/// Any error returned because the per-peer client semaphore is exhausted must
+/// include this exact substring in its `Display` representation.
+pub const CLIENT_THROTTLE_MARKER: &str = "ClientThrottle";
+
 /// Adaptive block-pack permit acquisition.
 ///
 /// Returns `Some(permit)` if the caller may proceed with serving a block-pack response,
@@ -1285,6 +1306,21 @@ pub struct UnifiedNetworkManager {
     /// Owned externally (wired in via `set_synced_state`); reads are a cheap atomic load on the
     /// hot path. Defaults to `false` (conservative — extras stay closed until told otherwise).
     is_synced_state: Arc<std::sync::atomic::AtomicBool>,
+    /// v10.9.27: Per-peer client-side block-pack inflight semaphores.
+    ///
+    /// When the chunk scheduler in `turbo_sync.rs` dispatches a
+    /// `RequestBlockRangeDirect` against a specific peer, it must first acquire
+    /// a permit from this peer's semaphore. The cap
+    /// (`CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER`) matches the typical server-side
+    /// `block_pack_semaphore` size on the remote, preventing the scheduler from
+    /// flooding a single peer faster than it can drain.
+    ///
+    /// Permits are held across the request-response round trip — they live in
+    /// the awaiter task spawned in the `RequestBlockRangeDirect` handler and
+    /// drop automatically when that task ends (response delivered, oneshot
+    /// dropped by `OutboundFailure` cleanup, or the 30s safety timeout fires).
+    /// This guarantees the permit is reclaimed even if the peer never replies.
+    pub client_block_pack_semaphores: Arc<DashMap<PeerId, Arc<tokio::sync::Semaphore>>>,
     /// v1.3.3-beta: Tor-enabled flag for adaptive timeouts and batch sizes
     /// Set during initialization based on Q_TOR_ENABLED, Q_TOR_PROXY, or SOCKS5 proxy detection
     tor_enabled: bool,
@@ -2564,6 +2600,7 @@ impl UnifiedNetworkManager {
             block_pack_semaphore: Arc::new(tokio::sync::Semaphore::new(BLOCK_PACK_BASE_PERMITS)), // v9.1.8 + adaptive: base, always-on permits (OOM-safe during sync)
             block_pack_extra_semaphore: Arc::new(tokio::sync::Semaphore::new(BLOCK_PACK_EXTRA_PERMITS)), // adaptive: only acquired when fully synced
             is_synced_state: Arc::new(std::sync::atomic::AtomicBool::new(false)), // adaptive: default conservative (no extras until wired)
+            client_block_pack_semaphores: Arc::new(DashMap::new()), // v10.9.27: per-peer client-side block-pack inflight cap
             // v1.3.3-beta: Tor-aware adaptive batch sizes and retry logic
             tor_enabled,
             // v1.3.3-beta: Exponential backoff retry queue for failed sync requests
@@ -5903,6 +5940,38 @@ impl UnifiedNetworkManager {
                 let target_peer = final_target;
 
                 if let Some(peer) = target_peer {
+                    // v10.9.27: Per-peer client-side block-pack inflight cap.
+                    // Acquire BEFORE sending the request so we never schedule more
+                    // concurrent block-packs at one peer than that peer can drain
+                    // (server-side `block_pack_semaphore` is also 4 on v10.9.23).
+                    // On exhaustion we return a typed `ClientThrottle` error so the
+                    // turbo_sync retry loop can back off WITHOUT consuming its retry
+                    // budget — this is local back-pressure, not a peer failure.
+                    let client_sem = self
+                        .client_block_pack_semaphores
+                        .entry(peer)
+                        .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(
+                            CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER,
+                        )))
+                        .clone();
+                    let permit = match client_sem.try_acquire_owned() {
+                        Ok(p) => p,
+                        Err(_) => {
+                            debug!(
+                                "🚦 [CLIENT THROTTLE] Per-peer block-pack inflight cap ({}) reached for peer {} — caller should back off",
+                                CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER,
+                                peer
+                            );
+                            let _ = response_tx.send(Err(anyhow::anyhow!(
+                                "{}: per-peer block-pack inflight cap ({}) reached for peer {}",
+                                CLIENT_THROTTLE_MARKER,
+                                CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER,
+                                peer
+                            )));
+                            return;
+                        }
+                    };
+
                     info!("📤 [TURBO SYNC DIRECT] Sending request-response to peer {}", peer);
                     info!("   Request: blocks {}-{} ({} blocks)", start_height, end_height, end_height - start_height + 1);
 
@@ -5922,19 +5991,46 @@ impl UnifiedNetworkManager {
                         pending.insert(request_id_str.clone(), internal_tx);
                     }
 
-                    // Spawn task to wait for response and forward it
+                    // Spawn task to wait for response and forward it.
+                    //
+                    // v10.9.27: The client semaphore `permit` is MOVED into this task
+                    // so it lives exactly as long as the in-flight round trip. The
+                    // permit drops — and the per-peer slot is released — in any of:
+                    //   (a) Response delivered: `internal_rx.await` returns Ok and the
+                    //       task ends.
+                    //   (b) Transport failure (`OutboundFailure`): the handler removes
+                    //       `internal_tx` from `pending_block_requests`, so
+                    //       `internal_rx.await` returns Err and the task ends.
+                    //   (c) Peer drop / silent stall: the 30s safety timeout below
+                    //       fires, the task ends, and the permit is reclaimed even
+                    //       though no `OutboundFailure` was ever delivered. Without
+                    //       this guard the permit could leak forever and starve all
+                    //       future requests to that peer.
                     let response_tx_clone = response_tx;
                     tokio::spawn(async move {
-                        match internal_rx.await {
-                            Ok(blocks) => {
+                        // Permit holder — moved in, drops when this task ends.
+                        // This is what guarantees the per-peer slot is released
+                        // regardless of how the round trip terminates.
+                        let _client_permit = permit;
+                        // Cap the wait at 30s. libp2p request-response has its own
+                        // timeout (~10s) which will trigger OutboundFailure and drop
+                        // `internal_tx`, but if something is wedged we never want to
+                        // pin a permit beyond 30s.
+                        match tokio::time::timeout(Duration::from_secs(30), internal_rx).await {
+                            Ok(Ok(blocks)) => {
                                 info!("✅ [TURBO SYNC DIRECT] Received {} blocks via request-response", blocks.len());
                                 let _ = response_tx_clone.send(Ok(blocks));
                             }
+                            Ok(Err(_)) => {
+                                warn!("❌ [TURBO SYNC DIRECT] Response channel dropped (transport error or peer disconnect)");
+                                let _ = response_tx_clone.send(Err(anyhow::anyhow!("Request-response channel closed")));
+                            }
                             Err(_) => {
-                                warn!("❌ [TURBO SYNC DIRECT] Response channel dropped (timeout or error)");
-                                let _ = response_tx_clone.send(Err(anyhow::anyhow!("Request-response timeout or channel closed")));
+                                warn!("⏰ [TURBO SYNC DIRECT] Response wait exceeded 30s safety timeout — releasing client semaphore permit");
+                                let _ = response_tx_clone.send(Err(anyhow::anyhow!("Request-response timeout (30s safety cap)")));
                             }
                         }
+                        // _client_permit drops here, releasing the per-peer slot.
                     });
 
                     info!("✅ [TURBO SYNC DIRECT] Request sent, waiting for response (request_id: {})",
@@ -6166,6 +6262,175 @@ mod tests {
         // 3. Gossip amplification from other peers
 
         // No configuration required!
+    }
+
+    // =========================================================================
+    // v10.9.27: Client-side per-peer block-pack semaphore tests
+    // =========================================================================
+
+    /// 8 concurrent acquirers against the per-peer client semaphore must all
+    /// see at most `CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER` permits in flight at
+    /// any moment, and the available count must never go negative.
+    #[tokio::test]
+    async fn client_block_pack_semaphore_caps_concurrent() {
+        let semaphores: Arc<DashMap<PeerId, Arc<tokio::sync::Semaphore>>> =
+            Arc::new(DashMap::new());
+        let peer = PeerId::random();
+        let sem = semaphores
+            .entry(peer)
+            .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(
+                CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER,
+            )))
+            .clone();
+
+        let inflight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let max_seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let permits_acquired = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let sem_c = sem.clone();
+            let inflight_c = inflight.clone();
+            let max_seen_c = max_seen.clone();
+            let acquired_c = permits_acquired.clone();
+            handles.push(tokio::spawn(async move {
+                // Use blocking acquire here so all 8 tasks eventually run,
+                // but only `CAP` may hold the permit at once.
+                let permit = sem_c.acquire_owned().await.expect("semaphore not closed");
+                acquired_c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let cur = inflight_c.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                // Track the maximum number ever simultaneously in flight.
+                let mut prev = max_seen_c.load(std::sync::atomic::Ordering::SeqCst);
+                while cur > prev {
+                    match max_seen_c.compare_exchange(
+                        prev,
+                        cur,
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                    ) {
+                        Ok(_) => break,
+                        Err(p) => prev = p,
+                    }
+                }
+                // Hold the permit briefly so concurrency is observable.
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                inflight_c.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                drop(permit);
+            }));
+        }
+
+        for h in handles {
+            h.await.expect("task must not panic");
+        }
+
+        // Every task should have eventually run.
+        assert_eq!(
+            permits_acquired.load(std::sync::atomic::Ordering::SeqCst),
+            8,
+            "all 8 tasks should eventually acquire a permit"
+        );
+        // But no more than CAP at any single moment.
+        assert!(
+            max_seen.load(std::sync::atomic::Ordering::SeqCst)
+                <= CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER,
+            "in-flight count never exceeds CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER"
+        );
+        // And — because we have 8 tasks contending for 4 slots — at least 4
+        // were simultaneously in flight at some point.
+        assert_eq!(
+            max_seen.load(std::sync::atomic::Ordering::SeqCst),
+            CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER,
+            "exactly CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER were in flight at peak"
+        );
+        // After all tasks finish, every permit must be back.
+        assert_eq!(
+            sem.available_permits(),
+            CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER,
+            "all permits released after tasks complete"
+        );
+    }
+
+    /// If a request never receives a response, the 30s safety timeout in the
+    /// dispatch task must reclaim the permit. Modelled here with a 200ms timeout
+    /// for fast tests: hold a permit inside a task, drop it on timeout, assert
+    /// the permit returns to the semaphore.
+    #[tokio::test]
+    async fn client_block_pack_semaphore_releases_on_timeout() {
+        let sem = Arc::new(tokio::sync::Semaphore::new(
+            CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER,
+        ));
+        assert_eq!(sem.available_permits(), CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER);
+
+        // Acquire a permit, then simulate "request never gets a response" by
+        // awaiting a oneshot that no one will ever send to, wrapped in a
+        // short-lived timeout (modelling the 30s safety cap on the real path).
+        let permit = sem
+            .clone()
+            .try_acquire_owned()
+            .expect("first permit must be available");
+        assert_eq!(
+            sem.available_permits(),
+            CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER - 1
+        );
+
+        let task = tokio::spawn(async move {
+            let _hold = permit; // moved in, drops when task ends
+            let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
+            // Drop _tx by NOT moving it into the task; awaiting rx will then
+            // resolve with an error (Sender dropped). Wrap in a timeout to
+            // model the 30s safety cap.
+            let _ = tokio::time::timeout(Duration::from_millis(200), rx).await;
+            // _hold drops here — permit returned.
+        });
+        task.await.expect("task should not panic");
+
+        assert_eq!(
+            sem.available_permits(),
+            CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER,
+            "permit reclaimed after the dispatch task ends"
+        );
+    }
+
+    /// `try_acquire_owned` must return Err once the per-peer cap is full, and
+    /// the caller-side dispatch path returns a `ClientThrottle` marker error.
+    /// This emulates the exact pattern in the `RequestBlockRangeDirect` handler.
+    #[tokio::test]
+    async fn client_block_pack_semaphore_returns_throttle_when_full() {
+        let sem = Arc::new(tokio::sync::Semaphore::new(
+            CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER,
+        ));
+
+        // Drain every permit.
+        let mut held = Vec::new();
+        for _ in 0..CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER {
+            held.push(
+                sem.clone()
+                    .try_acquire_owned()
+                    .expect("base permits must succeed"),
+            );
+        }
+        assert_eq!(sem.available_permits(), 0);
+
+        // Next attempt must fail — emulate the dispatch path producing a
+        // ClientThrottle error.
+        let fail = sem.clone().try_acquire_owned();
+        assert!(fail.is_err(), "exhausted semaphore must reject");
+        let err = anyhow::anyhow!(
+            "{}: per-peer block-pack inflight cap ({}) reached",
+            CLIENT_THROTTLE_MARKER,
+            CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER
+        );
+        assert!(
+            err.to_string().contains(CLIENT_THROTTLE_MARKER),
+            "dispatch-path error must contain the throttle marker so turbo_sync \
+             can recognise local back-pressure: got {err}"
+        );
+
+        // Release one permit and verify another can be acquired.
+        held.pop();
+        assert_eq!(sem.available_permits(), 1);
+        let recover = sem.clone().try_acquire_owned();
+        assert!(recover.is_ok(), "permit returns after drop");
     }
 }
 

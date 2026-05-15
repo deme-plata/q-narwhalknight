@@ -6165,10 +6165,20 @@ impl TurboSyncManager {
                 let max_retries = 3;
                 // v10.2.10: Wall-clock deadline prevents infinite stall on a single chunk.
                 // If all retries burn 120s total, abandon and let outer loop reschedule.
+                // v10.9.27: The deadline check is at the top of the loop, BEFORE the
+                // retry_count branch, so it still fires when a chunk loops only on
+                // ClientThrottle responses (which intentionally do NOT increment
+                // retry_count). This is the safety net for the throttle path.
                 let chunk_deadline = tokio::time::Instant::now() + Duration::from_secs(120);
                 // v10.2.10: Per-chunk peer exclusion — avoid retrying same slow peer
                 // on transport/timeout failures. Validation failures go through AEGIS.
                 let mut excluded_peers: HashSet<String> = HashSet::new();
+                // v10.9.27: Count of consecutive `ClientThrottle` responses observed
+                // for this chunk. These are local back-pressure (the per-peer client
+                // semaphore was exhausted), NOT peer failures, so they must NOT
+                // consume the retry budget. We still log a warning if the count
+                // grows excessively — that signals the client cap is mis-sized.
+                let mut throttle_waits: usize = 0;
 
                 loop {
                     // v10.2.10: Wall-clock circuit breaker
@@ -6214,11 +6224,40 @@ impl TurboSyncManager {
                             return Ok((start, end));
                         }
                         Err(e) => {
+                            let err_msg = e.to_string();
+
+                            // v10.9.27: Discriminate client-side throttle from real failures.
+                            //
+                            // When the per-peer client block-pack semaphore in
+                            // `unified_network_manager.rs` is full, the dispatch returns
+                            // an error whose Display contains `ClientThrottle`. This is
+                            // local back-pressure — the chunk hasn't actually been tried
+                            // against the peer yet, so we must NOT:
+                            //   - increment `retry_count` (would burn the retry budget)
+                            //   - mark the peer as excluded (it didn't misbehave)
+                            //   - record a `data_failure` on the trust tracker
+                            //
+                            // Instead we sleep briefly and loop. The 120s wall-clock
+                            // deadline at the top of the loop is the safety net that
+                            // prevents an infinite throttle spin if the cap is misconfigured.
+                            if err_msg.contains("ClientThrottle") {
+                                throttle_waits += 1;
+                                if throttle_waits == 100 || throttle_waits % 500 == 0 {
+                                    warn!(
+                                        "🚦 [THROTTLE] Chunk {}-{} blocked by local per-peer \
+                                         semaphore {} times against peer {} — check \
+                                         CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER capacity",
+                                        start, end, throttle_waits, peer
+                                    );
+                                }
+                                tokio::time::sleep(Duration::from_millis(50)).await;
+                                continue;
+                            }
+
                             retry_count += 1;
 
                             // v10.2.10: Exclude peer on transport/timeout failures only.
                             // Check if error looks like a timeout/transport issue.
-                            let err_msg = e.to_string();
                             let is_transport_failure = err_msg.contains("timeout")
                                 || err_msg.contains("Timeout")
                                 || err_msg.contains("timed out")
@@ -7803,6 +7842,96 @@ async fn read_container_memory_mb() -> Option<u64> {
 mod tests {
     use super::*;
 
-    // Tests removed temporarily - will be added after full integration
+    /// v10.9.27: The retry-storm dampener.
+    ///
+    /// `ClientThrottle` errors are local back-pressure — they must NOT consume
+    /// the retry budget. This test models the discriminator arm in the chunk
+    /// retry loop: feed it 20 chunks worth of throttle errors followed by an
+    /// Ok, and assert `retry_count` stayed at 0.
+    ///
+    /// The full retry loop lives inside `start_warp_sync_loop` (~6160) and is
+    /// not directly unit-testable without standing up a full `TurboSyncManager`
+    /// + libp2p swarm + peer mesh. This test verifies the discriminator
+    /// algorithm in isolation; the real loop is exercised end-to-end in the
+    /// Epsilon Docker sync test once the binary is built.
+    #[tokio::test]
+    async fn retry_count_unchanged_on_client_throttle() {
+        // Mirror of the discriminator in the chunk retry loop.
+        let mut retry_count: u32 = 0;
+        let max_retries: u32 = 3;
+        let mut throttle_waits: usize = 0;
+        let chunk_deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+
+        // Sequence: 20 throttle errors then a success.
+        let mut iter = 0;
+        loop {
+            // Wall-clock breaker matches the production code: it sits OUTSIDE
+            // the retry_count arm so throttle-only spins are still bounded.
+            assert!(
+                tokio::time::Instant::now() < chunk_deadline,
+                "wall-clock breaker MUST be reachable from throttle path"
+            );
+
+            iter += 1;
+
+            // Simulated dispatch error / success. The literal "ClientThrottle"
+            // matches `q_network::CLIENT_THROTTLE_MARKER`. Hard-coded here
+            // because q-storage does not (and cannot — circular dep risk)
+            // depend on q-network. The protocol between the two crates is this
+            // exact string substring.
+            let err_msg = if iter <= 20 {
+                Some("ClientThrottle: per-peer cap reached".to_string())
+            } else {
+                None // success
+            };
+
+            match err_msg {
+                None => break, // chunk succeeded
+                Some(err_msg) => {
+                    // The exact discriminator from turbo_sync.rs:
+                    if err_msg.contains("ClientThrottle") {
+                        throttle_waits += 1;
+                        // Production code sleeps 50ms here — use 0 in the test
+                        // to keep it fast.
+                        continue;
+                    }
+                    // Real failure path:
+                    retry_count += 1;
+                    if retry_count >= max_retries {
+                        panic!("test should never reach retry_count >= max_retries");
+                    }
+                }
+            }
+        }
+
+        assert_eq!(
+            retry_count, 0,
+            "ClientThrottle errors must NOT consume the retry budget"
+        );
+        assert_eq!(
+            throttle_waits, 20,
+            "all 20 throttles should have been counted as throttle_waits"
+        );
+    }
+
+    /// Sanity: a non-throttle error path DOES consume the retry budget.
+    #[tokio::test]
+    async fn retry_count_increments_on_real_failure() {
+        let mut retry_count: u32 = 0;
+        let mut throttle_waits: usize = 0;
+
+        for _ in 0..3 {
+            let err_msg = "timeout: peer did not respond".to_string();
+            if err_msg.contains("ClientThrottle") {
+                throttle_waits += 1;
+                continue;
+            }
+            retry_count += 1;
+        }
+
+        assert_eq!(retry_count, 3, "real timeouts must increment retry_count");
+        assert_eq!(throttle_waits, 0, "no throttles were issued in this scenario");
+    }
 }
 
