@@ -38,8 +38,13 @@ use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::prelude::Boolean;
 use ark_r1cs_std::alloc::AllocVar;
 use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
+use sha3::{Shake256, digest::{Update, ExtendableOutput, XofReader}};
 
 use crate::gadgets::dilithium::{NttRoots, PublicKeyVar, SignatureVar};
+
+/// τ = number of non-zero coefficients in the SampleInBall output for
+/// Dilithium5. Each non-zero coefficient is ±1.
+pub const TAU: usize = 60;
 
 /// Dilithium5 packed public-key bytes (2 592 bytes).
 ///
@@ -185,6 +190,53 @@ impl DilithiumKeyBytes {
 
 /// Bytes per packed t₁ polynomial: ceil(256 × 10 / 8) = 320.
 const T1_PACKED_POLY_BYTES: usize = 320;
+
+/// Native (off-circuit) implementation of FIPS-204 §4 Algorithm 3
+/// "SampleInBall". Given a 64-byte challenge seed c̃, produces the
+/// challenge polynomial c ∈ {-1, 0, 1}^256 with exactly τ=60 non-zero
+/// coefficients.
+///
+/// Algorithm:
+///   1. Initialize a SHAKE-256 XOF over c̃.
+///   2. Read 8 bytes; interpret as 64 sign bits.
+///   3. Fisher-Yates loop for i in (n - τ)..n:
+///      a. Rejection-sample j ∈ [0, i] by reading bytes one at a time.
+///      b. Set c[i] = c[j], c[j] = ±1 driven by the next sign bit.
+///
+/// The output is byte-identical between this native impl and any
+/// FIPS-204 reference implementation given the same c̃.
+pub fn sample_in_ball_native(c_tilde: &[u8; C_TILDE_BYTES]) -> [i32; N] {
+    let mut shake = Shake256::default();
+    Update::update(&mut shake, c_tilde);
+    let mut reader = shake.finalize_xof();
+
+    // Read 8 bytes of signs into a u64. The bits are consumed LSB-first
+    // as the algorithm progresses.
+    let mut sign_bytes = [0u8; 8];
+    reader.read(&mut sign_bytes);
+    let mut signs = u64::from_le_bytes(sign_bytes);
+
+    let mut c = [0i32; N];
+    for i in (N - TAU)..N {
+        // Rejection-sample j ∈ [0, i] by reading one byte at a time
+        // until a value ≤ i appears. Per FIPS-204 §4 Algorithm 3
+        // step 6, bytes > i are simply discarded.
+        let j: usize = loop {
+            let mut b = [0u8; 1];
+            reader.read(&mut b);
+            if (b[0] as usize) <= i {
+                break b[0] as usize;
+            }
+        };
+
+        c[i] = c[j];
+        // Sign: 0 → +1, 1 → -1. (FIPS-204 §4 step 8 specifies the
+        // sign bit ordering: low bit of the running signs value.)
+        c[j] = if signs & 1 == 0 { 1 } else { -1 };
+        signs >>= 1;
+    }
+    c
+}
 
 /// Inverse of `simple_bit_unpack_generic` — packs `n = values.len()`
 /// d-bit unsigned integers into a little-endian bit-stream.
@@ -372,16 +424,29 @@ impl DilithiumSigBytes {
             h.push(bool_poly);
         }
 
-        // ─── c_poly: STUB ──────────────────────────────────────────────
-        // See `dilithium-witness-sample-in-ball` follow-up.
-        // n zero coefficients — the verifier's algebra will not be
-        // satisfied with this, which is correct: the verify_structured
-        // call returns `Boolean::constant(false)` for any real signature
-        // until SampleInBall is wired. During the advisory window the
-        // δ-circuit doesn't enforce the verifier's Boolean (gated stub),
-        // so this doesn't reject blocks at the consensus level.
-        let c_poly: Vec<FpVar<F>> = (0..N)
-            .map(|_| FpVar::new_witness(cs.clone(), || Ok(F::zero())))
+        // ─── c_poly: SampleInBall(c̃) ───────────────────────────────────
+        //
+        // FIPS-204 §4 Algorithm 3. Deterministic — c̃ uniquely
+        // determines c_poly. We compute it natively here and allocate
+        // each coefficient as a witness; the in-circuit relationship
+        // "c_poly = SampleInBall(c̃)" is enforced by a separate
+        // sub-circuit (in-circuit SHAKE-256 + Fisher-Yates), tracked
+        // as `dilithium-witness-sample-in-ball-incircuit`. Until that
+        // lands, the recursive-proof level trusts the prover supplied
+        // the correct c_poly for the c̃ — block-by-block validation in
+        // the API server independently checks the signature.
+        let c_native = sample_in_ball_native(&self.c_tilde());
+        let c_poly: Vec<FpVar<F>> = c_native
+            .iter()
+            .map(|&signed| {
+                // -1 → q - 1, 0 → 0, 1 → 1 in the Z_q hosting field.
+                let value: u64 = if signed < 0 {
+                    Q - (-(signed as i64)) as u64
+                } else {
+                    signed as u64
+                };
+                FpVar::new_witness(cs.clone(), || Ok(F::from(value)))
+            })
             .collect::<Result<Vec<_>, _>>()?;
 
         // ─── c_tilde: allocate the 64-byte challenge seed as field
@@ -891,6 +956,51 @@ mod tests {
         let sig = DilithiumSigBytes(sig_bytes);
         assert!(sig.unpack_h_native().is_none(),
             "non-increasing indices within poly MUST fail to parse");
+    }
+
+    // ─── SampleInBall tests ───────────────────────────────────────────
+
+    #[test]
+    fn sample_in_ball_produces_exactly_tau_non_zeros() {
+        let c_tilde = [0x42u8; C_TILDE_BYTES];
+        let c = sample_in_ball_native(&c_tilde);
+        let non_zero_count = c.iter().filter(|&&x| x != 0).count();
+        assert_eq!(non_zero_count, TAU,
+            "Sample-in-ball must produce exactly τ=60 non-zero coefficients");
+    }
+
+    #[test]
+    fn sample_in_ball_only_emits_plus_minus_one() {
+        let c_tilde = [0xAAu8; C_TILDE_BYTES];
+        let c = sample_in_ball_native(&c_tilde);
+        for (i, &v) in c.iter().enumerate() {
+            assert!(
+                v == 0 || v == 1 || v == -1,
+                "c[{}] = {} not in {{-1, 0, 1}}",
+                i, v
+            );
+        }
+    }
+
+    #[test]
+    fn sample_in_ball_is_deterministic() {
+        // Same c̃ → same c_poly. SampleInBall is a deterministic
+        // function of c̃; this is critical for soundness — both
+        // signer and verifier must derive the same c.
+        let c_tilde = [0x11u8; C_TILDE_BYTES];
+        let c1 = sample_in_ball_native(&c_tilde);
+        let c2 = sample_in_ball_native(&c_tilde);
+        assert_eq!(c1, c2);
+    }
+
+    #[test]
+    fn sample_in_ball_different_seeds_produce_different_polys() {
+        let mut c_tilde_a = [0u8; C_TILDE_BYTES];
+        let mut c_tilde_b = [0u8; C_TILDE_BYTES];
+        c_tilde_b[0] = 1; // Flip one bit
+        let a = sample_in_ball_native(&c_tilde_a);
+        let b = sample_in_ball_native(&c_tilde_b);
+        assert_ne!(a, b, "Different seeds must produce different challenge polys");
     }
 
     #[test]
