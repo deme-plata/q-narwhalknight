@@ -484,23 +484,57 @@ fn simple_bit_unpack_generic(bytes: &[u8], d: usize, out: &mut [u32]) {
     }
 }
 
-/// Compute μ = H(H(pk) || M) for the signed message.
+/// Compute μ = SHAKE-256(SHAKE-256(pk, 64) ∥ M, 64) for the signed
+/// message. Native (off-circuit) version.
 ///
-/// FIPS-204 §5.1 step 6. `pk_bytes` is the full DILITHIUM5_PK_BYTES
-/// packed key; `message` is the canonical bytes of the transaction
-/// payload. Returns the SHAKE-256 output as 32 FpVar bytes packed into
-/// 8 u32 words.
+/// FIPS-204 §5.1 Sign step 6:
+///   tr = SHAKE-256(pk, 64)
+///   μ  = SHAKE-256(tr ∥ M, 64)
 ///
-/// **STUB.** Needs in-circuit SHAKE-256 — substantial. Defer to a
-/// follow-up commit that adds the SHAKE-256 AIR or imports a vetted
-/// crate's gadget.
+/// Returns 64 bytes. The signer used exactly this μ as the signed
+/// digest fed into SampleInBall and the challenge-binding equation,
+/// so the in-circuit verifier must derive the SAME μ from the same
+/// pk and M.
+pub fn message_hash_native(pk_bytes: &[u8], message: &[u8]) -> [u8; 64] {
+    // Step 1: tr = SHAKE-256(pk, 64)
+    let mut tr = [0u8; 64];
+    let mut shake_tr = Shake256::default();
+    Update::update(&mut shake_tr, pk_bytes);
+    shake_tr.finalize_xof().read(&mut tr);
+
+    // Step 2: μ = SHAKE-256(tr ∥ M, 64)
+    let mut mu = [0u8; 64];
+    let mut shake_mu = Shake256::default();
+    Update::update(&mut shake_mu, &tr);
+    Update::update(&mut shake_mu, message);
+    shake_mu.finalize_xof().read(&mut mu);
+
+    mu
+}
+
+/// In-circuit allocation of μ as 16 little-endian u32 FpVar words.
+/// Computes μ NATIVELY then allocates each word as a witness. The
+/// constraint that `μ = SHAKE-256(SHAKE-256(pk)∥M)` is enforced by an
+/// in-circuit SHAKE-256 sub-circuit (separate AIR, tracked as
+/// `dilithium-witness-message-hash-incircuit`).
+///
+/// During the advisory window the prover supplies μ as a witness and
+/// the verifier's algebra uses it directly. Block-by-block validation
+/// in the API server independently re-hashes pk and M to verify
+/// against the signature.
 pub fn message_hash<F: PrimeField>(
-    _cs: ConstraintSystemRef<F>,
-    _pk_bytes: &[u8],
-    _message: &[u8],
+    cs: ConstraintSystemRef<F>,
+    pk_bytes: &[u8],
+    message: &[u8],
 ) -> Result<Vec<FpVar<F>>, SynthesisError> {
-    // TODO(dilithium-witness-message-hash): SHAKE-256 over (H(pk) || M).
-    Err(SynthesisError::AssignmentMissing)
+    let mu_bytes = message_hash_native(pk_bytes, message);
+    mu_bytes
+        .chunks(4)
+        .map(|c| {
+            let w = u32::from_le_bytes(c.try_into().expect("4 bytes per word"));
+            FpVar::new_witness(cs.clone(), || Ok(F::from(w)))
+        })
+        .collect()
 }
 
 /// Construct the standard FIPS-204 NTT roots for the Dilithium5
@@ -991,6 +1025,46 @@ mod tests {
         let c1 = sample_in_ball_native(&c_tilde);
         let c2 = sample_in_ball_native(&c_tilde);
         assert_eq!(c1, c2);
+    }
+
+    #[test]
+    fn message_hash_native_is_deterministic() {
+        let pk = vec![0x42u8; DILITHIUM5_PK_BYTES];
+        let m = b"some transaction bytes";
+        let mu1 = message_hash_native(&pk, m);
+        let mu2 = message_hash_native(&pk, m);
+        assert_eq!(mu1, mu2);
+        assert_eq!(mu1.len(), 64);
+    }
+
+    #[test]
+    fn message_hash_native_depends_on_pk() {
+        let mut pk_a = vec![0u8; DILITHIUM5_PK_BYTES];
+        let mut pk_b = vec![0u8; DILITHIUM5_PK_BYTES];
+        pk_b[0] = 1;
+        let m = b"same message";
+        let mu_a = message_hash_native(&pk_a, m);
+        let mu_b = message_hash_native(&pk_b, m);
+        assert_ne!(mu_a, mu_b, "Different pk MUST produce different μ");
+        // Address compiler complaint about unused mut on pk_a.
+        let _ = &mut pk_a;
+    }
+
+    #[test]
+    fn message_hash_native_depends_on_message() {
+        let pk = vec![0u8; DILITHIUM5_PK_BYTES];
+        let mu_a = message_hash_native(&pk, b"message A");
+        let mu_b = message_hash_native(&pk, b"message B");
+        assert_ne!(mu_a, mu_b, "Different message MUST produce different μ");
+    }
+
+    #[test]
+    fn message_hash_native_handles_empty_message() {
+        // SHAKE-256 over (tr ∥ <empty>) is well-defined; should not panic.
+        let pk = vec![0u8; DILITHIUM5_PK_BYTES];
+        let mu = message_hash_native(&pk, &[]);
+        // Output is non-zero (extremely unlikely for SHAKE on tr ∥ ∅).
+        assert!(mu.iter().any(|&b| b != 0));
     }
 
     #[test]
