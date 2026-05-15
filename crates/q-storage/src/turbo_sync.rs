@@ -3581,6 +3581,32 @@ impl TurboSyncManager {
             cursor = end + 1;
         }
 
+        // v10.9.26: Apply genesis-window cap here too (gap-fill path).
+        // Without this, gap-fill in genesis mode would dispatch chunks at
+        // arbitrary high heights (the gap range is computed from the
+        // PEER tip, not from local contiguous height), causing the
+        // "stops at 26k" symptom — chunks land at 6M+ but contiguous
+        // can't advance.
+        let genesis_mode = std::env::var("Q_GENESIS_SYNC_ONLY")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if genesis_mode {
+            let lookahead: u64 = std::env::var("Q_GENESIS_LOOKAHEAD_BLOCKS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(1_000_000);
+            let window_cap = first_gap.saturating_add(lookahead);
+            let original_len = chunks.len();
+            chunks.retain(|(s, _)| *s <= window_cap);
+            if chunks.len() < original_len {
+                warn!(
+                    "🌱 [GENESIS-WINDOW v10.9.26] gap-fill capped: kept {}/{} chunks \
+                     (≤ height {} = first_gap {} + {} lookahead).",
+                    chunks.len(), original_len, window_cap, first_gap, lookahead
+                );
+            }
+        }
+
         // Eligible peers (already PeerId in the registry). Filter to peers at or above
         // the range end so they're guaranteed to have these blocks.
         let candidate_peers: Vec<PeerId> = {
@@ -4178,6 +4204,38 @@ impl TurboSyncManager {
             let chunk_end = (current + chunk_size - 1).min(end);
             chunks.push((current, chunk_end));
             current = chunk_end + 1;
+        }
+
+        // v10.9.26: Apply the genesis-window cap here, INSIDE split_into_chunks,
+        // so EVERY caller benefits (not just sync_to_height). Two known callers:
+        //   • sync_to_height (line ~6822) — already had v10.9.25 cap above this;
+        //     redundant but cheap.
+        //   • other paths that build chunks (gap-fill at line ~3580, additional
+        //     turbo paths at line ~7152) — previously bypassed the cap and were
+        //     producing requests at heights > local + 1M, causing the chain to
+        //     "stop at 26k" symptom from the v10.9.25 Beta test.
+        //
+        // The cap is computed from `start` (the request floor) rather than
+        // `local_height` — same effective semantics for genesis mode because
+        // start = local_height + 1 in all callers.
+        let genesis_mode = std::env::var("Q_GENESIS_SYNC_ONLY")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if genesis_mode {
+            let lookahead: u64 = std::env::var("Q_GENESIS_LOOKAHEAD_BLOCKS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(1_000_000);
+            let window_cap = start.saturating_add(lookahead);
+            let original_len = chunks.len();
+            chunks.retain(|(s, _)| *s <= window_cap);
+            if chunks.len() < original_len {
+                warn!(
+                    "🌱 [GENESIS-WINDOW v10.9.26] split_into_chunks capped: kept {}/{} chunks \
+                     (≤ height {} = start {} + {} lookahead).",
+                    chunks.len(), original_len, window_cap, start, lookahead
+                );
+            }
         }
 
         info!("📦 Split range {}-{} into {} chunks of ~{} blocks",
