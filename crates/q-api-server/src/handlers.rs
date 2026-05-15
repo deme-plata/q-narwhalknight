@@ -681,10 +681,13 @@ fn detect_latest_wallet_version() -> Option<(String, Option<String>)> {
     }
 
     let mut best: Option<(u64, u64, u64, String, std::path::PathBuf)> = None;
+    // Scan all known download locations — same set as detect_latest_node_version
+    // and detect_latest_miner_version. The Epsilon path (/home/orobit/...) was
+    // missing here, which is why /api/v1/version didn't surface latest_wallet_version
+    // even when slint-wallet-vN.N.N was on disk.
+    scan_dir(std::path::Path::new("/home/orobit/q-narwhalknight/dist-final/downloads"), &mut best);
+    scan_dir(std::path::Path::new("/opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads"), &mut best);
     scan_dir(std::path::Path::new("gui/quantum-wallet/dist-final/downloads"), &mut best);
-    if best.is_none() {
-        scan_dir(std::path::Path::new("/opt/orobit/shared/q-narwhalknight/gui/quantum-wallet/dist-final/downloads"), &mut best);
-    }
     best.map(|(_, _, _, version, path)| {
         let sha256 = std::fs::read(&path).ok().map(|data| {
             use sha2::{Digest, Sha256};

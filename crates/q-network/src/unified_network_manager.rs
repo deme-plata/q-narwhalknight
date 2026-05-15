@@ -2672,7 +2672,7 @@ impl UnifiedNetworkManager {
         Ok(Self {
             swarm,
             discovered_peers: Arc::new(RwLock::new(HashSet::new())),
-            peer_addresses: Arc::new(RwLock::new(HashMap::new())),
+            peer_addresses: Arc::new(RwLock::new(all_peer_addresses.clone())),
             bootstrap_peers: Arc::new(RwLock::new(bootstrap_peer_map)), // v0.6.8-beta: Auto-reconnection tracking
             local_peer_id,
             peer_tx: None, // Set via set_peer_channel() after construction
@@ -3624,6 +3624,26 @@ impl UnifiedNetworkManager {
             }
             QNarwhalEvent::Identify(event) => {
                 debug!("🔍 Identify event: {:?}", event);
+                // v10.9.30 Bug A fix: cache Identify-reported listen_addrs into
+                // `peer_addresses` so later block-pack requests targeting this
+                // peer ID by gossipsub-discovered peer-heights have a multiaddr
+                // to dial. Without this, the [PEER CHECK] fast-fail path drops
+                // the ideal sync source and round-robins through unrelated peers.
+                if let libp2p::identify::Event::Received { peer_id, info, .. } = event {
+                    let listen_addrs = info.listen_addrs.clone();
+                    if !listen_addrs.is_empty() {
+                        let cache = self.peer_addresses.clone();
+                        tokio::spawn(async move {
+                            let mut addrs = cache.write().await;
+                            let entry = addrs.entry(peer_id).or_default();
+                            for a in listen_addrs {
+                                if !entry.contains(&a) {
+                                    entry.push(a);
+                                }
+                            }
+                        });
+                    }
+                }
             }
             QNarwhalEvent::Ping(event) => {
                 // v4.3.0-beta: Extract RTT and feed into peer latency tracker
