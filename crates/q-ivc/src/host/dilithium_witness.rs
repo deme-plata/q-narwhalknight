@@ -194,25 +194,84 @@ pub fn message_hash<F: PrimeField>(
 /// Construct the standard FIPS-204 NTT roots for the Dilithium5
 /// parameter set (n=256, q=8 380 417).
 ///
-/// These are CONSTANTS — every call produces the same root table. The
-/// gadget allocates them as `F::from(constant)` so they're zero-cost
-/// in-circuit.
+/// The primitive 512-th root of unity in Z_q is ψ = 1753 per FIPS-204
+/// §A.4. From ψ we derive:
 ///
-/// **STUB.** Needs the 256-element forward + inverse root tables.
-/// They're derivable from the primitive 512-th root of unity ψ = 1 753
-/// (the FIPS-204 reference value) but require careful bit-reversal
-/// indexing. Land via a separate constants commit; the table is
-/// 256 × 2 × 8 bytes = 4 KB at runtime.
+///   ω = ψ²              (primitive 256-th root of unity)
+///   fwd[k] = ω^(bit_rev₈(k))   for k = 0..256, with 8-bit reversal
+///   inv[k] = ω^(−bit_rev₈(k))  = fwd[k]⁻¹ mod q
+///   n_inv  = 256⁻¹ mod q
+///
+/// All arithmetic happens natively in u64 (q fits comfortably; ψ^k for
+/// k < 512 stays well under u64::MAX with proper modular reduction).
+/// The resulting `F::from(...)` allocations are constants in any
+/// `PrimeField<F>` whose modulus is larger than q (BN254, BLS12-381,
+/// pasta, etc.) — i.e., any field the recursive proof might use.
+///
+/// The output table is ~4 KB; cache it once at startup.
 pub fn standard_ntt_roots<F: PrimeField>() -> NttRoots<F> {
-    // TODO(dilithium-witness-ntt-roots): populate from FIPS-204 §A.4
-    // primitive root ψ=1753; bit-reversal-permuted root array.
-    NttRoots {
-        fwd: Vec::new(),
-        inv: Vec::new(),
-        n_inv: F::one(),
-        psi: F::zero(),
-        psi_inv: F::zero(),
+    const PSI: u64 = 1753;
+
+    // ω = ψ² mod q
+    let omega = mul_mod(PSI, PSI, Q);
+
+    // ω^bit_rev_8(k) for k in 0..N
+    let mut fwd_native: Vec<u64> = Vec::with_capacity(N);
+    for k in 0..N {
+        let exp = bit_reverse_8(k as u8) as u64;
+        fwd_native.push(pow_mod(omega, exp, Q));
     }
+
+    // inv[k] = fwd[k]⁻¹ mod q  via Fermat's little theorem (q is prime).
+    // a⁻¹ ≡ a^(q−2) mod q.
+    let mut inv_native: Vec<u64> = Vec::with_capacity(N);
+    for &f in &fwd_native {
+        inv_native.push(pow_mod(f, Q - 2, Q));
+    }
+
+    // n_inv = 256⁻¹ mod q
+    let n_inv_native = pow_mod(N as u64, Q - 2, Q);
+
+    // ψ⁻¹ via Fermat's little theorem.
+    let psi_inv = pow_mod(PSI, Q - 2, Q);
+
+    NttRoots {
+        fwd: fwd_native.into_iter().map(F::from).collect(),
+        inv: inv_native.into_iter().map(F::from).collect(),
+        n_inv: F::from(n_inv_native),
+        psi: F::from(PSI),
+        psi_inv: F::from(psi_inv),
+    }
+}
+
+/// Bit-reverse the bottom 8 bits of `x`. For the n=256 NTT, indices
+/// are reversed within 8 bits (i.e., reflect across a 4-bit midpoint).
+fn bit_reverse_8(x: u8) -> u8 {
+    let mut r = 0u8;
+    for i in 0..8 {
+        r |= ((x >> i) & 1) << (7 - i);
+    }
+    r
+}
+
+/// (a × b) mod m using u128 intermediate to avoid u64 overflow.
+fn mul_mod(a: u64, b: u64, m: u64) -> u64 {
+    (((a as u128) * (b as u128)) % (m as u128)) as u64
+}
+
+/// (base ^ exp) mod m using square-and-multiply.
+fn pow_mod(base: u64, exp: u64, m: u64) -> u64 {
+    let mut result: u64 = 1;
+    let mut base = base % m;
+    let mut e = exp;
+    while e > 0 {
+        if e & 1 == 1 {
+            result = mul_mod(result, base, m);
+        }
+        e >>= 1;
+        base = mul_mod(base, base, m);
+    }
+    result
 }
 
 /// One-shot convenience that bundles pk-unpack + sig-unpack + message-hash
@@ -298,5 +357,103 @@ mod tests {
         assert_eq!(N, 256);
         assert_eq!(K, 8);
         assert_eq!(L, 7);
+    }
+
+    #[test]
+    fn bit_reverse_8_is_self_inverse() {
+        // Bit-reversal twice = identity.
+        for x in 0..=255u8 {
+            assert_eq!(bit_reverse_8(bit_reverse_8(x)), x);
+        }
+    }
+
+    #[test]
+    fn bit_reverse_8_specific_values() {
+        // Known values: bit_rev(0b00000001) = 0b10000000 = 128.
+        assert_eq!(bit_reverse_8(1), 128);
+        assert_eq!(bit_reverse_8(128), 1);
+        // bit_rev(0b11110000) = 0b00001111 = 15.
+        assert_eq!(bit_reverse_8(0b11110000), 0b00001111);
+    }
+
+    #[test]
+    fn pow_mod_satisfies_fermats_little_theorem() {
+        // For any a coprime to q (and q prime), a^(q-1) ≡ 1 mod q.
+        // Test on a few small bases.
+        for base in [2u64, 3, 5, 7, 1753] {
+            let result = pow_mod(base, Q - 1, Q);
+            assert_eq!(result, 1, "Fermat's little theorem fails for base {}", base);
+        }
+    }
+
+    #[test]
+    fn pow_mod_inverse_property() {
+        // a × a^(q-2) ≡ 1 mod q for prime q.
+        for a in [2u64, 7, 1753, 8_380_416] {
+            let a_inv = pow_mod(a, Q - 2, Q);
+            assert_eq!(mul_mod(a, a_inv, Q), 1);
+        }
+    }
+
+    #[test]
+    fn psi_is_primitive_512th_root_of_unity() {
+        // ψ = 1753, q = 8_380_417. ψ should satisfy ψ^512 ≡ 1 mod q
+        // and ψ^256 ≡ −1 mod q (i.e., q−1) but ψ^k ≠ 1 for any k < 512.
+        const PSI: u64 = 1753;
+
+        // ψ^512 = 1
+        assert_eq!(pow_mod(PSI, 512, Q), 1, "ψ^512 must be 1");
+
+        // ψ^256 = -1 = q - 1
+        assert_eq!(pow_mod(PSI, 256, Q), Q - 1, "ψ^256 must be q-1 (=-1 mod q)");
+
+        // ψ^d ≠ 1 for d ∈ {1, 2, 4, 8, 16, 32, 64, 128, 256}
+        // (i.e., 256 is the multiplicative order of ψ² = ω, so ψ has order 512)
+        for d in [1u64, 2, 4, 8, 16, 32, 64, 128, 256] {
+            let v = pow_mod(PSI, d, Q);
+            assert_ne!(v, 1, "ψ has order < {}", d);
+        }
+    }
+
+    #[test]
+    fn omega_is_primitive_256th_root_of_unity() {
+        // ω = ψ² has order n = 256.
+        const PSI: u64 = 1753;
+        let omega = mul_mod(PSI, PSI, Q);
+
+        assert_eq!(pow_mod(omega, 256, Q), 1, "ω^256 must be 1");
+        // Should not be 1 for any proper divisor of 256.
+        for d in [1u64, 2, 4, 8, 16, 32, 64, 128] {
+            assert_ne!(pow_mod(omega, d, Q), 1, "ω^{} must not be 1", d);
+        }
+    }
+
+    #[test]
+    fn standard_ntt_roots_table_has_correct_shape() {
+        use ark_bls12_381::Fr;
+        let roots = standard_ntt_roots::<Fr>();
+        assert_eq!(roots.fwd.len(), N, "fwd must have N=256 entries");
+        assert_eq!(roots.inv.len(), N, "inv must have N=256 entries");
+        // fwd and inv must be elementwise inverses:
+        //   fwd[k] × inv[k] ≡ 1 mod q  for all k
+        for k in 0..N {
+            let prod = roots.fwd[k] * roots.inv[k];
+            assert_eq!(prod, Fr::from(1u64), "fwd[{}] × inv[{}] != 1", k, k);
+        }
+        // n_inv × n ≡ 1
+        let n_check = roots.n_inv * Fr::from(N as u64);
+        assert_eq!(n_check, Fr::from(1u64));
+        // psi × psi_inv ≡ 1
+        let psi_check = roots.psi * roots.psi_inv;
+        assert_eq!(psi_check, Fr::from(1u64));
+    }
+
+    #[test]
+    fn standard_ntt_roots_first_entry_is_one() {
+        // fwd[0] = ω^(bit_rev_8(0)) = ω^0 = 1.
+        use ark_bls12_381::Fr;
+        let roots = standard_ntt_roots::<Fr>();
+        assert_eq!(roots.fwd[0], Fr::from(1u64));
+        assert_eq!(roots.inv[0], Fr::from(1u64));
     }
 }
