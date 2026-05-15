@@ -4282,6 +4282,14 @@ impl QStorage {
 
     /// Save wallet balance to persistent storage with SYNC to guarantee disk write
     /// v2.5.0: Updated to u128 (16 bytes) for extreme precision
+    /// v10.9.29: MAX-WINS GUARD added (CLAUDE.md Rule 1). Previous behaviour
+    ///   wrote unconditionally, allowing stale/partial-data callers to overwrite
+    ///   a correct higher balance with a lower one — exactly the pattern that
+    ///   caused the May 2026 Epsilon incident (3200 → 1484 QUG) and produces
+    ///   the visible "balance fluctuates 5% up/down" UX on production today.
+    /// Now: if the new value is LOWER than what's already in RocksDB, the
+    /// write is SKIPPED and an ERROR log is emitted. Only equal-or-higher
+    /// writes proceed.
     pub async fn save_wallet_balance(&self, address: &[u8; 32], amount: u128) -> Result<()> {
         let key = format!("wallet_balance_{}", hex::encode(address));
         let addr_hex = hex::encode(address);
@@ -4293,10 +4301,15 @@ impl QStorage {
             let delta_abs = if amount >= old_balance { amount - old_balance } else { old_balance - amount };
             let direction = if amount >= old_balance { "+" } else { "-" };
             if amount < old_balance {
+                // v10.9.29 MAX-WINS GUARD: refuse the write. Matches the
+                // existing guard in save_wallet_balances (plural, line ~4554).
+                // CLAUDE.md Rule 1: existing value is authoritative; the
+                // caller has stale or partial data.
                 error!(
-                    "🔴 [BALANCE WRITE] save_wallet_balance(): wallet={} old={} new={} delta={}{} caller=ABSOLUTE_OVERWRITE height=N/A",
+                    "🔴 [BALANCE WRITE] save_wallet_balance(): wallet={} SKIPPED (max-wins: old={} > new={}, delta={}{}) caller=ABSOLUTE_OVERWRITE",
                     &addr_hex[..16.min(addr_hex.len())], old_balance, amount, direction, delta_abs
                 );
+                return Ok(()); // do NOT write — existing value is higher and must be preserved
             } else {
                 warn!(
                     "🔴 [BALANCE WRITE] save_wallet_balance(): wallet={} old={} new={} delta={}{} caller=ABSOLUTE_OVERWRITE height=N/A",
