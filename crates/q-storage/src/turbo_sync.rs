@@ -3594,7 +3594,7 @@ impl TurboSyncManager {
             let lookahead: u64 = std::env::var("Q_GENESIS_LOOKAHEAD_BLOCKS")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(1_000_000);
+                .unwrap_or(10_000); // v10.9.28: match the GAP_SKIP_REFUSED ingestion safety cap (10000). Previous 1_000_000 caused chunks scheduled within 1M of contiguous to be later refused at ingest time when they landed >10K beyond local tip, producing the "🚫 [GAP SKIP REFUSED] ... Discarding out-of-range batch" storm seen in v10.9.27 Beta sync test (height stuck at 0, RSS growing 50MB/min from queued+retried chunks). With 10K window, every dispatched chunk is ingestable. Operators wanting parallelism still set Q_GENESIS_LOOKAHEAD_BLOCKS=N explicitly.
             let window_cap = first_gap.saturating_add(lookahead);
             let original_len = chunks.len();
             chunks.retain(|(s, _)| *s <= window_cap);
@@ -4225,7 +4225,7 @@ impl TurboSyncManager {
             let lookahead: u64 = std::env::var("Q_GENESIS_LOOKAHEAD_BLOCKS")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(1_000_000);
+                .unwrap_or(10_000); // v10.9.28: match the GAP_SKIP_REFUSED ingestion safety cap (10000). Previous 1_000_000 caused chunks scheduled within 1M of contiguous to be later refused at ingest time when they landed >10K beyond local tip, producing the "🚫 [GAP SKIP REFUSED] ... Discarding out-of-range batch" storm seen in v10.9.27 Beta sync test (height stuck at 0, RSS growing 50MB/min from queued+retried chunks). With 10K window, every dispatched chunk is ingestable. Operators wanting parallelism still set Q_GENESIS_LOOKAHEAD_BLOCKS=N explicitly.
             let window_cap = start.saturating_add(lookahead);
             let original_len = chunks.len();
             chunks.retain(|(s, _)| *s <= window_cap);
@@ -6945,7 +6945,7 @@ impl TurboSyncManager {
             let lookahead: u64 = std::env::var("Q_GENESIS_LOOKAHEAD_BLOCKS")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(1_000_000);
+                .unwrap_or(10_000); // v10.9.28: match the GAP_SKIP_REFUSED ingestion safety cap (10000). Previous 1_000_000 caused chunks scheduled within 1M of contiguous to be later refused at ingest time when they landed >10K beyond local tip, producing the "🚫 [GAP SKIP REFUSED] ... Discarding out-of-range batch" storm seen in v10.9.27 Beta sync test (height stuck at 0, RSS growing 50MB/min from queued+retried chunks). With 10K window, every dispatched chunk is ingestable. Operators wanting parallelism still set Q_GENESIS_LOOKAHEAD_BLOCKS=N explicitly.
             let window_cap = effective_start_height.saturating_add(lookahead);
             let original_len = chunks.len();
             chunks.retain(|(start, _)| *start <= window_cap);
