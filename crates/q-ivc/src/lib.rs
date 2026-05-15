@@ -23,6 +23,7 @@
 
 pub mod circuits;
 pub mod gadgets;
+pub mod host;
 pub mod recursion;
 
 pub use circuits::EpochTransitionCircuit;

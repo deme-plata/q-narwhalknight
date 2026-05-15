@@ -286,18 +286,28 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for DeltaBlockCircuit<F> {
         Blake3Gadget::verify_hash(cs.clone(), &header_preimage, &expected_hash_fp)?;
 
         // ╔═══════════════════════════════════════════════════════════════════╗
-        // ║  PHASE 2 — anchor-election NTT verification                       ║
+        // ║  PHASE 2 — anchor-election NTT verification (1B — wired stub)     ║
         // ╚═══════════════════════════════════════════════════════════════════╝
         //
-        // Enforce: the producer claimed in the block header is the legitimate
-        // anchor for this round under the NTT-based randomness beacon.
-        //
-        // TODO(delta-circuit-PHASE-1B): Call into NttVerifierGadget. The
-        // existing gadget already supports the FIPS 204 negacyclic convention;
-        // we need the wiring that consumes `self.inputs.anchor.ntt_witness` and
-        // produces a Boolean that must be `true`.
-        //
-        // Constraint cost: ~50M.
+        // Calls into `host::anchor_witness::verify_anchor_election` which is
+        // currently a stub returning constant-true (see that file for the
+        // unpacking spec). When the host-helper body lands, this call's
+        // returned Boolean must be enforced == true. Until then the anchor
+        // check is non-enforcing at the recursive level; the API server's
+        // accept_block path validates it block-by-block during the advisory
+        // window. Constraint cost when filled in: ~50M.
+        let anchor_ok = crate::host::anchor_witness::verify_anchor_election::<F>(
+            cs.clone(),
+            &[crate::host::anchor_witness::AnchorVdfBytes::new(
+                self.inputs.anchor.ntt_witness.clone(),
+            )],
+            self.inputs.anchor.claimed_producer_id,
+            self.inputs.block_height,
+        )?;
+        // Enforcing == true is currently a no-op (stub returns constant-true)
+        // but keeps the call site in canonical form so 1B-final lands as a
+        // single-file change to anchor_witness.rs.
+        anchor_ok.enforce_equal(&Boolean::constant(true))?;
 
         // ╔═══════════════════════════════════════════════════════════════════╗
         // ║  PHASE 3 — per-transaction loop                                   ║
@@ -315,36 +325,38 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for DeltaBlockCircuit<F> {
         let mut running_root = state_root_prev.clone();
 
         for (tx_idx, tx) in self.inputs.transactions.iter().enumerate() {
-            // ──── Phase 3a: Dilithium5 signature verification (1C — stub) ──
+            // ──── Phase 3a: Dilithium5 signature verification (1C — wired stub) ──
             //
-            // The DilithiumVerifierGadget::verify_structured API takes
-            // structured types (PublicKeyVar, SignatureVar, NttRoots,
-            // message_hash). Converting raw FIPS-204 byte encodings into
-            // those structured types is its own helper layer (~300-500 LOC
-            // of bit-unpacking; see Dilithium5 spec §5 for the packed
-            // key/sig formats). Lands in a dedicated commit alongside the
-            // `crates/q-ivc/src/host/dilithium_witness.rs` helper.
+            // Calls into `host::dilithium_witness::allocate_dilithium_witness_for_tx`
+            // which is currently a stub. The structural skeleton + FIPS-204
+            // spec references for the bit-unpacking live in that file; the
+            // bodies are tracked as follow-up commits.
             //
-            // For now: enforce nothing for the sig. The δ-circuit currently
-            // trusts the prover provided a valid sig — this is exactly the
-            // soundness gap that Phase 5 (mandatory verification at
-            // activation height) is designed NOT to be reached with.
-            // Block-by-block validation in the API server's accept_block
-            // path independently checks every signature; the recursive
-            // proof is ADVISORY until activation.
-            //
-            // TODO(delta-circuit-PHASE-1C-final): build PublicKeyVar from
-            // tx.from_pubkey_bytes, SignatureVar from tx.signature_bytes,
-            // message_hash from BLAKE3 of tx.signing_message, NttRoots from
-            // the standard FIPS-204 ω constants. Then call
-            // DilithiumVerifierGadget::verify_structured and enforce its
-            // returned Boolean is `true`.
+            // The call below is wrapped in a length check: if the prover
+            // didn't supply a full-length signature payload, we just skip
+            // (the API-server accept_block path independently checks the
+            // sig during the advisory window). When the host-helper bodies
+            // land, this short-circuit gets removed and the verifier's
+            // returned Boolean is enforced == true unconditionally.
             //
             // Constraint cost when filled in: ~1.5M per tx.
             let _ = tx_idx;
-            let _ = &tx.from_pubkey_bytes;
-            let _ = &tx.signature_bytes;
-            let _ = &tx.signing_message;
+            if tx.from_pubkey_bytes.len()
+                == crate::host::dilithium_witness::DILITHIUM5_PK_BYTES
+                && tx.signature_bytes.len()
+                    == crate::host::dilithium_witness::DILITHIUM5_SIG_BYTES
+            {
+                // Host helper currently returns AssignmentMissing; swallow
+                // until the stub body lands. The compile-time wiring is in
+                // place so the future body change is single-file.
+                let _stub = crate::host::dilithium_witness::allocate_dilithium_witness_for_tx::<F>(
+                    cs.clone(),
+                    &tx.from_pubkey_bytes,
+                    &tx.signature_bytes,
+                    &tx.signing_message,
+                );
+                let _ = _stub; // explicitly discard the Err until 1C-final lands
+            }
 
             // ──── Phase 3b/3e: amount + fee + balance range checks (1D + 1G) ──
             //
