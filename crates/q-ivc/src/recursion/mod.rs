@@ -29,5 +29,10 @@
 //! `tip_watcher.rs`.
 
 pub mod tip_watcher;
+pub mod step_circuit;
 
 pub use tip_watcher::{TipWatcher, TipWatcherState};
+pub use step_circuit::{
+    DeltaStepCircuit, FoldError, StepCircuitAdapter, StepIO, STEP_Z_LEN,
+    fold_native,
+};
