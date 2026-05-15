@@ -7,6 +7,8 @@ mod miner;
 #[allow(dead_code)]
 mod models;
 mod oauth_server;
+mod single_instance;
+mod tray;
 mod updater;
 #[allow(dead_code)]
 mod wallet;
@@ -28,6 +30,17 @@ fn main() {
         .cloned()
         .unwrap_or_else(|| "http://localhost:8080".to_string());
 
+    // v11.2.0: single-instance enforcement. If another wallet is already running
+    // we exit immediately. A follow-up commit will add IPC so the first instance
+    // raises its window and (later) handles forwarded quillon:// URLs.
+    let _instance_lock = match single_instance::acquire() {
+        Some(lock) => lock,
+        None => {
+            eprintln!("[slint-wallet] Another wallet is already running — exiting.");
+            std::process::exit(0);
+        }
+    };
+
     // Install Linux desktop launcher + icon + autostart (idempotent; no-op on non-Linux).
     // Errors are logged and non-fatal.
     desktop_integration::install_desktop_integration();
@@ -41,6 +54,11 @@ fn main() {
             AppWindow::new().expect("Failed to create window even with software renderer")
         }
     };
+
+    // v11.2.0: install the cross-platform tray icon. Returns None if the system
+    // has no tray; the wallet still works, just without a tray menu. Keep the
+    // handle alive for the rest of main() so the icon isn't dropped.
+    let _tray = tray::install(app.as_weak());
 
     // Surface app version on the login screen footer + center the window on the
     // primary monitor at startup. The window itself is sized via the .slint

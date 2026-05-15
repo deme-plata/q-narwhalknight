@@ -10,7 +10,10 @@ default = ["gpu-opencl"]
 gpu-opencl = ["opencl3"]
 
 [dependencies]
-slint = { version = "1.9", features = ["renderer-software"] }
+slint = { version = "1.16", features = ["renderer-software"] }
+toml = "0.8"
+dirs = "5"
+display-info = "0.5"
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
@@ -37,13 +40,23 @@ urlencoding = "2"
 num_cpus = "1.16"
 core_affinity = "0.8"
 raw-cpuid = "11"
+
+# v11.2.0: cross-platform system tray + single-instance enforcement
+tray-icon = "0.21"
+single-instance = "0.3"
+# Tray icon RGBA decoder (the PNG is embedded via include_bytes!)
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(not(windows))'.dependencies]
+# OpenCL ICD loader doesn't cross-compile cleanly to x86_64-pc-windows-gnu via
+# MinGW. Windows builds get CPU-only mining — Linux/macOS keep GPU support.
 opencl3 = { version = "0.9", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["processthreadsapi", "sysinfoapi", "winnt"] }
 
 [build-dependencies]
-slint-build = "1.9"
+slint-build = "1.16"
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
