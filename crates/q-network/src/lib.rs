@@ -65,11 +65,7 @@ pub use persistent_channels::PersistentChannelManager;
 pub use dag_sync::{DagSyncManager, DagSyncRequest, DagSyncResponse, SyncType, DagStateSummary};
 
 // Export libp2p discovery components
-pub use unified_network_manager::{
-    UnifiedNetworkManager, NetworkCommand, BandwidthTier, SUPERNODE_PEER_IDS,
-    // v10.9.27: client-side per-peer block-pack flow-control surface
-    CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER, CLIENT_THROTTLE_MARKER,
-};
+pub use unified_network_manager::{UnifiedNetworkManager, NetworkCommand, BandwidthTier, SUPERNODE_PEER_IDS};
 pub use libp2p_bridge::{Libp2pBridge, BridgeEvent, DhtEvent};
 
 // Export resonance consensus protocol components

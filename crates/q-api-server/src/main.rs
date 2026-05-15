@@ -25227,7 +25227,12 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/crypto/capabilities", get(handlers::crypto_capabilities)) // v7.2.12: EternalCypher capabilities
         .route("/api/v1/blocks/:height", get(handlers::get_block_by_height)) // v0.9.59-beta: HTTP fallback sync
         .route("/healthz", get(|| async { "OK" })) // v10.3.6: Kubernetes-style health probe
-        .route("/metrics", get(handlers::metrics))
+        // v10.9.27: /metrics route moved up to handlers::metrics_endpoint
+        // (the comprehensive libp2p + Q-NarwhalKnight registry). The legacy
+        // handlers::metrics hand-rolled handler is retained as dead code for
+        // one release in case a follow-up wants to merge its 3 unique
+        // gauges (qnk_storage_queue_depth, qnk_storage_congested) into
+        // NetworkMetrics; can be deleted in v10.9.28.
         // v5.1.1: Deploy Admin Panel - master-wallet-only rolling deployment control
         .route("/api/v1/admin/deploy/status", get(q_api_server::deploy_admin_api::deploy_status))
         .route("/api/v1/admin/deploy/verify", post(q_api_server::deploy_admin_api::deploy_verify))
