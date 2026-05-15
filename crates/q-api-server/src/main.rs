@@ -16756,6 +16756,17 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                   prev, db_height, db_height - prev);
                         }
                     }
+                    // v10.9.28: feed local_height + blocks_synced into NetworkMetrics
+                    // so /metrics gauges populate. Counter::inc_by uses the delta
+                    // since prev (the value before our fetch_max bumped it). For a
+                    // fresh sync, db_height starts at 0 and rises monotonically, so
+                    // the running total IS blocks_synced.
+                    if let Some(ref m) = app_state_height_reconcile.network_metrics {
+                        m.local_height.set(db_height as i64);
+                        if db_height > prev {
+                            m.blocks_synced_total.inc_by(db_height - prev);
+                        }
+                    }
                 }
             }
         });
