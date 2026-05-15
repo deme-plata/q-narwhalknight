@@ -212,11 +212,19 @@ pub struct DeltaBlockCircuit<F: PrimeField> {
 impl<F: PrimeField> ConstraintSynthesizer<F> for DeltaBlockCircuit<F> {
     fn generate_constraints(self, cs: ConstraintSystemRef<F>) -> Result<(), SynthesisError> {
         // ╔═══════════════════════════════════════════════════════════════════╗
-        // ║  PHASE 0 — allocate public inputs and the empty-subtree constants ║
+        // ║  PHASE 0 — allocate the 4 public inputs, then dispatch to inner   ║
         // ╚═══════════════════════════════════════════════════════════════════╝
         //
-        // The verifier sees: state_root_prev, state_root_next, block_header_hash,
-        // block_height. Everything else is private witness.
+        // Standalone (Groth16/Marlin) entry point. The verifier sees:
+        // state_root_prev, state_root_next, block_header_hash, block_height
+        // — everything else is private witness, enforced inside
+        // `generate_constraints_inner`.
+        //
+        // The Nova step-circuit wrapper bypasses this method: it allocates
+        // its own z_in/z_out as the chain-state vector and calls
+        // `generate_constraints_inner` directly with pre-allocated handles,
+        // avoiding double-allocation of the same field elements as Groth16
+        // public inputs.
 
         let state_root_prev = alloc_root_input(cs.clone(), &self.inputs.state_root_prev)?;
         let state_root_next = alloc_root_input(cs.clone(), &self.inputs.state_root_next)?;
@@ -225,6 +233,44 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for DeltaBlockCircuit<F> {
         let block_height_var = FpVar::new_input(cs.clone(), || {
             Ok(F::from(self.inputs.block_height))
         })?;
+
+        self.generate_constraints_inner(
+            cs,
+            &state_root_prev,
+            &state_root_next,
+            &block_header_hash,
+            &block_height_var,
+        )
+    }
+}
+
+impl<F: PrimeField> DeltaBlockCircuit<F> {
+    /// Phase 1–5 enforcement WITHOUT allocating the four canonical public
+    /// inputs (`state_root_prev`, `state_root_next`, `block_header_hash`,
+    /// `block_height`). Use this when an outer caller — typically the Nova
+    /// `StepCircuit` wrapper — already owns those handles as part of its
+    /// z_in/z_out chain state and would otherwise pay an extra allocation
+    /// per fold step.
+    ///
+    /// Slice arguments are expected to be exactly 8 `UInt32<F>` words each
+    /// (32-byte hash, little-endian word order). `block_height_var` is the
+    /// step's height variable; the inner body uses it only as input to
+    /// `era_emission_cap`.
+    ///
+    /// All Phase 1-5 invariants enforced by `generate_constraints` are also
+    /// enforced here — the two paths produce identical constraint systems
+    /// modulo the 4 public-input allocations (≈ 256 + 1 constraints).
+    pub fn generate_constraints_inner(
+        &self,
+        cs: ConstraintSystemRef<F>,
+        state_root_prev: &[UInt32<F>],
+        state_root_next: &[UInt32<F>],
+        block_header_hash: &[UInt32<F>],
+        block_height_var: &FpVar<F>,
+    ) -> Result<(), SynthesisError> {
+        debug_assert_eq!(state_root_prev.len(), 8);
+        debug_assert_eq!(state_root_next.len(), 8);
+        debug_assert_eq!(block_header_hash.len(), 8);
 
         // Empty-subtree hashes are public constants — derived from BLAKE3 and
         // the SMT tag bytes (`smt_leaf_v2`, `smt_node_v2`). The host computes
@@ -322,7 +368,10 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for DeltaBlockCircuit<F> {
         // iteration starts at `state_root_prev`. The last must equal
         // `state_root_next` (enforced after the coinbase).
 
-        let mut running_root = state_root_prev.clone();
+        // We carry a working copy of the input slice. UInt32<F>: Clone, so
+        // to_vec() produces an owned Vec whose individual word handles still
+        // reference the same constrained wires as the caller's slice.
+        let mut running_root: Vec<UInt32<F>> = state_root_prev.to_vec();
 
         for (tx_idx, tx) in self.inputs.transactions.iter().enumerate() {
             // ──── Phase 3a: Dilithium5 signature verification (1C — wired stub) ──
@@ -470,7 +519,7 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for DeltaBlockCircuit<F> {
 
         // Era-step emission cap: coinbase.amount ≤ era_emission_cap(block_height).
         // Use is_cmp(amount, cap+1, Less, false) which returns true iff amount ≤ cap.
-        let cap = era_emission_cap(cs.clone(), &block_height_var)?;
+        let cap = era_emission_cap(cs.clone(), block_height_var)?;
         let cap_plus_one = &cap + FpVar::Constant(F::one());
         let cap_ok = coinbase_amount_fp
             .is_cmp(&cap_plus_one, core::cmp::Ordering::Less, false)?;
@@ -923,6 +972,137 @@ mod tests {
             cs.num_instance_variables(),
             26,
             "Expected 26 instance variables (1 implicit + 24 root u32 words + 1 height)"
+        );
+    }
+
+    /// Companion to `delta_circuit_public_input_count_is_26`: the inner
+    /// method MUST NOT allocate any public inputs of its own. Only the
+    /// implicit `one` remains. The caller (Nova step-circuit wrapper) is
+    /// responsible for supplying pre-allocated handles.
+    #[test]
+    fn delta_circuit_inner_allocates_zero_public_inputs() {
+        use ark_r1cs_std::alloc::AllocVar;
+        let g = genesis_root();
+        let inputs = DeltaBlockInputs {
+            state_root_prev: g,
+            state_root_next: g,
+            block_header_hash: zero_header_hash(),
+            block_height: 1,
+            block_header_bytes: vec![0u8; 64],
+            transactions: Vec::new(),
+            coinbase: no_op_coinbase(),
+            anchor: empty_anchor(),
+        };
+        let circuit = DeltaBlockCircuit { inputs };
+        let cs = ConstraintSystem::<Fr>::new_ref();
+
+        // Allocate the four canonical handles as WITNESSES (not inputs) so
+        // they don't appear in the instance variable count. This mirrors
+        // what the Nova step circuit will do with its z_in / z_out chain.
+        let alloc_root = |bytes: &[u8; 32]| -> Vec<UInt32<Fr>> {
+            bytes
+                .chunks(4)
+                .map(|c| {
+                    let w = u32::from_le_bytes(c.try_into().unwrap());
+                    UInt32::new_witness(cs.clone(), || Ok(w)).unwrap()
+                })
+                .collect()
+        };
+        let state_root_prev = alloc_root(&circuit.inputs.state_root_prev);
+        let state_root_next = alloc_root(&circuit.inputs.state_root_next);
+        let block_header_hash = alloc_root(&circuit.inputs.block_header_hash);
+        let block_height_var =
+            FpVar::<Fr>::new_witness(cs.clone(), || Ok(Fr::from(circuit.inputs.block_height)))
+                .unwrap();
+
+        circuit
+            .generate_constraints_inner(
+                cs.clone(),
+                &state_root_prev,
+                &state_root_next,
+                &block_header_hash,
+                &block_height_var,
+            )
+            .unwrap();
+
+        assert_eq!(
+            cs.num_instance_variables(),
+            1,
+            "inner method must not allocate public inputs (only implicit `one` should remain)"
+        );
+        assert!(
+            cs.is_satisfied().unwrap(),
+            "inner method must produce a satisfiable constraint system on a valid witness"
+        );
+    }
+
+    /// The outer ConstraintSynthesizer impl is a thin wrapper that allocates
+    /// the four publics and then dispatches to the inner method. This test
+    /// pins the constraint-count delta to exactly the cost of those four
+    /// allocations (24 UInt32 inputs + 1 FpVar input). If a future change
+    /// drifts the inner body, the outer count will drift correspondingly,
+    /// and this test will catch any asymmetry.
+    #[test]
+    fn delta_circuit_outer_inner_constraint_count_match() {
+        use ark_r1cs_std::alloc::AllocVar;
+        let g = genesis_root();
+        let build_inputs = || DeltaBlockInputs {
+            state_root_prev: g,
+            state_root_next: g,
+            block_header_hash: zero_header_hash(),
+            block_height: 1,
+            block_header_bytes: vec![0u8; 64],
+            transactions: Vec::new(),
+            coinbase: no_op_coinbase(),
+            anchor: empty_anchor(),
+        };
+
+        // Outer path
+        let circuit_outer = DeltaBlockCircuit { inputs: build_inputs() };
+        let cs_outer = ConstraintSystem::<Fr>::new_ref();
+        circuit_outer.generate_constraints(cs_outer.clone()).unwrap();
+        let outer_constraints = cs_outer.num_constraints();
+
+        // Inner path with the four publics allocated as witnesses by the caller
+        let circuit_inner = DeltaBlockCircuit { inputs: build_inputs() };
+        let cs_inner = ConstraintSystem::<Fr>::new_ref();
+        let alloc_root = |bytes: &[u8; 32]| -> Vec<UInt32<Fr>> {
+            bytes
+                .chunks(4)
+                .map(|c| {
+                    let w = u32::from_le_bytes(c.try_into().unwrap());
+                    UInt32::new_witness(cs_inner.clone(), || Ok(w)).unwrap()
+                })
+                .collect()
+        };
+        let state_root_prev = alloc_root(&circuit_inner.inputs.state_root_prev);
+        let state_root_next = alloc_root(&circuit_inner.inputs.state_root_next);
+        let block_header_hash = alloc_root(&circuit_inner.inputs.block_header_hash);
+        let block_height_var =
+            FpVar::<Fr>::new_witness(cs_inner.clone(), || Ok(Fr::from(circuit_inner.inputs.block_height)))
+                .unwrap();
+        circuit_inner
+            .generate_constraints_inner(
+                cs_inner.clone(),
+                &state_root_prev,
+                &state_root_next,
+                &block_header_hash,
+                &block_height_var,
+            )
+            .unwrap();
+        let inner_constraints = cs_inner.num_constraints();
+
+        // Inner + outer should differ ONLY by the constraint cost of moving
+        // 24 u32 words + 1 FpVar from witness allocation to input allocation.
+        // In arkworks 0.4, that's the same r1cs cost (alloc_var is the same
+        // routine modulo where the variable lives), so the counts should be
+        // IDENTICAL. If this drifts, something nontrivial changed and we
+        // want CI to flag it.
+        assert_eq!(
+            outer_constraints, inner_constraints,
+            "Outer and inner constraint counts must match. \
+             Outer (with public inputs): {}. Inner (witness inputs): {}.",
+            outer_constraints, inner_constraints
         );
     }
 }
