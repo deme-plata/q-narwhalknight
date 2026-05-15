@@ -5599,6 +5599,15 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         state.libp2p_peer_count = Some(peer_count.clone());
         info!("📊 Atomic peer count integrated into AppState");
     }
+    // v10.9.27: Wire NetworkMetrics from UnifiedNetworkManager into AppState
+    // so the /metrics HTTP handler can read it. Mutates state pre-Arc.
+    if let Some(ref libp2p) = state.libp2p_discovery {
+        if let Ok(mgr) = libp2p.try_lock() {
+            state.network_metrics = Some(mgr.metrics.clone());
+            info!("📊 [METRICS] NetworkMetrics wired into AppState — /metrics endpoint live");
+        }
+    }
+
     // v1.0.2: Wire P2P outbound bandwidth counter to network manager
     if let Some(ref libp2p) = state.libp2p_discovery {
         if let Ok(mut mgr) = libp2p.try_lock() {
@@ -25206,6 +25215,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/health", get(handlers::health_check))
         .route("/api/v1/health", get(handlers::health_check))
         .route("/api/v1/health/simple", get(handlers::health_check_simple))
+        // v10.9.27: Prometheus-format /metrics — the diagnostic endpoint for
+        // "why doesn't sync work" questions. See handlers::metrics_endpoint
+        // for the full list of emitted families. No auth — metrics are
+        // non-sensitive (peer counts, height, byte totals).
+        .route("/metrics", get(handlers::metrics_endpoint))
         .route("/startup-progress", get(handlers::startup_progress)) // v1.4.15-beta: Startup progress for UI
         .route("/api/v1/startup-progress", get(handlers::startup_progress))
         .route("/version", get(handlers::version_info)) // v0.9.58-beta: Binary version info

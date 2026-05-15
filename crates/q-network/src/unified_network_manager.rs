@@ -1327,6 +1327,12 @@ pub struct UnifiedNetworkManager {
     /// dropped by `OutboundFailure` cleanup, or the 30s safety timeout fires).
     /// This guarantees the permit is reclaimed even if the peer never replies.
     pub client_block_pack_semaphores: Arc<DashMap<PeerId, Arc<tokio::sync::Semaphore>>>,
+    /// v10.9.27: Prometheus-format network observability. Owns the shared
+    /// Registry; libp2p built-in metrics record into it from the swarm event
+    /// loop, app-level counters (connection state, dial outcomes, throttle
+    /// events, height progress) update from various event handlers, and the
+    /// HTTP layer serializes the whole thing as text on /metrics scrapes.
+    pub metrics: Arc<crate::NetworkMetrics>,
     /// v1.3.3-beta: Tor-enabled flag for adaptive timeouts and batch sizes
     /// Set during initialization based on Q_TOR_ENABLED, Q_TOR_PROXY, or SOCKS5 proxy detection
     tor_enabled: bool,
@@ -2625,6 +2631,7 @@ impl UnifiedNetworkManager {
             block_pack_extra_semaphore: Arc::new(tokio::sync::Semaphore::new(BLOCK_PACK_EXTRA_PERMITS)), // adaptive: only acquired when fully synced
             is_synced_state: Arc::new(std::sync::atomic::AtomicBool::new(false)), // adaptive: default conservative (no extras until wired)
             client_block_pack_semaphores: Arc::new(DashMap::new()), // v10.9.27: per-peer client-side block-pack inflight cap
+            metrics: Arc::new(crate::NetworkMetrics::new()), // v10.9.27: Prometheus metrics registry — served on /metrics
             // v1.3.3-beta: Tor-aware adaptive batch sizes and retry logic
             tor_enabled,
             // v1.3.3-beta: Exponential backoff retry queue for failed sync requests
@@ -3098,6 +3105,17 @@ impl UnifiedNetworkManager {
                     // 🚨 v1.0.20-beta: CRITICAL - Log EVERY SwarmEvent to catch silent failures
                     debug!("🔍 [SWARM EVENT] {:?}", event);
 
+                    // v10.9.27: Feed every SwarmEvent into libp2p's built-in
+                    // Prometheus metrics. This populates: connection
+                    // established/closed counters, ping RTT histogram,
+                    // gossipsub mesh state, request-response counters,
+                    // Kademlia query stats, identify exchange counts —
+                    // all curl-able from /metrics.
+                    {
+                        use libp2p::metrics::Recorder;
+                        self.metrics.libp2p_metrics.record(&event);
+                    }
+
                     match event {
                     SwarmEvent::Behaviour(behaviour_event) => {
                         self.handle_behaviour_event(behaviour_event).await?;
@@ -3111,6 +3129,15 @@ impl UnifiedNetworkManager {
                         num_established,
                         ..
                     } => {
+                    // v10.9.27: keep qnk_peers_connected gauge in sync with libp2p's view.
+                    self.metrics.peers_connected.set(num_established.get() as i64);
+                    {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        self.metrics.peer_last_seen_secs.insert(peer_id, now);
+                    }
                     info!("🌐 [LIBP2P CONNECTION] ==========================================");
                     info!("✅ [CONNECTION] Successfully connected to peer: {}", peer_id);
                     info!("📍 [CONNECTION] Endpoint: {:?}", endpoint);
@@ -3207,7 +3234,7 @@ impl UnifiedNetworkManager {
                         info!("🔐 [CONSENSUS] Peer will participate in Bracha's protocol voting");
                         info!("🌐 [LIBP2P CONNECTION COMPLETE] ==========================================\n");
                     }
-                    SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                    SwarmEvent::ConnectionClosed { peer_id, cause, num_established, endpoint, .. } => {
                         // Remove peer from discovered set
                         let mut peers = self.discovered_peers.write().await;
                         peers.remove(&peer_id);
@@ -3217,7 +3244,35 @@ impl UnifiedNetworkManager {
                         // Update atomic counter
                         self.connected_peer_count.store(peer_count, std::sync::atomic::Ordering::SeqCst);
 
-                        info!("👋 [DISCONNECTION] Connection closed with peer: {} (remaining peers: {})", peer_id, peer_count);
+                        // v10.9.27 Step 6: connection-close diagnostic. The
+                        // disconnect cause is logged at WARN so it surfaces
+                        // through Epsilon's default journalctl filter (which
+                        // is set to warn-or-higher). We suppress noise when
+                        // the close is graceful AND we still have other
+                        // connections to the same peer (multi-transport
+                        // redundancy, num_established > 0).
+                        let cause_label = match &cause {
+                            None => "graceful".to_string(),
+                            Some(e) => format!("{}", e)
+                                .chars()
+                                .take(80)
+                                .collect::<String>(),
+                        };
+                        // Update qnk_peers_connected gauge from the global view
+                        // (peer_count is across ALL peers, not just this one).
+                        self.metrics.peers_connected.set(peer_count as i64);
+                        if !(cause.is_none() && num_established > 0) {
+                            warn!(
+                                "👋 [DISCONNECT] peer={} cause={} remaining={} endpoint={:?}",
+                                peer_id, cause_label, peer_count, endpoint
+                            );
+                        } else {
+                            // graceful, still have other transports to same peer-id
+                            info!(
+                                "👋 [DISCONNECT-redundant] peer={} (still {} other transport(s) open)",
+                                peer_id, num_established
+                            );
+                        }
 
                         // v10.1.5: Clean up QKD session for disconnected peer
                         self.qkd_session_manager.remove_session(&peer_id.to_string());

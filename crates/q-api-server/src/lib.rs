@@ -1185,6 +1185,12 @@ pub struct AppState {
     // Atomic peer count for fast lock-free access
     pub libp2p_peer_count: Option<Arc<std::sync::atomic::AtomicUsize>>,
 
+    // v10.9.27: Comprehensive network metrics — Prometheus-format /metrics
+    // endpoint. Some(...) once UnifiedNetworkManager has been constructed
+    // (it owns the Registry). The handler at handlers::metrics_endpoint
+    // clones this Arc and serializes on each scrape.
+    pub network_metrics: Option<Arc<q_network::NetworkMetrics>>,
+
     // v9.0.6: EMA-smoothed Decentralization Index (f64 bits stored as AtomicU64)
     pub di_ema: Arc<std::sync::atomic::AtomicU64>,
 
@@ -2844,6 +2850,7 @@ impl AppState {
             libp2p_command_tx: None, // Disabled in test mode
             libp2p_peer_info: Arc::new(RwLock::new((String::new(), vec![]))), // Empty initially
             libp2p_peer_count: None, // Disabled in test mode
+            network_metrics: None, // v10.9.27: wired in main.rs after UnifiedNetworkManager init
             di_ema: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v9.0.6: DI EMA smoothing
             node_signing_key: Arc::new(ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng)), // 💱 v0.6.1-beta: DEX pool signing key
             node_cypher: Arc::new(q_eternal_cypher::NodeCypher::from_ed25519_key(ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng))), // v7.2.12: test dummy
@@ -4233,6 +4240,7 @@ impl AppState {
 
             // Atomic peer count (will be populated from network manager)
             libp2p_peer_count: None, // Will be initialized in main.rs after network manager creation
+            network_metrics: None, // v10.9.27: wired in main.rs once UnifiedNetworkManager is built
             di_ema: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v9.0.6: DI EMA smoothing
             node_signing_key: Arc::new(ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng)), // 💱 v0.6.1-beta: DEX pool signing key (will be replaced in main.rs)
             node_cypher: Arc::new(q_eternal_cypher::NodeCypher::from_ed25519_key(ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng))), // v7.2.12: placeholder, replaced in main.rs

@@ -24,13 +24,22 @@ q-quantum-crypto = { path = "../q-quantum-crypto" }
 libp2p = { version = "0.56", features = [
     "noise", "yamux", "tcp", "gossipsub", "identify", "ping", "kad", "upnp",
     "macros", "tokio", "request-response",
-    "autonat",           # 🔥 Detect if node is dialable
-    "relay",             # 🔥 Be reachable via relay nodes
-    "dcutr",             # 🔥 Hole-punching for direct connections
-    "quic",              # 🔥 QUIC transport for better NAT traversal
-    "dns",               # 🔥 DNS resolution for bootstrap nodes
-    "websocket",         # 🌐 WebSocket transport for browser clients
+    "autonat",                    # 🔥 Detect if node is dialable
+    "relay",                      # 🔥 Be reachable via relay nodes
+    "dcutr",                      # 🔥 Hole-punching for direct connections
+    "quic",                       # 🔥 QUIC transport for better NAT traversal
+    "dns",                        # 🔥 DNS resolution for bootstrap nodes
+    "websocket",                  # 🌐 WebSocket transport for browser clients
+    "memory-connection-limits",   # v10.9.27: OOM-safety — refuse new conns under mem pressure
+    "metrics",                    # v10.9.27: Prometheus-format /metrics endpoint
 ] }
+
+# v10.9.27: Prometheus metrics registry — exposes the libp2p-metrics output
+# alongside our own app-level counters (peer state, dial outcomes, throttle
+# events, height progress, chunk in-flight). Same crate libp2p re-exports for
+# its Metrics struct so all data lives in one Registry that we serialize as
+# `text` format on the /metrics HTTP endpoint.
+prometheus-client = "0.22"
 libp2p-websocket = "0.45" # 🌐 WebSocket transport for browser connections
 # 🌐 v2.0.0: WebRTC-Direct transport for true browser P2P (optional)
 libp2p-webrtc = { version = "0.9.0-alpha.1", features = ["tokio"], optional = true }

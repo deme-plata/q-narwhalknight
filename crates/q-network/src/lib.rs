@@ -33,6 +33,13 @@ pub mod unified_network_manager;
 pub mod libp2p_bridge;
 pub mod dag_sync_adapter; // 🚀 v1.0.4-beta: Phase 2 DAG-Aware Sync network adapter
 
+// v10.9.27: Prometheus-format network observability — wraps the libp2p built-in
+// metrics module plus our own app-level counters (peer state, dial outcomes,
+// throttle events, height progress, chunk in-flight, process RSS / FDs / DB).
+// Served on /metrics HTTP endpoint; see docs/network-metrics-guide.md
+pub mod metrics;
+pub use metrics::{NetworkMetrics, BootstrapDialLabels, BlockPackLabels, ChunkRetryLabels, TopicLabels};
+
 // Resonance consensus protocol (Phase 3: String-theoretic consensus)
 #[cfg(feature = "resonance")]
 pub mod resonance_protocol;

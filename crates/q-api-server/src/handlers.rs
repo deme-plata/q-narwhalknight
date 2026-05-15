@@ -418,6 +418,70 @@ pub async fn health_check_simple() -> Result<Json<ApiResponse<String>>, StatusCo
     Ok(Json(ApiResponse::success("OK".to_string())))
 }
 
+/// v10.9.27: Prometheus-format `/metrics` endpoint.
+///
+/// Returns the full network observability snapshot in OpenMetrics text
+/// format. This is the diagnostic endpoint for "why doesn't sync work"
+/// questions — no Prometheus server required, just `curl` and `grep`.
+///
+/// Headline metrics emitted (full list in `crates/q-network/src/metrics.rs`):
+///   - `qnk_peers_connected` — currently established peer count
+///   - `qnk_peers_in_gossipsub_mesh{topic="..."}` — per-topic mesh size
+///   - `qnk_bootstrap_dial_total{result="success|failure", cause="..."}`
+///   - `qnk_block_pack_request_total{direction="in|out", result="..."}`
+///   - `qnk_block_pack_response_bytes` (histogram)
+///   - `qnk_block_pack_response_duration_seconds` (histogram)
+///   - `qnk_client_throttle_total` — Step 1+2 client semaphore throttles
+///   - `qnk_chunk_retry_total{reason="throttle|timeout|transport|other"}`
+///   - `qnk_chunks_in_flight` — outstanding block-pack requests
+///   - `qnk_local_height`, `qnk_network_max_height`, `qnk_gap_to_tip`
+///   - `qnk_process_rss_bytes`, `qnk_db_size_bytes`, `qnk_open_file_descriptors`
+///   - All `libp2p_*` built-ins: swarm conn lifecycle (by close cause!),
+///     gossipsub mesh state, request-response counters, ping RTT, identify
+///     exchange counters, Kademlia query stats
+///
+/// Auth: NONE. Metrics are non-sensitive (peer counts, height, byte totals)
+/// and operators / monitoring tools need them unauthenticated. If we ever
+/// add per-peer labels with potentially-identifying info, gate then.
+pub async fn metrics_endpoint(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<crate::AppState>>,
+) -> axum::response::Response {
+    use axum::http::header;
+    use axum::response::IntoResponse;
+
+    let metrics_arc = match state.network_metrics.as_ref() {
+        Some(m) => m.clone(),
+        None => {
+            // Metrics not initialized yet (very early in startup, or
+            // network manager construction failed). Emit a placeholder
+            // valid OpenMetrics doc so scrapers don't crash.
+            let body = "# HELP qnk_metrics_ready 1 once NetworkMetrics is wired into AppState.\n\
+                        # TYPE qnk_metrics_ready gauge\n\
+                        qnk_metrics_ready 0\n\
+                        # EOF\n";
+            return ([(header::CONTENT_TYPE,
+                      "application/openmetrics-text; version=1.0.0; charset=utf-8")],
+                    body.to_string()).into_response();
+        }
+    };
+
+    // Refresh resource gauges from /proc on each scrape.
+    let db_path = std::env::var("Q_DB_PATH").ok();
+    metrics_arc.refresh_process_stats(db_path.as_ref().map(std::path::Path::new));
+
+    match metrics_arc.encode_text() {
+        Ok(body) => (
+            [(header::CONTENT_TYPE,
+              "application/openmetrics-text; version=1.0.0; charset=utf-8")],
+            body,
+        ).into_response(),
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("encode error: {}", e),
+        ).into_response(),
+    }
+}
+
 /// SYNC-006 admin reset endpoint (v1.0.2).
 /// POST /api/v1/admin/reset-balance-replay
 /// Clears the `meta:balance_replay_v10.7.8` flag in CF_MANIFEST so SYNC-006 will
