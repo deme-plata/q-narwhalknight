@@ -2384,9 +2384,14 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 } else { hex.to_string() }
             })
             .unwrap_or_else(|| "(none — admin panel disabled)".to_string());
-        let network = matches.get_one::<String>("network")
-            .cloned()
-            .or_else(|| std::env::var("Q_NETWORK_ID").ok())
+        // v10.9.27 (Step 5): env-first to match the actual network resolution
+        // at line ~2557. Previously this used CLI-first which would show the
+        // clap default ("testnet") in the banner even when Q_NETWORK_ID in
+        // /.env resolved to something different (e.g., "mainnet-genesis"),
+        // misleading the operator. The actual network used at runtime was
+        // already env-first per the Phase-8 priority fix (memory.md).
+        let network = std::env::var("Q_NETWORK_ID").ok()
+            .or_else(|| matches.get_one::<String>("network").cloned())
             .unwrap_or_else(|| "testnet (default)".to_string());
         let db_path = std::env::var("Q_DB_PATH").unwrap_or_else(|_| "./data (default)".to_string());
 
@@ -2549,6 +2554,55 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         error!("❌ Configuration validation failed: {}", e);
         error!("❌ Please fix your configuration and try again");
         std::process::exit(1);
+    }
+
+    // v10.9.27 (Step 3): empty-DB auto-defaults — "works out of the box"
+    //
+    // Fresh nodes today require the operator to set Q_GENESIS_SYNC_ONLY=1 and
+    // Q_SKIP_CHECKPOINT=1 to avoid the gravity-assist scheduler dispatching
+    // chunks millions of blocks ahead of the local tip. We detect a fresh node
+    // (no existing DB directory or empty dir without RocksDB markers) and
+    // auto-set those env vars BEFORE the chunk scheduler reads them.
+    //
+    // Production restart safety: this runs AFTER an existing-DB check, so a
+    // restart of Beta/Gamma/Delta/Epsilon (which all have CURRENT files in their
+    // db dirs) takes the early-return branch and never touches env state. If
+    // the operator has explicitly set either env var (to ANY value including
+    // "0" or empty), we also skip — explicit operator intent always wins.
+    {
+        let db_path_str = std::env::var("Q_DB_PATH").unwrap_or_else(|_| "./data-mainnet-genesis".to_string());
+        let db_path = std::path::Path::new(&db_path_str);
+        let already_set = std::env::var("Q_GENESIS_SYNC_ONLY").is_ok()
+            || std::env::var("Q_SKIP_CHECKPOINT").is_ok();
+
+        let is_fresh = if !already_set {
+            // Fresh = path missing OR exists but contains no RocksDB CURRENT
+            // marker (RocksDB writes this on first put; its absence is a
+            // reliable "this DB has never been written to" signal).
+            if !db_path.exists() {
+                true
+            } else if db_path.is_dir() {
+                let current_marker = db_path.join("CURRENT");
+                !current_marker.exists()
+            } else {
+                // db_path exists but is not a directory — operator config bug.
+                // Don't auto-default; let the storage layer fail loudly.
+                false
+            }
+        } else {
+            false
+        };
+
+        if is_fresh {
+            std::env::set_var("Q_GENESIS_SYNC_ONLY", "1");
+            std::env::set_var("Q_SKIP_CHECKPOINT", "1");
+            warn!(
+                "🌱 [AUTO-GENESIS v10.9.27] Fresh-node detected at {} (no RocksDB CURRENT). \
+                 Auto-enabled Q_GENESIS_SYNC_ONLY=1 and Q_SKIP_CHECKPOINT=1 for a clean \
+                 genesis sync. To override, set either env var explicitly before launch.",
+                db_path_str
+            );
+        }
     }
 
     // Parse network configuration (testnet/mainnet)
