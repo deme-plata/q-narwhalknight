@@ -39,7 +39,7 @@ libp2p = { version = "0.56", features = [
 # events, height progress, chunk in-flight). Same crate libp2p re-exports for
 # its Metrics struct so all data lives in one Registry that we serialize as
 # `text` format on the /metrics HTTP endpoint.
-prometheus-client = "0.22"
+prometheus-client = "0.23"  # MUST match libp2p-metrics 0.17.0's version (0.23.1) — bumping creates Registry-type mismatch
 libp2p-websocket = "0.45" # 🌐 WebSocket transport for browser connections
 # 🌐 v2.0.0: WebRTC-Direct transport for true browser P2P (optional)
 libp2p-webrtc = { version = "0.9.0-alpha.1", features = ["tokio"], optional = true }
