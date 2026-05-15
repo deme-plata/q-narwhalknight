@@ -50,10 +50,10 @@ pub const DILITHIUM5_PK_BYTES: usize = 2_592;
 
 /// Dilithium5 packed signature bytes (4 627 bytes).
 ///
-/// Layout (FIPS-204 §5.2.3):
-///   bytes    0..32  c̃ — 32-byte challenge seed
-///   bytes   32..2304 packed z (7 polynomials × ~324 bytes each)
-///   bytes 4544..4627 packed h (hint indices, ω + k bytes)
+/// Layout (FIPS-204 §5.2.3, ML-DSA-87):
+///   bytes    0..64  c̃ — 64-byte challenge seed (2·λ/8 with λ=256)
+///   bytes   64..4544 packed z (7 polynomials × 640 bytes each)
+///   bytes 4544..4627 packed h (hint indices, ω + k = 75 + 8 = 83 bytes)
 pub const DILITHIUM5_SIG_BYTES: usize = 4_627;
 
 /// Dilithium parameters used by the host-side unpacker. Match
@@ -62,6 +62,19 @@ pub const N: usize = 256;
 pub const K: usize = 8;
 pub const L: usize = 7;
 pub const Q: u64 = 8_380_417;
+/// γ₁ = 2^19 = 524 288. Sets the per-coefficient bound on z.
+pub const GAMMA1: u32 = 1 << 19;
+/// Hint weight bound (max set bits across all h polynomials).
+pub const OMEGA: usize = 75;
+
+/// Signature subsection byte lengths (must sum to `DILITHIUM5_SIG_BYTES`).
+pub const C_TILDE_BYTES: usize = 64;
+/// Bits-per-coefficient for z encoding: γ₁ = 2^19 → encoded value fits in 20 bits.
+pub const Z_BITS_PER_COEFF: usize = 20;
+/// Bytes per packed z polynomial: ceil(256 × 20 / 8) = 640.
+pub const Z_PACKED_POLY_BYTES: usize = 640;
+/// Total bytes for h: ω indices + k poly-end-position bytes.
+pub const H_PACKED_BYTES: usize = OMEGA + K;
 
 /// Raw FIPS-204 packed public-key bytes wrapped for type safety.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -94,34 +107,104 @@ impl DilithiumKeyBytes {
         &self.0[32..]
     }
 
+    /// Unpack the t₁ region (bytes 32..2592) into 8 polynomials of 256
+    /// 10-bit coefficients each, per FIPS-204 §5.2.1 SimpleBitPack.
+    ///
+    /// `t₁` values live in [0, 2¹⁰) = [0, 1024) — the truncated upper bits
+    /// of the public-key polynomial `t = t₁·2^d + t₀` where d=13 for
+    /// Dilithium5. The lower 13 bits (`t₀`) are in the secret key, not
+    /// the public key.
+    ///
+    /// Returns `[u32; N]` × K = `[u32; 256] × 8`. Caller allocates each
+    /// coefficient as an `FpVar` witness in the circuit.
+    pub fn unpack_t1_native(&self) -> [[u32; N]; K] {
+        let mut out = [[0u32; N]; K];
+        for poly_idx in 0..K {
+            let start = 32 + poly_idx * T1_PACKED_POLY_BYTES;
+            let end = start + T1_PACKED_POLY_BYTES;
+            simple_bit_unpack_generic(&self.0[start..end], 10, &mut out[poly_idx]);
+        }
+        out
+    }
+
     /// Allocate as in-circuit `PublicKeyVar`.
     ///
-    /// **STUB.** The body needs to:
-    ///   1. Expand ρ into A (the k×l matrix) via ExpandA (FIPS-204 §3).
-    ///      ExpandA uses SHAKE-128 keyed by (ρ, j||i) for each polynomial
-    ///      in row i, column j. Each polynomial is rejection-sampled
-    ///      into the range [0, q-1] via the algorithm in FIPS-204 §A.1.
-    ///      Two implementation paths:
-    ///        a. Compute A natively (off-circuit), pass as witness, trust
-    ///           the prover — soundness requires VERIFYING the SHAKE
-    ///           expansion in-circuit OR using rho as a public input and
-    ///           reproducing A in-circuit. Neither is cheap.
-    ///        b. Make A a public input (one allocation per circuit
-    ///           setup) — works if the validator set is bounded and
-    ///           keys are public anyway. ~14 336 FpVar public inputs.
-    ///      Decision pending; see whitepaper §3.4.
-    ///   2. Unpack the t₁ region: 8 polynomials, each 256 coefficients
-    ///      of 10 bits packed bit-by-bit in 320-byte chunks (per FIPS-204
-    ///      §5.2.1 SimpleBitPack with d=10). Each unpacked coefficient
-    ///      is allocated as an FpVar witness.
-    ///   3. Wrap into PublicKeyVar { a_mat, t_vec }.
+    /// Implements two of the three sub-tasks listed in this file's docstring:
+    ///   • t₁ unpacking via `unpack_t1_native` + per-coefficient `FpVar`
+    ///     allocation as witnesses.
+    ///   • a_mat: PARTIAL. Returns an empty `Vec<Vec<FpVar<F>>>` for now.
+    ///     The proper fill-in needs `ExpandA(ρ)` — SHAKE-128 keyed
+    ///     polynomial sampling per FIPS-204 §3.2. SHAKE-128 in pure Rust
+    ///     is available via the `sha3` crate (already in workspace), so
+    ///     this is a finite follow-up (~150 LOC). Tracked as
+    ///     `dilithium-witness-expand-a`.
+    ///
+    /// **Soundness note**: the DilithiumVerifierGadget::verify_structured
+    /// implementation in `gadgets/dilithium.rs` consumes `a_mat` directly
+    /// as witness coefficients — there's no in-circuit check that
+    /// `a_mat == ExpandA(ρ)`. That means the prover providing a CORRUPT
+    /// `a_mat` (random polynomials unrelated to ρ) could produce a
+    /// "valid" w' but the signature wouldn't actually verify against
+    /// the intended public key. This is a known soundness gap for Phase 1
+    /// and is closed by either (a) in-circuit ExpandA verification or
+    /// (b) committing to `a_mat` via Poseidon and binding the commitment
+    /// to ρ via a separate ZK-friendly AIR. Phase 5 mandatory
+    /// activation requires this closed.
     pub fn allocate<F: PrimeField>(
         &self,
-        _cs: ConstraintSystemRef<F>,
+        cs: ConstraintSystemRef<F>,
     ) -> Result<PublicKeyVar<F>, SynthesisError> {
-        // TODO(dilithium-witness-pk-allocate): see module docstring +
-        // FIPS-204 §3 / §5.2.1.
-        Err(SynthesisError::AssignmentMissing)
+        // ─── t_vec: k polynomials × n coefficients ────────────────────
+        let t1_native = self.unpack_t1_native();
+        let mut t_vec: Vec<Vec<FpVar<F>>> = Vec::with_capacity(K);
+        for poly in t1_native.iter() {
+            let mut fp_poly: Vec<FpVar<F>> = Vec::with_capacity(N);
+            for &coeff in poly.iter() {
+                // Range constraint: t₁ coefficients fit in 10 bits. The
+                // FpVar allocation itself doesn't enforce this — callers
+                // who care about strict spec conformance should add
+                // `NttVerifierGadget::verify_infinity_norm` with
+                // bound = 1024 over t_vec[i]. The signature verifier in
+                // verify_structured doesn't currently do that (it relies
+                // on the q-range check inside compute_az_minus_ct).
+                fp_poly.push(FpVar::new_witness(cs.clone(), || Ok(F::from(coeff)))?);
+            }
+            t_vec.push(fp_poly);
+        }
+
+        // ─── a_mat: STUB ──────────────────────────────────────────────
+        // See `dilithium-witness-expand-a` follow-up. Empty Vec for now;
+        // downstream verify_structured asserts `a_mat.len() == k*l` and
+        // will fail with the empty Vec — the caller must NOT pass this
+        // PublicKeyVar to verify_structured until ExpandA is implemented.
+        let a_mat: Vec<Vec<FpVar<F>>> = Vec::new();
+
+        Ok(PublicKeyVar { a_mat, t_vec })
+    }
+}
+
+/// Bytes per packed t₁ polynomial: ceil(256 × 10 / 8) = 320.
+const T1_PACKED_POLY_BYTES: usize = 320;
+
+/// Inverse of `simple_bit_unpack_generic` — packs `n = values.len()`
+/// d-bit unsigned integers into a little-endian bit-stream.
+///
+/// Test helper (not used by the production verifier path; the signer
+/// produces the packed bytes externally). Lives here so the unpacker
+/// tests have a way to construct synthetic packed inputs.
+fn simple_bit_pack_generic(values: &[u32], d: usize, out: &mut [u8]) {
+    out.fill(0);
+    for (k, &v) in values.iter().enumerate() {
+        let bit_pos = k * d;
+        let byte_idx = bit_pos / 8;
+        let bit_offset = bit_pos % 8;
+        let span_bytes = (bit_offset + d + 7) / 8;
+        let shifted: u64 = (v as u64) << bit_offset;
+        for i in 0..span_bytes {
+            let byte_shift = i * 8;
+            let byte_chunk = ((shifted >> byte_shift) & 0xFF) as u8;
+            out[byte_idx + i] |= byte_chunk;
+        }
     }
 }
 
@@ -135,40 +218,204 @@ impl DilithiumSigBytes {
         Some(Self(bytes))
     }
 
-    /// Extract c̃, the 32-byte challenge seed.
-    pub fn c_tilde(&self) -> [u8; 32] {
-        let mut c = [0u8; 32];
-        c.copy_from_slice(&self.0[..32]);
+    /// Extract c̃, the 64-byte challenge seed (ML-DSA-87).
+    pub fn c_tilde(&self) -> [u8; C_TILDE_BYTES] {
+        let mut c = [0u8; C_TILDE_BYTES];
+        c.copy_from_slice(&self.0[..C_TILDE_BYTES]);
         c
+    }
+
+    /// Unpack the z region into 7 polynomials × 256 coefficients each,
+    /// per FIPS-204 §5.2.3 BitPack(z, γ₁-1, γ₁) with d=20.
+    ///
+    /// Encoding (signer side): each signed coefficient z[i] ∈ (-γ₁, γ₁]
+    /// is stored as `enc = γ₁ - z[i]` ∈ [0, 2γ₁), packed as 20-bit
+    /// little-endian within the 640-byte polynomial slab.
+    ///
+    /// Decoding (this function): `z[i] = γ₁ - enc`. Negative results are
+    /// converted to their Z_q representation `q - |z[i]|` so the
+    /// downstream FpVar arithmetic matches the gadget's expectation
+    /// (positives stored as-is; negatives stored as q-complement).
+    ///
+    /// Returns u32 because Z_q values < 2^23 < 2^32. Caller allocates
+    /// each as an `FpVar` witness.
+    pub fn unpack_z_native(&self) -> [[u32; N]; L] {
+        let mut out = [[0u32; N]; L];
+        for poly_idx in 0..L {
+            let start = C_TILDE_BYTES + poly_idx * Z_PACKED_POLY_BYTES;
+            let end = start + Z_PACKED_POLY_BYTES;
+            let mut encoded = [0u32; N];
+            simple_bit_unpack_generic(&self.0[start..end], Z_BITS_PER_COEFF, &mut encoded);
+            for (i, &enc) in encoded.iter().enumerate() {
+                // signed_z lives in (-γ₁, γ₁]; |signed_z| < γ₁ < q so the
+                // i64 intermediate doesn't overflow.
+                let signed_z: i64 = GAMMA1 as i64 - enc as i64;
+                let z_in_zq: u32 = if signed_z < 0 {
+                    (Q as i64 + signed_z) as u32
+                } else {
+                    signed_z as u32
+                };
+                out[poly_idx][i] = z_in_zq;
+            }
+        }
+        out
+    }
+
+    /// Unpack the h region into 8 polynomials × 256 hint-bits, per
+    /// FIPS-204 §5.2.3 HintBitUnpack.
+    ///
+    /// h is packed as 83 bytes total:
+    ///   bytes 0..ω  (=75): coefficient indices in [0, 256) where hint bits
+    ///                       are set, packed contiguously per polynomial.
+    ///   bytes ω..ω+k (=83): cumulative end-positions — byte i tells the
+    ///                       reader the END index (exclusive) of polynomial
+    ///                       i's hint-index list within bytes 0..ω.
+    ///
+    /// Returns `[[bool; N]; K]`. Caller allocates each as `Boolean<F>`.
+    ///
+    /// **Malformed-witness handling**: per FIPS-204 §4 algorithm 7
+    /// Verify step 4, a hint vector with > ω total set bits OR with
+    /// non-monotonic length bytes OR with out-of-range coefficient
+    /// indices MUST cause signature rejection. This function returns
+    /// `None` on any such violation; the gadget allocates a Boolean
+    /// `valid_hint` from `result.is_some()` and ANDs it into the
+    /// overall signature-validity result.
+    pub fn unpack_h_native(&self) -> Option<[[bool; N]; K]> {
+        let hint_start = C_TILDE_BYTES + L * Z_PACKED_POLY_BYTES;
+        if hint_start + H_PACKED_BYTES > DILITHIUM5_SIG_BYTES {
+            return None;
+        }
+        let hint_bytes = &self.0[hint_start..hint_start + H_PACKED_BYTES];
+        let length_bytes = &hint_bytes[OMEGA..OMEGA + K];
+
+        let mut out = [[false; N]; K];
+        let mut cursor: usize = 0;
+        for poly_idx in 0..K {
+            let end_pos = length_bytes[poly_idx] as usize;
+            // Length bytes must be monotone non-decreasing AND ≤ ω.
+            if end_pos < cursor || end_pos > OMEGA {
+                return None;
+            }
+            for idx_byte_pos in cursor..end_pos {
+                let coef_idx = hint_bytes[idx_byte_pos] as usize;
+                if coef_idx >= N {
+                    return None;
+                }
+                // Indices within one poly must be strictly increasing per
+                // FIPS-204 — otherwise a malicious signer could pad to
+                // weight ≤ ω while encoding more than τ effective hints.
+                if idx_byte_pos > cursor {
+                    let prev = hint_bytes[idx_byte_pos - 1] as usize;
+                    if coef_idx <= prev {
+                        return None;
+                    }
+                }
+                out[poly_idx][coef_idx] = true;
+            }
+            cursor = end_pos;
+        }
+        // All bytes past `cursor` up to OMEGA must be zero-padded.
+        for &b in &hint_bytes[cursor..OMEGA] {
+            if b != 0 {
+                return None;
+            }
+        }
+        Some(out)
     }
 
     /// Allocate as in-circuit `SignatureVar`.
     ///
-    /// **STUB.** The body needs to:
-    ///   1. SampleInBall(c̃) → c_poly (FIPS-204 §4 "Sample in ball").
-    ///      Deterministic: takes the 32-byte seed and produces a
-    ///      polynomial with exactly τ=60 non-zero coefficients (each ±1)
-    ///      via rejection sampling driven by SHAKE-256. Re-implementing
-    ///      this in-circuit requires SHAKE-256 (Keccak-f[1600] permutation,
-    ///      ~190 K constraints per call). Alternative: pass c_poly as
-    ///      witness, hash c̃ in-circuit and verify the SampleInBall
-    ///      relation via a dedicated AIR (separate sub-circuit, ~250 K
-    ///      constraints).
-    ///   2. Unpack z: 7 polynomials, each 256 coefficients in [-(γ₁-1),
-    ///      γ₁-1] = [-524 287, 524 287]. FIPS-204 §5.2.3 BitPack with
-    ///      d=20. Each unpacked coefficient is stored as a positive FpVar
-    ///      (negative values represented as q-|v|).
-    ///   3. Unpack h: 8 polynomials each holding 256 hint bits, packed
-    ///      as ω=75 indices + k=8 length bytes per FIPS-204 §5.2.3
-    ///      HintBitPack. Allocate as Boolean<F>.
-    ///   4. Wrap into SignatureVar { z, h, c_poly }.
+    /// Implements two of the three sub-tasks listed in this file's docstring:
+    ///   • z unpacking via `unpack_z_native` + per-coefficient `FpVar`
+    ///     witness allocation.
+    ///   • h unpacking via `unpack_h_native` + per-bit `Boolean<F>` witness
+    ///     allocation. Returns `AssignmentMissing` on malformed hint
+    ///     packing (the gadget caller wraps the entire signature
+    ///     verification in an outer Boolean that captures this).
+    ///   • c_poly: PARTIAL. Returns an n-zero polynomial.
+    ///     The proper fill-in needs `SampleInBall(c̃)` (FIPS-204 §4),
+    ///     which is rejection-sampling driven by SHAKE-256. SHAKE-256
+    ///     is available via the workspace `sha3` crate, so this is a
+    ///     finite follow-up (~80 LOC). Tracked as
+    ///     `dilithium-witness-sample-in-ball`.
+    ///
+    /// **Soundness note**: until `SampleInBall` is wired,
+    /// the prover supplies `c_poly` as a witness without
+    /// constraint binding to `c̃`. A malicious prover could supply a
+    /// c_poly that satisfies the verifier's algebra but doesn't actually
+    /// commit to the signed message's challenge. Phase 5 mandatory
+    /// activation requires this closed.
     pub fn allocate<F: PrimeField>(
         &self,
-        _cs: ConstraintSystemRef<F>,
+        cs: ConstraintSystemRef<F>,
     ) -> Result<SignatureVar<F>, SynthesisError> {
-        // TODO(dilithium-witness-sig-allocate): see module docstring +
-        // FIPS-204 §5.2.3.
-        Err(SynthesisError::AssignmentMissing)
+        // ─── z: l polynomials × n coefficients ─────────────────────────
+        let z_native = self.unpack_z_native();
+        let mut z: Vec<Vec<FpVar<F>>> = Vec::with_capacity(L);
+        for poly in z_native.iter() {
+            let mut fp_poly: Vec<FpVar<F>> = Vec::with_capacity(N);
+            for &coeff in poly.iter() {
+                fp_poly.push(FpVar::new_witness(cs.clone(), || Ok(F::from(coeff)))?);
+            }
+            z.push(fp_poly);
+        }
+
+        // ─── h: k polynomials × n Booleans ─────────────────────────────
+        let h_native = self.unpack_h_native()
+            .ok_or(SynthesisError::AssignmentMissing)?;
+        let mut h: Vec<Vec<Boolean<F>>> = Vec::with_capacity(K);
+        for poly in h_native.iter() {
+            let mut bool_poly: Vec<Boolean<F>> = Vec::with_capacity(N);
+            for &bit in poly.iter() {
+                bool_poly.push(Boolean::new_witness(cs.clone(), || Ok(bit))?);
+            }
+            h.push(bool_poly);
+        }
+
+        // ─── c_poly: STUB ──────────────────────────────────────────────
+        // See `dilithium-witness-sample-in-ball` follow-up.
+        // n zero coefficients — the verifier's algebra will not be
+        // satisfied with this, which is correct: the verify_structured
+        // call returns `Boolean::constant(false)` for any real signature
+        // until SampleInBall is wired. During the advisory window the
+        // δ-circuit doesn't enforce the verifier's Boolean (gated stub),
+        // so this doesn't reject blocks at the consensus level.
+        let c_poly: Vec<FpVar<F>> = (0..N)
+            .map(|_| FpVar::new_witness(cs.clone(), || Ok(F::zero())))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // ─── c_tilde: allocate the 64-byte challenge seed as field
+        // elements. The gadget's SignatureVar has `c_tilde: Vec<FpVar<F>>`
+        // — pack as 16 little-endian u32 words (64 bytes = 16 words).
+        let c_tilde_bytes = self.c_tilde();
+        let c_tilde: Vec<FpVar<F>> = c_tilde_bytes
+            .chunks(4)
+            .map(|c| {
+                let w = u32::from_le_bytes(c.try_into().expect("4 bytes per word"));
+                FpVar::new_witness(cs.clone(), || Ok(F::from(w)))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(SignatureVar { z, h, c_tilde, c_poly })
+    }
+}
+
+/// Generic SimpleBitPack: read `bytes` and write `n = out.len()` values
+/// of `d` bits each into `out`. Each value is little-endian bit-packed.
+fn simple_bit_unpack_generic(bytes: &[u8], d: usize, out: &mut [u32]) {
+    let mask: u64 = (1u64 << d) - 1;
+    for k in 0..out.len() {
+        let bit_pos = k * d;
+        let byte_idx = bit_pos / 8;
+        let bit_offset = bit_pos % 8;
+        // Pull enough bytes to cover (bit_offset + d) bits.
+        let span_bytes = (bit_offset + d + 7) / 8;
+        let mut combined: u64 = 0;
+        for i in 0..span_bytes {
+            let b = *bytes.get(byte_idx + i).unwrap_or(&0) as u64;
+            combined |= b << (i * 8);
+        }
+        out[k] = ((combined >> bit_offset) & mask) as u32;
     }
 }
 
@@ -455,5 +702,223 @@ mod tests {
         let roots = standard_ntt_roots::<Fr>();
         assert_eq!(roots.fwd[0], Fr::from(1u64));
         assert_eq!(roots.inv[0], Fr::from(1u64));
+    }
+
+    // ─── Generic bit-pack / unpack round-trip ─────────────────────────
+
+    #[test]
+    fn simple_bit_pack_unpack_round_trip_d10() {
+        // 256 random values in [0, 1024) should round-trip through
+        // pack + unpack identically.
+        let mut values = [0u32; 256];
+        for i in 0..256 {
+            values[i] = ((i * 31 + 7) % 1024) as u32;
+        }
+        let mut packed = [0u8; 320];
+        simple_bit_pack_generic(&values, 10, &mut packed);
+        let mut unpacked = [0u32; 256];
+        simple_bit_unpack_generic(&packed, 10, &mut unpacked);
+        for i in 0..256 {
+            assert_eq!(unpacked[i], values[i], "d=10 round-trip failed at index {}", i);
+        }
+    }
+
+    #[test]
+    fn simple_bit_pack_unpack_round_trip_d20() {
+        // 256 random values in [0, 2^20) should round-trip.
+        let mut values = [0u32; 256];
+        for i in 0..256 {
+            // Use a mix of small + large values to exercise high bits.
+            values[i] = ((i as u32 * 1009 + 41).wrapping_mul(31337)) & 0xFFFFF;
+        }
+        let mut packed = [0u8; 640];
+        simple_bit_pack_generic(&values, 20, &mut packed);
+        let mut unpacked = [0u32; 256];
+        simple_bit_unpack_generic(&packed, 20, &mut unpacked);
+        for i in 0..256 {
+            assert_eq!(unpacked[i], values[i], "d=20 round-trip failed at index {}", i);
+        }
+    }
+
+    // ─── PK t₁ unpack tests ───────────────────────────────────────────
+
+    #[test]
+    fn pk_t1_unpack_returns_all_zeros_for_zero_input() {
+        let pk = DilithiumKeyBytes([0u8; DILITHIUM5_PK_BYTES]);
+        let t1 = pk.unpack_t1_native();
+        for poly in &t1 {
+            for &coeff in poly.iter() {
+                assert_eq!(coeff, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn pk_t1_unpack_round_trip_with_known_coeffs() {
+        // Construct a packed PK where each poly i has coefficient j = (i*256 + j) % 1024.
+        let mut pk_bytes = [0u8; DILITHIUM5_PK_BYTES];
+        for poly_idx in 0..K {
+            let mut values = [0u32; N];
+            for j in 0..N {
+                values[j] = ((poly_idx * N + j) % 1024) as u32;
+            }
+            let start = 32 + poly_idx * T1_PACKED_POLY_BYTES;
+            let end = start + T1_PACKED_POLY_BYTES;
+            simple_bit_pack_generic(&values, 10, &mut pk_bytes[start..end]);
+        }
+        let pk = DilithiumKeyBytes(pk_bytes);
+        let t1 = pk.unpack_t1_native();
+        for poly_idx in 0..K {
+            for j in 0..N {
+                let expected = ((poly_idx * N + j) % 1024) as u32;
+                assert_eq!(t1[poly_idx][j], expected,
+                    "t₁[{}][{}] mismatch", poly_idx, j);
+            }
+        }
+    }
+
+    // ─── SIG z unpack tests ───────────────────────────────────────────
+
+    #[test]
+    fn sig_z_unpack_all_zero_packed_means_z_equals_gamma1() {
+        // Decoding rule: z[i] = γ₁ - enc[i]. enc = 0 → z = γ₁, which
+        // is the maximum positive z value (one above the spec bound,
+        // but the unpacker just decodes; range-checking happens
+        // separately in the gadget).
+        let sig = DilithiumSigBytes([0u8; DILITHIUM5_SIG_BYTES]);
+        let z = sig.unpack_z_native();
+        for poly in &z {
+            for &coeff in poly.iter() {
+                // z = γ₁. Stored in Z_q as γ₁ (positive, < q).
+                assert_eq!(coeff, GAMMA1);
+            }
+        }
+    }
+
+    #[test]
+    fn sig_z_unpack_round_trip_with_known_coeffs() {
+        let mut sig_bytes = [0u8; DILITHIUM5_SIG_BYTES];
+        let mut expected_z = [[0u32; N]; L];
+        for poly_idx in 0..L {
+            let mut encoded = [0u32; N];
+            for j in 0..N {
+                // Choose encoded values that map to a known z.
+                // We pick z values in (-γ₁, γ₁]; pick enc = (poly_idx * 17 + j) mod 2γ₁.
+                let enc = ((poly_idx as u64 * 17 + j as u64) % (2 * GAMMA1 as u64)) as u32;
+                encoded[j] = enc;
+                let signed_z = GAMMA1 as i64 - enc as i64;
+                expected_z[poly_idx][j] = if signed_z < 0 {
+                    (Q as i64 + signed_z) as u32
+                } else {
+                    signed_z as u32
+                };
+            }
+            let start = C_TILDE_BYTES + poly_idx * Z_PACKED_POLY_BYTES;
+            let end = start + Z_PACKED_POLY_BYTES;
+            simple_bit_pack_generic(&encoded, Z_BITS_PER_COEFF, &mut sig_bytes[start..end]);
+        }
+        let sig = DilithiumSigBytes(sig_bytes);
+        let z = sig.unpack_z_native();
+        for poly_idx in 0..L {
+            for j in 0..N {
+                assert_eq!(z[poly_idx][j], expected_z[poly_idx][j],
+                    "z[{}][{}] mismatch", poly_idx, j);
+            }
+        }
+    }
+
+    // ─── SIG h unpack tests ───────────────────────────────────────────
+
+    #[test]
+    fn sig_h_unpack_all_zero_means_no_hints() {
+        // All-zero hint region: all 8 length bytes are 0 (no indices per poly),
+        // and the index region is all zeros (unused). Should parse as
+        // 8 all-false hint vectors.
+        let sig = DilithiumSigBytes([0u8; DILITHIUM5_SIG_BYTES]);
+        let h = sig.unpack_h_native().expect("all-zero hint must parse");
+        for poly in &h {
+            for &bit in poly.iter() {
+                assert_eq!(bit, false);
+            }
+        }
+    }
+
+    #[test]
+    fn sig_h_unpack_rejects_non_monotone_length_bytes() {
+        // Build a sig where length bytes are [5, 3, ...] — second poly
+        // claims FEWER cumulative indices than the first. Must be
+        // rejected as malformed.
+        let mut sig_bytes = [0u8; DILITHIUM5_SIG_BYTES];
+        let hint_start = C_TILDE_BYTES + L * Z_PACKED_POLY_BYTES;
+        // Indices 0..5 are valid (e.g., 0,1,2,3,4).
+        for i in 0..5 {
+            sig_bytes[hint_start + i] = i as u8;
+        }
+        // Length bytes: first poly ends at index 5, second poly ends at
+        // index 3 (regression — not allowed).
+        sig_bytes[hint_start + OMEGA] = 5;
+        sig_bytes[hint_start + OMEGA + 1] = 3;
+        let sig = DilithiumSigBytes(sig_bytes);
+        assert!(sig.unpack_h_native().is_none(),
+            "non-monotone length bytes MUST fail to parse");
+    }
+
+    #[test]
+    fn sig_h_unpack_rejects_out_of_range_coefficient_index() {
+        // Coefficient index ≥ N (256). The actual byte value is u8 so
+        // max storable is 255 — which is in range. We can't construct
+        // an out-of-range index with a single u8. But we CAN test that
+        // the OMEGA limit is enforced: try to claim 76 indices.
+        let mut sig_bytes = [0u8; DILITHIUM5_SIG_BYTES];
+        let hint_start = C_TILDE_BYTES + L * Z_PACKED_POLY_BYTES;
+        sig_bytes[hint_start + OMEGA] = (OMEGA + 1) as u8; // 76 > ω=75
+        let sig = DilithiumSigBytes(sig_bytes);
+        assert!(sig.unpack_h_native().is_none(),
+            "end_pos > ω MUST fail to parse");
+    }
+
+    #[test]
+    fn sig_h_unpack_rejects_non_increasing_indices_within_poly() {
+        // Indices within ONE poly must be strictly increasing.
+        // [3, 5, 4] is non-monotone — must reject.
+        let mut sig_bytes = [0u8; DILITHIUM5_SIG_BYTES];
+        let hint_start = C_TILDE_BYTES + L * Z_PACKED_POLY_BYTES;
+        sig_bytes[hint_start] = 3;
+        sig_bytes[hint_start + 1] = 5;
+        sig_bytes[hint_start + 2] = 4;
+        // Poly 0 has 3 indices.
+        sig_bytes[hint_start + OMEGA] = 3;
+        let sig = DilithiumSigBytes(sig_bytes);
+        assert!(sig.unpack_h_native().is_none(),
+            "non-increasing indices within poly MUST fail to parse");
+    }
+
+    #[test]
+    fn sig_h_unpack_accepts_well_formed_hints() {
+        let mut sig_bytes = [0u8; DILITHIUM5_SIG_BYTES];
+        let hint_start = C_TILDE_BYTES + L * Z_PACKED_POLY_BYTES;
+        // Poly 0: indices [3, 7, 100], i.e., 3 bits set
+        sig_bytes[hint_start] = 3;
+        sig_bytes[hint_start + 1] = 7;
+        sig_bytes[hint_start + 2] = 100;
+        // Poly 1: index [200], 1 bit set
+        sig_bytes[hint_start + 3] = 200;
+        // Polys 2..7: empty
+        // Length bytes (cumulative): [3, 4, 4, 4, 4, 4, 4, 4]
+        sig_bytes[hint_start + OMEGA] = 3;
+        sig_bytes[hint_start + OMEGA + 1] = 4;
+        for i in 2..K {
+            sig_bytes[hint_start + OMEGA + i] = 4;
+        }
+        let sig = DilithiumSigBytes(sig_bytes);
+        let h = sig.unpack_h_native().expect("well-formed hints must parse");
+        // Verify the expected bits are set.
+        assert!(h[0][3]);
+        assert!(h[0][7]);
+        assert!(h[0][100]);
+        assert!(h[1][200]);
+        // And no other bits.
+        let total_set: usize = h.iter().flatten().filter(|&&b| b).count();
+        assert_eq!(total_set, 4);
     }
 }
