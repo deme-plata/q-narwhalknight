@@ -808,6 +808,46 @@ impl QStorage {
         storage.height_cache.update(initial_height).await;
         info!("✅ Height cache initialized with height {} (one-time DB scan)", initial_height);
 
+        // v10.9.23: Heal `qblock:latest` if it lags the actual contiguous tip.
+        //
+        // SYMPTOM this fixes: after a checkpoint snapshot apply (which writes
+        // blocks at heights ~16.5M directly into CF_BLOCKS but never advances
+        // qblock:latest from 0), turbo sync builds its next request range from
+        // `qblock:latest = 0` and ends up asking for `range: 0-0` (i.e. one
+        // block at height 0, which no peer has). Sync wedges; node looks
+        // ready but never advances. With the v1.0.2 pointer-cap "Option A"
+        // active, the pointer can never self-heal forward from 0 because the
+        // walk starts at `current_pointer + 1 = 1` and finds nothing.
+        //
+        // FIX: at startup, after we know the real highest contiguous block,
+        // bump qblock:latest up to match if it's behind. This is safe because
+        // `initial_height` came from `scan_highest_contiguous_block_internal`
+        // — it's guaranteed contiguous from genesis (or from the checkpoint
+        // floor) up to that value.
+        if initial_height > 0 {
+            let current_pointer: u64 = match storage.hot_db.get(CF_BLOCKS, b"qblock:latest").await? {
+                Some(bytes) if bytes.len() == 8 => {
+                    u64::from_be_bytes(bytes[..8].try_into().unwrap_or([0u8; 8]))
+                }
+                _ => 0,
+            };
+            if current_pointer < initial_height {
+                let height_bytes = initial_height.to_be_bytes();
+                if let Err(e) = storage.hot_db.put_sync(CF_BLOCKS, b"qblock:latest", &height_bytes).await {
+                    warn!(
+                        "⚠️ [POINTER-HEAL] Failed to heal qblock:latest {} → {}: {} (sync may stall)",
+                        current_pointer, initial_height, e
+                    );
+                } else {
+                    warn!(
+                        "🔧 [POINTER-HEAL] qblock:latest healed {} → {} (matches scan_highest_contiguous). \
+                         This unsticks turbo-sync request building after a checkpoint apply.",
+                        current_pointer, initial_height
+                    );
+                }
+            }
+        }
+
         // v10.2.8: Scan for corrupt blocks near the recovered tip (kill -9 fix)
         // Must run HERE (not in recover()) because recover() gets height 0 from empty cache.
         // scan_highest_contiguous_block_internal() is the real height discovery.

@@ -1125,13 +1125,31 @@ async fn update_tui_metrics(
     let readiness_contiguous = app_state
         .contiguous_height_atomic
         .load(std::sync::atomic::Ordering::Relaxed);
-    let readiness_archive_complete = readiness_contiguous >= readiness_tip && readiness_tip > 0;
+    // v10.9.23: include peer-announced max height when deciding whether the
+    // chain is fully archived. Without this, a node that only knows its own
+    // local height (e.g. fresh sync, peer height proofs not yet flowing)
+    // sees `readiness_tip == readiness_contiguous` and flips to
+    // ArchiveComplete at e.g. height 21,000 even though peers are at 18M.
+    // The user-visible bug: "I synced 21k blocks then nothing happens".
+    //
+    // Real tip = max of (local current_height, peer-max-height). If both
+    // are 0 (no peers + no blocks), we stay in Bootstrapping. If only
+    // local is non-zero AND we have no peer-height-proof evidence, we err
+    // on the side of NOT declaring ArchiveComplete — operators can read
+    // the actual `connected_peers` field separately.
+    let readiness_peer_max = app_state
+        .highest_network_height
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let readiness_real_tip = readiness_tip.max(readiness_peer_max);
+    let readiness_archive_complete = readiness_real_tip > 0
+        && readiness_contiguous >= readiness_real_tip
+        && readiness_peer_max > 0; // require at least one peer-height-proof seen
     let readiness_checkpoint_applied = app_state.storage_engine.is_checkpoint_applied().await;
     let computed_readiness_mode = if readiness_archive_complete {
         q_tui::metrics::ReadinessMode::ArchiveComplete
     } else if readiness_checkpoint_applied {
         q_tui::metrics::ReadinessMode::CheckpointTrust
-    } else if readiness_tip > 0 && readiness_contiguous < 100 {
+    } else if readiness_real_tip > 0 && readiness_contiguous < 100 {
         q_tui::metrics::ReadinessMode::GenesisSync
     } else {
         q_tui::metrics::ReadinessMode::Bootstrapping
