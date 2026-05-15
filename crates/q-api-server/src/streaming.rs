@@ -665,9 +665,24 @@ impl EventBroadcaster {
     }
 }
 
-/// SSE endpoint for real-time event streaming with privacy filtering
+/// SSE endpoint for real-time event streaming with privacy filtering.
+///
 /// Usage: GET /api/v1/events?wallet_address=<address>&headers_only=true&miner_mode=true
-/// Requires: X-Wallet-Auth header for authentication (optional but recommended)
+///
+/// v11.0.0 PRIVACY HARDENING:
+/// - **No wallet filter** → subscriber receives **public events only**
+///   (NodeStatusUpdate, BlockFinalized, NewBlock, MetricsUpdate, TokenPriceUpdate,
+///    LiquidityPoolUpdate, NitroBoostsUpdate, ServerVersion, StateSyncComplete).
+///   Previously this returned ALL events (broadcast leak — anyone reading any wallet's
+///   BalanceUpdated/MiningReward/EmailReceived/etc.).
+/// - **Email and Calendar events** are dropped from per-wallet SSE streams because the
+///   StreamEvent schema currently lacks an owner-address field that would let the server
+///   filter them. Frontends that rely on Email/Calendar SSE must wait for the schema to
+///   carry the owner address (see TODO in is_event_relevant).
+///
+/// TODO(privacy v11.1.0): require X-Wallet-Auth (or `?auth=...` query token for browser
+/// EventSource compat) when `?wallet_address=` is present, so a subscriber can only
+/// filter to a wallet whose ownership they've proven.
 ///
 /// v1.0.2 Bandwidth optimizations:
 /// - `?headers_only=true` — NewBlock events send compact headers (~100 bytes vs ~2-5KB)
@@ -701,7 +716,7 @@ pub async fn sse_events(
             hex::encode(&wallet_hash.as_bytes()[..8])
         );
     } else {
-        warn!("⚠️ SSE connection without wallet filter - will receive all events (privacy risk)");
+        debug!("SSE connection without wallet filter — public events only (v11.0.0 hardening)");
     }
 
     // Create a manual stream that keeps the receiver alive
@@ -716,9 +731,21 @@ pub async fn sse_events(
 
     // Helper function to check if event is relevant to the wallet
     let is_event_relevant = move |event: &StreamEvent, filter: &Option<String>| -> bool {
-        // If no filter specified, allow all events (backward compatibility, but not recommended)
+        // v11.0.0 PRIVACY: No filter → only public-by-nature events. Previously returned
+        // true for all events, which exposed every wallet's BalanceUpdated, MiningReward,
+        // EmailReceived, etc. to any unfiltered subscriber.
         let Some(wallet_addr) = filter else {
-            return true;
+            return matches!(event,
+                StreamEvent::NodeStatusUpdate { .. }
+                | StreamEvent::BlockFinalized { .. }
+                | StreamEvent::NewBlock { .. }
+                | StreamEvent::MetricsUpdate { .. }
+                | StreamEvent::TokenPriceUpdate { .. }
+                | StreamEvent::LiquidityPoolUpdate { .. }
+                | StreamEvent::NitroBoostsUpdate { .. }
+                | StreamEvent::ServerVersion { .. }
+                | StreamEvent::StateSyncComplete { .. }
+            );
         };
 
         // Normalize wallet address (remove "qnk" prefix if present)
@@ -834,15 +861,22 @@ pub async fn sse_events(
             | StreamEvent::ServerVersion { .. }
             | StreamEvent::StateSyncComplete { .. } => true,
 
-            // v7.3.2: Email events - send to all connected clients (filtered by wallet on frontend)
+            // v11.0.0 PRIVACY: Email and Calendar StreamEvent variants currently lack an
+            // owner-address field in their schema (see definitions at L427–479), so the
+            // server cannot match them to a per-subscriber filter. Dropping them closes
+            // the broadcast-to-all leak (previously: `=> true` shipped every user's email
+            // and calendar events to every SSE subscriber, with only frontend-side filter).
+            //
+            // TODO(privacy): add `owner_address: String` to EmailReceived, EmailSent,
+            // EmailUnreadCount, CalendarEventCreated, CalendarReminder,
+            // ScheduledTransactionExecuted. Update emit sites (email_api.rs:905 et al.)
+            // and the calendar emit sites. Then filter by `owner_address == normalized_filter`.
             StreamEvent::EmailReceived { .. }
             | StreamEvent::EmailSent { .. }
-            | StreamEvent::EmailUnreadCount { .. } => true,
-
-            // v7.3.3: Calendar events - send to all connected clients (filtered by wallet on frontend)
-            StreamEvent::CalendarEventCreated { .. }
+            | StreamEvent::EmailUnreadCount { .. }
+            | StreamEvent::CalendarEventCreated { .. }
             | StreamEvent::CalendarReminder { .. }
-            | StreamEvent::ScheduledTransactionExecuted { .. } => true,
+            | StreamEvent::ScheduledTransactionExecuted { .. } => false,
 
             // v10.2.9: Token balance updates (QUGUSD, custom tokens) — filter by wallet address
             StreamEvent::TokenBalanceUpdated { ref wallet_address, .. } => {
