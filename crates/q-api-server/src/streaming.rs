@@ -6,7 +6,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
-    http::header,
+    http::{header, StatusCode},
     response::{
         sse::{Event, Sse},
         Response,
@@ -24,6 +24,7 @@ use tracing::{debug, error, info, trace, warn};
 
 use axum::extract::Query;
 use crate::AppState;
+use crate::wallet_auth::AuthenticatedWallet;
 
 /// v1.0.2: SSE query parameters for bandwidth optimization
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -669,20 +670,26 @@ impl EventBroadcaster {
 ///
 /// Usage: GET /api/v1/events?wallet_address=<address>&headers_only=true&miner_mode=true
 ///
-/// v11.0.0 PRIVACY HARDENING:
+/// v11.0.0 / v11.1.0 PRIVACY HARDENING:
 /// - **No wallet filter** → subscriber receives **public events only**
 ///   (NodeStatusUpdate, BlockFinalized, NewBlock, MetricsUpdate, TokenPriceUpdate,
 ///    LiquidityPoolUpdate, NitroBoostsUpdate, ServerVersion, StateSyncComplete).
 ///   Previously this returned ALL events (broadcast leak — anyone reading any wallet's
 ///   BalanceUpdated/MiningReward/EmailReceived/etc.).
+/// - **`?wallet_address=W` requires X-Wallet-Auth proving ownership of W.** On mismatch
+///   or missing header, the request is rejected with HTTP 401 (v11.1.1 hardening — was
+///   previously a silent downgrade to the public stream, which masked auth failures
+///   from browser clients).
+///   Bad signatures are also rejected by the AuthenticatedWallet extractor (HTTP 401).
 /// - **Email and Calendar events** are dropped from per-wallet SSE streams because the
 ///   StreamEvent schema currently lacks an owner-address field that would let the server
 ///   filter them. Frontends that rely on Email/Calendar SSE must wait for the schema to
 ///   carry the owner address (see TODO in is_event_relevant).
 ///
-/// TODO(privacy v11.1.0): require X-Wallet-Auth (or `?auth=...` query token for browser
-/// EventSource compat) when `?wallet_address=` is present, so a subscriber can only
-/// filter to a wallet whose ownership they've proven.
+/// TODO(privacy): browser EventSource cannot send custom headers. For browser frontends,
+/// add a `?auth=<base64url(auth_blob)>` query-parameter path that reuses the same payload
+/// the X-Wallet-Auth header carries. Until that lands, browser clients should subscribe
+/// via fetch+ReadableStream (or a polyfill) so they can attach the header.
 ///
 /// v1.0.2 Bandwidth optimizations:
 /// - `?headers_only=true` — NewBlock events send compact headers (~100 bytes vs ~2-5KB)
@@ -695,7 +702,8 @@ pub async fn sse_events(
     State(state): State<Arc<AppState>>,
     user_agent: Option<TypedHeader<headers::UserAgent>>,
     Query(params): Query<SseQueryParams>,
-) -> Sse<impl tokio_stream::Stream<Item = Result<Event, axum::Error>>> {
+    auth_wallet: Option<AuthenticatedWallet>,
+) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, axum::Error>>>, (StatusCode, &'static str)> {
     let user_agent_str = user_agent
         .as_ref()
         .map(|ua| ua.as_str())
@@ -703,9 +711,44 @@ pub async fn sse_events(
     info!("New SSE client connected: {} (headers_only={}, miner_mode={})", user_agent_str, params.headers_only, params.miner_mode);
 
     // Extract wallet_address filter parameter (optional)
-    let wallet_filter = params.wallet_address.clone();
+    let requested_filter = params.wallet_address.clone();
     let headers_only = params.headers_only;
     let miner_mode = params.miner_mode;
+
+    // v11.1.1 PRIVACY: REQUIRE X-Wallet-Auth for any ?wallet_address= filter.
+    // Earlier versions silently downgraded missing/mismatched auth to a public stream,
+    // which let browser clients silently lose wallet-specific events without knowing
+    // why. v11.1.1 returns 401 instead — explicit failure beats invisible degradation.
+    // Unfiltered public streams still work without auth.
+    let wallet_filter: Option<String> = match (requested_filter.as_ref(), auth_wallet.as_ref()) {
+        (Some(filter), Some(auth)) => {
+            let hex_part = filter.strip_prefix("qnk").unwrap_or(filter.as_str());
+            let matches = hex_part.len() == 64
+                && hex::decode(hex_part)
+                    .ok()
+                    .filter(|b| b.len() == 32)
+                    .map(|b| {
+                        let mut arr = [0u8; 32];
+                        arr.copy_from_slice(&b);
+                        arr == auth.address
+                    })
+                    .unwrap_or(false);
+            if matches {
+                requested_filter.clone()
+            } else {
+                warn!("🔒 SSE: wallet_filter does not match authenticated wallet — rejecting with 401");
+                return Err((StatusCode::UNAUTHORIZED, "wallet_address does not match X-Wallet-Auth"));
+            }
+        }
+        (Some(_filter), None) => {
+            warn!(
+                "🔒 SSE: wallet_filter requested without X-Wallet-Auth — rejecting with 401 \
+                 (v11.1.1 hardening; supply X-Wallet-Auth header to receive wallet-specific events)"
+            );
+            return Err((StatusCode::UNAUTHORIZED, "X-Wallet-Auth required for wallet_address filter"));
+        }
+        (None, _) => None,
+    };
 
     if let Some(ref wallet) = wallet_filter {
         // 🔒 PRIVACY: Hash wallet address for logging
@@ -1080,11 +1123,11 @@ pub async fn sse_events(
         },
     );
 
-    Sse::new(stream).keep_alive(
+    Ok(Sse::new(stream).keep_alive(
         axum::response::sse::KeepAlive::new()
             .interval(std::time::Duration::from_secs(15))
             .text("keep-alive"),
-    )
+    ))
 }
 
 /// v1.0.2: Delta-compressed WebSocket endpoint for bandwidth-efficient streaming
