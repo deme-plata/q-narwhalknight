@@ -46,6 +46,8 @@
 use ark_ff::PrimeField;
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::prelude::Boolean;
+#[cfg(test)]
+use ark_r1cs_std::R1CSVar;
 use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
 
 /// NTT modulus and dimension for the anchor-election polynomial.

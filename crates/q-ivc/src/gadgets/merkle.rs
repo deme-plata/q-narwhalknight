@@ -174,9 +174,16 @@ impl MerklePathGadget {
         }
 
         // Pack 64 bytes into 16 little-endian u32 words.
+        // ark-r1cs-std 0.4 has no `UInt32::from_bytes_le`; we go via bits.
         let msg: Vec<UInt32<F>> = msg_bytes
             .chunks(4)
-            .map(|c| UInt32::from_bytes_le(c))
+            .map(|c| -> Result<UInt32<F>, SynthesisError> {
+                let mut bits = Vec::with_capacity(32);
+                for byte in c {
+                    bits.extend_from_slice(&byte.to_bits_le()?);
+                }
+                Ok(UInt32::from_bits_le(&bits))
+            })
             .collect::<Result<Vec<_>, _>>()?;
 
         // Single-block compression with the SINGLE-block flag combo.
@@ -578,15 +585,26 @@ pub fn smt_node_hash_two_block<F: PrimeField>(
 
     // bytes[11..43] — left (32 bytes). Each u32 word is decomposed to
     // 4 little-endian bytes per BLAKE3's word-to-byte convention.
+    // ark-r1cs-std 0.4: go via bits since UInt32 has no direct to_bytes_le.
+    let word_to_4_bytes = |word: &UInt32<F>| -> Result<[UInt8<F>; 4], SynthesisError> {
+        let bits = word.to_bits_le();
+        debug_assert_eq!(bits.len(), 32);
+        Ok([
+            UInt8::from_bits_le(&bits[0..8]),
+            UInt8::from_bits_le(&bits[8..16]),
+            UInt8::from_bits_le(&bits[16..24]),
+            UInt8::from_bits_le(&bits[24..32]),
+        ])
+    };
     for word in left {
-        for byte in word.to_bytes_le()? {
+        for byte in word_to_4_bytes(word)? {
             bytes.push(byte);
         }
     }
 
     // bytes[43..75] — right (32 bytes).
     for word in right {
-        for byte in word.to_bytes_le()? {
+        for byte in word_to_4_bytes(word)? {
             bytes.push(byte);
         }
     }
@@ -601,10 +619,17 @@ pub fn smt_node_hash_two_block<F: PrimeField>(
     }
 
     // Pack into u32 little-endian words: 16 words per 64-byte block.
+    // arkworks 0.4 has no UInt32::from_bytes_le; concat the bits of 4 bytes.
     let pack = |chunk: &[UInt8<F>]| -> Result<Vec<UInt32<F>>, SynthesisError> {
         chunk
             .chunks(4)
-            .map(|c| UInt32::from_bytes_le(c))
+            .map(|c| -> Result<UInt32<F>, SynthesisError> {
+                let mut bits = Vec::with_capacity(32);
+                for byte in c {
+                    bits.extend_from_slice(&byte.to_bits_le()?);
+                }
+                Ok(UInt32::from_bits_le(&bits))
+            })
             .collect()
     };
 
