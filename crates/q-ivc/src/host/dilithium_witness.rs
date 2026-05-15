@@ -203,7 +203,8 @@ impl DilithiumKeyBytes {
 const T1_PACKED_POLY_BYTES: usize = 320;
 
 /// Native (off-circuit) implementation of FIPS-204 §3.2 Algorithm 8
-/// "ExpandA". Given a 32-byte seed ρ, produces the public-key matrix
+/// "ExpandA" (Algorithm 4 RejBoundedPoly per the August 2024 final
+/// version). Given a 32-byte seed ρ, produces the public-key matrix
 /// A — k × l = 56 polynomials of 256 coefficients each in [0, q).
 ///
 /// **Output domain**: NTT-domain coefficients per FIPS-204. The reference
@@ -213,7 +214,11 @@ const T1_PACKED_POLY_BYTES: usize = 320;
 /// caveat.
 ///
 /// Algorithm per polynomial (rows×cols indexed (i,j)):
-///   1. SHAKE-128 seeded with ρ ∥ IntegerToBytes(j, 1) ∥ IntegerToBytes(i, 1)
+///   1. SHAKE-128 seeded with **ρ ∥ IntegerToBytes(i, 1) ∥ IntegerToBytes(j, 1)**
+///      — row index first, then column. (Caught in DeepSeek peer review
+///      2026-05-15; previous version had columns first, which would have
+///      silently bypassed advisory-mode validation but broken the future
+///      in-circuit SHAKE-128 binding `A == ExpandA(ρ)`.)
 ///   2. Rejection-sample 256 coefficients: read 3 bytes, parse as a
 ///      23-bit value (mask off top bit), accept if < q.
 ///
@@ -222,11 +227,11 @@ pub fn expand_a_native(rho: &[u8; 32]) -> Vec<[u32; N]> {
     let mut out: Vec<[u32; N]> = Vec::with_capacity(K * L);
     for i in 0..K {
         for j in 0..L {
-            // SHAKE-128(ρ ∥ j ∥ i)
+            // SHAKE-128(ρ ∥ i ∥ j) per FIPS-204 §3.2 Algorithm 4.
             let mut shake = Shake128::default();
             Update::update(&mut shake, rho);
-            Update::update(&mut shake, &[j as u8]);
             Update::update(&mut shake, &[i as u8]);
+            Update::update(&mut shake, &[j as u8]);
             let mut reader = shake.finalize_xof();
 
             let mut poly = [0u32; N];
@@ -413,9 +418,13 @@ impl DilithiumSigBytes {
                 if coef_idx >= N {
                     return None;
                 }
-                // Indices within one poly must be strictly increasing per
-                // FIPS-204 — otherwise a malicious signer could pad to
-                // weight ≤ ω while encoding more than τ effective hints.
+                // Indices within one poly must be strictly increasing.
+                // FIPS-204 §4.3 Algorithm 7 (UnpackHint) requires that
+                // "the indices are sorted in increasing order"; since
+                // the polynomial coefficients are binary, sorted +
+                // no-duplicate is equivalent to strictly-increasing.
+                // Confirmed in DeepSeek peer review 2026-05-15 as
+                // implied by spec, not an extra invariant.
                 if idx_byte_pos > cursor {
                     let prev = hint_bytes[idx_byte_pos - 1] as usize;
                     if coef_idx <= prev {

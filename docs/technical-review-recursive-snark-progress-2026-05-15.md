@@ -306,13 +306,18 @@ uniformity check (4 q-quartile buckets within 60-140% of expected
 count over 14336 samples).
 
 **Peer review questions:**
-- ExpandA byte order: I use `ρ ∥ j ∥ i` where j is the column and i
-  is the row. FIPS-204 §3.2 specifies this but reference
-  implementations sometimes swap. Cross-check needed against the
-  Microsoft / Cloudflare reference impls.
-- The 23-bit rejection sampling (mask = 0x7F on byte 2) — this is
-  the standard Dilithium approach but newer FIPS-204 drafts may
-  have moved to 24-bit. Reading the final FIPS-204 §A.1 to confirm.
+- ~~ExpandA byte order: I use `ρ ∥ j ∥ i` where j is the column and i
+  is the row.~~ **FIXED 2026-05-15 per DeepSeek peer review**: the
+  correct order is `ρ ∥ i ∥ j` (row first, then column) per FIPS-204
+  §3.2 Algorithm 4 RejBoundedPoly. Corrected in the same-day commit
+  alongside the peer-review feedback. The bug was latent during
+  advisory mode (the prover and verifier used the same wrong matrix
+  consistently) but would have broken the future in-circuit SHAKE-128
+  binding `A == ExpandA(ρ)`. **Catching this BEFORE that binding lands
+  is exactly what peer review is for.**
+- The 23-bit rejection sampling (mask = 0x7F on byte 2) — DeepSeek
+  confirmed this matches the standard "RejectUnitfromSeed" procedure.
+  No issue.
 
 ## 4. δ-circuit consensus rules — what each phase enforces
 
@@ -632,8 +637,36 @@ seconds) is roughly 2-3 weeks of disciplined work past this commit.
 
 ---
 
+## 12. DeepSeek peer review disposition (2026-05-15)
+
+DeepSeek returned a full review of the five §9 asks. Disposition:
+
+| # | Ask | Finding | Action |
+|---|-----|---------|--------|
+| 1 | ExpandA byte order | **Bug confirmed.** I had `ρ ∥ j ∥ i`; FIPS-204 §3.2 Algorithm 4 specifies `ρ ∥ i ∥ j`. | ✅ **FIXED same-day.** Swapped byte order; tests unchanged (none depended on specific output values). Cross-check against `pqcrystals-dilithium` reference vectors tracked as a follow-up before the in-circuit SHAKE-128 binding lands. |
+| 2 | SampleInBall sign convention | ✅ Confirmed correct. LSB-first within the 8-byte sign pool matches FIPS-204 §4 step 8 (`sign = (signs mod 2) ? −1 : 1; signs = signs / 2`). | No change. |
+| 3 | h-unpack strictly-increasing check | Confirmed: spec-implied per FIPS-204 §4.3 Algorithm 7 — "indices are sorted in increasing order", which for binary coefficients is equivalent to strictly-increasing. | ✅ Added citation comment in the code so future readers don't think it's an extra invariant. |
+| 4 | u128 range check on `to_balance_new` | Acceptable. u128 max (~3.4×10³⁸ units) vastly exceeds realistic supply. No extra "overflow detection" gadget needed. | No change. |
+| 5 | Single-sibling-set design | Sound. The post-from-update siblings semantic is correctly handled by the prover supplying fresh siblings + threading `running_root`. | No change. |
+
+DeepSeek's overall assessment: "Phase 1 is functionally complete and
+well-structured. The δ-circuit faithfully captures all consensus rules…
+With [the ExpandA] correction, the work is ready to proceed into
+Phase 2 crate selection and step-circuit implementation."
+
+DeepSeek also flagged that the integration risk (no end-to-end
+in-circuit proof test yet) should be closed early — recommending a
+`#[ignore]`'d single-block Groth16 prove+verify smoke test as soon
+as the Nova step circuit is wired. Tracked as a follow-up.
+
+Net result of peer review: **1 silent bug caught and fixed,
+4 design choices validated, code accepted as Phase-2-ready post-fix.**
+
+---
+
 End of review. ~5500 LOC, ~80 tests, zero risk to the live mainnet
 binary (all changes in `crates/q-ivc/` which is not a `q-api-server`
-dep). DeepSeek peer review requested per §9.
+dep). DeepSeek peer review complete per §9 / §12.
 
 Co-Authored-By: Server Beta <server-beta@q-narwhalknight.dev>
+Reviewed-By: DeepSeek
