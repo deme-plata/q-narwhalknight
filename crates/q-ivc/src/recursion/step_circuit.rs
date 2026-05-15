@@ -295,45 +295,50 @@ impl<F: PrimeField> StepCircuitAdapter<F> for DeltaStepCircuit<F> {
                 .try_for_each(|(a, b)| a.enforce_equal(b))?;
         }
 
-        // ─── Note on the inner DeltaBlockCircuit generate_constraints
-        // call ─────────────────────────────────────────────────────────
+        // ─── Invoke the inner δ-circuit body (Phase 1-5 enforcement) ────
         //
-        // The full δ-circuit body (Phases 1-5) enforces:
-        //   • header BLAKE3
-        //   • NTT anchor (wired stub during advisory mode)
-        //   • per-tx Dilithium + range + Merkle (~46M constraints/tx)
-        //   • coinbase emission + era cap
-        //   • running_root == state_root_next
+        // The refactor that split DeltaBlockCircuit::generate_constraints
+        // into outer (public-input allocation) + inner (Phase 1-5 body)
+        // landed in commit e43a404d. We now invoke the inner method
+        // directly with the witness handles we already allocated:
+        //   • z_in[0..8]              — state_root_prev (chained from
+        //                               previous fold step via Nova)
+        //   • z_out_state_root[0..8]  — state_root_next (allocated above
+        //                               as witness from inner.inputs)
+        //   • block_header_hash_words — newly allocated witness from
+        //                               self.inner.inputs.block_header_hash
+        //   • block_height_var        — z_in[8] as FpVar (height_in;
+        //                               note inner uses block_height,
+        //                               not block_height_in + 1; the +1
+        //                               semantics live in z_out[8])
         //
-        // For Phase 2 boundary, we want to invoke
-        // self.inner.generate_constraints(cs) BUT that allocates a SECOND
-        // set of state_root_{prev,next} as PUBLIC INPUTs (via
-        // alloc_root_input / new_input). That double-allocates and
-        // means the verifier sees 26 public inputs from inner PLUS the
-        // 9 z_in / 9 z_out from Nova — wasteful but not incorrect.
-        //
-        // Server Beta is in parallel doing the refactor that splits
-        // generate_constraints into a "synth-only" inner method which
-        // takes pre-allocated (state_root_prev, state_root_next,
-        // header_hash, block_height) vars. Once that refactor lands,
-        // this synthesize_step calls it directly with the z_in / z_out
-        // word allocations, no double-allocation.
-        //
-        // Until the refactor lands, we COULD call the existing
-        // generate_constraints and accept the double-allocation cost —
-        // 24 extra UInt32 public inputs is ~768 constraints, dwarfed
-        // by the ~442M total. But for THIS commit (Phase 2 boundary
-        // unblock), the cleaner path is to leave the inner constraint
-        // body OUT and let the refactor wire it. The current
-        // synthesize_step thus enforces:
-        //   • z_in / z_out shape correctness
-        //   • z_in[0..8] == inner.state_root_prev
-        //   • z_out[0..8] == inner.state_root_next
-        //   • z_out[8] == z_in[8] + 1
-        // which is what the Nova fold mechanism needs to chain
-        // proofs across blocks. The block-validity constraints
-        // (Phases 1-5) are added by the refactor + a follow-up call
-        // from this method.
+        // After this call, every Phase 1-5 invariant (header BLAKE3,
+        // anchor election stub, per-tx Dilithium + range + Merkle,
+        // coinbase emission + era cap, running_root == state_root_next)
+        // is enforced inside the Nova step's constraint system.
+        let block_header_hash_words: Vec<UInt32<F>> = self.inner.inputs.block_header_hash
+            .chunks(4)
+            .map(|c| {
+                let w = u32::from_le_bytes(c.try_into().expect("4 bytes per word"));
+                UInt32::new_witness(cs.clone(), || Ok(w))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // FpVar bridge: convert z_in[8] (UInt32) to FpVar for the inner
+        // method's block_height_var parameter. The inner's era_emission_cap
+        // call expects an FpVar.
+        let block_height_var: FpVar<F> = {
+            let bits = z_in[8].to_bits_le();
+            Boolean::le_bits_to_fp_var(&bits)?
+        };
+
+        self.inner.generate_constraints_inner(
+            cs.clone(),
+            &z_in[..8],
+            &z_out_state_root,
+            &block_header_hash_words,
+            &block_height_var,
+        )?;
 
         let mut z_out = Vec::with_capacity(STEP_Z_LEN);
         z_out.extend(z_out_state_root);
