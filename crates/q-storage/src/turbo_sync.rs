@@ -3594,14 +3594,23 @@ impl TurboSyncManager {
             let lookahead: u64 = std::env::var("Q_GENESIS_LOOKAHEAD_BLOCKS")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(10_000); // v10.9.28: match the GAP_SKIP_REFUSED ingestion safety cap (10000). Previous 1_000_000 caused chunks scheduled within 1M of contiguous to be later refused at ingest time when they landed >10K beyond local tip, producing the "🚫 [GAP SKIP REFUSED] ... Discarding out-of-range batch" storm seen in v10.9.27 Beta sync test (height stuck at 0, RSS growing 50MB/min from queued+retried chunks). With 10K window, every dispatched chunk is ingestable. Operators wanting parallelism still set Q_GENESIS_LOOKAHEAD_BLOCKS=N explicitly.
+                .unwrap_or(10_000);
             let window_cap = first_gap.saturating_add(lookahead);
             let original_len = chunks.len();
-            chunks.retain(|(s, _)| *s <= window_cap);
+            // v10.9.29: cap BOTH chunk start AND chunk end (clip). See split_into_chunks
+            // for the rationale — a single oversized chunk slipping through breaks ingestion.
+            chunks.retain_mut(|(s, e)| {
+                if *s > window_cap {
+                    false
+                } else {
+                    *e = (*e).min(window_cap);
+                    true
+                }
+            });
             if chunks.len() < original_len {
                 warn!(
-                    "🌱 [GENESIS-WINDOW v10.9.26] gap-fill capped: kept {}/{} chunks \
-                     (≤ height {} = first_gap {} + {} lookahead).",
+                    "🌱 [GENESIS-WINDOW v10.9.29] gap-fill capped: kept {}/{} chunks, \
+                     each clipped to end ≤ {} (= first_gap {} + {} lookahead).",
                     chunks.len(), original_len, window_cap, first_gap, lookahead
                 );
             }
@@ -4225,14 +4234,36 @@ impl TurboSyncManager {
             let lookahead: u64 = std::env::var("Q_GENESIS_LOOKAHEAD_BLOCKS")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(10_000); // v10.9.28: match the GAP_SKIP_REFUSED ingestion safety cap (10000). Previous 1_000_000 caused chunks scheduled within 1M of contiguous to be later refused at ingest time when they landed >10K beyond local tip, producing the "🚫 [GAP SKIP REFUSED] ... Discarding out-of-range batch" storm seen in v10.9.27 Beta sync test (height stuck at 0, RSS growing 50MB/min from queued+retried chunks). With 10K window, every dispatched chunk is ingestable. Operators wanting parallelism still set Q_GENESIS_LOOKAHEAD_BLOCKS=N explicitly.
+                .unwrap_or(10_000); // v10.9.28: match the GAP_SKIP_REFUSED ingestion safety cap (10000).
             let window_cap = start.saturating_add(lookahead);
             let original_len = chunks.len();
-            chunks.retain(|(s, _)| *s <= window_cap);
+            // v10.9.29: cap BOTH chunk start AND chunk end (clip).
+            //
+            // The v10.9.28 cap only filtered by chunk start. If the ML chunk-size
+            // predictor (or Kalman blend, or supernode-boost) produced a chunk
+            // larger than `lookahead`, a single chunk spanning [start, start+N]
+            // with N >> lookahead would pass the filter (start <= window_cap) but
+            // span far beyond window_cap. When dispatched, the peer returns the
+            // full N-block payload, the ingestion path's 10K gap-from-contiguous
+            // safety check refuses it, and the contiguous chain doesn't advance.
+            //
+            // Observed v10.9.28 symptom: Beta sync test reached 26K (one good
+            // batch) then froze; "1/1 chunks failed" loop. The single chunk was
+            // spanning ~18M blocks (full target) because the chunk_size predictor
+            // went large. Clipping each chunk end to window_cap forces every
+            // dispatched chunk into the ingestable window.
+            chunks.retain_mut(|(s, e)| {
+                if *s > window_cap {
+                    false
+                } else {
+                    *e = (*e).min(window_cap);
+                    true
+                }
+            });
             if chunks.len() < original_len {
                 warn!(
-                    "🌱 [GENESIS-WINDOW v10.9.26] split_into_chunks capped: kept {}/{} chunks \
-                     (≤ height {} = start {} + {} lookahead).",
+                    "🌱 [GENESIS-WINDOW v10.9.29] split_into_chunks capped: kept {}/{} chunks, \
+                     each clipped to end ≤ {} (= start {} + {} lookahead).",
                     chunks.len(), original_len, window_cap, start, lookahead
                 );
             }
@@ -6945,14 +6976,23 @@ impl TurboSyncManager {
             let lookahead: u64 = std::env::var("Q_GENESIS_LOOKAHEAD_BLOCKS")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(10_000); // v10.9.28: match the GAP_SKIP_REFUSED ingestion safety cap (10000). Previous 1_000_000 caused chunks scheduled within 1M of contiguous to be later refused at ingest time when they landed >10K beyond local tip, producing the "🚫 [GAP SKIP REFUSED] ... Discarding out-of-range batch" storm seen in v10.9.27 Beta sync test (height stuck at 0, RSS growing 50MB/min from queued+retried chunks). With 10K window, every dispatched chunk is ingestable. Operators wanting parallelism still set Q_GENESIS_LOOKAHEAD_BLOCKS=N explicitly.
+                .unwrap_or(10_000);
             let window_cap = effective_start_height.saturating_add(lookahead);
             let original_len = chunks.len();
-            chunks.retain(|(start, _)| *start <= window_cap);
+            // v10.9.29: cap BOTH chunk start AND chunk end (clip). See split_into_chunks
+            // for the rationale — a single oversized chunk slipping through breaks ingestion.
+            chunks.retain_mut(|(start, end)| {
+                if *start > window_cap {
+                    false
+                } else {
+                    *end = (*end).min(window_cap);
+                    true
+                }
+            });
             if chunks.len() < original_len {
                 warn!(
-                    "🌱 [GENESIS-WINDOW v10.9.25] Capped chunk window: kept {}/{} chunks (≤ height {} = contiguous {} + {} lookahead). \
-                     The rest will be scheduled in subsequent sync_to_height() calls as contiguous advances.",
+                    "🌱 [GENESIS-WINDOW v10.9.29] sync_to_height capped: kept {}/{} chunks, each clipped to end ≤ {} \
+                     (= contiguous {} + {} lookahead). Remainder scheduled on next sync_to_height tick as contiguous advances.",
                     chunks.len(), original_len, window_cap, effective_start_height, lookahead
                 );
             }
