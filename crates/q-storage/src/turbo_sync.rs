@@ -6819,7 +6819,48 @@ impl TurboSyncManager {
         warn!("   local_height={}, effective_start={}, sync_start={}, target={}",
               local_height, effective_start_height, sync_start_height, target_height);
         // 🤖 v1.4.0-beta: Pass ML-predicted chunk_size to split_into_chunks
-        let chunks = self.split_into_chunks(sync_start_height, target_height, chunk_size);
+        let mut chunks = self.split_into_chunks(sync_start_height, target_height, chunk_size);
+
+        // v10.9.25: GENESIS-MODE CHUNK WINDOW.
+        //
+        // SYMPTOM this fixes: with Q_GENESIS_SYNC_ONLY=1 and a fresh node at
+        // contiguous height 4045, gravity-assist parallel streams were spawning
+        // chunks across the entire 4046..18M range. The first few thousand
+        // chunks (4046, 5046, 6046, …) extended the contiguous chain, but the
+        // bulk of in-flight chunks at heights 6M, 9M, 13M wasted bandwidth —
+        // their blocks downloaded and saved, but with no contiguous predecessor
+        // they never advanced `qblock:latest`. From the operator's view the
+        // node looked stuck (gravity-assist progress bar moved 3200/360000
+        // chunks while contiguous height stayed at 4045).
+        //
+        // FIX: when Q_GENESIS_SYNC_ONLY=1, restrict the chunk set to those
+        // within GENESIS_LOOKAHEAD_BLOCKS of the current contiguous height.
+        // The default 1M window keeps gravity-assist effective (10K concurrent
+        // chunks at 100-block size all fit) while ensuring every in-flight
+        // chunk DIRECTLY extends the contiguous chain on completion. Tunable
+        // via Q_GENESIS_LOOKAHEAD_BLOCKS for operators with fast peers.
+        //
+        // Checkpoint and endgame modes are NOT affected — only Q_GENESIS_SYNC_ONLY.
+        let genesis_mode = std::env::var("Q_GENESIS_SYNC_ONLY")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if genesis_mode {
+            let lookahead: u64 = std::env::var("Q_GENESIS_LOOKAHEAD_BLOCKS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(1_000_000);
+            let window_cap = effective_start_height.saturating_add(lookahead);
+            let original_len = chunks.len();
+            chunks.retain(|(start, _)| *start <= window_cap);
+            if chunks.len() < original_len {
+                warn!(
+                    "🌱 [GENESIS-WINDOW v10.9.25] Capped chunk window: kept {}/{} chunks (≤ height {} = contiguous {} + {} lookahead). \
+                     The rest will be scheduled in subsequent sync_to_height() calls as contiguous advances.",
+                    chunks.len(), original_len, window_cap, effective_start_height, lookahead
+                );
+            }
+        }
+
         info!("🔍 [v0.9.40 DEBUG] PHASE 2 COMPLETE: Created {} chunks for parallel download", chunks.len());
 
         if !chunks.is_empty() {
