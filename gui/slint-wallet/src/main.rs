@@ -1,5 +1,7 @@
 #[allow(dead_code)]
 mod api_client;
+mod config;
+mod desktop_integration;
 mod gpu_miner;
 mod miner;
 #[allow(dead_code)]
@@ -26,6 +28,10 @@ fn main() {
         .cloned()
         .unwrap_or_else(|| "http://localhost:8080".to_string());
 
+    // Install Linux desktop launcher + icon + autostart (idempotent; no-op on non-Linux).
+    // Errors are logged and non-fatal.
+    desktop_integration::install_desktop_integration();
+
     let app = match AppWindow::new() {
         Ok(app) => app,
         Err(e) => {
@@ -35,6 +41,75 @@ fn main() {
             AppWindow::new().expect("Failed to create window even with software renderer")
         }
     };
+
+    // Surface app version on the login screen footer + center the window on the
+    // primary monitor at startup. The window itself is sized via the .slint
+    // preferred-width / preferred-height (720×900); we just compute the offset
+    // so the OS doesn't drop it in the top-left corner.
+    app.set_wallet_version(slint::SharedString::from(format!(
+        "v{}",
+        env!("CARGO_PKG_VERSION")
+    )));
+
+    // Seed miner controls from persisted config (default: 1 thread / 5% GPU).
+    {
+        let cfg = config::load();
+        let cores = num_cpus::get().max(1) as i32;
+        app.set_cpu_threads_max(cores);
+        app.set_cpu_threads_current(cfg.effective_cpu_threads().min(cores as usize) as i32);
+        app.set_gpu_intensity_current(cfg.effective_gpu_intensity_pct() as i32);
+
+        let app_weak_cpu = app.as_weak();
+        app.on_set_cpu_threads(move |n| {
+            let n = n.max(1) as usize;
+            config::set_cpu_threads(n);
+            if let Some(app) = app_weak_cpu.upgrade() {
+                app.set_cpu_threads_current(n as i32);
+            }
+            eprintln!("[CONFIG] cpu_threads → {n} (will apply on next mining start)");
+        });
+
+        let app_weak_gpu = app.as_weak();
+        app.on_set_gpu_intensity(move |p| {
+            let p = (p.max(1).min(100)) as u8;
+            config::set_gpu_intensity_pct(p);
+            if let Some(app) = app_weak_gpu.upgrade() {
+                app.set_gpu_intensity_current(p as i32);
+            }
+            eprintln!("[CONFIG] gpu_intensity_pct → {p}% (will apply on next mining start)");
+        });
+    }
+    {
+        let win = app.window();
+        let win_size = win.size();
+        let (mut win_w, mut win_h) = (win_size.width, win_size.height);
+        // size() can be (0,0) before the first show; fall back to our designed defaults.
+        if win_w == 0 || win_h == 0 {
+            win_w = 720;
+            win_h = 900;
+        }
+        match display_info::DisplayInfo::all() {
+            Ok(displays) => {
+                if let Some(primary) = displays.iter().find(|d| d.is_primary).or_else(|| displays.first()) {
+                    let scale = primary.scale_factor.max(0.5);
+                    let screen_w = (primary.width as f32 / scale) as i32;
+                    let screen_h = (primary.height as f32 / scale) as i32;
+                    let x = ((screen_w - win_w as i32) / 2).max(0);
+                    let y = ((screen_h - win_h as i32) / 2).max(0);
+                    win.set_position(slint::PhysicalPosition::new(
+                        primary.x + (x as f32 * scale) as i32,
+                        primary.y + (y as f32 * scale) as i32,
+                    ));
+                    eprintln!(
+                        "[WINDOW] Centered on primary display {}x{} @ ({},{}) scale={}",
+                        primary.width, primary.height, primary.x, primary.y, scale
+                    );
+                }
+            }
+            Err(e) => eprintln!("[WINDOW] display_info unavailable, leaving WM default: {e}"),
+        }
+    }
+
     let app_weak = app.as_weak();
 
     // Shared state
