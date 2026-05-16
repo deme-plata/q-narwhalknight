@@ -6,6 +6,7 @@ mod gpu_miner;
 mod miner;
 #[allow(dead_code)]
 mod models;
+mod notifications;
 mod oauth_server;
 mod single_instance;
 mod tray;
@@ -59,6 +60,14 @@ fn main() {
     // has no tray; the wallet still works, just without a tray menu. Keep the
     // handle alive for the rest of main() so the icon isn't dropped.
     let _tray = tray::install(app.as_weak());
+
+    // v11.3.0: confirm the notifications backend is reachable on startup. This
+    // also exercises libnotify / WinRT toast permissions so the user is asked
+    // once now rather than at the moment a mining reward lands.
+    notifications::notify(
+        notifications::Category::Info,
+        "Wallet started. You'll see toasts here for mining rewards and incoming transactions.",
+    );
 
     // Surface app version on the login screen footer + center the window on the
     // primary monitor at startup. The window itself is sized via the .slint

@@ -46,6 +46,9 @@ tray-icon = "0.21"
 single-instance = "0.3"
 # Tray icon RGBA decoder (the PNG is embedded via include_bytes!)
 image = { version = "0.25", default-features = false, features = ["png"] }
+# v11.3.0: cross-platform desktop notifications + IPC for protocol-handler forwarding
+notify-rust = "4"
+interprocess = "2"
 
 [target.'cfg(not(windows))'.dependencies]
 # OpenCL ICD loader doesn't cross-compile cleanly to x86_64-pc-windows-gnu via
@@ -54,6 +57,10 @@ opencl3 = { version = "0.9", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["processthreadsapi", "sysinfoapi", "winnt"] }
+# v11.3.0: Windows-native toast + Start Menu shortcut + Run-key autostart + protocol handler registry
+tauri-winrt-notification = "0.7"
+mslnk = "0.2"
+winreg = "0.52"
 
 [build-dependencies]
 slint-build = "1.16"
