@@ -6245,8 +6245,15 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 match manager_clone.try_lock() {
                     Ok(mut nm) => {
                         // Successfully acquired lock - process one event with timeout
+                        // v10.9.36: bumped 10ms → 100ms. Per code analytics 2026-05-16:
+                        // 10ms slices starve libp2p's Swarm of polling time during
+                        // multi-round-trip Noise/Identify handshakes — peer mesh
+                        // never forms (qnk_peers_connected stays at 0 indefinitely).
+                        // 100ms still well below the "lock held forever" deadlock
+                        // threshold cited in v1.0.22 (was several MINUTES). Other
+                        // tasks needing the lock wait at most 100ms per iteration.
                         let result = tokio::time::timeout(
-                            std::time::Duration::from_millis(10),
+                            std::time::Duration::from_millis(100),
                             nm.run_once()
                         ).await;
 
