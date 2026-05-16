@@ -1122,7 +1122,17 @@ const BOOTSTRAP_BLACKLIST_MULTIPLIER: u32 = 3;
 /// During initial sync these are the ONLY permits available, capping concurrent block-pack
 /// responses at this number to prevent OOM from large simultaneous serializations
 /// (each response can be 50MB; 4 × 50MB = 200MB worst case).
-pub const BLOCK_PACK_BASE_PERMITS: usize = 4;
+// v10.9.31 sync-fix: bump base permits 4 → 16. With v10.9.27's 200-block
+// per-response cap (~50 MB max), 16 concurrent base permits = ~800 MB peak
+// allocation, well under the 50 GB cgroup high-water mark. The previous "4"
+// constant was set defensively in v9.1.8 BEFORE the 200-block cap landed and
+// is now the dominant source of empty-response back-pressure to syncing peers
+// (see line ~3940: when permits are exhausted, the server replies with an
+// empty BlockPackResponse, which a client cannot distinguish from "no blocks
+// at this height" and slows sync to ~13 b/s. Lifting the base capacity lets
+// even an unsynced node serve all 16 concurrent block-pack requests it could
+// previously only serve when fully synced.)
+pub const BLOCK_PACK_BASE_PERMITS: usize = 16;
 
 /// Adaptive block-pack semaphore — extra permits (only acquirable once fully synced).
 /// At tip, IO/memory pressure is low and we can comfortably serve more peers in parallel,

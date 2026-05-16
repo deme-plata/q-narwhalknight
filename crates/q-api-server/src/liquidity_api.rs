@@ -786,6 +786,19 @@ pub async fn add_liquidity(
             }
             *balance -= request.amount0;
             native_qug_balance_change = Some((provider, *balance)); // v10.2.1: Track for persistence
+            // v11.2.1: CRITICAL — also write the DEX debit counter so the
+            // deduction survives balance-rebuild on restart. Without this,
+            // balance_consensus replays the on-chain history (which has no
+            // record of the LP deposit), apply_dex_qug_adjustments() finds
+            // no debit counter, and the QUG returns to the wallet while the
+            // pool keeps its reserves — money created from nothing.
+            if let Err(e) = state
+                .storage_engine
+                .record_dex_qug_debit(&hex::encode(provider), request.amount0)
+                .await
+            {
+                tracing::error!("🚨 [DEX-DEBIT] Failed to record add_liquidity QUG debit (token0): {}", e);
+            }
             tracing::info!(
                 "💸 Deducted {} QUG from {} for liquidity. New balance: {}",
                 request.amount0 as f64 / 1e24,
@@ -1052,6 +1065,15 @@ pub async fn add_liquidity(
             }
             *balance -= request.amount1;
             native_qug_balance_change = Some((provider, *balance)); // v10.2.1: Track for persistence
+            // v11.2.1: CRITICAL — also write the DEX debit counter (see token0
+            // branch above for the full explanation).
+            if let Err(e) = state
+                .storage_engine
+                .record_dex_qug_debit(&hex::encode(provider), request.amount1)
+                .await
+            {
+                tracing::error!("🚨 [DEX-DEBIT] Failed to record add_liquidity QUG debit (token1): {}", e);
+            }
             tracing::info!(
                 "💸 Deducted {} QUG from {} for liquidity. New balance: {}",
                 request.amount1 as f64 / 1e24,
