@@ -59,7 +59,7 @@ opencl3 = { version = "0.9", optional = true }
 winapi = { version = "0.3", features = ["processthreadsapi", "sysinfoapi", "winnt"] }
 # v11.3.0: Windows-native toast + Start Menu shortcut + Run-key autostart + protocol handler registry
 tauri-winrt-notification = "0.7"
-mslnk = "0.2"
+mslnk = "0.1"
 winreg = "0.52"
 
 [build-dependencies]

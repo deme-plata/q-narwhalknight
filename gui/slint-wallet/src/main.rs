@@ -413,9 +413,12 @@ fn main() {
                 None
             };
 
+            // v11.4.0: read the Quantum Mixer toggle from the send screen.
+            let via_mixer = app.get_use_mixer();
+
             let weak = app.as_weak();
             rt_handle.spawn(async move {
-                let result = client.send_transaction(&recipient, &amount, memo_opt, mnemonic, &token_str).await;
+                let result = client.send_transaction(&recipient, &amount, memo_opt, mnemonic, &token_str, via_mixer).await;
                 let _ = slint::invoke_from_event_loop(move || {
                     let app = weak.upgrade().unwrap();
                     app.set_sending(false);
@@ -2255,17 +2258,32 @@ fn main() {
                                 tokio::spawn(async move {
                                     match client_fb.get_balance().await {
                                         Ok(bal) => {
+                                            // v11.4.0 zero-balance fix: server returns `{balance:null, syncing:true}`
+                                            // during startup sync. BalanceResponse deserializes that as
+                                            // `balance_qnk: 0.0` via #[serde(default)]. Mirror the primary path's
+                                            // gate so a transient sync 0 cannot overwrite a known positive
+                                            // balance in the UI. Update only when the new value is positive OR
+                                            // the display is currently uninitialised / showing zero.
                                             let balance_display = format!("{:.4}", bal.balance_qnk);
                                             let value_usd = format!("${:.2}", bal.balance_qnk * 3000.0);
+                                            let bal_qnk = bal.balance_qnk;
                                             map_fb.lock().unwrap().insert("QUG".to_string(), balance_display.clone());
                                             let _ = slint::invoke_from_event_loop(move || {
                                                 if let Some(app) = weak_fb.upgrade() {
-                                                    app.set_qug_balance(slint::SharedString::from(&balance_display));
-                                                    app.set_qug_value_usd(slint::SharedString::from(&value_usd));
-                                                    if app.get_selected_token() == "QUG" {
-                                                        app.set_send_balance_display(slint::SharedString::from(
-                                                            format!("{} QUG", balance_display),
-                                                        ));
+                                                    let cur = app.get_qug_balance();
+                                                    if bal_qnk > 0.0 || cur.is_empty() || cur == "0.0000" {
+                                                        app.set_qug_balance(slint::SharedString::from(&balance_display));
+                                                        app.set_qug_value_usd(slint::SharedString::from(&value_usd));
+                                                        if app.get_selected_token() == "QUG" {
+                                                            app.set_send_balance_display(slint::SharedString::from(
+                                                                format!("{} QUG", balance_display),
+                                                            ));
+                                                        }
+                                                    } else {
+                                                        eprintln!(
+                                                            "[Balance] fallback returned 0 while display={}; suppressed (server likely syncing)",
+                                                            cur
+                                                        );
                                                     }
                                                 }
                                             });

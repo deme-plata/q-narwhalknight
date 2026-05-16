@@ -305,9 +305,12 @@ impl ApiClient {
         self.get_public::<Vec<crate::models::SupportedToken>>("/api/v1/dex/tokens").await
     }
 
-    /// Send a transaction via the /transactions/send endpoint.
+    /// Send a transaction. When `via_mixer` is true the request is routed to
+    /// `/api/v1/mixer/send` (quantum privacy mixing pool); otherwise it goes
+    /// to the direct `/api/v1/transactions/send` endpoint.
+    ///
     /// v8.1.7: OAuth2 Bearer users auto-sign via server vault (no mnemonic needed).
-    /// Mnemonic is only sent on first use to seed the vault, or for wallet-auth mode.
+    /// v11.4.0: added `via_mixer` flag.
     pub async fn send_transaction(
         &self,
         to: &str,
@@ -315,6 +318,7 @@ impl ApiClient {
         memo: Option<String>,
         mnemonic: Option<String>,
         token_type: &str,
+        via_mixer: bool,
     ) -> Result<serde_json::Value> {
         let amount_f64: f64 = amount.parse().unwrap_or(0.0);
 
@@ -326,7 +330,6 @@ impl ApiClient {
         };
 
         // v10.2.3: Pass actual selected token type instead of hardcoding QUG.
-        // Fixes critical bug where QUGUSD transfers arrived as QUG.
         let body = serde_json::json!({
             "from": self.address(),
             "to": to,
@@ -336,7 +339,12 @@ impl ApiClient {
             "mnemonic": send_mnemonic,
         });
 
-        self.post_auth("/api/v1/transactions/send", &body).await
+        let endpoint = if via_mixer {
+            "/api/v1/mixer/send"
+        } else {
+            "/api/v1/transactions/send"
+        };
+        self.post_auth(endpoint, &body).await
     }
 
     /// Fetch transaction history.
