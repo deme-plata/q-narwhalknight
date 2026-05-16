@@ -1,4 +1,6 @@
 #[allow(dead_code)]
+mod ai_trade;
+#[allow(dead_code)]
 mod api_client;
 mod config;
 mod desktop_integration;
@@ -720,6 +722,16 @@ fn main() {
                 }
             });
             std::mem::forget(timer); // prevent timer from being dropped
+        });
+    }
+
+    // ── AI TRADE callback (from dashboard flagship card) ──
+    // v11.5.0: emit instructions for connecting the user's Claude Code to the
+    // quillon-wallet MCP. First slice: write a setup file + fire a desktop
+    // notification. Auto-write to ~/.claude.json is a follow-up.
+    {
+        app.on_ai_trade_clicked(move || {
+            ai_trade::emit_setup_instructions();
         });
     }
 

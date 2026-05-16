@@ -17,6 +17,8 @@ export component DashboardScreen inherits Rectangle {
     callback navigate(int);
     callback copy-address();
     callback send-token(string);
+    // v11.5.0: AI TRADE — request MCP setup so user's Claude Code can analyse the portfolio
+    callback ai-trade-clicked();
 
     background: Theme.bg-primary;
 
@@ -363,6 +365,119 @@ export component DashboardScreen inherits Rectangle {
                         }
                     }
                     Text { text: "Miner"; color: Theme.text-secondary; font-size: Theme.font-xs; font-weight: 500; horizontal-alignment: center; }
+                }
+            }
+        }
+
+        // ─────────────────────────────────────────────
+        // AI TRADE — flagship card: connect Claude Code via OAuth2 + MCP
+        // ─────────────────────────────────────────────
+        Rectangle {
+            height: 84px;
+            border-radius: Theme.radius-lg;
+            background: ai-touch.has-hover
+                ? @linear-gradient(135deg,
+                    Theme.accent-purple.with-alpha(0.18),
+                    Theme.accent-cyan.with-alpha(0.12))
+                : @linear-gradient(135deg,
+                    Theme.accent-purple.with-alpha(0.10),
+                    Theme.accent-cyan.with-alpha(0.06));
+            border-width: 1px;
+            border-color: ai-touch.has-hover
+                ? Theme.accent-purple.with-alpha(0.6)
+                : Theme.accent-purple.with-alpha(0.3);
+            drop-shadow-blur: ai-touch.has-hover ? 16px : 6px;
+            drop-shadow-offset-y: ai-touch.has-hover ? 4px : 2px;
+            drop-shadow-color: Theme.accent-purple.with-alpha(0.25);
+            animate background, border-color, drop-shadow-blur, drop-shadow-offset-y { duration: 180ms; }
+
+            // Left accent stripe
+            Rectangle {
+                x: 0;
+                y: 0;
+                width: 4px;
+                height: parent.height;
+                background: @linear-gradient(180deg, Theme.accent-purple, Theme.accent-cyan);
+                border-top-left-radius: Theme.radius-lg;
+                border-bottom-left-radius: Theme.radius-lg;
+            }
+
+            ai-touch := TouchArea {
+                clicked => { root.ai-trade-clicked(); }
+            }
+
+            HorizontalLayout {
+                padding-left: Theme.spacing-lg;
+                padding-right: Theme.spacing-md;
+                spacing: Theme.spacing-md;
+
+                // Bot avatar tile
+                Rectangle {
+                    width: 56px;
+                    height: 56px;
+                    border-radius: Theme.radius-md;
+                    background: @radial-gradient(circle,
+                        Theme.accent-purple.with-alpha(0.30) 0%,
+                        Theme.accent-cyan.with-alpha(0.10) 60%,
+                        transparent 100%);
+                    y: (parent.height - 56px) / 2;
+
+                    Icon {
+                        source: @image-url("icons/bot.svg");
+                        icon-color: Theme.accent-purple;
+                        width: 30px;
+                        height: 30px;
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 4px;
+                    horizontal-stretch: 1;
+
+                    HorizontalLayout {
+                        spacing: Theme.spacing-sm;
+                        Text {
+                            text: "AI TRADE";
+                            color: Theme.text-primary;
+                            font-size: Theme.font-lg;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+                        // "Beta" pill
+                        Rectangle {
+                            width: 44px;
+                            height: 18px;
+                            border-radius: 9px;
+                            background: Theme.accent-cyan.with-alpha(0.18);
+                            border-width: 1px;
+                            border-color: Theme.accent-cyan.with-alpha(0.4);
+                            Text {
+                                text: "BETA";
+                                color: Theme.accent-cyan;
+                                font-size: 9px;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+                    Text {
+                        text: "Connect Claude Code via OAuth2 + MCP — read-only portfolio analysis & trade suggestions";
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-xs;
+                        wrap: word-wrap;
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    Icon {
+                        source: @image-url("icons/arrow-right.svg");
+                        icon-color: Theme.accent-purple.with-alpha(0.7);
+                        width: Theme.icon-md;
+                        height: Theme.icon-md;
+                    }
                 }
             }
         }
