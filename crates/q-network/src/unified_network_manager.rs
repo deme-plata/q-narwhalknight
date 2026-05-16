@@ -3899,6 +3899,13 @@ impl UnifiedNetworkManager {
                                 info!("📥 [BLOCK-PACK] Received block pack request from {}", peer);
                                 info!("   Requested: start_height={}, end_height={}, max_blocks={}",
                                       request.start_height, request.end_height, request.max_blocks);
+                                // v10.9.31: wire qnk_libp2p_rx_bytes_total — server side, count
+                                // the (bincode-serialized) request bytes so we can finally see
+                                // whether libp2p block-pack traffic is actually flowing.
+                                if let Ok(req_bytes) = bincode::serialized_size(&request) {
+                                    self.metrics.rx_bytes_total
+                                        .fetch_add(req_bytes, std::sync::atomic::Ordering::Relaxed);
+                                }
 
                                 // v1.2.7-beta: NON-BLOCKING HANDLER - Prevents ResponseOmission timeouts
                                 // Instead of blocking on async DB calls, we:
@@ -4045,6 +4052,14 @@ impl UnifiedNetworkManager {
                                 debug!("🚀 [BLOCK-PACK] Spawned async handler task for request {}", async_req_id);
                             }
                             Message::Response { request_id, response } => {
+                                // v10.9.31: wire qnk_libp2p_rx_bytes_total — client-side, count
+                                // bytes of every block-pack response we receive. This is the
+                                // diagnostic we needed to confirm whether libp2p data plane is
+                                // actually carrying block traffic, vs the HTTP turbo-sync fallback.
+                                if let Ok(resp_bytes) = bincode::serialized_size(&response) {
+                                    self.metrics.rx_bytes_total
+                                        .fetch_add(resp_bytes, std::sync::atomic::Ordering::Relaxed);
+                                }
                                 // v1.0.45-beta: Update known network height for progress display
                                 // v8.1.6: Sanity check — reject cross-chain height poisoning
                                 // A rogue peer (e.g. old mainnet2026.1.1 at 204K) can claim a high
@@ -5446,10 +5461,18 @@ impl UnifiedNetworkManager {
                 // Retrieve the stored response channel and send response
                 if let Some(channel) = self.pending_response_channels.lock().unwrap().remove(&async_req_id) {
                     let block_count = response.blocks.len();
+                    // v10.9.31: wire qnk_libp2p_tx_bytes_total + qnk_block_pack_response_bytes
+                    // histogram BEFORE we move `response` into send_response. These were declared
+                    // in metrics.rs but never incremented — every dashboard showed zero forever.
+                    let resp_bytes = bincode::serialized_size(&response).unwrap_or(0);
+                    self.metrics.tx_bytes_total
+                        .fetch_add(resp_bytes, std::sync::atomic::Ordering::Relaxed);
+                    self.metrics.block_pack_response_bytes
+                        .observe(resp_bytes as f64);
                     if let Err(e) = self.swarm.behaviour_mut().block_sync.send_response(channel, response) {
                         error!("❌ [BLOCK-PACK ASYNC] Failed to send response for request {}: {:?}", async_req_id, e);
                     } else {
-                        info!("✅ [BLOCK-PACK ASYNC] Sent {} blocks for async request {} (via run_once)", block_count, async_req_id);
+                        info!("✅ [BLOCK-PACK ASYNC] Sent {} blocks ({} bytes) for async request {} (via run_once)", block_count, resp_bytes, async_req_id);
                     }
                 } else {
                     warn!("⚠️ [BLOCK-PACK ASYNC] No pending channel for request {} (may have timed out)", async_req_id);
