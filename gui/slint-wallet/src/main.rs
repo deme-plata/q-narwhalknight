@@ -31,19 +31,28 @@ fn main() {
         .cloned()
         .unwrap_or_else(|| "http://localhost:8080".to_string());
 
-    // v11.2.0: single-instance enforcement. If another wallet is already running
-    // we exit immediately. A follow-up commit will add IPC so the first instance
-    // raises its window and (later) handles forwarded quillon:// URLs.
+    // v11.3.0: detect a quillon:// URL passed by the OS protocol handler.
+    let incoming_url: Option<String> = args
+        .iter()
+        .skip(1)
+        .find(|a| a.starts_with("quillon://"))
+        .cloned();
+
+    // v11.2.0 / v11.3.0: single-instance enforcement with IPC forwarding.
+    // If another wallet is already running, forward our URL (or a "focus" ping
+    // if no URL) to it and exit cleanly.
     let _instance_lock = match single_instance::acquire() {
         Some(lock) => lock,
         None => {
-            eprintln!("[slint-wallet] Another wallet is already running — exiting.");
+            let forward = incoming_url.clone().unwrap_or_else(|| "focus".to_string());
+            single_instance::forward(&forward);
+            eprintln!("[slint-wallet] Already running — forwarded '{}' to existing instance.", forward);
             std::process::exit(0);
         }
     };
 
-    // Install Linux desktop launcher + icon + autostart (idempotent; no-op on non-Linux).
-    // Errors are logged and non-fatal.
+    // Install Linux desktop launcher / Windows Start Menu + autostart + quillon://
+    // protocol handler (idempotent; no-op on macOS). Errors are logged and non-fatal.
     desktop_integration::install_desktop_integration();
 
     let app = match AppWindow::new() {
@@ -60,6 +69,32 @@ fn main() {
     // has no tray; the wallet still works, just without a tray menu. Keep the
     // handle alive for the rest of main() so the icon isn't dropped.
     let _tray = tray::install(app.as_weak());
+
+    // v11.3.0: start the IPC server so a second-launch can raise this window
+    // and forward a quillon:// URL. The callback runs on the IPC thread and
+    // marshals back to the Slint event loop.
+    {
+        let weak = app.as_weak();
+        single_instance::start_server(move |msg| {
+            eprintln!("[ipc] received: {}", msg);
+            let weak = weak.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(app) = weak.upgrade() {
+                    let _ = app.show();
+                    if msg.starts_with("quillon://") {
+                        // TODO: parse `quillon://<address>?amount=...&memo=...&token=...`
+                        // and route into the Send screen with the fields prefilled.
+                        eprintln!("[ipc] TODO: deep-link parse for {}", msg);
+                    }
+                }
+            });
+        });
+    }
+
+    if let Some(ref url) = incoming_url {
+        // TODO: same deep-link parsing as the IPC handler — for now just log.
+        eprintln!("[startup] launched with quillon:// URL: {}", url);
+    }
 
     // v11.3.0: confirm the notifications backend is reachable on startup. This
     // also exercises libnotify / WinRT toast permissions so the user is asked
