@@ -4002,8 +4002,16 @@ impl UnifiedNetworkManager {
 
                                         let block_count = (end_height - start_height + 1) as usize;
                                         // v9.1.8: Hard cap at 200 blocks per response (~50MB max)
-                                        // Prevents 500+ block responses that serialize to 150MB+
-                                        let limit = block_count.min(max_blocks).min(200);
+                                        // v10.9.37: bump to 2000 (~500 MB max — still safe under 8 GB
+                                        // container memory). With CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER=16
+                                        // and 200-cap, theoretical ceiling was ~66 b/s (200 blocks × 16
+                                        // in-flight ÷ ~50 sec for RTT+validation). At 2000-cap the same
+                                        // math gives ~660-2500 b/s depending on validation parallelism.
+                                        // Tunable via Q_BLOCK_PACK_MAX env var for operators on tighter
+                                        // memory budgets.
+                                        let hard_cap: usize = std::env::var("Q_BLOCK_PACK_MAX")
+                                            .ok().and_then(|s| s.parse().ok()).unwrap_or(2000);
+                                        let limit = block_count.min(max_blocks).min(hard_cap);
 
                                         info!("🔍 [BLOCK-PACK-DEBUG] our_height(contiguous)={}, requested range={}-{}, computed limit={}",
                                               our_height, start_height, end_height, limit);
