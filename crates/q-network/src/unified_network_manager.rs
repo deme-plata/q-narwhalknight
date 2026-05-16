@@ -3207,8 +3207,31 @@ impl UnifiedNetworkManager {
                         self.metrics.libp2p_metrics.record(&event);
                     }
 
+                    // v10.9.33 DEBUG: trace every SwarmEvent variant so we can see exactly
+                    // what the Swarm task is processing (or not). Diagnoses the "swarm task
+                    // appears inert" symptom where libp2p_*_total metrics never tick.
+                    info!("🛰️  [SWARM-EVT] {}", match &event {
+                        SwarmEvent::Behaviour(_) => "Behaviour",
+                        SwarmEvent::NewListenAddr { .. } => "NewListenAddr",
+                        SwarmEvent::ConnectionEstablished { .. } => "ConnectionEstablished",
+                        SwarmEvent::ConnectionClosed { .. } => "ConnectionClosed",
+                        SwarmEvent::OutgoingConnectionError { .. } => "OutgoingConnectionError",
+                        SwarmEvent::IncomingConnection { .. } => "IncomingConnection",
+                        SwarmEvent::IncomingConnectionError { .. } => "IncomingConnectionError",
+                        SwarmEvent::Dialing { .. } => "Dialing",
+                        SwarmEvent::ExpiredListenAddr { .. } => "ExpiredListenAddr",
+                        SwarmEvent::ListenerClosed { .. } => "ListenerClosed",
+                        SwarmEvent::ListenerError { .. } => "ListenerError",
+                        SwarmEvent::ExternalAddrConfirmed { .. } => "ExternalAddrConfirmed",
+                        SwarmEvent::ExternalAddrExpired { .. } => "ExternalAddrExpired",
+                        SwarmEvent::NewExternalAddrCandidate { .. } => "NewExternalAddrCandidate",
+                        SwarmEvent::NewExternalAddrOfPeer { .. } => "NewExternalAddrOfPeer",
+                        _ => "Other",
+                    });
+
                     match event {
                     SwarmEvent::Behaviour(behaviour_event) => {
+                        info!("🛰️  [SWARM-EVT-BEHAVIOUR] kind={}", std::any::type_name_of_val(&behaviour_event));
                         self.handle_behaviour_event(behaviour_event).await?;
                     }
                     SwarmEvent::NewListenAddr { address, .. } => {
