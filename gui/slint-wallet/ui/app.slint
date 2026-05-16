@@ -21,11 +21,11 @@ import { DexScreen, DexToken, ChartBar, TokenTx } from "dex.slint";
 export { TokenInfo, TxRecord, OAuthScope, AddressEntry, DexToken, ChartBar, TokenTx }
 
 export component AppWindow inherits Window {
-    title: "Q-NarwhalKnight Wallet";
-    min-width: 440px;
-    min-height: 720px;
-    preferred-width: 480px;
-    preferred-height: 820px;
+    title: "Quillon Graph Wallet";
+    min-width: 600px;
+    min-height: 800px;
+    preferred-width: 720px;
+    preferred-height: 900px;
     background: Theme.bg-primary;
 
     // Screen state: 0=login, 1=dashboard, 2=send, 3=history, 4=miner, 5=receive, 6=oauth-consent, 7=pos, 8=dex
@@ -79,6 +79,24 @@ export component AppWindow inherits Window {
     in property <string> gpu-device-count: "0";
     in property <string> gpu-status: "";
     in property <string> gpu-blocks-found: "0";
+
+    // Wallet version (footer on login screen)
+    in property <string> wallet-version: "v?";
+
+    // Miner controls (persisted user preferences)
+    in property <int> cpu-threads-current: 1;
+    in property <int> cpu-threads-max: 16;
+    in property <int> gpu-intensity-current: 5;
+
+    callback set-cpu-threads(int);
+    callback set-gpu-intensity(int);
+
+    // v11.4.0: Quantum Mixer toggle on Send screen — main.rs reads via get_use_mixer()
+    in-out property <bool> use-mixer: false;
+    in property <bool> mixer-available: true;
+
+    // v11.5.0: AI TRADE dashboard card — emits Claude Code MCP setup instructions
+    callback ai-trade-clicked();
 
     // Receive / QR code properties
     in property <image> qr-code-image;
@@ -197,6 +215,7 @@ export component AppWindow inherits Window {
                 generated-mnemonic: root.generated-mnemonic;
                 show-create-view <=> root.show-create-view;
                 server-url <=> root.server-url;
+                wallet-version: root.wallet-version;
 
                 create-wallet => { root.create-wallet(); }
                 import-wallet(m) => { root.import-wallet(m); }
@@ -218,6 +237,7 @@ export component AppWindow inherits Window {
                 }
                 copy-address => { root.copy-address(); }
                 send-token(symbol) => { root.send-token(symbol); }
+                ai-trade-clicked => { root.ai-trade-clicked(); }
             }
 
             if root.active-screen == 2 : SendScreen {
@@ -234,6 +254,8 @@ export component AppWindow inherits Window {
                 selected-token <=> root.selected-token;
                 current-fee: root.current-fee;
                 fee-tier: root.fee-tier;
+                use-mixer <=> root.use-mixer;
+                mixer-available: root.mixer-available;
 
                 send-transaction => {
                     root.send-transaction(self.recipient, self.amount, self.memo, self.seed-phrase, root.selected-token);
@@ -243,6 +265,7 @@ export component AppWindow inherits Window {
                     root.save-contact(self.recipient, self.contact-label);
                 }
                 select-token(symbol) => { root.select-token(symbol); }
+                toggle-mixer(on) => { root.use-mixer = on; }
             }
 
             if root.active-screen == 3 : HistoryScreen {
@@ -268,8 +291,13 @@ export component AppWindow inherits Window {
                 gpu-device-count: root.gpu-device-count;
                 gpu-status: root.gpu-status;
                 gpu-blocks-found: root.gpu-blocks-found;
+                cpu-threads-current: root.cpu-threads-current;
+                cpu-threads-max: root.cpu-threads-max;
+                gpu-intensity-current: root.gpu-intensity-current;
 
                 toggle-mining => { root.toggle-mining(); }
+                set-cpu-threads(n) => { root.set-cpu-threads(n); }
+                set-gpu-intensity(p) => { root.set-gpu-intensity(p); }
                 go-back => { root.active-screen = 1; }
             }
 

@@ -16,8 +16,16 @@ export component MinerScreen inherits Rectangle {
     in property <string> gpu-status: "";
     in property <string> gpu-blocks-found: "0";
 
+    // v10.9.x: User-tunable resource controls (default low: 1 thread / 5% GPU).
+    // Users dial up via the in-app +/- buttons; choices persist to disk.
+    in property <int> cpu-threads-current: 1;
+    in property <int> cpu-threads-max: 16;
+    in property <int> gpu-intensity-current: 5; // percent 1..100
+
     callback toggle-mining();
     callback go-back();
+    callback set-cpu-threads(int);
+    callback set-gpu-intensity(int);
 
     background: Theme.bg-primary;
 
@@ -324,20 +332,143 @@ export component MinerScreen inherits Rectangle {
                     }
                 }
 
+                // CPU threads stepper (default 1 = ~5% on a 16-core box)
                 HorizontalLayout {
                     alignment: space-between;
-                    Text {
-                        text: "Mining Threads";
-                        color: Theme.text-secondary;
-                        font-size: Theme.font-sm;
-                        vertical-alignment: center;
+                    spacing: Theme.spacing-sm;
+
+                    VerticalLayout {
+                        alignment: center;
+                        Text {
+                            text: "CPU Threads";
+                            color: Theme.text-secondary;
+                            font-size: Theme.font-sm;
+                        }
+                        Text {
+                            text: "live: " + root.thread-count + " · max: " + root.cpu-threads-max;
+                            color: Theme.text-muted;
+                            font-size: Theme.font-xs;
+                        }
                     }
-                    Text {
-                        text: root.thread-count;
-                        color: Theme.accent-cyan;
-                        font-size: Theme.font-sm;
-                        font-weight: 500;
-                        vertical-alignment: center;
+
+                    HorizontalLayout {
+                        spacing: 4px;
+
+                        Rectangle {
+                            width: 32px; height: 32px;
+                            border-radius: Theme.radius-sm;
+                            background: cpu-minus.has-hover ? Theme.bg-hover : Theme.bg-input;
+                            border-width: 1px; border-color: Theme.border;
+                            cpu-minus := TouchArea {
+                                clicked => {
+                                    if (root.cpu-threads-current > 1) {
+                                        root.set-cpu-threads(root.cpu-threads-current - 1);
+                                    }
+                                }
+                            }
+                            Text { text: "−"; color: Theme.text-primary; font-size: Theme.font-md; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+
+                        Rectangle {
+                            width: 56px; height: 32px;
+                            border-radius: Theme.radius-sm;
+                            background: Theme.accent-cyan.with-alpha(0.10);
+                            border-width: 1px;
+                            border-color: Theme.accent-cyan.with-alpha(0.4);
+                            Text {
+                                text: root.cpu-threads-current;
+                                color: Theme.accent-cyan;
+                                font-size: Theme.font-md;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Rectangle {
+                            width: 32px; height: 32px;
+                            border-radius: Theme.radius-sm;
+                            background: cpu-plus.has-hover ? Theme.bg-hover : Theme.bg-input;
+                            border-width: 1px; border-color: Theme.border;
+                            cpu-plus := TouchArea {
+                                clicked => {
+                                    if (root.cpu-threads-current < root.cpu-threads-max) {
+                                        root.set-cpu-threads(root.cpu-threads-current + 1);
+                                    }
+                                }
+                            }
+                            Text { text: "+"; color: Theme.text-primary; font-size: Theme.font-md; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                    }
+                }
+
+                // GPU intensity stepper (5% steps; default 5%)
+                if root.gpu-device-count != "0" : HorizontalLayout {
+                    alignment: space-between;
+                    spacing: Theme.spacing-sm;
+
+                    VerticalLayout {
+                        alignment: center;
+                        Text {
+                            text: "GPU Intensity";
+                            color: Theme.text-secondary;
+                            font-size: Theme.font-sm;
+                        }
+                        Text {
+                            text: "default low — increase if your GPU is idle";
+                            color: Theme.text-muted;
+                            font-size: Theme.font-xs;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 4px;
+
+                        Rectangle {
+                            width: 32px; height: 32px;
+                            border-radius: Theme.radius-sm;
+                            background: gpu-minus.has-hover ? Theme.bg-hover : Theme.bg-input;
+                            border-width: 1px; border-color: Theme.border;
+                            gpu-minus := TouchArea {
+                                clicked => {
+                                    if (root.gpu-intensity-current > 5) {
+                                        root.set-gpu-intensity(root.gpu-intensity-current - 5);
+                                    }
+                                }
+                            }
+                            Text { text: "−"; color: Theme.text-primary; font-size: Theme.font-md; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+
+                        Rectangle {
+                            width: 56px; height: 32px;
+                            border-radius: Theme.radius-sm;
+                            background: Theme.accent-purple.with-alpha(0.10);
+                            border-width: 1px;
+                            border-color: Theme.accent-purple.with-alpha(0.4);
+                            Text {
+                                text: root.gpu-intensity-current + "%";
+                                color: Theme.accent-purple;
+                                font-size: Theme.font-md;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Rectangle {
+                            width: 32px; height: 32px;
+                            border-radius: Theme.radius-sm;
+                            background: gpu-plus.has-hover ? Theme.bg-hover : Theme.bg-input;
+                            border-width: 1px; border-color: Theme.border;
+                            gpu-plus := TouchArea {
+                                clicked => {
+                                    if (root.gpu-intensity-current < 100) {
+                                        root.set-gpu-intensity(root.gpu-intensity-current + 5);
+                                    }
+                                }
+                            }
+                            Text { text: "+"; color: Theme.text-primary; font-size: Theme.font-md; horizontal-alignment: center; vertical-alignment: center; }
+                        }
                     }
                 }
 
