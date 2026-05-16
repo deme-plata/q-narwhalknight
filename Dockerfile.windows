@@ -1,6 +1,6 @@
 # Dockerfile for Windows cross-compilation of Q-NarwhalKnight Full Node + Slint GUI
 # Based on rust:latest with MinGW-w64 toolchain + Slint dependencies
-FROM rust:1.81-bookworm
+FROM rust:1.86-bookworm
 
 # Install MinGW-w64 cross-compilation toolchain + Slint GUI dependencies
 RUN dpkg --add-architecture i386 && \
