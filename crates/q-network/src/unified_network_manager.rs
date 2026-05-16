@@ -4040,9 +4040,32 @@ impl UnifiedNetworkManager {
                                                 }
                                                 match storage.get_qblocks_forward(start_height, limit).await {
                                                     Ok(fwd_blocks) if !fwd_blocks.is_empty() => {
-                                                        info!("🚀 [BLOCK-PACK] Forward-seek found {} blocks starting at {} for {}",
-                                                              fwd_blocks.len(), fwd_blocks[0].header.height, peer_clone);
-                                                        fwd_blocks
+                                                        // v10.9.37 ROOT-CAUSE FIX for "stuck at 26K" stall:
+                                                        // get_qblocks_forward seeks the FIRST available block at or
+                                                        // after start_height. If there's a storage-format discontinuity
+                                                        // (e.g. blocks 26001..100440 in old format that the iterator
+                                                        // can't traverse), this returns blocks from 100441+. The
+                                                        // requester's GAP_SKIP_REFUSED safety cap (10K) then rejects
+                                                        // them → infinite retry of the same range with the same misaligned
+                                                        // response. Diagnosed 2026-05-16 via canary log + Prometheus on
+                                                        // q-sync-test-v10936: requested 26001..=30520, server returned
+                                                        // heights 100441-105859, ingestion refused, height stuck at 26000.
+                                                        //
+                                                        // Fix: if forward-seek's first block is >10K past the requested
+                                                        // start, the server has a gap in the requested range — return an
+                                                        // empty response (the client treats this as "no blocks at this
+                                                        // range" and moves the request window forward via gap-fill).
+                                                        let first_h = fwd_blocks[0].header.height;
+                                                        const MAX_FORWARD_SKIP: u64 = 10_000;
+                                                        if first_h > start_height.saturating_add(MAX_FORWARD_SKIP) {
+                                                            warn!("🚧 [BLOCK-PACK] Forward-seek skipped {} blocks ({}→{}) — storage gap, refusing misaligned response to {} (would cause client stall)",
+                                                                  first_h.saturating_sub(start_height), start_height, first_h, peer_clone);
+                                                            vec![]
+                                                        } else {
+                                                            info!("🚀 [BLOCK-PACK] Forward-seek found {} blocks starting at {} for {}",
+                                                                  fwd_blocks.len(), first_h, peer_clone);
+                                                            fwd_blocks
+                                                        }
                                                     }
                                                     _ => {
                                                         // Forward-seek also empty — last resort: slow per-block scan.
