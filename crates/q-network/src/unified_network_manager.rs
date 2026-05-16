@@ -5521,6 +5521,27 @@ impl UnifiedNetworkManager {
             }
             // Process swarm events (connections, messages, etc.)
             Some(event) = self.swarm.next() => {
+                // v10.9.35 DEBUG: trace every SwarmEvent variant inside run_once() —
+                // the ACTIVE driver loop (run() above is dead code per main.rs:6250).
+                // Diagnoses "Swarm task inert" symptom where libp2p_*_total stays 0.
+                info!("🛰️  [SWARM-EVT-RUN-ONCE] {}", match &event {
+                    SwarmEvent::Behaviour(_) => "Behaviour",
+                    SwarmEvent::NewListenAddr { .. } => "NewListenAddr",
+                    SwarmEvent::ConnectionEstablished { .. } => "ConnectionEstablished",
+                    SwarmEvent::ConnectionClosed { .. } => "ConnectionClosed",
+                    SwarmEvent::OutgoingConnectionError { .. } => "OutgoingConnectionError",
+                    SwarmEvent::IncomingConnection { .. } => "IncomingConnection",
+                    SwarmEvent::IncomingConnectionError { .. } => "IncomingConnectionError",
+                    SwarmEvent::Dialing { .. } => "Dialing",
+                    SwarmEvent::ExpiredListenAddr { .. } => "ExpiredListenAddr",
+                    SwarmEvent::ListenerClosed { .. } => "ListenerClosed",
+                    SwarmEvent::ListenerError { .. } => "ListenerError",
+                    SwarmEvent::ExternalAddrConfirmed { .. } => "ExternalAddrConfirmed",
+                    SwarmEvent::ExternalAddrExpired { .. } => "ExternalAddrExpired",
+                    SwarmEvent::NewExternalAddrCandidate { .. } => "NewExternalAddrCandidate",
+                    SwarmEvent::NewExternalAddrOfPeer { .. } => "NewExternalAddrOfPeer",
+                    _ => "Other",
+                });
                 match event {
                     SwarmEvent::Behaviour(behaviour_event) => {
                         self.handle_behaviour_event(behaviour_event).await?;
