@@ -297,12 +297,25 @@ pub const HARDCODED_BOOTSTRAP_PEER: &str = "/ip4/89.149.241.126/tcp/9001/p2p/12D
 fn priority_ordered_bootstrap(
     map: &std::collections::HashMap<PeerId, Multiaddr>,
 ) -> Vec<(PeerId, Multiaddr)> {
+    priority_ordered_bootstrap_filtered(map, None)
+}
+
+/// v10.9.32: variant that filters out our own local_peer_id from the dial set.
+/// Without this, an Epsilon (whose own peer_id is in HARDCODED_BOOTSTRAP_PEERS)
+/// keeps trying to dial itself every cycle, the [PEER CHECK] fast-fail at line
+/// ~6070 emits a noisy ERROR, and a scheduler slot is wasted on every iteration.
+/// Found via Agent-A diagnostic 2026-05-16: "self-dial spam wastes [PEER CHECK]".
+pub(crate) fn priority_ordered_bootstrap_filtered(
+    map: &std::collections::HashMap<PeerId, Multiaddr>,
+    local: Option<&PeerId>,
+) -> Vec<(PeerId, Multiaddr)> {
     use libp2p::multiaddr::Protocol;
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::with_capacity(map.len());
     for hardcoded in HARDCODED_BOOTSTRAP_PEERS {
         if let Ok(addr) = hardcoded.parse::<Multiaddr>() {
             if let Some(Protocol::P2p(pid)) = addr.iter().last() {
+                if local == Some(&pid) { continue; } // skip self
                 if seen.insert(pid) {
                     if let Some(stored_addr) = map.get(&pid) {
                         out.push((pid, stored_addr.clone()));
@@ -315,6 +328,7 @@ fn priority_ordered_bootstrap(
     // DNS-discovered, known_peers.json). Their iteration order is non-deterministic but they
     // come AFTER the priority-listed peers.
     for (pid, addr) in map {
+        if local == Some(pid) { continue; } // skip self
         if seen.insert(*pid) {
             out.push((*pid, addr.clone()));
         }
@@ -2360,7 +2374,7 @@ impl UnifiedNetworkManager {
             // v10.9.16: Iterate in HARDCODED_BOOTSTRAP_PEERS declaration order so Epsilon
             // (priority #1, 10Gbit supernode) is dialed first deterministically.
             info!("🔧 [BOOTSTRAP-DIAG] Manually dialing {} bootstrap peers in priority order for immediate error visibility", bootstrap_count);
-            for (peer_id, addr) in priority_ordered_bootstrap(&bootstrap_peer_map) {
+            for (peer_id, addr) in priority_ordered_bootstrap_filtered(&bootstrap_peer_map, Some(&local_peer_id)) {
                 // 🔧 v1.0.88-beta: FIX - Skip dialing ourselves as bootstrap peer
                 // CRITICAL: When this node IS the bootstrap peer, it was trying to dial itself
                 // and getting blacklisted after 150 failures, breaking ALL P2P connectivity
