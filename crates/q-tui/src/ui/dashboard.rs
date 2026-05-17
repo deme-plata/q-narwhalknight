@@ -84,29 +84,25 @@ pub fn render(f: &mut Frame, app: &App) {
     // 🔥 Top Movers panel: 5 rows + header + borders = 7 rows tall.
     // Always rendered so users see the "No data yet" placeholder on a fresh node.
     let movers_height: u16 = 7;
-    let constraints = if metrics.is_syncing {
+    // Sync card is now always shown so operators can see blocks/sec even when fully synced.
+    // Sync Progress Bar = 4 rows, Sync Stats Card = 5 rows (Prometheus + stats API panel).
+    let constraints = {
         let mut v = vec![
             Constraint::Length(3),   // Header
-            Constraint::Length(4),   // Sync Progress Bar
+            Constraint::Length(4),   // Sync Progress Bar (always)
+            Constraint::Length(5),   // Sync Stats Card (Prometheus + stats API)
             Constraint::Length(9),   // Metrics cards
         ];
         if has_compute { v.push(Constraint::Length(5)); } // Compute Power cards
         if has_kparam { v.push(Constraint::Length(5)); }  // K-Parameter Health Gauge
-        v.push(Constraint::Length(movers_height));        // 🔥 Top Movers (NEW)
-        v.push(Constraint::Length(9));  // APOLLO Control Systems
-        v.push(Constraint::Min(4));    // Logs
-        v.push(Constraint::Length(3)); // Footer
-        v
-    } else {
-        let mut v = vec![
-            Constraint::Length(3),   // Header
-            Constraint::Length(9),   // Metrics cards
-        ];
-        if has_compute { v.push(Constraint::Length(5)); } // Compute Power cards
-        if has_kparam { v.push(Constraint::Length(5)); }  // K-Parameter Health Gauge
-        v.push(Constraint::Length(movers_height));        // 🔥 Top Movers (NEW)
-        v.push(Constraint::Length(7)); // TPS Chart or AI Metrics
-        v.push(Constraint::Min(8));   // Logs
+        v.push(Constraint::Length(movers_height));        // 🔥 Top Movers
+        if metrics.is_syncing {
+            v.push(Constraint::Length(9));  // APOLLO Control Systems
+            v.push(Constraint::Min(4));     // Logs
+        } else {
+            v.push(Constraint::Length(7));  // TPS Chart or AI Metrics
+            v.push(Constraint::Min(8));     // Logs
+        }
         v.push(Constraint::Length(3)); // Footer
         v
     };
@@ -137,14 +133,15 @@ pub fn render(f: &mut Frame, app: &App) {
 
     render_header(f, chunks[idx], app);
     idx += 1;
+    drop(metrics);
 
-    if metrics.is_syncing {
-        drop(metrics);
-        render_sync_progress(f, chunks[idx], app);
-        idx += 1;
-    } else {
-        drop(metrics);
-    }
+    // Sync progress + stats card are now always rendered so operators see
+    // blocks/sec, peers, bandwidth and Prometheus-sourced sync telemetry even
+    // when the node is fully synced.
+    render_sync_progress(f, chunks[idx], app);
+    idx += 1;
+    render_sync_stats_card(f, chunks[idx], app);
+    idx += 1;
 
     render_metrics_grid(f, chunks[idx], app);
     idx += 1;
@@ -955,13 +952,22 @@ fn render_recent_logs(f: &mut Frame, area: Rect, app: &App) {
 fn render_sync_progress(f: &mut Frame, area: Rect, app: &App) {
     let metrics = app.metrics.read().unwrap();
 
-    let progress = metrics.sync_progress_percent.clamp(0.0, 100.0);
+    // When fully synced (is_syncing=false) we still render the card so the
+    // operator can see the 10s sliding-window blocks/sec — but show 100% bar
+    // and "Synced" instead of an ETA.
+    let progress = if metrics.is_syncing {
+        metrics.sync_progress_percent.clamp(0.0, 100.0)
+    } else {
+        100.0
+    };
     // bar_width accounts for left/right border (2 chars)
     let inner_width = area.width.saturating_sub(2);
     let bar_width = (inner_width as f32 * progress / 100.0) as u16;
 
     let speed = metrics.sync_speed_blocks_per_sec;
-    let eta_str = if speed > 0.5 {
+    let eta_str = if !metrics.is_syncing {
+        "Synced".to_string()
+    } else if speed > 0.5 {
         let blocks_remaining = metrics.sync_target_height.saturating_sub(metrics.sync_current_height) as f32;
         let secs_remaining = blocks_remaining / speed;
         let mins = (secs_remaining / 60.0) as u32;
@@ -1061,15 +1067,117 @@ fn render_sync_progress(f: &mut Frame, area: Rect, app: &App) {
         ]),
     ];
 
+    let (title, title_color) = if metrics.is_syncing {
+        ("⏳ Blockchain Sync", Color::Yellow)
+    } else {
+        ("✓ Blockchain Sync", Color::Green)
+    };
     let sync_widget = Paragraph::new(sync_text)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("⏳ Blockchain Sync")
-                .style(Style::default().fg(Color::Yellow))
+                .title(title)
+                .style(Style::default().fg(title_color))
         );
 
     f.render_widget(sync_widget, area);
+}
+
+/// Second sync card showing Prometheus-style telemetry — peers, bandwidth,
+/// APOLLO Kalman/PID predictor state, mempool size, API rate, mining hashrate.
+/// All values come from the same `Metrics` struct already populated by
+/// `update_tui_metrics` from AppState atomics (the same source `/metrics`
+/// Prometheus endpoint reads).
+fn render_sync_stats_card(f: &mut Frame, area: Rect, app: &App) {
+    use ratatui::widgets::Wrap;
+    let metrics = app.metrics.read().unwrap();
+
+    // Compute the available inner width once. Lines that exceed it get
+    // truncated rather than wrapping (which was breaking the TUI layout
+    // after ~2 min when bandwidth/api/apollo values grew past their
+    // estimated column budget).
+    let inner_width = area.width.saturating_sub(2) as usize; // minus borders
+
+    // Bandwidth lines — show rate + cumulative. Keep formats SHORT.
+    let in_rate = Metrics::format_bytes_rate(metrics.bytes_in_per_sec);
+    let out_rate = Metrics::format_bytes_rate(metrics.bytes_out_per_sec);
+    let in_total = Metrics::format_bytes(metrics.total_bytes_in);
+    let out_total = Metrics::format_bytes(metrics.total_bytes_out);
+
+    // APOLLO Kalman predictor — when turbo sync is engaged. Cap fields so
+    // a runaway value doesn't blow the line width.
+    let kalman_str = if metrics.apollo_kalman_confidence > 0.0 {
+        format!(
+            "{:.0}Mb {}x {}K",
+            metrics.apollo_kalman_bandwidth_mbps.min(99999.0),
+            metrics.apollo_kalman_concurrency.max(1).min(99),
+            metrics.apollo_kalman_optimal_chunk_kb.min(9999),
+        )
+    } else {
+        "idle".to_string()
+    };
+
+    // PID target vs current. Same overflow-cap pattern.
+    let pid_str = if metrics.apollo_pid_target_bps > 0.0 {
+        format!(
+            "{:.0}/{:.0} b/s",
+            metrics.apollo_pid_current_bps.min(999_999.0),
+            metrics.apollo_pid_target_bps.min(999_999.0),
+        )
+    } else {
+        "-".to_string()
+    };
+
+    let api_total = metrics.engine_api_requests_total;
+
+    // Build each line as a single pre-formatted string so we can truncate
+    // to inner_width. Using individual styled spans lets long content sneak
+    // past ratatui's width accounting on emoji boundaries (cells per emoji
+    // vary terminal-to-terminal — this is what was breaking the box).
+    let line1_plain = format!(
+        "Peers {} (in:{} out:{})  RX {}/s  TX {}/s  total {}/{}",
+        metrics.peer_count, metrics.inbound_peers, metrics.outbound_peers,
+        in_rate, out_rate, in_total, out_total
+    );
+    let line2_plain = format!(
+        "Apollo {}  PID {}",
+        kalman_str, pid_str
+    );
+    let line3_plain = format!(
+        "Mining {} {:.1} kH/s  API {} req  Integrity {}",
+        if metrics.mining_enabled { "ON" } else { "off" },
+        metrics.hashrate / 1000.0,
+        api_total,
+        if metrics.engine_data_integrity_ok { "OK" } else { "PENDING" },
+    );
+
+    // Truncate each line to the inner width to prevent overflow into the
+    // border or wrapping past the card's reserved row count.
+    fn trunc(s: String, max: usize) -> String {
+        if s.chars().count() <= max { s }
+        else { s.chars().take(max.saturating_sub(1)).collect::<String>() + "…" }
+    }
+    let line1 = trunc(line1_plain, inner_width);
+    let line2 = trunc(line2_plain, inner_width);
+    let line3 = trunc(line3_plain, inner_width);
+
+    let lines = vec![
+        Line::from(Span::styled(line1, Style::default().fg(Color::White))),
+        Line::from(Span::styled(line2, Style::default().fg(Color::Magenta))),
+        Line::from(Span::styled(line3, Style::default().fg(Color::Cyan))),
+    ];
+
+    // wrap: clip (false) — we already truncated explicitly. If clip is enabled
+    // and our truncation guess was wrong, the widget still won't break out.
+    let widget = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Sync Stats (Prometheus+API)") // no emoji in title — varied terminal width caused 1-col drift
+                .style(Style::default().fg(Color::Cyan)),
+        )
+        .wrap(Wrap { trim: true });
+    f.render_widget(widget, area);
 }
 
 /// 🚀 v1.0.2: APOLLO Control Systems panel — shown during sync instead of TPS chart

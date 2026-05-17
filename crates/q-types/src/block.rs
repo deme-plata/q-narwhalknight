@@ -625,6 +625,43 @@ impl QBlock {
         blake3::hash(&header_bytes).into()
     }
 
+    /// v10.9.43: Batch BLAKE3 hash computation for a slice of blocks.
+    ///
+    /// Equivalent to `blocks.iter().map(|b| b.calculate_hash()).collect()` —
+    /// produces bit-identical output to `calculate_hash()` per block — but
+    /// dispatches in parallel via rayon and uses BLAKE3's `update_rayon`
+    /// (multi-threaded tree-mode SIMD) for any individual header that's large
+    /// enough (>=128 KiB; typical headers are 200-800B so they hit the
+    /// scalar `update` path, but parallelism across blocks still wins).
+    ///
+    /// Performance rationale: per-block headers are too small to benefit from
+    /// BLAKE3's internal SIMD chunking, so the win on a 2000-block pack comes
+    /// from thread-level parallelism over the rayon pool. Future call sites
+    /// that already have the serialized header bytes can avoid the bincode
+    /// round-trip; this helper preserves correctness equivalence with the
+    /// scalar path.
+    ///
+    /// Safety: must produce bit-identical hashes to `calculate_hash` — same
+    /// bincode encoding, same BLAKE3 mode. Verified by the unit test below.
+    pub fn batch_calculate_hashes(blocks: &[QBlock]) -> Vec<BlockHash> {
+        use rayon::prelude::*;
+        blocks
+            .par_iter()
+            .map(|b| {
+                let bytes = bincode::serialize(&b.header)
+                    .expect("Failed to serialize header");
+                if bytes.len() >= 128 * 1024 {
+                    // Tree-mode multi-threaded for very large inputs.
+                    let mut hasher = blake3::Hasher::new();
+                    hasher.update_rayon(&bytes);
+                    hasher.finalize().into()
+                } else {
+                    blake3::hash(&bytes).into()
+                }
+            })
+            .collect()
+    }
+
     /// Verify block integrity
     /// v0.6.0-beta: Added expected_network_id parameter to prevent cross-network pollution
     pub fn verify(&self, expected_network_id: Option<&str>) -> Result<(), String> {
@@ -1173,6 +1210,55 @@ mod tests {
 
         let distance = coord1.distance(&coord2);
         assert!(distance > 0.0);
+    }
+
+    #[test]
+    fn test_batch_calculate_hashes_matches_scalar() {
+        // v10.9.43: batch_calculate_hashes MUST produce bit-identical output
+        // to per-block calculate_hash. This is a load-bearing invariant: the
+        // merkle root computed via the batch path is compared against the
+        // root in AEGIS-QL block packs.
+        let mut blocks = Vec::with_capacity(100);
+        for i in 0..100u64 {
+            let mut prev = [0u8; 32];
+            prev[0..8].copy_from_slice(&i.to_le_bytes());
+            blocks.push(QBlock {
+                header: BlockHeader {
+                    height: i,
+                    phase: 5,
+                    network_id: "mainnet-genesis".to_string(),
+                    prev_block_hash: prev,
+                    solutions_root: [i as u8; 32],
+                    tx_root: [(i ^ 0xAA) as u8; 32],
+                    state_root: [(i ^ 0x55) as u8; 32],
+                    timestamp: 1_700_000_000 + i,
+                    dag_round: i,
+                    vdf_proof: VDFProof::default(),
+                    anchor_validator: None,
+                    proposer: [(i ^ 0x11) as u8; 32],
+                    producer_id: 0,
+                    total_difficulty: 1000u128 + i as u128,
+                    producer_public_key: None,
+                    producer_signature: None,
+                    coinbase_merkle_root: None,
+                    total_coinbase_reward: None,
+                    coinbase_count: None,
+                },
+                mining_solutions: vec![],
+                dag_parents: vec![],
+                quantum_metadata: QuantumMetadata::default(),
+                transactions: vec![],
+                balance_updates: vec![],
+                size_bytes: 0,
+            });
+        }
+
+        let batched = QBlock::batch_calculate_hashes(&blocks);
+        let scalar: Vec<BlockHash> = blocks.iter().map(|b| b.calculate_hash()).collect();
+        assert_eq!(batched.len(), scalar.len(), "length mismatch");
+        for i in 0..batched.len() {
+            assert_eq!(batched[i], scalar[i], "hash mismatch at index {}", i);
+        }
     }
 
     #[test]

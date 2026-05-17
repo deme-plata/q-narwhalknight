@@ -1269,6 +1269,19 @@ pub struct AppState {
     // that has gaps in its archive history (e.g. fresh checkpoint-synced node still doing backfill).
     pub current_height_atomic: Arc<std::sync::atomic::AtomicU64>,
 
+    /// v10.9.41: live chain-wide recursive lattice tip proof.
+    /// Updated by a background producer-hook task on every contiguous-height
+    /// advance: `tip_extend(prev, new_height, new_state_root, prev_hash, tx_root)`.
+    /// `proof_tip` handler reads this with a single RwLock::read().await — constant
+    /// time, no per-request work. `None` only during the brief window between
+    /// startup and the first extension (genesis anchor is recorded eagerly).
+    ///
+    /// Persistence: the proof is small (176 B) — stored in CF_MANIFEST under
+    /// key `lattice_tip_proof_v1` every 1000 blocks. On restart the producer
+    /// task loads it, calls `tip_extend` for any blocks committed since the last
+    /// persist (catch-up loop), and resumes live extension.
+    pub lattice_tip_proof: Arc<tokio::sync::RwLock<Option<q_recursive_proofs::LatticeTipProof>>>,
+
     // v1.0.2: Honest archive-height reporting. Reflects the highest height where every
     // block 1..=N is stored locally (contiguous storage), refreshed every 5s from
     // `get_highest_contiguous_block()`. Diverges from `current_height_atomic` whenever
@@ -2873,6 +2886,7 @@ impl AppState {
             operator_fees_earned_total: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v8.1.1
             operator_fee_tx_count: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v8.1.1
             current_height_atomic: Arc::new(std::sync::atomic::AtomicU64::new(initial_height)), // ⚡ v0.9.66-beta: Lock-free height (max-seen)
+            lattice_tip_proof: Arc::new(tokio::sync::RwLock::new(None)), // v10.9.41: chain-wide recursive lattice proof, initialised by producer-hook task
             contiguous_height_atomic: Arc::new(std::sync::atomic::AtomicU64::new(initial_height)), // v1.0.2: Honest contiguous height; refreshed every 5s
             peak_height_atomic: Arc::new(std::sync::atomic::AtomicU64::new(initial_height)), // v8.2.9: Peak height (never decreases)
             api_requests_served: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v10.9.19: engine_pulse counter
@@ -4263,6 +4277,7 @@ impl AppState {
             operator_fees_earned_total: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v8.1.1
             operator_fee_tx_count: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v8.1.1
             current_height_atomic: Arc::new(std::sync::atomic::AtomicU64::new(initial_height)), // ⚡ v0.9.66-beta: Lock-free height (max-seen)
+            lattice_tip_proof: Arc::new(tokio::sync::RwLock::new(None)), // v10.9.41: chain-wide recursive lattice proof, initialised by producer-hook task
             contiguous_height_atomic: Arc::new(std::sync::atomic::AtomicU64::new(initial_height)), // v1.0.2: Honest contiguous height; refreshed every 5s
             peak_height_atomic: Arc::new(std::sync::atomic::AtomicU64::new(initial_height)), // v8.2.9: Peak height (never decreases)
             api_requests_served: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v10.9.19: engine_pulse counter

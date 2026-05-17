@@ -70,6 +70,8 @@ pub mod avx512;
 pub mod benchmarks;
 pub mod parallel_ed25519;
 pub mod simd_merkle;  // Phase 3.1: SIMD-optimized Merkle tree computation
+pub mod dilithium_batch;  // v10.9.43 item 10: AVX2 batch Dilithium5 verify
+pub mod state_root_compare;  // v10.9.43 item 14: SIMD u8x32 compare + chain-linkage
 
 // Re-export key types
 pub use batch_verification::{BatchSignatureVerifier, BatchVerificationResult};

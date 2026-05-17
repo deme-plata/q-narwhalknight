@@ -145,42 +145,58 @@ pub async fn validation_stage(
             }
         }
 
-        // Batch verify Ed25519 signatures
+        // v10.9.43 item 11: Batch verify Ed25519 signatures via the shared
+        // q-crypto-simd ParallelEd25519Verifier. This replaces a duplicated
+        // inline rayon loop (~50 lines, ed25519_dalek directly) with a call
+        // into the central verifier that:
+        //   1. Shares the rayon pool with other SIMD operations,
+        //   2. Returns per-index validity (Vec<bool>) so we can attribute
+        //      failures back to the originating block,
+        //   3. Uses cache-friendly chunking (32-tx chunks) on large batches.
+        //
+        // Below-threshold batches still use the unchunked parallel path
+        // (`verify_batch_parallel`); above-threshold ones use the chunked
+        // variant for cache locality.
         let mut ed25519_failures: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
-        if ed25519_entries.len() >= config.parallel_sig_threshold {
-            use rayon::prelude::*;
-            use ed25519_dalek::{Verifier, VerifyingKey, Signature as Ed25519Sig};
+        if !ed25519_entries.is_empty() {
+            // Reshape (block_idx, msg, sig, pk) into the parallel-verifier
+            // input format. We need owned Vec<u8> per entry because the
+            // verifier API takes &[Vec<u8>] (chosen to dodge lifetime
+            // gymnastics on the hot path).
+            let messages: Vec<Vec<u8>> = ed25519_entries.iter().map(|(_, m, _, _)| m.clone()).collect();
+            let sigs:     Vec<Vec<u8>> = ed25519_entries.iter().map(|(_, _, s, _)| s.clone()).collect();
+            let pks:      Vec<Vec<u8>> = ed25519_entries.iter().map(|(_, _, _, p)| p.clone()).collect();
 
-            let results: Vec<(usize, bool)> = ed25519_entries.par_iter().map(|(block_idx, msg, sig, pk)| {
-                let valid = (|| -> Option<bool> {
-                    let pk_bytes: &[u8; 32] = pk.as_slice().try_into().ok()?;
-                    let sig_bytes: &[u8; 64] = sig.as_slice().try_into().ok()?;
-                    let pubkey = VerifyingKey::from_bytes(pk_bytes).ok()?;
-                    let signature = Ed25519Sig::from_bytes(sig_bytes);
-                    Some(pubkey.verify(msg, &signature).is_ok())
-                })().unwrap_or(false);
-                (*block_idx, valid)
-            }).collect();
+            let verifier = q_crypto_simd::parallel_ed25519::ParallelEd25519Verifier::new(
+                num_cpus::get().max(1)
+            );
 
-            for (block_idx, valid) in results {
-                if !valid {
-                    ed25519_failures.insert(block_idx);
+            let res = if ed25519_entries.len() >= config.parallel_sig_threshold {
+                verifier.verify_batch_chunked(&messages, &sigs, &pks)
+            } else {
+                verifier.verify_batch_parallel(&messages, &sigs, &pks)
+            };
+
+            match res {
+                Ok(r) => {
+                    // results[i] == true ⇔ ed25519_entries[i].0's block has a valid sig
+                    for (i, ok) in r.results.iter().enumerate() {
+                        if !ok {
+                            let block_idx = ed25519_entries[i].0;
+                            ed25519_failures.insert(block_idx);
+                        }
+                    }
                 }
-            }
-        } else {
-            use ed25519_dalek::{Verifier, VerifyingKey, Signature as Ed25519Sig};
-
-            for (block_idx, msg, sig, pk) in &ed25519_entries {
-                let valid = (|| -> Option<bool> {
-                    let pk_bytes: &[u8; 32] = pk.as_slice().try_into().ok()?;
-                    let sig_bytes: &[u8; 64] = sig.as_slice().try_into().ok()?;
-                    let pubkey = VerifyingKey::from_bytes(pk_bytes).ok()?;
-                    let signature = Ed25519Sig::from_bytes(sig_bytes);
-                    Some(pubkey.verify(msg, &signature).is_ok())
-                })().unwrap_or(false);
-                if !valid {
-                    ed25519_failures.insert(*block_idx);
+                Err(e) => {
+                    // Verifier returned an error (e.g. batch size mismatch
+                    // — should never happen since we built the three
+                    // vectors from the same iterator). Mark all blocks
+                    // that had Ed25519 sigs as failed to fail-closed.
+                    warn!("🚫 [PIPELINE] ParallelEd25519Verifier error: {} — failing all Ed25519 blocks closed", e);
+                    for (block_idx, _, _, _) in &ed25519_entries {
+                        ed25519_failures.insert(*block_idx);
+                    }
                 }
             }
         }

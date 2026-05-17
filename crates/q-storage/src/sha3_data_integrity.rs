@@ -294,14 +294,21 @@ impl Sha3DataIntegrity {
             return (0, vec![]);
         }
 
-        // Parallel verification using rayon - CPU-bound, no async needed
+        // Parallel verification using rayon - CPU-bound, no async needed.
+        // v10.9.43 item 14: replace the byte-by-byte `iter().all(|&b| b == 0)`
+        // zero-check with a SIMD u8x32 compare (single AVX2 instruction on
+        // Epsilon Xeon Gold). Falls back to portable SSE2/NEON via the
+        // `wide` crate on non-AVX2 hosts. ~3-5× faster on the inner check.
         let results: Vec<(u64, bool)> = blocks
             .par_iter()
             .map(|block| {
                 let height = block.header.height;
-                // Fast sync-safe verification: check block structure integrity
-                // Genesis block (height 0) has empty prev_hash, all others must have valid prev_hash
-                let is_valid = height == 0 || !block.header.prev_block_hash.iter().all(|&b| b == 0);
+                // Genesis block (height 0) has empty prev_hash, all others
+                // must have a non-zero prev_hash. SIMD compare.
+                let is_valid = height == 0
+                    || !q_crypto_simd::state_root_compare::simd_is_zero_32(
+                        &block.header.prev_block_hash,
+                    );
                 (height, is_valid)
             })
             .collect();
@@ -314,6 +321,45 @@ impl Sha3DataIntegrity {
             .collect();
 
         (valid_count, failed_heights)
+    }
+
+    /// v10.9.43 item 14: SIMD chain-linkage validation pass.
+    ///
+    /// For an in-order, contiguous block pack (`is_in_order == true` per
+    /// `turbo_sync.rs::apply_block_pack`), verifies that each block's
+    /// `prev_block_hash` equals the BLAKE3 hash of the previous block's
+    /// header. Closes a real correctness gap: today's chunk-ingest does
+    /// not perform this check, so a peer can ship a pack of individually-
+    /// valid but disconnected blocks and they all pass per-block integrity.
+    ///
+    /// Returns `Ok(())` if linkage is intact (or the slice has <2 blocks).
+    /// Returns `Err` with a human-readable message containing the offending
+    /// index/height on the first mismatch.
+    ///
+    /// Caller MUST only invoke this on in-order packs (skip for parallel-
+    /// sync packs that arrive out of order).
+    pub fn verify_chain_linkage(&self, blocks: &[QBlock]) -> Result<(), String> {
+        use q_crypto_simd::state_root_compare::{
+            verify_chain_linkage, ChainLinkageResult,
+        };
+        // Precompute hashes via the batched BLAKE3 helper (item 9) to
+        // avoid recomputing inside the pair loop.
+        let hashes = QBlock::batch_calculate_hashes(blocks);
+        match verify_chain_linkage(blocks, Some(&hashes)) {
+            ChainLinkageResult::Ok => Ok(()),
+            ChainLinkageResult::Mismatch {
+                index,
+                height,
+                observed_prev,
+                expected_prev,
+            } => Err(format!(
+                "chain-linkage mismatch at index {} (height {}): observed prev_block_hash={}... expected={}...",
+                index,
+                height,
+                hex::encode(&observed_prev[..8]),
+                hex::encode(&expected_prev[..8]),
+            )),
+        }
     }
 
     /// 🚀 v1.4.2-beta: PARALLEL SHA3 hash computation + verification
@@ -331,8 +377,11 @@ impl Sha3DataIntegrity {
                 let height = block.header.height;
                 let computed_hash = Self::compute_block_hash(block);
 
-                // Verify block structure integrity
-                let is_valid = height == 0 || !block.header.prev_block_hash.iter().all(|&b| b == 0);
+                // v10.9.43 item 14: SIMD u8x32 zero check (see notes above).
+                let is_valid = height == 0
+                    || !q_crypto_simd::state_root_compare::simd_is_zero_32(
+                        &block.header.prev_block_hash,
+                    );
 
                 (height, computed_hash, is_valid)
             })
@@ -830,4 +879,12 @@ mod tests {
         assert!(Sha3DataIntegrity::verify_height_proof(&proof2));
         assert_eq!(proof2.prev_proof_hash, Some(proof1.proof_hash));
     }
+
+    // v10.9.43 item 14: chain-linkage validation tests live in
+    // `tests/chain_linkage_integration_tests.rs` (separate compile unit).
+    // Inline tests in this module would require building the entire
+    // q-storage `--lib` test target, which has pre-existing schema-drift
+    // errors in unrelated sibling test fixtures (`balance_consensus.rs`,
+    // `manifest.rs`, `aegis_sync.rs`, etc.). The integration-test file
+    // compiles against q-storage's public API only and is unaffected.
 }

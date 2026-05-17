@@ -255,8 +255,8 @@ pub const HARDCODED_BOOTSTRAP_PEERS: &[&str] = &[
     "/dns4/quillon.xyz/tcp/9443/wss/p2p/12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM",
     // Server Delta - 1Gbit (second fastest)
     "/ip4/5.79.79.158/tcp/9001/p2p/12D3KooWLJJRvqo6mBoHLpgxVbGKfW3Jv39ziU4kz1adKFv93JbK",
-    // Server Gamma - 1Gbit
-    "/ip4/109.205.176.60/tcp/9001/p2p/12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH",
+    // Server Gamma - 1Gbit (peer ID refreshed 2026-05-16 — old `WFfZKfKbBnB5` rejected with WrongPeerId)
+    "/ip4/109.205.176.60/tcp/9001/p2p/12D3KooWHNhCWYmUiGGGXGGwTbDgTFZKrXBQ6LSZdGKhkpDici1U",
     // Server Beta - 100Mbit (DHT coordinator, gossipsub anchor)
     "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWKyjQUYXJQ8y8WdHbtMVxsNt4a412Ccqdr1oKjSY8fy93",
 ];
@@ -1370,6 +1370,16 @@ pub struct UnifiedNetworkManager {
     block_pack_response_rx: mpsc::UnboundedReceiver<(u64, q_types::BlockPackResponse)>,
     /// v1.2.7-beta: Pending response channels indexed by request ID for async responses
     pending_response_channels: Arc<std::sync::Mutex<HashMap<u64, libp2p::request_response::ResponseChannel<q_types::BlockPackResponse>>>>,
+    /// v10.9.41: Permanent-gap declarations tally. Key = (gap_start, gap_end), value =
+    /// set of PeerIds that have declared this gap. The Message::Response handler
+    /// counts unique reporters; once Q_GAP_QUORUM (default 2) is reached the
+    /// `gap_advance_tx` broadcast fires so turbo_sync can advance past the gap.
+    gap_declarations: Arc<std::sync::Mutex<HashMap<(u64, u64), std::collections::HashSet<PeerId>>>>,
+    /// v10.9.41: Broadcast channel for quorum-met gap declarations. Wired to
+    /// turbo_sync's ingest loop, which advances `contiguous_height` to `gap_end+1`.
+    /// Optional because turbo_sync is itself optional; None means gaps are logged
+    /// but not acted on (server-only deployments don't sync).
+    gap_advance_tx: Option<tokio::sync::broadcast::Sender<(u64, u64)>>,
     /// v1.2.7-beta: Counter for generating unique request IDs for async response tracking
     next_async_request_id: Arc<std::sync::atomic::AtomicU64>,
     /// v9.1.8: Base semaphore for concurrent block-pack responses (prevents OOM during initial sync).
@@ -1426,6 +1436,22 @@ pub struct UnifiedNetworkManager {
     /// Browser peers connect via WSS and need guaranteed block delivery.
     /// add_explicit_peer() ensures gossipsub always sends messages to them.
     websocket_peers: HashSet<PeerId>,
+
+    /// v10.9.44: Per-peer CUBIC AIMD congestion window (item 3). Replaces the
+    /// fixed `CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER` constant with a dynamic
+    /// per-peer window. cwnd grows by +1 on success, *0.7 on failure. The
+    /// scheduler resizes (or, at minimum, gates by) the per-peer semaphore
+    /// using this value via `per_peer_cwnd()`.
+    ///
+    /// `Arc<parking_lot::Mutex<…>>` because Thompson-style mutation must be
+    /// O(µs) and tokio::RwLock has too much overhead for the chunk hot path.
+    pub cubic_registry: Arc<parking_lot::Mutex<q_sync_optimizers::CubicRegistry<PeerId>>>,
+
+    /// v10.9.44: Per-peer EWMV (exponentially-weighted moving variance) over
+    /// RTT (item 7). Drives the per-peer adaptive timeout via `mean + 3σ`,
+    /// clamped to [5s, 120s]. Falls back to `Q_P2P_REQUEST_TIMEOUT` (or 60s)
+    /// when no samples have been observed yet.
+    pub ewmv_rtt: Arc<DashMap<PeerId, q_sync_optimizers::EwmvRtt>>,
 }
 
 // SAFETY: UnifiedNetworkManager is Sync because:
@@ -1895,12 +1921,25 @@ impl UnifiedNetworkManager {
                 let gossipsub_config = gossipsub::ConfigBuilder::default()
                     .heartbeat_interval(Duration::from_millis(heartbeat_ms))  // ⚡ Adaptive heartbeat
                     .validation_mode(ValidationMode::Strict)
+                    // v10.9.43: REVERTED v10.9.42's 2 MB cap back to 1 MB. The bigger cap was
+                    // suspected (with reason) of accelerating the memory leak — prod NRestarts
+                    // jumped from ~2/hr (v10.9.41) to ~6/hr (v10.9.42). Reverting one knob at
+                    // a time so we can attribute future leak changes correctly.
                     .max_transmit_size(1 * 1024 * 1024)  // 1 MB per message
                     .flood_publish(flood_publish)   // ⚡ Adaptive flood publish
                     .mesh_outbound_min(mesh_outbound_min)  // ⚡ Adaptive outbound
                     .mesh_n_low(mesh_n_low)         // ⚡ Adaptive min peers
                     .mesh_n(mesh_n)                 // ⚡ Adaptive target peers
                     .mesh_n_high(mesh_n_high)       // ⚡ Adaptive max peers
+                    // v10.9.42: backpressure knobs to slow the 150 MB/min memory leak in v10.9.41.
+                    // Per DeepSeek review §"Change 2 enhancements": the per-stream send_queue_size is
+                    // effectively unbounded by default in libp2p-gossipsub; hard-cap it at 512 per peer
+                    // so we drop messages instead of buffering them indefinitely. gossip_lazy(2) halves
+                    // the lazy fanout (default ~6) to reduce the number of peers a single publish replicates
+                    // to. max_messages_per_rpc caps per-batch sizes to prevent the queue drain from emitting
+                    // huge RPCs that take long to serialise + sign.
+                    .gossip_lazy(2)
+                    .max_messages_per_rpc(Some(1024))
                     .message_id_fn(|message: &gossipsub::Message| {
                         // 🔥 v2.0.0: Use blake3 for cryptographic message deduplication
                         // This prevents hash collision attacks on gossipsub
@@ -2717,6 +2756,8 @@ impl UnifiedNetworkManager {
             block_pack_response_tx: block_pack_response_tx,
             block_pack_response_rx: block_pack_response_rx,
             pending_response_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            gap_declarations: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            gap_advance_tx: None, // wired by set_gap_advance_tx() from main.rs after turbo_sync is built
             next_async_request_id: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             block_pack_semaphore: Arc::new(tokio::sync::Semaphore::new(BLOCK_PACK_BASE_PERMITS)), // v9.1.8 + adaptive: base, always-on permits (OOM-safe during sync)
             block_pack_extra_semaphore: Arc::new(tokio::sync::Semaphore::new(BLOCK_PACK_EXTRA_PERMITS)), // adaptive: only acquired when fully synced
@@ -2733,6 +2774,9 @@ impl UnifiedNetworkManager {
             pq_session_manager: Arc::new(crate::pq_handshake::PQSessionManager::new()),
             qkd_session_manager: Arc::new(crate::qkd_transport::QKDSessionManager::new()),
             websocket_peers: HashSet::new(),
+            // v10.9.44: per-peer CUBIC cwnd + EWMV RTT
+            cubic_registry: Arc::new(parking_lot::Mutex::new(q_sync_optimizers::CubicRegistry::new())),
+            ewmv_rtt: Arc::new(DashMap::new()),
         })
     }
 
@@ -2793,6 +2837,75 @@ impl UnifiedNetworkManager {
               BLOCK_PACK_BASE_PERMITS, BLOCK_PACK_EXTRA_PERMITS);
     }
 
+    // ════════════════════════════════════════════════════════════════════════
+    // v10.9.44 — q-sync-optimizers: per-peer CUBIC cwnd + EWMV adaptive timeout
+    // ════════════════════════════════════════════════════════════════════════
+
+    /// Current per-peer CUBIC cwnd (additive-increase / multiplicative-decrease
+    /// window). Used by the chunk scheduler to gate the number of in-flight
+    /// block-pack requests for a given peer.
+    ///
+    /// Defaults to `CWND_INITIAL` (16) for unknown peers. Always ≥ 1.
+    pub fn per_peer_cwnd(&self, peer: &PeerId) -> u32 {
+        self.cubic_registry.lock().cwnd(peer)
+    }
+
+    /// Effective per-peer in-flight cap = `min(static cap, cubic_cwnd)`.
+    ///
+    /// The static cap is `CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER` (4). CUBIC can
+    /// only *lower* the effective cap — never raise it above the static value.
+    /// This keeps the existing "never flood a peer faster than its server-side
+    /// semaphore can drain" invariant in place while letting CUBIC shrink the
+    /// effective cap on failures.
+    pub fn effective_per_peer_inflight(&self, peer: &PeerId) -> u32 {
+        self.per_peer_cwnd(peer)
+            .min(CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER as u32)
+            .max(1)
+    }
+
+    /// Record a successful block-pack response from `peer` with measured RTT.
+    /// Drives CUBIC additive-increase and updates the EWMV RTT estimator.
+    pub fn record_block_pack_success(&self, peer: &PeerId, rtt: Duration) {
+        self.cubic_registry.lock().on_success(peer);
+        self.ewmv_rtt
+            .entry(*peer)
+            .or_insert_with(q_sync_optimizers::EwmvRtt::new)
+            .record(rtt.as_secs_f64() * 1000.0);
+    }
+
+    /// Record a failure (timeout, transport error, validation failure) for
+    /// `peer`. Triggers CUBIC multiplicative-decrease.
+    pub fn record_block_pack_failure(&self, peer: &PeerId) {
+        self.cubic_registry.lock().on_loss(peer);
+    }
+
+    /// Adaptive per-peer request timeout from EWMV RTT.
+    ///
+    /// Returns `mean + 3σ` clamped to `[5s, 120s]`. Falls back to
+    /// `Q_P2P_REQUEST_TIMEOUT` (or 60 s) for peers with no samples.
+    pub fn block_pack_timeout(&self, peer: &PeerId) -> Duration {
+        match self.ewmv_rtt.get(peer) {
+            Some(est) => {
+                let ms = est.value().timeout_ms();
+                Duration::from_millis(ms as u64)
+            }
+            None => {
+                let fallback_secs: u64 = std::env::var("Q_P2P_REQUEST_TIMEOUT")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(60);
+                Duration::from_secs(fallback_secs)
+            }
+        }
+    }
+
+    /// Reset all q-sync-optimizers per-peer state for `peer` (call on
+    /// reconnect to give a fresh start).
+    pub fn reset_sync_optimizer_state(&self, peer: &PeerId) {
+        self.cubic_registry.lock().reset(peer);
+        self.ewmv_rtt.remove(peer);
+    }
+
     /// Set channel for forwarding synced blocks to consensus (Phase 3b)
     pub fn set_block_sync_channel(&mut self, tx: mpsc::UnboundedSender<Vec<q_types::block::QBlock>>) {
         self.block_sync_tx = Some(tx);
@@ -2813,12 +2926,27 @@ impl UnifiedNetworkManager {
         // Combined with batch_size increase (100 → 1000), this gives ~100 blocks/second
         // vs previous ~3.3 blocks/second (30x improvement)
         let mut health_check_interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
+        health_check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        // v4.3.0-beta: Queue drain interval - flush priority gossipsub queue to swarm
-        let mut queue_drain_interval = tokio::time::interval(tokio::time::Duration::from_millis(1));
+        // v4.3.0-beta: Queue drain interval - flush priority gossipsub queue to swarm.
+        // v10.9.40: bumped 1ms → 10ms AND set MissedTickBehavior::Skip. At 1ms the
+        // queue_drain branch was ALWAYS Ready in the biased select!, starving
+        // `self.swarm.select_next_some()` (declared at slot #5). Default Burst behaviour
+        // made it worse: when a single drain took 50 ms (publish + sign + mesh lookup
+        // for a batch of 10 messages), the next 50 ticks accumulated and fired back-to-back,
+        // blocking the swarm poll for hundreds of milliseconds. Skip means a missed tick
+        // is silently dropped; the next .tick() returns at the next 10 ms boundary.
+        // Symptom (diagnosed 2026-05-16 via tshark + ss -tn on Epsilon): TCP Recv-Q at
+        // port 9001 filled to 500+ KB per peer (kernel buffering unread block-pack
+        // requests), qnk_peers_connected stuck at 0, fork_detector saw 0 peers even
+        // though tshark confirmed sustained PSH+ACK traffic from peers. With Skip+10ms,
+        // worst-case starvation is one drain (50 ms), then swarm gets next slot.
+        let mut queue_drain_interval = tokio::time::interval(tokio::time::Duration::from_millis(10));
+        queue_drain_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         // v4.3.0-beta: Peer scoring interval - update gossipsub scores from latency data
         let mut peer_scoring_interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
+        peer_scoring_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         // v10.1.5: QKD key refresh timer (aligned with QuantumBeacon 240s circuit rotation)
         let mut qkd_refresh_interval = tokio::time::interval(Duration::from_secs(240));
@@ -2907,8 +3035,14 @@ impl UnifiedNetworkManager {
                                 }
                             }
                             Err(e) => {
-                                // Upgraded from debug to warn for visibility
-                                warn!("⚠️ [QUEUE DRAIN] Failed to publish {} ({} bytes): {}", topic_str, data_len, e);
+                                // Rate-limited at debug — a solo node generates 30+ failures/sec
+                                // for miner-stats/finality-certs/mining-challenges because the mesh
+                                // is empty (NoPeersSubscribedToTopic) or full (Send Queue full).
+                                // Both are routine when peers are missing; logging at warn level
+                                // floods syslog and exacerbates the libp2p starvation we're trying
+                                // to diagnose. Operators still see the underlying root cause via
+                                // peer_count=0 in metrics + dashboard.
+                                debug!("⚠️ [QUEUE DRAIN] Failed to publish {} ({} bytes): {}", topic_str, data_len, e);
                             }
                         }
                     }
@@ -4025,12 +4159,10 @@ impl UnifiedNetworkManager {
                                                 fast_blocks
                                             }
                                             Ok(fast_blocks) => {
-                                                // Partial or empty — try forward-seek FIRST (O(1) seek, fast for
-                                                // historical DAG-format blocks), then fall back to the slow
-                                                // per-block multi-format scan only as a last resort.
-                                                // Root-cause fix: old code ran get_qblocks_range_any_format
-                                                // (200 × 3 prefix-scans = ~60s) before get_qblocks_forward
-                                                // (single iterator seek = <1s), causing 30s timeouts on peers.
+                                                // v10.9.42: ALWAYS probe forward-seek with a 5s timeout when fast-path
+                                                // returns less than `limit`. The v10.9.41 trigger was unreachable in
+                                                // prod — live test 2026-05-17 saw ZERO permanent_gap declarations
+                                                // across 30 min of canaries hammering the gap edge at h=25,987.
                                                 if fast_blocks.is_empty() {
                                                     info!("🔍 [BLOCK-PACK] Fast path empty for {}-{}, trying forward-seek...",
                                                           start_height, start_height + limit as u64);
@@ -4038,47 +4170,78 @@ impl UnifiedNetworkManager {
                                                     info!("🔍 [BLOCK-PACK] Fast path partial ({}/{}) for {}-{}, trying forward-seek...",
                                                           fast_blocks.len(), limit, start_height, start_height + limit as u64);
                                                 }
-                                                match storage.get_qblocks_forward(start_height, limit).await {
+                                                // v10.9.43: REMOVED the 5s timeout from v10.9.42 — it fired constantly
+                                                // in prod, cutting off the EXACT path that detects gaps. Forward-seek
+                                                // through a 219 GB RocksDB takes >5s; the per-request handler runs in
+                                                // a spawned task gated by block_pack_semaphore so a slow seek doesn't
+                                                // block the main loop. Let it run as long as needed.
+                                                info!("🔬 [BLOCK-PACK] Probing forward-seek for {}-{} (limit {}, our_height={})",
+                                                      start_height, start_height + limit as u64, limit, our_height);
+                                                let fwd_start = std::time::Instant::now();
+                                                let fwd_result = storage.get_qblocks_forward(start_height, limit).await;
+                                                let fwd_elapsed = fwd_start.elapsed();
+                                                match fwd_result {
                                                     Ok(fwd_blocks) if !fwd_blocks.is_empty() => {
-                                                        // v10.9.37 ROOT-CAUSE FIX for "stuck at 26K" stall:
-                                                        // get_qblocks_forward seeks the FIRST available block at or
-                                                        // after start_height. If there's a storage-format discontinuity
-                                                        // (e.g. blocks 26001..100440 in old format that the iterator
-                                                        // can't traverse), this returns blocks from 100441+. The
-                                                        // requester's GAP_SKIP_REFUSED safety cap (10K) then rejects
-                                                        // them → infinite retry of the same range with the same misaligned
-                                                        // response. Diagnosed 2026-05-16 via canary log + Prometheus on
-                                                        // q-sync-test-v10936: requested 26001..=30520, server returned
-                                                        // heights 100441-105859, ingestion refused, height stuck at 26000.
-                                                        //
-                                                        // Fix: if forward-seek's first block is >10K past the requested
-                                                        // start, the server has a gap in the requested range — return an
-                                                        // empty response (the client treats this as "no blocks at this
-                                                        // range" and moves the request window forward via gap-fill).
                                                         let first_h = fwd_blocks[0].header.height;
+                                                        let last_h = fwd_blocks.last().unwrap().header.height;
                                                         const MAX_FORWARD_SKIP: u64 = 10_000;
+                                                        info!("🔬 [BLOCK-PACK] Forward-seek returned {} blocks (heights {}-{}) in {:.2}s; skip={}, threshold={}",
+                                                              fwd_blocks.len(), first_h, last_h, fwd_elapsed.as_secs_f32(),
+                                                              first_h.saturating_sub(start_height), MAX_FORWARD_SKIP);
                                                         if first_h > start_height.saturating_add(MAX_FORWARD_SKIP) {
-                                                            warn!("🚧 [BLOCK-PACK] Forward-seek skipped {} blocks ({}→{}) — storage gap, refusing misaligned response to {} (would cause client stall)",
-                                                                  first_h.saturating_sub(start_height), start_height, first_h, peer_clone);
-                                                            vec![]
+                                                            info!("🚧 [GAP-DECL] Declaring permanent gap {}-{} to peer {} ({}-block skip)",
+                                                                  start_height, first_h.saturating_sub(1), peer_clone,
+                                                                  first_h.saturating_sub(start_height));
+                                                            let response = q_types::BlockPackResponse::with_permanent_gap(
+                                                                our_height,
+                                                                start_height,
+                                                                first_h.saturating_sub(1),
+                                                            );
+                                                            if let Err(e) = response_tx.send((async_req_id, response)) {
+                                                                error!("❌ [BLOCK-PACK] Failed to send gap-declaration response: {}", e);
+                                                            }
+                                                            return;
                                                         } else {
                                                             info!("🚀 [BLOCK-PACK] Forward-seek found {} blocks starting at {} for {}",
                                                                   fwd_blocks.len(), first_h, peer_clone);
                                                             fwd_blocks
                                                         }
                                                     }
-                                                    _ => {
-                                                        // Forward-seek also empty — last resort: slow per-block scan.
-                                                        // This path is only hit when blocks exist in a format that
-                                                        // the DAG iterator cannot traverse (very rare / old data).
+                                                    Ok(_empty) => {
+                                                        info!("🔬 [BLOCK-PACK] Forward-seek returned EMPTY in {:.2}s; our_height={}, start={}",
+                                                              fwd_elapsed.as_secs_f32(), our_height, start_height);
+                                                        // v10.9.42: forward-seek empty AND fast-path partial — if we know
+                                                        // our_height >> start, declare a conservative gap. Otherwise fall
+                                                        // through to legacy multi-format scan.
+                                                        if our_height > start_height.saturating_add(10_000) {
+                                                            info!("🚧 [GAP-DECL] Forward-seek empty but our_height={} >> start={} — declaring gap (probe-empty path)",
+                                                                  our_height, start_height);
+                                                            let gap_end = start_height
+                                                                .saturating_add(100_000)
+                                                                .min(our_height.saturating_sub(1));
+                                                            let response = q_types::BlockPackResponse::with_permanent_gap(
+                                                                our_height,
+                                                                start_height,
+                                                                gap_end,
+                                                            );
+                                                            if let Err(e) = response_tx.send((async_req_id, response)) {
+                                                                error!("❌ [BLOCK-PACK] Failed to send gap-declaration response: {}", e);
+                                                            }
+                                                            return;
+                                                        }
+                                                        // Legacy multi-format scan as last resort.
                                                         match storage.get_qblocks_range_any_format(start_height, limit).await {
                                                             Ok(any_blocks) if !any_blocks.is_empty() => {
                                                                 info!("✅ [BLOCK-PACK] Multi-format fallback found {} blocks for {}",
                                                                       any_blocks.len(), peer_clone);
                                                                 any_blocks
                                                             }
-                                                            _ => fast_blocks // Nothing found anywhere
+                                                            _ => fast_blocks,
                                                         }
+                                                    }
+                                                    Err(e) => {
+                                                        warn!("❌ [BLOCK-PACK] get_qblocks_forward error in {:.2}s: {}", fwd_elapsed.as_secs_f32(), e);
+                                                        fast_blocks
                                                     }
                                                 }
                                             }
@@ -4127,6 +4290,49 @@ impl UnifiedNetworkManager {
                                 if let Ok(resp_bytes) = bincode::serialized_size(&response) {
                                     self.metrics.rx_bytes_total
                                         .fetch_add(resp_bytes, std::sync::atomic::Ordering::Relaxed);
+                                }
+
+                                // v10.9.41: process permanent-gap declarations.
+                                // When the server's forward-seek hit a network-wide pruning-bug
+                                // gap (e.g. 26,001..=100,440), it returns no blocks but sets
+                                // `permanent_gap`. The client records the gap in the per-peer
+                                // tally; once Q_GAP_QUORUM independent peers report the same gap,
+                                // the ingest path is told to advance `contiguous_height` to
+                                // gap_end+1 so sync can resume from the next available block.
+                                //
+                                // Single-peer trust mode (operator override): set
+                                // Q_GAP_TRUST_SINGLE_PEER=1 to accept a gap declaration from any
+                                // one peer without quorum. Useful when only one peer in the
+                                // network has the post-gap data.
+                                if let Some((gap_start, gap_end)) = response.permanent_gap {
+                                    let trust_single = std::env::var("Q_GAP_TRUST_SINGLE_PEER")
+                                        .ok()
+                                        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                                        .unwrap_or(false);
+                                    let quorum: usize = std::env::var("Q_GAP_QUORUM")
+                                        .ok()
+                                        .and_then(|v| v.parse().ok())
+                                        .unwrap_or(2);
+                                    let mut tally = self.gap_declarations.lock().unwrap();
+                                    let entry = tally.entry((gap_start, gap_end)).or_default();
+                                    entry.insert(peer);
+                                    let reporter_count = entry.len();
+                                    let qmet = trust_single || reporter_count >= quorum;
+                                    drop(tally);
+                                    warn!(
+                                        "🚧 [BLOCK-PACK] Peer {} declared permanent gap {}-{} \
+                                         (reporters: {}, quorum: {}, trust_single: {}, qmet: {})",
+                                        peer, gap_start, gap_end, reporter_count, quorum,
+                                        trust_single, qmet
+                                    );
+                                    if qmet {
+                                        // Signal turbo_sync to advance past the gap. We use the
+                                        // gap_advance_tx broadcast channel so the ingest loop can
+                                        // pick it up without us holding the swarm event loop.
+                                        if let Some(tx) = &self.gap_advance_tx {
+                                            let _ = tx.send((gap_start, gap_end));
+                                        }
+                                    }
                                 }
                                 // v1.0.45-beta: Update known network height for progress display
                                 // v8.1.6: Sanity check — reject cross-chain height poisoning
@@ -6242,6 +6448,12 @@ impl UnifiedNetworkManager {
                             CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER,
                         )))
                         .clone();
+                    // v10.9.44: keep a non-consuming handle on the semaphore so we can
+                    // read `available_permits()` after `try_acquire_owned()` (which moves
+                    // its `Arc<Semaphore>` receiver into the permit). Both Arcs point at
+                    // the same underlying Semaphore, so the static-availability read is
+                    // accurate.
+                    let client_sem_for_read = Arc::clone(&client_sem);
                     let permit = match client_sem.try_acquire_owned() {
                         Ok(p) => p,
                         Err(_) => {
@@ -6259,6 +6471,29 @@ impl UnifiedNetworkManager {
                             return;
                         }
                     };
+
+                    // v10.9.44: CUBIC AIMD gate — if cwnd has shrunk below the
+                    // currently-active in-flight count for this peer, treat the
+                    // dispatch as throttled and let the scheduler back off.
+                    // Computed as a *soft* gate: the static semaphore still
+                    // enforces the upper bound, but CUBIC can dynamically lower
+                    // the effective cap based on observed failure rate.
+                    let effective_cap = self.effective_per_peer_inflight(&peer);
+                    let static_available = client_sem_for_read.available_permits() as u32;
+                    let in_flight_now = (CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER as u32)
+                        .saturating_sub(static_available);
+                    if in_flight_now > effective_cap {
+                        debug!(
+                            "🚦 [CUBIC] cwnd-throttle: peer {} cwnd={} static_inflight={} static_cap={} — backing off",
+                            peer, effective_cap, in_flight_now, CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER
+                        );
+                        // Permit `permit` is dropped here, freeing the static slot.
+                        let _ = response_tx.send(Err(anyhow::anyhow!(
+                            "{}: CUBIC cwnd ({}) lower than current in-flight ({}) for peer {}",
+                            CLIENT_THROTTLE_MARKER, effective_cap, in_flight_now, peer
+                        )));
+                        return;
+                    }
 
                     info!("📤 [TURBO SYNC DIRECT] Sending request-response to peer {}", peer);
                     info!("   Request: blocks {}-{} ({} blocks)", start_height, end_height, end_height - start_height + 1);
@@ -6295,6 +6530,11 @@ impl UnifiedNetworkManager {
                     //       this guard the permit could leak forever and starve all
                     //       future requests to that peer.
                     let response_tx_clone = response_tx;
+                    // v10.9.44: clone Arc handles into the task so we can record
+                    // CUBIC + EWMV per-peer outcomes when the round trip ends.
+                    let cubic_for_task = Arc::clone(&self.cubic_registry);
+                    let ewmv_for_task = Arc::clone(&self.ewmv_rtt);
+                    let req_start = std::time::Instant::now();
                     tokio::spawn(async move {
                         // Permit holder — moved in, drops when this task ends.
                         // This is what guarantees the per-peer slot is released
@@ -6307,14 +6547,25 @@ impl UnifiedNetworkManager {
                         match tokio::time::timeout(Duration::from_secs(30), internal_rx).await {
                             Ok(Ok(blocks)) => {
                                 info!("✅ [TURBO SYNC DIRECT] Received {} blocks via request-response", blocks.len());
+                                // v10.9.44: success → CUBIC additive-increase + EWMV update.
+                                let rtt = req_start.elapsed();
+                                cubic_for_task.lock().on_success(&peer);
+                                ewmv_for_task
+                                    .entry(peer)
+                                    .or_insert_with(q_sync_optimizers::EwmvRtt::new)
+                                    .record(rtt.as_secs_f64() * 1000.0);
                                 let _ = response_tx_clone.send(Ok(blocks));
                             }
                             Ok(Err(_)) => {
                                 warn!("❌ [TURBO SYNC DIRECT] Response channel dropped (transport error or peer disconnect)");
+                                // v10.9.44: transport failure → CUBIC multiplicative-decrease.
+                                cubic_for_task.lock().on_loss(&peer);
                                 let _ = response_tx_clone.send(Err(anyhow::anyhow!("Request-response channel closed")));
                             }
                             Err(_) => {
                                 warn!("⏰ [TURBO SYNC DIRECT] Response wait exceeded 30s safety timeout — releasing client semaphore permit");
+                                // v10.9.44: timeout → CUBIC multiplicative-decrease.
+                                cubic_for_task.lock().on_loss(&peer);
                                 let _ = response_tx_clone.send(Err(anyhow::anyhow!("Request-response timeout (30s safety cap)")));
                             }
                         }

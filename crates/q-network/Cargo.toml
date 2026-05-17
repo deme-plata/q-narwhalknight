@@ -126,6 +126,10 @@ lazy_static = "1.4"
 # Prometheus metrics for Tor integration
 prometheus = { workspace = true }
 
+# v10.9.44: Scientific sync toolkit (CUBIC AIMD, EWMV RTT, Markov peer-state, peer-fail predictor)
+q-sync-optimizers = { path = "../q-sync-optimizers" }
+parking_lot = { workspace = true }
+
 [dev-dependencies]
 tokio-test = "0.4"
 proptest = { workspace = true }

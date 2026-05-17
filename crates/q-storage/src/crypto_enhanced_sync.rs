@@ -242,16 +242,15 @@ impl IncrementalBlockVerifier {
         // ========================================================================
         // OPTIMIZATION #1: Pre-compute all block hashes in parallel using rayon
         // This moves expensive hash computation OUTSIDE the lock
+        //
+        // v10.9.43: routed through QBlock::batch_calculate_hashes, which uses
+        // BLAKE3's update_rayon (tree-mode SIMD) for large headers and falls
+        // back to rayon-parallel scalar dispatch for small headers. Produces
+        // bit-identical output to the previous inline path.
         // ========================================================================
-        let block_hashes: Vec<Result<[u8; 32], String>> = blocks
-            .par_iter()
-            .map(|block| {
-                match bincode::serialize(&block.header) {
-                    Ok(bytes) => Ok(*blake3::hash(&bytes).as_bytes()),
-                    Err(e) => Err(format!("Serialization failed: {}", e)),
-                }
-            })
-            .collect();
+        let computed_hashes: Vec<[u8; 32]> = QBlock::batch_calculate_hashes(blocks);
+        let block_hashes: Vec<Result<[u8; 32], String>> =
+            computed_hashes.into_iter().map(Ok).collect();
 
         // ========================================================================
         // OPTIMIZATION #2: Single lock acquisition for entire batch

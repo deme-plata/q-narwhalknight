@@ -201,6 +201,7 @@ pub mod price_history;
 pub mod contract_events;  // v2.9.2-beta: Contract event persistence for VM decentralization
 pub mod transaction;
 pub mod turbo_sync;
+pub mod known_gaps;  // ✅ v10.9.44 - Q_KNOWN_PERMANENT_GAPS env-driven gap-skip (deterministic 26K→100K fix)
 // TEMPORARILY DISABLED: Circular dependency with q-api-server (sync_activation module)
 // TODO v1.0.15: Fix turbo_sync_peer_bridge circular dependency
 // pub mod turbo_sync_peer_bridge;

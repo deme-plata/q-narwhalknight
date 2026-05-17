@@ -65,6 +65,10 @@ tower_governor = "0.3"  # Governor integration for Axum/Tower
 
 # Async runtime
 tokio = { workspace = true }
+# v10.9.43: tokio-console scheduler-tracing subscriber (opt-in via --features tokio-console).
+# Adds per-task scheduler visibility. See [features].tokio-console below for the build-time
+# RUSTFLAGS requirement (--cfg tokio_unstable).
+console-subscriber = { version = "0.4", optional = true }
 futures = { workspace = true }
 
 # 🔍 v1.0.17-beta-v3: Tokio Console for deep deadlock debugging
@@ -269,6 +273,16 @@ resonance = ["q-resonance", "q-network/resonance"]
 # ✨ v1.0.58-beta: Enable FROST threshold signing for validator committees
 # Note: q-crypto-advanced is now always included for SQIsign consensus
 advanced-crypto = []  # Feature flag kept for backwards compat, but dep is always included
+
+# v10.9.43: tokio-console support (opt-in via --features tokio-console).
+# Adds per-task scheduler visibility — would have caught the v10.9.40 swarm starvation
+# in 30 seconds vs the hours of tshark + ss digging it actually took. Connect with:
+#   tokio-console http://node:6669
+# Build with:
+#   RUSTFLAGS="--cfg tokio_unstable" cargo build --release --features tokio-console
+# Default-OFF because tokio_unstable affects ABI and the subscriber adds per-poll
+# overhead (~3-5% throughput hit). Operators enable only during diagnostic sessions.
+tokio-console = ["dep:console-subscriber"]
 
 # 🚀 v1.4.12-beta: GPU acceleration for AI inference
 # Build with: cargo build --release --features cuda

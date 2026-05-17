@@ -45,6 +45,12 @@ pub mod circuits;
 pub mod gadgets;
 pub mod light_client;
 pub mod protocol;
+pub mod tip_proof_v1;
+
+pub use tip_proof_v1::{
+    anchor as tip_anchor, extend as tip_extend, verify as tip_verify, LatticeTipProof,
+    VerifyError as TipVerifyError,
+};
 
 // Re-exports
 pub use circuits::{

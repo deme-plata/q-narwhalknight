@@ -2484,43 +2484,56 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     // Initialize privacy-preserving log redaction (reads Q_LOG_PRIVACY env var)
     q_log_privacy::init_privacy_level();
 
-    // v10.9.43: tokio-console scheduler-tracing subscriber (opt-in via `--features tokio-console`).
-    // When enabled, exposes a gRPC server on TOKIO_CONSOLE_BIND (default 0.0.0.0:6669) that the
-    // tokio-console CLI connects to for per-task scheduler visibility. Required RUSTFLAGS:
-    //   RUSTFLAGS="--cfg tokio_unstable" cargo build --release --features tokio-console
-    // No-op when the feature is off — production builds pay zero overhead.
+    // v10.9.44 FIX: tokio-console scheduler-tracing subscriber (opt-in via `--features tokio-console`).
+    // The v10.9.43 version called `console_subscriber::init()` which installs ITS OWN global
+    // tracing dispatcher — then the existing `tracing_subscriber::registry().init()` below
+    // panicked with "a global default trace dispatcher has already been set". Fixed by
+    // building the console layer separately and composing it INTO the existing registry
+    // alongside fmt + env_filter, so there's exactly ONE global dispatcher.
+    // Connect with: tokio-console http://<this-host>:6669 (bind via TOKIO_CONSOLE_BIND env).
+    #[cfg(feature = "tokio-console")]
+    let tokio_console_layer = Some(console_subscriber::ConsoleLayer::builder()
+        .with_default_env()
+        .spawn());
     #[cfg(feature = "tokio-console")]
     {
-        console_subscriber::init();
         eprintln!("🔍 [TOKIO-CONSOLE] gRPC server bound on TOKIO_CONSOLE_BIND (default 0.0.0.0:6669)");
         eprintln!("                   Connect with: tokio-console http://<this-host>:6669");
     }
+    #[cfg(not(feature = "tokio-console"))]
+    let tokio_console_layer: Option<()> = None;
+    let _ = &tokio_console_layer; // silence unused warning in cfg-disabled paths
 
-    // Initialize tracing (re-enabled since tokio-console is disabled)
+    // Initialize tracing
     if !tui_mode {
         // Normal logging mode - suppress verbose third-party library output
+        let env_filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            "q_api_server=debug,\
+                 q_storage=info,\
+                 q_network=debug,\
+                 tower_http=debug,\
+                 candle=warn,\
+                 candle_core=warn,\
+                 candle_nn=warn,\
+                 mistralrs=warn,\
+                 tokenizers=warn,\
+                 safetensors=warn,\
+                 hf_hub=warn"
+                .into()
+        });
+        let fmt_layer = tracing_subscriber::fmt::layer().event_format(
+            q_log_privacy::RedactedFormatter::new(tracing_subscriber::fmt::format::Format::default())
+        );
+        #[cfg(feature = "tokio-console")]
         tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                    // Our crates: debug level for detailed logs
-                    // Third-party AI/ML libs: warn level to suppress verbose tensor/byte array output
-                    "q_api_server=debug,\
-                         q_storage=info,\
-                         q_network=debug,\
-                         tower_http=debug,\
-                         candle=warn,\
-                         candle_core=warn,\
-                         candle_nn=warn,\
-                         mistralrs=warn,\
-                         tokenizers=warn,\
-                         safetensors=warn,\
-                         hf_hub=warn"
-                        .into()
-                }),
-            )
-            .with(tracing_subscriber::fmt::layer().event_format(
-                q_log_privacy::RedactedFormatter::new(tracing_subscriber::fmt::format::Format::default())
-            ))
+            .with(tokio_console_layer.unwrap())
+            .with(env_filter)
+            .with(fmt_layer)
+            .init();
+        #[cfg(not(feature = "tokio-console"))]
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(fmt_layer)
             .init();
     } else {
         // TUI mode - route tracing into TUI ring buffer instead of stdout.
@@ -2534,24 +2547,38 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             TUI_LOG_BUFFER.with(|cell| {
                 *cell.borrow_mut() = Some(tui_log_buffer.clone());
             });
+            let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "q_api_server=info,q_network=info,tower_http=warn".into());
+            let tui_layer = q_tui::TuiLogLayer::new(tui_log_buffer);
+            #[cfg(feature = "tokio-console")]
             tracing_subscriber::registry()
-                .with(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| "q_api_server=info,q_network=info,tower_http=warn".into()),
-                )
-                .with(q_tui::TuiLogLayer::new(tui_log_buffer))
+                .with(tokio_console_layer.unwrap())
+                .with(env_filter)
+                .with(tui_layer)
+                .init();
+            #[cfg(not(feature = "tokio-console"))]
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(tui_layer)
                 .init();
         }
         #[cfg(not(feature = "tui"))]
         {
+            let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "q_api_server=info,q_network=info,tower_http=warn".into());
+            let fmt_layer = tracing_subscriber::fmt::layer().event_format(
+                q_log_privacy::RedactedFormatter::new(tracing_subscriber::fmt::format::Format::default())
+            );
+            #[cfg(feature = "tokio-console")]
             tracing_subscriber::registry()
-                .with(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| "q_api_server=info,q_network=info,tower_http=warn".into()),
-                )
-                .with(tracing_subscriber::fmt::layer().event_format(
-                    q_log_privacy::RedactedFormatter::new(tracing_subscriber::fmt::format::Format::default())
-                ))
+                .with(tokio_console_layer.unwrap())
+                .with(env_filter)
+                .with(fmt_layer)
+                .init();
+            #[cfg(not(feature = "tokio-console"))]
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(fmt_layer)
                 .init();
         }
     }
