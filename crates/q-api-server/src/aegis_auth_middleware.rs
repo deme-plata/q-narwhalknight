@@ -182,21 +182,28 @@ pub async fn verify_founder_signature(
 ) -> Result<Response, StatusCode> {
     info!("🔐 AEGIS-QL authentication check initiated");
 
-    // Localhost bypass: CLI running on the same machine can use X-Admin-Local header
-    // This is safe because only server admins have SSH access to localhost
+    // Localhost bypass: CLI running on the same machine can use X-Admin-Local header.
+    // SECURITY (issue #58): fail closed when ConnectInfo is missing. The previous
+    // `.unwrap_or(true)` defaulted to "local" if no SocketAddr was attached, which is
+    // exploitable behind any proxy that strips connection metadata (or in any tower-only
+    // pipeline that constructs Requests without ConnectInfo). For Unix-socket deployments,
+    // set `Q_ENABLE_LOCAL_ADMIN_BYPASS=1` so the bypass can engage; otherwise the bypass
+    // is rejected and the request must pass normal AEGIS founder authentication.
     if request.headers().get("X-Admin-Local").map(|v| v.as_bytes()) == Some(b"true") {
-        // Verify request actually comes from localhost
         let is_local = request
             .extensions()
             .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
             .map(|ci| ci.0.ip().is_loopback())
-            .unwrap_or(true); // Default to true if ConnectInfo not available (unix socket, etc.)
+            .unwrap_or_else(|| {
+                // Fail closed unless explicitly opted in.
+                std::env::var("Q_ENABLE_LOCAL_ADMIN_BYPASS").ok().as_deref() == Some("1")
+            });
 
         if is_local {
             info!("✅ Localhost admin bypass - X-Admin-Local header from loopback address");
             return Ok(next.run(request).await);
         } else {
-            warn!("❌ X-Admin-Local header from non-localhost IP, rejecting");
+            warn!("❌ X-Admin-Local header rejected — non-loopback address or missing ConnectInfo (set Q_ENABLE_LOCAL_ADMIN_BYPASS=1 for unix-socket deployments)");
         }
     }
 
