@@ -1234,19 +1234,21 @@ pub async fn add_liquidity(
         token1_canonical
     );
 
-    // Check if a pool already exists for this token pair (with same provider)
-    // FIXED: Now uses normalized canonical addresses for comparison, not raw request strings
+    // Look up the existing pool for this token pair.
+    // v10.9.52 CRITICAL FIX: do NOT gate on `pool.provider == provider`. Any
+    // wallet must be allowed to LP into an existing pool — the `provider` field
+    // only records the original creator, and per-LP shares are tracked via
+    // generate_lp_token_address(pool_id) credits in token_balances. Gating
+    // here previously made non-creator LPs miss the "augment existing" branch
+    // and fall through to `pools.insert(new_pool_id, pool)` at the create-path,
+    // which silently OVERWROTE the pool with the new caller's amounts as the
+    // entire reserve — destroying the original LP's position.
     let pool_id = {
         let pools = state.liquidity_pools.read().await;
 
         // First, try to find by deterministic pool ID (fastest)
         if pools.contains_key(&deterministic_pool_id) {
-            let pool = pools.get(&deterministic_pool_id).unwrap();
-            if pool.provider == provider {
-                Some(deterministic_pool_id.clone())
-            } else {
-                None // Pool exists but different provider
-            }
+            Some(deterministic_pool_id.clone())
         } else {
             // Fallback: Search by normalized token addresses (for legacy pools)
             pools
@@ -1260,7 +1262,7 @@ pub async fn add_liquidity(
                     let legacy_matches = (p.token0 == request.token0 && p.token1 == request.token1)
                         || (p.token0 == request.token1 && p.token1 == request.token0);
 
-                    (pool_matches || legacy_matches) && p.provider == provider
+                    pool_matches || legacy_matches
                 })
                 .map(|p| p.pool_id.clone())
         }
