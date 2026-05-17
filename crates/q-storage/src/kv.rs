@@ -743,6 +743,16 @@ impl RocksDBKV {
 
         // 🚨 Additional safety settings
         opts.set_paranoid_checks(true); // Extra validation
+        // v10.9.55: Defense-in-depth against kill-9-during-compaction loss
+        // (Mar 2026 incident lost ~8M historical blocks because compaction output SSTs
+        // were referenced by MANIFEST but never fully written).
+        //   - force_consistency_checks: catches MANIFEST↔SST divergence at DB open time
+        //     and refuses to start rather than serving a silently-corrupted view.
+        //   - paranoid_file_checks: per-SST consistency check at open (small startup
+        //     cost on 48K-SST DBs; ~seconds, well worth it for catching half-written
+        //     output SSTs from interrupted compactions).
+        opts.set_force_consistency_checks(true);
+        opts.set_paranoid_file_checks(true);
 
         // Background tuning
         opts.set_max_background_flushes(2);
@@ -813,6 +823,10 @@ impl RocksDBKV {
         opts.set_write_buffer_size(Self::scale_write_buffer(64)); // 64MB write buffer
         opts.set_target_file_size_base(128 * 1024 * 1024); // 128MB target file size
         opts.set_max_write_buffer_number(4); // v8.6.0: quad buffering for write throughput
+
+        // v10.9.55: defense-in-depth (see CF_BLOCKS for full rationale).
+        opts.set_force_consistency_checks(true);
+        opts.set_paranoid_file_checks(true);
 
         Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(CF_TRANSACTIONS, opts)
@@ -1327,6 +1341,11 @@ impl RocksDBKV {
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
         opts.set_write_buffer_size(Self::scale_write_buffer(16)); // 16MB - one per block
         opts.set_max_write_buffer_number(2);
+
+        // v10.9.55: defense-in-depth (see CF_BLOCKS for full rationale).
+        opts.set_force_consistency_checks(true);
+        opts.set_paranoid_file_checks(true);
+
         Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_QUANTUM_METADATA, opts)
     }

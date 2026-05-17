@@ -511,7 +511,7 @@ const HTTP_BOOTSTRAP_PEERS: &[&str] = &[
 /// peer IDs to register them in turbo sync. This mapping enables that.
 fn bootstrap_peer_id_for_url(url: &str) -> Option<&'static str> {
     if url.contains("89.149.241.126") { Some("12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM") }      // Epsilon (verified 2026-04-25)
-    else if url.contains("5.79.79.158") { Some("12D3KooWLJJRvqo6mBoHLpgxVbGKfW3Jv39ziU4kz1adKFv93JbK") }     // Delta
+    else if url.contains("5.79.79.158") { Some("12D3KooWPg1GsUhYtZdzN37NcLQCz2PXJ3GssKMtELwvMvHFrjTt") }     // Delta
     else if url.contains("109.205.176.60") { Some("12D3KooWHNhCWYmUiGGGXGGwTbDgTFZKrXBQ6LSZdGKhkpDici1U") }  // Gamma (verified live 2026-05-16; was 12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH which caused WrongPeerId rejections)
     else if url.contains("185.182.185.227") { Some("12D3KooWKyjQUYXJQ8y8WdHbtMVxsNt4a412Ccqdr1oKjSY8fy93") } // Beta (verified 2026-04-25)
     else if url.contains("quillon.xyz") { Some("12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM") }    // quillon.xyz = Epsilon
@@ -528,7 +528,7 @@ fn is_allowed_balance_update_origin(origin_node_id: &str) -> bool {
         "12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH", // Server Beta (legacy, for compat)
         "12D3KooWHNhCWYmUiGGGXGGwTbDgTFZKrXBQ6LSZdGKhkpDici1U", // Server Gamma (current peer ID, verified 2026-05-16)
         "12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH", // Server Gamma (Mainnet 2026.1.3 legacy, kept for backwards-compat allowlist)
-        "12D3KooWLJJRvqo6mBoHLpgxVbGKfW3Jv39ziU4kz1adKFv93JbK", // Server Delta (Mainnet 2026.1.3)
+        "12D3KooWPg1GsUhYtZdzN37NcLQCz2PXJ3GssKMtELwvMvHFrjTt", // Server Delta (Mainnet 2026.1.3)
         "12D3KooWBHTC9FhwwXmvH7YA17YHTLdcxbtLWg2U5xEtxSeqX7jc", // Server Beta (legacy, for compat)
         "12D3KooWFqPX9TkvF43eyDeH9wwxYTSfnBn8AobLJeA7xRnmpPcv", // Server Gamma (legacy, for compat)
     ];
@@ -1156,135 +1156,26 @@ async fn update_tui_metrics(
         q_tui::metrics::ReadinessMode::Bootstrapping
     };
 
-    // 🔥 Top Movers: ingest any blocks newer than `top_movers_last_ingested_height`
-    // into the ring buffer, then compute the top 5 |Δ| wallets across the window.
-    // Cheap in steady state (0-3 new blocks per second at 1 bps). Catch-up after
-    // a stall is bounded to 60 blocks per tick so we never block >50ms.
-    //
-    // Anti-patterns avoided:
-    //   - No `unwrap()` — all storage lookups use `if let Ok(...) = ...` and skip
-    //     gaps silently rather than panicking.
-    //   - No DB scan if no new blocks (early-return when last_ingested == tip).
-    //   - Ring is capped at RING_CAPACITY via pop_front before push_back.
-    use std::collections::HashMap;
-    const RING_CAPACITY: usize = 60;
-    const MAX_INGEST_PER_TICK: u64 = 60; // bound catch-up so we don't hog the tick
+    // v10.9.53 — Top movers card removed (private chain, low signal).
+    // The compute block + the recent_balance_deltas ring are no longer populated
+    // here; the AppState fields are kept for ABI stability but read by no card.
 
-    let top_movers_computed: Vec<q_tui::metrics::TopMover> = {
-        let last_ingested = app_state
-            .top_movers_last_ingested_height
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let tip = block_height;
-
-        // Only walk storage when we're actually behind. On a freshly started node
-        // last_ingested=0 and tip>0 — we'll backfill up to MAX_INGEST_PER_TICK
-        // blocks here, and pick up the rest on subsequent ticks.
-        if tip > last_ingested {
-            let start = last_ingested.saturating_add(1);
-            // Inclusive end height: don't scan beyond tip, and bound per tick.
-            let end = tip.min(start.saturating_add(MAX_INGEST_PER_TICK).saturating_sub(1));
-
-            // Pull each new block's transactions and build a per-block delta map.
-            // We hold the write lock on `recent_balance_deltas` for the full ingest
-            // loop — this is fine because the deque has no readers except this
-            // task. If contention ever appears we can move to per-block locking.
-            if let Ok(mut deltas) = app_state.recent_balance_deltas.try_write() {
-                for h in start..=end {
-                    let qblock = match app_state.storage_engine.get_qblock_by_height(h).await {
-                        Ok(Some(b)) => b,
-                        // Missing or unreadable — record an empty map so the ring stays in lockstep with height
-                        _ => {
-                            // Maintain ring length even on gap so old entries age out correctly.
-                            if deltas.len() >= RING_CAPACITY {
-                                deltas.pop_front();
-                            }
-                            deltas.push_back(HashMap::new());
-                            continue;
-                        }
-                    };
-
-                    let mut block_deltas: HashMap<q_types::Address, i128> = HashMap::new();
-                    for tx in &qblock.transactions {
-                        // Sender loses (amount + fee), receiver gains amount.
-                        // i128 holds u128 fine for QUG values (max ~21M * 1e24 ≈ 2.1e31, fits).
-                        let amount_i128 = tx.amount as i128;
-                        let fee_i128 = tx.fee as i128;
-                        // Skip coinbase-style txs that have a synthetic `from` of all zeros:
-                        // they would otherwise pollute the leaderboard with a single
-                        // hot "zero address" entry. Real wallets have non-zero prefixes.
-                        let from_is_zero = tx.from.iter().all(|b| *b == 0);
-                        if !from_is_zero {
-                            let entry = block_deltas.entry(tx.from).or_insert(0);
-                            *entry = entry.saturating_sub(amount_i128.saturating_add(fee_i128));
-                        }
-                        let entry = block_deltas.entry(tx.to).or_insert(0);
-                        *entry = entry.saturating_add(amount_i128);
-                    }
-
-                    if deltas.len() >= RING_CAPACITY {
-                        deltas.pop_front();
-                    }
-                    deltas.push_back(block_deltas);
-                }
-
-                // Advance pointer to the last height we tried to ingest. Even on a
-                // missing block we still consumed that slot (with an empty map),
-                // so the next tick should start from `end+1`.
-                app_state
-                    .top_movers_last_ingested_height
-                    .store(end, std::sync::atomic::Ordering::Relaxed);
+    // v10.9.53 — Lattice tip-proof snapshot for the TRUSTLESS BOOTSTRAP PROOF card.
+    let (tip_proof_version, tip_proof_anchor, tip_proof_tip, tip_proof_step, tip_proof_size) = {
+        let lp = app_state.lattice_tip_proof.read().await;
+        match lp.as_ref() {
+            Some(proof) => {
+                let bytes = bincode::serialize(proof).map(|v| v.len() as u64).unwrap_or(0);
+                (
+                    "tip-blake3-fs-v1.1".to_string(),
+                    proof.anchor_height,
+                    proof.tip_height,
+                    proof.step_count,
+                    bytes,
+                )
             }
-            // If try_write() failed, just skip ingestion this tick — we'll catch up
-            // on the next one. Better than blocking the metrics task.
+            None => ("placeholder-v0".to_string(), 0u64, 0u64, 0u64, 0u64),
         }
-
-        // Aggregate per-address totals across the ring buffer.
-        // Cost: O(60 × avg_unique_addrs_per_block). At ~100 addrs/block ≈ 6k ops, well under 50ms.
-        // On rare contention we yield an empty aggregate (= empty top_movers); other
-        // metric fields still update normally.
-        let aggregated: HashMap<q_types::Address, i128> =
-            if let Ok(deltas) = app_state.recent_balance_deltas.try_read() {
-                let mut acc: HashMap<q_types::Address, i128> = HashMap::new();
-                for block_map in deltas.iter() {
-                    for (addr, delta) in block_map.iter() {
-                        let entry = acc.entry(*addr).or_insert(0);
-                        *entry = entry.saturating_add(*delta);
-                    }
-                }
-                acc
-            } else {
-                HashMap::new()
-            };
-
-        // Take top 5 by |delta|, descending. Tiebreak by address for determinism.
-        let mut ranked: Vec<(q_types::Address, i128)> = aggregated
-            .into_iter()
-            .filter(|(_, d)| *d != 0)
-            .collect();
-        ranked.sort_by(|a, b| {
-            b.1.abs().cmp(&a.1.abs()).then_with(|| a.0.cmp(&b.0))
-        });
-        ranked.truncate(5);
-
-        ranked
-            .into_iter()
-            .map(|(addr, delta)| {
-                let mut prefix = [0u8; 4];
-                prefix.copy_from_slice(&addr[..4]);
-                let direction = if delta > 0 {
-                    q_tui::metrics::MoverDirection::Up
-                } else if delta < 0 {
-                    q_tui::metrics::MoverDirection::Down
-                } else {
-                    q_tui::metrics::MoverDirection::Flat
-                };
-                q_tui::metrics::TopMover {
-                    addr_prefix: prefix,
-                    delta_qug: delta,
-                    direction,
-                }
-            })
-            .collect()
     };
 
     // Now acquire write lock and update metrics (no awaits here!)
@@ -1330,9 +1221,21 @@ async fn update_tui_metrics(
         metrics.archive_lowest_indexed_height = readiness_contiguous;
         metrics.archive_complete = readiness_archive_complete;
 
-        // 🔥 Top Movers: hand the pre-computed Vec<TopMover> over. Owned move
-        // is fine — we built it above outside the lock.
-        metrics.top_movers = top_movers_computed;
+        // v10.9.53 — Top movers field removed from Metrics. Tip-proof telemetry
+        // populated for the new TRUSTLESS BOOTSTRAP PROOF card.
+        metrics.tip_proof_version = tip_proof_version;
+        metrics.tip_proof_anchor_height = tip_proof_anchor;
+        metrics.tip_proof_tip_height = tip_proof_tip;
+        metrics.tip_proof_step_count = tip_proof_step;
+        metrics.tip_proof_size_bytes = tip_proof_size;
+        // tip_proof_last_verify_us is set by the /api/v1/proof/tip handler
+
+        // v10.9.53 — Mine-to-this-node card data. Port defaults to 8080 (canonical);
+        // host + peer_id are populated once at startup, left alone here.
+        if metrics.mine_endpoint_port == 0 {
+            metrics.mine_endpoint_port = 8080;
+        }
+        metrics.mine_reward_per_block_qug = emission_rate;
 
         // v10.9.19 — Engine pulse: snapshot current atomics for the TUI's K-parameter
         // gauge engine-pulse card. Computed cheaply from existing AppState atomics.
@@ -2484,43 +2387,56 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     // Initialize privacy-preserving log redaction (reads Q_LOG_PRIVACY env var)
     q_log_privacy::init_privacy_level();
 
-    // v10.9.43: tokio-console scheduler-tracing subscriber (opt-in via `--features tokio-console`).
-    // When enabled, exposes a gRPC server on TOKIO_CONSOLE_BIND (default 0.0.0.0:6669) that the
-    // tokio-console CLI connects to for per-task scheduler visibility. Required RUSTFLAGS:
-    //   RUSTFLAGS="--cfg tokio_unstable" cargo build --release --features tokio-console
-    // No-op when the feature is off — production builds pay zero overhead.
+    // v10.9.44 FIX: tokio-console scheduler-tracing subscriber (opt-in via `--features tokio-console`).
+    // The v10.9.43 version called `console_subscriber::init()` which installs ITS OWN global
+    // tracing dispatcher — then the existing `tracing_subscriber::registry().init()` below
+    // panicked with "a global default trace dispatcher has already been set". Fixed by
+    // building the console layer separately and composing it INTO the existing registry
+    // alongside fmt + env_filter, so there's exactly ONE global dispatcher.
+    // Connect with: tokio-console http://<this-host>:6669 (bind via TOKIO_CONSOLE_BIND env).
+    #[cfg(feature = "tokio-console")]
+    let tokio_console_layer = Some(console_subscriber::ConsoleLayer::builder()
+        .with_default_env()
+        .spawn());
     #[cfg(feature = "tokio-console")]
     {
-        console_subscriber::init();
         eprintln!("🔍 [TOKIO-CONSOLE] gRPC server bound on TOKIO_CONSOLE_BIND (default 0.0.0.0:6669)");
         eprintln!("                   Connect with: tokio-console http://<this-host>:6669");
     }
+    #[cfg(not(feature = "tokio-console"))]
+    let tokio_console_layer: Option<()> = None;
+    let _ = &tokio_console_layer; // silence unused warning in cfg-disabled paths
 
-    // Initialize tracing (re-enabled since tokio-console is disabled)
+    // Initialize tracing
     if !tui_mode {
         // Normal logging mode - suppress verbose third-party library output
+        let env_filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            "q_api_server=debug,\
+                 q_storage=info,\
+                 q_network=debug,\
+                 tower_http=debug,\
+                 candle=warn,\
+                 candle_core=warn,\
+                 candle_nn=warn,\
+                 mistralrs=warn,\
+                 tokenizers=warn,\
+                 safetensors=warn,\
+                 hf_hub=warn"
+                .into()
+        });
+        let fmt_layer = tracing_subscriber::fmt::layer().event_format(
+            q_log_privacy::RedactedFormatter::new(tracing_subscriber::fmt::format::Format::default())
+        );
+        #[cfg(feature = "tokio-console")]
         tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                    // Our crates: debug level for detailed logs
-                    // Third-party AI/ML libs: warn level to suppress verbose tensor/byte array output
-                    "q_api_server=debug,\
-                         q_storage=info,\
-                         q_network=debug,\
-                         tower_http=debug,\
-                         candle=warn,\
-                         candle_core=warn,\
-                         candle_nn=warn,\
-                         mistralrs=warn,\
-                         tokenizers=warn,\
-                         safetensors=warn,\
-                         hf_hub=warn"
-                        .into()
-                }),
-            )
-            .with(tracing_subscriber::fmt::layer().event_format(
-                q_log_privacy::RedactedFormatter::new(tracing_subscriber::fmt::format::Format::default())
-            ))
+            .with(tokio_console_layer.unwrap())
+            .with(env_filter)
+            .with(fmt_layer)
+            .init();
+        #[cfg(not(feature = "tokio-console"))]
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(fmt_layer)
             .init();
     } else {
         // TUI mode - route tracing into TUI ring buffer instead of stdout.
@@ -2534,24 +2450,38 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             TUI_LOG_BUFFER.with(|cell| {
                 *cell.borrow_mut() = Some(tui_log_buffer.clone());
             });
+            let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "q_api_server=info,q_network=info,tower_http=warn".into());
+            let tui_layer = q_tui::TuiLogLayer::new(tui_log_buffer);
+            #[cfg(feature = "tokio-console")]
             tracing_subscriber::registry()
-                .with(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| "q_api_server=info,q_network=info,tower_http=warn".into()),
-                )
-                .with(q_tui::TuiLogLayer::new(tui_log_buffer))
+                .with(tokio_console_layer.unwrap())
+                .with(env_filter)
+                .with(tui_layer)
+                .init();
+            #[cfg(not(feature = "tokio-console"))]
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(tui_layer)
                 .init();
         }
         #[cfg(not(feature = "tui"))]
         {
+            let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "q_api_server=info,q_network=info,tower_http=warn".into());
+            let fmt_layer = tracing_subscriber::fmt::layer().event_format(
+                q_log_privacy::RedactedFormatter::new(tracing_subscriber::fmt::format::Format::default())
+            );
+            #[cfg(feature = "tokio-console")]
             tracing_subscriber::registry()
-                .with(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| "q_api_server=info,q_network=info,tower_http=warn".into()),
-                )
-                .with(tracing_subscriber::fmt::layer().event_format(
-                    q_log_privacy::RedactedFormatter::new(tracing_subscriber::fmt::format::Format::default())
-                ))
+                .with(tokio_console_layer.unwrap())
+                .with(env_filter)
+                .with(fmt_layer)
+                .init();
+            #[cfg(not(feature = "tokio-console"))]
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(fmt_layer)
                 .init();
         }
     }
@@ -2614,6 +2544,40 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                  Auto-enabled Q_GENESIS_SYNC_ONLY=1 and Q_SKIP_CHECKPOINT=1 for a clean \
                  genesis sync. To override, set either env var explicitly before launch.",
                 db_path_str
+            );
+        }
+    }
+
+    // v10.9.50: Opinionated defaults for ./q-api-server stand-alone invocation.
+    // Three env vars that previously needed manual setting now default to "1"
+    // unless the operator explicitly sets them. This makes `./q-api-server`
+    // "just work" out of the box for fresh-sync users without any env-var
+    // dance. Operators on prod multi-peer setups can disable any of these
+    // with =0 / false.
+    //
+    // (1) Q_GAP_TRUST_SINGLE_PEER=1 — autonomous gap heal accepts a single
+    //     peer's permanent_gap declaration without waiting for quorum. Safe
+    //     because peer trust validation still applies + gaps persist to
+    //     RocksDB. Without this default, single-peer fresh-sync wedges at
+    //     historical pruning gaps until either quorum=2 or beta_score
+    //     climbs above 0.8 (~20+ successful chunks first).
+    // (2) Q_GENESIS_SYNC_ONLY=1 — engages the 10K-lookahead window cap on
+    //     turbo_sync. Harmless for synced nodes (chunks near tip stay in
+    //     range); critical for fresh nodes to avoid gravity-assist requesting
+    //     blocks at 10M+ heights that won't extend contiguous.
+    // (3) Q_SKIP_CHECKPOINT=1 — bypasses the checkpoint-download path. Fresh
+    //     nodes need this to walk the chain via autonomous heal instead of
+    //     trusting a checkpoint snapshot.
+    for (var, default) in &[
+        ("Q_GAP_TRUST_SINGLE_PEER", "1"),
+        ("Q_GENESIS_SYNC_ONLY", "1"),
+        ("Q_SKIP_CHECKPOINT", "1"),
+    ] {
+        if std::env::var(var).is_err() {
+            std::env::set_var(var, default);
+            eprintln!(
+                "    \x1b[1;32m✓\x1b[0m \x1b[1m{}={}\x1b[0m   \x1b[2m(v10.9.50 default; set to 0 to disable)\x1b[0m",
+                var, default
             );
         }
     }
@@ -6316,15 +6280,41 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             let storage = state.storage_engine.clone();
             tokio::spawn(async move {
                 info!("🔐 [LATTICE-TIP] Producer-hook task starting (anchors at genesis, extends per block)");
-                // Anchor at genesis with the all-zero state root. We could query the
-                // genesis block for its real state_root here, but a constant anchor
-                // is simpler and the verifier just needs the same constant.
-                let mut current_proof = q_recursive_proofs::tip_anchor(0, [0u8; 32]);
+                // v10.9.51: try to resume from persisted proof first (skips the
+                // 18s warmup walk through 18M blocks on restart). If load
+                // fails (no persisted proof, OR deserialise error from older
+                // wire format), fall through to cold-start anchor.
+                let mut current_proof = match storage.load_tip_proof_bytes().await {
+                    Some(bytes) => match bincode::deserialize::<q_recursive_proofs::LatticeTipProof>(&bytes) {
+                        Ok(p) => {
+                            info!(
+                                "🔐 [LATTICE-TIP v10.9.51] RESUMED from persisted proof at height {} (skipped warmup walk; {} bytes loaded)",
+                                p.tip_height, bytes.len()
+                            );
+                            p
+                        }
+                        Err(e) => {
+                            warn!(
+                                "🔐 [LATTICE-TIP v10.9.51] persisted proof deserialise failed ({}) — cold-starting from anchor. Old wire format will be overwritten on next save.",
+                                e
+                            );
+                            q_recursive_proofs::tip_anchor(0, [0u8; 32])
+                        }
+                    },
+                    None => {
+                        info!("🔐 [LATTICE-TIP v10.9.51] no persisted proof — cold-starting from anchor (first run or fresh DB)");
+                        q_recursive_proofs::tip_anchor(0, [0u8; 32])
+                    }
+                };
                 {
                     let mut guard = proof_slot.write().await;
                     *guard = Some(current_proof.clone());
                 }
-                let mut last_extended_height = 0u64;
+                let mut last_extended_height = current_proof.tip_height;
+                // v10.9.51: persist every PERSIST_INTERVAL extends to bound
+                // restart loss (~500 ms of extend work at typical block rate).
+                const PERSIST_INTERVAL: u64 = 1_000;
+                let mut extends_since_persist: u64 = 0;
                 loop {
                     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                     let contiguous = height_atomic.load(std::sync::atomic::Ordering::Relaxed);
@@ -6345,6 +6335,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                     block.header.tx_root,
                                 );
                                 last_extended_height = h;
+                                extends_since_persist += 1;
                             }
                             Ok(None) => {
                                 if h % 1000 == 0 {
@@ -6361,6 +6352,34 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     {
                         let mut guard = proof_slot.write().await;
                         *guard = Some(current_proof.clone());
+                    }
+                    // v10.9.51 (closes plan task #74): persist to RocksDB
+                    // every PERSIST_INTERVAL extends so restart skips the
+                    // 18s warmup walk. Worst-case loss = last PERSIST_INTERVAL
+                    // extends (~1 ms of producer work to redo).
+                    if extends_since_persist >= PERSIST_INTERVAL {
+                        match bincode::serialize(&current_proof) {
+                            Ok(bytes) => {
+                                if let Err(e) = storage.save_tip_proof_bytes(&bytes).await {
+                                    warn!(
+                                        "🔐 [LATTICE-TIP v10.9.51] persist failed at height {}: {} — will retry on next batch",
+                                        last_extended_height, e
+                                    );
+                                } else {
+                                    debug!(
+                                        "🔐 [LATTICE-TIP v10.9.51] persisted proof at height {} ({} bytes, {} extends since last save)",
+                                        last_extended_height, bytes.len(), extends_since_persist
+                                    );
+                                    extends_since_persist = 0;
+                                }
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "🔐 [LATTICE-TIP v10.9.51] bincode serialize failed at height {}: {} — skipping persist",
+                                    last_extended_height, e
+                                );
+                            }
+                        }
                     }
                     if last_extended_height % 10_000 == 0 && last_extended_height > 0 {
                         info!(
@@ -8348,6 +8367,36 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
     let turbo_sync = Arc::new(turbo_sync_manager);
     state.turbo_sync = Some(turbo_sync.clone());
+
+    // v10.9.47: AUTONOMOUS GAP HEAL — wire NetworkManager → TurboSync broadcast.
+    // 1. Hydrate known_gaps from RocksDB-persisted entries (gaps detected in prior runs).
+    // 2. Create broadcast channel (capacity 64 — handles bursts of new-peer discoveries).
+    // 3. Lock libp2p_manager briefly to install the tx; install rx on turbo_sync.
+    // 4. Spawn the handler task that applies Beta-trust policy + persists accepted gaps.
+    // Once spawned, the user-facing Q_KNOWN_PERMANENT_GAPS env var is no longer needed:
+    // peers declare gaps via the v10.9.41 protocol, the handler validates, persists,
+    // and the next sync_to_height tick auto-advances past them via the v10.9.46
+    // KNOWN-GAP check.
+    if let Some(libp2p_manager_arc) = state.libp2p_discovery.as_ref() {
+        let hydrated = turbo_sync.load_persisted_gaps().await;
+        info!(
+            "🚧 [KNOWN-GAP v10.9.47] Hydrated {} permanent gap(s) from RocksDB at startup",
+            hydrated
+        );
+        let (gap_tx, gap_rx) = tokio::sync::broadcast::channel::<(u64, u64, libp2p::PeerId)>(64);
+        turbo_sync.set_gap_advance_rx(gap_rx);
+        {
+            let mut mgr = libp2p_manager_arc.lock().await;
+            mgr.set_gap_advance_tx(gap_tx);
+        }
+        turbo_sync.clone().spawn_gap_advance_handler();
+        info!("🚧 [KNOWN-GAP v10.9.47] Autonomous gap-heal wired and active");
+    } else {
+        warn!(
+            "🚧 [KNOWN-GAP v10.9.47] libp2p_discovery is None — autonomous gap-heal DISABLED. \
+             Set Q_KNOWN_PERMANENT_GAPS env var to fall back to manual config."
+        );
+    }
 
     // v10.5.0 RC-3: Spawn gap-fill consumer — receives (first_gap, last_gap) from auto-repair.
     // Fetches the missing block range via P2P (libp2p block-pack) and stores each block in
@@ -12454,22 +12503,51 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                         );
                                         return; // BAL-001 ENFORCEMENT: reject zero state_root
                                     } else {
-                                        // Compute local balance root BEFORE applying this block's transactions.
-                                        let local_root = match storage.compute_balance_root_for_block().await {
-                                            Ok(r) => r,
-                                            Err(e) => {
-                                                error!("💥 [BALANCE ROOT v1] Failed to compute local balance root at block {}: {}. \
-                                                        Cannot verify — accepting (storage error, not peer fault).",
-                                                       block_height, e);
-                                                [0u8; 32]
+                                        // v10.9.55 (C1, Codex review 2026-05-17): FAIL-CLOSED on local compute error,
+                                        // but with bounded retry first so a momentary I/O hiccup doesn't kick the node
+                                        // off the chain. Three attempts with 100ms / 500ms / 2s backoff = up to ~2.6s
+                                        // total wait before giving up. If all three fail, the storage is genuinely
+                                        // unhealthy and rejecting is the correct response under enforcement.
+                                        //
+                                        // Pre-v10.9.55 behaviour mapped storage errors to [0u8;32] and then accepted
+                                        // when local == [0u8;32]. That meant a node with transient DB/read failure
+                                        // would silently accept blocks it could not verify, while healthy peers
+                                        // applied real consensus. A consensus split surface under enforcement.
+                                        const COMPUTE_BACKOFF_MS: [u64; 3] = [100, 500, 2000];
+                                        let mut last_err: Option<anyhow::Error> = None;
+                                        let mut computed: Option<[u8; 32]> = None;
+                                        for (attempt, backoff_ms) in COMPUTE_BACKOFF_MS.iter().enumerate() {
+                                            match storage.compute_balance_root_for_block().await {
+                                                Ok(r) => { computed = Some(r); break; }
+                                                Err(e) => {
+                                                    warn!(
+                                                        "⚠️ [BALANCE ROOT v1] compute_balance_root_for_block attempt {}/{} \
+                                                         failed at block {}: {}. Backing off {}ms before retry.",
+                                                        attempt + 1, COMPUTE_BACKOFF_MS.len(), block_height, e, backoff_ms
+                                                    );
+                                                    last_err = Some(e);
+                                                    if attempt + 1 < COMPUTE_BACKOFF_MS.len() {
+                                                        tokio::time::sleep(std::time::Duration::from_millis(*backoff_ms)).await;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        let local_root = match computed {
+                                            Some(r) => r,
+                                            None => {
+                                                error!(
+                                                    "🚨 [BALANCE ROOT v1] REJECT block {} — local root computation FAILED \
+                                                     {} times in a row while enforcement is active. Last error: {}. \
+                                                     Local storage unhealthy; cannot verify consensus data. \
+                                                     Operator action required.",
+                                                    block_height,
+                                                    COMPUTE_BACKOFF_MS.len(),
+                                                    last_err.as_ref().map(|e| e.to_string()).unwrap_or_else(|| "<unknown>".into())
+                                                );
+                                                return; // BAL-001 ENFORCEMENT: fail-closed on storage error
                                             }
                                         };
-                                        if local_root == [0u8; 32] {
-                                            // Our own computation failed (storage error) — cannot enforce.
-                                            // Accept and warn; do NOT punish the peer for our storage fault.
-                                            warn!("⚠️ [BALANCE ROOT v1] Block {} accepted despite local root computation failure — check storage health.",
-                                                  block_height);
-                                        } else if local_root != block.header.state_root {
+                                        if local_root != block.header.state_root {
                                             error!(
                                                 "🚨 [BALANCE ROOT v1] REJECT block {} — root MISMATCH (enforcement active h>=20,000,000).\n  \
                                                  Block claims: {}\n  \
@@ -24739,6 +24817,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             "/api/v1/transactions/send",
             post(handlers::send_transaction),
         ) // Combined send endpoint
+        .route(
+            "/api/v1/transactions/send_signed",
+            post(handlers::send_transaction_signed),
+        ) // v10.9.46: X-Wallet-Auth-only mode (no mnemonic, no vault) — for client-managed wallets
         .route(
             "/api/v1/transactions/estimate-fee",
             post(handlers::estimate_fee),

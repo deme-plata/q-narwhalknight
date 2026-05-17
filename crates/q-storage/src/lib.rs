@@ -201,6 +201,7 @@ pub mod price_history;
 pub mod contract_events;  // v2.9.2-beta: Contract event persistence for VM decentralization
 pub mod transaction;
 pub mod turbo_sync;
+pub mod known_gaps;  // ✅ v10.9.44 - Q_KNOWN_PERMANENT_GAPS env-driven gap-skip (deterministic 26K→100K fix)
 // TEMPORARILY DISABLED: Circular dependency with q-api-server (sync_activation module)
 // TODO v1.0.15: Fix turbo_sync_peer_bridge circular dependency
 // pub mod turbo_sync_peer_bridge;
@@ -440,6 +441,31 @@ pub const CF_SYNC_CERTIFICATES: &str = "sync_certificates";  // v0.9.14-beta: AE
 pub const CF_PEER_TRUST: &str = "peer_trust";  // v0.9.14-beta: AEGIS-QL peer trust metrics
 pub const CF_MINING_REWARDS: &str = "mining_rewards";  // v0.6.2-beta: Mining rewards history
 
+// ========== v10.9.55 present-heights index ==========
+//
+// Per-height marker keys in CF_MANIFEST, written atomically with `qblock:height:N`.
+// Key layout: `h_present:NNNNNNNNNNN` (11-digit zero-padded for sortable iteration up
+// to 99,999,999,999 — handles 5,000+ years at 1 bps). Value: 32-byte block hash so
+// the marker can sanity-check the block it points to.
+//
+// Purpose: the API endpoint and the sync layer can cheaply answer "does height N
+// have a block?" via a single O(log n) point lookup in CF_MANIFEST instead of the
+// 12s 3-format scan fallback in `get_qblock_any_format`. Also unblocks the sync
+// layer (Task 4 / synced_through pointer) which uses this to skip dead ranges.
+//
+// Migration: only new blocks (post-v10.9.55) carry markers. `is_height_present()`
+// falls back to checking `qblock:height:N` directly for pre-v10.9.55 blocks, so
+// old blocks remain queryable; new blocks get the fast path. No bootstrap scan
+// required at first boot.
+pub const HEIGHT_PRESENT_PREFIX: &str = "h_present:";
+
+/// Encode a height as the per-height marker key. 11-digit zero-padded so keys
+/// sort numerically when iterated in the CF.
+#[inline]
+pub fn height_present_key(height: u64) -> Vec<u8> {
+    format!("{}{:011}", HEIGHT_PRESENT_PREFIX, height).into_bytes()
+}
+
 // ========== v1.0.60-beta: Comprehensive State Sync Column Families ==========
 /// Token balances: key = [account:32 | token:32], value = balance:u64
 pub const CF_TOKEN_BALANCES: &str = "cf_token_balances";
@@ -668,6 +694,21 @@ pub struct QStorage {
     /// 🚨 v1.1.9: Counter for cache verification
     /// Every 100 heights, we verify the cache matches the actual database
     cache_verification_counter: std::sync::atomic::AtomicU64,
+    /// v10.9.55 Task 4 — synced_through pointer (range-fetch progress).
+    ///
+    /// Distinct from `height_cache` (= contiguous_height): this tracks the highest
+    /// height through which the sync layer has REQUESTED a window, regardless of
+    /// whether every height in that window had a block. On a DAG-Knight chain with
+    /// legitimate sparse heights, the requester needs this pointer to advance past
+    /// dead ranges instead of wedging on heights that have no block.
+    ///
+    /// Persistence key: `qblock:synced_through` in CF_BLOCKS. Loaded at startup;
+    /// advanced via `advance_synced_through(height)`. The advance is fetch_max so
+    /// concurrent advances always pick the highest value (idempotent + safe).
+    ///
+    /// Used by `turbo_sync::sync_to_height` as the chunk-build start, replacing
+    /// `local_height` which was the contiguous pointer.
+    synced_through_atomic: Arc<std::sync::atomic::AtomicU64>,
     /// 📊 v10.9.23: Sparse Merkle Tree for balance_root_v2.
     ///
     /// Opened on the same physical RocksDB instance as `hot_db_concrete` so
@@ -795,6 +836,8 @@ impl QStorage {
             global_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             // 🚨 v1.1.9: Cache verification counter
             cache_verification_counter: std::sync::atomic::AtomicU64::new(0),
+            // v10.9.55 Task 4: initialized to 0; reloaded from disk below after `recover()`.
+            synced_through_atomic: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             // 📊 v10.9.23: BalanceSmt for balance_root_v2 (dormant until D2 wires it)
             balance_smt,
         };
@@ -807,6 +850,26 @@ impl QStorage {
         let initial_height = storage.scan_highest_contiguous_block_internal().await?;
         storage.height_cache.update(initial_height).await;
         info!("✅ Height cache initialized with height {} (one-time DB scan)", initial_height);
+
+        // v10.9.55 Task 4: load synced_through_atomic from disk, defaulting to the
+        // contiguous height. Existing nodes upgrading to v10.9.55 don't have the
+        // qblock:synced_through key persisted yet — initialize to contiguous so the
+        // sync loop's chunk-build start matches today's behaviour, and advance from
+        // there as new chunks complete.
+        {
+            let persisted: u64 = match storage.hot_db.get(CF_BLOCKS, b"qblock:synced_through").await? {
+                Some(bytes) if bytes.len() == 8 => {
+                    u64::from_be_bytes(bytes[..8].try_into().unwrap_or([0u8; 8]))
+                }
+                _ => 0,
+            };
+            let init = persisted.max(initial_height);
+            storage.synced_through_atomic.store(init, std::sync::atomic::Ordering::Release);
+            info!(
+                "✅ [SYNCED-THROUGH] Initialized to {} (persisted={}, contiguous={})",
+                init, persisted, initial_height
+            );
+        }
 
         // v10.9.23: Heal `qblock:latest` if it lags the actual contiguous tip.
         //
@@ -1370,6 +1433,11 @@ impl QStorage {
             let hash_key = format!("qblock:hash:{}", hex::encode(block_hash));
             batch.push((CF_BLOCKS, hash_key.into_bytes(), height.to_be_bytes().to_vec()));
 
+            // v10.9.55 Task 3: present-height marker — atomic with the canonical key.
+            // Lets API + sync answer "does height N exist?" in ~µs instead of the
+            // 12s 3-format scan fallback. Marker value is block_hash for sanity check.
+            batch.push((CF_MANIFEST, height_present_key(height), block_hash.to_vec()));
+
             // Quantum metadata (separate CF for lazy loading)
             if !qm_data.is_empty() {
                 let qm_key = format!("qm:{}", height);
@@ -1683,6 +1751,9 @@ impl QStorage {
             let hash_key = format!("qblock:hash:{}", hex::encode(block_hash));
             batch.push((CF_BLOCKS, hash_key.into_bytes(), height.to_be_bytes().to_vec()));
 
+            // v10.9.55 Task 3: present-height marker (see other batch path for rationale).
+            batch.push((CF_MANIFEST, height_present_key(height), block_hash.to_vec()));
+
             // Quantum metadata (separate CF)
             if !qm_data.is_empty() {
                 let qm_key = format!("qm:{}", height);
@@ -1923,6 +1994,79 @@ impl QStorage {
         );
 
         Ok(())
+    }
+
+    /// v10.9.55 Task 4: get the current synced-through height.
+    ///
+    /// Always in-memory atomic read. Distinct from `height_cache.cached()` which
+    /// is the contiguous height. The sync layer (`turbo_sync::sync_to_height`)
+    /// uses THIS pointer as the chunk-build start so it advances past sparse
+    /// ranges instead of wedging on heights that have no block.
+    #[inline]
+    pub fn get_synced_through_height(&self) -> u64 {
+        self.synced_through_atomic.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// v10.9.55 Task 4: advance synced_through to at least `height` (fetch_max).
+    ///
+    /// Idempotent and safe under concurrent callers (atomic CAS loop). After
+    /// updating the in-memory atomic, persists to `qblock:synced_through` in
+    /// CF_BLOCKS so the pointer survives restart. The persist is best-effort:
+    /// if it fails, the in-memory atomic still advances (worst case: a restart
+    /// reverts to the previous persisted value and a few windows get re-requested
+    /// from peers — no consensus or data risk).
+    pub async fn advance_synced_through(&self, height: u64) -> Result<()> {
+        // Atomic CAS loop to ensure monotonic advance.
+        let mut current = self.synced_through_atomic.load(std::sync::atomic::Ordering::Relaxed);
+        while height > current {
+            match self.synced_through_atomic.compare_exchange_weak(
+                current,
+                height,
+                std::sync::atomic::Ordering::Release,
+                std::sync::atomic::Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
+        // Persist only if we actually advanced.
+        let new_value = self.synced_through_atomic.load(std::sync::atomic::Ordering::Acquire);
+        if new_value >= height && new_value > current {
+            let height_bytes = new_value.to_be_bytes();
+            if let Err(e) = self.hot_db.put(CF_BLOCKS, b"qblock:synced_through", &height_bytes).await {
+                warn!(
+                    "⚠️ [SYNCED-THROUGH] Failed to persist {} → {}: {} \
+                     (in-memory advance kept; will re-request after restart)",
+                    current, new_value, e
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// v10.9.55 Task 3: cheap "does this height have a block?" check.
+    ///
+    /// Used by the API endpoint fast-path and the sync layer's range-fetch logic
+    /// (synced_through pointer) to skip dead heights without paying the cost of
+    /// `get_qblock_any_format`'s 3-format scan exhaustion (~12s on misses).
+    ///
+    /// Two-tier lookup:
+    /// 1. Fast: check the `h_present:NNN` marker in CF_MANIFEST (written atomically
+    ///    with every post-v10.9.55 block save).
+    /// 2. Fallback: check the canonical `qblock:height:N` key in CF_BLOCKS — covers
+    ///    pre-v10.9.55 blocks that don't have markers yet.
+    ///
+    /// Both tiers are O(log n) point lookups. Total latency well under 1ms.
+    /// Returns Ok(true) if the block exists in either tier, Ok(false) if neither.
+    pub async fn is_height_present(&self, height: u64) -> Result<bool> {
+        // Tier 1: marker
+        let marker_key = height_present_key(height);
+        if self.hot_db.get(CF_MANIFEST, &marker_key).await?.is_some() {
+            return Ok(true);
+        }
+        // Tier 2: canonical key (for pre-v10.9.55 blocks)
+        let height_key = format!("qblock:height:{}", height).into_bytes();
+        Ok(self.hot_db.get(CF_BLOCKS, &height_key).await?.is_some())
     }
 
     /// Get QBlock by height
@@ -3124,6 +3268,86 @@ impl QStorage {
             }
             _ => 0,
         }
+    }
+
+    /// v10.9.51 (closes plan task #74): persist the latest `LatticeTipProof`
+    /// to RocksDB so a node restart skips the 18-second warmup walk through
+    /// 18M blocks. Producer-hook calls this every ~1000 extends; reload
+    /// happens at boot via `load_tip_proof_bytes()`.
+    ///
+    /// Storage: `CF_MANIFEST` key `b"tip_proof:latest"`. Value is the raw
+    /// bincode-serialised `LatticeTipProof` (caller serialises — we keep
+    /// this layer dep-free of q-recursive-proofs to avoid a cross-crate
+    /// dependency, since q-storage is below q-recursive-proofs in the
+    /// dep graph). Uses put_sync() for OOM-kill survival.
+    pub async fn save_tip_proof_bytes(&self, bytes: &[u8]) -> Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        self.hot_db
+            .put_sync(CF_MANIFEST, b"tip_proof:latest", bytes)
+            .await?;
+        Ok(())
+    }
+
+    /// v10.9.51 — companion loader for save_tip_proof_bytes. Returns None
+    /// if no proof has been persisted yet (fresh DB). Caller deserialises
+    /// via bincode and falls back to anchor() on deserialise error (e.g.
+    /// stored bytes are from an older wire format).
+    pub async fn load_tip_proof_bytes(&self) -> Option<Vec<u8>> {
+        self.hot_db
+            .get(CF_MANIFEST, b"tip_proof:latest")
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// v10.9.47: Persist a runtime-detected permanent gap to CF_MANIFEST so it
+    /// survives restart. The key format `permanent_gap:{start:0>20}:{end:0>20}`
+    /// keeps entries lexicographically sortable. Uses put_sync() so the gap
+    /// survives OOM-kill (same rationale as save_safe_floor).
+    pub async fn persist_permanent_gap(&self, start: u64, end: u64) -> Result<()> {
+        if start > end {
+            return Err(anyhow::anyhow!("invalid gap: start {} > end {}", start, end));
+        }
+        let key = format!("permanent_gap:{:020}:{:020}", start, end);
+        let mut value = [0u8; 16];
+        value[..8].copy_from_slice(&start.to_be_bytes());
+        value[8..].copy_from_slice(&end.to_be_bytes());
+        self.hot_db
+            .put_sync(CF_MANIFEST, key.as_bytes(), &value)
+            .await?;
+        Ok(())
+    }
+
+    /// v10.9.47: Load all runtime-detected permanent gaps from CF_MANIFEST.
+    /// Called once at TurboSync construction so the auto-advance check has
+    /// the full historical set immediately, before any peer interaction.
+    pub async fn load_permanent_gaps(&self) -> Vec<(u64, u64)> {
+        let prefix = b"permanent_gap:";
+        let entries = match self.hot_db.scan_prefix(CF_MANIFEST, prefix).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("[permanent_gap] CF_MANIFEST prefix scan failed: {}", e);
+                return Vec::new();
+            }
+        };
+        let mut gaps: Vec<(u64, u64)> = Vec::with_capacity(entries.len());
+        for (_key, value) in entries {
+            if value.len() != 16 {
+                continue;
+            }
+            let mut sa = [0u8; 8];
+            let mut ea = [0u8; 8];
+            sa.copy_from_slice(&value[..8]);
+            ea.copy_from_slice(&value[8..]);
+            let start = u64::from_be_bytes(sa);
+            let end = u64::from_be_bytes(ea);
+            if start <= end {
+                gaps.push((start, end));
+            }
+        }
+        gaps
     }
 
     /// INTERNAL: Scan database for highest height (called ONLY on cache initialization)

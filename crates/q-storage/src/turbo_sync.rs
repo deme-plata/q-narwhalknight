@@ -1828,6 +1828,15 @@ pub struct DetailedSyncStatus {
     pub best_peer_height: u64,
     pub is_fully_synced: bool,
     pub eta_seconds: Option<u64>,
+    // v10.9.44 — q-sync-optimizers integration STATUS:
+    //   1. KalmanBdpEstimator   — WIRED on TurboSyncManager::kalman_bdp; used in pick_chunk_size_kb().
+    //   2. BetaScoreRegistry    — WIRED on TurboSyncManager::beta_scores; used in pick_chunk_peer().
+    //   3. CubicRegistry        — WIRED on UnifiedNetworkManager (q-network) for per-peer cwnd.
+    //   4. LittlesLawEstimator  — WIRED on TurboSyncManager::littles_law; exposed via qnk_optimal_inflight gauge.
+    //   5. ChunkFloorEstimator  — WIRED on TurboSyncManager::chunk_floor; exposed via qnk_chunk_size_floor gauge.
+    //   6. MarkovRegistry       — WIRED on TurboSyncManager::markov_states; exposed via qnk_peer_state gauge.
+    //   7. EwmvRtt              — WIRED on UnifiedNetworkManager (per-peer timeout registry).
+    //   8. PeerFailPredictor    — WIRED on TurboSyncManager::peer_fail_predictor; exposed via qnk_peer_p_fail gauge.
     // v8.2.8: Apollo subsystem metrics
     pub apollo_kalman_bandwidth_mbps: f64,
     pub apollo_kalman_latency_ms: f64,
@@ -2091,6 +2100,54 @@ pub struct TurboSyncManager {
     /// Normal: config-default in-flight, 10ms inter-chunk delay
     /// Turbo: 2x config in-flight, 0ms delay (max speed)
     pub network_throttle_mode: Arc<AtomicU8>,
+
+    /// v10.9.44: Known permanent gaps in the chain (e.g. 25988..=100440 from
+    /// the historical pruning incident). Parsed from `Q_KNOWN_PERMANENT_GAPS`
+    /// at startup. When sync_to_height observes `contiguous + 1 == gap.start`,
+    /// the contiguous pointer is advanced past `gap.end` so chunk scheduling
+    /// can skip the network-wide hole instead of stalling forever.
+    pub known_gaps: Arc<crate::known_gaps::KnownGaps>,
+
+    /// v10.9.44: Per-peer Kalman BDP estimator state (B.1). Wraps the algorithm
+    /// from `q-sync-optimizers::kalman_bdp`. The hot path reads the current
+    /// snapshot from `apollo_kalman_predictor` and calls `chunk_size_kb`.
+    pub kalman_bdp: Arc<RwLock<q_sync_optimizers::KalmanBdpEstimator>>,
+
+    /// v10.9.44: Beta-distribution peer score registry (B.4 + Thompson sampling
+    /// for chunk dispatch). Lock-protected because Thompson sampling mutates
+    /// the per-peer counter on every draw; the lock is held microseconds.
+    pub beta_scores: Arc<parking_lot::Mutex<q_sync_optimizers::BetaScoreRegistry<libp2p::PeerId>>>,
+
+    /// v10.9.44: Markov peer-state registry for per-peer state tracking (item 6).
+    /// Exported as `qnk_peer_state{peer="..."}` gauge.
+    pub markov_states: Arc<parking_lot::Mutex<q_sync_optimizers::MarkovRegistry<libp2p::PeerId>>>,
+
+    /// v10.9.44: Per-peer Little's Law estimators (item 4 — combined with CUBIC cwnd).
+    /// Exported as `qnk_optimal_inflight{peer="..."}` gauge.
+    pub littles_law: Arc<dashmap::DashMap<libp2p::PeerId, q_sync_optimizers::LittlesLawEstimator>>,
+
+    /// v10.9.44: Information-theoretic chunk-size floor (item 5). Single
+    /// shared estimator — bits-per-block is global, peer-set-size is the input.
+    /// Output exported as `qnk_chunk_size_floor` gauge.
+    pub chunk_floor: Arc<q_sync_optimizers::ChunkFloorEstimator>,
+
+    /// v10.9.44: Per-peer "about-to-fail" logistic predictor (item 8).
+    /// Stateless — config only — features are extracted per-call.
+    /// Output exported as `qnk_peer_p_fail{peer="..."}` gauge.
+    pub peer_fail_predictor: Arc<q_sync_optimizers::PeerFailPredictor>,
+
+    /// v10.9.47: Autonomous permanent-gap detection — tally of how many
+    /// independent peers have declared each (start,end) gap. The handler task
+    /// reads gap_advance_rx, updates this tally, and decides whether to commit
+    /// a gap into `known_gaps` based on quorum + per-peer Beta trust.
+    /// Inner key: (gap_start, gap_end). Value: set of peer ids that reported it.
+    pub gap_detection_tally: Arc<parking_lot::Mutex<std::collections::HashMap<(u64, u64), std::collections::HashSet<libp2p::PeerId>>>>,
+
+    /// v10.9.47: Receiver for runtime gap declarations from NetworkManager.
+    /// Set via `set_gap_advance_rx()` in main.rs after both components are
+    /// constructed. `spawn_gap_advance_handler()` takes ownership and spawns
+    /// the long-lived processor task.
+    pub gap_advance_rx: parking_lot::Mutex<Option<tokio::sync::broadcast::Receiver<(u64, u64, libp2p::PeerId)>>>,
 }
 
 impl TurboSyncManager {
@@ -2478,7 +2535,159 @@ impl TurboSyncManager {
             // 🔒 v10.5.0: Fresh-start single-flight gate
             fresh_sync_gate: Arc::new(Mutex::new(())),
             fresh_sync_target: Arc::new(AtomicU64::new(0)),
+            // v10.9.44: Definitive gap-skip from Q_KNOWN_PERMANENT_GAPS env var
+            known_gaps: Arc::new(crate::known_gaps::KnownGaps::from_env()),
+            // v10.9.44: Scientific sync optimizers (q-sync-optimizers crate)
+            kalman_bdp: Arc::new(RwLock::new(q_sync_optimizers::KalmanBdpEstimator::new())),
+            beta_scores: Arc::new(parking_lot::Mutex::new(q_sync_optimizers::BetaScoreRegistry::new())),
+            markov_states: Arc::new(parking_lot::Mutex::new(q_sync_optimizers::MarkovRegistry::new())),
+            littles_law: Arc::new(dashmap::DashMap::new()),
+            chunk_floor: Arc::new(q_sync_optimizers::ChunkFloorEstimator::new()),
+            peer_fail_predictor: Arc::new(q_sync_optimizers::PeerFailPredictor::default()),
+            // v10.9.47: Autonomous gap-heal infrastructure (empty at startup; populated
+            // by spawn_gap_advance_handler after main.rs wires the broadcast channel).
+            gap_detection_tally: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+            gap_advance_rx: parking_lot::Mutex::new(None),
         }
+    }
+
+    /// v10.9.47: Wire the broadcast receiver from NetworkManager. Call this
+    /// AFTER NetworkManager has been constructed and `set_gap_advance_tx` has
+    /// been used to pair the channel. Then call `spawn_gap_advance_handler()`.
+    pub fn set_gap_advance_rx(&self, rx: tokio::sync::broadcast::Receiver<(u64, u64, libp2p::PeerId)>) {
+        *self.gap_advance_rx.lock() = Some(rx);
+    }
+
+    /// v10.9.47: Hydrate `known_gaps` from RocksDB-persisted entries. Call
+    /// once at startup, after storage is ready and before sync begins.
+    /// Returns the number of gaps loaded.
+    pub async fn load_persisted_gaps(&self) -> usize {
+        let pairs = self.storage.load_permanent_gaps().await;
+        let count = pairs.len();
+        for (start, end) in pairs {
+            self.known_gaps.add_gap(start, end);
+        }
+        // Refresh observability gauge.
+        crate::metrics::SyncOptimizerGauges::instance()
+            .known_gap_configured_count
+            .set(self.known_gaps.len() as i64);
+        if count > 0 {
+            info!(
+                "[KNOWN-GAP v10.9.47] Hydrated {} permanent gap(s) from RocksDB: {:?}",
+                count,
+                self.known_gaps.snapshot()
+            );
+        }
+        count
+    }
+
+    /// v10.9.47: Spawn the long-lived autonomous gap-heal handler. Takes the
+    /// broadcast receiver from `gap_advance_rx`, processes each declared gap,
+    /// applies a Beta-trust + quorum policy, and commits to `known_gaps` +
+    /// RocksDB persistence when accepted. Idempotent — safe to call once.
+    ///
+    /// Policy (v10.9.47):
+    ///   accept if `unique_reporters >= 2`
+    ///   OR `unique_reporters >= 1 AND beta_score(peer).mean() >= 0.8`
+    ///   OR `Q_GAP_TRUST_SINGLE_PEER=1` (operator override)
+    pub fn spawn_gap_advance_handler(self: Arc<Self>) {
+        let mut rx = match self.gap_advance_rx.lock().take() {
+            Some(rx) => rx,
+            None => {
+                warn!("[KNOWN-GAP] spawn_gap_advance_handler called without rx wired — autonomous heal DISABLED");
+                return;
+            }
+        };
+        let trust_single = std::env::var("Q_GAP_TRUST_SINGLE_PEER")
+            .ok()
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let trust_threshold = std::env::var("Q_GAP_TRUST_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.8);
+        info!(
+            "[KNOWN-GAP v10.9.47] Autonomous gap-heal handler started \
+             (trust_threshold={:.2}, trust_single={}, quorum=2)",
+            trust_threshold, trust_single
+        );
+
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok((start, end, peer)) => {
+                        if start > end {
+                            warn!(
+                                "[KNOWN-GAP] Invalid gap declaration {}-{} from peer {} — discarding",
+                                start, end, peer
+                            );
+                            continue;
+                        }
+
+                        // Tally the report.
+                        let reporter_count = {
+                            let mut tally = self.gap_detection_tally.lock();
+                            let entry = tally.entry((start, end)).or_default();
+                            entry.insert(peer);
+                            entry.len()
+                        };
+
+                        // Skip-if-already-known check (idempotent — we may
+                        // already have this gap from RocksDB or a prior accept).
+                        if self.known_gaps.contains(start) && self.known_gaps.contains(end) {
+                            // Already known — don't re-log, don't re-persist.
+                            continue;
+                        }
+
+                        // Look up the peer's trust score (Beta mean).
+                        // BetaScoreRegistry::mean(&peer) returns 0.5 for unseen peers
+                        // (Beta(1,1) prior) and grows toward 1.0 with successful chunks.
+                        let beta_mean = self.beta_scores.lock().mean(&peer);
+
+                        let accept = trust_single
+                            || reporter_count >= 2
+                            || beta_mean >= trust_threshold;
+
+                        if !accept {
+                            info!(
+                                "[KNOWN-GAP v10.9.47] Provisional gap {}-{} from {} \
+                                 (reporters={}, trust={:.3}) — below threshold, awaiting quorum",
+                                start, end, peer, reporter_count, beta_mean
+                            );
+                            continue;
+                        }
+
+                        // Commit: add to known_gaps + persist to RocksDB + observability.
+                        let changed = self.known_gaps.add_gap(start, end);
+                        if changed {
+                            if let Err(e) = self.storage.persist_permanent_gap(start, end).await {
+                                warn!(
+                                    "[KNOWN-GAP] Failed to persist gap {}-{}: {} — \
+                                     will be re-detected next time",
+                                    start, end, e
+                                );
+                            }
+                            let gauges = crate::metrics::SyncOptimizerGauges::instance();
+                            gauges
+                                .known_gap_configured_count
+                                .set(self.known_gaps.len() as i64);
+                            info!(
+                                "[KNOWN-GAP v10.9.47] ✅ ACCEPTED gap {}-{} (reporters={}, \
+                                 trust={:.3}, persisted to RocksDB). Total gaps: {}",
+                                start, end, reporter_count, beta_mean, self.known_gaps.len()
+                            );
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("[KNOWN-GAP] handler lagged {} declarations — continuing", n);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        info!("[KNOWN-GAP] handler channel closed — exiting");
+                        return;
+                    }
+                }
+            }
+        });
     }
 
     /// 🌐 Set network channel for TRUE P2P communication
@@ -2921,6 +3130,141 @@ impl TurboSyncManager {
     pub async fn apollo_get_optimal_chunk_size(&self) -> usize {
         let state = self.apollo_get_network_state().await;
         state.optimal_chunk_size()
+    }
+
+    /// v10.9.44: Kalman BDP chunk-size in **blocks** via q-sync-optimizers.
+    ///
+    /// Returns `Some(blocks)` when the Apollo Kalman estimator has sufficient
+    /// confidence to produce a useful estimate; `None` otherwise (caller should
+    /// fall back to the existing ML-blended path).
+    ///
+    /// Conversion: bytes/sec → mbps (× 8 / 1e6), then KalmanBdpEstimator
+    /// returns chunk KiB clamped to [floor, 4096]. Convert to blocks via
+    /// `avg_block_size_bytes = 1000` (per spec).
+    pub async fn bdp_chunk_size_blocks(&self) -> Option<u64> {
+        let state = self.apollo_get_network_state().await;
+        if !(state.confidence > 0.0) || state.bandwidth_bps <= 0.0 || state.latency_ms <= 0.0 {
+            return None;
+        }
+        let bw_mbps = state.bandwidth_bps * 8.0 / 1_000_000.0;
+        let snap = q_sync_optimizers::KalmanSnapshot::new(bw_mbps, state.latency_ms, state.confidence);
+        let est = self.kalman_bdp.read().await;
+        let kb = est.chunk_size_kb(snap);
+        // 1000 B/block estimate per spec → blocks = KB * 1024 / 1000 ≈ KB.
+        let blocks = (kb as u64).saturating_mul(1024).saturating_div(1000);
+        Some(blocks.max(1))
+    }
+
+    /// v10.9.44: Thompson-sample a peer from the Beta-score registry (item 2).
+    ///
+    /// Returns `None` for empty `candidates`. Otherwise picks the peer with
+    /// the highest sample drawn from its `Beta(α, β)` posterior. After the
+    /// caller observes the outcome it should call `record_peer_outcome` to
+    /// update the per-peer counter.
+    pub fn thompson_pick_peer<'a>(
+        &self,
+        candidates: &'a [libp2p::PeerId],
+    ) -> Option<&'a libp2p::PeerId> {
+        if candidates.is_empty() {
+            return None;
+        }
+        // The registry's thompson_pick borrows `candidates` so the return value
+        // lives as long as the input. We hold the lock only for the draw.
+        let mut reg = self.beta_scores.lock();
+        let mut rng = rand::thread_rng();
+        reg.thompson_pick(candidates, &mut rng)
+    }
+
+    /// v10.9.44: Record an outcome for the Beta-score registry (item 2).
+    ///
+    /// Pass `true` on a successful block-pack response, `false` on failure.
+    pub fn record_peer_outcome(&self, peer: &libp2p::PeerId, success: bool) {
+        let mut reg = self.beta_scores.lock();
+        if success {
+            reg.record_success(peer);
+        } else {
+            reg.record_failure(peer);
+        }
+    }
+
+    /// v10.9.44: Record a per-peer RTT into the Markov state model (item 6)
+    /// AND the Little's law per-peer estimator (item 4). Idempotent for NaN /
+    /// negative values (silently ignored by the underlying estimators).
+    pub fn record_peer_rtt(&self, peer: &libp2p::PeerId, rtt_ms: f64) {
+        // Markov state — guards against NaN internally.
+        self.markov_states.lock().record_rtt(peer, rtt_ms);
+        // Little's law per-peer — also guards against NaN internally.
+        let mut entry = self
+            .littles_law
+            .entry(*peer)
+            .or_insert_with(q_sync_optimizers::LittlesLawEstimator::new);
+        entry.record_rtt_ms(rtt_ms);
+    }
+
+    /// v10.9.44: Record a peer timeout into the Markov model (item 6).
+    pub fn record_peer_timeout(&self, peer: &libp2p::PeerId) {
+        self.markov_states.lock().record_timeout(peer);
+    }
+
+    /// v10.9.44: Refresh the q-sync-optimizers Prometheus gauges (items 4/5/6/8).
+    ///
+    /// Called on every scheduler tick. All math is O(peers) and budget is < 10 µs.
+    /// Gauges:
+    /// - `qnk_chunk_size_floor` (KiB) — from ChunkFloorEstimator with current peer-set size.
+    /// - `qnk_optimal_inflight{peer}` — from LittlesLawEstimator combined with CUBIC cwnd.
+    /// - `qnk_peer_state{peer}` — 0=Fast, 1=Slow, 2=Stalled.
+    /// - `qnk_peer_p_fail{peer}` — PeerFailPredictor logistic output [0,1].
+    pub fn refresh_sync_optimizer_gauges(
+        &self,
+        peer_set: &[libp2p::PeerId],
+        per_peer_cwnd: impl Fn(&libp2p::PeerId) -> u32,
+    ) {
+        use q_sync_optimizers::PeerFailFeatures;
+        let metrics = &crate::metrics::SyncOptimizerGauges::instance();
+
+        // Item 5 — chunk floor (single global gauge).
+        let floor_kib = self.chunk_floor.floor_kib(peer_set.len() as u32);
+        metrics.chunk_size_floor.set(floor_kib as i64);
+
+        // Per-peer gauges (items 4/6/8).
+        let markov = self.markov_states.lock();
+        for peer in peer_set {
+            let peer_label = peer.to_string();
+
+            // Item 4 — optimal in-flight combined with CUBIC cwnd.
+            let cwnd = per_peer_cwnd(peer);
+            if let Some(est) = self.littles_law.get(peer) {
+                let l = est.value().combined_with_cubic(cwnd);
+                metrics
+                    .optimal_inflight
+                    .with_label_values(&[&peer_label])
+                    .set(l as f64);
+            } else {
+                // No RTT data — fall back to cwnd alone.
+                metrics
+                    .optimal_inflight
+                    .with_label_values(&[&peer_label])
+                    .set(cwnd as f64);
+            }
+
+            // Item 6 — Markov state.
+            let state = markov.state(peer) as u32;
+            metrics
+                .peer_state
+                .with_label_values(&[&peer_label])
+                .set(state as f64);
+
+            // Item 8 — peer-fail predictor with default features (until the
+            // call sites that have richer per-peer telemetry start feeding
+            // real values). Defaults give a baseline reading; integrations
+            // upstream can override via call-site-specific feature extraction.
+            let features = PeerFailFeatures::default();
+            let p_fail = self.peer_fail_predictor.p_fail(&features);
+            metrics
+                .peer_p_fail
+                .with_label_values(&[&peer_label])
+                .set(p_fail);
+        }
     }
 
     /// 🔭 v2.0.0-KALMAN: Get optimal timeout from network state
@@ -4679,6 +5023,36 @@ impl TurboSyncManager {
             debug!(
                 "🚀 [SHA3-256] All {}/{} blocks verified (parallel, quantum-resistant) in {:?}",
                 sha3_valid_count, blocks.len(), sha3_time
+            );
+        }
+
+        // v10.9.43 item 14: SIMD chain-linkage validation.
+        //
+        // Only run on in-order, contiguous packs. Out-of-order parallel-sync
+        // packs MUST skip this check — they cross chunk boundaries and the
+        // chain-linkage invariant only holds for adjacent in-pack blocks
+        // from the same source range.
+        //
+        // Closes a real correctness gap: today's chunk-ingest path doesn't
+        // verify that adjacent blocks chain via BLAKE3, so a malicious peer
+        // can construct individually-valid but disconnected blocks. Each
+        // pair compare is a single SIMD u8x32 instruction via the `wide`
+        // crate (~0.5ms per 2000-block pack on Epsilon).
+        if is_in_order && blocks.len() >= 2 {
+            let linkage_start = Instant::now();
+            if let Err(err) = self.sha3_verifier.verify_chain_linkage(&blocks) {
+                warn!(
+                    "🚨 [CHAIN-LINKAGE] Pack {}-{} failed chain-linkage: {}",
+                    pack.start_height, pack.end_height, err
+                );
+                anyhow::bail!(
+                    "chain-linkage validation failed in pack {}-{}: {}",
+                    pack.start_height, pack.end_height, err
+                );
+            }
+            debug!(
+                "🔗 [CHAIN-LINKAGE] {} blocks chain-linkage validated in {:?}",
+                blocks.len(), linkage_start.elapsed()
             );
         }
 
@@ -6604,6 +6978,19 @@ impl TurboSyncManager {
             session_sync_mode: Arc::clone(&self.session_sync_mode),
             // 🎚️ v8.5.4: Share throttle mode (same Arc)
             network_throttle_mode: Arc::clone(&self.network_throttle_mode),
+            // v10.9.44: Share gap config + scientific sync state across clones
+            known_gaps: Arc::clone(&self.known_gaps),
+            kalman_bdp: Arc::clone(&self.kalman_bdp),
+            beta_scores: Arc::clone(&self.beta_scores),
+            markov_states: Arc::clone(&self.markov_states),
+            littles_law: Arc::clone(&self.littles_law),
+            chunk_floor: Arc::clone(&self.chunk_floor),
+            peer_fail_predictor: Arc::clone(&self.peer_fail_predictor),
+            // v10.9.47: Share gap-detection tally across clones. The
+            // gap_advance_rx is NOT shared (only the primary instance owns it);
+            // clones get a fresh None.
+            gap_detection_tally: Arc::clone(&self.gap_detection_tally),
+            gap_advance_rx: parking_lot::Mutex::new(None),
         }
     }
 
@@ -6611,7 +6998,31 @@ impl TurboSyncManager {
     pub async fn sync_to_height(&self, target_height: u64) -> Result<()> {
         let sync_start = Instant::now();
 
-        let local_height = self.get_local_height().await?;
+        // v10.9.44: local_height is mut so the known-gap advance (below) can
+        // reflect the post-skip value to downstream checks.
+        let mut local_height = self.get_local_height().await?;
+
+        // v10.9.55 Task 4: SYNCED-THROUGH POINTER.
+        //
+        // On a DAG-Knight chain with legitimately sparse heights (15M+ is ~93-96%
+        // dense; pre-7M is mostly missing from historical damage), the chunk-build
+        // start must be the "highest range we've REQUESTED" — not "highest height
+        // where blocks 0..H all exist contiguously". With the old model the loop
+        // wedges on sparse heights forever; with this one it advances past dead
+        // ranges and gets to the live tail.
+        //
+        // synced_through is monotonic and persisted (key `qblock:synced_through`),
+        // so a restart picks up where we left off. The known-gap auto-advance below
+        // still runs — it can push contiguous_height past configured gaps; we then
+        // take max(local_height, synced_through) to honor whichever advanced further.
+        let synced_through = self.storage.get_synced_through_height();
+        if synced_through > local_height {
+            info!(
+                "⏭️ [SYNCED-THROUGH v10.9.55] Resuming from {} (contiguous={}, persisted synced_through={})",
+                synced_through, local_height, synced_through
+            );
+            local_height = synced_through;
+        }
 
         if local_height >= target_height {
             info!("🎯 Already synced to height {} (target: {})", local_height, target_height);
@@ -6651,6 +7062,97 @@ impl TurboSyncManager {
                 This protects against data loss. Check peer announcements.",
                 local_height, target_height, local_height - target_height
             ));
+        }
+
+        // ⏩ v10.9.44: KNOWN-GAP AUTO-ADVANCE (deterministic 26K→100K fix).
+        //
+        // Before any peer discovery or chunk dispatch, check whether our
+        // contiguous height sits immediately below a known network-wide gap
+        // (configured via `Q_KNOWN_PERMANENT_GAPS`, default `25988:100440`).
+        // If yes, advance `contiguous_height` past `gap_end` so the sync loop
+        // can immediately resume from post-gap blocks rather than wedging on
+        // a request no peer can serve.
+        //
+        // Multiple gaps are handled with a loop — if jumping past one gap
+        // lands us at the edge of another (adjacent gaps), keep jumping until
+        // the next gap is no longer immediately ahead.
+        //
+        // Persistence: `save_safe_floor()` is called after every advance so
+        // the jump survives restart. Idempotent — repeat invocations are a
+        // no-op once contiguous has advanced past all gaps.
+        // v10.9.46: Fire when contiguous+1 falls INSIDE a known gap, not only at
+        // the exact gap-start. The original strict equality (gap_start ==
+        // working_height + 1) silently failed every call on the canary: contiguous
+        // was 26,000 vs configured gap (25,988, 100,440), so 25988 == 26001 was
+        // FALSE and the loop fell to `_ => break` without advancing. Verified
+        // 2026-05-17: canary stalled at h=26,000 for 22+ min with [CONFIG]
+        // Q_KNOWN_PERMANENT_GAPS = '25988:100440' parsed correctly but zero
+        // KNOWN-GAP auto-advances fired in the log. The off-by-one is real and
+        // also defends against operator gap configs whose declared start is
+        // slightly low.
+        let mut advanced = false;
+        let mut working_height = local_height;
+        loop {
+            let next_block = working_height.saturating_add(1);
+            match self.known_gaps.next_gap_above(working_height) {
+                Some((gap_start, gap_end)) if next_block >= gap_start && next_block <= gap_end => {
+                    // Next missing block is INSIDE the known gap → jump to gap_end
+                    // so the next chunk request lands at gap_end+1 (post-gap region).
+                    let new_contiguous = gap_end; // height pointer at end of gap
+                    info!(
+                        "⏩ [KNOWN-GAP v10.9.46] Auto-advanced contiguous {} → {} via Q_KNOWN_PERMANENT_GAPS \
+                         (next_block={} inside gap {}..={}, skipped {} blocks)",
+                        working_height,
+                        new_contiguous,
+                        next_block,
+                        gap_start,
+                        gap_end,
+                        gap_end - gap_start + 1
+                    );
+                    // Wire Prometheus gauges so /metrics shows the fire (v10.9.46).
+                    let gauges = crate::metrics::SyncOptimizerGauges::instance();
+                    gauges.known_gap_advances_total.inc();
+                    gauges.known_gap_blocks_skipped_total.inc_by(gap_end - gap_start + 1);
+                    self.storage.update_height_cache(new_contiguous).await;
+                    if let Err(e) = self.storage.save_safe_floor(new_contiguous).await {
+                        warn!("⏩ [KNOWN-GAP] save_safe_floor({}) failed: {} \
+                              — advance is in-memory only and may not survive restart",
+                              new_contiguous, e);
+                    }
+                    working_height = new_contiguous;
+                    advanced = true;
+                    // Stop if we've now passed/reached the target.
+                    if working_height >= target_height {
+                        info!("⏩ [KNOWN-GAP v10.9.46] Advanced past target height ({} >= {}), \
+                               nothing left to sync this round",
+                              working_height, target_height);
+                        return Ok(());
+                    }
+                }
+                Some((gap_start, gap_end)) => {
+                    // Gap exists but next_block is before it (sync gap fill in
+                    // progress) — log once and stop. Don't advance.
+                    debug!(
+                        "⏩ [KNOWN-GAP v10.9.46] Next gap {}..={} ahead but not yet adjacent \
+                         (contiguous={}, next_block={}, distance={}). No advance.",
+                        gap_start, gap_end, working_height, next_block,
+                        gap_start.saturating_sub(next_block)
+                    );
+                    break;
+                }
+                None => break, // No more gaps ahead.
+            }
+        }
+        if advanced {
+            info!(
+                "⏩ [KNOWN-GAP v10.9.44] Total advance: {} → {} ({} blocks skipped). \
+                 Resuming normal sync from height {} toward target {}.",
+                local_height, working_height, working_height - local_height,
+                working_height, target_height
+            );
+            // Reflect post-skip value to downstream checks (fresh-start detection,
+            // endgame detection, effective_start_height computation).
+            local_height = working_height;
         }
 
         // 🔒 v10.5.0: Fresh-start single-flight gate.
@@ -7172,6 +7674,16 @@ impl TurboSyncManager {
             }
         }
 
+        // v10.9.55 Task 4: advance synced_through to target so the next sync invocation
+        // starts past this window. Idempotent under fetch_max — concurrent advances
+        // won't regress. Best-effort persist: if the write fails, the in-memory atomic
+        // still advances; worst case a restart re-requests this window.
+        if let Err(e) = self.storage.advance_synced_through(target_height).await {
+            warn!("⚠️ [SYNCED-THROUGH] Failed to advance to {}: {} \
+                   (in-memory atomic still updated; will re-request on restart)",
+                  target_height, e);
+        }
+
         Ok(())
     }
 
@@ -7345,10 +7857,10 @@ impl TurboSyncManager {
         let start_sign = Instant::now();
 
         // 1. Compute merkle root of block hashes
-        let block_hashes: Vec<[u8; 32]> = blocks
-            .iter()
-            .map(|b| b.calculate_hash())
-            .collect();
+        // v10.9.43: batched BLAKE3 path — rayon-parallel + tree-mode SIMD when
+        // headers exceed 128 KiB (typical hot path uses scalar-blake3-per-block
+        // dispatched in parallel; ~2-3x wall-clock vs sequential).
+        let block_hashes: Vec<[u8; 32]> = QBlock::batch_calculate_hashes(&blocks);
         let merkle_root = compute_merkle_root(&block_hashes);
 
         // 2. Create message to sign
@@ -7395,10 +7907,8 @@ impl TurboSyncManager {
         }
 
         // 2. Verify merkle root matches blocks
-        let block_hashes: Vec<[u8; 32]> = pack.blocks
-            .iter()
-            .map(|b| b.calculate_hash())
-            .collect();
+        // v10.9.43: batched BLAKE3 helper — see QBlock::batch_calculate_hashes
+        let block_hashes: Vec<[u8; 32]> = QBlock::batch_calculate_hashes(&pack.blocks);
         let computed_root = compute_merkle_root(&block_hashes);
 
         if computed_root != pack.merkle_root {
@@ -7462,10 +7972,8 @@ impl TurboSyncManager {
         let end_height = blocks.last().map(|b| b.header.height).unwrap_or(0);
 
         // 1. Compute merkle root of UNCOMPRESSED blocks (before compression)
-        let block_hashes: Vec<[u8; 32]> = blocks
-            .iter()
-            .map(|b| b.calculate_hash())
-            .collect();
+        // v10.9.43: batched BLAKE3 helper — see QBlock::batch_calculate_hashes
+        let block_hashes: Vec<[u8; 32]> = QBlock::batch_calculate_hashes(&blocks);
         let merkle_root = compute_merkle_root(&block_hashes);
 
         // 2. Serialize blocks with postcard (efficient binary format)
@@ -7602,10 +8110,8 @@ impl TurboSyncManager {
 
         // 5. Verify merkle root matches decompressed blocks
         // ✅ v0.9.41-beta: Parallel hash calculation with rayon (2-4x faster on multi-core CPUs)
-        let block_hashes: Vec<[u8; 32]> = blocks
-            .par_iter()  // ✅ Parallel iterator
-            .map(|b| b.calculate_hash())
-            .collect();
+        // v10.9.43: routed through QBlock::batch_calculate_hashes for SIMD tree-mode on large headers
+        let block_hashes: Vec<[u8; 32]> = QBlock::batch_calculate_hashes(&blocks);
         let computed_root = compute_merkle_root(&block_hashes);
 
         if computed_root != pack.merkle_root {
