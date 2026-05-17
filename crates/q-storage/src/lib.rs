@@ -3127,6 +3127,38 @@ impl QStorage {
         }
     }
 
+    /// v10.9.51 (closes plan task #74): persist the latest `LatticeTipProof`
+    /// to RocksDB so a node restart skips the 18-second warmup walk through
+    /// 18M blocks. Producer-hook calls this every ~1000 extends; reload
+    /// happens at boot via `load_tip_proof_bytes()`.
+    ///
+    /// Storage: `CF_MANIFEST` key `b"tip_proof:latest"`. Value is the raw
+    /// bincode-serialised `LatticeTipProof` (caller serialises — we keep
+    /// this layer dep-free of q-recursive-proofs to avoid a cross-crate
+    /// dependency, since q-storage is below q-recursive-proofs in the
+    /// dep graph). Uses put_sync() for OOM-kill survival.
+    pub async fn save_tip_proof_bytes(&self, bytes: &[u8]) -> Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        self.hot_db
+            .put_sync(CF_MANIFEST, b"tip_proof:latest", bytes)
+            .await?;
+        Ok(())
+    }
+
+    /// v10.9.51 — companion loader for save_tip_proof_bytes. Returns None
+    /// if no proof has been persisted yet (fresh DB). Caller deserialises
+    /// via bincode and falls back to anchor() on deserialise error (e.g.
+    /// stored bytes are from an older wire format).
+    pub async fn load_tip_proof_bytes(&self) -> Option<Vec<u8>> {
+        self.hot_db
+            .get(CF_MANIFEST, b"tip_proof:latest")
+            .await
+            .ok()
+            .flatten()
+    }
+
     /// v10.9.47: Persist a runtime-detected permanent gap to CF_MANIFEST so it
     /// survives restart. The key format `permanent_gap:{start:0>20}:{end:0>20}`
     /// keeps entries lexicographically sortable. Uses put_sync() so the gap

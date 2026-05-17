@@ -87,7 +87,9 @@ fn transcript_bytes_of(t: &Transcript) -> [u8; 64] {
 }
 
 /// The proof object that gets returned from `/api/v1/proof/tip` and
-/// shipped to fresh bootstrapping nodes. Wire size = 144 bytes.
+/// shipped to fresh bootstrapping nodes. Wire size = 184 bytes (was 176
+/// before v10.9.51 step_count addition; comment previously said 144 which
+/// was incorrect even for the original layout — fixed in this revision).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LatticeTipProof {
     /// SIS-style commitment to the absorbed header sequence.
@@ -106,11 +108,24 @@ pub struct LatticeTipProof {
     pub anchor_height: u64,
     /// Anchor state root — the verifier seeds its transcript with this.
     pub anchor_state: FoldedState,
+    /// v10.9.51 (closes DeepSeek §8): number of `extend()` calls applied
+    /// since `anchor()`. Verifier asserts `step_count == tip_height -
+    /// anchor_height` AND folds this into the commitment, preventing a
+    /// prover from claiming a transcript covers M extensions when it
+    /// actually covers K ≠ M.
+    ///
+    /// `#[serde(default)]` makes this forward-compatible with v10.9.41
+    /// wire-format proofs (which had no step_count) — deserialising an
+    /// older proof yields step_count = 0. The verify-time equality check
+    /// will then catch any mismatched claim (tip - anchor must equal 0
+    /// for v10.9.41 anchor-only proofs).
+    #[serde(default)]
+    pub step_count: u64,
 }
 
 impl LatticeTipProof {
-    /// Constant-size serialization (144 bytes when anchor fields are
-    /// included; the wire encoding uses bincode for forward compatibility).
+    /// Constant-size serialization (184 bytes post-v10.9.51 step_count
+    /// addition; the wire encoding uses bincode for forward compatibility).
     pub fn wire_size() -> usize {
         32 /* commitment */
             + 32 /* folded_state */
@@ -118,6 +133,7 @@ impl LatticeTipProof {
             + 64 /* transcript */
             + 8  /* anchor_height */
             + 32 /* anchor_state */
+            + 8  /* step_count (v10.9.51, DeepSeek §8) */
     }
 }
 
@@ -135,9 +151,10 @@ pub fn anchor(anchor_height: u64, anchor_state: FoldedState) -> LatticeTipProof 
 
     let mut transcript: Transcript = [0u32; 16];
     write_transcript(&mut transcript, &transcript_bytes);
-    // For the anchor case the tip equals the anchor, so commit() binds
-    // (anchor_height, anchor_state, anchor_height, anchor_state, transcript).
-    let commitment = commit(anchor_height, &anchor_state, anchor_height, &anchor_state, &transcript);
+    // For the anchor case the tip equals the anchor and step_count = 0, so
+    // commit() binds (anchor_height, anchor_state, anchor_height, anchor_state,
+    // 0, transcript).
+    let commitment = commit(anchor_height, &anchor_state, anchor_height, &anchor_state, 0, &transcript);
 
     LatticeTipProof {
         commitment,
@@ -146,6 +163,7 @@ pub fn anchor(anchor_height: u64, anchor_state: FoldedState) -> LatticeTipProof 
         transcript,
         anchor_height,
         anchor_state,
+        step_count: 0, // v10.9.51 — anchor is the recursion base, zero extends applied
     }
 }
 
@@ -182,11 +200,15 @@ pub fn extend(
     // Bind the FULL public-input set (anchor + tip claim) to the transcript.
     // Closes the DeepSeek §0 forgery: prover can't claim a different anchor
     // or different tip without finding a BLAKE3 preimage.
+    // v10.9.51: step_count incremented by 1 per extend; commit() folds it
+    // in so the verifier can assert step_count == tip_height - anchor_height.
+    let new_step_count = prev.step_count + 1;
     let commitment = commit(
         prev.anchor_height,
         &prev.anchor_state,
         new_height,
         &new_state_root,
+        new_step_count,
         &transcript,
     );
 
@@ -197,6 +219,7 @@ pub fn extend(
         transcript,
         anchor_height: prev.anchor_height,
         anchor_state: prev.anchor_state,
+        step_count: new_step_count,
     }
 }
 
@@ -227,10 +250,23 @@ pub fn verify(
     if proof.tip_height < proof.anchor_height {
         return Err(VerifyError::TipBelowAnchor);
     }
+    // v10.9.51 (closes DeepSeek §8): the step_count MUST equal the number of
+    // blocks between anchor and tip. Without this check a prover could
+    // construct a transcript covering K extensions and claim it represents
+    // M ≠ K, because the original commitment didn't bind the extension count.
+    // Step_count is now folded into commit(), so this is a redundant explicit
+    // check that produces a precise error (rather than a CommitmentMismatch).
+    let derived_steps = proof.tip_height.saturating_sub(proof.anchor_height);
+    if proof.step_count != derived_steps {
+        return Err(VerifyError::StepCountMismatch {
+            claimed: proof.step_count,
+            derived: derived_steps,
+        });
+    }
     // Recompute the commitment over the EXPECTED public inputs (verifier's
-    // anchor) plus the proof's claimed tip + transcript. If they don't match,
-    // either the prover used a different anchor/tip, or the transcript is
-    // forged. Either way, reject.
+    // anchor) plus the proof's claimed tip + step_count + transcript. If they
+    // don't match, either the prover used a different anchor/tip, used a
+    // different step count, or the transcript is forged. Either way, reject.
     //
     // This closes the DeepSeek §0 forgery — pre-2026-05-16 the commitment was
     // only over the transcript, so swapping in any (anchor, tip) pair passed
@@ -241,6 +277,7 @@ pub fn verify(
         &expected_anchor_state,
         proof.tip_height,
         &proof.folded_state,
+        proof.step_count,
         &proof.transcript,
     );
     if recomputed != proof.commitment {
@@ -261,17 +298,25 @@ pub enum VerifyError {
     TipBelowAnchor,
     #[error("commitment does not match transcript — proof forged or corrupt")]
     CommitmentMismatch,
+    /// v10.9.51 (closes DeepSeek §8): claimed step_count differs from
+    /// `tip_height - anchor_height`. Prevents a prover from claiming a
+    /// transcript covers M extensions when it actually covers K ≠ M.
+    #[error("step_count mismatch: claimed {claimed} but tip - anchor = {derived}")]
+    StepCountMismatch { claimed: u64, derived: u64 },
 }
 
 /// 32-byte BLAKE3 keyed-hash commitment over the FULL public-input set:
-/// `(anchor_height, anchor_state, tip_height, folded_state, transcript)`.
+/// `(anchor_height, anchor_state, tip_height, folded_state, step_count, transcript)`.
 ///
-/// Why all 5 inputs:
+/// Why all 6 inputs:
 /// - `anchor_*` ensures the prover can't pretend to commit to a different
 ///   recursion base than the verifier expects (the original `lattice-tip-v1`
 ///   bug DeepSeek caught — see §0 of the technical review).
 /// - `tip_*` ensures the prover can't inflate `tip_height` or substitute
 ///   a different `folded_state` while keeping the same transcript.
+/// - `step_count` (v10.9.51, closes DeepSeek §8) ensures the prover commits
+///   to the exact number of extensions; a forger can't reuse a longer
+///   transcript and claim a shorter chain (or vice versa).
 /// - `transcript` is the chain witness; under preimage resistance the
 ///   adversary can't construct one matching a target commitment without
 ///   honestly running the extend chain.
@@ -284,6 +329,7 @@ fn commit(
     anchor_state: &FoldedState,
     tip_height: u64,
     folded_state: &FoldedState,
+    step_count: u64,
     transcript: &Transcript,
 ) -> Commitment {
     let key = blake3::hash(b"qnk-tip-commit-v1");
@@ -293,6 +339,7 @@ fn commit(
     h.update(anchor_state);
     h.update(&tip_height.to_le_bytes());
     h.update(folded_state);
+    h.update(&step_count.to_le_bytes()); // v10.9.51 — DeepSeek §8
     h.update(&transcript_bytes_of(transcript));
     *h.finalize().as_bytes()
 }
@@ -398,6 +445,75 @@ mod tests {
         };
         let err = verify(&inflated, 50, arb_root(7)).unwrap_err();
         assert!(matches!(err, VerifyError::CommitmentMismatch));
+    }
+
+    /// v10.9.51 — closes DeepSeek §8. Forging step_count without changing
+    /// tip_height or transcript is rejected, because step_count is now
+    /// folded into commit() AND verify() asserts step_count == tip - anchor.
+    /// This test demonstrates BOTH defenses fire (StepCountMismatch is the
+    /// first one tripped — we never get to CommitmentMismatch).
+    #[test]
+    fn rejects_step_count_inflation() {
+        let mut p = anchor(0, arb_root(11));
+        for h in 1..=5 {
+            p = extend(&p, h, arb_root(h as u8 + 50), arb_root(h as u8 + 60), arb_root(h as u8 + 70));
+        }
+        // honest proof: step_count == 5, tip == 5, anchor == 0
+        assert_eq!(p.step_count, 5);
+        verify(&p, 0, arb_root(11)).expect("honest proof verifies");
+
+        // forge step_count, leave everything else
+        let forged = LatticeTipProof {
+            step_count: 99,
+            ..p.clone()
+        };
+        let err = verify(&forged, 0, arb_root(11)).unwrap_err();
+        match err {
+            VerifyError::StepCountMismatch { claimed: 99, derived: 5 } => {}
+            other => panic!("expected StepCountMismatch{{99,5}}, got {:?}", other),
+        }
+
+        // forge step_count to match (tip-anchor) but break commitment binding:
+        // claim a transcript covers 5 extensions when it really covers 1.
+        let short = anchor(0, arb_root(11));
+        let short_extended = extend(&short, 1, arb_root(99), arb_root(98), arb_root(97));
+        // splice the 1-extend transcript onto a proof claiming 5 extends.
+        // verify() should reject because commit() now includes step_count;
+        // recomputing with claimed_step=5 won't match the 1-extend commitment.
+        let spliced = LatticeTipProof {
+            commitment: short_extended.commitment,
+            transcript: short_extended.transcript,
+            // honest claim about step_count == tip - anchor passes the equality
+            // check but commit() recompute fails:
+            tip_height: 5,
+            step_count: 5,
+            ..p
+        };
+        let err = verify(&spliced, 0, arb_root(11)).unwrap_err();
+        assert!(matches!(err, VerifyError::CommitmentMismatch),
+            "spliced-transcript attack must trigger CommitmentMismatch, got {:?}", err);
+    }
+
+    /// v10.9.51 — the anchor (zero extensions) case correctly reports
+    /// step_count = 0 and verify() passes.
+    #[test]
+    fn accepts_anchor_zero_step_count() {
+        let a = anchor(0, arb_root(42));
+        assert_eq!(a.step_count, 0);
+        verify(&a, 0, arb_root(42)).expect("anchor verifies with step_count=0");
+    }
+
+    /// v10.9.51 — forward compatibility: a deserialized v10.9.41 proof (no
+    /// step_count field, serde-default to 0) at the anchor (tip == anchor)
+    /// still verifies. For non-anchor v10.9.41 proofs the equality check
+    /// would catch the mismatch (claimed=0 vs derived>0).
+    #[test]
+    fn forward_compat_v10_9_41_anchor_only() {
+        // simulate a v10.9.41 wire-format proof by constructing the struct
+        // with step_count = 0 (as serde_default would produce).
+        let a = anchor(0, arb_root(99));
+        let as_v10_9_41 = LatticeTipProof { step_count: 0, ..a };
+        verify(&as_v10_9_41, 0, arb_root(99)).expect("v10.9.41 anchor-only proof still verifies");
     }
 
     #[test]

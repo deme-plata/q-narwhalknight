@@ -1457,11 +1457,16 @@ pub async fn proof_tip(
 
     let (proof_version, proof_bytes, step_count, anchor_height, anchor_state_hex) = match live_proof {
         Some(ref p) => {
-            let step = p.tip_height.saturating_sub(p.anchor_height);
+            // v10.9.51 wire-format bump: proof_version → "tip-blake3-fs-v1.1".
+            // The struct now includes step_count (8 extra bytes at end of bincode
+            // encoding). v10.9.41 verifiers using bincode-positional decode will
+            // see "trailing bytes" and reject — that's correct, they should
+            // upgrade. We bump the version string so wallets can detect and
+            // adapt. (DeepSeek §8 fix; step_count folded into commit().)
             (
-                "tip-blake3-fs-v1".to_string(),
+                "tip-blake3-fs-v1.1".to_string(),
                 bincode::serialize(p).unwrap_or_default(),
-                step,
+                p.step_count,
                 p.anchor_height,
                 format!("0x{}", hex::encode(p.anchor_state)),
             )

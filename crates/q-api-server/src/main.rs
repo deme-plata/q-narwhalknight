@@ -6377,15 +6377,41 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             let storage = state.storage_engine.clone();
             tokio::spawn(async move {
                 info!("🔐 [LATTICE-TIP] Producer-hook task starting (anchors at genesis, extends per block)");
-                // Anchor at genesis with the all-zero state root. We could query the
-                // genesis block for its real state_root here, but a constant anchor
-                // is simpler and the verifier just needs the same constant.
-                let mut current_proof = q_recursive_proofs::tip_anchor(0, [0u8; 32]);
+                // v10.9.51: try to resume from persisted proof first (skips the
+                // 18s warmup walk through 18M blocks on restart). If load
+                // fails (no persisted proof, OR deserialise error from older
+                // wire format), fall through to cold-start anchor.
+                let mut current_proof = match storage.load_tip_proof_bytes().await {
+                    Some(bytes) => match bincode::deserialize::<q_recursive_proofs::LatticeTipProof>(&bytes) {
+                        Ok(p) => {
+                            info!(
+                                "🔐 [LATTICE-TIP v10.9.51] RESUMED from persisted proof at height {} (skipped warmup walk; {} bytes loaded)",
+                                p.tip_height, bytes.len()
+                            );
+                            p
+                        }
+                        Err(e) => {
+                            warn!(
+                                "🔐 [LATTICE-TIP v10.9.51] persisted proof deserialise failed ({}) — cold-starting from anchor. Old wire format will be overwritten on next save.",
+                                e
+                            );
+                            q_recursive_proofs::tip_anchor(0, [0u8; 32])
+                        }
+                    },
+                    None => {
+                        info!("🔐 [LATTICE-TIP v10.9.51] no persisted proof — cold-starting from anchor (first run or fresh DB)");
+                        q_recursive_proofs::tip_anchor(0, [0u8; 32])
+                    }
+                };
                 {
                     let mut guard = proof_slot.write().await;
                     *guard = Some(current_proof.clone());
                 }
-                let mut last_extended_height = 0u64;
+                let mut last_extended_height = current_proof.tip_height;
+                // v10.9.51: persist every PERSIST_INTERVAL extends to bound
+                // restart loss (~500 ms of extend work at typical block rate).
+                const PERSIST_INTERVAL: u64 = 1_000;
+                let mut extends_since_persist: u64 = 0;
                 loop {
                     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                     let contiguous = height_atomic.load(std::sync::atomic::Ordering::Relaxed);
@@ -6406,6 +6432,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                     block.header.tx_root,
                                 );
                                 last_extended_height = h;
+                                extends_since_persist += 1;
                             }
                             Ok(None) => {
                                 if h % 1000 == 0 {
@@ -6422,6 +6449,34 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     {
                         let mut guard = proof_slot.write().await;
                         *guard = Some(current_proof.clone());
+                    }
+                    // v10.9.51 (closes plan task #74): persist to RocksDB
+                    // every PERSIST_INTERVAL extends so restart skips the
+                    // 18s warmup walk. Worst-case loss = last PERSIST_INTERVAL
+                    // extends (~1 ms of producer work to redo).
+                    if extends_since_persist >= PERSIST_INTERVAL {
+                        match bincode::serialize(&current_proof) {
+                            Ok(bytes) => {
+                                if let Err(e) = storage.save_tip_proof_bytes(&bytes).await {
+                                    warn!(
+                                        "🔐 [LATTICE-TIP v10.9.51] persist failed at height {}: {} — will retry on next batch",
+                                        last_extended_height, e
+                                    );
+                                } else {
+                                    debug!(
+                                        "🔐 [LATTICE-TIP v10.9.51] persisted proof at height {} ({} bytes, {} extends since last save)",
+                                        last_extended_height, bytes.len(), extends_since_persist
+                                    );
+                                    extends_since_persist = 0;
+                                }
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "🔐 [LATTICE-TIP v10.9.51] bincode serialize failed at height {}: {} — skipping persist",
+                                    last_extended_height, e
+                                );
+                            }
+                        }
                     }
                     if last_extended_height % 10_000 == 0 && last_extended_height > 0 {
                         info!(
