@@ -1,0 +1,44 @@
+# Technical Review: Private-Crypto Security Triage
+
+**Date**: 2026-05-17
+**Reviewer**: Codex
+**Scope**: Static analysis of selected Quillon Graph private cryptocurrency paths.
+
+## Executive Summary
+
+This pass raised seven actionable issues in `docs/security-audit/issues/`. The most urgent risks are an unauthenticated emergency pause/resume control plane and stablecoin minting that updates local vault state before a signed consensus-accepted transaction is proven. Several privacy and collateral modules still expose placeholder behavior that should not be shipped as production privacy or solvency logic.
+
+## Issues Raised
+
+1. [Issue #001: Make QUGUSD minting consensus-first and balance-safe](security-audit/issues/001-stablecoin-mint-consensus-first.md)
+2. [Issue #002: Bind wallet auth to method, body, query, and one-time nonce](security-audit/issues/002-wallet-auth-replay.md)
+3. [Issue #003: Replace stablecoin placeholder proofs and signatures](security-audit/issues/003-stablecoin-placeholder-privacy.md)
+4. [Issue #004: Back stablecoin collateral calculations with real per-user state](security-audit/issues/004-stablecoin-collateral-placeholder-state.md)
+5. [Issue #005: Use integer or decimal-safe arithmetic for 24-decimal token amounts](security-audit/issues/005-fixed-point-amount-arithmetic.md)
+6. [Issue #006: Remove or lock down server-side mnemonic generation](security-audit/issues/006-server-side-mnemonic-endpoint.md)
+7. [Issue #007: Require founder authentication for emergency pause and resume](security-audit/issues/007-emergency-pause-unauthenticated.md)
+
+## Highest-Risk Observations
+
+### Public emergency pause/resume
+
+The main router exposes emergency pause and resume as POST routes. The handlers currently validate timestamp and reason, then directly mutate `state.emergency_paused`, with TODO comments for founder signature verification. Treat this as a public kill switch until fixed.
+
+### Stablecoin minting before consensus acceptance
+
+`mint_qugusd` mutates and persists `CollateralVault` before checking whether the generated `StableMint` transaction was accepted. The generated transaction is built unsigned and zero-fee. The handler records it as optimistically applied and ignores the submit result.
+
+### Placeholder privacy/collateral logic
+
+The stablecoin privacy layer returns fixed bytes for proofs and signatures. The collateral manager returns fixed values and a `"test"` user position. These should be disabled, feature-gated, or made to return explicit not-implemented errors until real verification and storage-backed collateral state exist.
+
+## Suggested Triage Plan
+
+- First patch admin authentication on pause/resume and add regression tests for anonymous rejection.
+- Next move stablecoin mint/burn effects into the block/state transition path and reject unsigned operations.
+- Then replace floating-point money parsing with shared fixed-point parsing.
+- Finally remove placeholder privacy/collateral behavior or gate it behind development-only features.
+
+## Validation Performed
+
+Static review only. I did not run the full Rust test suite because this PR only adds issue documentation and does not change executable code.
