@@ -2640,10 +2640,9 @@ impl TurboSyncManager {
                         }
 
                         // Look up the peer's trust score (Beta mean).
-                        let beta_mean = {
-                            let mut reg = self.beta_scores.lock();
-                            reg.score(&peer).mean()
-                        };
+                        // BetaScoreRegistry::mean(&peer) returns 0.5 for unseen peers
+                        // (Beta(1,1) prior) and grows toward 1.0 with successful chunks.
+                        let beta_mean = self.beta_scores.lock().mean(&peer);
 
                         let accept = trust_single
                             || reporter_count >= 2
