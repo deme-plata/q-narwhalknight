@@ -41,6 +41,14 @@ const NODE_TAG: &[u8] = b"smt_node_v2";
 /// internal nodes, 'L' for leaves).
 const KEY_PERSISTED_ROOT: &[u8] = b"R__root__";
 
+/// Reserved sentinel marking an in-progress rebuild. Set BEFORE the CF truncate
+/// in `rebuild_from_balances` and CLEARED in the same WriteBatch as
+/// KEY_PERSISTED_ROOT. If `BalanceSmt::open` finds this key, the prior rebuild
+/// was interrupted (crash between truncate and persist) and the SMT state is
+/// inconsistent — open refuses rather than silently initializing to genesis on
+/// top of a partially-cleared CF. v10.9.55 Codex review (HIGH).
+const KEY_REBUILD_IN_PROGRESS: &[u8] = b"R__rebuilding__";
+
 /// v10.9.55 (C2, Codex review 2026-05-17): key-encoding domain bytes.
 ///
 /// PRE-v10.9.55 BUG: `node_key(depth=254, addr)` and `node_key(depth=256, addr)`
@@ -248,6 +256,25 @@ impl BalanceSmt {
             .cf_handle(CF_BALANCE_SMT)
             .ok_or_else(|| anyhow!("column family {} missing — was DB opened with it?", CF_BALANCE_SMT))?;
 
+        // v10.9.55 Codex HIGH: refuse to open if rebuild was interrupted.
+        // KEY_REBUILD_IN_PROGRESS is set inside the truncate batch and cleared
+        // atomically with KEY_PERSISTED_ROOT. Its presence means rebuild crashed
+        // between the two writes and CF_BALANCE_SMT is in an inconsistent state.
+        // Returning Err here forces the operator to rerun rebuild rather than
+        // silently initializing to a possibly-wrong genesis root.
+        {
+            let cf = db.cf_handle(CF_BALANCE_SMT).unwrap();
+            if db.get_cf(&cf, KEY_REBUILD_IN_PROGRESS).context("reading SMT rebuild sentinel")?.is_some() {
+                return Err(anyhow!(
+                    "BalanceSmt CF_BALANCE_SMT was left in an interrupted-rebuild state \
+                     (sentinel KEY_REBUILD_IN_PROGRESS present). Crash between truncate \
+                     and persist. Rerun `rebuild_balance_smt_from_wallet_table()` via the \
+                     admin endpoint, or clear the sentinel manually after confirming \
+                     consistency. Refusing to open with possibly-corrupt SMT state."
+                ));
+            }
+        }
+
         let empty = precompute_empty_subtrees();
         let genesis_root = empty[0];
 
@@ -309,11 +336,20 @@ impl BalanceSmt {
     ) -> Result<[u8; 32]> {
         let cf = self.db.cf_handle(&self.cf_name).unwrap();
 
-        // (1) Truncate. delete_range_cf is O(1) at LSM layer — writes a single
-        // tombstone over the range; compaction handles the rest. Safe at scale.
+        // (1) Truncate + sentinel in ONE atomic batch.
+        //
+        // Crash-atomicity: there are two RocksDB writes in this function (truncate,
+        // then rebuilt-state). A crash between them used to leave the CF empty with
+        // no persisted root — BalanceSmt::open() would then silently initialize to
+        // genesis (Codex 2026-05-18 HIGH). The sentinel `R__rebuilding__` is written
+        // INSIDE the truncate batch (after delete_range_cf in batch insertion order,
+        // so it survives the broad-range delete) and CLEARED in the second batch.
+        // If a crash occurs between the two writes, the sentinel persists and
+        // BalanceSmt::open() refuses to load until rebuild is rerun.
         {
             let mut clear_batch = WriteBatch::default();
             clear_batch.delete_range_cf(&cf, &[0x00u8], &[0xFFu8; 64]);
+            clear_batch.put_cf(&cf, KEY_REBUILD_IN_PROGRESS, &[1u8]);
             self.db.write(clear_batch).context("truncating SMT CF before rebuild")?;
         }
 
@@ -328,7 +364,10 @@ impl BalanceSmt {
         let mut batch = WriteBatch::default();
         let new_root = self.apply_to_batch_internal(&cf, &mut batch, &updates)?;
 
+        // (3) Persist new root + CLEAR the in-progress sentinel atomically. After
+        // db.write succeeds, BalanceSmt::open() will load the new root cleanly.
         batch.put_cf(&cf, KEY_PERSISTED_ROOT, new_root);
+        batch.delete_cf(&cf, KEY_REBUILD_IN_PROGRESS);
         self.db.write(batch).context("writing SMT rebuild batch")?;
         *self.cached_root.write() = new_root;
         Ok(new_root)
@@ -783,5 +822,109 @@ mod tests {
             let k = node_key(d, &a);
             assert!(seen.insert(k.clone()), "duplicate key at depth {}", d);
         }
+    }
+
+    /// v10.9.55 Codex MEDIUM: explicit regression for the pre-v10.9.55 depth-254
+    /// vs leaf collision class. Pre-fix, `node_key(254, addr)` produced
+    /// `[0xFE, addr[0..31], addr[31] & 0xFC]` and `node_key(256, addr)` (leaf)
+    /// produced `[0xFE, addr[0..32]]` — byte-identical for any address with
+    /// low 2 bits = 00. This test exercises that exact shape across many addresses
+    /// AND across multiple depth pairs (254/256, 255/256, KEY_PERSISTED_ROOT).
+    #[test]
+    fn node_key_no_collision_in_old_failure_shape_v10955() {
+        // Addresses that would have collided pre-fix (last byte's low 2 bits = 00).
+        let collision_addrs: Vec<[u8; 32]> = vec![
+            {
+                let mut a = [0u8; 32];
+                a[31] = 0x00; // 0b00000000
+                a
+            },
+            {
+                let mut a = [0u8; 32];
+                a[31] = 0x04; // 0b00000100
+                a
+            },
+            {
+                let mut a = [0xAAu8; 32];
+                a[31] = 0xFC; // 0b11111100
+                a
+            },
+            {
+                let mut a = [0x55u8; 32];
+                a[31] = 0x50; // 0b01010000
+                a
+            },
+        ];
+
+        for addr in &collision_addrs {
+            let k254 = node_key(254, addr);
+            let k255 = node_key(255, addr);
+            let kleaf = node_key(SMT_DEPTH, addr);
+            assert_ne!(
+                k254, kleaf,
+                "depth-254 and leaf MUST NOT collide for addr {:?}", addr
+            );
+            assert_ne!(
+                k255, kleaf,
+                "depth-255 and leaf MUST NOT collide for addr {:?}", addr
+            );
+            assert_ne!(
+                k254, k255,
+                "depth-254 and depth-255 MUST be distinct for addr {:?}", addr
+            );
+        }
+
+        // Sentinel keys must not collide with any node_key output either.
+        let any_addr = [0u8; 32];
+        for d in 0..=SMT_DEPTH {
+            let k = node_key(d, &any_addr);
+            assert_ne!(k.as_slice(), KEY_PERSISTED_ROOT, "node_key collides with persisted-root at depth {}", d);
+            assert_ne!(k.as_slice(), KEY_REBUILD_IN_PROGRESS, "node_key collides with rebuild-sentinel at depth {}", d);
+        }
+    }
+
+    /// v10.9.55 Codex MEDIUM: rebuild determinism under DIVERGENT prior SMT CF
+    /// histories. Two nodes can have byte-identical wallet tables but different
+    /// stale SMT data from earlier shadow-mode runs. After rebuild, both must
+    /// produce the same root (otherwise V2 activation forks).
+    #[test]
+    fn rebuild_independent_of_prior_smt_cf_contents() {
+        use std::collections::HashMap;
+
+        let (db_a, _t_a) = open_test_db();
+        let (db_b, _t_b) = open_test_db();
+
+        let smt_a = BalanceSmt::open(db_a).unwrap();
+        let smt_b = BalanceSmt::open(db_b).unwrap();
+
+        // Step 1: populate DB A with wallet set X. DB B stays empty.
+        let mut wallet_set_x: HashMap<[u8; 32], u128> = HashMap::new();
+        for i in 0u8..50 {
+            let mut a = [0u8; 32];
+            a[0] = i;
+            a[31] = i.wrapping_mul(7); // mix in some low-bit variation
+            wallet_set_x.insert(a, 1000 + i as u128);
+        }
+        smt_a.rebuild_from_balances(&wallet_set_x).unwrap();
+
+        // Step 2: build wallet set Y (disjoint from X, fewer entries).
+        let mut wallet_set_y: HashMap<[u8; 32], u128> = HashMap::new();
+        for i in 100u8..130 {
+            let mut a = [0u8; 32];
+            a[0] = i;
+            a[31] = i.wrapping_mul(11);
+            wallet_set_y.insert(a, 5000 + i as u128);
+        }
+
+        // Step 3: rebuild BOTH databases with set Y.
+        let root_a = smt_a.rebuild_from_balances(&wallet_set_y).unwrap();
+        let root_b = smt_b.rebuild_from_balances(&wallet_set_y).unwrap();
+
+        // Step 4: roots must be byte-identical despite different prior histories.
+        assert_eq!(
+            root_a, root_b,
+            "rebuild_from_balances must be a pure function of the input map; \
+             prior CF contents must not affect the result"
+        );
     }
 }

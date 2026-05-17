@@ -134,22 +134,26 @@ Pieces to add/fix (v10.9.55 scope):
 
 ---
 
-## 6. v10.9.55 patch list (revised, narrower)
+## 6. v10.9.55 actual ship-list
 
-| # | Patch | Type | Priority |
+Updated 2026-05-18 post-Codex review to reflect what landed vs deferred.
+
+| # | Patch | Status | Notes |
 |---|---|---|---|
-| 1 | C1: Fail-closed on BalanceRootV1 root-compute error (`main.rs:12507`) | Consensus-critical, pre-20M | **HIGHEST** |
-| 2 | C2: Collision-free SMT key encoding (`balance_smt.rs:113`) | Pre-V2-activation | High |
-| 3 | C3: SMT rebuild epoch namespace + sort by address (`balance_smt.rs:270`) | Pre-V2-activation | High |
-| 4 | Sync: range-based requester + drop contiguity gate (turbo_sync + height pointer) | Unblocks fresh-node sync | High |
-| 5 | API + sync: in-memory present-heights bitmap, exposed to peers | Perf + sync correctness | Medium |
-| 6 | RocksDB hardening: `paranoid_file_checks`, `verify_checksums_in_compaction` | Defense-in-depth | Low |
-| 7 | systemd hardening: `KillMode=mixed`, `TimeoutStopSec=60` on all node service files | Prevent future compaction loss | Low |
+| 1 | C1: Fail-closed BalanceRootV1 + 3-attempt retry-with-backoff (`main.rs:~12506`) | **SHIPPED** | Pre-20M consensus-critical |
+| 2 | C2: Collision-free SMT key encoding (`balance_smt.rs:~113`) | **SHIPPED** | Pre-V2-activation, ~25% addresses affected pre-fix |
+| 3 | C3+H4: SMT rebuild — truncate via `delete_range_cf` + sort by address + crash-atomic sentinel (`balance_smt.rs:~285`) | **SHIPPED** | Pre-V2-activation, byte-identical roots across nodes guaranteed |
+| 4 | Sync MVP: `synced_through` pointer (`lib.rs:~698,~2000` + `turbo_sync.rs:~7003,~7654`) | **SHIPPED** | Pointer + persistence + sync_to_height start/end hooks; the full range-window scheduler refactor is deferred. The pointer alone is enough to stop the wedge-on-dead-heights stall |
+| 5 | Present-heights index `h_present:NNN` in CF_MANIFEST (`lib.rs:~1369,~1685,~1985`) | **SHIPPED** | Per-block marker write + `is_height_present()` helper. API fast-fail integration deferred (would need a backfill scan for the 8.17M pre-v10.9.55 blocks) |
+| 6 | RocksDB CF-level hardening (`force_consistency_checks`, `paranoid_file_checks`) | **NOT SHIPPED** | rust-rocksdb 0.22.0 doesn't expose these setters (Codex 2026-05-18 caught this before compile). Defense is now systemd-level only; bump rocksdb in a follow-up release |
+| 7 | systemd hardening: `KillMode=mixed` + `TimeoutStopSec=120` (`docs/v10.9.55-systemd-hardening.md`) | **SHIPPED** as operator runbook | Per-server config push during deploy window |
 
 **Explicitly dropped from scope:**
 - Q_KNOWN_PERMANENT_GAPS defaults — wrong mental model; the chain is sparse everywhere, not in fixed ranges
 - Checkpoint-sync at 17M — per operator decision, fresh nodes should sync everything available
 - Historical block recovery — Beta/Gamma have the same loss, no peer has the data, blocks are coinbase-only and balances are intact via P2P state sync
+- Full range-window sync scheduler — `synced_through` pointer alone unblocks fresh-node sync; the full refactor stays for v10.9.56
+- API endpoint fast-fail via marker — needs a backfill scan over 8M existing blocks; defer until either a quiet maintenance window or a streaming backfill that doesn't block startup
 
 ---
 
