@@ -84,7 +84,7 @@ const PhaseTransitionModal: React.FC<PhaseTransitionModalProps> = ({ onClose }) 
               <div className="detail-section highlight">
                 <h3>✨ How to Upgrade</h3>
                 <ul className="bullet-list">
-                  <li>📥 <strong>Download v10.5.3</strong> — Latest binary with gap-aware sync + mining load balancing</li>
+                  <li>📥 <strong>Download v10.9.54</strong> — Latest binary with gap-aware sync + mining load balancing</li>
                   <li>📂 <strong>Fresh data directory</strong> — Automatically uses data-mainnet2026.2</li>
                   <li>🔑 <strong>New identity keys</strong> — Generated on first boot</li>
                   <li>🌐 <strong>P2P isolation</strong> — Old mainnet2026.1 nodes cannot connect</li>
@@ -94,28 +94,28 @@ const PhaseTransitionModal: React.FC<PhaseTransitionModalProps> = ({ onClose }) 
 
               {/* Download Section */}
               <div className="action-section">
-                <h3>📥 Download v10.5.3</h3>
+                <h3>📥 Download v10.9.54</h3>
                 <p>Download the latest binary:</p>
                 <div className="download-links">
-                  <a href="https://quillon.xyz/downloads/q-api-server-v10.5.3" className="download-btn" download style={{marginRight: '10px'}}>
-                    📦 Node v10.5.3
+                  <a href="https://quillon.xyz/downloads/q-api-server-v10.9.54" className="download-btn" download style={{marginRight: '10px'}}>
+                    📦 Node v10.9.54
                   </a>
-                  <a href="https://quillon.xyz/downloads/q-miner-v10.5.3" className="download-btn" download>
-                    ⛏️ Miner v10.5.3
+                  <a href="https://quillon.xyz/downloads/q-miner-v10.9.54" className="download-btn" download>
+                    ⛏️ Miner v10.9.54
                   </a>
                 </div>
                 <div className="code-block">
                   <code>
                     # Stop your old node<br/>
                     pkill -f q-api-server<br/><br/>
-                    # Download v10.5.3<br/>
-                    wget https://quillon.xyz/downloads/q-api-server-v10.5.3<br/>
-                    wget https://quillon.xyz/downloads/q-miner-v10.5.3<br/>
-                    chmod +x q-api-server-v10.5.3 q-miner-v10.5.3<br/><br/>
+                    # Download v10.9.54<br/>
+                    wget https://quillon.xyz/downloads/q-api-server-v10.9.54<br/>
+                    wget https://quillon.xyz/downloads/q-miner-v10.9.54<br/>
+                    chmod +x q-api-server-v10.9.54 q-miner-v10.9.54<br/><br/>
                     # Start node<br/>
-                    ./q-api-server-v10.5.3 --port 8080<br/><br/>
+                    ./q-api-server-v10.9.54 --port 8080<br/><br/>
                     # Start mining<br/>
-                    ./q-miner-v10.5.3 --mode solo --wallet YOUR_WALLET --threads 4
+                    ./q-miner-v10.9.54 --mode solo --wallet YOUR_WALLET --threads 4
                   </code>
                 </div>
               </div>

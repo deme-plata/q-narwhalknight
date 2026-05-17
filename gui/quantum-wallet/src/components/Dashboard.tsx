@@ -3397,8 +3397,8 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
 
       {activeDashboardTab === 'wallet' && <>
 
-      {/* ── HiBT Listing Donation Banner */}
-      <HiBTDonationBanner />
+      {/* ── HiBT Listing Donation Banner removed v10.9.54 — listing concluded ── */}
+      {/* <HiBTDonationBanner /> */}
 
       {/* ── News & Blog Row ─────────────────────────────────────────── */}
       <motion.div
@@ -3572,9 +3572,9 @@ Both lanes must be satisfied for a block to be considered fully valid. This crea
 ## Download the CPU Miner
 
 \`\`\`bash
-wget https://quillon.xyz/downloads/q-miner-v10.5.3
-chmod +x q-miner-v10.5.3
-./q-miner-v10.5.3 --mode vdf --wallet YOUR_ADDRESS
+wget https://quillon.xyz/downloads/q-miner-linux-x64
+chmod +x q-miner-linux-x64
+./q-miner-linux-x64 --mode vdf --wallet YOUR_ADDRESS
 \`\`\`
 
 The miner auto-detects your hardware and selects the optimal lane. Run both simultaneously on the same machine for maximum rewards.`,
