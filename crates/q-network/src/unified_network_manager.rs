@@ -4194,7 +4194,14 @@ impl UnifiedNetworkManager {
                                                     Ok(fwd_blocks) if !fwd_blocks.is_empty() => {
                                                         let first_h = fwd_blocks[0].header.height;
                                                         let last_h = fwd_blocks.last().unwrap().header.height;
-                                                        const MAX_FORWARD_SKIP: u64 = 10_000;
+                                                        // v10.9.50: lowered 10_000 → 1_000 so SMALL gaps (e.g. 600-block
+                                                        // historical pruning regions) also trigger permanent_gap
+                                                        // declaration. Previously fresh-sync canaries wedged at h=1.39M
+                                                        // because Beta's forward-seek skipped only 657 blocks — under
+                                                        // the old 10K threshold so no declaration fired. Lowering to 1K
+                                                        // catches all real pruning gaps while still tolerating normal
+                                                        // sync hiccups (a few hundred blocks "skipped" by reordering).
+                                                        const MAX_FORWARD_SKIP: u64 = 1_000;
                                                         info!("🔬 [BLOCK-PACK] Forward-seek returned {} blocks (heights {}-{}) in {:.2}s; skip={}, threshold={}",
                                                               fwd_blocks.len(), first_h, last_h, fwd_elapsed.as_secs_f32(),
                                                               first_h.saturating_sub(start_height), MAX_FORWARD_SKIP);
@@ -4223,7 +4230,9 @@ impl UnifiedNetworkManager {
                                                         // v10.9.42: forward-seek empty AND fast-path partial — if we know
                                                         // our_height >> start, declare a conservative gap. Otherwise fall
                                                         // through to legacy multi-format scan.
-                                                        if our_height > start_height.saturating_add(10_000) {
+                                                        // v10.9.50: lowered 10_000 → 1_000 (matches MAX_FORWARD_SKIP) so
+                                                        // small gaps trigger declaration via this path too.
+                                                        if our_height > start_height.saturating_add(1_000) {
                                                             info!("🚧 [GAP-DECL] Forward-seek empty but our_height={} >> start={} — declaring gap (probe-empty path)",
                                                                   our_height, start_height);
                                                             let gap_end = start_height

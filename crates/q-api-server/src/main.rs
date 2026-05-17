@@ -2645,6 +2645,40 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         }
     }
 
+    // v10.9.50: Opinionated defaults for ./q-api-server stand-alone invocation.
+    // Three env vars that previously needed manual setting now default to "1"
+    // unless the operator explicitly sets them. This makes `./q-api-server`
+    // "just work" out of the box for fresh-sync users without any env-var
+    // dance. Operators on prod multi-peer setups can disable any of these
+    // with =0 / false.
+    //
+    // (1) Q_GAP_TRUST_SINGLE_PEER=1 — autonomous gap heal accepts a single
+    //     peer's permanent_gap declaration without waiting for quorum. Safe
+    //     because peer trust validation still applies + gaps persist to
+    //     RocksDB. Without this default, single-peer fresh-sync wedges at
+    //     historical pruning gaps until either quorum=2 or beta_score
+    //     climbs above 0.8 (~20+ successful chunks first).
+    // (2) Q_GENESIS_SYNC_ONLY=1 — engages the 10K-lookahead window cap on
+    //     turbo_sync. Harmless for synced nodes (chunks near tip stay in
+    //     range); critical for fresh nodes to avoid gravity-assist requesting
+    //     blocks at 10M+ heights that won't extend contiguous.
+    // (3) Q_SKIP_CHECKPOINT=1 — bypasses the checkpoint-download path. Fresh
+    //     nodes need this to walk the chain via autonomous heal instead of
+    //     trusting a checkpoint snapshot.
+    for (var, default) in &[
+        ("Q_GAP_TRUST_SINGLE_PEER", "1"),
+        ("Q_GENESIS_SYNC_ONLY", "1"),
+        ("Q_SKIP_CHECKPOINT", "1"),
+    ] {
+        if std::env::var(var).is_err() {
+            std::env::set_var(var, default);
+            eprintln!(
+                "    \x1b[1;32m✓\x1b[0m \x1b[1m{}={}\x1b[0m   \x1b[2m(v10.9.50 default; set to 0 to disable)\x1b[0m",
+                var, default
+            );
+        }
+    }
+
     // Parse network configuration (testnet/mainnet)
     // ✅ v0.9.93-beta: Check Q_NETWORK_ID environment variable FIRST, then CLI args (Bug #2 fix)
     // ✅ v7.3.2: Auto-detect network based on current time if not explicitly set
