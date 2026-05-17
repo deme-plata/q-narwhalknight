@@ -8385,7 +8385,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     // peers declare gaps via the v10.9.41 protocol, the handler validates, persists,
     // and the next sync_to_height tick auto-advances past them via the v10.9.46
     // KNOWN-GAP check.
-    if let Some(libp2p_manager_arc) = libp2p_discovery.as_ref() {
+    if let Some(libp2p_manager_arc) = state.libp2p_discovery.as_ref() {
         let hydrated = turbo_sync.load_persisted_gaps().await;
         info!(
             "🚧 [KNOWN-GAP v10.9.47] Hydrated {} permanent gap(s) from RocksDB at startup",
