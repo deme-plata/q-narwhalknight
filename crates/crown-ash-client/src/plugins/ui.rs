@@ -8,13 +8,14 @@
 //! - `minimap` — small map overview with clickable provinces
 //! - `action_buttons` — player action submission (all 17 game actions)
 //! - `join_dialog` — "Join Game" overlay for new players
+//! - `tutorial_overlay` — first-run guided tour for new players
 //! - `keyboard_shortcuts` — ESC/Tab/1-7 for quick navigation
 
 use bevy::prelude::*;
 use bevy_egui::EguiPlugin;
 
 use crate::resources::narrative_state::{DialogState, NarrativeState, ToastState};
-use crate::systems::{action_submit, narrative_update, ui_panels};
+use crate::systems::{action_submit, narrative_update, tutorial, ui_panels};
 
 /// Plugin that sets up the entire Crown & Ash egui-based UI layer.
 pub struct CrownAshUiPlugin;
@@ -27,6 +28,7 @@ impl Plugin for CrownAshUiPlugin {
             .init_resource::<NarrativeState>()
             .init_resource::<DialogState>()
             .init_resource::<ToastState>()
+            .init_resource::<tutorial::TutorialState>()
             .init_resource::<narrative_update::NarrativeProgress>()
             // Narrative update systems (run before UI so text is ready)
             .add_systems(Update, narrative_update::update_event_narratives)
@@ -47,6 +49,8 @@ impl Plugin for CrownAshUiPlugin {
             .add_systems(Update, ui_panels::minimap)
             .add_systems(Update, ui_panels::join_dialog)
             .add_systems(Update, ui_panels::keyboard_shortcuts)
+            .add_systems(Update, tutorial::tutorial_shortcuts)
+            .add_systems(Update, tutorial::tutorial_overlay)
             .add_systems(Update, ui_panels::dialog_bubbles)
             .add_systems(Update, ui_panels::notification_toasts)
             .add_systems(Update, action_submit::action_buttons)
