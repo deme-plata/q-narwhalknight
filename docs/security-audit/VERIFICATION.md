@@ -25,7 +25,15 @@ nl -ba crates/q-api-server/src/wallet_auth.rs | sed -n '205,230p'
 nl -ba crates/q-stablecoin/src/privacy.rs | sed -n '20,50p'
 nl -ba crates/q-stablecoin/src/collateral.rs | sed -n '19,35p'
 nl -ba crates/q-api-server/src/handlers.rs | sed -n '7109,7168p;17228,17316p'
-nl -ba crates/q-api-server/src/main.rs | sed -n '24675,24682p;24793,24799p'
+nl -ba crates/q-api-server/src/main.rs | sed -n '24675,24682p;24793,24799p;25310,25317p;25432,25433p'
+
+nl -ba crates/q-api-server/src/aegis_auth_middleware.rs | sed -n '180,245p'
+nl -ba crates/q-types/src/lib.rs | sed -n '2828,2908p'
+nl -ba crates/q-api-server/src/handlers.rs | sed -n '2590,2630p;4350,4470p;4594,4610p'
+nl -ba crates/q-storage/src/balance_consensus.rs | sed -n '834,918p'
+nl -ba crates/q-api-server/src/privacy_proof_generator.rs | sed -n '1,220p;219,394p'
+nl -ba crates/q-api-server/src/bitcoin_deposit_api.rs | sed -n '330,485p'
+nl -ba crates/q-api-server/src/payment_api.rs | sed -n '1,45p;80,125p;523,540p;650,820p;860,940p'
 ```
 
 ## Verified Findings
@@ -39,6 +47,11 @@ nl -ba crates/q-api-server/src/main.rs | sed -n '24675,24682p;24793,24799p'
 | [#005 Floating-point amount arithmetic](issues/005-fixed-point-amount-arithmetic.md) | `stablecoin_api.rs:617-628`, `stablecoin_api.rs:640-651`, `stablecoin_api.rs:698-710` | Confirmed. Stablecoin mint/redeem paths convert 24-decimal amounts through `f64`. |
 | [#006 Server-side mnemonic endpoint](issues/006-server-side-mnemonic-endpoint.md) | `main.rs:24679`, `handlers.rs:7109-7165` | Confirmed. Public route calls server-side mnemonic generation and returns mnemonic/entropy fields. |
 | [#007 Emergency pause unauthenticated](issues/007-emergency-pause-unauthenticated.md) | `main.rs:24795-24797`, `handlers.rs:17228-17314` | Confirmed. Pause/resume are public routes and signature verification remains TODO in handlers. |
+| [#008 AEGIS localhost bypass](issues/008-aegis-localhost-bypass-default-allow.md) | `aegis_auth_middleware.rs:185-197`, `main.rs:25310-25317` | Confirmed. `X-Admin-Local: true` bypass treats missing `ConnectInfo` as local. |
+| [#009 Signer/from binding](issues/009-transaction-signature-from-binding.md) | `lib.rs:2870-2900`, `handlers.rs:2593-2614`, `balance_consensus.rs:868-912` | Confirmed. Signature verifier can use `tx.data` public key while balance application debits `tx.from`. |
+| [#010 Transaction privacy placeholders](issues/010-transaction-privacy-placeholder-proofs.md) | `privacy_proof_generator.rs:5-12`, `privacy_proof_generator.rs:128-161`, `privacy_proof_generator.rs:219-394` | Confirmed. Proof bytes are generated locally from hashes/format scaffolding and failures are non-fatal. |
+| [#011 wBTC withdrawal consensus burn](issues/011-wbtc-withdrawal-consensus-burn.md) | `main.rs:25432-25433`, `bitcoin_deposit_api.rs:354-485` | Confirmed. Handler directly edits/persists local token balance before Bitcoin broadcast. |
+| [#012 Payment header auth](issues/012-payment-api-header-auth.md) | `payment_api.rs:25-43`, `payment_api.rs:97-116`, `payment_api.rs:523-540`, `payment_api.rs:654-766`, `payment_api.rs:863-880` | Confirmed. Money-moving payment handlers trust raw header text and rate limiting is stubbed. |
 
 ## Scope Caveat
 

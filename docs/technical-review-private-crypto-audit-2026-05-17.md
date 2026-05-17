@@ -6,7 +6,7 @@
 
 ## Executive Summary
 
-This pass raised seven actionable issues in `docs/security-audit/issues/`. The most urgent risks are an unauthenticated emergency pause/resume control plane and stablecoin minting that updates local vault state before a signed consensus-accepted transaction is proven. Several privacy and collateral modules still expose placeholder behavior that should not be shipped as production privacy or solvency logic.
+This pass now tracks twelve actionable issues in `docs/security-audit/issues/`. The most urgent risks are raw header-string payment authorization, transaction signatures that are not bound to the debited `from` account, an unauthenticated emergency pause/resume control plane, and stablecoin minting that updates local vault state before a signed consensus-accepted transaction is proven. Several privacy and collateral modules still expose placeholder behavior that should not be shipped as production privacy or solvency logic.
 
 ## Review-Comment Follow-up
 
@@ -21,8 +21,21 @@ After feedback that the previous commit/PR artifact was not visible outside this
 5. [Issue #005: Use integer or decimal-safe arithmetic for 24-decimal token amounts](security-audit/issues/005-fixed-point-amount-arithmetic.md)
 6. [Issue #006: Remove or lock down server-side mnemonic generation](security-audit/issues/006-server-side-mnemonic-endpoint.md)
 7. [Issue #007: Require founder authentication for emergency pause and resume](security-audit/issues/007-emergency-pause-unauthenticated.md)
+8. [Issue #008: Make AEGIS localhost admin bypass fail closed](security-audit/issues/008-aegis-localhost-bypass-default-allow.md)
+9. [Issue #009: Bind transaction signatures to the debited `from` address](security-audit/issues/009-transaction-signature-from-binding.md)
+10. [Issue #010: Replace transaction privacy proof placeholders with real proofs or disable claims](security-audit/issues/010-transaction-privacy-placeholder-proofs.md)
+11. [Issue #011: Make wBTC withdrawals burn through consensus and persist an atomic bridge record](security-audit/issues/011-wbtc-withdrawal-consensus-burn.md)
+12. [Issue #012: Replace payment API header-string auth with cryptographic wallet auth](security-audit/issues/012-payment-api-header-auth.md)
+
+## Second Pass Additions
+
+The continued audit added five more findings: AEGIS local admin bypass fail-open behavior, transaction signatures not being bound to the debited `from` address, placeholder transaction privacy proofs, wBTC withdrawals mutating local balances outside consensus, and payment APIs trusting raw header strings as wallet authorization.
 
 ## Highest-Risk Observations
+
+### Payment and transaction authorization
+
+The most urgent second-pass findings are raw-string payment authorization and transaction signature verification that can trust a key from `tx.data` without proving it owns `tx.from`. Fix these before expanding money-moving API surface.
 
 ### Public emergency pause/resume
 
@@ -38,10 +51,11 @@ The stablecoin privacy layer returns fixed bytes for proofs and signatures. The 
 
 ## Suggested Triage Plan
 
-- First patch admin authentication on pause/resume and add regression tests for anonymous rejection.
+- First replace payment header-string auth with cryptographic wallet auth and bind transaction signers to `tx.from`.
+- Then patch admin authentication on pause/resume and make the AEGIS local bypass fail closed.
 - Next move stablecoin mint/burn effects into the block/state transition path and reject unsigned operations.
 - Then replace floating-point money parsing with shared fixed-point parsing.
-- Finally remove placeholder privacy/collateral behavior or gate it behind development-only features.
+- Finally remove placeholder privacy/collateral behavior or gate it behind development-only features, including the transaction privacy proof generator.
 
 ## Validation Performed
 
