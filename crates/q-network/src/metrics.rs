@@ -430,10 +430,19 @@ impl NetworkMetrics {
              qnk_libp2p_rx_bytes_total {}\n\
              # HELP qnk_libp2p_tx_bytes_total Total bytes sent over libp2p transports.\n\
              # TYPE qnk_libp2p_tx_bytes_total counter\n\
-             qnk_libp2p_tx_bytes_total {}\n\
-             # EOF\n",
+             qnk_libp2p_tx_bytes_total {}\n",
             uptime, rx, tx
         ));
+        // v10.9.46: Append the legacy `prometheus` crate's default registry
+        // (q-storage::metrics::SyncOptimizerGauges — KNOWN-GAP visibility,
+        // Apollo Kalman gauges, peer-state gauges). These were registered
+        // but unreachable in earlier releases because /metrics only encoded
+        // the prometheus_client registry.
+        out.push_str(&q_storage::metrics::SyncOptimizerGauges::encode_default_registry());
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("# EOF\n");
         Ok(out)
     }
 }

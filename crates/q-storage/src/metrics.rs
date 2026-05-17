@@ -9,6 +9,186 @@ use std::{
 use tokio::sync::RwLock;
 use tracing::debug;
 
+// v10.9.44: q-sync-optimizers Prometheus gauges (items 4/5/6/8).
+//
+// Exposed as a global singleton via `SyncOptimizerGauges::instance()` so any
+// call site (`turbo_sync.rs`, `unified_network_manager.rs`, the
+// chunk-dispatch loop, etc.) can update them without plumbing a registry
+// reference through every call boundary. The metrics are registered with the
+// default global Registry so a single `prometheus::gather()` scrape picks them
+// up alongside the rest of the storage gauges.
+use lazy_static::lazy_static;
+use prometheus::{Encoder, Gauge, GaugeVec, IntCounter, IntGauge, Opts, TextEncoder};
+
+/// Prometheus gauges exposed by q-sync-optimizers integration.
+///
+/// v10.9.46: Added KNOWN-GAP visibility gauges (`known_gap_*`) and Apollo
+/// Kalman gauges (`kalman_*`) so /metrics shows the science-module activity.
+#[derive(Debug)]
+pub struct SyncOptimizerGauges {
+    /// Info-theoretic chunk floor (KiB) — single global value.
+    pub chunk_size_floor: IntGauge,
+    /// Optimal in-flight per peer (combined Little's law + CUBIC cwnd).
+    pub optimal_inflight: GaugeVec,
+    /// Per-peer Markov state (0=Fast, 1=Slow, 2=Stalled).
+    pub peer_state: GaugeVec,
+    /// Per-peer probability of imminent failure (logistic predictor) in [0,1].
+    pub peer_p_fail: GaugeVec,
+    /// Number of permanent gaps configured via Q_KNOWN_PERMANENT_GAPS (set at
+    /// startup; usually 1 in production).
+    pub known_gap_configured_count: IntGauge,
+    /// Counter — KNOWN-GAP auto-advance fires (each fire skips one gap).
+    pub known_gap_advances_total: IntCounter,
+    /// Counter — total blocks skipped by KNOWN-GAP auto-advance.
+    pub known_gap_blocks_skipped_total: IntCounter,
+    /// Apollo Kalman: predicted bandwidth in Mbps.
+    pub kalman_bandwidth_mbps: Gauge,
+    /// Apollo Kalman: predicted RTT in milliseconds.
+    pub kalman_latency_ms: Gauge,
+    /// Apollo Kalman: predicted loss fraction in percent.
+    pub kalman_loss_percent: Gauge,
+    /// Apollo Kalman: optimal chunk size in KB.
+    pub kalman_optimal_chunk_kb: IntGauge,
+    /// Apollo Kalman: prediction confidence in [0,1].
+    pub kalman_confidence: Gauge,
+}
+
+impl SyncOptimizerGauges {
+    fn register() -> Self {
+        let chunk_size_floor = IntGauge::with_opts(Opts::new(
+            "qnk_chunk_size_floor_kib",
+            "Info-theoretic chunk-size floor (KiB) — log2(peers) × bits/block / 8 / 1024.",
+        ))
+        .expect("static gauge construction");
+        let optimal_inflight = GaugeVec::new(
+            Opts::new(
+                "qnk_optimal_inflight",
+                "Optimal in-flight requests per peer — min(Little's law, CUBIC cwnd).",
+            ),
+            &["peer"],
+        )
+        .expect("static gauge_vec construction");
+        let peer_state = GaugeVec::new(
+            Opts::new(
+                "qnk_peer_state",
+                "Per-peer Markov state (0=Fast, 1=Slow, 2=Stalled).",
+            ),
+            &["peer"],
+        )
+        .expect("static gauge_vec construction");
+        let peer_p_fail = GaugeVec::new(
+            Opts::new(
+                "qnk_peer_p_fail",
+                "Per-peer probability of imminent failure (logistic predictor) in [0,1].",
+            ),
+            &["peer"],
+        )
+        .expect("static gauge_vec construction");
+
+        // v10.9.46: KNOWN-GAP visibility gauges.
+        let known_gap_configured_count = IntGauge::with_opts(Opts::new(
+            "qnk_known_gap_configured_count",
+            "Number of permanent gaps configured via Q_KNOWN_PERMANENT_GAPS at startup.",
+        ))
+        .expect("static gauge construction");
+        let known_gap_advances_total = IntCounter::with_opts(Opts::new(
+            "qnk_known_gap_advances_total",
+            "Total times the KNOWN-GAP auto-advance fired (each fire jumps past one permanent gap).",
+        ))
+        .expect("static counter construction");
+        let known_gap_blocks_skipped_total = IntCounter::with_opts(Opts::new(
+            "qnk_known_gap_blocks_skipped_total",
+            "Total number of block heights skipped by KNOWN-GAP auto-advance.",
+        ))
+        .expect("static counter construction");
+
+        // v10.9.46: Apollo Kalman science gauges. Wire-points in turbo_sync.rs:3252.
+        let kalman_bandwidth_mbps = Gauge::with_opts(Opts::new(
+            "qnk_kalman_bandwidth_mbps",
+            "Apollo Kalman predictor: estimated bandwidth in Mbps.",
+        ))
+        .expect("static gauge construction");
+        let kalman_latency_ms = Gauge::with_opts(Opts::new(
+            "qnk_kalman_latency_ms",
+            "Apollo Kalman predictor: estimated RTT in milliseconds.",
+        ))
+        .expect("static gauge construction");
+        let kalman_loss_percent = Gauge::with_opts(Opts::new(
+            "qnk_kalman_loss_percent",
+            "Apollo Kalman predictor: estimated loss fraction (percent, 0..100).",
+        ))
+        .expect("static gauge construction");
+        let kalman_optimal_chunk_kb = IntGauge::with_opts(Opts::new(
+            "qnk_kalman_optimal_chunk_kb",
+            "Apollo Kalman predictor: optimal chunk size in KB.",
+        ))
+        .expect("static gauge construction");
+        let kalman_confidence = Gauge::with_opts(Opts::new(
+            "qnk_kalman_confidence",
+            "Apollo Kalman predictor: prediction confidence in [0,1].",
+        ))
+        .expect("static gauge construction");
+
+        // Best-effort registration. If a name collision already exists (e.g.
+        // during a test reload) we keep our gauges around — they just won't
+        // appear in the default registry. The Gauge handles themselves still
+        // work for read/write, which is all the caller cares about.
+        let _ = prometheus::default_registry().register(Box::new(chunk_size_floor.clone()));
+        let _ = prometheus::default_registry().register(Box::new(optimal_inflight.clone()));
+        let _ = prometheus::default_registry().register(Box::new(peer_state.clone()));
+        let _ = prometheus::default_registry().register(Box::new(peer_p_fail.clone()));
+        let _ = prometheus::default_registry().register(Box::new(known_gap_configured_count.clone()));
+        let _ = prometheus::default_registry().register(Box::new(known_gap_advances_total.clone()));
+        let _ = prometheus::default_registry().register(Box::new(known_gap_blocks_skipped_total.clone()));
+        let _ = prometheus::default_registry().register(Box::new(kalman_bandwidth_mbps.clone()));
+        let _ = prometheus::default_registry().register(Box::new(kalman_latency_ms.clone()));
+        let _ = prometheus::default_registry().register(Box::new(kalman_loss_percent.clone()));
+        let _ = prometheus::default_registry().register(Box::new(kalman_optimal_chunk_kb.clone()));
+        let _ = prometheus::default_registry().register(Box::new(kalman_confidence.clone()));
+
+        Self {
+            chunk_size_floor,
+            optimal_inflight,
+            peer_state,
+            peer_p_fail,
+            known_gap_configured_count,
+            known_gap_advances_total,
+            known_gap_blocks_skipped_total,
+            kalman_bandwidth_mbps,
+            kalman_latency_ms,
+            kalman_loss_percent,
+            kalman_optimal_chunk_kb,
+            kalman_confidence,
+        }
+    }
+
+    /// v10.9.46: Render all gauges/counters registered with the legacy
+    /// `prometheus` crate's default registry as Prometheus text format.
+    /// `NetworkMetrics::encode_text()` calls this and appends the output so
+    /// scrapers see the science gauges alongside the openmetrics families.
+    pub fn encode_default_registry() -> String {
+        // Force gauge init lazy_static side effect.
+        let _ = Self::instance();
+        let encoder = TextEncoder::new();
+        let metric_families = prometheus::default_registry().gather();
+        let mut buf = Vec::with_capacity(4096);
+        if encoder.encode(&metric_families, &mut buf).is_err() {
+            return String::new();
+        }
+        String::from_utf8(buf).unwrap_or_default()
+    }
+
+    /// Singleton accessor. The first call registers gauges with the default
+    /// Prometheus registry; subsequent calls return the same handles.
+    pub fn instance() -> &'static Self {
+        &GAUGES
+    }
+}
+
+lazy_static! {
+    static ref GAUGES: SyncOptimizerGauges = SyncOptimizerGauges::register();
+}
+
 /// Storage performance metrics collector
 #[derive(Debug)]
 pub struct StorageMetrics {
