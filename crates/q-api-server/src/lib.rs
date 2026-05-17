@@ -1213,15 +1213,9 @@ pub struct AppState {
     pub p2p_bytes_in: Arc<std::sync::atomic::AtomicU64>,
     pub p2p_bytes_out: Arc<std::sync::atomic::AtomicU64>,
 
-    // 🔥 Top Movers ring buffer (last 60 blocks of per-address balance deltas).
-    // Each entry is a HashMap<Address, i128> for one block. Bounded to length 60
-    // via push_back + pop_front in `update_tui_metrics`. Memory cost: roughly
-    // 60 × ~100 addrs × (32 + 16) bytes ≈ 290 KB worst case.
-    pub recent_balance_deltas:
-        Arc<RwLock<std::collections::VecDeque<HashMap<Address, i128>>>>,
-    // Highest block height already ingested into `recent_balance_deltas`.
-    // Used to pull only the new blocks each TUI tick (typically 0-3 per tick at 1 bps).
-    pub top_movers_last_ingested_height: Arc<std::sync::atomic::AtomicU64>,
+    // v10.9.53: Top Movers ring buffer + cursor removed (TUI card retired,
+    // private chain made it low signal). Saves ~290 KB and the per-tick
+    // RocksDB scan that populated it.
 
     // v8.5.4: Network throttle mode (0=Conservative, 1=Normal, 2=Turbo) — set by TUI, read by sync loop
     // Conservative: 2 in-flight chunks, 200ms delay (SSD-friendly for cheap hardware)
@@ -2871,9 +2865,7 @@ impl AppState {
             stripe_client: crate::payment_api::init_stripe_client().ok(),
             p2p_bytes_in: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             p2p_bytes_out: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            // 🔥 Top Movers ring buffer — empty deque + zero ingest height.
-            recent_balance_deltas: Arc::new(RwLock::new(std::collections::VecDeque::new())),
-            top_movers_last_ingested_height: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            // (top movers fields removed v10.9.53)
             network_throttle_mode: Arc::new(std::sync::atomic::AtomicU8::new(2)), // 2 = Turbo (default)
             highest_network_height: Arc::new(std::sync::atomic::AtomicU64::new(0)), // Sync mode tracking
             last_peer_height_update: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v5.2.0: Peer height staleness
@@ -4262,9 +4254,7 @@ impl AppState {
             stripe_client: crate::payment_api::init_stripe_client().ok(),
             p2p_bytes_in: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             p2p_bytes_out: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            // 🔥 Top Movers ring buffer — empty deque + zero ingest height.
-            recent_balance_deltas: Arc::new(RwLock::new(std::collections::VecDeque::new())),
-            top_movers_last_ingested_height: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            // (top movers fields removed v10.9.53)
             network_throttle_mode: Arc::new(std::sync::atomic::AtomicU8::new(2)), // 2 = Turbo (default)
             highest_network_height: Arc::new(std::sync::atomic::AtomicU64::new(0)), // Sync mode tracking
             last_peer_height_update: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v5.2.0: Peer height staleness

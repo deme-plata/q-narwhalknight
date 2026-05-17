@@ -1156,135 +1156,26 @@ async fn update_tui_metrics(
         q_tui::metrics::ReadinessMode::Bootstrapping
     };
 
-    // 🔥 Top Movers: ingest any blocks newer than `top_movers_last_ingested_height`
-    // into the ring buffer, then compute the top 5 |Δ| wallets across the window.
-    // Cheap in steady state (0-3 new blocks per second at 1 bps). Catch-up after
-    // a stall is bounded to 60 blocks per tick so we never block >50ms.
-    //
-    // Anti-patterns avoided:
-    //   - No `unwrap()` — all storage lookups use `if let Ok(...) = ...` and skip
-    //     gaps silently rather than panicking.
-    //   - No DB scan if no new blocks (early-return when last_ingested == tip).
-    //   - Ring is capped at RING_CAPACITY via pop_front before push_back.
-    use std::collections::HashMap;
-    const RING_CAPACITY: usize = 60;
-    const MAX_INGEST_PER_TICK: u64 = 60; // bound catch-up so we don't hog the tick
+    // v10.9.53 — Top movers card removed (private chain, low signal).
+    // The compute block + the recent_balance_deltas ring are no longer populated
+    // here; the AppState fields are kept for ABI stability but read by no card.
 
-    let top_movers_computed: Vec<q_tui::metrics::TopMover> = {
-        let last_ingested = app_state
-            .top_movers_last_ingested_height
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let tip = block_height;
-
-        // Only walk storage when we're actually behind. On a freshly started node
-        // last_ingested=0 and tip>0 — we'll backfill up to MAX_INGEST_PER_TICK
-        // blocks here, and pick up the rest on subsequent ticks.
-        if tip > last_ingested {
-            let start = last_ingested.saturating_add(1);
-            // Inclusive end height: don't scan beyond tip, and bound per tick.
-            let end = tip.min(start.saturating_add(MAX_INGEST_PER_TICK).saturating_sub(1));
-
-            // Pull each new block's transactions and build a per-block delta map.
-            // We hold the write lock on `recent_balance_deltas` for the full ingest
-            // loop — this is fine because the deque has no readers except this
-            // task. If contention ever appears we can move to per-block locking.
-            if let Ok(mut deltas) = app_state.recent_balance_deltas.try_write() {
-                for h in start..=end {
-                    let qblock = match app_state.storage_engine.get_qblock_by_height(h).await {
-                        Ok(Some(b)) => b,
-                        // Missing or unreadable — record an empty map so the ring stays in lockstep with height
-                        _ => {
-                            // Maintain ring length even on gap so old entries age out correctly.
-                            if deltas.len() >= RING_CAPACITY {
-                                deltas.pop_front();
-                            }
-                            deltas.push_back(HashMap::new());
-                            continue;
-                        }
-                    };
-
-                    let mut block_deltas: HashMap<q_types::Address, i128> = HashMap::new();
-                    for tx in &qblock.transactions {
-                        // Sender loses (amount + fee), receiver gains amount.
-                        // i128 holds u128 fine for QUG values (max ~21M * 1e24 ≈ 2.1e31, fits).
-                        let amount_i128 = tx.amount as i128;
-                        let fee_i128 = tx.fee as i128;
-                        // Skip coinbase-style txs that have a synthetic `from` of all zeros:
-                        // they would otherwise pollute the leaderboard with a single
-                        // hot "zero address" entry. Real wallets have non-zero prefixes.
-                        let from_is_zero = tx.from.iter().all(|b| *b == 0);
-                        if !from_is_zero {
-                            let entry = block_deltas.entry(tx.from).or_insert(0);
-                            *entry = entry.saturating_sub(amount_i128.saturating_add(fee_i128));
-                        }
-                        let entry = block_deltas.entry(tx.to).or_insert(0);
-                        *entry = entry.saturating_add(amount_i128);
-                    }
-
-                    if deltas.len() >= RING_CAPACITY {
-                        deltas.pop_front();
-                    }
-                    deltas.push_back(block_deltas);
-                }
-
-                // Advance pointer to the last height we tried to ingest. Even on a
-                // missing block we still consumed that slot (with an empty map),
-                // so the next tick should start from `end+1`.
-                app_state
-                    .top_movers_last_ingested_height
-                    .store(end, std::sync::atomic::Ordering::Relaxed);
+    // v10.9.53 — Lattice tip-proof snapshot for the TRUSTLESS BOOTSTRAP PROOF card.
+    let (tip_proof_version, tip_proof_anchor, tip_proof_tip, tip_proof_step, tip_proof_size) = {
+        let lp = app_state.lattice_tip_proof.read().await;
+        match lp.as_ref() {
+            Some(proof) => {
+                let bytes = bincode::serialize(proof).map(|v| v.len() as u64).unwrap_or(0);
+                (
+                    "tip-blake3-fs-v1.1".to_string(),
+                    proof.anchor_height,
+                    proof.tip_height,
+                    proof.step_count,
+                    bytes,
+                )
             }
-            // If try_write() failed, just skip ingestion this tick — we'll catch up
-            // on the next one. Better than blocking the metrics task.
+            None => ("placeholder-v0".to_string(), 0u64, 0u64, 0u64, 0u64),
         }
-
-        // Aggregate per-address totals across the ring buffer.
-        // Cost: O(60 × avg_unique_addrs_per_block). At ~100 addrs/block ≈ 6k ops, well under 50ms.
-        // On rare contention we yield an empty aggregate (= empty top_movers); other
-        // metric fields still update normally.
-        let aggregated: HashMap<q_types::Address, i128> =
-            if let Ok(deltas) = app_state.recent_balance_deltas.try_read() {
-                let mut acc: HashMap<q_types::Address, i128> = HashMap::new();
-                for block_map in deltas.iter() {
-                    for (addr, delta) in block_map.iter() {
-                        let entry = acc.entry(*addr).or_insert(0);
-                        *entry = entry.saturating_add(*delta);
-                    }
-                }
-                acc
-            } else {
-                HashMap::new()
-            };
-
-        // Take top 5 by |delta|, descending. Tiebreak by address for determinism.
-        let mut ranked: Vec<(q_types::Address, i128)> = aggregated
-            .into_iter()
-            .filter(|(_, d)| *d != 0)
-            .collect();
-        ranked.sort_by(|a, b| {
-            b.1.abs().cmp(&a.1.abs()).then_with(|| a.0.cmp(&b.0))
-        });
-        ranked.truncate(5);
-
-        ranked
-            .into_iter()
-            .map(|(addr, delta)| {
-                let mut prefix = [0u8; 4];
-                prefix.copy_from_slice(&addr[..4]);
-                let direction = if delta > 0 {
-                    q_tui::metrics::MoverDirection::Up
-                } else if delta < 0 {
-                    q_tui::metrics::MoverDirection::Down
-                } else {
-                    q_tui::metrics::MoverDirection::Flat
-                };
-                q_tui::metrics::TopMover {
-                    addr_prefix: prefix,
-                    delta_qug: delta,
-                    direction,
-                }
-            })
-            .collect()
     };
 
     // Now acquire write lock and update metrics (no awaits here!)
@@ -1330,9 +1221,21 @@ async fn update_tui_metrics(
         metrics.archive_lowest_indexed_height = readiness_contiguous;
         metrics.archive_complete = readiness_archive_complete;
 
-        // 🔥 Top Movers: hand the pre-computed Vec<TopMover> over. Owned move
-        // is fine — we built it above outside the lock.
-        metrics.top_movers = top_movers_computed;
+        // v10.9.53 — Top movers field removed from Metrics. Tip-proof telemetry
+        // populated for the new TRUSTLESS BOOTSTRAP PROOF card.
+        metrics.tip_proof_version = tip_proof_version;
+        metrics.tip_proof_anchor_height = tip_proof_anchor;
+        metrics.tip_proof_tip_height = tip_proof_tip;
+        metrics.tip_proof_step_count = tip_proof_step;
+        metrics.tip_proof_size_bytes = tip_proof_size;
+        // tip_proof_last_verify_us is set by the /api/v1/proof/tip handler
+
+        // v10.9.53 — Mine-to-this-node card data. Port defaults to 8080 (canonical);
+        // host + peer_id are populated once at startup, left alone here.
+        if metrics.mine_endpoint_port == 0 {
+            metrics.mine_endpoint_port = 8080;
+        }
+        metrics.mine_reward_per_block_qug = emission_rate;
 
         // v10.9.19 — Engine pulse: snapshot current atomics for the TUI's K-parameter
         // gauge engine-pulse card. Computed cheaply from existing AppState atomics.

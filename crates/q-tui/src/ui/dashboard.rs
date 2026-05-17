@@ -1,5 +1,5 @@
 use crate::app::{App, LogLevel};
-use crate::metrics::{Metrics, MoverDirection, ReadinessMode};
+use crate::metrics::{Metrics, ReadinessMode};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -81,9 +81,13 @@ pub fn render(f: &mut Frame, app: &App) {
         || metrics.compute_connected_peers > 0
         || !metrics.compute_simd_tier.is_empty();
     let has_kparam = metrics.kparam_rounds > 0 || metrics.kparam_k_value > 0.0;
-    // 🔥 Top Movers panel: 5 rows + header + borders = 7 rows tall.
-    // Always rendered so users see the "No data yet" placeholder on a fresh node.
-    let movers_height: u16 = 7;
+    // v10.9.53 — Top Movers removed (private chain). Two new cards:
+    //   • TRUSTLESS BOOTSTRAP PROOF card (6 rows): live lattice tip-proof
+    //     telemetry — proof_version, anchor→tip step_count, wire size, verify time.
+    //   • MINE TO THIS NODE card (7 rows): operator-facing onboarding info —
+    //     endpoint URL, reward/block, recent credit count, one-line miner wget.
+    let proof_card_height: u16 = 6;
+    let mine_card_height: u16 = 7;
     // Sync card is now always shown so operators can see blocks/sec even when fully synced.
     // Sync Progress Bar = 4 rows, Sync Stats Card = 5 rows (Prometheus + stats API panel).
     let constraints = {
@@ -95,7 +99,8 @@ pub fn render(f: &mut Frame, app: &App) {
         ];
         if has_compute { v.push(Constraint::Length(5)); } // Compute Power cards
         if has_kparam { v.push(Constraint::Length(5)); }  // K-Parameter Health Gauge
-        v.push(Constraint::Length(movers_height));        // 🔥 Top Movers
+        v.push(Constraint::Length(proof_card_height));    // 🔐 Trustless Bootstrap Proof
+        v.push(Constraint::Length(mine_card_height));     // ⛏️  Mine to This Node
         if metrics.is_syncing {
             v.push(Constraint::Length(9));  // APOLLO Control Systems
             v.push(Constraint::Min(4));     // Logs
@@ -158,9 +163,10 @@ pub fn render(f: &mut Frame, app: &App) {
         idx += 1;
     }
 
-    // 🔥 Top Movers (last 60 blocks) — added per task spec.
-    // Always reserved a slot so first-boot nodes show the "No data yet" placeholder.
-    render_top_movers(f, chunks[idx], app);
+    // v10.9.53 — Two new cards replace Top Movers
+    render_lattice_tip_proof(f, chunks[idx], app);
+    idx += 1;
+    render_mine_to_node(f, chunks[idx], app);
     idx += 1;
 
     // Always show APOLLO control systems — they track live network state even when synced
@@ -814,71 +820,172 @@ fn render_kparam_health_gauge(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(engine_widget, cols[4]);
 }
 
-/// 🔥 Top Movers panel — 5 wallets with the largest |Δ balance| over the last
-/// 60 blocks. Header + 5 rows. Renders a "No data yet" placeholder when the
-/// ring buffer is empty (fresh node or first ingest tick).
-///
-/// Data shape: `Metrics.top_movers: Vec<TopMover>` — populated by the
-/// `update_tui_metrics` task in q-api-server every tick.
-fn render_top_movers(f: &mut Frame, area: Rect, app: &App) {
+/// 🔐 TRUSTLESS BOOTSTRAP PROOF — the wicked-cool card.
+/// Shows the live recursive-lattice tip proof a fresh node uses to verify the
+/// chain head in <10ms without trusting any peer. Cycles a 3-frame quantum
+/// glyph next to the proof_version to communicate "this is being recomputed".
+fn render_lattice_tip_proof(f: &mut Frame, area: Rect, app: &App) {
     let metrics = app.metrics.read().unwrap();
+
+    // Animated quantum glyph: ▰▱▰ / ▱▰▱ / ▰▰▰ cycling once per second.
+    // Driven off uptime so it's deterministic and survives lock contention.
+    let phase = (metrics.uptime_secs % 3) as usize;
+    let glyph = ["▰▱▰", "▱▰▱", "▰▰▰"][phase];
+
+    let version_color = match metrics.tip_proof_version.as_str() {
+        "tip-blake3-fs-v1.1" => Color::Green,   // current live version
+        "placeholder-v0"     => Color::DarkGray, // pre-warmup
+        _                    => Color::Yellow,   // unknown / future
+    };
+
+    // Render verify-time as "X µs" if set, else "—"
+    let verify_str = if metrics.tip_proof_last_verify_us == 0 {
+        "—".to_string()
+    } else if metrics.tip_proof_last_verify_us >= 1000 {
+        format!("{:.2} ms", metrics.tip_proof_last_verify_us as f64 / 1000.0)
+    } else {
+        format!("{} µs", metrics.tip_proof_last_verify_us)
+    };
+
+    // Target: 10ms on Pi 4. Color the verify time vs the target.
+    let verify_color = if metrics.tip_proof_last_verify_us == 0 {
+        Color::DarkGray
+    } else if metrics.tip_proof_last_verify_us < 1_000 {
+        Color::Green   // sub-millisecond — beating Xeon baseline
+    } else if metrics.tip_proof_last_verify_us < 10_000 {
+        Color::Cyan    // under the 10ms target
+    } else {
+        Color::Yellow  // over target
+    };
+
+    let lines = vec![
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(glyph, Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+            Span::raw("  scheme   "),
+            Span::styled(metrics.tip_proof_version.clone(), Style::default().fg(version_color).add_modifier(Modifier::BOLD)),
+            Span::raw("   anchor "),
+            Span::styled(format!("{}", metrics.tip_proof_anchor_height), Style::default().fg(Color::White)),
+            Span::raw(" → tip "),
+            Span::styled(format!("{}", metrics.tip_proof_tip_height), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(vec![
+            Span::raw("     steps    "),
+            Span::styled(format!("{}", metrics.tip_proof_step_count), Style::default().fg(Color::Cyan)),
+            Span::raw("       wire   "),
+            Span::styled(format!("{} B", metrics.tip_proof_size_bytes), Style::default().fg(Color::Cyan)),
+            Span::raw("       verify "),
+            Span::styled(verify_str, Style::default().fg(verify_color).add_modifier(Modifier::BOLD)),
+            Span::raw("  / target "),
+            Span::styled("10 ms", Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "     PQ-secure  ·  BLAKE3 Fiat-Shamir + step_count binding",
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "     GET /api/v1/proof/tip  →  fresh nodes verify before sync",
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+            ),
+        ]),
+    ];
 
     let block = Block::default()
         .borders(Borders::ALL)
         .title(Span::styled(
-            "🔥 Top Movers (last 60 blocks)",
-            Style::default()
-                .fg(Color::LightRed)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .style(Style::default().fg(Color::DarkGray));
+            "🔐 TRUSTLESS BOOTSTRAP PROOF — recursive lattice tip-proof",
+            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+        ));
 
-    if metrics.top_movers.is_empty() {
-        let placeholder = Paragraph::new(Line::from(vec![Span::styled(
-            "  No data yet — waiting for blocks…",
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::ITALIC),
-        )]))
-        .block(block);
-        f.render_widget(placeholder, area);
-        return;
-    }
+    let widget = Paragraph::new(lines).block(block);
+    f.render_widget(widget, area);
+}
 
-    let items: Vec<ListItem> = metrics
-        .top_movers
-        .iter()
-        .take(5)
-        .map(|m| {
-            // Direction glyph + color: ▲ green for inflows, ▼ red for outflows,
-            // ● dim gray for the defensive zero case.
-            let (arrow, arrow_color) = match m.direction {
-                MoverDirection::Up => ("▲", Color::Green),
-                MoverDirection::Down => ("▼", Color::Red),
-                MoverDirection::Flat => ("●", Color::DarkGray),
-            };
+/// ⛏️  MINE TO THIS NODE — operator onboarding card.
+/// Tells the operator (and anyone shoulder-surfing) the exact endpoint to point
+/// `q-miner` at, plus the current QUG/block reward and recent credit count.
+fn render_mine_to_node(f: &mut Frame, area: Rect, app: &App) {
+    let metrics = app.metrics.read().unwrap();
 
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!(" {} ", arrow),
-                    Style::default().fg(arrow_color).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    // 8-char hex prefix in dim gray
-                    format!("{}…  ", m.format_addr()),
-                    Style::default().fg(Color::Gray),
-                ),
-                Span::styled(
-                    // Signed delta in white with K/M/B suffix
-                    m.format_delta(),
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-                ),
-            ]))
-        })
-        .collect();
+    let host = if metrics.mine_endpoint_host.is_empty() {
+        "<this-host>".to_string()
+    } else {
+        metrics.mine_endpoint_host.clone()
+    };
+    let endpoint = format!("http://{}:{}", host, metrics.mine_endpoint_port);
 
-    let list = List::new(items).block(block);
-    f.render_widget(list, area);
+    let mining_state_text = if metrics.mining_enabled {
+        if metrics.active_miners > 0 {
+            format!("✓ accepting submissions  ({} active miner{})",
+                metrics.active_miners,
+                if metrics.active_miners == 1 { "" } else { "s" })
+        } else {
+            "✓ accepting submissions  (no active miners yet — be the first)".to_string()
+        }
+    } else {
+        "✗ mining disabled — start with --mining or Q_MINING_ENABLED=1".to_string()
+    };
+
+    let mining_color = if metrics.mining_enabled { Color::Green } else { Color::Yellow };
+
+    let lines = vec![
+        Line::from(vec![
+            Span::raw("  Endpoint   "),
+            Span::styled(endpoint.clone(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw("     status   "),
+            Span::styled(mining_state_text, Style::default().fg(mining_color)),
+        ]),
+        Line::from(vec![
+            Span::raw("  Reward     "),
+            Span::styled(
+                format!("{:.4} QUG / block", metrics.mine_reward_per_block_qug),
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("    Blocks   "),
+            Span::styled(
+                format!("{}", metrics.blocks_mined),
+                Style::default().fg(Color::White),
+            ),
+            Span::raw("   credited /hr  "),
+            Span::styled(
+                format!("{}", metrics.mine_blocks_credited_last_hour),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("  Get miner  "),
+            Span::styled(
+                "wget https://quillon.xyz/downloads/q-miner-linux-x64 && chmod +x q-miner-linux-x64",
+                Style::default().fg(Color::Gray),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("  Run        "),
+            Span::styled(
+                format!("./q-miner-linux-x64 --node {} --wallet <qnk-address>", endpoint),
+                Style::default().fg(Color::Gray),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  Solo mining pays full block reward to your wallet on each accepted solution.",
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+            ),
+        ]),
+    ];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(
+            "⛏️  MINE TO THIS NODE",
+            Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD),
+        ));
+
+    let widget = Paragraph::new(lines).block(block);
+    f.render_widget(widget, area);
 }
 
 fn render_tps_chart(f: &mut Frame, area: Rect, app: &App) {
@@ -903,7 +1010,51 @@ fn render_tps_chart(f: &mut Frame, area: Rect, app: &App) {
 
 fn render_recent_logs(f: &mut Frame, area: Rect, app: &App) {
     let available_height = area.height.saturating_sub(2); // Account for borders
+    let available_width  = area.width.saturating_sub(2);  // Account for borders
     let logs = app.get_recent_logs(available_height as usize);
+
+    // Reserve room for "[HH:MM:SS] LEVEL  " prefix (~18 chars) before the message,
+    // then truncate to keep each ListItem to ONE rendered line. v10.9.53 fix:
+    // raw log.message values previously leaked into Span::raw, where embedded
+    // newlines, ANSI escape sequences (\x1b[...m), and zero-width chars
+    // miscounted by ratatui's grapheme width logic broke the log-panel layout
+    // after a few hours uptime — manifesting as warped borders, vanishing
+    // separators, and lines stamped over the footer.
+    let msg_budget: usize = (available_width as usize).saturating_sub(18).max(8);
+
+    fn sanitize(raw: &str, max_chars: usize) -> String {
+        // Drop ANSI CSI sequences (\x1b[...m and similar), control chars, and
+        // newlines. Keep printable ASCII + most Unicode but bound visible width.
+        let mut out = String::with_capacity(raw.len().min(max_chars));
+        let mut iter = raw.chars().peekable();
+        let mut visible: usize = 0;
+        while let Some(c) = iter.next() {
+            if c == '\u{1b}' {
+                // Skip until the terminating letter of the CSI sequence.
+                if iter.peek() == Some(&'[') {
+                    iter.next();
+                    for nc in iter.by_ref() {
+                        if nc.is_ascii_alphabetic() { break; }
+                    }
+                }
+                continue;
+            }
+            if c == '\n' || c == '\r' {
+                out.push(' ');
+                visible += 1;
+            } else if (c as u32) < 0x20 || c == '\u{7f}' {
+                continue; // strip other control chars
+            } else {
+                out.push(c);
+                visible += 1;
+            }
+            if visible >= max_chars {
+                out.push('…');
+                break;
+            }
+        }
+        out
+    }
 
     let log_items: Vec<ListItem> = logs
         .iter()
@@ -918,6 +1069,8 @@ fn render_recent_logs(f: &mut Frame, area: Rect, app: &App) {
                 LogLevel::Error => Color::Red,
             };
 
+            let clean_msg = sanitize(&log.message, msg_budget);
+
             ListItem::new(Line::from(vec![
                 Span::raw("["),
                 Span::styled(time_str, Style::default().fg(Color::DarkGray)),
@@ -927,7 +1080,7 @@ fn render_recent_logs(f: &mut Frame, area: Rect, app: &App) {
                     Style::default().fg(level_color).add_modifier(Modifier::BOLD)
                 ),
                 Span::raw("  "),
-                Span::raw(&log.message),
+                Span::raw(clean_msg),
             ]))
         })
         .collect();
