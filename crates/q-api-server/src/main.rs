@@ -67,7 +67,7 @@ mod ai_transaction_assistant;
 // ✅ v1.0.3-beta - Block Production Loop v2 with Comprehensive Stall Protection
 mod block_production_v2;
 // ✅ Chat/Voice/Video signaling server — routes SDP/ICE between browser peers
-use q_api_server::signaling_server::{ws_signal_handler, SignalingState};
+use q_api_server::signaling_server::{signaling_diag_handler, ws_signal_handler, SignalingState};
 // ⛏️  Integrated mining removed v7.1.3 - use external q-miner binary instead
 // mod integrated_mining;
 use cdp_simple::create_cdp_router;
@@ -501,7 +501,7 @@ const HTTP_BOOTSTRAP_PEERS: &[&str] = &[
     "https://quillon.xyz",          // HTTPS via q-flux (works behind NAT/firewalls on port 443)
     "http://89.149.241.126:8080",   // Server Epsilon (10Gbit supernode)
     "http://5.79.79.158:8080",      // Server Delta (primary - 1Gbit fastest)
-    "http://109.205.176.60:8080",   // Server Gamma (secondary - 1Gbit)
+    "http://109.205.176.60:8808",   // Server Gamma (secondary - 1Gbit; port 8808 not 8080 — verified 2026-05-16)
     "http://185.182.185.227:8080",  // Server Beta (tertiary - 100Mbit)
     "http://161.35.219.10:8080",    // Server Alpha (quaternary)
 ];
@@ -512,7 +512,7 @@ const HTTP_BOOTSTRAP_PEERS: &[&str] = &[
 fn bootstrap_peer_id_for_url(url: &str) -> Option<&'static str> {
     if url.contains("89.149.241.126") { Some("12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM") }      // Epsilon (verified 2026-04-25)
     else if url.contains("5.79.79.158") { Some("12D3KooWLJJRvqo6mBoHLpgxVbGKfW3Jv39ziU4kz1adKFv93JbK") }     // Delta
-    else if url.contains("109.205.176.60") { Some("12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH") }  // Gamma
+    else if url.contains("109.205.176.60") { Some("12D3KooWHNhCWYmUiGGGXGGwTbDgTFZKrXBQ6LSZdGKhkpDici1U") }  // Gamma (verified live 2026-05-16; was 12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH which caused WrongPeerId rejections)
     else if url.contains("185.182.185.227") { Some("12D3KooWKyjQUYXJQ8y8WdHbtMVxsNt4a412Ccqdr1oKjSY8fy93") } // Beta (verified 2026-04-25)
     else if url.contains("quillon.xyz") { Some("12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM") }    // quillon.xyz = Epsilon
     else { None }
@@ -526,7 +526,8 @@ fn is_allowed_balance_update_origin(origin_node_id: &str) -> bool {
         "12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM", // Server Epsilon (10Gbit supernode, verified 2026-04-25)
         "12D3KooWKyjQUYXJQ8y8WdHbtMVxsNt4a412Ccqdr1oKjSY8fy93", // Server Beta (verified 2026-04-25)
         "12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH", // Server Beta (legacy, for compat)
-        "12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH", // Server Gamma (Mainnet 2026.1.3)
+        "12D3KooWHNhCWYmUiGGGXGGwTbDgTFZKrXBQ6LSZdGKhkpDici1U", // Server Gamma (current peer ID, verified 2026-05-16)
+        "12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH", // Server Gamma (Mainnet 2026.1.3 legacy, kept for backwards-compat allowlist)
         "12D3KooWLJJRvqo6mBoHLpgxVbGKfW3Jv39ziU4kz1adKFv93JbK", // Server Delta (Mainnet 2026.1.3)
         "12D3KooWBHTC9FhwwXmvH7YA17YHTLdcxbtLWg2U5xEtxSeqX7jc", // Server Beta (legacy, for compat)
         "12D3KooWFqPX9TkvF43eyDeH9wwxYTSfnBn8AobLJeA7xRnmpPcv", // Server Gamma (legacy, for compat)
@@ -2482,6 +2483,18 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
     // Initialize privacy-preserving log redaction (reads Q_LOG_PRIVACY env var)
     q_log_privacy::init_privacy_level();
+
+    // v10.9.43: tokio-console scheduler-tracing subscriber (opt-in via `--features tokio-console`).
+    // When enabled, exposes a gRPC server on TOKIO_CONSOLE_BIND (default 0.0.0.0:6669) that the
+    // tokio-console CLI connects to for per-task scheduler visibility. Required RUSTFLAGS:
+    //   RUSTFLAGS="--cfg tokio_unstable" cargo build --release --features tokio-console
+    // No-op when the feature is off — production builds pay zero overhead.
+    #[cfg(feature = "tokio-console")]
+    {
+        console_subscriber::init();
+        eprintln!("🔍 [TOKIO-CONSOLE] gRPC server bound on TOKIO_CONSOLE_BIND (default 0.0.0.0:6669)");
+        eprintln!("                   Connect with: tokio-console http://<this-host>:6669");
+    }
 
     // Initialize tracing (re-enabled since tokio-console is disabled)
     if !tui_mode {
@@ -6284,6 +6297,80 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         });
 
         info!("✅ libp2p network event loop spawned with storage and block sync configured");
+
+        // v10.9.41: spawn the producer-hook task that extends the lattice tip
+        // proof on every contiguous-height advance. Decoupled from save_qblock
+        // (which lives in q-storage, no dep on q-recursive-proofs) — instead we
+        // poll the atomic at 500ms and catch up on whatever was committed.
+        // Cost in steady state: 1 BLAKE3-XOF per new block (~1 µs), so even a
+        // 10-block-per-tick burst is sub-millisecond. On startup the loop walks
+        // from genesis (height 0, all-zero state) up to current contiguous
+        // height — for a fully-synced 18M-block chain that's ~18 s of warmup,
+        // amortised once. Future v10.9.42+: persist to RocksDB so the warmup
+        // is skipped on subsequent restarts.
+        {
+            // AppState is owned (not Arc-wrapped) at this point, so we clone just
+            // the Arc'd fields the producer-hook task needs.
+            let proof_slot = state.lattice_tip_proof.clone();
+            let height_atomic = state.contiguous_height_atomic.clone();
+            let storage = state.storage_engine.clone();
+            tokio::spawn(async move {
+                info!("🔐 [LATTICE-TIP] Producer-hook task starting (anchors at genesis, extends per block)");
+                // Anchor at genesis with the all-zero state root. We could query the
+                // genesis block for its real state_root here, but a constant anchor
+                // is simpler and the verifier just needs the same constant.
+                let mut current_proof = q_recursive_proofs::tip_anchor(0, [0u8; 32]);
+                {
+                    let mut guard = proof_slot.write().await;
+                    *guard = Some(current_proof.clone());
+                }
+                let mut last_extended_height = 0u64;
+                loop {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                    let contiguous = height_atomic.load(std::sync::atomic::Ordering::Relaxed);
+                    if contiguous <= last_extended_height {
+                        continue;
+                    }
+                    // Bound per-tick work so the warmup walk doesn't starve
+                    // other tasks. 1000 blocks * ~1 µs/block = 1 ms per tick.
+                    let target = contiguous.min(last_extended_height + 1000);
+                    for h in (last_extended_height + 1)..=target {
+                        match storage.get_qblock_by_height(h).await {
+                            Ok(Some(block)) => {
+                                current_proof = q_recursive_proofs::tip_extend(
+                                    &current_proof,
+                                    h,
+                                    block.header.state_root,
+                                    block.header.prev_block_hash,
+                                    block.header.tx_root,
+                                );
+                                last_extended_height = h;
+                            }
+                            Ok(None) => {
+                                if h % 1000 == 0 {
+                                    warn!("🔐 [LATTICE-TIP] block {} missing — skipping in proof chain", h);
+                                }
+                                last_extended_height = h;
+                            }
+                            Err(e) => {
+                                warn!("🔐 [LATTICE-TIP] failed to load block {}: {}", h, e);
+                                break; // retry next tick
+                            }
+                        }
+                    }
+                    {
+                        let mut guard = proof_slot.write().await;
+                        *guard = Some(current_proof.clone());
+                    }
+                    if last_extended_height % 10_000 == 0 && last_extended_height > 0 {
+                        info!(
+                            "🔐 [LATTICE-TIP] extended proof through height {} (anchor={}, transcript advance)",
+                            last_extended_height, current_proof.anchor_height
+                        );
+                    }
+                }
+            });
+        }
 
         // 🚀 v1.0.3-beta: CRITICAL FIX #2 - Add P2P peer height announcements
         // BUG: v1.0.2-beta NEVER sends height announcements, causing network_height=0 on all fresh nodes
@@ -25570,6 +25657,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     let signaling_state = SignalingState::new();
     let signaling_router = Router::new()
         .route("/ws/chat/signal", get(ws_signal_handler))
+        .route("/api/v1/signaling/diag", get(signaling_diag_handler))
         .with_state(signaling_state)
         .layer(tower_http::cors::CorsLayer::permissive());
 
@@ -25943,6 +26031,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 info!("📊 Starting TUI metrics updater task...");
                 let mut prev_bytes_in: u64 = 0;
                 let mut prev_bytes_out: u64 = 0;
+                // Sliding window for blocks-per-sec — last 10 samples (1 Hz tick → 10 s window).
+                // Replaces the cumulative-average sync_speed which never reflected
+                // recent activity once a process had been running for hours.
+                let mut block_samples: std::collections::VecDeque<(std::time::Instant, u64)> =
+                    std::collections::VecDeque::with_capacity(16);
                 loop {
                     // Snapshot cumulative P2P byte counters and compute per-second rates
                     let cur_bytes_in = app_state_clone.p2p_bytes_in.load(std::sync::atomic::Ordering::Relaxed);
@@ -25951,6 +26044,27 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     let delta_out = cur_bytes_out.saturating_sub(prev_bytes_out);
                     prev_bytes_in = cur_bytes_in;
                     prev_bytes_out = cur_bytes_out;
+
+                    // Compute sliding-window blocks/sec from atomic height (independent of
+                    // update_tui_metrics, which uses cumulative-from-process-start averaging).
+                    let now_inst = std::time::Instant::now();
+                    let cur_height = app_state_clone
+                        .current_height_atomic
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    block_samples.push_back((now_inst, cur_height));
+                    while block_samples.len() > 1
+                        && now_inst.duration_since(block_samples.front().unwrap().0).as_secs_f32() > 10.0
+                    {
+                        block_samples.pop_front();
+                    }
+                    let window_bps: f32 = if block_samples.len() >= 2 {
+                        let (t0, h0) = *block_samples.front().unwrap();
+                        let (t1, h1) = *block_samples.back().unwrap();
+                        let dt = t1.duration_since(t0).as_secs_f32();
+                        if dt > 0.0 { h1.saturating_sub(h0) as f32 / dt } else { 0.0 }
+                    } else {
+                        0.0
+                    };
 
                     // Update metrics from app state
                     if let Err(e) =
@@ -25967,6 +26081,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         m.total_bytes_out = cur_bytes_out;
                         m.bytes_received = delta_in; // backwards-compat: rate per tick
                         m.bytes_sent = delta_out;
+                        // Overwrite the cumulative-average bps with the 10-second
+                        // sliding window. When fully synced the window naturally reads
+                        // ~0 blk/s (no new blocks), which is the correct display.
+                        m.sync_speed_blocks_per_sec = window_bps;
 
                         // 🎚️ v8.5.4: Bridge TUI throttle mode → AppState → TurboSyncManager
                         // TUI writes to Metrics.network_throttle_mode, we propagate to the AtomicU8

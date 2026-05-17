@@ -16,13 +16,14 @@ use axum::{
     },
     http::StatusCode,
     response::{IntoResponse, Response},
+    Json,
 };
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::call_manager::{CallManager, CALL_INITIATION_TIMEOUT_SECS};
 use crate::wallet_auth::validate_signaling_auth_query;
@@ -145,32 +146,94 @@ pub async fn ws_signal_handler(
     Query(query): Query<SignalQuery>,
     State(state): State<SignalingState>,
 ) -> Response {
+    let short = short_peer(&query.peer_id);
+
     // ── CRIT-1: Verify ownership of peer_id via Ed25519 signature ─────────────
     if let Some(auth_json) = &query.auth_header {
         match validate_signaling_auth_query(auth_json, &query.peer_id) {
             Ok(_) => { /* authenticated */ }
             Err(reason) => {
-                warn!("Signaling: auth rejected for {} — {}", query.peer_id, reason);
+                warn!(
+                    "Signaling: auth REJECTED for peer_id={} reason={} auth_len={}",
+                    short,
+                    reason,
+                    auth_json.len()
+                );
                 return (StatusCode::UNAUTHORIZED, reason).into_response();
             }
         }
     } else {
+        warn!("Signaling: connect REJECTED for peer_id={} reason=missing_auth_header", short);
         return (StatusCode::UNAUTHORIZED, "auth_header query parameter required").into_response();
     }
 
     // ── CRIT-2: Sanitise peer_id before accepting the connection ─────────────
     let peer_id = query.peer_id.trim().to_string();
     if peer_id.is_empty() || peer_id.len() > MAX_PEER_ID_LEN {
+        warn!(
+            "Signaling: connect REJECTED for peer_id={} reason=invalid_length (len={})",
+            short,
+            peer_id.len()
+        );
         return (StatusCode::BAD_REQUEST, "peer_id invalid or too long").into_response();
     }
 
     // Reject duplicate peer_id — prevents session hijacking (CRIT-1 supplement)
     if state.peers.contains_key(&peer_id) {
-        warn!("Signaling: duplicate peer_id rejected — {}", peer_id);
+        warn!(
+            "Signaling: duplicate peer_id rejected — {} (already connected; current peer_count={})",
+            short,
+            state.peers.len()
+        );
         return (StatusCode::CONFLICT, "peer_id already connected").into_response();
     }
 
+    info!(
+        "Signaling: connect ACCEPTED peer_id={} (peer_count_before={})",
+        short,
+        state.peers.len()
+    );
     ws.on_upgrade(move |socket| handle_peer(socket, peer_id, state))
+}
+
+/// Short representation of a peer_id for logs — first 8 and last 6 chars.
+fn short_peer(peer_id: &str) -> String {
+    if peer_id.len() <= 16 {
+        return peer_id.to_string();
+    }
+    format!("{}…{}", &peer_id[..8], &peer_id[peer_id.len() - 6..])
+}
+
+// ─── Diagnostic endpoint ─────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct SignalingDiagResponse {
+    pub peer_count: usize,
+    pub peers: Vec<String>,
+    pub room_count: usize,
+    pub active_call_count: usize,
+}
+
+/// GET /api/v1/signaling/diag — lists currently-connected signaling peers.
+///
+/// Public diagnostic endpoint: lets callers verify whether the peer they're
+/// trying to reach is actually connected to *this* backend (vs. a different
+/// load-balanced one). Returns truncated peer_ids — full IDs are not needed
+/// for diagnostics and shouldn't leak via this endpoint.
+pub async fn signaling_diag_handler(
+    State(state): State<SignalingState>,
+) -> Json<SignalingDiagResponse> {
+    let peers: Vec<String> = state
+        .peers
+        .iter()
+        .map(|p| short_peer(p.key()))
+        .collect();
+    Json(SignalingDiagResponse {
+        peer_count: state.peers.len(),
+        peers,
+        room_count: state.rooms.len(),
+        active_call_count: state.call_manager.active_call_count(),
+    })
 }
 
 async fn handle_peer(socket: WebSocket, peer_id: String, state: SignalingState) {
@@ -423,20 +486,53 @@ async fn route_message(state: &SignalingState, envelope: SignalingEnvelope) {
 
     // Direct peer routing
     if let Some(target) = &envelope.to {
+        let msg_type = match &envelope.payload {
+            SignalingPayload::CallOffer { .. } => "call_offer",
+            SignalingPayload::CallAnswer { .. } => "call_answer",
+            SignalingPayload::CallEnd { .. } => "call_end",
+            SignalingPayload::IceCandidate { .. } => "ice_candidate",
+            SignalingPayload::ChatMessage { .. } => "chat_message",
+            _ => "other",
+        };
+        let from_short = short_peer(&envelope.from);
+        let to_short = short_peer(target);
         if let Some(sender) = state.peers.get(target) {
-            let msg_type = match &envelope.payload {
-                SignalingPayload::CallOffer { .. } => "call_offer",
-                SignalingPayload::CallAnswer { .. } => "call_answer",
-                SignalingPayload::CallEnd { .. } => "call_end",
-                SignalingPayload::IceCandidate { .. } => "ice_candidate",
-                _ => "other",
-            };
             match sender.try_send(envelope.clone()) {
-                Ok(_) => warn!("Signaling: delivered {} from {} to {}", msg_type, envelope.from, target),
-                Err(e) => warn!("Signaling: FAILED to deliver {} to {} — {}", msg_type, target, e),
+                Ok(_) => {
+                    // Call-control envelopes are rare and useful to see; chat / ICE are noisy.
+                    if matches!(
+                        msg_type,
+                        "call_offer" | "call_answer" | "call_end"
+                    ) {
+                        info!(
+                            "Signaling: routed {} {} → {} (sid={:?})",
+                            msg_type, from_short, to_short, envelope.session_id
+                        );
+                    } else {
+                        debug!(
+                            "Signaling: routed {} {} → {} (sid={:?})",
+                            msg_type, from_short, to_short, envelope.session_id
+                        );
+                    }
+                }
+                Err(e) => warn!(
+                    "Signaling: DROP {} {} → {} (channel full or closed — {})",
+                    msg_type, from_short, to_short, e
+                ),
             }
         } else {
-            warn!("Signaling: target peer {} not connected", target);
+            // Compact preview of who IS connected so debugging "where's my peer?" is one log away.
+            let peer_count = state.peers.len();
+            let preview: Vec<String> = state
+                .peers
+                .iter()
+                .take(8)
+                .map(|p| short_peer(p.key()))
+                .collect();
+            warn!(
+                "Signaling: target NOT CONNECTED {} {} → {} (peer_count={} connected_preview={:?})",
+                msg_type, from_short, to_short, peer_count, preview
+            );
             // Notify sender that target is offline
             if let Some(from_sender) = state.peers.get(&envelope.from) {
                 let _ = from_sender.try_send(SignalingEnvelope {

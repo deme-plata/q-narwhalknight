@@ -726,9 +726,15 @@ async fn try_aioc_service_auth(
 pub fn validate_signaling_auth_query(auth_json: &str, expected_peer_id: &str) -> Result<String, &'static str> {
     let auth: AuthHeader = serde_json::from_str(auth_json).map_err(|_| "invalid_auth_json")?;
 
-    // Replay-attack prevention: reject headers older than 5 minutes
+    // Replay-attack prevention: reject headers older than 5 minutes.
+    // Surface the drift so callers can tell "client clock is off" from "stale token".
     let now = chrono::Utc::now().timestamp();
-    if (now - auth.timestamp).abs() > 300 {
+    let drift = now - auth.timestamp;
+    if drift.abs() > 300 {
+        tracing::warn!(
+            "Signaling auth: expired_auth — drift={}s (server_now={}, client_ts={})",
+            drift, now, auth.timestamp
+        );
         return Err("expired_auth");
     }
 

@@ -13,7 +13,7 @@ import {
   Loader2, Shield, Lock, Search, Star, ChevronRight, Plus, Bot,
 } from 'lucide-react';
 import { SignalingService } from '../services/SignalingService';
-import type { SignalingEnvelope, PeerInfo, CallType } from '../services/SignalingService';
+import type { SignalingEnvelope, PeerInfo, CallType, SignalingDiag } from '../services/SignalingService';
 import { WebRTCManager } from '../webrtc/WebRTCManager';
 import type { ConnectionState } from '../webrtc/WebRTCManager';
 import { walletSession, generateAuthHeader } from '../services/walletAuth';
@@ -139,6 +139,10 @@ export default function ChatScreen() {
   const [roomInput, setRoomInput] = useState('');
   const [isConnected, setIsConnected] = useState(false);
   const [incomingCall, setIncomingCall] = useState<{ from: string; sdp: string; callType: 'audio' | 'video'; sessionId: string | null } | null>(null);
+  // Connection diagnostics — exposed to UI so the user can see exactly why a call isn't going through
+  const [diag, setDiag] = useState<SignalingDiag | null>(null);
+  const [showDiag, setShowDiag] = useState(false);
+  const [serverPeers, setServerPeers] = useState<{ peer_count: number; peers: string[]; room_count: number; active_call_count: number } | null>(null);
 
   // Contact sidebar state
   const [contacts, setContacts] = useState<SavedContact[]>([]);
@@ -295,10 +299,18 @@ export default function ChatScreen() {
       handleIncoming(envelope, signaling, webrtc);
     });
 
+    const unsubDiag = signaling.onDiag((d) => {
+      setDiag(d);
+      // Treat 'open' as connected immediately, don't wait for pong (which takes up to 20s).
+      if (d.wsState === 'open') setIsConnected(true);
+      else if (d.wsState === 'closed' || d.wsState === 'error') setIsConnected(false);
+    });
+
     signaling.connect();
 
     return () => {
       unsub();
+      unsubDiag();
       webrtc.hangupAll();
       signaling.disconnect();
       signalingRef.current = null;
@@ -354,9 +366,26 @@ export default function ChatScreen() {
       }
       case 'call_end': {
         webrtc.hangup(from);
+        // Server-originated CallEnd carries a `reason` field — surface it so the
+        // caller sees "peer not connected" instead of a generic spinner that never resolves.
+        if (from === 'server' && payload.reason) {
+          const reason = payload.reason;
+          const friendly = (
+            reason === 'peer_not_found'    ? 'The other wallet is not connected to this signaling server right now. Both wallets must be online at the same time.' :
+            reason === 'peer_busy'         ? 'The other wallet is already in a call.' :
+            reason === 'server_capacity'   ? 'Server is at maximum concurrent calls. Try again in a moment.' :
+            reason === 'timeout'           ? 'Call timed out — the other side didn\'t answer.' :
+            reason === 'peer_disconnected' ? 'The other wallet just disconnected.' :
+            reason === 'rejected'          ? 'Call was declined.' :
+            `Call ended by server (${reason}).`
+          );
+          console.warn('[ChatScreen] server call_end reason=%s', reason);
+          setCallError(friendly);
+        }
         setActiveCall((prev) => {
-          if (prev?.peerId === from) {
-            recordCallEnd(from, prev.callType);
+          if (prev?.peerId === from || (from === 'server' && prev)) {
+            const peer = prev!.peerId;
+            recordCallEnd(peer, prev!.callType);
             return null;
           }
           return prev;
@@ -966,6 +995,97 @@ export default function ChatScreen() {
                   </button>
                 </div>
               )}
+
+              {/* ── Connection Diagnostics (debug aid) ────────────────────── */}
+              <div
+                className="w-full rounded-xl shrink-0 text-[10px]"
+                style={{ background: 'rgba(15,23,42,0.4)', border: '1px solid rgba(212,175,55,0.15)' }}
+              >
+                <button
+                  onClick={() => {
+                    const next = !showDiag;
+                    setShowDiag(next);
+                    if (next) signalingRef.current?.pollServerDiag().then(setServerPeers);
+                  }}
+                  className="w-full px-3 py-2 flex items-center justify-between text-amber-300/70 hover:text-amber-300"
+                >
+                  <span className="font-bold">Connection diagnostics</span>
+                  <span className="opacity-60">{showDiag ? '▾' : '▸'}</span>
+                </button>
+                {showDiag && !diag && (
+                  <div className="px-3 pb-3 text-amber-300/70 font-mono">
+                    (signaling not initialised — is your wallet unlocked?)
+                  </div>
+                )}
+                {showDiag && diag && (
+                  <div className="px-3 pb-3 space-y-1 font-mono text-amber-200/70 leading-snug">
+                    <div>my peer_id: <span className="text-amber-300">{truncAddr(diag.peerId) || '(none — wallet not loaded)'}</span></div>
+                    <div>target:     <span className="text-amber-300">{targetPeerId ? truncAddr(targetPeerId) : '(none selected)'}</span></div>
+                    <div>ws state:   <span className={
+                      diag.wsState === 'open' ? 'text-green-400' :
+                      diag.wsState === 'connecting' ? 'text-amber-300' :
+                      'text-red-400'
+                    }>{diag.wsState}</span>{diag.reconnectAttempts > 0 && ` (retry #${diag.reconnectAttempts})`}</div>
+                    <div>ws url:     <span className="text-amber-300/60 break-all">{diag.wsUrl || '(not built yet)'}</span></div>
+                    <div>auth:       <span className={diag.authStatus === 'ok' ? 'text-green-400' : 'text-red-400'}>
+                      {diag.authStatus}
+                    </span>{diag.authError && <span className="text-red-300/70"> — {diag.authError}</span>}</div>
+                    {diag.lastCloseCode !== null && (
+                      <div>last close: code={diag.lastCloseCode} reason="{diag.lastCloseReason}"</div>
+                    )}
+                    {diag.lastOutgoing && (
+                      <div>last sent:  {diag.lastOutgoing.type} → {diag.lastOutgoing.to ? truncAddr(diag.lastOutgoing.to) : '(broadcast)'} {diag.lastOutgoing.sid && `sid=${diag.lastOutgoing.sid.slice(0, 8)}`}</div>
+                    )}
+                    {diag.lastIncoming && (
+                      <div>last recv:  {diag.lastIncoming.type} ← {diag.lastIncoming.from === 'server' ? 'server' : truncAddr(diag.lastIncoming.from)}{diag.lastIncoming.reason && ` reason=${diag.lastIncoming.reason}`}</div>
+                    )}
+                    <div className="pt-2 border-t border-amber-400/10">
+                      <button
+                        className="text-amber-400/70 hover:text-amber-300 underline"
+                        onClick={() => signalingRef.current?.pollServerDiag().then(setServerPeers)}
+                      >
+                        ↻ refresh server peer list
+                      </button>
+                    </div>
+                    {serverPeers && (
+                      <>
+                        <div>server peer_count: <span className="text-amber-300">{serverPeers.peer_count}</span></div>
+                        <div>active calls:     <span className="text-amber-300">{serverPeers.active_call_count}</span></div>
+                        <div>peers (truncated):</div>
+                        <ul className="pl-3 space-y-0.5 max-h-32 overflow-y-auto">
+                          {serverPeers.peers.length === 0 ? (
+                            <li className="text-red-400">(none — no other wallets are connected to this backend)</li>
+                          ) : (
+                            serverPeers.peers.map((p, i) => <li key={i} className="text-amber-200/60">{p}</li>)
+                          )}
+                        </ul>
+                        {targetPeerId && serverPeers.peer_count > 0 && (() => {
+                          // Server's short_peer() format is "<first 8>…<last 6>".
+                          // Match without case sensitivity since the server stores the original case.
+                          const tLow = targetPeerId.toLowerCase();
+                          const tPrefix = tLow.slice(0, 8);
+                          const tSuffix = tLow.slice(-6);
+                          const hit = serverPeers.peers.some((p) => {
+                            const pLow = p.toLowerCase();
+                            return pLow.startsWith(tPrefix) && pLow.endsWith(tSuffix);
+                          });
+                          return (
+                            <div className="pt-1">
+                              target {truncAddr(targetPeerId)}{' '}
+                              {hit ? (
+                                <span className="text-green-400">✓ appears connected to this backend</span>
+                              ) : (
+                                <span className="text-red-400">✗ NOT seen on this backend (may be on a different load-balanced server, or not connected at all)</span>
+                              )}
+                            </div>
+                          );
+                        })()}
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+
 
               {activeCall ? (
                 <div
