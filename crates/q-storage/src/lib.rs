@@ -12181,6 +12181,62 @@ mod tests {
         assert!(storage.is_ok());
     }
 
+    /// v10.9.55 Codex MEDIUM: synced_through_atomic must survive restart via
+    /// persistence under `qblock:synced_through` in CF_BLOCKS.
+    #[tokio::test]
+    async fn test_synced_through_survives_restart_v10955() {
+        let temp_dir = TempDir::new().unwrap();
+        let node_id = [42u8; 32];
+
+        // Open, advance, drop.
+        {
+            let storage = QStorage::open(temp_dir.path(), node_id)
+                .await
+                .expect("first open");
+            assert_eq!(storage.get_synced_through_height(), 0, "fresh DB starts at 0");
+            storage
+                .advance_synced_through(12_345)
+                .await
+                .expect("advance");
+            assert_eq!(
+                storage.get_synced_through_height(),
+                12_345,
+                "in-memory reflects advance"
+            );
+            // Drop here.
+        }
+
+        // Reopen: in-memory atomic should reload from persisted key.
+        {
+            let storage = QStorage::open(temp_dir.path(), node_id)
+                .await
+                .expect("reopen");
+            let loaded = storage.get_synced_through_height();
+            assert!(
+                loaded >= 12_345,
+                "synced_through must persist across restart, got {}",
+                loaded
+            );
+        }
+
+        // Monotonic — calling advance with a LOWER value must not regress.
+        {
+            let storage = QStorage::open(temp_dir.path(), node_id)
+                .await
+                .expect("reopen 2");
+            let before = storage.get_synced_through_height();
+            storage
+                .advance_synced_through(100)
+                .await
+                .expect("regressing advance");
+            assert_eq!(
+                storage.get_synced_through_height(),
+                before,
+                "advance(N < current) must not regress the pointer"
+            );
+        }
+    }
+
     #[test]
     fn test_key_generation() {
         let storage = QStorage {

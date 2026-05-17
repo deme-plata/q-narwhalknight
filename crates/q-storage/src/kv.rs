@@ -743,16 +743,14 @@ impl RocksDBKV {
 
         // 🚨 Additional safety settings
         opts.set_paranoid_checks(true); // Extra validation
-        // v10.9.55: Defense-in-depth against kill-9-during-compaction loss
-        // (Mar 2026 incident lost ~8M historical blocks because compaction output SSTs
-        // were referenced by MANIFEST but never fully written).
-        //   - force_consistency_checks: catches MANIFEST↔SST divergence at DB open time
-        //     and refuses to start rather than serving a silently-corrupted view.
-        //   - paranoid_file_checks: per-SST consistency check at open (small startup
-        //     cost on 48K-SST DBs; ~seconds, well worth it for catching half-written
-        //     output SSTs from interrupted compactions).
-        opts.set_force_consistency_checks(true);
-        opts.set_paranoid_file_checks(true);
+        // v10.9.55: defense-in-depth against kill-9-during-compaction loss is
+        // delivered via `docs/v10.9.55-systemd-hardening.md` (KillMode=mixed +
+        // TimeoutStopSec=120) — prevents the corruption pattern in the first place.
+        // rust-rocksdb 0.22.0 does NOT expose set_force_consistency_checks /
+        // set_paranoid_file_checks (verified 2026-05-18 against the cached crate),
+        // so we leave that detection layer to a follow-up release that bumps the
+        // rocksdb dependency. The existing set_paranoid_checks(true) above still
+        // covers DB-open-time corruption refusal.
 
         // Background tuning
         opts.set_max_background_flushes(2);
@@ -824,9 +822,9 @@ impl RocksDBKV {
         opts.set_target_file_size_base(128 * 1024 * 1024); // 128MB target file size
         opts.set_max_write_buffer_number(4); // v8.6.0: quad buffering for write throughput
 
-        // v10.9.55: defense-in-depth (see CF_BLOCKS for full rationale).
-        opts.set_force_consistency_checks(true);
-        opts.set_paranoid_file_checks(true);
+        // v10.9.55: see CF_BLOCKS — the force_consistency_checks /
+        // paranoid_file_checks setters are unavailable on rust-rocksdb 0.22.0.
+        // systemd hardening is the active defense.
 
         Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(CF_TRANSACTIONS, opts)
@@ -1342,9 +1340,7 @@ impl RocksDBKV {
         opts.set_write_buffer_size(Self::scale_write_buffer(16)); // 16MB - one per block
         opts.set_max_write_buffer_number(2);
 
-        // v10.9.55: defense-in-depth (see CF_BLOCKS for full rationale).
-        opts.set_force_consistency_checks(true);
-        opts.set_paranoid_file_checks(true);
+        // v10.9.55: see CF_BLOCKS — those setters unavailable on rust-rocksdb 0.22.0.
 
         Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_QUANTUM_METADATA, opts)
