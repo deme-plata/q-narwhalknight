@@ -4293,10 +4293,17 @@ impl QStorage {
             let delta_abs = if amount >= old_balance { amount - old_balance } else { old_balance - amount };
             let direction = if amount >= old_balance { "+" } else { "-" };
             if amount < old_balance {
+                // SECURITY (issue #54): max-wins guard per CLAUDE.md Rule 1.
+                // Stale/partial callers (state-sync, replay, batch reconciliation) may pass a
+                // lower amount than the authoritative on-disk value. Skipping the write preserves
+                // the higher balance and matches the existing behavior of the batch variant
+                // `save_wallet_balances`. Legitimate debits (fees, signed transfers via consensus)
+                // must go through a dedicated path; see issue #54 for the 20+ caller audit.
                 error!(
-                    "🔴 [BALANCE WRITE] save_wallet_balance(): wallet={} old={} new={} delta={}{} caller=ABSOLUTE_OVERWRITE height=N/A",
-                    &addr_hex[..16.min(addr_hex.len())], old_balance, amount, direction, delta_abs
+                    "🔴 [BALANCE WRITE] save_wallet_balance(): wallet={} SKIPPED (max-wins: old={} > new={}) caller=ABSOLUTE_OVERWRITE",
+                    &addr_hex[..16.min(addr_hex.len())], old_balance, amount
                 );
+                return Ok(());
             } else {
                 warn!(
                     "🔴 [BALANCE WRITE] save_wallet_balance(): wallet={} old={} new={} delta={}{} caller=ABSOLUTE_OVERWRITE height=N/A",
