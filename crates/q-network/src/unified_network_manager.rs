@@ -254,7 +254,7 @@ pub const HARDCODED_BOOTSTRAP_PEERS: &[&str] = &[
     // WSS via port 9443 — dedicated libp2p WebSocket port (fallback if 443 detection fails)
     "/dns4/quillon.xyz/tcp/9443/wss/p2p/12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM",
     // Server Delta - 1Gbit (second fastest)
-    "/ip4/5.79.79.158/tcp/9001/p2p/12D3KooWLJJRvqo6mBoHLpgxVbGKfW3Jv39ziU4kz1adKFv93JbK",
+    "/ip4/5.79.79.158/tcp/9001/p2p/12D3KooWPg1GsUhYtZdzN37NcLQCz2PXJ3GssKMtELwvMvHFrjTt",
     // Server Gamma - 1Gbit (peer ID refreshed 2026-05-16 — old `WFfZKfKbBnB5` rejected with WrongPeerId)
     "/ip4/109.205.176.60/tcp/9001/p2p/12D3KooWHNhCWYmUiGGGXGGwTbDgTFZKrXBQ6LSZdGKhkpDici1U",
     // Server Beta - 100Mbit (DHT coordinator, gossipsub anchor)

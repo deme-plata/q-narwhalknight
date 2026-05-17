@@ -511,7 +511,7 @@ const HTTP_BOOTSTRAP_PEERS: &[&str] = &[
 /// peer IDs to register them in turbo sync. This mapping enables that.
 fn bootstrap_peer_id_for_url(url: &str) -> Option<&'static str> {
     if url.contains("89.149.241.126") { Some("12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM") }      // Epsilon (verified 2026-04-25)
-    else if url.contains("5.79.79.158") { Some("12D3KooWLJJRvqo6mBoHLpgxVbGKfW3Jv39ziU4kz1adKFv93JbK") }     // Delta
+    else if url.contains("5.79.79.158") { Some("12D3KooWPg1GsUhYtZdzN37NcLQCz2PXJ3GssKMtELwvMvHFrjTt") }     // Delta
     else if url.contains("109.205.176.60") { Some("12D3KooWHNhCWYmUiGGGXGGwTbDgTFZKrXBQ6LSZdGKhkpDici1U") }  // Gamma (verified live 2026-05-16; was 12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH which caused WrongPeerId rejections)
     else if url.contains("185.182.185.227") { Some("12D3KooWKyjQUYXJQ8y8WdHbtMVxsNt4a412Ccqdr1oKjSY8fy93") } // Beta (verified 2026-04-25)
     else if url.contains("quillon.xyz") { Some("12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM") }    // quillon.xyz = Epsilon
@@ -528,7 +528,7 @@ fn is_allowed_balance_update_origin(origin_node_id: &str) -> bool {
         "12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH", // Server Beta (legacy, for compat)
         "12D3KooWHNhCWYmUiGGGXGGwTbDgTFZKrXBQ6LSZdGKhkpDici1U", // Server Gamma (current peer ID, verified 2026-05-16)
         "12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH", // Server Gamma (Mainnet 2026.1.3 legacy, kept for backwards-compat allowlist)
-        "12D3KooWLJJRvqo6mBoHLpgxVbGKfW3Jv39ziU4kz1adKFv93JbK", // Server Delta (Mainnet 2026.1.3)
+        "12D3KooWPg1GsUhYtZdzN37NcLQCz2PXJ3GssKMtELwvMvHFrjTt", // Server Delta (Mainnet 2026.1.3)
         "12D3KooWBHTC9FhwwXmvH7YA17YHTLdcxbtLWg2U5xEtxSeqX7jc", // Server Beta (legacy, for compat)
         "12D3KooWFqPX9TkvF43eyDeH9wwxYTSfnBn8AobLJeA7xRnmpPcv", // Server Gamma (legacy, for compat)
     ];

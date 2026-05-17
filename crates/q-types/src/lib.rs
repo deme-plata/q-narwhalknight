@@ -4302,7 +4302,7 @@ impl NetworkConfig {
             // Multiple bootstrap nodes for redundancy
             bootstrap_peers: vec![
                 // Primary bootstrap node - Server Delta (5.79.79.158) - 1Gbit fastest sync
-                "/ip4/5.79.79.158/tcp/9001/p2p/12D3KooWLJJRvqo6mBoHLpgxVbGKfW3Jv39ziU4kz1adKFv93JbK".to_string(),
+                "/ip4/5.79.79.158/tcp/9001/p2p/12D3KooWPg1GsUhYtZdzN37NcLQCz2PXJ3GssKMtELwvMvHFrjTt".to_string(),
                 // Secondary bootstrap node - Server Gamma (109.205.176.60) - 1Gbit
                 "/ip4/109.205.176.60/tcp/9001/p2p/12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH".to_string(),
                 // Tertiary bootstrap node - Server Beta (185.182.185.227) - 100Mbit DHT anchor

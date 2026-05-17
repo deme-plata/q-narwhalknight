@@ -246,7 +246,7 @@ journalctl -u q-api-server --since "5 minutes ago" | grep -E "Gossipsub BLOCK fr
 
 ### **P2P Network Bootstrap (mainnet-genesis — ACTIVE):**
 - **Bootstrap Peer ID (Epsilon)**: `12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM` (10Gbit SUPERNODE — primary sync target; changed 2026-05-09)
-- **Bootstrap Peer ID (Delta)**: `12D3KooWLJJRvqo6mBoHLpgxVbGKfW3Jv39ziU4kz1adKFv93JbK` (1Gbit — second fastest)
+- **Bootstrap Peer ID (Delta)**: `12D3KooWPg1GsUhYtZdzN37NcLQCz2PXJ3GssKMtELwvMvHFrjTt` (1Gbit — second fastest)
 - **Bootstrap Peer ID (Gamma)**: `12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH` (1Gbit)
 - **Bootstrap Peer ID (Beta)**: `12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH` (100Mbit — DHT coordinator)
 - **Bootstrap Peer ID (Alpha)**: `12D3KooWPwin4nJcU9PzsxNgUVXj5e6zDnACr84H7RZ1XzmnARsY` (canary)
