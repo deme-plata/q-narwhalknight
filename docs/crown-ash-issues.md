@@ -47,10 +47,10 @@
 - **Files**: `crates/crown-ash-client/src/plugins/audio.rs` (new)
 
 ### CLIENT-004: Tutorial Overlay
-- **Status**: ⚪ Planned
+- **Status**: ✅ Implemented
 - **Priority**: Low
-- **Description**: First-time player tutorial using egui overlay panels. Step through: select province → view details → raise army → move army → diplomacy. Track tutorial progress in a `TutorialState` resource.
-- **Files**: `crates/crown-ash-client/src/systems/tutorial.rs` (new)
+- **Description**: First-time player tutorial using egui overlay panels. Steps through welcome, province selection, detail panel review, faction selection, Actions window, and chronicle/toast awareness. Includes auto-advance for completed goals, Back/Next/Skip/Reset controls, F1 toggle, and Shift+F1 reset.
+- **Files**: `crates/crown-ash-client/src/systems/tutorial.rs`, `crates/crown-ash-client/src/plugins/ui.rs`
 
 ---
 

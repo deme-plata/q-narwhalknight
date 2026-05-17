@@ -1997,7 +1997,7 @@ dependencies = [
 
 [[package]]
 name = "crown-ash-narrative"
-version = "10.2.2"
+version = "10.9.38"
 dependencies = [
  "crown-ash-types",
  "serde",
@@ -2006,7 +2006,7 @@ dependencies = [
 
 [[package]]
 name = "crown-ash-types"
-version = "10.2.2"
+version = "10.9.38"
 dependencies = [
  "bincode",
  "serde",
