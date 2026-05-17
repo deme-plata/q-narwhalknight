@@ -247,8 +247,8 @@ journalctl -u q-api-server --since "5 minutes ago" | grep -E "Gossipsub BLOCK fr
 ### **P2P Network Bootstrap (mainnet-genesis — ACTIVE):**
 - **Bootstrap Peer ID (Epsilon)**: `12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM` (10Gbit SUPERNODE — primary sync target; changed 2026-05-09)
 - **Bootstrap Peer ID (Delta)**: `12D3KooWPg1GsUhYtZdzN37NcLQCz2PXJ3GssKMtELwvMvHFrjTt` (1Gbit — second fastest)
-- **Bootstrap Peer ID (Gamma)**: `12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH` (1Gbit)
-- **Bootstrap Peer ID (Beta)**: `12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH` (100Mbit — DHT coordinator)
+- **Bootstrap Peer ID (Gamma)**: `12D3KooWHNhCWYmUiGGGXGGwTbDgTFZKrXBQ6LSZdGKhkpDici1U` (1Gbit; verified live via Gamma `:8808/api/v1/status` 2026-05-17. Pre-v10.9.40 was `12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH` — Gamma regenerated identity; kept as legacy allowlist entry in main.rs:530)
+- **Bootstrap Peer ID (Beta)**: `12D3KooWKyjQUYXJQ8y8WdHbtMVxsNt4a412Ccqdr1oKjSY8fy93` (verified live via Beta sync-test 2026-04-25; production Beta on :8080 was offline at 2026-05-17 audit. Legacy `12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH` kept in main.rs:528 for compat)
 - **Bootstrap Peer ID (Alpha)**: `12D3KooWPwin4nJcU9PzsxNgUVXj5e6zDnACr84H7RZ1XzmnARsY` (canary)
 - **Bootstrap Address**: `/ip4/89.149.241.126/tcp/9001/p2p/12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM`
 - **Network ID**: `mainnet2026.1`

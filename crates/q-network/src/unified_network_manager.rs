@@ -1422,7 +1422,9 @@ pub struct UnifiedNetworkManager {
     /// Stores (height, retry_count, next_retry_time) for failed heights that should be retried
     sync_retry_queue: Arc<std::sync::Mutex<Vec<(u64, u8, std::time::Instant)>>>,
     /// v1.0.2-safe: Track strike count for chronically slow peers
-    /// After 5 strikes in 60s, disconnect the peer to free internal libp2p send buffers
+    /// After 20 strikes in 60s (raised from 5 in v10.9.54), disconnect the peer
+    /// to free internal libp2p send buffers. The lower 5-strike threshold was
+    /// causing thrashing-disconnects from healthy supernodes serving fresh syncs.
     slow_peer_strikes: DashMap<PeerId, (u32, std::time::Instant)>,
     /// v1.0.2: Outbound P2P bandwidth counter (cumulative bytes published via gossipsub)
     /// Set by caller via set_p2p_bytes_out() after construction
@@ -4043,26 +4045,36 @@ impl UnifiedNetworkManager {
                 warn!("⚠️ [GOSSIPSUB MESH] Peer {} does not support gossipsub protocol!", peer_id);
                 warn!("   This peer cannot participate in mesh-based message propagation");
             }
-            // v1.0.2-safe: Handle SlowPeer — disconnect after 5 strikes in 60s
-            // Frees internal libp2p send buffers for chronically slow peers,
-            // preventing backpressure from propagating to the entire event loop
+            // v1.0.2-safe → v10.9.54: SlowPeer disconnect threshold raised 5 → 20
+            // strikes in 60s. The original 5-strike trip-wire was disconnecting
+            // healthy supernodes (notably Epsilon serving fresh syncs from genesis)
+            // while their get_qblocks_forward did a slow scan past 18M pruned blocks
+            // hunting for the next available chunk. Each forward-seek took 1-3s →
+            // 5 timed-out block-pack requests in a row → 5 strikes → disconnect →
+            // auto-reconnect → repeat forever. Delta observed thrashing at
+            // 18:40-18:43 UTC 2026-05-17 with peer height climbing on Epsilon
+            // (18118639 → 18118664) but Delta unable to retain the connection
+            // long enough to receive a single block-pack response.
+            //
+            // 20 strikes/60s = up to ~3s/strike still tolerated, which covers the
+            // worst-case forward-seek latency we've measured. Real "dead peer"
+            // disconnection still happens via libp2p's own keepalive/idle timeouts.
             QNarwhalEvent::Gossipsub(gossipsub::Event::SlowPeer { peer_id, ref failed_messages }) => {
                 let now = std::time::Instant::now();
                 let mut entry = self.slow_peer_strikes.entry(peer_id).or_insert((0, now));
                 if now.duration_since(entry.1) > Duration::from_secs(60) {
-                    // Reset window
                     *entry = (1, now);
                 } else {
                     entry.0 += 1;
                 }
                 let strikes = entry.0;
                 drop(entry);
-                if strikes >= 5 {
+                if strikes >= 20 {
                     warn!("🔌 Disconnecting slow peer {} ({} strikes, {:?})", peer_id, strikes, failed_messages);
                     let _ = self.swarm.disconnect_peer_id(peer_id);
                     self.slow_peer_strikes.remove(&peer_id);
                 } else {
-                    debug!("⚠️ SlowPeer {} strike {}/5: {:?}", peer_id, strikes, failed_messages);
+                    debug!("⚠️ SlowPeer {} strike {}/20: {:?}", peer_id, strikes, failed_messages);
                 }
             }
             QNarwhalEvent::Gossipsub(event) => {
