@@ -2226,7 +2226,11 @@ pub async fn burn_tokens(
 }
 
 /// Airdrop tokens to multiple recipients
+/// v10.9.46 SECURITY FIX: Requires AuthenticatedWallet + caller must be the
+/// contract deployer. Previously this was completely unauthenticated, which
+/// would have let any caller drain the airdrop function on any contract.
 pub async fn airdrop_tokens(
+    auth_wallet: crate::wallet_auth::AuthenticatedWallet,
     State(state): State<Arc<AppState>>,
     Json(request): Json<AirdropRequest>,
 ) -> Result<Json<ApiResponse<TokenOperationResponse>>, StatusCode> {
@@ -2235,6 +2239,37 @@ pub async fn airdrop_tokens(
         Ok(addr) => addr,
         Err(e) => return Ok(Json(ApiResponse::error(e))),
     };
+
+    // v10.9.46: ENFORCE caller is contract deployer (only owner can airdrop)
+    use q_vm::contracts::orobit_smart_contracts::ContractAddress;
+    let contract = match state.orobit_ecosystem
+        .get_contract_by_address(ContractAddress(contract_addr)).await
+    {
+        Some(c) => c,
+        None => return Ok(Json(ApiResponse::error(format!(
+            "Contract not found: {}", request.contract_address
+        )))),
+    };
+    if contract.deployer != auth_wallet.address {
+        tracing::warn!(
+            "🚨 [AIRDROP v10.9.46] Unauthorized airdrop attempt: contract deployer={} auth={}",
+            hex::encode(&contract.deployer[..8]),
+            hex::encode(&auth_wallet.address[..8]),
+        );
+        return Ok(Json(ApiResponse::error(
+            "Unauthorized: only the contract deployer can airdrop this contract's tokens".to_string()
+        )));
+    }
+
+    // v10.9.46: DoS cap on recipients per call (was unbounded — a single call
+    // could request a million-recipient airdrop and stall the node).
+    const MAX_RECIPIENTS_PER_AIRDROP: usize = 1000;
+    if request.recipients.len() > MAX_RECIPIENTS_PER_AIRDROP {
+        return Ok(Json(ApiResponse::error(format!(
+            "Too many recipients (max {} per call, got {})",
+            MAX_RECIPIENTS_PER_AIRDROP, request.recipients.len()
+        ))));
+    }
 
     // Parse amount per recipient
     let amount_per_recipient = match request.amount_per_recipient.parse::<u64>() {

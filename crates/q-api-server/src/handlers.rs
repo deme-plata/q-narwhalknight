@@ -5190,6 +5190,148 @@ async fn send_transaction_inner(
     Ok(Json(ApiResponse::success(response)))
 }
 
+// ============================================================================
+// v10.9.46 — X-Wallet-Auth-only transfer endpoint (no mnemonic, no vault)
+// ============================================================================
+// Mirrors the /dex/swap pattern: trusts the X-Wallet-Auth extractor's proof
+// that the caller controls the from address, constructs an unsigned tx, and
+// submits to mempool. The mempool/state processor accepts handler-vouched txs
+// (same way it accepts swaps and contract deployments without per-tx Ed25519
+// signatures). This unblocks client-managed wallets that have a raw 32-byte
+// seed instead of a BIP39 mnemonic.
+//
+// Security model:
+//   - AuthenticatedWallet extractor verifies X-Wallet-Auth (Ed25519 sig over
+//     pubkey + timestamp + path) with 5-min replay window.
+//   - We enforce auth_wallet.address == request.from (no impersonation).
+//   - Amount cap and recipient validation prevent obvious abuse.
+//   - No mnemonic ever touches the server (matches the client-managed model).
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct SendTransactionSignedRequest {
+    pub from: String,
+    pub to: String,
+    pub amount: u128,
+    #[serde(default)]
+    pub memo: Option<String>,
+    /// "QUG" | "QUGUSD" | "<qnk-contract-address-hex>"
+    #[serde(default = "default_token_type_str")]
+    pub token_type: String,
+}
+
+pub async fn send_transaction_signed(
+    auth_wallet: AuthenticatedWallet,
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<SendTransactionSignedRequest>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    use q_types::{TransactionType, TokenType};
+
+    // 1. Parse from + to
+    let from_address = match parse_wallet_address(&request.from) {
+        Ok(a) => a,
+        Err(e) => return Ok(Json(ApiResponse::error(format!("Invalid from: {}", e)))),
+    };
+    let to_address = match parse_wallet_address(&request.to) {
+        Ok(a) => a,
+        Err(e) => return Ok(Json(ApiResponse::error(format!("Invalid to: {}", e)))),
+    };
+
+    // 2. SECURITY: auth must match from (X-Wallet-Auth proved caller's identity)
+    if auth_wallet.address != from_address {
+        warn!(
+            "🚨 [SEND-SIGNED v10.9.46] Auth mismatch: auth={} request.from={}",
+            q_log_privacy::mask_addr(&hex::encode(auth_wallet.address)),
+            q_log_privacy::mask_addr(&hex::encode(from_address)),
+        );
+        return Ok(Json(ApiResponse::error(
+            "Unauthorized: auth wallet does not match request.from".to_string()
+        )));
+    }
+
+    // 3. Amount sanity
+    if request.amount == 0 {
+        return Ok(Json(ApiResponse::error("Amount must be > 0".to_string())));
+    }
+    // Defensive upper bound (~1B QUG in 24-decimal raw) — prevents accidental overflow attacks
+    if request.amount > 10u128.pow(33) {
+        return Ok(Json(ApiResponse::error(
+            "Amount too large (cap: 1e33 raw units, ~1B in 24-decimal)".to_string()
+        )));
+    }
+
+    // 4. Self-transfer rejection
+    if from_address == to_address {
+        return Ok(Json(ApiResponse::error("from == to (no-op)".to_string())));
+    }
+
+    // 5. Resolve token type
+    let token_str_upper = request.token_type.to_uppercase();
+    let (tx_type, token_type, tx_data) = if token_str_upper == "QUG" || token_str_upper == "NATIVE-QUG" {
+        (TransactionType::Transfer, TokenType::QUG, Vec::<u8>::new())
+    } else if token_str_upper == "QUGUSD" || token_str_upper == "QUGUSD-STABLE" {
+        let token_addr = q_types::QUGUSD_TOKEN_ADDRESS;
+        (TransactionType::TokenTransfer, TokenType::QUGUSD, token_addr.to_vec())
+    } else {
+        // Custom token by contract address
+        let token_addr = match parse_wallet_address(&request.token_type) {
+            Ok(a) => a,
+            Err(e) => return Ok(Json(ApiResponse::error(format!(
+                "Invalid token_type (must be QUG, QUGUSD, or qnk-prefixed contract address): {}", e
+            )))),
+        };
+        (TransactionType::TokenTransfer, TokenType::Custom(token_addr), token_addr.to_vec())
+    };
+
+    // 6. Build the unsigned transaction (mirrors /dex/swap pattern)
+    let nonce = state.nonce_tracker.get_and_increment(&from_address);
+    let now = chrono::Utc::now();
+    let mut tx = transaction_utils::TransactionBuilder::new()
+        .from(from_address)
+        .to(to_address)
+        .amount(request.amount)
+        .token_type(token_type)
+        .tx_type(tx_type)
+        .data(tx_data)
+        .build_with_nonce(nonce, now);
+
+    // 7. Memo support (preserves the field used by inbox messages)
+    if let Some(memo) = request.memo {
+        tx.memo = Some(memo);
+        // Recompute the tx hash to include the memo
+        tx.id = transaction_utils::compute_transaction_id(&tx);
+    }
+
+    info!(
+        "📤 [SEND-SIGNED v10.9.46] {} → {}: amount={} token={} nonce={} tx_id=0x{}",
+        q_log_privacy::mask_addr(&hex::encode(from_address)),
+        q_log_privacy::mask_addr(&hex::encode(to_address)),
+        q_log_privacy::mask_amt(request.amount),
+        request.token_type,
+        nonce,
+        &hex::encode(tx.id)[..16],
+    );
+
+    // 8. Submit unsigned tx to mempool (same path /dex/swap uses)
+    let result = transaction_utils::submit_transaction(
+        tx,
+        &state.tx_pool,
+        &state.tx_status,
+        state.production_mempool.as_ref(),
+        state.libp2p_discovery.as_ref(),
+    ).await;
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "transaction_id": format!("0x{}", hex::encode(result.tx_id)),
+        "queued_for_block": result.queued_for_block,
+        "broadcast_success": result.broadcast_success,
+        "from": hex::encode(from_address),
+        "to": hex::encode(to_address),
+        "amount": request.amount.to_string(),
+        "token_type": request.token_type,
+    }))))
+}
+
 /// Get recent transactions for dashboard (filtered by wallet address for privacy)
 /// SECURITY: Requires cryptographic authentication via X-Wallet-Auth header
 /// Returns ONLY transactions for the authenticated wallet (sender or recipient)
