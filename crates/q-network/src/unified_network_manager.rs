@@ -1371,15 +1371,14 @@ pub struct UnifiedNetworkManager {
     /// v1.2.7-beta: Pending response channels indexed by request ID for async responses
     pending_response_channels: Arc<std::sync::Mutex<HashMap<u64, libp2p::request_response::ResponseChannel<q_types::BlockPackResponse>>>>,
     /// v10.9.41: Permanent-gap declarations tally. Key = (gap_start, gap_end), value =
-    /// set of PeerIds that have declared this gap. The Message::Response handler
-    /// counts unique reporters; once Q_GAP_QUORUM (default 2) is reached the
-    /// `gap_advance_tx` broadcast fires so turbo_sync can advance past the gap.
+    /// set of PeerIds that have declared this gap. v10.9.47: kept for INFO
+    /// observability only — policy moved to TurboSync handler which has Beta-trust data.
     gap_declarations: Arc<std::sync::Mutex<HashMap<(u64, u64), std::collections::HashSet<PeerId>>>>,
-    /// v10.9.41: Broadcast channel for quorum-met gap declarations. Wired to
-    /// turbo_sync's ingest loop, which advances `contiguous_height` to `gap_end+1`.
-    /// Optional because turbo_sync is itself optional; None means gaps are logged
-    /// but not acted on (server-only deployments don't sync).
-    gap_advance_tx: Option<tokio::sync::broadcast::Sender<(u64, u64)>>,
+    /// v10.9.47: Broadcast channel for every received permanent_gap declaration.
+    /// Carries `(gap_start, gap_end, peer_id)`. TurboSync subscribes and decides
+    /// (via Beta-trust + quorum) whether to commit + persist. NetworkManager
+    /// no longer applies a quorum gate — pure relay.
+    gap_advance_tx: Option<tokio::sync::broadcast::Sender<(u64, u64, PeerId)>>,
     /// v1.2.7-beta: Counter for generating unique request IDs for async response tracking
     next_async_request_id: Arc<std::sync::atomic::AtomicU64>,
     /// v9.1.8: Base semaphore for concurrent block-pack responses (prevents OOM during initial sync).
@@ -2818,6 +2817,17 @@ impl UnifiedNetworkManager {
     pub fn set_storage(&mut self, storage: Arc<q_storage::QStorage>) {
         self.storage = Some(storage);
         info!("🗄️ Storage engine linked to network manager for block sync");
+    }
+
+    /// v10.9.47: Wire the broadcast channel for autonomous gap-heal. Pair this
+    /// with `TurboSyncManager::set_gap_advance_rx` + `spawn_gap_advance_handler`
+    /// in main.rs after both managers are constructed.
+    pub fn set_gap_advance_tx(
+        &mut self,
+        tx: tokio::sync::broadcast::Sender<(u64, u64, libp2p::PeerId)>,
+    ) {
+        self.gap_advance_tx = Some(tx);
+        info!("🚧 [KNOWN-GAP v10.9.47] gap_advance_tx wired — autonomous gap-heal active");
     }
 
     /// Adaptive block-pack: wire the shared sync-state atomic from `TurboSyncManager`.
@@ -4292,46 +4302,28 @@ impl UnifiedNetworkManager {
                                         .fetch_add(resp_bytes, std::sync::atomic::Ordering::Relaxed);
                                 }
 
-                                // v10.9.41: process permanent-gap declarations.
-                                // When the server's forward-seek hit a network-wide pruning-bug
-                                // gap (e.g. 26,001..=100,440), it returns no blocks but sets
-                                // `permanent_gap`. The client records the gap in the per-peer
-                                // tally; once Q_GAP_QUORUM independent peers report the same gap,
-                                // the ingest path is told to advance `contiguous_height` to
-                                // gap_end+1 so sync can resume from the next available block.
-                                //
-                                // Single-peer trust mode (operator override): set
-                                // Q_GAP_TRUST_SINGLE_PEER=1 to accept a gap declaration from any
-                                // one peer without quorum. Useful when only one peer in the
-                                // network has the post-gap data.
+                                // v10.9.47: process permanent-gap declarations. NetworkManager
+                                // is now a PURE RELAY — every received declaration is forwarded
+                                // to TurboSync via the broadcast channel. TurboSync owns the
+                                // accept policy (Beta-trust + quorum + persistence). This
+                                // removes the operator-facing Q_KNOWN_PERMANENT_GAPS env var
+                                // by making detection fully autonomous.
                                 if let Some((gap_start, gap_end)) = response.permanent_gap {
-                                    let trust_single = std::env::var("Q_GAP_TRUST_SINGLE_PEER")
-                                        .ok()
-                                        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                                        .unwrap_or(false);
-                                    let quorum: usize = std::env::var("Q_GAP_QUORUM")
-                                        .ok()
-                                        .and_then(|v| v.parse().ok())
-                                        .unwrap_or(2);
-                                    let mut tally = self.gap_declarations.lock().unwrap();
-                                    let entry = tally.entry((gap_start, gap_end)).or_default();
-                                    entry.insert(peer);
-                                    let reporter_count = entry.len();
-                                    let qmet = trust_single || reporter_count >= quorum;
-                                    drop(tally);
-                                    warn!(
+                                    // Maintain the per-peer tally for observability only.
+                                    let reporter_count = {
+                                        let mut tally = self.gap_declarations.lock().unwrap();
+                                        let entry = tally.entry((gap_start, gap_end)).or_default();
+                                        entry.insert(peer);
+                                        entry.len()
+                                    };
+                                    info!(
                                         "🚧 [BLOCK-PACK] Peer {} declared permanent gap {}-{} \
-                                         (reporters: {}, quorum: {}, trust_single: {}, qmet: {})",
-                                        peer, gap_start, gap_end, reporter_count, quorum,
-                                        trust_single, qmet
+                                         (reporters: {}, relaying to turbo_sync for trust check)",
+                                        peer, gap_start, gap_end, reporter_count
                                     );
-                                    if qmet {
-                                        // Signal turbo_sync to advance past the gap. We use the
-                                        // gap_advance_tx broadcast channel so the ingest loop can
-                                        // pick it up without us holding the swarm event loop.
-                                        if let Some(tx) = &self.gap_advance_tx {
-                                            let _ = tx.send((gap_start, gap_end));
-                                        }
+                                    // Always relay — TurboSync handler decides accept/defer.
+                                    if let Some(tx) = &self.gap_advance_tx {
+                                        let _ = tx.send((gap_start, gap_end, peer));
                                     }
                                 }
                                 // v1.0.45-beta: Update known network height for progress display

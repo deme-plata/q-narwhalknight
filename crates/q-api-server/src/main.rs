@@ -8376,6 +8376,36 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     let turbo_sync = Arc::new(turbo_sync_manager);
     state.turbo_sync = Some(turbo_sync.clone());
 
+    // v10.9.47: AUTONOMOUS GAP HEAL — wire NetworkManager → TurboSync broadcast.
+    // 1. Hydrate known_gaps from RocksDB-persisted entries (gaps detected in prior runs).
+    // 2. Create broadcast channel (capacity 64 — handles bursts of new-peer discoveries).
+    // 3. Lock libp2p_manager briefly to install the tx; install rx on turbo_sync.
+    // 4. Spawn the handler task that applies Beta-trust policy + persists accepted gaps.
+    // Once spawned, the user-facing Q_KNOWN_PERMANENT_GAPS env var is no longer needed:
+    // peers declare gaps via the v10.9.41 protocol, the handler validates, persists,
+    // and the next sync_to_height tick auto-advances past them via the v10.9.46
+    // KNOWN-GAP check.
+    if let Some(libp2p_manager_arc) = libp2p_discovery.as_ref() {
+        let hydrated = turbo_sync.load_persisted_gaps().await;
+        info!(
+            "🚧 [KNOWN-GAP v10.9.47] Hydrated {} permanent gap(s) from RocksDB at startup",
+            hydrated
+        );
+        let (gap_tx, gap_rx) = tokio::sync::broadcast::channel::<(u64, u64, libp2p::PeerId)>(64);
+        turbo_sync.set_gap_advance_rx(gap_rx);
+        {
+            let mut mgr = libp2p_manager_arc.lock().await;
+            mgr.set_gap_advance_tx(gap_tx);
+        }
+        turbo_sync.clone().spawn_gap_advance_handler();
+        info!("🚧 [KNOWN-GAP v10.9.47] Autonomous gap-heal wired and active");
+    } else {
+        warn!(
+            "🚧 [KNOWN-GAP v10.9.47] libp2p_discovery is None — autonomous gap-heal DISABLED. \
+             Set Q_KNOWN_PERMANENT_GAPS env var to fall back to manual config."
+        );
+    }
+
     // v10.5.0 RC-3: Spawn gap-fill consumer — receives (first_gap, last_gap) from auto-repair.
     // Fetches the missing block range via P2P (libp2p block-pack) and stores each block in
     // RocksDB without touching the contiguous pointer (pointer advances on next integrity check).
@@ -24766,6 +24796,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             "/api/v1/transactions/send",
             post(handlers::send_transaction),
         ) // Combined send endpoint
+        .route(
+            "/api/v1/transactions/send_signed",
+            post(handlers::send_transaction_signed),
+        ) // v10.9.46: X-Wallet-Auth-only mode (no mnemonic, no vault) — for client-managed wallets
         .route(
             "/api/v1/transactions/estimate-fee",
             post(handlers::estimate_fee),

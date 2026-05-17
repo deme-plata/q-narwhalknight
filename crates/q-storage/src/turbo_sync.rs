@@ -2135,6 +2135,19 @@ pub struct TurboSyncManager {
     /// Stateless — config only — features are extracted per-call.
     /// Output exported as `qnk_peer_p_fail{peer="..."}` gauge.
     pub peer_fail_predictor: Arc<q_sync_optimizers::PeerFailPredictor>,
+
+    /// v10.9.47: Autonomous permanent-gap detection — tally of how many
+    /// independent peers have declared each (start,end) gap. The handler task
+    /// reads gap_advance_rx, updates this tally, and decides whether to commit
+    /// a gap into `known_gaps` based on quorum + per-peer Beta trust.
+    /// Inner key: (gap_start, gap_end). Value: set of peer ids that reported it.
+    pub gap_detection_tally: Arc<parking_lot::Mutex<std::collections::HashMap<(u64, u64), std::collections::HashSet<libp2p::PeerId>>>>,
+
+    /// v10.9.47: Receiver for runtime gap declarations from NetworkManager.
+    /// Set via `set_gap_advance_rx()` in main.rs after both components are
+    /// constructed. `spawn_gap_advance_handler()` takes ownership and spawns
+    /// the long-lived processor task.
+    pub gap_advance_rx: parking_lot::Mutex<Option<tokio::sync::broadcast::Receiver<(u64, u64, libp2p::PeerId)>>>,
 }
 
 impl TurboSyncManager {
@@ -2531,7 +2544,151 @@ impl TurboSyncManager {
             littles_law: Arc::new(dashmap::DashMap::new()),
             chunk_floor: Arc::new(q_sync_optimizers::ChunkFloorEstimator::new()),
             peer_fail_predictor: Arc::new(q_sync_optimizers::PeerFailPredictor::default()),
+            // v10.9.47: Autonomous gap-heal infrastructure (empty at startup; populated
+            // by spawn_gap_advance_handler after main.rs wires the broadcast channel).
+            gap_detection_tally: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+            gap_advance_rx: parking_lot::Mutex::new(None),
         }
+    }
+
+    /// v10.9.47: Wire the broadcast receiver from NetworkManager. Call this
+    /// AFTER NetworkManager has been constructed and `set_gap_advance_tx` has
+    /// been used to pair the channel. Then call `spawn_gap_advance_handler()`.
+    pub fn set_gap_advance_rx(&self, rx: tokio::sync::broadcast::Receiver<(u64, u64, libp2p::PeerId)>) {
+        *self.gap_advance_rx.lock() = Some(rx);
+    }
+
+    /// v10.9.47: Hydrate `known_gaps` from RocksDB-persisted entries. Call
+    /// once at startup, after storage is ready and before sync begins.
+    /// Returns the number of gaps loaded.
+    pub async fn load_persisted_gaps(&self) -> usize {
+        let pairs = self.storage.load_permanent_gaps().await;
+        let count = pairs.len();
+        for (start, end) in pairs {
+            self.known_gaps.add_gap(start, end);
+        }
+        // Refresh observability gauge.
+        crate::metrics::SyncOptimizerGauges::instance()
+            .known_gap_configured_count
+            .set(self.known_gaps.len() as i64);
+        if count > 0 {
+            info!(
+                "[KNOWN-GAP v10.9.47] Hydrated {} permanent gap(s) from RocksDB: {:?}",
+                count,
+                self.known_gaps.snapshot()
+            );
+        }
+        count
+    }
+
+    /// v10.9.47: Spawn the long-lived autonomous gap-heal handler. Takes the
+    /// broadcast receiver from `gap_advance_rx`, processes each declared gap,
+    /// applies a Beta-trust + quorum policy, and commits to `known_gaps` +
+    /// RocksDB persistence when accepted. Idempotent — safe to call once.
+    ///
+    /// Policy (v10.9.47):
+    ///   accept if `unique_reporters >= 2`
+    ///   OR `unique_reporters >= 1 AND beta_score(peer).mean() >= 0.8`
+    ///   OR `Q_GAP_TRUST_SINGLE_PEER=1` (operator override)
+    pub fn spawn_gap_advance_handler(self: Arc<Self>) {
+        let mut rx = match self.gap_advance_rx.lock().take() {
+            Some(rx) => rx,
+            None => {
+                warn!("[KNOWN-GAP] spawn_gap_advance_handler called without rx wired — autonomous heal DISABLED");
+                return;
+            }
+        };
+        let trust_single = std::env::var("Q_GAP_TRUST_SINGLE_PEER")
+            .ok()
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let trust_threshold = std::env::var("Q_GAP_TRUST_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.8);
+        info!(
+            "[KNOWN-GAP v10.9.47] Autonomous gap-heal handler started \
+             (trust_threshold={:.2}, trust_single={}, quorum=2)",
+            trust_threshold, trust_single
+        );
+
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok((start, end, peer)) => {
+                        if start > end {
+                            warn!(
+                                "[KNOWN-GAP] Invalid gap declaration {}-{} from peer {} — discarding",
+                                start, end, peer
+                            );
+                            continue;
+                        }
+
+                        // Tally the report.
+                        let reporter_count = {
+                            let mut tally = self.gap_detection_tally.lock();
+                            let entry = tally.entry((start, end)).or_default();
+                            entry.insert(peer);
+                            entry.len()
+                        };
+
+                        // Skip-if-already-known check (idempotent — we may
+                        // already have this gap from RocksDB or a prior accept).
+                        if self.known_gaps.contains(start) && self.known_gaps.contains(end) {
+                            // Already known — don't re-log, don't re-persist.
+                            continue;
+                        }
+
+                        // Look up the peer's trust score (Beta mean).
+                        let beta_mean = {
+                            let mut reg = self.beta_scores.lock();
+                            reg.score(&peer).mean()
+                        };
+
+                        let accept = trust_single
+                            || reporter_count >= 2
+                            || beta_mean >= trust_threshold;
+
+                        if !accept {
+                            info!(
+                                "[KNOWN-GAP v10.9.47] Provisional gap {}-{} from {} \
+                                 (reporters={}, trust={:.3}) — below threshold, awaiting quorum",
+                                start, end, peer, reporter_count, beta_mean
+                            );
+                            continue;
+                        }
+
+                        // Commit: add to known_gaps + persist to RocksDB + observability.
+                        let changed = self.known_gaps.add_gap(start, end);
+                        if changed {
+                            if let Err(e) = self.storage.persist_permanent_gap(start, end).await {
+                                warn!(
+                                    "[KNOWN-GAP] Failed to persist gap {}-{}: {} — \
+                                     will be re-detected next time",
+                                    start, end, e
+                                );
+                            }
+                            let gauges = crate::metrics::SyncOptimizerGauges::instance();
+                            gauges
+                                .known_gap_configured_count
+                                .set(self.known_gaps.len() as i64);
+                            info!(
+                                "[KNOWN-GAP v10.9.47] ✅ ACCEPTED gap {}-{} (reporters={}, \
+                                 trust={:.3}, persisted to RocksDB). Total gaps: {}",
+                                start, end, reporter_count, beta_mean, self.known_gaps.len()
+                            );
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("[KNOWN-GAP] handler lagged {} declarations — continuing", n);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        info!("[KNOWN-GAP] handler channel closed — exiting");
+                        return;
+                    }
+                }
+            }
+        });
     }
 
     /// 🌐 Set network channel for TRUE P2P communication
@@ -6830,6 +6987,11 @@ impl TurboSyncManager {
             littles_law: Arc::clone(&self.littles_law),
             chunk_floor: Arc::clone(&self.chunk_floor),
             peer_fail_predictor: Arc::clone(&self.peer_fail_predictor),
+            // v10.9.47: Share gap-detection tally across clones. The
+            // gap_advance_rx is NOT shared (only the primary instance owns it);
+            // clones get a fresh None.
+            gap_detection_tally: Arc::clone(&self.gap_detection_tally),
+            gap_advance_rx: parking_lot::Mutex::new(None),
         }
     }
 

@@ -3127,6 +3127,54 @@ impl QStorage {
         }
     }
 
+    /// v10.9.47: Persist a runtime-detected permanent gap to CF_MANIFEST so it
+    /// survives restart. The key format `permanent_gap:{start:0>20}:{end:0>20}`
+    /// keeps entries lexicographically sortable. Uses put_sync() so the gap
+    /// survives OOM-kill (same rationale as save_safe_floor).
+    pub async fn persist_permanent_gap(&self, start: u64, end: u64) -> Result<()> {
+        if start > end {
+            return Err(anyhow::anyhow!("invalid gap: start {} > end {}", start, end));
+        }
+        let key = format!("permanent_gap:{:020}:{:020}", start, end);
+        let mut value = [0u8; 16];
+        value[..8].copy_from_slice(&start.to_be_bytes());
+        value[8..].copy_from_slice(&end.to_be_bytes());
+        self.hot_db
+            .put_sync(CF_MANIFEST, key.as_bytes(), &value)
+            .await?;
+        Ok(())
+    }
+
+    /// v10.9.47: Load all runtime-detected permanent gaps from CF_MANIFEST.
+    /// Called once at TurboSync construction so the auto-advance check has
+    /// the full historical set immediately, before any peer interaction.
+    pub async fn load_permanent_gaps(&self) -> Vec<(u64, u64)> {
+        let prefix = b"permanent_gap:";
+        let entries = match self.hot_db.scan_prefix(CF_MANIFEST, prefix).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("[permanent_gap] CF_MANIFEST prefix scan failed: {}", e);
+                return Vec::new();
+            }
+        };
+        let mut gaps: Vec<(u64, u64)> = Vec::with_capacity(entries.len());
+        for (_key, value) in entries {
+            if value.len() != 16 {
+                continue;
+            }
+            let mut sa = [0u8; 8];
+            let mut ea = [0u8; 8];
+            sa.copy_from_slice(&value[..8]);
+            ea.copy_from_slice(&value[8..]);
+            let start = u64::from_be_bytes(sa);
+            let end = u64::from_be_bytes(ea);
+            if start <= end {
+                gaps.push((start, end));
+            }
+        }
+        gaps
+    }
+
     /// INTERNAL: Scan database for highest height (called ONLY on cache initialization)
     /// This is the slow path that used to be called 180 times per minute!
     async fn scan_highest_contiguous_block_internal(&self) -> Result<u64> {
