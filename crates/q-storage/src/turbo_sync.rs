@@ -7509,6 +7509,21 @@ impl TurboSyncManager {
             }
         }
 
+        // v10.9.55 (Codex PASS-2 fix, 2026-05-18): capture the highest chunk-end
+        // BEFORE moving `chunks` into download_chunks_parallel. After the chunks
+        // complete, synced_through must advance to this `requested_through`, NOT
+        // to the original target_height — because with Q_GENESIS_SYNC_ONLY=1 the
+        // chunks may have been capped to a small genesis window (default 10K
+        // lookahead). Advancing synced_through to the full target on a capped
+        // sync caused the next invocation to short-circuit at "already synced"
+        // and skip the remaining millions of blocks. The fix: advance only to
+        // what we actually requested.
+        let requested_through: u64 = chunks
+            .iter()
+            .map(|(_, end)| *end)
+            .max()
+            .unwrap_or(effective_start_height);
+
         // PHASE 3: Download chunks in parallel from multiple peers
         info!("🔍 [v0.9.40 DEBUG] PHASE 3: Starting parallel download of {} chunks...", chunks.len());
         // 🤖 v1.4.0-beta: Save chunk count for ML outcome recording
@@ -7646,8 +7661,52 @@ impl TurboSyncManager {
             warn!("⚠️  Sync speed {:.0} blocks/min is below target of 1000 blocks/min", blocks_per_min);
         }
 
+        // v10.9.55 Task 4 + Codex PASS-2 fix (2026-05-18): advance synced_through to
+        // the actual REQUESTED-THROUGH height (highest chunk end), NOT the original
+        // target_height. ORDER MATTERS: advance must happen BEFORE any conditional
+        // return below; previously the cert-skip branch returned without advancing,
+        // wedging the pointer.
+        //
+        // With Q_GENESIS_SYNC_ONLY=1 active by default + 10K lookahead, chunks are
+        // routinely capped to a small window. Advancing to target_height on a capped
+        // sync caused the next invocation to short-circuit at "already synced" and
+        // skip the rest of the chain — the catastrophic-but-silent bug Codex caught
+        // before compile. Now each successive sync_to_height tick walks forward one
+        // window at a time: synced_through 10001 → 20002 → 30003 → ... → tip.
+        // Idempotent under fetch_max — concurrent advances won't regress.
+        if let Err(e) = self.storage.advance_synced_through(requested_through).await {
+            warn!("⚠️ [SYNCED-THROUGH] Failed to advance to {}: {} \
+                   (in-memory atomic still updated; will re-request on restart)",
+                  requested_through, e);
+        } else if requested_through < target_height {
+            info!(
+                "🌱 [SYNCED-THROUGH] Window completed: advanced to {} (capped from target {}). \
+                 Next sync_to_height tick will resume from here.",
+                requested_through, target_height
+            );
+        }
+
         // 📜 v0.9.15-beta: Create AEGIS-QL sync affirmation certificate
-        // This cryptographically proves sync completion and prevents restart loops
+        // This cryptographically proves sync completion and prevents restart loops.
+        //
+        // v10.9.55 Codex PASS-2 fix: only create the cert when this invocation
+        // ACTUALLY completed to target — i.e. requested_through >= target_height.
+        // On a capped genesis-mode sync (Q_GENESIS_SYNC_ONLY=1, default 10K window)
+        // we requested only a tiny slice of the chain; creating a cert claiming
+        // completion through any target would either (a) trick check_if_already_synced
+        // into skipping remaining work, or (b) trigger the stale-detection path
+        // (contiguous < cert.end on a sparse chain is always true) and waste CF
+        // writes on a create-then-delete cycle every tick. The `synced_through`
+        // pointer is the authoritative restart-loop guard for partial windows.
+        if requested_through < target_height {
+            info!(
+                "📜 [AEGIS-QL] Skipping certificate creation — capped window ({} < target {}). \
+                 synced_through pointer at {} is the restart-loop guard for this window.",
+                requested_through, target_height, requested_through
+            );
+            return Ok(());
+        }
+
         info!("📜 [AEGIS-QL] Creating sync affirmation certificate...");
         let cert_start = Instant::now();
 
@@ -7674,15 +7733,9 @@ impl TurboSyncManager {
             }
         }
 
-        // v10.9.55 Task 4: advance synced_through to target so the next sync invocation
-        // starts past this window. Idempotent under fetch_max — concurrent advances
-        // won't regress. Best-effort persist: if the write fails, the in-memory atomic
-        // still advances; worst case a restart re-requests this window.
-        if let Err(e) = self.storage.advance_synced_through(target_height).await {
-            warn!("⚠️ [SYNCED-THROUGH] Failed to advance to {}: {} \
-                   (in-memory atomic still updated; will re-request on restart)",
-                  target_height, e);
-        }
+        // synced_through was advanced above (before the cert decision) so that
+        // capped-window early-returns also persist progress. No additional advance
+        // needed here.
 
         Ok(())
     }
