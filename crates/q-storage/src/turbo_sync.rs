@@ -7072,6 +7072,28 @@ impl TurboSyncManager {
         // reflect the post-skip value to downstream checks.
         let mut local_height = self.get_local_height().await?;
 
+        // v10.9.55 Task 4: SYNCED-THROUGH POINTER.
+        //
+        // On a DAG-Knight chain with legitimately sparse heights (15M+ is ~93-96%
+        // dense; pre-7M is mostly missing from historical damage), the chunk-build
+        // start must be the "highest range we've REQUESTED" — not "highest height
+        // where blocks 0..H all exist contiguously". With the old model the loop
+        // wedges on sparse heights forever; with this one it advances past dead
+        // ranges and gets to the live tail.
+        //
+        // synced_through is monotonic and persisted (key `qblock:synced_through`),
+        // so a restart picks up where we left off. The known-gap auto-advance below
+        // still runs — it can push contiguous_height past configured gaps; we then
+        // take max(local_height, synced_through) to honor whichever advanced further.
+        let synced_through = self.storage.get_synced_through_height();
+        if synced_through > local_height {
+            info!(
+                "⏭️ [SYNCED-THROUGH v10.9.55] Resuming from {} (contiguous={}, persisted synced_through={})",
+                synced_through, local_height, synced_through
+            );
+            local_height = synced_through;
+        }
+
         if local_height >= target_height {
             info!("🎯 Already synced to height {} (target: {})", local_height, target_height);
             return Ok(());
@@ -7720,6 +7742,16 @@ impl TurboSyncManager {
                 warn!("⚠️ [AEGIS-QL] Failed to create certificate: {}", e);
                 warn!("   Sync completed but certificate not created (not critical)");
             }
+        }
+
+        // v10.9.55 Task 4: advance synced_through to target so the next sync invocation
+        // starts past this window. Idempotent under fetch_max — concurrent advances
+        // won't regress. Best-effort persist: if the write fails, the in-memory atomic
+        // still advances; worst case a restart re-requests this window.
+        if let Err(e) = self.storage.advance_synced_through(target_height).await {
+            warn!("⚠️ [SYNCED-THROUGH] Failed to advance to {}: {} \
+                   (in-memory atomic still updated; will re-request on restart)",
+                  target_height, e);
         }
 
         Ok(())

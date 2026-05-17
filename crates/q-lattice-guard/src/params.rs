@@ -104,9 +104,18 @@ impl RlweParams {
     /// requires soundness analysis (see `crate::folding::ParameterNotes`).
     pub fn pq128_folding() -> Self {
         // Provisional 60-bit prime: 2^60 - 2^32 * 256 - 2^16 * 16 + 1.
-        // The `(mod 2n)` condition with n=1024 means q ≡ 1 (mod 2048).
         // FINAL PARAMETER SELECTION DEFERRED — see the Phase C research
         // risk register in `/root/.claude/plans/optimized-frolicking-bubble.md`.
+        //
+        // NOTE 2026-05-21: this q does NOT satisfy q ≡ 1 (mod 2n) for
+        // n=1024, so a 2n-th primitive root of unity does not exist —
+        // calling `find_primitive_root` here loops effectively
+        // forever. `ntt_root: 0` is a deliberate placeholder until
+        // Phase C parameter selection finalizes; consumers must check
+        // `ntt_root != 0` before any NTT use. The struct still
+        // constructs cheaply so the type-shape tests in
+        // `crate::folding` and `RlweParams::test_security_levels`
+        // don't hang.
         let modulus = 0x0FFFFFFFEFFE0001u64;
         let dimension = 1024;
 
@@ -120,7 +129,7 @@ impl RlweParams {
             error_bound: 1 << 40,
             modulus_bits: 60,
             security_level: SecurityLevel::PQ128,
-            ntt_root: Self::find_primitive_root(modulus, 2 * dimension as u64),
+            ntt_root: 0, // placeholder — see comment above
         }
     }
 

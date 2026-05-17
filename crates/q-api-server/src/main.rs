@@ -12593,22 +12593,51 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                         );
                                         return; // BAL-001 ENFORCEMENT: reject zero state_root
                                     } else {
-                                        // Compute local balance root BEFORE applying this block's transactions.
-                                        let local_root = match storage.compute_balance_root_for_block().await {
-                                            Ok(r) => r,
-                                            Err(e) => {
-                                                error!("💥 [BALANCE ROOT v1] Failed to compute local balance root at block {}: {}. \
-                                                        Cannot verify — accepting (storage error, not peer fault).",
-                                                       block_height, e);
-                                                [0u8; 32]
+                                        // v10.9.55 (C1, Codex review 2026-05-17): FAIL-CLOSED on local compute error,
+                                        // but with bounded retry first so a momentary I/O hiccup doesn't kick the node
+                                        // off the chain. Three attempts with 100ms / 500ms / 2s backoff = up to ~2.6s
+                                        // total wait before giving up. If all three fail, the storage is genuinely
+                                        // unhealthy and rejecting is the correct response under enforcement.
+                                        //
+                                        // Pre-v10.9.55 behaviour mapped storage errors to [0u8;32] and then accepted
+                                        // when local == [0u8;32]. That meant a node with transient DB/read failure
+                                        // would silently accept blocks it could not verify, while healthy peers
+                                        // applied real consensus. A consensus split surface under enforcement.
+                                        const COMPUTE_BACKOFF_MS: [u64; 3] = [100, 500, 2000];
+                                        let mut last_err: Option<anyhow::Error> = None;
+                                        let mut computed: Option<[u8; 32]> = None;
+                                        for (attempt, backoff_ms) in COMPUTE_BACKOFF_MS.iter().enumerate() {
+                                            match storage.compute_balance_root_for_block().await {
+                                                Ok(r) => { computed = Some(r); break; }
+                                                Err(e) => {
+                                                    warn!(
+                                                        "⚠️ [BALANCE ROOT v1] compute_balance_root_for_block attempt {}/{} \
+                                                         failed at block {}: {}. Backing off {}ms before retry.",
+                                                        attempt + 1, COMPUTE_BACKOFF_MS.len(), block_height, e, backoff_ms
+                                                    );
+                                                    last_err = Some(e);
+                                                    if attempt + 1 < COMPUTE_BACKOFF_MS.len() {
+                                                        tokio::time::sleep(std::time::Duration::from_millis(*backoff_ms)).await;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        let local_root = match computed {
+                                            Some(r) => r,
+                                            None => {
+                                                error!(
+                                                    "🚨 [BALANCE ROOT v1] REJECT block {} — local root computation FAILED \
+                                                     {} times in a row while enforcement is active. Last error: {}. \
+                                                     Local storage unhealthy; cannot verify consensus data. \
+                                                     Operator action required.",
+                                                    block_height,
+                                                    COMPUTE_BACKOFF_MS.len(),
+                                                    last_err.as_ref().map(|e| e.to_string()).unwrap_or_else(|| "<unknown>".into())
+                                                );
+                                                return; // BAL-001 ENFORCEMENT: fail-closed on storage error
                                             }
                                         };
-                                        if local_root == [0u8; 32] {
-                                            // Our own computation failed (storage error) — cannot enforce.
-                                            // Accept and warn; do NOT punish the peer for our storage fault.
-                                            warn!("⚠️ [BALANCE ROOT v1] Block {} accepted despite local root computation failure — check storage health.",
-                                                  block_height);
-                                        } else if local_root != block.header.state_root {
+                                        if local_root != block.header.state_root {
                                             error!(
                                                 "🚨 [BALANCE ROOT v1] REJECT block {} — root MISMATCH (enforcement active h>=20,000,000).\n  \
                                                  Block claims: {}\n  \

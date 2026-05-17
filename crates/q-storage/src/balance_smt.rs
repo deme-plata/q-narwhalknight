@@ -36,11 +36,33 @@ const LEAF_TAG: &[u8] = b"smt_leaf_v2";
 /// Domain separator for internal node: BLAKE3("smt_node_v2" || left || right).
 const NODE_TAG: &[u8] = b"smt_node_v2";
 
-/// Reserved key for the persisted root pointer. Uses a prefix byte (0xFF) that
-/// cannot collide with any `node_key` (which uses depth bytes 0..=SMT_DEPTH=0x00..0x100,
-/// but depth is u8 so 0..=0xFF; we use 0xFF as reserved for root storage).
-/// To avoid any collision risk, we use a 9-byte key starting with 0xFF + ASCII tag.
-const KEY_PERSISTED_ROOT: &[u8] = b"\xff__root__";
+/// Reserved key for the persisted root pointer. v10.9.55: uses a distinct domain
+/// byte ('R'=0x52) that cannot collide with the new `node_key` encoding ('N' for
+/// internal nodes, 'L' for leaves).
+const KEY_PERSISTED_ROOT: &[u8] = b"R__root__";
+
+/// v10.9.55 (C2, Codex review 2026-05-17): key-encoding domain bytes.
+///
+/// PRE-v10.9.55 BUG: `node_key(depth=254, addr)` and `node_key(depth=256, addr)`
+/// (leaf) both produced 33-byte keys whose first byte was 0xFE (depth=254 → u8 byte
+/// 0xFE, leaf sentinel also 0xFE). For any address whose lowest 2 bits are 00
+/// (≈25% of addresses), the depth-254 internal-node key and the leaf key were
+/// byte-identical → silently collided in RocksDB. Apply order would decide which
+/// one "won", producing nondeterministic SMT state across nodes — a consensus-fork
+/// hazard at BalanceRootV2 activation (or at 100M-wallet scale, ~25M proofs would
+/// be silently wrong).
+///
+/// FIX: explicit domain bytes for node vs leaf, and a u16-BE depth field. Now
+/// node_key(depth, addr) = [b'N', depth_hi, depth_lo, prefix_bytes...]
+/// leaf_key(addr)        = [b'L', addr_full_32_bytes...]
+/// These can never collide regardless of depth or address.
+///
+/// Migration: BalanceRootV2 is currently DORMANT on mainnet (u64::MAX activation).
+/// Any persisted SMT data from before this fix is per-node shadow-mode only; can
+/// be discarded by deleting `cf_balance_smt` contents and letting the SMT rebuild
+/// from the wallet table at next access. See `rebuild_from_balances()`.
+const NODE_DOMAIN: u8 = b'N';
+const LEAF_DOMAIN: u8 = b'L';
 
 // ════════════════════════════════════════════════════════════════════════════
 // Pure helpers (deterministic, no DB access)
@@ -96,34 +118,39 @@ fn flip_bit(addr: &[u8; 32], i: usize) -> [u8; 32] {
 }
 
 /// Encode a node key for the given depth and path-prefix (the first `depth` bits of `addr`).
-/// Key layout: `[depth_byte | prefix_bytes]`, low bits beyond `depth` zeroed.
+/// v10.9.55: domain-separated key encoding (closes the depth-254/leaf collision).
 ///
-/// - depth = 0: key = `[0x00]` (the root).
-/// - depth = 8: key = `[0x08, addr[0]]`.
-/// - depth = 12: key = `[0x0C, addr[0], addr[1] & 0xF0]`.
-/// - depth = 256: key = `[0xFE, addr[0..32]]` (depth byte is 0xFE because u8 saturates;
-///   we encode SMT_DEPTH==256 by using a sentinel 0xFE — leaf rows are addressed by
-///   the full 32-byte address, no depth byte needed for uniqueness, but we keep the
-///   byte for collision-avoidance with internal-node keys).
+/// Key layout:
+/// - Internal node at depth `d` ∈ [0, SMT_DEPTH-1]:
+///     `[NODE_DOMAIN | depth_be_u16 | prefix_bytes]`
+///   where `prefix_bytes` = first `ceil(d/8)` bytes of `addr` with low bits beyond
+///   `depth` zeroed.
+/// - Leaf at depth SMT_DEPTH (=256):
+///     `[LEAF_DOMAIN | addr_full_32_bytes]`
 ///
-/// NB: We treat depth as `u8` for the byte literal, which means 0..=255 fit, but
-/// depth=256 (leaf) needs a special encoding. We use 0xFE for the leaf row prefix
-/// and 0xFF is reserved for `KEY_PERSISTED_ROOT`. Internal nodes use depth 0..=255
-/// directly.
+/// Examples:
+/// - depth=0 root:  `[b'N', 0x00, 0x00]`
+/// - depth=8:       `[b'N', 0x00, 0x08, addr[0]]`
+/// - depth=12:      `[b'N', 0x00, 0x0C, addr[0], addr[1] & 0xF0]`
+/// - depth=254:     `[b'N', 0x00, 0xFE, addr[0..31], addr[31] & 0xFC]`
+/// - depth=256:     `[b'L', addr[0..32]]`  ← distinct domain, can never collide
 fn node_key(depth: usize, addr: &[u8; 32]) -> Vec<u8> {
     debug_assert!(depth <= SMT_DEPTH);
     if depth == SMT_DEPTH {
-        // Leaf row
+        // Leaf row — distinct domain byte, never collides with internal-node keys.
         let mut key = Vec::with_capacity(1 + 32);
-        key.push(0xFE);
+        key.push(LEAF_DOMAIN);
         key.extend_from_slice(addr);
         return key;
     }
     let full_bytes = depth / 8;
     let extra_bits = depth % 8;
     let prefix_len = full_bytes + (if extra_bits > 0 { 1 } else { 0 });
-    let mut key = Vec::with_capacity(1 + prefix_len);
-    key.push(depth as u8);
+    // 3-byte header: domain + u16 BE depth. Header is fixed-length so any two
+    // (depth, addr) pairs produce distinct keys iff (depth, prefix_bytes) differ.
+    let mut key = Vec::with_capacity(3 + prefix_len);
+    key.push(NODE_DOMAIN);
+    key.extend_from_slice(&(depth as u16).to_be_bytes());
     key.extend_from_slice(&addr[..full_bytes]);
     if extra_bits > 0 {
         let mask = 0xFFu8 << (8 - extra_bits);
@@ -266,22 +293,39 @@ impl BalanceSmt {
     }
 
     /// Rebuild from a complete `(addr → balance)` snapshot. Used at fresh-start
-    /// from a balance checkpoint. Atomic: one WriteBatch.
+    /// from a balance checkpoint, and at BalanceRootV2 activation.
+    ///
+    /// v10.9.55 (C3 + H4, Codex review 2026-05-17): pure function of `balances`.
+    /// 1. Truncate the SMT CF before rebuild — eliminates stale-node contamination.
+    ///    apply_to_batch_internal reads siblings via `pending → DB → empty_subtree`,
+    ///    so any leftover node from a prior shadow rebuild could fold into the new
+    ///    root. Now wiped first.
+    /// 2. Sort updates by address — defensive against any subtle ordering dependency
+    ///    in the pending-map propagation. Guarantees byte-identical root across N
+    ///    nodes that may hash-randomize HashMaps differently.
     pub fn rebuild_from_balances(
         &self,
         balances: &HashMap<[u8; 32], u128>,
     ) -> Result<[u8; 32]> {
-        // Drop any prior state: we don't truncate the CF (RocksDB makes that
-        // expensive); instead we trust the caller to have started from a fresh
-        // CF or to have stable contents. For safety, we issue deletes for the
-        // KEY_PERSISTED_ROOT then write the new state.
-        let mut batch = WriteBatch::default();
         let cf = self.db.cf_handle(&self.cf_name).unwrap();
 
-        // Reset cache to genesis so apply_one_to_batch starts from empty.
+        // (1) Truncate. delete_range_cf is O(1) at LSM layer — writes a single
+        // tombstone over the range; compaction handles the rest. Safe at scale.
+        {
+            let mut clear_batch = WriteBatch::default();
+            clear_batch.delete_range_cf(&cf, &[0x00u8], &[0xFFu8; 64]);
+            self.db.write(clear_batch).context("truncating SMT CF before rebuild")?;
+        }
+
+        // Reset cache to genesis so apply_one starts from empty.
         *self.cached_root.write() = self.genesis_root;
 
-        let updates: Vec<([u8; 32], u128)> = balances.iter().map(|(a, b)| (*a, *b)).collect();
+        // (2) Sort updates by address for determinism. `[u8; 32]` has total ordering.
+        let mut updates: Vec<([u8; 32], u128)> =
+            balances.iter().map(|(a, b)| (*a, *b)).collect();
+        updates.sort_unstable_by_key(|(addr, _)| *addr);
+
+        let mut batch = WriteBatch::default();
         let new_root = self.apply_to_batch_internal(&cf, &mut batch, &updates)?;
 
         batch.put_cf(&cf, KEY_PERSISTED_ROOT, new_root);
